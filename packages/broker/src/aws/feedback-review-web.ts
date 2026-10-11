@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
+import { describeWorkflowCheckChanges } from "@agentx/contracts";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import {
@@ -75,9 +76,13 @@ function page(review: Record<string, unknown>, csrf: string, nonce: string): str
     const tests = Array.isArray(proposal?.tests) ? proposal.tests as Array<Record<string, unknown>> : [];
     // A finding the reviewer left to the owner holds a question (and its options), not a fix: no Files or Tests to list.
     const isQuestion = finding.proposedDisposition === "OWNER_DECISION";
+    const changes = finding.checkChanges !== null && typeof finding.checkChanges === "object" ? finding.checkChanges as Record<string, unknown> : undefined;
+    const labels = (value: unknown) => (Array.isArray(value) ? value : []).filter((label): label is string => typeof label === "string").map(label => escape(label));
+    const checksLine = changes === undefined ? undefined : describeWorkflowCheckChanges({ obsolete: labels(changes.obsolete), added: labels(changes.added) });
+    const checksContent = checksLine === undefined ? "" : `<h5>Checks</h5><p>${checksLine}</p>`;
     const proposalContent = proposal === undefined ? "" : isQuestion
       ? `<section aria-label="Question for you"><h4>Question for you</h4><p>${escape(proposal.summary)}</p></section>`
-      : `<section aria-label="Proposed fix"><h4>Proposed fix</h4><p>${escape(proposal.summary)}</p><h5>Files</h5><ul>${fileChanges.map(change => `<li>${escape(change.operation)} <code>${escape(change.repositoryId)}/${escape(change.path)}</code>: ${escape(change.change)}</li>`).join("")}</ul><h5>Tests</h5>${tests.length === 0 ? "<p>No new tests: the change is documentation only, or the repository has no tests.</p>" : `<ul>${tests.map(test => `<li>${escape(test.operation)} <code>${escape(test.repositoryId)}/${escape(test.path)}</code>: ${escape(test.behavior)}</li>`).join("")}</ul>`}</section>`;
+      : `<section aria-label="Proposed fix"><h4>Proposed fix</h4><p>${escape(proposal.summary)}</p><h5>Files</h5><ul>${fileChanges.map(change => `<li>${escape(change.operation)} <code>${escape(change.repositoryId)}/${escape(change.path)}</code>: ${escape(change.change)}</li>`).join("")}</ul><h5>Tests</h5>${tests.length === 0 ? "<p>No new tests: the change is documentation only, or the repository has no tests.</p>" : `<ul>${tests.map(test => `<li>${escape(test.operation)} <code>${escape(test.repositoryId)}/${escape(test.path)}</code>: ${escape(test.behavior)}</li>`).join("")}</ul>`}${checksContent}</section>`;
     return `<article class="finding"><h3>${escape(finding.priority)} · ${escape(finding.assessment)}</h3><p>${escape(finding.rationale)}</p><p class="muted">${recommended ? "AgentX recommends addressing this." : "AgentX does not recommend a code change for this item."}</p>${selection}<details><summary>${isQuestion ? "See the question, comments and evidence" : "See proposed fix, comments and evidence"}</summary>${proposalContent}<p>${escape(finding.confidence && typeof finding.confidence === "object" ? (finding.confidence as Record<string, unknown>).reason : "")}</p><ul>${commentContent}</ul><ul>${(Array.isArray(finding.evidence) ? finding.evidence as Array<Record<string, unknown>> : []).map(evidence => `<li>${escape(evidence.source)}: ${escape(evidence.reference)}</li>`).join("")}</ul></details></article>`;
   }).join("");
   const prList = candidates.map(pr => `<li>${escape(pr.repositoryId)} #${escape(pr.number)} · head <code>${escape(pr.headSha)}</code></li>`).join("");

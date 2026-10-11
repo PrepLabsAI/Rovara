@@ -71,6 +71,8 @@ import {
   createWorkflowSnapshot,
   decideWorkflow,
   decideWorkflowFeedbackFindings,
+  applyWorkflowFeedbackCheckChanges,
+  workflowFeedbackCheckChanges,
   retryWorkflowFeedbackReview,
   WorkflowPublishRetryRequestSchema,
   WORKFLOW_PLAN_MAX_BYTES,
@@ -390,6 +392,9 @@ export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependen
   const priorityOrder = { MUST_FIX: 0, SHOULD_FIX: 1, OPTIONAL: 2 } as const;
   const findings = report.findings.map(finding => ({
     ...finding,
+    // The checks this finding's fix changes, by label, as approving it would apply them.
+    checkChanges: (({ obsolete, added }) => ({ obsolete: obsolete.map(check => check.label), added: added.map(check => check.label) }))(
+      workflowFeedbackCheckChanges(workflow.checkPolicy, [finding])),
     comments: finding.commentIds.map(commentId => bundleByDigest.get(finding.bundleDigest)?.get(commentId)).filter((comment): comment is NonNullable<typeof comment> => comment !== undefined),
   })).sort((left, right) => priorityOrder[left.priority] - priorityOrder[right.priority]
     || Number(right.recommended) - Number(left.recommended) || left.id.localeCompare(right.id));
@@ -506,6 +511,14 @@ export async function submitWorkflowFeedbackDecision(
     const verified = await getWorkflowFeedbackReview(deps, caller, taskId);
     const selected = (verified.findings as Array<Record<string, unknown>>).filter(finding => input.selectedFindingIds.includes(String(finding.id)));
     if (selected.length !== input.selectedFindingIds.length) throw agentXError("CONFIG_INVALID", "the approved finding set changed; reload the review");
+    // The owner's approval covers the approved fixes' check changes: from now on the task runs the updated checks
+    // (required project checks always stay), for this fix and for every later step and feedback round.
+    try {
+      next = applyWorkflowFeedbackCheckChanges(next, workflowFeedbackCheckChanges(next.checkPolicy, selected as Parameters<typeof workflowFeedbackCheckChanges>[1]));
+    } catch (error) {
+      if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
+      throw error;
+    }
     // A question the reviewer left to the owner is coded only from the owner's answer, from Slack or the web page alike;
     // the words that reach the coder are capped as Slack caps them.
     if (input.ownerNote === undefined && selected.some(finding => finding.proposedDisposition === "OWNER_DECISION")) {

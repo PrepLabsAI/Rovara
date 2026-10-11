@@ -1635,6 +1635,29 @@ describe("the PR feedback advisory summary", () => {
     expect(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value.length).toBeLessThan(2_000);
   });
 
+  it("says which checks the recommended fix changes, so Approve visibly covers them (0.2.12 live test)", async () => {
+    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const BANNED = /\b(candidate|revision|digest|operation|artifact|workflow|invalid json)\b|\b(SUCCEEDED|FAILED|INTERRUPTED|CANCELLED)\b/i;
+    const card = (checkChanges?: { obsolete: string[]; added: string[] }) => feedbackReviewSlackMessage({
+      taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+      totalComments: 1, recommendedFindingIds: ["finding-1"], highestPriority: "SHOULD_FIX",
+      detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111", ...(checkChanges === undefined ? {} : { checkChanges }),
+    });
+    const replaced = card({ obsolete: ["Code of Conduct sentence present in README.md"], added: ["Shorter sentence present in README.md"] });
+    expect(visibleSlackText(replaced.text)).toBe("PR feedback is ready: 1 comments; 1 recommendations. Highest priority: should fix.\n"
+      + "Updates checks: Code of Conduct sentence present in README.md → Shorter sentence present in README.md\nOpen details.");
+    expect(visibleSlackText(replaced.text)).not.toMatch(BANNED);
+    // A check dropped with nothing in its place, and one added on its own, are said too; a label is the reviewer's text, made inert.
+    const mixed = visibleSlackText(card({ obsolete: ["Old check", "Second old"], added: ["New <!channel> check"] }).text);
+    expect(mixed).toMatch(/^Updates checks: Old check → New .+ check; Second old → removed$/m);
+    expect(card({ obsolete: [], added: ["New <!channel> check"] }).text).not.toContain("<!channel>");
+    expect(visibleSlackText(card({ obsolete: [], added: ["Extra check"] }).text)).toContain("Updates checks: adds Extra check");
+    // No change, no line: the card reads as before.
+    expect(card({ obsolete: [], added: [] }).text).toBe(card().text);
+    expect(card().text).not.toContain("Updates checks");
+  });
+
   it("does not offer approval when there are no recommended fixes", async () => {
     const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
     const message = feedbackReviewSlackMessage({

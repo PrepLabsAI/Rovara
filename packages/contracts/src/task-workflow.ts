@@ -699,6 +699,20 @@ export function workflowFeedbackCheckChanges(
 }
 
 /**
+ * How a proposal card and the review page say an approved fix's check changes, from the checks' labels (the caller makes
+ * them safe to show first): "Updates checks: Old → New; Other → removed; adds Extra". Undefined when nothing changes.
+ */
+export function describeWorkflowCheckChanges(changes: { obsolete: readonly string[]; added: readonly string[] }): string | undefined {
+  const paired = Math.min(changes.obsolete.length, changes.added.length);
+  const parts = [
+    ...changes.obsolete.slice(0, paired).map((label, index) => `${label} → ${changes.added[index]!}`),
+    ...changes.obsolete.slice(paired).map((label) => `${label} → removed`),
+    ...changes.added.slice(paired).map((label) => `adds ${label}`),
+  ];
+  return parts.length === 0 ? undefined : `Updates checks: ${parts.join("; ")}`;
+}
+
+/**
  * The workflow with an approved fix's check changes in its check policy, so its checks and every later step (and later
  * feedback rounds) run the updated set: the obsolete proposed checks are removed and the corrected ones added as
  * proposed checks `feedback-<round>-<n>`. The revision is not changed; the caller stores it with the approval.

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createFeedbackReviewWeb, type FeedbackReviewWebDependencies } from "../../packages/broker/src/aws/feedback-review-web.js";
 import { getWorkflowFeedbackReview, submitWorkflowFeedbackDecision } from "../../packages/broker/src/aws/developer-tasks.js";
 import { authenticateDeveloperSessionId } from "../../packages/broker/src/aws/developer-routes.js";
-import { createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema, type WorkflowSnapshot } from "@agentx/contracts";
+import { createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
 import { createDeveloperTaskBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
 import { feedbackReviewNoticeId } from "../../packages/broker/src/developer/notifications.js";
@@ -280,7 +280,7 @@ describe("authenticated PR feedback review web journey", () => {
 
 describe("broker-backed feedback review data", () => {
   /** `firstFinding` changes the first finding (and its reference): for example, to leave it to the owner as a question. */
-  async function preparedReview(prCount = 1, firstFinding: Record<string, unknown> = {}) {
+  async function preparedReview(prCount = 1, firstFinding: Record<string, unknown> = {}, checkPolicy?: WorkflowCheckPolicyInput) {
     const now = "2026-10-05T12:00:00.000Z";
     const repositories = prCount === 1 ? [{ repositoryId: "demo", number: 42 }] : [
       { repositoryId: "demo", number: 42 }, { repositoryId: "ui", number: 43 },
@@ -348,7 +348,7 @@ describe("broker-backed feedback review data", () => {
     const { findings, ...reportMetadata } = report;
     void findings;
     const reportRef = { ...reportMetadata, sha256: reviewDigest, objectKey: reportKey };
-    const base = createWorkflowSnapshot({ taskId, ownerId: task.ownerKey, now });
+    const base = createWorkflowSnapshot({ taskId, ownerId: task.ownerKey, now, ...(checkPolicy === undefined ? {} : { checkPolicy }) });
     const waiting = { ...base, stage: "WAIT_FOR_MERGE" as const, state: "WAITING" as const, candidate,
       verification: { candidateDigest: candidate.digest, producer: "test", environmentId: "fixture", recordedAt: now, results: [{ checkId: "test", status: "PASS" as const }] },
       reviews: (["CRITIC", "SECURITY"] as const).map(role => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: now })),
@@ -412,6 +412,37 @@ describe("broker-backed feedback review data", () => {
     expect(result).toMatchObject({ status: "APPROVED", nextAction: "implementation" });
     const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { ownerKey: string };
     expect(fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META")?.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING", feedbackDecisions: [{ actorRole: "TASK_OWNER", actorId: task.ownerKey, selectedFindingIds: ["finding-1"] }] });
+  });
+
+  it("approving a fix approves its check changes: the coding step and its checks run the updated set, and the review page shows them (0.2.12)", async () => {
+    const grep = (text: string) => ({ cwd: "repo/demo", executable: "grep", args: ["-q", text, "README.md"], timeoutSeconds: 30 });
+    const unit = { id: "required-1", label: "Unit tests", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 600 } };
+    const sentence = { id: "proposed-1", label: "Sentence present", command: grep("Old sentence.") };
+    const links = { id: "proposed-2", label: "Links present", command: grep("CODE_OF_CONDUCT.md") };
+    const replacement = { label: "Shorter sentence present", cwd: "repo/demo", executable: "grep", args: ["-q", "New.", "README.md"] };
+    const fixture = await preparedReview(1, { fixProposal: { summary: "Shorten the sentence.",
+      fileChanges: [{ repositoryId: "demo", path: "README.md", operation: "MODIFY", change: "Use the shorter sentence." }], tests: [],
+      // The reviewer may not drop a required check: that name is ignored.
+      obsoleteChecks: ["proposed-1", "required-1"], replacementChecks: [replacement] } },
+    { required: [unit], optional: [], selectedOptionalIds: [], proposed: [sentence, links] });
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    const review = await getWorkflowFeedbackReview(fixture.deps, owner, fixture.taskId);
+    expect((review.findings as Array<Record<string, unknown>>)[0]?.checkChanges).toEqual({ obsolete: ["Sentence present"], added: ["Shorter sentence present"] });
+    const page = await createFeedbackReviewWeb(dependencies({ getWorkflowFeedbackReview: vi.fn(async () => review) }))(
+      request("GET", `/review/${fixture.taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${fixture.taskId}`, origin));
+    expect(page.body).toContain("Updates checks: Sentence present → Shorter sentence present");
+
+    await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+    });
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workspaceId: string; workflow: WorkflowSnapshot };
+    const added = { cwd: replacement.cwd, executable: replacement.executable, args: replacement.args, timeoutSeconds: 600 };
+    expect(task.workflow.checkPolicy?.proposed).toEqual([links, { id: "feedback-1-1", label: replacement.label, command: added }]);
+    expect(task.workflow.checkPolicy?.required).toEqual([unit]);
+    const dispatch = fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION").find(item => item.workflowMode === "IMPLEMENT");
+    const invocation = fixture.harness.db.find(item => item.entityType === "OUTBOX" && item.operationId === dispatch?.id)[0]?.invocation as { payload?: { readiness?: unknown } };
+    expect(invocation.payload?.readiness).toEqual([unit.command, links.command, added]);
   });
 
   it("emits only privacy-safe aggregate decision measures after the owner decision commits", async () => {
