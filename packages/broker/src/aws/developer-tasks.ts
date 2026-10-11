@@ -1239,7 +1239,7 @@ function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: boolean, 
         ? { status: "Trying again to open the draft pull request; the last try didn't open it", nextStep: "Review and merge it on GitHub once it's open." }
         : { status: "Opening a draft pull request", nextStep: "Review and merge it on GitHub once it's open." };
     case "PULL_REQUEST/BLOCKED": return { status: "The draft pull request didn't open", nextStep: `Retry opening the pull request or close the task ${inSlack}.` };
-    case "WAIT_FOR_MERGE/WAITING": return { status: "Draft pull request opened", nextStep: `Review and merge it on GitHub, then close the task ${inSlack}.` };
+    case "WAIT_FOR_MERGE/WAITING": return { status: "Waiting for the pull request to be merged", nextStep: "Review and merge it on GitHub; the task finishes when it's merged." };
     case "WAIT_FOR_MERGE/BLOCKED": return { status: "Stopped following the pull request", nextStep: `Close the task ${inSlack}.` };
     case "MERGED/COMPLETE": return { status: "Merged", nextStep: "Nothing; this task is complete." };
     default: return { status: "In progress", nextStep: `Follow the task ${inSlack}.` };

@@ -806,7 +806,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     expect(actions[0]?.text.text).toBe("Approve requirements");
   });
 
-  it("posts the draft pull request links once, with a way to close the task after merging on GitHub", async () => {
+  it("posts concise Slack updates as GitHub merges each required pull request", async () => {
     const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
     await h.pump();
     h.advance(10_000);
@@ -825,13 +825,19 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     };
     await saveWorkflow(first);
     await h.pump();
-    expect(h.posts.at(-1)!.text).toBe("Draft pull requests opened: <https://github.com/example/api/pull/12|PR #12>, <https://github.com/example/web/pull/13|PR #13>. Review them and merge them on GitHub, then close this task here.");
+    expect(h.posts.at(-1)!.text).toBe("Draft pull requests opened: <https://github.com/example/api/pull/12|PR #12>, <https://github.com/example/web/pull/13|PR #13>. Review them and merge them on GitHub; I'll finish this task when they're all merged.");
     expect(JSON.stringify(h.posts.at(-1)!.blocks)).toContain("agentx_workflow_close");
     // A later step that changes nothing about the pull requests says nothing again.
     const before = h.posts.length;
     await saveWorkflow({ ...first, revision: 3 });
     await h.pump();
     expect(h.posts).toHaveLength(before);
+    await saveWorkflow({ ...first, revision: 6, pullRequests: first.pullRequests.map((pr, index) => ({ ...pr, state: index === 0 ? "MERGED" : "OPEN" })) });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("GitHub update: 1 of 2 pull requests merged. <https://github.com/example/web/pull/13|PR #13> is still open.");
+    await saveWorkflow({ ...first, revision: 7, stage: "MERGED", state: "COMPLETE", outcome: "MERGED", pullRequests: first.pullRequests.map((pr) => ({ ...pr, state: "MERGED" })) });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("All 2 pull requests are merged. This task is complete.");
   });
 
   it("posts the start message in the channel and records the thread", async () => {

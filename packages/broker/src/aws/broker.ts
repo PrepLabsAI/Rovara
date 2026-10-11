@@ -140,7 +140,8 @@ import { recordPrepareFailureEvent } from "./operation-events.js";
 import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
-import { appIdFromSecret, GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
+import { appIdFromSecret, GitHubAppCredentialProvider, privateKeyFromSecret, webhookSecretFromSecret } from "../github-app.js";
+import { GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
@@ -277,7 +278,9 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestFeedback" | "getCommitTree" | "getCommitParents" | "getBranchHead">>;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestFeedback" | "getCommitTree" | "getCommitParents" | "getBranchHead">>;
+  /** Reads the GitHub webhook HMAC key from the configured GitHub App secret. */
+  githubWebhookSecret?: () => Promise<string>;
   /** Refuses, with CONFIG_INVALID, a repository its credential cannot reach; checked at registration. */
   checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
   codeBuild: CodeBuildGateway;
@@ -587,7 +590,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.workflow-dispatch-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.workflow-dispatch-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -596,6 +599,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       } catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "admin_change.press_failed", changeId: event.changeId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
         return json({ outcome: "failed", changeId: event.changeId }, "slack-ingress", 500);
+      }
+    }
+    if (isGithubWebhookRecoveryEvent(event)) {
+      try { return json(await retryDueGithubWebhookEvents(dependencies), "github-webhook-recovery"); }
+      catch (error) {
+        console.log(JSON.stringify({ component: "broker", event: "github.webhook_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
+        return json({ error: "recovery_failed" }, "github-webhook-recovery", 500);
       }
     }
     // Gap 6: the scheduled sweep that re-runs any workflow dispatch left behind after its result committed.
@@ -661,6 +671,41 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       }
       // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
       if (event.routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
+      if (url.pathname === "/v1/github/webhooks") {
+        if (request.method !== "POST") return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
+        if (request.body === undefined || dependencies.githubWebhookSecret === undefined) {
+          return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
+        }
+        try {
+          const result = await handleGithubWebhook({
+            documentClient: dependencies.documentClient,
+            tableName: dependencies.tableName,
+            rawBody: request.body,
+            headers: request.headers,
+            secret: await dependencies.githubWebhookSecret(),
+            authorizeRepository: (scope) => authorizeLinkedGithubWebhook({
+              documentClient: dependencies.documentClient,
+              tableName: dependencies.tableName,
+              scope,
+              loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
+              repositoryUrl: async (projectName, revision, repositoryId) => {
+                const project = await requireProject(dependencies, projectName, revision);
+                return project.definition.repositories.find((repository) => repository.name === repositoryId)?.url;
+              },
+              verifyRepository: (repositoryUrl, webhookScope) => dependencies.githubPullRequests.verifyWebhookRepository(repositoryUrl, webhookScope),
+            }),
+            process: (workflowEvent, deliveryId) => processGithubWorkflowEvent(dependencies, workflowEvent, deliveryId),
+            now: () => new Date().toISOString(),
+          });
+          if (result.status === "IN_PROGRESS") return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId, 503);
+          return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId);
+        } catch (error) {
+          if (error instanceof GithubWebhookRefusal) return json({ error: { code: "FORBIDDEN", message: error.message } }, request.requestId, 403);
+          if (error instanceof GithubWebhookRetryableError) return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
+          if (error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return json({ error: { code: error.code, message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
+          throw error;
+        }
+      }
       // Spec 043: an eval runner's callbacks, authorized by the run's own capability.
       const evalCallback = isSwebenchCallbackPath(url.pathname);
       if (request.method === "POST" && evalCallback !== undefined) {
@@ -758,6 +803,10 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         adminClaim: dependencies.adminClaim,
         adminValues: dependencies.adminValues,
       });
+      const webhookRetry = /^\/v1\/admin\/github\/webhook-deliveries\/([0-9a-f-]{36})\/retry$/.exec(url.pathname);
+      if (request.method === "POST" && webhookRetry?.[1]) {
+        return json(await retryGithubWebhookAsAdministrator(dependencies, identity, webhookRetry[1]), request.requestId, 202);
+      }
       const body = parseBody(request.body);
       // Spec 025 phase 25e: admin changes (FR-039 to FR-041, FR-052).
       const changed = await routeAdminChange(adminChanges, identity, { method: request.method, headers: request.headers, body }, url);
@@ -4706,6 +4755,100 @@ async function completedTurnItems(
   return [{ Put: { TableName: table, Item: item, ConditionExpression: "attribute_not_exists(pk)" } }];
 }
 
+/** Reconcile every PR webhook against GitHub; comments and delivery order never grant authority. */
+export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"], deliveryId: string): Promise<void> {
+  const getFeedback = dependencies.githubPullRequests.getPullRequestFeedback;
+  if (getFeedback === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "current GitHub feedback collection is not configured");
+  await reconcileTaskPullRequestFeedback({
+    documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+    repositoryFullName: event.fullName, number: event.number, deliveryId,
+    loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
+    repositoryUrl: async (projectName, revision, repositoryId) => {
+      const project = await requireProject(dependencies, projectName, revision);
+      return project.definition.repositories.find(repository => repository.name === repositoryId)?.url;
+    },
+    getCurrentFeedback: (url, number) => getFeedback.call(dependencies.githubPullRequests, url, number),
+    saveWorkflow: async (taskId, expectedRevision, workflow) => {
+      await dependencies.documentClient.send(new UpdateCommand({
+        TableName: dependencies.tableName, Key: taskKey(taskId),
+        UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+        ConditionExpression: "workflow.revision = :revision AND attribute_not_exists(closedAt)",
+        ExpressionAttributeValues: { ":workflow": workflow, ":now": workflow.updatedAt, ":revision": expectedRevision },
+      }));
+    },
+    now: new Date().toISOString(),
+  });
+}
+
+async function githubEventStillAuthorized(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"]): Promise<boolean> {
+  return authorizeLinkedGithubWebhook({
+    documentClient: dependencies.documentClient,
+    tableName: dependencies.tableName,
+    scope: { installationId: event.installationId, repositoryId: event.repositoryId, fullName: event.fullName, pullRequestNumber: event.number },
+    loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
+    repositoryUrl: async (projectName, revision, repositoryId) => {
+      const project = await requireProject(dependencies, projectName, revision);
+      return project.definition.repositories.find((repository) => repository.name === repositoryId)?.url;
+    },
+    verifyRepository: (repositoryUrl, scope) => dependencies.githubPullRequests.verifyWebhookRepository(repositoryUrl, scope),
+  });
+}
+
+async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies): Promise<{ attempted: number; processed: number; delayed: number }> {
+  const now = new Date().toISOString();
+  const due = await listDueGithubWebhookDeliveries({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now, limit: 25 });
+  let processed = 0;
+  let delayed = 0;
+  for (const delivery of due) {
+    try {
+      const result = await processGithubWebhookDelivery({
+        documentClient: dependencies.documentClient,
+        tableName: dependencies.tableName,
+        received: { delivery: "ACCEPTED", deliveryId: delivery.deliveryId, event: delivery.event },
+        process: async (event) => {
+          // Revalidate under the delivery lease. Revoked scope is terminal; transient GitHub/API
+          // errors consume the ordinary bounded retry budget instead of leaving a hot due row.
+          if (!await githubEventStillAuthorized(dependencies, event)) {
+            throw new GithubWebhookRefusal("linked GitHub pull request is no longer authorized");
+          }
+          await processGithubWorkflowEvent(dependencies, event, delivery.deliveryId);
+        },
+        now: () => new Date().toISOString(),
+      });
+      if (result === "PROCESSED") processed += 1;
+      else delayed += 1;
+    } catch (error) {
+      console.log(JSON.stringify({ component: "broker", event: "github.webhook_retry_failed", deliveryId: delivery.deliveryId, error: error instanceof Error ? error.name : "unknown" }));
+    }
+  }
+  return { attempted: due.length, processed, delayed };
+}
+
+export async function retryGithubWebhookAsAdministrator(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, deliveryId: string) {
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deliveryId)) throw agentXError("NOT_FOUND", "webhook delivery not found");
+  const key = { pk: `GITHUB_DELIVERY#${deliveryId}`, sk: "META" };
+  const stored = await getItem<Record<string, unknown>>(dependencies, key);
+  if (stored === undefined || (stored.status !== "RETRYABLE" && stored.status !== "DEAD") || stored.event === undefined) throw agentXError("CONFIG_INVALID", "only a failed GitHub delivery can be retried");
+  const event = stored.event as ReceivedGithubWebhook["event"];
+  if (!await githubEventStillAuthorized(dependencies, event)) throw agentXError("FORBIDDEN", "linked GitHub pull request is no longer authorized");
+  const now = new Date().toISOString();
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Update: { TableName: dependencies.tableName, Key: key,
+      UpdateExpression: "SET #status = :received, updatedAt = :now, nextAttemptAt = :now, webhookRecoveryPk = :pk, webhookRecoverySk = :sk REMOVE leaseToken, leaseExpiresAt, attempts",
+      ConditionExpression: "#status = :retryable OR #status = :dead",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":received": "RECEIVED", ":retryable": "RETRYABLE", ":dead": "DEAD", ":now": now, ":pk": "GITHUB_WEBHOOK_RECOVERY", ":sk": `${now}#${deliveryId}` },
+    } },
+    { Put: { TableName: dependencies.tableName, Item: { pk: `GITHUB_DELIVERY#${deliveryId}`, sk: `RETRY#${now}`, entityType: "GITHUB_WEBHOOK_RETRY_AUDIT", deliveryId, actor: identity.subject, at: now }, ConditionExpression: "attribute_not_exists(pk)" } },
+  ] }));
+  return { deliveryId, status: "RETRY_QUEUED" as const };
+}
+
+function isGithubWebhookRecoveryEvent(event: unknown): event is { source: "agentx.github-webhook-recovery" } {
+  return event !== null && typeof event === "object" && (event as { source?: unknown }).source === "agentx.github-webhook-recovery";
+}
+
 /**
  * Gap 6: the intent to start the next workflow step with no one asking, written in the same transaction as the
  * result that made it due. The broker runs it right after that commit; the recovery sweep runs any row left behind.
@@ -6219,6 +6362,7 @@ const loadGitHubApp = (): Promise<{ appId: string; privateKey: string }> => {
   return githubApp;
 };
 const loadGitHubPrivateKey = (): Promise<string> => loadGitHubAppSecret().then(privateKeyFromSecret);
+const loadGitHubWebhookSecret = (): Promise<string> => loadGitHubAppSecret().then(webhookSecretFromSecret);
 const githubCredentials = new GitHubAppCredentialProvider({
   credentialRef: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"),
   appId: githubAppIdSetting !== "" ? githubAppIdSetting : async () => (await loadGitHubApp()).appId,
@@ -6277,6 +6421,7 @@ export const handler = createAwsBrokerHandler({
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrants,
   githubPullRequests: githubCredentials,
+  githubWebhookSecret: loadGitHubWebhookSecret,
   checkRepositoryAccess: (repository) => githubCredentials.checkRepository(repository),
   githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },
   connectorCredentials: {

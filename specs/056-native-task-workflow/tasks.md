@@ -24,9 +24,9 @@
   thread, show plan approve/change controls, and collect optional project-approved checks in a modal.
   Broker transitions recheck the Slack task owner, exact thread, plan revision and digest.
 - [ ] 9. Extend the sample flow through independent candidate checks, read-only review, PR-ready
-  state and GitHub reconciliation. Candidate-bound checks and separate operation-bound reviews
-  are implemented. GitHub webhook ingress and merge reconciliation are a separate change. Slack/MCP
-  review controls and automatic review scheduling remain open.
+  state and GitHub reconciliation. Candidate-bound checks, separate operation-bound reviews,
+  webhook ingress, and merge reconciliation are implemented. Slack/MCP review controls and
+  automatic review scheduling remain open.
 - [ ] 10. Run the full repository suite and interruption/recovery matrix. Quick/Full phase
   contracts and task flow have focused Node 22 coverage. The full suite and complete restart/replay
   matrix remain outstanding.

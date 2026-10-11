@@ -13,6 +13,7 @@ import {
   submitWorkflowReview,
   recordExpectedWorkflowPullRequests,
   registerWorkflowPullRequest,
+  observeWorkflowPullRequest,
   WorkflowSnapshotSchema,
   WorkflowReviewReportSchema,
   submitWorkflowArtifact,
@@ -188,7 +189,7 @@ describe("native task workflow contracts", () => {
     expect(blocked).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
   });
 
-  it("waits on GitHub for every expected pull request once all are recorded", () => {
+  it("waits for every expected pull request to be observed merged by GitHub", () => {
     const candidate = createCandidateManifest([
       { repositoryId: "payments-api", commitSha: "a".repeat(40), treeSha: "1".repeat(40) },
       { repositoryId: "payments-ui", commitSha: "b".repeat(40), treeSha: "2".repeat(40) },
@@ -209,8 +210,22 @@ describe("native task workflow contracts", () => {
       { repositoryId: "payments-api", number: 11, url: "https://github.com/acme/api/pull/11", candidateDigest: current.candidate.digest, required: true },
       { repositoryId: "payments-ui", number: 12, url: "https://github.com/acme/ui/pull/12", candidateDigest: current.candidate.digest, required: true },
     ], "2026-10-05T12:04:00.000Z");
-    expect(waiting).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ repositoryId: "payments-api", state: "UNKNOWN" }, { repositoryId: "payments-ui", state: "UNKNOWN" }] });
-    expect(waiting).not.toHaveProperty("outcome");
+    const oneMerged = observeWorkflowPullRequest(waiting, {
+      repositoryId: "payments-api", number: 11, candidateDigest: current.candidate.digest,
+      state: "MERGED", source: "GITHUB_API", observedAt: "2026-10-05T12:05:00.000Z",
+    }, "2026-10-05T12:05:00.000Z");
+    expect(oneMerged).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    const allMerged = observeWorkflowPullRequest(oneMerged, {
+      repositoryId: "payments-ui", number: 12, candidateDigest: current.candidate.digest,
+      state: "MERGED", source: "GITHUB_API", observedAt: "2026-10-05T12:06:00.000Z",
+    }, "2026-10-05T12:06:00.000Z");
+    expect(allMerged).toMatchObject({ stage: "MERGED", state: "COMPLETE", outcome: "MERGED" });
+    const reopened = observeWorkflowPullRequest(allMerged, {
+      repositoryId: "payments-api", number: 11, candidateDigest: current.candidate.digest,
+      state: "OPEN", source: "GITHUB_API", observedAt: "2026-10-05T12:07:00.000Z",
+    }, "2026-10-05T12:07:00.000Z");
+    expect(reopened).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(reopened).not.toHaveProperty("outcome");
   });
 
   it("keeps a multi-repository workflow in PR creation until every candidate repository has a PR", () => {
@@ -237,6 +252,10 @@ describe("native task workflow contracts", () => {
       repositoryId: "payments-ui", number: 12, url: "https://github.com/acme/ui/pull/12", headSha: "e".repeat(40), candidateDigest: candidate.digest, required: true,
     }, "2026-10-05T12:05:00.000Z");
     expect(completeSet).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ repositoryId: "payments-api" }, { repositoryId: "payments-ui" }] });
+    const oneMerged = observeWorkflowPullRequest(completeSet, { repositoryId: "payments-api", number: 11, candidateDigest: candidate.digest, state: "MERGED", source: "GITHUB_API", observedAt: "2026-10-05T12:06:00.000Z" }, "2026-10-05T12:06:00.000Z");
+    expect(oneMerged).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    const allMerged = observeWorkflowPullRequest(oneMerged, { repositoryId: "payments-ui", number: 12, candidateDigest: candidate.digest, state: "MERGED", source: "GITHUB_API", observedAt: "2026-10-05T12:07:00.000Z" }, "2026-10-05T12:07:00.000Z");
+    expect(allMerged).toMatchObject({ stage: "MERGED", state: "COMPLETE", outcome: "MERGED" });
   });
 
   it("rejects persisted PR-ready or merged stages without their required evidence", () => {

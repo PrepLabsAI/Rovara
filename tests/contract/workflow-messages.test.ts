@@ -213,10 +213,9 @@ describe("workflow Slack messages", () => {
     expect(workflowMessageKey(snapshot("PULL_REQUEST", "READY"))).toBe(workflowMessageKey({ ...snapshot("PULL_REQUEST", "READY"), revision: 12 }));
   });
 
-  it("says a person merges the draft pull request on GitHub, then closes the task here, without promising to follow it", () => {
+  it("offers Close task on the draft pull request post, so an owner can close the task while its pull request is open", () => {
     const message = workflowMessage({ taskId, workflow: snapshot("WAIT_FOR_MERGE", "WAITING") })!;
-    expect(message.text).toBe("Draft pull request opened: <https://github.com/example/demo/pull/42|PR #42>. Review it and merge it on GitHub, then close this task here.");
-    expect(message.text).not.toMatch(/finish|when it's merged/);
+    expect(message.text).toMatch(/^Draft pull request opened: /);
     expect(buttonsOf(message.blocks).map((button) => [button.action_id, button.text.text])).toEqual([["agentx_workflow_close", "Close task"]]);
   });
 
