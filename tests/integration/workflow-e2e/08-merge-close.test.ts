@@ -424,6 +424,41 @@ describe("Suite 8: merge and close", () => {
       expect(texts).not.toContain(CLOSED_REPLY);
     }, 120_000);
 
+    /** The owner rejects the coding plan through their AI tool (the one way to reject one). */
+    async function rejectPlan(e2e: WorkflowE2E): Promise<void> {
+      const workflow = e2e.workflow();
+      const plan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)!;
+      const answer = await e2e.mcp("agentx_decide_workflow", { task_id: e2e.taskId(), request_id: randomUUID(), expected_revision: workflow.revision,
+        decision: "REJECT", reason: "Not needed after all.", artifact_digest: plan.sha256 });
+      expect(answer.isError).toBe(false);
+      await e2e.settle();
+      expect(e2e.workflow()).toMatchObject({ stage: "CLOSED", state: "COMPLETE", outcome: "REJECTED" });
+    }
+
+    it("a rejected plan gives back its slot and its workspace at once, with the close's audit record and its reason", async () => {
+      const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: editsOrFix } });
+      await atPlanReview(e2e);
+      const taskId = e2e.taskId();
+      expect(counter(e2e, MEMBER)).toEqual({ count: 1, tasks: [taskId] });
+      await rejectPlan(e2e);
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(0);
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
+      const records = e2e.db.find((item) => item.taskId === taskId && item.action === "close" && item.phase === "completed");
+      expect(records.map((record) => record.responseText)).toEqual(["The task is complete (its plan was rejected), and its workspace is released."]);
+    }, 120_000);
+
+    it("a merge writes the close's audit record once, saying the pull request merged", async () => {
+      const { e2e, pullRequest } = await waiting();
+      await mergeWebhook(e2e, pullRequest.number);
+      await e2e.settle();
+      expect(await e2e.githubWebhook(pullRequest.number, { merged: true })).toBe(200);
+      await e2e.settle();
+      const records = e2e.db.find((item) => item.taskId === e2e.taskId() && item.action === "close" && item.phase === "completed");
+      expect(records.map((record) => record.responseText)).toEqual(["The task is complete (its pull request merged), and its workspace is released."]);
+    }, 120_000);
+
     it("a merge while the feedback review runs releases the slot once that review ends", async () => {
       const { e2e, pullRequest } = await waiting();
       await comment(e2e, pullRequest.number);
@@ -452,7 +487,8 @@ describe("Suite 8: merge and close", () => {
     it("self-heal: slots merged tasks kept before this release are given back when a start meets the limit", async () => {
       const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: editsOrFix } });
       const merged = await mergedTask(e2e, "Add a greet(name) function");
-      // As the live table was: three merged tasks still counted, their workspaces READY, no release recorded.
+      // As the live table was: three finished tasks still counted (two merged, one rejected), their workspaces READY, no
+      // release recorded.
       const original = taskById(e2e, merged);
       const stuck = [merged, randomUUID(), randomUUID()];
       for (const taskId of stuck.slice(1)) {
@@ -460,7 +496,9 @@ describe("Suite 8: merge and close", () => {
         e2e.db.set({ ...workspaceOf(e2e, merged), pk: `WORKSPACE#${workspaceId}`, id: workspaceId });
         // Each in its own thread, as each was started.
         const share = { ...(original.share as Record<string, unknown>), threadTs: `1695700000.${String(stuck.indexOf(taskId)).padStart(6, "0")}` };
-        e2e.db.set({ ...original, pk: `DEVTASK#${taskId}`, taskId, workspaceId, share });
+        // The last one's plan was rejected instead (CLOSED/COMPLETE, outcome REJECTED).
+        const workflow = taskId === stuck[2] ? { ...(original.workflow as Record<string, unknown>), stage: "CLOSED", state: "COMPLETE", outcome: "REJECTED" } : original.workflow;
+        e2e.db.set({ ...original, pk: `DEVTASK#${taskId}`, taskId, workspaceId, share, workflow });
       }
       for (const taskId of stuck) {
         const { releasedAt: _released, ...task } = taskById(e2e, taskId);

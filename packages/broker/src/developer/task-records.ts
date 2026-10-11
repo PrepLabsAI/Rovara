@@ -70,6 +70,8 @@ export interface DeveloperTaskRecord {
    * its workspace. A closed task gives them back with its close instead, and has none.
    */
   releasedAt?: string;
+  /** When that release claimed the workspace (CLOSING) before deleting its compute; removed once it is released. */
+  releaseClaimedAt?: string;
   workflow?: WorkflowSnapshot;
   /** The commit each repository's preparation checked out, from the prepare result; the task's base until one is pinned. */
   preparedBase?: WorkflowReviewBase;

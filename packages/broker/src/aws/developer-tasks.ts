@@ -1415,6 +1415,8 @@ export async function decideTaskWorkflow(
       ExpressionAttributeNames: { "#state": "state" },
       ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":waiting": "WAITING" },
     } }]);
+    // A rejected plan ends the task: it gives back its slot and its workspace now.
+    await releaseFinishedTaskQuietly(deps, taskId);
     const fresh = await loadOwnedTask(deps, caller, taskId);
     return { task: await taskView(deps, fresh, { events: 0, details: false }) };
   }
@@ -3732,11 +3734,13 @@ export async function finishTaskClose(
   throw lastError;
 }
 
-/** Whether a workflow task is finished: all its pull requests merged, or its workflow closed it. Nothing changes it after. */
+/**
+ * Whether a workflow task is finished: all its pull requests merged, or its workflow ended in the CLOSED stage (the
+ * owner rejected its plan). Nothing changes either after.
+ */
 export function workflowTaskFinished(task: Pick<DeveloperTaskRecord, "workflow">): boolean {
   const workflow = task.workflow;
-  return workflow?.state === "COMPLETE"
-    && ((workflow.stage === "MERGED" && workflow.outcome === "MERGED") || (workflow.stage === "CLOSED" && workflow.outcome === "CLOSED"));
+  return workflow?.state === "COMPLETE" && ((workflow.stage === "MERGED" && workflow.outcome === "MERGED") || workflow.stage === "CLOSED");
 }
 
 /** Workspace states whose compute a finished task can remove: nothing is starting, stopping, closing or running there. */
@@ -3744,34 +3748,69 @@ const RELEASABLE_WORKSPACE = new Set(["READY", "STOPPED", "UNHEALTHY"]);
 
 export type FinishedTaskRelease = "released" | "already_released" | "not_finished" | "busy";
 
+type ReleaseDeps = { tableName: string; actions: DeveloperTaskActions; documentClient: { send(command: unknown): Promise<unknown> } };
+
+/** The release's own audit record ID for a task: one per task, so a repeated release writes it once. */
+function releaseTurnId(taskId: string): string {
+  const hex = createHash("sha256").update(`agentx-release\0${taskId}`, "utf8").digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 /**
- * A finished workflow task (all its pull requests merged, or its workflow closed) gives back its workspace slot and its
- * workspace, as a close does: the compute is deleted first, then one transaction releases the counters the task charged,
- * marks the workspace CLOSED and the index row CLOSED, and sets the task's `releasedAt`. The task stays as it is
- * otherwise (it is complete, not closed). Idempotent and self-guarding as the close is: the member counter's
- * `contains(#tasks, taskId)` condition and the task's own `releasedAt` make a second release a no-op, never a second
- * decrement. A workspace still running an operation is left alone ("busy"): that operation's result calls this again.
- * A task closed in the usual way gave its slot back with its close; one still holding it (an older record) gives back the
- * slot alone.
+ * A finished workflow task (all its pull requests merged, or its plan rejected) gives back its workspace slot and its
+ * workspace, in the order a close uses. First it claims the workspace: CLOSING, with the claim recorded on the task
+ * (`releaseClaimedAt`), only while nothing runs there, so no operation can start meanwhile. Then it deletes the compute.
+ * Then one transaction releases the counters the task charged, marks the workspace and the index row CLOSED, sets the
+ * task's `releasedAt` and writes the audit record a close writes, with the reason. The task stays complete, not closed.
+ *
+ * Idempotent and self-guarding as the close is: the member counter's `contains(#tasks, taskId)` condition, the task's
+ * `releasedAt` and the audit record's key make a second release a no-op, never a second decrement. A claim left by a
+ * release that stopped part way is taken up again by the next call. A workspace something still runs on is left alone
+ * ("busy"): that operation's result, the recovery sweep or the owner's next start tries again.
+ * A task closed in the usual way gave its slot back with its close; one still holding it (an older record) gives back
+ * the slot alone.
  */
-export async function releaseFinishedTask(
-  deps: { tableName: string; actions: DeveloperTaskActions; documentClient: { send(command: unknown): Promise<unknown> } },
-  task: DeveloperTaskRecord,
-): Promise<FinishedTaskRelease> {
+export async function releaseFinishedTask(deps: ReleaseDeps, task: DeveloperTaskRecord): Promise<FinishedTaskRelease> {
   const closed = task.closedAt !== undefined;
   if (!closed && !workflowTaskFinished(task)) return "not_finished";
   if (task.releasedAt !== undefined) return "already_released";
   let releaseWorkspace = false;
-  let workspaceStatus: string | undefined;
   if (!closed) {
     const workspace = await deps.actions.workspace(task.workspaceId);
-    workspaceStatus = workspace.status;
     if (workspace.status !== "CLOSED") {
-      if (!RELEASABLE_WORKSPACE.has(workspace.status) || workspace.activeOperationId != null) return "busy";
+      // Ours when the task records the claim and the workspace is CLOSING with no close of its own.
+      const claimed = task.releaseClaimedAt !== undefined && workspace.status === "CLOSING" && workspace.closeOperationId === undefined;
+      if (!claimed) {
+        if (!RELEASABLE_WORKSPACE.has(workspace.status) || workspace.activeOperationId != null) return "busy";
+        const now = new Date().toISOString();
+        try {
+          await deps.actions.transact([
+            { Update: {
+              TableName: deps.tableName, Key: { pk: `WORKSPACE#${task.workspaceId}`, sk: "META" },
+              // A close the owner asked for earlier and that was refused may have left its ID: it is over, and only
+              // this release's claim may stand on a CLOSING workspace with no close of its own.
+              UpdateExpression: "SET #status = :closing, updatedAt = :now REMOVE closeOperationId",
+              ConditionExpression: "#status = :was AND attribute_not_exists(activeOperationId)",
+              ExpressionAttributeNames: { "#status": "status" },
+              ExpressionAttributeValues: { ":closing": "CLOSING", ":now": now, ":was": workspace.status },
+            } },
+            { Update: {
+              TableName: deps.tableName, Key: taskKey(task.taskId),
+              UpdateExpression: "SET releaseClaimedAt = :now",
+              ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(releasedAt) AND attribute_not_exists(closedAt)",
+              ExpressionAttributeValues: { ":now": now },
+            } },
+          ]);
+        } catch (error) {
+          if (!isConditional(error)) throw error;
+          const fresh = await get<DeveloperTaskRecord>(deps, taskKey(task.taskId));
+          return fresh?.releasedAt !== undefined || fresh?.closedAt !== undefined ? "already_released" : "busy";
+        }
+      }
       try {
         await deps.actions.deleteCompute(workspace);
       } catch (error) {
-        // Compute that is starting or stopping refuses; the next call tries again.
+        // Compute that is starting or stopping refuses; the claim stays, and the next call takes it up.
         if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY") return "busy";
         throw error;
       }
@@ -3779,19 +3818,20 @@ export async function releaseFinishedTask(
     }
   }
   const now = new Date().toISOString();
+  const reason = task.workflow?.stage === "CLOSED" ? "its plan was rejected" : "its pull request merged";
   const rest = (): TransactItems => [
     ...(releaseWorkspace ? [{ Update: {
       TableName: deps.tableName,
       Key: { pk: `WORKSPACE#${task.workspaceId}`, sk: "META" },
       UpdateExpression: "SET #status = :closed, closedAt = :now, updatedAt = :now REMOVE closeError",
-      ConditionExpression: "#status = :was AND attribute_not_exists(activeOperationId)",
+      ConditionExpression: "#status = :closing AND attribute_not_exists(activeOperationId) AND attribute_not_exists(closeOperationId)",
       ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":closed": "CLOSED", ":now": now, ":was": workspaceStatus },
+      ExpressionAttributeValues: { ":closed": "CLOSED", ":now": now, ":closing": "CLOSING" },
     } }] : []),
     ...(closed ? [] : [
       { Update: {
         TableName: deps.tableName, Key: taskKey(task.taskId),
-        UpdateExpression: "SET releasedAt = :now",
+        UpdateExpression: "SET releasedAt = :now REMOVE releaseClaimedAt",
         ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(releasedAt) AND attribute_not_exists(closedAt)",
         ExpressionAttributeValues: { ":now": now },
       } },
@@ -3801,6 +3841,16 @@ export async function releaseFinishedTask(
         UpdateExpression: "SET #status = :closed, updatedAt = :now", ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: { ":closed": "CLOSED", ":now": now },
       } },
+      // The audit record a close writes, saying why: one per task.
+      ...(deps.actions.turnRecordsTableName === undefined ? [] : [{ Put: {
+        TableName: deps.actions.turnRecordsTableName,
+        Item: aiToolTurn({
+          party: partyOfTask(task), turnId: releaseTurnId(task.taskId), action: "close", phase: "completed", outcome: "succeeded",
+          receivedAt: now, finishedAt: now, request: "close",
+          response: `The task is complete (${reason}), and its workspace is released.`,
+        }),
+        ConditionExpression: "attribute_not_exists(pk)",
+      } }]),
     ]),
   ];
   let release = true;
@@ -3820,7 +3870,7 @@ export async function releaseFinishedTask(
         // Counters that no longer hold this task: given back already; the rest is sent again without them.
         await releaseConflict(deps.documentClient, deps.tableName, task.charge, task.taskId, error);
       } catch {
-        // Not the counters: the workspace started something meanwhile.
+        // Not the counters: something else moved meanwhile; the next call tries again.
         return "busy";
       }
       release = false;
@@ -3829,18 +3879,20 @@ export async function releaseFinishedTask(
   return "busy";
 }
 
+/** The most finished tasks one limit-refused start gives back, so the start stays quick. */
+const SELF_HEAL_MAX = 10;
+
 /**
- * Self-heal for slots a finished task kept (tasks finished by a merge before releases ran on merge): each task the member
- * counter holds that is finished or closed gives its slot back, by releaseFinishedTask. Answers how many it released.
- * Best effort: a task that cannot be released now is left for the next time.
+ * Self-heal for slots finished tasks kept (tasks merged or rejected before releases ran then, or whose release found the
+ * workspace busy): each task the member counter holds that is finished or closed gives its slot back, by
+ * releaseFinishedTask, at most SELF_HEAL_MAX per call. Answers how many it released. Best effort: a task that cannot be
+ * released now is left for the next time.
  */
-export async function releaseFinishedTasksOf(
-  deps: { tableName: string; actions: DeveloperTaskActions; documentClient: { send(command: unknown): Promise<unknown> } },
-  member: { pk: string; sk: string },
-): Promise<number> {
+export async function releaseFinishedTasksOf(deps: ReleaseDeps, member: { pk: string; sk: string }): Promise<number> {
   const counter = await get<{ tasks?: Set<string> }>(deps, member);
   let released = 0;
   for (const taskId of [...(counter?.tasks ?? [])].slice(0, 50)) {
+    if (released >= SELF_HEAL_MAX) break;
     const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
     if (task === undefined) continue;
     try {
@@ -3850,6 +3902,20 @@ export async function releaseFinishedTasksOf(
     }
   }
   return released;
+}
+
+/** releaseFinishedTask, logged and never thrown: for callers whose own work is done (a decision, a webhook, a sweep). */
+export async function releaseFinishedTaskQuietly(deps: ReleaseDeps, taskId: string): Promise<FinishedTaskRelease | undefined> {
+  try {
+    const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
+    if (task === undefined || task.closedAt !== undefined || task.releasedAt !== undefined) return undefined;
+    const outcome = await releaseFinishedTask(deps, task);
+    if (outcome === "released" || outcome === "busy") console.log(JSON.stringify({ component: "broker", event: `developer.finished_task_${outcome}`, taskId }));
+    return outcome;
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "developer.finished_task_release_failed", taskId, error: error instanceof Error ? error.name : "unknown" }));
+    return undefined;
+  }
 }
 
 /**
