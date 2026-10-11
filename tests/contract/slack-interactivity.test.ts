@@ -832,6 +832,20 @@ describe("Slack native workflow review controls", () => {
     const submission = (privateMetadata: unknown, values: Record<string, unknown> = {}, user = requester, team = thread.teamId) => ({
       user: { id: user, team_id: team }, team: { id: team }, view: { private_metadata: privateMetadata, state: { values } } });
 
+    it("says \"1 more required check\" when one required check is left off the list", async () => {
+      const command = { cwd: "workspace", executable: "npm", args: ["test"], timeoutSeconds: 60 };
+      const required = Array.from({ length: 21 }, (_, index) => ({ id: `required-${index + 1}`, label: `npm run check-${index}`, command }));
+      const at = new Date(nowSeconds * 1_000).toISOString();
+      const big = submitWorkflowArtifact(createWorkflowSnapshot({ taskId, ownerId: "b".repeat(64), now: at, checkPolicy: { required, optional: [{ id: "extra-1", label: "Optional check", command }], selectedOptionalIds: [] } }),
+        { expectedRevision: 1, now: at, artifact: { id: "plan-1", type: "plan", version: 1, sha256: digest, producer: "p", objectKey: "private/o/w/op/plan.md", createdAt: at } });
+      let opened: Record<string, unknown> | undefined;
+      const handlers = workflowSlackHandlers({ loadTask: async () => ({ ...task, workflow: big }), openView: async (trigger, view) => { await strict.openView(trigger, view); opened = view; }, submit: async () => undefined });
+      await handlers.handleAction(approve(big.revision));
+      const text = JSON.stringify(opened?.blocks);
+      expect(text).toContain("and 1 more required check");
+      expect(text).not.toContain("and 1 more required checks");
+    });
+
     it("offers more than ten optional checks in a multi-select with Slack-safe labels and a capped required list", async () => {
       const command = { cwd: "workspace", executable: "npm", args: ["test"], timeoutSeconds: 60 };
       const required = Array.from({ length: 64 }, (_, index) => ({ id: `required-${index + 1}`, label: `npm run check-${index} ${"y".repeat(70)}`.slice(0, 80), command }));
@@ -1669,7 +1683,7 @@ describe("Quick or Full buttons (gap 3)", () => {
   it("explains a refused start in plain words", async () => {
     const { handler, ephemeral, updates } = buttons(new SlackWorkflowStartError("WORKSPACE_LIMIT"));
     await handler(press("agentx_workflow_path_quick"));
-    expect(ephemeral).toEqual(["You've reached your limit of open AgentX tasks. Close one in its thread, or merge its pull request, then try again."]);
+    expect(ephemeral).toEqual(["You've reached your limit of open AgentX tasks. Close one of your open tasks, or merge its pull request, then try again."]);
     expect(updates).toEqual([]);
     const unknown = buttons(new SlackWorkflowStartError("UNKNOWN"));
     await unknown.handler(press("agentx_workflow_path_quick"));

@@ -61,7 +61,7 @@ describe("starting a task from Slack", () => {
     const notice = workflowStartFailureNotice("UNKNOWN", "Ev0000000042");
     expect(notice).toContain("Ev0000000042");
     expect(notice).not.toContain("workflow:");
-    expect(workflowStartFailureNotice("WORKSPACE_LIMIT", "Ev1")).toBe("You've reached your limit of open AgentX tasks. Close one in its thread, or merge its pull request, then try again.");
+    expect(workflowStartFailureNotice("WORKSPACE_LIMIT", "Ev1")).toBe("You've reached your limit of open AgentX tasks. Close one of your open tasks, or merge its pull request, then try again.");
     expect(workflowStartFailureNotice("WORKSPACE_BUSY", "Ev1")).toBe("This thread already has a task. Start a new request in the channel.");
     for (const code of ["FORBIDDEN", "CHANNEL_REQUIRED"]) {
       expect(workflowStartFailureNotice(code, "Ev1")).toBe("This channel isn't connected to an AgentX project you can use. Ask an AgentX admin to check the channel.");
