@@ -1,15 +1,18 @@
 // tests/contract/admin-actions.test.ts
 // Spec 025 E8, E9, E19: the handlers 25e's change tools apply that had no admin command before.
 import { describe, expect, it, vi } from "vitest";
+import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import { developerIdForSlackUser, endSessions, grantProjectAccess, projectGrant, resolveDeveloper, revokeProjectAccess, setWorkspaceLimits, type AdminActionDependencies } from "../../packages/broker/src/aws/admin-actions.js";
 import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, isWholeLimit, readWorkspaceLimits } from "../../packages/broker/src/developer/limits.js";
 import { emailIndexKey } from "../../packages/broker/src/developer/store.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const ADMIN = { issuer: "https://identity.example.test", subject: "admin-subject" };
-function deps(extra: Partial<AdminActionDependencies> = {}): AdminActionDependencies & { db: FakeDynamoDb } {
+type AdminActionFixtureOverrides = Omit<Partial<AdminActionDependencies>, "signInTableName"> & { signInTableName?: string | undefined };
+function deps(extra: AdminActionFixtureOverrides = {}): AdminActionDependencies & { db: FakeDynamoDb } {
   const db = new FakeDynamoDb();
-  return { db, documentClient: db, tableName: "state", signInTableName: "signin", slackTeamId: "T0BSHLLUGBD", limitDefaults: { member: 3, organization: 20 }, now: () => Date.parse("2026-10-02T09:00:00.000Z"), ...extra };
+  // The local fixture keeps an own signInTableName key when the setup is explicitly absent.
+  return { db, documentClient: db, tableName: "state", signInTableName: "signin", slackTeamId: "T0BSHLLUGBD", limitDefaults: { member: 3, organization: 20 }, now: () => Date.parse("2026-10-02T09:00:00.000Z"), ...extra } as AdminActionDependencies & { db: FakeDynamoDb };
 }
 const NOT_SIGNED_IN = "NOT_FOUND: nobody has signed in to AgentX with that email yet; name them by Slack user ID, or ask them to sign in first";
 
@@ -88,12 +91,12 @@ describe("a grant that races another write (FR-013.1)", () => {
   function racing(role: "developer" | "administrator") {
     const d = deps();
     const id = developerIdForSlackUser("U0ADA00001");
-    const send = d.db.send.bind(d.db);
+    const send = d.documentClient.send.bind(d.documentClient);
     // Another writer adds the row between the grant's read and its conditional put.
-    d.documentClient = { send: async (command: unknown) => {
-      if ((command as { constructor: { name: string } }).constructor.name === "PutCommand") d.db.set({ pk: `MEMBER#${id}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: id, projectName: "payments", role });
+    d.documentClient = { send: vi.fn<AdminActionDependencies["documentClient"]["send"]>(async (command) => {
+      if (command instanceof PutCommand) d.db.set({ pk: `MEMBER#${id}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP", ownerKey: id, projectName: "payments", role });
       return send(command);
-    } };
+    }) };
     return { d, id };
   }
 
