@@ -66,9 +66,9 @@ const suggestionKey = (taskId: string, document: CommentDocument, decisionId: st
 const rateKey = (taskId: string, kind: string, actor: string) => ({ pk: partition(taskId), sk: `RATE#${kind}#${actor}` });
 const nudgeKey = (taskId: string, developerId: string) => ({ pk: partition(taskId), sk: `NUDGE#${developerId}` });
 
-/** The stored fields that are not part of a comment or suggestion. */
+/** The stored fields that are not part of a comment, suggestion or decision detail. */
 const STORE_FIELDS: ReadonlySet<string> = new Set(["pk", "sk", "entityType"]);
-function withoutKeys(item: Record<string, unknown>): Record<string, unknown> {
+export function withoutKeys(item: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(item).filter(([key]) => !STORE_FIELDS.has(key)));
 }
 

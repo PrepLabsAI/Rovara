@@ -185,6 +185,7 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
+import { ownerAnswersFor } from "../developer/owner-answers.js";
 import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown } from "../developer/plan-artifacts.js";
 import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, planEvidenceEvent, planEvidenceJobItem, planEvidenceSources, type PlanEvidenceEvent, type PlanEvidenceJob } from "../developer/plan-evidence-jobs.js";
 import { resolvePlanEvidence } from "../developer/plan-evidence.js";
@@ -3173,7 +3174,9 @@ async function acceptTask(
           duplicate: true,
         };
       }
-      throw agentXError("WORKSPACE_BUSY", "workspace already has an active writer");
+      // Which of the caller's own items failed (after this function's four), so it can tell its own conditions apart.
+      const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons ?? [];
+      throw Object.assign(agentXError("WORKSPACE_BUSY", "workspace already has an active writer"), { extraCancellation: reasons.slice(4).map((reason) => reason.Code ?? "None") });
     }
     throw error;
   }
@@ -4415,8 +4418,9 @@ async function readFeedbackBundlesForCritic(
   for (const artifact of latestStructured === undefined ? requirements : [latestStructured]) {
     if (!artifact.objectKey.startsWith(`private/${task.ownerKey}/${task.workspaceId}/`)) throw agentXError("CALLBACK_FORBIDDEN", "approved requirement artifact is outside this task's private storage");
     if (artifact.format === "structured") {
-      // The owner approved it with AgentX's recommended answers. A copy too long for the critic is cut, never refused.
-      const loaded = await loadWorkflowDocument((key, maxBytes) => readObjectText(dependencies, key, maxBytes), artifact, { answers: "recommended" });
+      // With the owner's answers and the comments they sent. A copy too long for the critic is cut, never refused.
+      const answers = await ownerAnswersFor({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, workflow, artifact);
+      const loaded = await loadWorkflowDocument((key, maxBytes) => readObjectText(dependencies, key, maxBytes), artifact, { answers });
       if (loaded === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "approved task requirements failed size or digest validation");
       const heading = artifact.type.toUpperCase() + " (sha256 " + artifact.sha256 + "):\n";
       approved.push(heading + shortenMarkdown(loaded.markdown, FEEDBACK_REQUIREMENTS_MAX_BYTES - Buffer.byteLength(heading, "utf8"), "… (shortened; the full plan is on the task page)"));
