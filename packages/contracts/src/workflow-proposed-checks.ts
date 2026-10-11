@@ -1,35 +1,12 @@
 import { z } from "zod";
-import { RelativeWorkspacePathSchema } from "./project.js";
 import { WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckProposalSchema, type WorkflowCheck, type WorkflowCheckProposal } from "./task-workflow.js";
+import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema as ProposedCheckInputSchema, hasControlCharacter } from "./workflow-check-input.js";
+
+export { WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX, WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema, feedbackReplacementCheckProblem, hasControlCharacter, proposedCheckExecutableAllowed, proposedCheckProblem, type WorkflowProposedCheckInput } from "./workflow-check-input.js";
 
 /** The note shown when a plan's `agentx-checks` block is malformed or over a limit. */
 export const WORKFLOW_PROPOSED_CHECKS_UNREADABLE = "AgentX could not read the proposed checks";
-export const WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS = 600;
 const CHECKS_INFO_STRING = "agentx-checks";
-const BARE_EXECUTABLE = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
-const RELATIVE_EXECUTABLE = /^\.\/[A-Za-z0-9._+/-]{1,254}$/;
-
-const ExecutableSchema = z.string().refine((value) => BARE_EXECUTABLE.test(value)
-  || (RELATIVE_EXECUTABLE.test(value) && RelativeWorkspacePathSchema.safeParse(value.slice(2)).success));
-
-/** True when the text holds a character below U+0020 (line breaks and tabs included) or U+007F. */
-export function hasControlCharacter(value: string): boolean {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code < 0x20 || code === 0x7f) return true;
-  }
-  return false;
-}
-
-const PlainText = (schema: z.ZodString) => schema.refine((value) => !hasControlCharacter(value));
-
-const ProposedCheckInputSchema = z.object({
-  label: PlainText(z.string().trim().min(1).max(80)),
-  cwd: RelativeWorkspacePathSchema,
-  executable: ExecutableSchema,
-  args: z.array(PlainText(z.string().max(1_024))).max(32),
-  timeoutSeconds: z.number().int().min(1).max(1_800).optional(),
-}).strict();
 
 /** The most claims one check may name in `proves`; matches the most claims a plan document holds. */
 const PROVES_MAX = 50;

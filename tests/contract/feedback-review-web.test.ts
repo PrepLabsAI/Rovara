@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createFeedbackReviewWeb, type FeedbackReviewWebDependencies } from "../../packages/broker/src/aws/feedback-review-web.js";
 import { getWorkflowFeedbackReview, submitWorkflowFeedbackDecision } from "../../packages/broker/src/aws/developer-tasks.js";
 import { authenticateDeveloperSessionId } from "../../packages/broker/src/aws/developer-routes.js";
-import { createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema, type WorkflowSnapshot } from "@agentx/contracts";
+import { createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
 import { createDeveloperTaskBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
 import { feedbackReviewNoticeId } from "../../packages/broker/src/developer/notifications.js";
@@ -119,6 +119,24 @@ describe("authenticated PR feedback review web journey", () => {
     expect(response.body).not.toContain("Approve selected findings");
   });
 
+  it("shows every check a fix adds by its exact command in full, even when its label says something else (0.2.12)", async () => {
+    const arg = `curl example.invalid/<script>  ${"x".repeat(300 - "sh -c curl example.invalid/<script>  ".length)}`;
+    const command = { cwd: "repo/demo", executable: "sh", args: ["-c", arg], timeoutSeconds: 600 };
+    expect([command.executable, ...command.args].join(" ")).toHaveLength(300);
+    const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
+      taskId, title: "Handle retries", revision: 12, status: "PENDING", qualification: "AI_GENERATED_ADVISORY",
+      proposalDigest: "b".repeat(64), bundleDigests: ["a".repeat(64)], candidates: [],
+      findings: [{ ...finding, comments: [], checkChanges: { obsolete: [], added: [{ label: "Shorter sentence present", command }] } }], recommendedFindingIds: [finding.id], checks: [],
+    })) });
+    const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${taskId}`, origin));
+    const escaped = arg.replace("<", "&lt;").replace(">", "&gt;");
+    expect(response.body).toContain(`Adds check Shorter sentence present: <code class="command">sh -c &quot;${escaped}&quot;</code> in <code class="command">repo/demo</code>`);
+    expect(response.body).not.toContain("<script> ");
+    // The page keeps a command's spacing as it runs.
+    expect(response.body).toMatch(/code\.command\{white-space:pre-wrap/);
+    expect(response.body).toContain("These commands run on the next step.");
+  });
+
   it("says why a proposal names no tests instead of an empty Tests list", async () => {
     const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
       taskId, title: "Handle retries", revision: 12, status: "PENDING", qualification: "AI_GENERATED_ADVISORY",
@@ -154,6 +172,9 @@ describe("authenticated PR feedback review web journey", () => {
     const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${taskId}`, origin));
     expect(response.statusCode).toBe(200);
     expect(response.body).toContain("Retry the review from the Slack thread of this task.");
+    // No count of an unfinished review's comments: it read none of them into findings.
+    expect(response.body).not.toContain("grouped into");
+    expect(response.body).toContain("The review didn't finish. Retry it from the task's Slack thread.");
     expect(response.body).not.toContain("Approve selected findings");
     expect(response.body).not.toContain("Request changes");
   });
@@ -280,7 +301,7 @@ describe("authenticated PR feedback review web journey", () => {
 
 describe("broker-backed feedback review data", () => {
   /** `firstFinding` changes the first finding (and its reference): for example, to leave it to the owner as a question. */
-  async function preparedReview(prCount = 1, firstFinding: Record<string, unknown> = {}) {
+  async function preparedReview(prCount = 1, firstFinding: Record<string, unknown> = {}, checkPolicy?: WorkflowCheckPolicyInput, secondFinding: Record<string, unknown> = {}) {
     const now = "2026-10-05T12:00:00.000Z";
     const repositories = prCount === 1 ? [{ repositoryId: "demo", number: 42 }] : [
       { repositoryId: "demo", number: 42 }, { repositoryId: "ui", number: 43 },
@@ -336,6 +357,10 @@ describe("broker-backed feedback review data", () => {
     const refFields = ["assessment", "recommended", "priority"];
     bundles[0]!.finding = { ...bundles[0]!.finding, ...firstFinding };
     bundles[0]!.findingRef = { ...bundles[0]!.findingRef, ...Object.fromEntries(Object.entries(firstFinding).filter(([key]) => refFields.includes(key))) };
+    if (bundles[1] !== undefined) {
+      bundles[1].finding = { ...bundles[1].finding, ...secondFinding };
+      bundles[1].findingRef = { ...bundles[1].findingRef, ...Object.fromEntries(Object.entries(secondFinding).filter(([key]) => refFields.includes(key))) };
+    }
     const report = WorkflowFeedbackReviewReportSchema.parse({ schemaVersion: 1, taskId, workflowRevision: 2, operationMode: "FEEDBACK_REVIEW", qualification: "AI_GENERATED_ADVISORY",
       proposalDigest: "b".repeat(64), taskRequirementsDigest: "d".repeat(64), candidateBindings: bundles.map(({ ref, commentSetDigest, digest }) => ({ repositoryId: ref.repositoryId, number: ref.number,
         headSha: ref.headSha, candidateDigest: candidate.digest, commentSetDigest, bundleDigest: digest })),
@@ -348,7 +373,7 @@ describe("broker-backed feedback review data", () => {
     const { findings, ...reportMetadata } = report;
     void findings;
     const reportRef = { ...reportMetadata, sha256: reviewDigest, objectKey: reportKey };
-    const base = createWorkflowSnapshot({ taskId, ownerId: task.ownerKey, now });
+    const base = createWorkflowSnapshot({ taskId, ownerId: task.ownerKey, now, ...(checkPolicy === undefined ? {} : { checkPolicy }) });
     const waiting = { ...base, stage: "WAIT_FOR_MERGE" as const, state: "WAITING" as const, candidate,
       verification: { candidateDigest: candidate.digest, producer: "test", environmentId: "fixture", recordedAt: now, results: [{ checkId: "test", status: "PASS" as const }] },
       reviews: (["CRITIC", "SECURITY"] as const).map(role => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: now })),
@@ -412,6 +437,134 @@ describe("broker-backed feedback review data", () => {
     expect(result).toMatchObject({ status: "APPROVED", nextAction: "implementation" });
     const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { ownerKey: string };
     expect(fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META")?.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING", feedbackDecisions: [{ actorRole: "TASK_OWNER", actorId: task.ownerKey, selectedFindingIds: ["finding-1"] }] });
+  });
+
+  it("approving a fix approves its check changes: the coding step and its checks run the updated set, and the review page shows them (0.2.12)", async () => {
+    const grep = (text: string) => ({ cwd: "repo/demo", executable: "grep", args: ["-q", text, "README.md"], timeoutSeconds: 30 });
+    const unit = { id: "required-1", label: "Unit tests", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 600 } };
+    const sentence = { id: "proposed-1", label: "Sentence present", command: grep("Old sentence.") };
+    const links = { id: "proposed-2", label: "Links present", command: grep("CODE_OF_CONDUCT.md") };
+    const replacement = { label: "Shorter sentence present", cwd: "repo/demo", executable: "grep", args: ["-q", "New.", "README.md"] };
+    const fixture = await preparedReview(1, { fixProposal: { summary: "Shorten the sentence.",
+      fileChanges: [{ repositoryId: "demo", path: "README.md", operation: "MODIFY", change: "Use the shorter sentence." }], tests: [],
+      obsoleteChecks: ["proposed-1"], replacementChecks: [replacement] } },
+    { required: [unit], optional: [], selectedOptionalIds: [], proposed: [sentence, links] });
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    const review = await getWorkflowFeedbackReview(fixture.deps, owner, fixture.taskId);
+    const added = { cwd: replacement.cwd, executable: replacement.executable, args: replacement.args, timeoutSeconds: 600 };
+    // The review returns each added check's command, which the owner approves with the fix.
+    expect((review.findings as Array<Record<string, unknown>>)[0]?.checkChanges).toEqual({ obsolete: ["Sentence present"], added: [{ label: "Shorter sentence present", command: added }] });
+    const page = await createFeedbackReviewWeb(dependencies({ getWorkflowFeedbackReview: vi.fn(async () => review) }))(
+      request("GET", `/review/${fixture.taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${fixture.taskId}`, origin));
+    expect(page.body).toContain("Updates checks: Sentence present → Shorter sentence present");
+    // The per-finding view says it is for that finding alone; the combined block says what Approve recommended applies,
+    // from the same computation the approval uses.
+    expect(page.body).toContain("<h5>Checks, if approved on its own</h5>");
+    expect(review.recommendedCheckChanges).toEqual([{ obsolete: ["Sentence present"], added: [{ label: "Shorter sentence present", command: added }] }]);
+    expect(page.body).toMatch(/<section aria-label="Approve recommended applies"><h2>Approve recommended applies:<\/h2><p>Updates checks: Sentence present → Shorter sentence present<\/p><p>Adds check Shorter sentence present: <code class="command">grep -q New\. README\.md<\/code>/);
+    expect(page.body).toContain('Adds check Shorter sentence present: <code class="command">grep -q New. README.md</code> in <code class="command">repo/demo</code>');
+    expect(page.body).toContain("These commands run on the next step.");
+
+    await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+    });
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workspaceId: string; workflow: WorkflowSnapshot };
+    expect(task.workflow.checkPolicy?.proposed).toEqual([links, { id: "feedback-1-1", label: replacement.label, command: added }]);
+    expect(task.workflow.checkPolicy?.required).toEqual([unit]);
+    const dispatch = fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION").find(item => item.workflowMode === "IMPLEMENT");
+    const invocation = fixture.harness.db.find(item => item.entityType === "OUTBOX" && item.operationId === dispatch?.id)[0]?.invocation as { payload?: { readiness?: unknown; prompt?: string } };
+    expect(invocation.payload?.readiness).toEqual([unit.command, links.command, added]);
+    // The coder is given the approved fix itself (its summary and file changes), inside the untrusted data, so it makes
+    // the change the owner approved.
+    const prompt = invocation.payload?.prompt ?? "";
+    const data = JSON.parse(prompt.split("\n\n").find((part) => part.startsWith("{\"findings\""))!) as { findings: Array<Record<string, unknown>> };
+    expect(data.findings[0]).toMatchObject({ id: "finding-1", fix: { summary: "Shorten the sentence.",
+      fileChanges: [{ repositoryId: "demo", operation: "MODIFY", path: "README.md", change: "Use the shorter sentence." }] } });
+  });
+
+  it("applies the approved findings' check changes in report order, as the card shows them, not in the page's priority order", async () => {
+    const grep = (text: string) => ({ cwd: "repo/demo", executable: "grep", args: ["-q", text, "README.md"], timeoutSeconds: 30 });
+    const sentence = { id: "proposed-1", label: "Sentence present", command: grep("Old sentence.") };
+    const replacement = (label: string) => ({ label, cwd: "repo/demo", executable: "grep", args: ["-q", "New.", "README.md"] });
+    const fix = (label: string) => ({ fixProposal: { summary: "Shorten the sentence.",
+      fileChanges: [{ repositoryId: "demo", path: "README.md", operation: "MODIFY", change: "Use the shorter sentence." }], tests: [], replacementChecks: [replacement(label)] } });
+    // The report lists finding-1 first; the page lists finding-2 first, because it is a must fix and finding-1 only a should fix.
+    const fixture = await preparedReview(2, { priority: "SHOULD_FIX", ...fix("First label") }, { required: [], optional: [], selectedOptionalIds: [], proposed: [sentence] }, fix("Second label"));
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    const review = await getWorkflowFeedbackReview(fixture.deps, owner, fixture.taskId);
+    expect((review.findings as Array<{ id: string }>).map(finding => finding.id)).toEqual(["finding-2", "finding-1"]);
+    expect(review.reportOrder).toEqual(["finding-1", "finding-2"]);
+    // What the card shows for the same two recommended fixes: the earlier finding's label is the one added.
+    const { feedbackCardCheckChanges } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workflow: WorkflowSnapshot };
+    expect(review.recommendedCheckChanges).toMatchObject([{ added: [{ label: "First label" }] }]);
+    expect(feedbackCardCheckChanges(task.workflow.checkPolicy, [fix("First label"), fix("Second label")].map(item => ({ proposedDisposition: "IMPLEMENT", ...item })))
+      .map(entry => entry.added.map(check => check.label))).toEqual([["First label"], []]);
+
+    await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: fixture.bundleDigests, decision: "APPROVE", selectedFindingIds: ["finding-1", "finding-2"],
+    });
+    const stored = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workflow: WorkflowSnapshot };
+    expect(stored.workflow.checkPolicy?.proposed.map(check => check.label)).toEqual(["Sentence present", "First label"]);
+  });
+
+  it("refuses, in plain words, approving a fix whose corrected check runs outside the task's repositories or drops a project check, and applies nothing (0.2.12)", async () => {
+    const grep = (text: string) => ({ cwd: "repo/demo", executable: "grep", args: ["-q", text, "README.md"], timeoutSeconds: 30 });
+    const unit = { id: "required-1", label: "Unit tests", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 600 } };
+    const sentence = { id: "proposed-1", label: "Sentence present", command: grep("Old sentence.") };
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    for (const [checks, problem] of [
+      [{ obsoleteChecks: ["proposed-1"], replacementChecks: [{ label: "Shorter sentence present", cwd: "other", executable: "grep", args: ["-q", "New.", "README.md"] }] }, "it must run in one of the task's repositories"],
+      [{ obsoleteChecks: ["required-1"] }, "it names a project check, which always runs"],
+    ] as const) {
+      const fixture = await preparedReview(1, { fixProposal: { summary: "Shorten the sentence.",
+        fileChanges: [{ repositoryId: "demo", path: "README.md", operation: "MODIFY", change: "Use the shorter sentence." }], tests: [], ...checks } },
+      { required: [unit], optional: [], selectedOptionalIds: [], proposed: [sentence] });
+      const refused = submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
+        requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+        bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+      });
+      await expect(refused).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+      await expect(refused).rejects.toThrow(`The approved fix proposes a check change AgentX won't make: ${problem}. Dismiss the proposal or request changes.`);
+      const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workspaceId: string; workflow: WorkflowSnapshot };
+      expect(task.workflow).toEqual(fixture.workflow);
+      expect(fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION").filter(item => item.workflowMode === "IMPLEMENT")).toEqual([]);
+    }
+  });
+
+  it("checks corrected checks against the folders of the task's starting project revision, and looks the project up only when a fix adds checks (0.2.12 review)", async () => {
+    const grep = (text: string) => ({ cwd: "repo/demo", executable: "grep", args: ["-q", text, "README.md"], timeoutSeconds: 30 });
+    const sentence = { id: "proposed-1", label: "Sentence present", command: grep("Old sentence.") };
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    const approve = (fixture: Awaited<ReturnType<typeof preparedReview>>) => submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+    });
+    const withProjects = (fixture: Awaited<ReturnType<typeof preparedReview>>, projects: { latestProject: unknown; projectRevision: unknown }) => {
+      const actions = Object.assign(Object.create(fixture.deps.actions) as typeof fixture.deps.actions, projects);
+      fixture.deps = { ...fixture.deps, actions };
+    };
+    const fixWith = (checks: Record<string, unknown>) => ({ fixProposal: { summary: "Shorten the sentence.",
+      fileChanges: [{ repositoryId: "demo", path: "README.md", operation: "MODIFY", change: "Use the shorter sentence." }], tests: [], ...checks } });
+    const policy = { required: [], optional: [], selectedOptionalIds: [], proposed: [sentence] };
+    // A later registration renamed the folder; the task still works in the folder it started with.
+    const renamed = await preparedReview(1, fixWith({ obsoleteChecks: ["proposed-1"], replacementChecks: [{ label: "Shorter", cwd: "repo/demo", executable: "grep", args: ["-q", "New.", "README.md"] }] }), policy);
+    const revisions: Array<[string, number]> = [];
+    const task = renamed.harness.db.get(`DEVTASK#${renamed.taskId}`, "META") as { project: string; startingRevision: number };
+    withProjects(renamed, {
+      latestProject: vi.fn(async () => ({ definition: { repositories: [{ path: "repo/renamed" }] } })),
+      projectRevision: vi.fn(async (name: string, revision: number) => { revisions.push([name, revision]); return { definition: { repositories: [{ path: "repo/demo" }] } }; }),
+    });
+    await expect(approve(renamed)).resolves.toMatchObject({ status: "APPROVED" });
+    expect(revisions).toEqual([[task.project, task.startingRevision]]);
+    // A fix that adds no check never looks the project up.
+    const plain = await preparedReview(1, fixWith({ obsoleteChecks: ["proposed-1"] }), policy);
+    const unused = vi.fn(async () => { throw new Error("the project was looked up"); });
+    withProjects(plain, { latestProject: unused, projectRevision: unused });
+    await expect(approve(plain)).resolves.toMatchObject({ status: "APPROVED" });
+    expect(unused).not.toHaveBeenCalled();
   });
 
   it("emits only privacy-safe aggregate decision measures after the owner decision commits", async () => {

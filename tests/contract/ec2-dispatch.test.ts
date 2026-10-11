@@ -156,6 +156,26 @@ describe("ec2-ebs delivery", () => {
       log.mockRestore();
     });
 
+    it("gives reviewers the owner's approved PR feedback only on a worker that lists it; an older worker reviews without it and keeps the plan", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const workflowBase = [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }];
+      const workflowReviewPlan = { markdown: "# Plan\n\nDo the thing.", sha256: "b".repeat(64) };
+      const workflowReviewFeedback = [{ summary: "Use the shorter sentence.", fileChanges: [{ repositoryId: "demo", path: "README.md", change: "Shorten it." }] }];
+      const record = taskRecord({ workflowMode: "REVIEW", workflowBase, workflowReviewPlan, workflowReviewFeedback });
+      const base = ["task.workflowMode", "task.workflowReview", "task.workflowBase", "task.workflowReviewPlan"];
+      const capable = delivery({ workerFeatures: async () => [...base, "task.workflowReviewFeedback"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post).workflowReviewFeedback).toEqual(workflowReviewFeedback);
+      const older = delivery({ workerFeatures: async () => base });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post)).not.toHaveProperty("workflowReviewFeedback");
+      expect(postedPayload(older.post).workflowReviewPlan).toEqual(workflowReviewPlan);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.review_feedback_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
     it("tells a planning run its document kind and structured format only on a worker that lists them; an older worker plans without them", async () => {
       const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
       const record = taskRecord({ workflowMode: "PLAN", workflowPhase: "DESIGN", planFormat: "structured" });

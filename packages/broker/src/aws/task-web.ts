@@ -1,7 +1,7 @@
 // Task 18 (gap 4): the read-only AgentX task page. A brief Slack message links here for the full document; the page
 // shows the task's documents (every version), where it stands, its checks, the current code's review findings, its pull
-// requests and its history. GET only, no forms, and one small script (by nonce) that only opens and scrolls to a deep
-// link. Every value is escaped; model and reviewer text is plain text in the page, so a link in it is never a link.
+// requests and its history. GET only, no forms, and one small script (by nonce) that opens and scrolls to a deep
+// link and, while the page is open, asks this origin's `/task/status` whether the task moved on. Every value is escaped; model and reviewer text is plain text in the page, so a link in it is never a link.
 import { randomBytes } from "node:crypto";
 import { redactText, type PlanDocument, type PlanEvidenceBundle } from "@agentx/contracts";
 import type { DeveloperCaller } from "./developer-routes.js";
@@ -27,6 +27,8 @@ export interface TaskDocumentView {
   nextStep: string;
   /** For the progress strip. */
   path: "QUICK" | "FULL";
+  /** The task's state counter when the page was read; the page compares it with `/task/status` to say it moved on. */
+  revision?: number;
   /** The current step's name as the progress strip spells it (`Requirements`, `Design`, `Coding plan`, `Coding`, `Checks`, `Reviews`, `Pull request`); `Complete` when every step is done (merged); empty when no step is current. */
   stage: string;
   /** Whether the reader is the task's owner. */
@@ -55,15 +57,28 @@ export interface TaskWebDependencies {
   authenticateSession(sessionId: string): Promise<DeveloperCaller | undefined>;
   /** Must load the task through the broker and refuse (TASK_NOT_FOUND) a reader who may not see it. */
   getTaskDocumentView(caller: DeveloperCaller, taskId: string): Promise<TaskDocumentView>;
+  /**
+   * Where the task stands now: its state counter and the current step's name, nothing else. Must refuse a reader who may
+   * not see the task exactly as `getTaskDocumentView` does. Without it, `/task/status` is not found.
+   */
+  getTaskFreshness?(caller: DeveloperCaller, taskId: string): Promise<TaskFreshness>;
 }
+
+/** What `/review/<task ID>/task/status` answers. */
+export interface TaskFreshness { revision: number; stage: string }
 
 /** `/review/<task ID>/task`: the task page's path; every other `/review/` path is the PR-feedback page's. */
 export const TASK_PAGE = /^\/review\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/task$/i;
+/** `/review/<task ID>/task/status`: where the task stands now, for the open page's "moved on" banner. */
+export const TASK_STATUS = /^\/review\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/task\/status$/i;
 const HIDDEN = new Set(["FORBIDDEN", "TASK_NOT_FOUND", "NOT_FOUND"]);
 
-/** This page's policy: its one style element and its one script, each by nonce, and nothing else; nothing is fetched or submitted. */
+/**
+ * This page's policy: its one style element and its one script, each by nonce, and nothing else; nothing is submitted,
+ * and the only request the script may make is to this origin (`/task/status`).
+ */
 const policy = (nonce: string) =>
-  `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
+  `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src 'none'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
 
 /**
  * A reviewer's file path, shown only when it is a plain relative path inside the repository: no leading slash or
@@ -264,8 +279,12 @@ async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequ
       return `<li><time datetime="${escapeHtml(entry.at)}">${escapeHtml(historyTime(entry.at))}</time> ${linked ? `<a href="${escapeHtml(entry.link)}">${text}</a>` : text}</li>`;
     }).join("")}</ol>`;
   const role = view.role === "owner" ? "You're the task owner." : "You can read this task.";
+  // Hidden until the script sees the task moved on; without scripts it never shows and the page reads as before.
+  const movedOn = `<div id="moved-on" class="moved-on" role="status" hidden data-version="${escapeHtml(view.revision ?? 0)}" data-stage="${escapeHtml(view.stage)}"`
+    + ` data-check="/review/${escapeHtml(view.taskId)}/task/status"><p>This task has moved on. Refresh to see the latest.</p>`
+    + `<button type="button" id="moved-on-refresh">Refresh</button></div>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AgentX task · ${escapeHtml(view.title)}</title>`
-    + `<style nonce="${nonce}">${TASK_PAGE_STYLE}</style></head><body>`
+    + `<style nonce="${nonce}">${TASK_PAGE_STYLE}</style></head><body>${movedOn}`
     + `<header><h1>${escapeHtml(view.title)}</h1><p class="muted">${role}</p>${progressStrip(view, { checks: checks !== undefined && checks !== "" })}`
     + `<p><strong>${escapeHtml(view.status)}</strong></p><p>Next: ${escapeHtml(view.nextStep)}</p><p class="muted">Decisions are made in Slack.</p></header>`
     + `<main>${unverified}${documents}${noDocuments}`
@@ -301,9 +320,36 @@ function messagePage(statusCode: number, heading: string, text: string): WebResp
     + `<body><main><h1>${escapeHtml(heading)}</h1><p>${escapeHtml(text)}</p></main></body></html>`, nonce);
 }
 
+/**
+ * `/task/status`: the open page's question "did the task move on?". Same sign-in and same access rule as the page; it
+ * answers only the state counter and the step's name, never cached. A signed-out reader gets 401, not a redirect.
+ */
+async function taskStatus(deps: TaskWebDependencies, request: AdaptedHttpRequest, taskId: string): Promise<WebResponse> {
+  if (request.method !== "GET") {
+    const refused = safeResponse(405, { error: "This address answers GET only." });
+    refused.headers.allow = "GET";
+    return refused;
+  }
+  const notFound = () => safeResponse(404, { error: "Not found." });
+  if (deps.getTaskFreshness === undefined) return notFound();
+  const sessionId = parseCookie(request.headers, SESSION_COOKIE);
+  const caller = sessionId === undefined ? undefined : await deps.authenticateSession(sessionId);
+  if (caller === undefined) return safeResponse(401, { error: "Sign in again." });
+  try {
+    const { revision, stage } = await deps.getTaskFreshness(caller, taskId);
+    return safeResponse(200, { revision, stage });
+  } catch (error) {
+    const code = String((error as { code?: unknown })?.code);
+    if (code === "TASK_ACCESS_DENIED" || HIDDEN.has(code)) return notFound();
+    return safeResponse(503, { error: "Try again shortly." });
+  }
+}
+
 /** The read-only task page. The session and the reader's right to see the task are checked on every request. */
 export function createTaskWeb(deps: TaskWebDependencies): (request: AdaptedHttpRequest, url: URL) => Promise<WebResponse> {
   return async (request, url) => {
+    const statusOf = TASK_STATUS.exec(url.pathname)?.[1];
+    if (statusOf !== undefined) return taskStatus(deps, request, statusOf);
     const taskId = TASK_PAGE.exec(url.pathname)?.[1];
     if (taskId === undefined) return messagePage(404, "Not found", "This page doesn't exist.");
     if (request.method !== "GET") {

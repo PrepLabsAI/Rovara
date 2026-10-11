@@ -2,10 +2,12 @@ import {
   CodeBuildCheckResultSchema,
   WorkflowFeedbackBundleRefSchema,
   WorkflowFeedbackApprovalBindingSchema,
+  WorkflowFeedbackTaskChecksSchema,
   agentXError,
   type CheckEntry,
   type WorkerInvocation,
   type WorkflowFeedbackApprovalBinding,
+  type WorkflowFeedbackTaskChecks,
 } from "@agentx/contracts";
 import type { ArtifactSink } from "./artifacts.js";
 import type { EventBatchSink } from "./events.js";
@@ -16,6 +18,8 @@ export type TerminalResultSink = (result: WorkerTerminalResult) => Promise<void>
 
 export interface FeedbackBundleReadResult {
   taskRequirements: string;
+  /** The task's checks, from a broker that sends them, so the reviewer can list the ones its fix makes wrong. */
+  taskChecks?: WorkflowFeedbackTaskChecks;
   bundles: Array<{ ref: ReturnType<typeof WorkflowFeedbackBundleRefSchema.parse>; bytes: string }>;
 }
 
@@ -132,7 +136,9 @@ export function createWorkerCallbackSinks(input: {
         if (bytes.toString("base64") !== item.bytesBase64) throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle callback response encoding is invalid");
         return { ref: WorkflowFeedbackBundleRefSchema.parse(item.ref), bytes: bytes.toString("utf8") };
       });
-      return { taskRequirements: record.taskRequirements, bundles };
+      const taskChecks = record.taskChecks === undefined ? undefined : WorkflowFeedbackTaskChecksSchema.safeParse(record.taskChecks);
+      if (taskChecks !== undefined && !taskChecks.success) throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle callback response is invalid");
+      return { taskRequirements: record.taskRequirements, bundles, ...(taskChecks === undefined ? {} : { taskChecks: taskChecks.data }) };
     },
     authorizeFeedbackApproval: async (binding) => {
       const approval = WorkflowFeedbackApprovalBindingSchema.parse(binding);

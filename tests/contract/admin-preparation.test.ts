@@ -8,6 +8,7 @@ import {
   type AuthenticatedIdentity,
 } from "../../packages/broker/src/index.js";
 import { describe, expect, it } from "vitest";
+import { reorderMaps } from "../support/fake-dynamodb.js";
 
 const administrator = identity("a".repeat(64), true);
 const memberships = [
@@ -40,6 +41,18 @@ describe("administrator project registration", () => {
     expect(() => projects.register(identity("b".repeat(64), false), definition, memberships)).toThrow(
       /administrator/i,
     );
+  });
+});
+
+describe("administrator project re-registration", () => {
+  it("treats a stored definition whose maps are in another key order as the same revision", () => {
+    const projects = new InMemoryProjectRegistry();
+    const definition = projectDefinition();
+    projects.register(administrator, definition, memberships);
+    const key = [...projects.projects.keys()][0]!;
+    const stored = projects.projects.get(key)!;
+    projects.projects.set(key, { ...stored, definition: reorderMaps(stored.definition) as ProjectDefinition });
+    expect(projects.register(administrator, definition, memberships).duplicate).toBe(true);
   });
 });
 

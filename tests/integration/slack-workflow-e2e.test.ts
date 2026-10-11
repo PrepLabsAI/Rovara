@@ -6,7 +6,8 @@ import { E2E_BRIEF_LIMIT as BRIEF_LIMIT, E2E_CHECK, FakeGitHub, WORKER_CALLBACK_
 import { MAYA } from "../support/developer-task-broker.js";
 import { SLACK_TEAM } from "../support/slack-broker.js";
 import { visibleSlackText } from "../support/strict-slack.js";
-import { feedbackCriticReply, feedbackMixedReply, feedbackOwnerDecisionReply, reviewerReply } from "../support/faux-scripts.js";
+import { feedbackCriticReply, feedbackMixedReply, feedbackOwnerDecisionReply, firstUserText, reviewerReply } from "../support/faux-scripts.js";
+import { fauxAssistantMessage, type FauxResponseStep } from "@earendil-works/pi-ai";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { VIEW_ONLY_NOTICE, type WorkflowOptionalCheck } from "../../packages/contracts/src/index.js";
 import { TASK_ANSWER_FOOTER } from "../../packages/slack-service/src/task-question.js";
@@ -1090,6 +1091,99 @@ describe("Slack-only workflow, end to end in one process", () => {
     expect(await e2e.githubWebhook(pullRequest.number, { merged: true })).toBe(200);
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE", outcome: "MERGED" });
+  }, 120_000);
+
+  // 0.2.12 live test: the owner asked for a shorter sentence. The task's own approved check looked for the old sentence, so
+  // the approved fix failed it, and the code reviewer then blocked the fix for differing from the plan. Once the owner
+  // approves a fix from PR feedback, it supersedes the matching parts of the plan for the fix's checks and reviews.
+  it("a PR comment that changes text a check looks for: the proposal replaces the check, Approve runs the replacement, and the reviews judge the fix by the approved feedback", async () => {
+    const OLD = "Everyone is expected to treat each other with respect and kindness.";
+    const NEW = "Be respectful and kind.";
+    const OLD_CHECK = { label: "Code of Conduct sentence present in README.md", cwd: "repo/demo", executable: "grep", args: ["-q", OLD, "README.md"], timeoutSeconds: 30 };
+    const NEW_CHECK = { label: "Shorter Code of Conduct sentence present in README.md", cwd: "repo/demo", executable: "grep", args: ["-q", NEW, "README.md"] };
+    const readme = (sentence: string) => [{ path: "repo/demo/README.md", content: `# Demo\n\n${sentence}\n` }];
+    const plan = planAnswer(PLAN_DOCUMENT, { checks: { checks: [{ ...OLD_CHECK, proves: ["1"] }], none_reason: null } });
+    let fixMade = false;
+    // The feedback reviewer proposes the shorter sentence and, shown the task's checks, the check it makes wrong and its replacement.
+    const feedback = (prompt: string): string => {
+      const reply = JSON.parse(feedbackCriticReply(prompt, { repositoryId: "demo", path: "README.md", testPath: "unused.test.ts" })) as { findings: Array<{ fixProposal: Record<string, unknown> }> };
+      const showsChecks = prompt.includes("The task's checks") && prompt.includes(OLD_CHECK.label);
+      for (const finding of reply.findings) {
+        finding.fixProposal = { summary: `Replace the sentence with "${NEW}"`,
+          fileChanges: [{ repositoryId: "demo", path: "README.md", operation: "MODIFY", change: `Replace the sentence with "${NEW}"` }], tests: [],
+          ...(showsChecks ? { obsoleteChecks: ["proposed-1"], replacementChecks: [NEW_CHECK] } : {}) };
+      }
+      return JSON.stringify(reply);
+    };
+    // A code reviewer that judges against the plan alone, as the live one did, unless it is told the owner's approved feedback supersedes it.
+    const SUPERSEDE = "They supersede the plan where they differ";
+    const reviewerPrompts: string[] = [];
+    const codeReviewer: FauxResponseStep = (context) => {
+      const prompt = firstUserText(context);
+      reviewerPrompts.push(prompt);
+      return prompt.includes(NEW) && !prompt.includes(SUPERSEDE)
+        ? fauxAssistantMessage(JSON.stringify({ findings: [{ text: `The approved plan specifies the sentence '${OLD}' but the diff inserts '${NEW}'.`, origin: "INTRODUCED", severity: "MEDIUM", file: "README.md", line: 3 }] }))
+        : fauxAssistantMessage(JSON.stringify({ findings: [] }));
+    };
+    const e2e = await createWorkflowE2E({
+      model: { plan, feedback, reviews: { CODE: [codeReviewer] },
+        // The coder writes the shorter sentence only when it is given the approved fix's wording (the comment names none).
+        edits: (latest) => {
+          if (!latest.includes("Implement only the owner-approved PR feedback")) return readme(OLD);
+          if (!latest.includes(`Replace the sentence with \\"${NEW}\\"`)) return [];
+          fixMade = true;
+          return readme(NEW);
+        } },
+      // The old check finds the old sentence until the fix replaces it.
+      checkResult: (command) => command.args.includes(OLD) && fixMade ? { exitCode: 1, stdout: "", stderr: "" } : undefined,
+    });
+    expect(await e2e.mention("quick: Add the Code of Conduct sentence to the README")).toBe(200);
+    await e2e.settle();
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    const opened = e2e.workflow();
+    expect(opened).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    const pullRequest = e2e.github.pullRequests[0]!;
+    const firstHead = pullRequest.commit;
+
+    const comment = e2e.github.comment(pullRequest.number, "maya", "Make the sentence shorter.");
+    expect(await e2e.githubWebhook(pullRequest.number, { comment })).toBe(200);
+    await e2e.settle();
+    // The proposal says which check the fix changes; Approve covers it.
+    const proposal = e2e.slack.lastPostWithAction("agentx_feedback_review_recommended");
+    expect(visibleSlackText(proposal.text)).toContain(`Updates checks: \`${OLD_CHECK.label}\` → \`${NEW_CHECK.label}\``);
+    // ...and the exact command it adds, which the owner approves with it.
+    expect(visibleSlackText(proposal.text)).toContain(`Adds check \`${NEW_CHECK.label}\`: \`grep -q "${NEW}" README.md\` in \`repo/demo\``);
+    expect(visibleSlackText(proposal.text)).toContain("These commands run on the next step.");
+    expect(visibleSlackText(proposal.text)).not.toMatch(JARGON);
+    const runsBefore = e2e.checkRuns.length;
+    const reviewersBefore = reviewerPrompts.length;
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+
+    const fixed = e2e.workflow();
+    expect(await e2e.repoFile("README.md")).toContain(NEW);
+    expect(fixed).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    // The approved check change is stored: the old check is gone, the replacement runs from now on, the project's check stays.
+    expect(fixed.checkPolicy?.proposed.map((check) => check.label)).toEqual([NEW_CHECK.label]);
+    const runs = e2e.checkRuns.slice(runsBefore).map((run) => run.command);
+    expect(runs).toContainEqual(E2E_CHECK);
+    expect(runs).toContainEqual({ cwd: NEW_CHECK.cwd, executable: NEW_CHECK.executable, args: NEW_CHECK.args, timeoutSeconds: 600 });
+    expect(runs.some((command) => command.args.includes(OLD))).toBe(false);
+    expect(fixed.verification?.results.every((result) => result.status === "PASS")).toBe(true);
+    expect(fixed.verification?.results.map((result) => result.checkId)).toContain(fixed.checkPolicy?.proposed[0]?.id);
+    // The reviewers were given the owner's approved feedback and the rule that it supersedes the plan, so the fix passed.
+    const reviewOfFix = e2e.invocations.filter((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW").at(-1);
+    expect(reviewOfFix?.kind === "task" ? reviewOfFix.payload.workflowReviewFeedback : undefined)
+      .toEqual([expect.objectContaining({ summary: `Replace the sentence with "${NEW}"` })]);
+    expect(reviewerPrompts.slice(reviewersBefore).every((prompt) => prompt.includes(SUPERSEDE) && prompt.includes(NEW))).toBe(true);
+    expect(fixed.reviews?.map((review) => review.status)).toEqual(["PASS", "PASS"]);
+    expect(fixed.acceptedFindings ?? []).toEqual([]);
+    // The fix went to the same pull request.
+    expect(e2e.github.pullRequests).toHaveLength(1);
+    expect(e2e.github.parents.get(pullRequest.commit)).toEqual([firstHead]);
+    expect(e2e.slack.posts.map((post) => visibleSlackText(post.text)).at(-1))
+      .toBe(`Pushed the fix to PR #${pullRequest.number}. Review it and merge it on GitHub; I'll finish this task when it's merged.`);
   }, 120_000);
 
   // 0.2.9 live test: two inline comments with the same words, each in its own review thread. Every Approve press restarted

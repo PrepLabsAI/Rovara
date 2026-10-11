@@ -1,4 +1,4 @@
-import { ProjectDefinitionSchema, agentXError, type ProjectDefinition } from "@agentx/contracts";
+import { ProjectDefinitionSchema, agentXError, sameJsonContent, type ProjectDefinition } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "./auth.js";
 import { authorizeProject, type ProjectMembership } from "./authorization.js";
 
@@ -22,7 +22,7 @@ export class InMemoryProjectRegistry {
     const key = projectKey(definition.name, definition.revision);
     const existing = this.projects.get(key);
     if (existing) {
-      if (JSON.stringify(existing.definition) !== JSON.stringify(definition)) {
+      if (!sameJsonContent(existing.definition, definition)) {
         throw agentXError(
           "PROJECT_REVISION_MISMATCH",
           "a project revision is immutable after registration",

@@ -12,7 +12,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number];
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -47,6 +47,25 @@ export const WorkflowReviewPlanSchema = z.object({
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
 }).strict();
 export type WorkflowReviewPlan = z.infer<typeof WorkflowReviewPlanSchema>;
+
+/** The most owner-approved PR feedback findings the reviewers are shown, and the most bytes they take as JSON. */
+export const WORKFLOW_REVIEW_FEEDBACK_MAX = 20;
+export const WORKFLOW_REVIEW_FEEDBACK_MAX_BYTES = 32_768;
+
+/**
+ * The fixes the owner approved from pull request feedback since the plan, as the reviewers read them: each approved
+ * finding's proposed fix (its summary and file changes) and the owner's note on that decision. Shown to reviewers as
+ * untrusted data, with the rule that these changes supersede the plan where they differ.
+ */
+export const WorkflowReviewFeedbackSchema = z.array(z.object({
+  summary: z.string().trim().min(1).max(2_000),
+  fileChanges: z.array(z.object({
+    repositoryId: z.string().trim().min(1).max(200), path: z.string().trim().min(1).max(1_000), change: z.string().trim().min(1).max(4_000),
+  }).strict()).max(32),
+  ownerNote: z.string().trim().min(1).max(2_000).optional(),
+}).strict()).min(1).max(WORKFLOW_REVIEW_FEEDBACK_MAX)
+  .refine((value) => new TextEncoder().encode(JSON.stringify(value)).byteLength <= WORKFLOW_REVIEW_FEEDBACK_MAX_BYTES, `approved feedback exceeds ${WORKFLOW_REVIEW_FEEDBACK_MAX_BYTES} UTF-8 bytes`);
+export type WorkflowReviewFeedback = z.infer<typeof WorkflowReviewFeedbackSchema>;
 
 const InvocationBaseSchema = z.object({
   protocolVersion: z.literal(AGENTX_PROTOCOL_VERSION),
@@ -101,6 +120,12 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * whose /ping lists "task.workflowReviewPlan"; an older worker is sent the review without it.
          */
         workflowReviewPlan: WorkflowReviewPlanSchema.optional(),
+        /**
+         * The fixes the owner approved from pull request feedback since the plan, for the reviewers' prompt. Review
+         * operations only. Sent only to a worker whose /ping lists "task.workflowReviewFeedback"; an older worker is sent
+         * the review without it.
+         */
+        workflowReviewFeedback: WorkflowReviewFeedbackSchema.optional(),
         model: ModelSelectionSchema.optional(),
         modelSelectionDiagnostic: z.string().min(1).max(512).optional(),
         /**
@@ -125,6 +150,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         }
         if (payload.workflowReviewPlan !== undefined && payload.workflowMode !== "REVIEW") {
           context.addIssue({ code: "custom", path: ["workflowReviewPlan"], message: "the approved plan reviewers are shown requires review mode" });
+        }
+        if (payload.workflowReviewFeedback !== undefined && payload.workflowMode !== "REVIEW") {
+          context.addIssue({ code: "custom", path: ["workflowReviewFeedback"], message: "the approved feedback reviewers are shown requires review mode" });
         }
         if (payload.workflowFeedbackApproval !== undefined && payload.workflowMode !== "IMPLEMENT") {
           context.addIssue({ code: "custom", path: ["workflowFeedbackApproval"], message: "feedback approval binding requires implementation mode" });

@@ -116,6 +116,7 @@ export async function runTaskInvocation(
         taskRequirements: collected.taskRequirements, candidateDigest: binding.candidateDigest,
         rootPath: dependencies.rootPath, model: dependencies.model, candidate: candidateRepositories,
         repositories: repositoryInputs, bundles: collected.bundles, artifactSink: dependencies.artifactSink,
+        ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
         ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
         onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
       });
@@ -520,6 +521,7 @@ export async function runTaskInvocation(
           repositories,
           ...(invocation.payload.workflowReviewChecks === undefined ? {} : { reviewChecks: invocation.payload.workflowReviewChecks }),
           ...(invocation.payload.workflowReviewPlan === undefined ? {} : { reviewPlan: invocation.payload.workflowReviewPlan }),
+          ...(invocation.payload.workflowReviewFeedback === undefined ? {} : { reviewFeedback: invocation.payload.workflowReviewFeedback }),
           signal: verificationStop.signal,
           ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }),
           onProgress: (message) => { void events.append("progress", { message }).catch(() => undefined); },

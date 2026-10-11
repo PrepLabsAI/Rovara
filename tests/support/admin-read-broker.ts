@@ -11,9 +11,7 @@ const GITHUB_APP_CREDENTIAL = { ref: "github-app", secretName: "arn:aws:secretsm
 export async function createAdminReadBroker(options: Parameters<typeof createDeveloperTaskBroker>[0] = {}) {
   // Like the deployed broker, connector credentials are configured, so GET /v1/admin/credentials answers.
   const connectorCredentials = { secrets: { read: async () => undefined }, githubApp: GITHUB_APP_CREDENTIAL };
-  // Re-registering an identical project revision still compares the stored definition by its JSON text, which only an
-  // insertion-ordered table keeps equal (a follow-up), so these admin journeys read maps back in insertion order.
-  const harness = await createDeveloperTaskBroker({ mapOrder: "insertion", ...options, brokerExtra: { connectorCredentials, ...options.brokerExtra } });
+  const harness = await createDeveloperTaskBroker({ ...options, brokerExtra: { connectorCredentials, ...options.brokerExtra } });
   /** The OIDC entry point as an admin (the `groups` claim holds `admins`), or as a non-admin. */
   const admin = async (method: string, path: string, call: { admin?: boolean; subject?: string; headers?: Record<string, string>; body?: unknown } = {}) => {
     const claims = { iss: issuer, sub: call.subject ?? ADMIN_SUBJECT, groups: call.admin === false ? [] : ["admins"] };

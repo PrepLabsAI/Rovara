@@ -144,6 +144,11 @@ export interface GitHubApi {
   getApp(jwt: string): Promise<{ slug: string; owner: { login: string; type: string }; events?: string[] }>;
   /** The App's webhook settings. GitHub masks the secret, so only the rest can be read back. */
   getHookConfig(jwt: string): Promise<{ url?: string; contentType?: string; insecureSsl?: string }>;
+  /**
+   * The App's most recent webhook deliveries (GitHub lists them newest first): when, GitHub's status text and the HTTP
+   * code the endpoint answered (0 when it gave none). Nothing else is kept: never a payload or a header.
+   */
+  listHookDeliveries(jwt: string): Promise<Array<{ deliveredAt: string; status: string; statusCode: number }>>;
   /** Points the App's webhook at url and sets the secret GitHub signs deliveries with. */
   setHookConfig(jwt: string, hook: { url: string; secret: string }): Promise<void>;
   listInstallations(jwt: string): Promise<Array<{ id: number; account: { login: string } }>>;
@@ -213,6 +218,13 @@ export function githubRestApi(fetchImplementation: typeof fetch): GitHubApi {
         // GitHub sends insecure_ssl as a string or a number.
         ...(typeof config.insecure_ssl === "string" || typeof config.insecure_ssl === "number" ? { insecureSsl: String(config.insecure_ssl) } : {}),
       };
+    },
+    async listHookDeliveries(jwt) {
+      const listed = await call("webhook delivery list", "/app/hook/deliveries?per_page=10", { token: jwt });
+      return (Array.isArray(listed) ? listed as Array<Record<string, unknown>> : []).flatMap((entry) =>
+        typeof entry.delivered_at === "string" && typeof entry.status === "string"
+          ? [{ deliveredAt: entry.delivered_at, status: entry.status, statusCode: typeof entry.status_code === "number" ? entry.status_code : 0 }]
+          : []);
     },
     async setHookConfig(jwt, hook) {
       await call("webhook update", "/app/hook/config", { method: "PATCH", token: jwt, body: { url: hook.url, content_type: "json", secret: hook.secret, insecure_ssl: "0" } });

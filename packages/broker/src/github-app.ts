@@ -798,6 +798,13 @@ function parsePullRequestDetails(
   ) {
     throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request response");
   }
+  // AgentX opens its pull requests from a branch of the base repository: a head in another repository (a fork, or a
+  // deleted fork, which leaves no head repository) is never one of them.
+  const headRepository = (head as Record<string, unknown>).repo;
+  const headFullName = headRepository && typeof headRepository === "object" ? (headRepository as Record<string, unknown>).full_name : undefined;
+  if (typeof headFullName !== "string" || headFullName.toLowerCase() !== `${repository.owner}/${repository.name}`.toLowerCase()) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned a pull request from another repository");
+  }
   return {
     ...basic,
     state: candidate.merged ? "merged" : candidate.state,

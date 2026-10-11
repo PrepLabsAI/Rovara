@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createCandidateManifest, workflowRequestId } from "../../packages/contracts/src/task-workflow.js";
 import { canonicalPlanJson, parsePlanDocument, planDocumentMarkdown, readCanonicalPlan, type PlanDocument } from "@agentx/contracts";
 import { SlackThreadWorkspaceResultSchema } from "@agentx/contracts";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, collectWorkflowFeedbackBundles, createWorkflowSnapshot, sharedTaskKey, SharedTaskRecordSchema, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, WorkflowThreadNoteSchema, type WorkflowSnapshot } from "@agentx/contracts";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, collectWorkflowFeedbackBundles, createWorkflowSnapshot, sharedTaskKey, SharedTaskRecordSchema, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, WorkflowThreadNoteSchema, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
 import * as workflowContracts from "../../packages/contracts/src/task-workflow.js";
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
@@ -88,7 +88,8 @@ async function workflowAtVerification(harness: Harness, structured?: PlanDocumen
  * A task waiting for merge whose feedback critic has just been started: its approved plan is `plan.content` (stored as a
  * structured document when `plan.structured`), and the critic's first read of the feedback bundles is ready to make.
  */
-async function collectingFeedbackTask(plan: { content: string; structured?: boolean; earlier?: Array<{ type: "requirements" | "design"; content: string }> } = { content: "Approved plan: address the linked PR feedback after owner approval." }) {
+async function collectingFeedbackTask(plan: { content: string; structured?: boolean; earlier?: Array<{ type: "requirements" | "design"; content: string }> } = { content: "Approved plan: address the linked PR feedback after owner approval." },
+  options: { checkPolicy?: WorkflowCheckPolicyInput } = {}) {
     const currentFeedback = { pullRequest: { number: 7, url: "https://github.com/example/demo/pull/7", state: "open" as const,
       headBranch: "feature", baseBranch: "main", headCommit: "a".repeat(40), headTreeSha: "b".repeat(40), title: "Fix retry", body: "" }, comments: [], threads: [] };
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getPullRequestFeedback: async () => currentFeedback } } });
@@ -116,7 +117,7 @@ async function collectingFeedbackTask(plan: { content: string; structured?: bool
       return { id: `${document.type}-v1`, type: document.type, version: 1, sha256, producer: "agentx-owner-approved", objectKey, createdAt: now, format: "structured" };
     });
     let workflow = WorkflowSnapshotSchema.parse({
-      ...createWorkflowSnapshot({ taskId, ownerId: task.ownerKey, now }),
+      ...createWorkflowSnapshot({ taskId, ownerId: task.ownerKey, now, ...(options.checkPolicy === undefined ? {} : { checkPolicy: options.checkPolicy }) }),
       stage: "WAIT_FOR_MERGE", state: "WAITING", candidate,
       artifacts: [...earlier, { id: "plan-v1", type: "plan", version: 1, sha256: planSha, producer: "agentx-owner-approved", objectKey: planKey, createdAt: now, ...(plan.structured === true ? { format: "structured" } : {}) }],
       decisions: [...earlier.map((document) => document.sha256), planSha].map((artifactDigest) => ({ requestId: randomUUID(), workflowRevision: 1, decision: "APPROVE", actorId: task.ownerKey, actorRole: "TASK_OWNER", reason: "Approved plan", artifactDigest, at: now })),
@@ -272,6 +273,49 @@ describe("native developer task workflow", () => {
     expect(taskWorkflow(harness, taskId)).toEqual(before);
     expect(feedbackReviews()).toHaveLength(1);
     harness.db.set({ ...harness.db.get(`WORKSPACE#${workspaceId}`, "META")!, status: workspaceMeta.status });
+
+    // A press that loses the race to another (which started the review and holds the workspace) is not told "busy":
+    // the review it pressed for changed, and the review now running posts a new card.
+    {
+      const send = harness.db.send;
+      let raced = false;
+      harness.db.send = async (command) => {
+        if (!raced && command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes('"workflowMode":"FEEDBACK_REVIEW"')) {
+          raced = true;
+          const record = harness.db.get(`DEVTASK#${taskId}`, "META")! as Record<string, unknown> & { workflow: WorkflowSnapshot };
+          harness.db.set({ ...record, workflow: { ...record.workflow, revision: record.workflow.revision + 1, state: "RUNNING" } });
+          harness.db.set({ ...harness.db.get(`WORKSPACE#${workspaceId}`, "META")!, status: "BUSY", activeOperationId: "other-operation" });
+        }
+        return send(command);
+      };
+      const lost = JSON.parse(String((await retry()).body)) as Record<string, unknown>;
+      harness.db.send = send;
+      expect(raced).toBe(true);
+      expect(lost).toMatchObject({ refused: true, message: "This review changed; a new card is coming." });
+      harness.db.set({ ...harness.db.get(`DEVTASK#${taskId}`, "META")!, workflow: before });
+      harness.db.set({ ...harness.db.get(`WORKSPACE#${workspaceId}`, "META")!, status: workspaceMeta.status, activeOperationId: workspaceMeta.activeOperationId });
+      expect(feedbackReviews()).toHaveLength(1);
+    }
+    // A press that loses to the task being closed promises no new card: the button is out of date.
+    {
+      const send = harness.db.send;
+      let raced = false;
+      harness.db.send = async (command) => {
+        if (!raced && command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes('"workflowMode":"FEEDBACK_REVIEW"')) {
+          raced = true;
+          harness.db.set({ ...harness.db.get(`DEVTASK#${taskId}`, "META")!, closedAt: new Date().toISOString() });
+        }
+        return send(command);
+      };
+      const closed = JSON.parse(String((await retry()).body)) as Record<string, unknown>;
+      harness.db.send = send;
+      expect(raced).toBe(true);
+      expect(closed).toMatchObject({ refused: true, message: "That button is out of date. Use the latest message in this thread." });
+      const reopened = { ...harness.db.get(`DEVTASK#${taskId}`, "META")!, workflow: before };
+      delete (reopened as Record<string, unknown>).closedAt;
+      harness.db.set(reopened);
+      expect(feedbackReviews()).toHaveLength(1);
+    }
 
     const pressed = await retry();
     expect(pressed.statusCode).toBe(200);
@@ -3146,6 +3190,28 @@ describe("a structured plan reaches coders, reviewers and the pull request as Ma
     expect(legacy.split("\n").slice(0, 3)).toEqual(["First line.", "Second line.", ""]);
   });
 
+  it("gives the feedback critic the task's checks: the proposed ones it runs now, the required ones, and the repository folders (0.2.12)", async () => {
+    const command = (args: string[]) => ({ cwd: "repo/demo", executable: "grep", args, timeoutSeconds: 30 });
+    const checkPolicy = {
+      required: [{ id: "required-1", label: "Unit tests", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 600 } }],
+      optional: [], selectedOptionalIds: [],
+      proposed: [{ id: "proposed-1", label: "Sentence present", command: command(["-q", "Old sentence.", "README.md"]) },
+        { id: "proposed-2", label: "Unticked check", command: command(["-q", "Other.", "README.md"]) }],
+      selectedProposedIds: ["proposed-1"],
+    };
+    const { readBundles, binding } = await collectingFeedbackTask(undefined, { checkPolicy });
+    const material = await readBundles(binding) as { taskChecks?: unknown };
+    expect(material.taskChecks).toEqual({
+      proposed: [checkPolicy.proposed[0]],
+      required: [{ id: "required-1", label: "Unit tests" }],
+      optional: [],
+      repositoryPaths: ["repo/demo"],
+    });
+    // A task stored without a check policy runs the project's checks; the critic is told nothing about checks.
+    const plain = await collectingFeedbackTask();
+    expect(await plain.readBundles(plain.binding)).not.toHaveProperty("taskChecks");
+  });
+
   it("gives the feedback critic the approved structured plan as Markdown", async () => {
     const plan = planDocument();
     const { readBundles, binding } = await collectingFeedbackTask({ content: canonicalPlanJson(plan), structured: true });
@@ -3957,6 +4023,21 @@ describe("pushing an approved PR feedback fix to the same pull request (item 7)"
     t.gh.state.parent = "d".repeat(40);
     await t.harness.finish(t.workspaceId, maintain!.id, "FAILED", { error: "git push failed: remote rejected" });
     expect(taskWorkflow(t.harness, t.taskId)).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED", pullRequestUpdateFailure: { cause: "PUSH_REFUSED" } });
+  });
+
+  it("does not take a push as landed when the pull request's head branch is no longer the one AgentX pushed to", async () => {
+    // With the update callback, the pull request's record already names the pushed commit: only the branch check refuses it.
+    for (const [status, callback] of [["SUCCEEDED", true], ["SUCCEEDED", false], ["FAILED", false]] as const) {
+      const t = await fixPassed();
+      await t.pass();
+      const maintain = await pushLands(t, { callback });
+      // The pull request now shows the reviewed tree, but from another branch.
+      t.gh.branch.name = "someone-else/branch";
+      await t.harness.finish(t.workspaceId, maintain.id, status, status === "SUCCEEDED" ? appendResult(maintain) : { error: "CODEBUILD_FAILED: a validation gate did not pass" });
+      const workflow = taskWorkflow(t.harness, t.taskId);
+      expect(workflow, `${status} ${String(callback)}`).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
+      expect(workflow.pullRequests, `${status} ${String(callback)}`).toEqual([expect.objectContaining({ headSha: "d".repeat(40), candidateDigest: t.first.digest })]);
+    }
   });
 
   // 0.2.11 live blocker: GitHub moves a pull request's head a moment after a push to its branch. The worker's update

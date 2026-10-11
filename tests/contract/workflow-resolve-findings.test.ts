@@ -116,6 +116,17 @@ describe("the owner resolves each blocking review finding", () => {
     expect(workflowContracts.openReviewFindings(fresh).map((entry) => entry.text)).toEqual(["Another problem."]);
   });
 
+  it("names the review that did not pass in the block reason, not the one recorded last", () => {
+    const waiting = WorkflowSnapshotSchema.parse({ ...blockedWith([]), state: "WAITING", blockReason: undefined });
+    // The worker records the code review first and the security review second: a code finding blocks, security passes.
+    const codeOnly = submitWorkflowReview(submitWorkflowReview(waiting, report("CRITIC", "FINDINGS", [parser]), at), report("SECURITY", "PASS", []), at);
+    expect(codeOnly).toMatchObject({ stage: "REVIEW", state: "BLOCKED", blockReason: "the code review did not pass" });
+    const securityOnly = submitWorkflowReview(submitWorkflowReview(waiting, report("CRITIC", "PASS", []), at), report("SECURITY", "FINDINGS", [token]), at);
+    expect(securityOnly.blockReason).toBe("the security review did not pass");
+    const both = submitWorkflowReview(submitWorkflowReview(waiting, report("CRITIC", "FINDINGS", [parser]), at), report("SECURITY", "FINDINGS", [token]), at);
+    expect(both.blockReason).toBe("the code and security reviews did not pass");
+  });
+
   it("does not apply accepted findings to a new candidate", () => {
     const first = blockedWith([report("CRITIC", "FINDINGS", [parser]), report("SECURITY", "PASS", [])]);
     const mixed = resolve(first, request(first, [{ findingId: id("CRITIC", parser), action: "ACCEPT", note: "Fine." }]));

@@ -105,6 +105,18 @@ describe("registration preflight", () => {
     expect((await register(handler, githubConnector([long]))).body).toMatchObject({ duplicate: true });
   });
 
+  it("re-accepts an identical revision whose stored maps DynamoDB reads back in another key order", async () => {
+    const { handler } = await createAdminBroker({ mapOrder: "dynamodb" });
+    const overrides = githubConnector(["list_issues"]);
+    expect((await register(handler, overrides)).status).toBe(201);
+    const again = await register(handler, overrides);
+    expect(again.status).toBe(201);
+    expect(again.body).toMatchObject({ duplicate: true });
+    // A real change is still refused.
+    const changed = await register(handler, { ...overrides, orchestratorInstructions: "Changed." });
+    expect(changed.body).toMatchObject({ error: { code: "PROJECT_REVISION_MISMATCH" } });
+  });
+
   it("answers a registration that lost the write race as a duplicate, with its preflight report and one vendor contact", async () => {
     const githubMcp = vendor([plainTool("list_issues")]);
     const { handler, db } = await createAdminBroker({ githubMcp });

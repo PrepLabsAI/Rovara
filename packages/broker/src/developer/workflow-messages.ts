@@ -502,6 +502,7 @@ export function feedbackReviewFailurePlainReason(blockReason: string | undefined
   if (/^candidate changed (?:before|during) review$/.test(reason)) return "the code changed during the review";
   if (reason === "review could not verify the exact candidate") return "the review couldn't check the code";
   if (/not accounted for|answered more than once|names a comment or bundle that was not supplied/.test(reason)) return "the reviewer didn't answer every comment";
+  if (/^reviewer output: fixProposal\.(?:replacementChecks|obsoleteChecks)/.test(reason)) return "the reviewer proposed a check change AgentX can't use";
   if (/^reviewer output: .*fixProposal/.test(reason)) return "the reviewer's proposal was incomplete";
   // An answer that was read but broke a rule is named by the rule; only an answer that could not be read says so.
   if (/^reviewer output: finding \d+ is uncertain but not left for the owner$/.test(reason)) return "the reviewer was unsure but didn't leave the choice to you";
@@ -656,13 +657,31 @@ export function slackSectionTexts(text: string): string[] {
   const chunks: string[] = [];
   let remaining = text;
   while (remaining.length > SECTION_TEXT_LIMIT) {
-    let splitAt = remaining.lastIndexOf("\n", SECTION_TEXT_LIMIT);
-    if (splitAt < SECTION_TEXT_LIMIT / 2) splitAt = SECTION_TEXT_LIMIT;
+    // At a line break whenever one fits, so a line (a check's command, say) is never split; only a single line too long
+    // for one section is split, at a safe place.
+    const lineBreak = remaining.lastIndexOf("\n", SECTION_TEXT_LIMIT);
+    const splitAt = lineBreak > 0 ? lineBreak : safeSplit(remaining, SECTION_TEXT_LIMIT);
     chunks.push(remaining.slice(0, splitAt));
     remaining = remaining.slice(splitAt).replace(/^\n+/, "");
   }
   if (remaining.length > 0) chunks.push(remaining);
   return chunks;
+}
+
+/**
+ * Where to split one over-long line at or before `limit`: never inside an escaped character ("&lt;") and, when it can,
+ * not inside a code span (before its opening backtick instead).
+ */
+function safeSplit(line: string, limit: number): number {
+  let splitAt = limit;
+  const amp = line.lastIndexOf("&", splitAt - 1);
+  if (amp >= 0 && amp > splitAt - 10 && /^&[A-Za-z#0-9]{1,8};/.test(line.slice(amp)) && line.indexOf(";", amp) >= splitAt) splitAt = amp;
+  const ticks = (line.slice(0, splitAt).match(/`/g) ?? []).length;
+  if (ticks % 2 === 1) {
+    const opening = line.lastIndexOf("`", splitAt - 1);
+    if (opening > 0) splitAt = opening;
+  }
+  return splitAt > 0 ? splitAt : limit;
 }
 
 /**

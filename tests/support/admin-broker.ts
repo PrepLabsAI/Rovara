@@ -52,9 +52,11 @@ export async function createAdminBroker(options: {
   turnRecords?: TurnRecordExport;
   checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
   developer?: DeveloperApiConfiguration;
+  /** "dynamodb" reads each stored map back in another attribute order, as DynamoDB does. */
+  mapOrder?: "insertion" | "dynamodb";
 } = {}): Promise<{ db: FakeDynamoDb; handler: AdminHandler; registry: CredentialRegistry | undefined }> {
   const { createAwsBrokerHandler, CredentialRegistry: Registry } = await loadBroker();
-  const db = new FakeDynamoDb();
+  const db = new FakeDynamoDb(options.mapOrder === undefined ? {} : { mapOrder: options.mapOrder });
   const registry = options.connectorCredentials
     ? new Registry({ ...options.connectorCredentials, documentClient: db as never, tableName: "state" })
     : undefined;

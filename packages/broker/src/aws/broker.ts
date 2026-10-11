@@ -117,6 +117,7 @@ import {
   type WorkflowReviewBase,
   type WorkflowReviewChecks,
   type WorkflowReviewPlan,
+  type WorkflowReviewFeedback,
   type RegistrationPreflight,
   type PullRequestLifecycleResult,
   type SlackChannelBinding,
@@ -133,6 +134,8 @@ import {
   type CandidateRepository,
   WORKFLOW_PLAN_MAX_BYTES,
   WorkflowFeedbackBundleRefSchema,
+  WorkflowFeedbackTaskChecksSchema,
+  type WorkflowFeedbackTaskChecks,
   WorkflowFeedbackBundleSchema,
   WorkflowFeedbackApprovalBindingSchema,
   workflowFeedbackApprovalMatchesReview,
@@ -156,6 +159,7 @@ import {
   INDEX_EXPIRY_ATTRIBUTE,
   indexExpiresAt,
   WORKFLOW_RESOLVE_FINDINGS_MAX,
+  sameJsonContent,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
@@ -194,7 +198,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -999,6 +1003,7 @@ const SLACK_PLAIN_REFUSALS: ReadonlyMap<string, string> = new Map([
   ["select at least one check before retrying verification", "Select at least one check, then try again."],
   ["choose checks that are approved for this project", "Choose from this project's checks, then try again."],
   [FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_BUSY],
+  [FEEDBACK_REVIEW_RETRY_CHANGED, FEEDBACK_REVIEW_RETRY_CHANGED],
   [FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_CHANGED_SINCE_CARD],
 ]);
 /**
@@ -1366,10 +1371,8 @@ async function registerProject(
   const key = projectKey(definition.name, definition.revision);
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
-    if (
-      JSON.stringify(existing.definition) !== JSON.stringify(definition) ||
-      JSON.stringify(existing.runtimeBinding) !== JSON.stringify(runtimeBinding)
-    ) {
+    // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
+    if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding)) {
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
     }
     // A revision stored before the static checks existed stays idempotent: report, never refuse.
@@ -2981,7 +2984,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; retiredClaimIds?: readonly string[] },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[] },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -3050,6 +3053,7 @@ async function taskOperationParts(
       ...(input.workflowBase === undefined ? {} : { workflowBase: input.workflowBase }),
       ...(input.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: input.workflowReviewChecks }),
       ...(input.workflowReviewPlan === undefined ? {} : { workflowReviewPlan: input.workflowReviewPlan }),
+      ...(input.workflowReviewFeedback === undefined ? {} : { workflowReviewFeedback: input.workflowReviewFeedback }),
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
       // Spec 051 (P-1): the checks the worker reruns when the agent finishes. The latest revision's readiness, as
@@ -3086,7 +3090,7 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; retiredClaimIds?: readonly string[] } = {},
+  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[] } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
@@ -3134,6 +3138,7 @@ async function acceptTask(
     ...(options.workflowBase === undefined ? {} : { workflowBase: options.workflowBase }),
     ...(options.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: options.workflowReviewChecks }),
     ...(options.workflowReviewPlan === undefined ? {} : { workflowReviewPlan: options.workflowReviewPlan }),
+    ...(options.workflowReviewFeedback === undefined ? {} : { workflowReviewFeedback: options.workflowReviewFeedback }),
     ...(options.retiredClaimIds === undefined ? {} : { retiredClaimIds: options.retiredClaimIds }),
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
   }, now);
@@ -4373,7 +4378,7 @@ async function readFeedbackBundlesForCritic(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
   value: unknown,
-): Promise<{ taskRequirements: string; bundles: Array<{ ref: ReturnType<typeof WorkflowFeedbackBundleRefSchema.parse>; bytesBase64: string }> }> {
+): Promise<{ taskRequirements: string; bundles: Array<{ ref: ReturnType<typeof WorkflowFeedbackBundleRefSchema.parse>; bytesBase64: string }>; taskChecks?: WorkflowFeedbackTaskChecks }> {
   const input = object(value, "feedback bundle request");
   const taskId = input.taskId;
   const workflowRevision = input.workflowRevision;
@@ -4459,7 +4464,27 @@ async function readFeedbackBundlesForCritic(
     bundles.push({ ref, bytesBase64: bytes.toString("base64") });
   }
   if (bundles.length !== workflow.feedbackReview.bundleRefs.length) throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle set is incomplete");
-  return { taskRequirements, bundles };
+  const taskChecks = await feedbackTaskChecks(dependencies, task, workflow);
+  return { taskRequirements, bundles, ...(taskChecks === undefined ? {} : { taskChecks }) };
+}
+
+/**
+ * What the feedback critic is told about the task's checks, so it can list the proposed ones its fix makes wrong: the
+ * proposed checks the task runs now, the project's required checks and the task's repository folders. Nothing for a task
+ * stored without a check policy (it runs the project's checks, and a check change would be ignored). An older worker
+ * ignores the field.
+ */
+async function feedbackTaskChecks(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, workflow: WorkflowSnapshot): Promise<WorkflowFeedbackTaskChecks | undefined> {
+  const policy = workflow.checkPolicy;
+  if (policy === undefined) return undefined;
+  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  const kept = policy.selectedProposedIds;
+  return WorkflowFeedbackTaskChecksSchema.parse({
+    proposed: policy.proposed.filter((check) => kept === undefined || kept.includes(check.id)),
+    required: policy.required.map((check) => ({ id: check.id, label: check.label })),
+    optional: policy.optional.map((check) => ({ id: check.id, label: check.label })),
+    repositoryPaths: project.definition.repositories.map((repository) => repository.path),
+  });
 }
 
 async function handleCodeBuild(
@@ -5824,8 +5849,9 @@ async function completedPullRequestUpdateItems(
       // GitHub could not say: the pull request's own head stands.
     }
   }
+  // The pull request must still come from the branch AgentX pushed to: the same tree on another branch is not this push.
   const onReviewedTree = current.pullRequest.number === pullRequest.number && current.pullRequest.url === pullRequest.url
-    && headTree === binding.treeSha && head !== maintenance.expectedHeadCommit && /^[a-f0-9]{40}$/.test(head);
+    && current.pullRequest.headBranch === maintenance.headBranch && headTree === binding.treeSha && head !== maintenance.expectedHeadCommit && /^[a-f0-9]{40}$/.test(head);
   const ownFastForward = async (): Promise<boolean> => {
     if (record?.expectedHeadCommit === head) return true;
     try {

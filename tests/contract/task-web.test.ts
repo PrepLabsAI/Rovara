@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { canonicalPlanJson, createCandidateManifest, createWorkflowSnapshot, workflowFindingFingerprint, type PlanDocument } from "@agentx/contracts";
 import { claimAnchor } from "../../packages/broker/src/aws/plan-page/render-plan.js";
 import { createTaskWeb, type TaskDocumentEntry, type TaskDocumentKind, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
-import { TASK_PAGE_SCRIPT } from "../../packages/broker/src/aws/task-page-assets.js";
+import { TASK_PAGE_SCRIPT, TASK_PAGE_STYLE } from "../../packages/broker/src/aws/task-page-assets.js";
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
 import { MAYA, OMAR, createDeveloperTaskBroker, grantProject, registerRevision, type Developer } from "../support/developer-task-broker.js";
 import { planDocument } from "../support/plan-documents.js";
@@ -68,7 +68,8 @@ describe("read-only task page", () => {
     const csp = answer.headers["content-security-policy"]!;
     expect(csp).toContain(`script-src 'nonce-${nonce}'`);
     expect(csp).toContain(`style-src 'nonce-${nonce}'`);
-    expect(csp).toContain("connect-src 'none'");
+    // The page may ask its own origin whether the task moved on, and nothing else.
+    expect(csp).toContain("connect-src 'self'");
     expect(csp).toContain("img-src 'none'");
     expect(csp).toContain("form-action 'none'");
     expect(csp).toContain("frame-ancestors 'none'");
@@ -672,6 +673,153 @@ describe("the task page's documents, versions and history", () => {
   });
 });
 
+describe("the task page says when the task has moved on", () => {
+  const statusUrl = new URL(`https://agentx.example.test/review/${taskId}/task/status`);
+  const statusRequest = (cookie?: string, method = "GET"): AdaptedHttpRequest => ({ ...request(`/review/${taskId}/task/status`, cookie), method });
+  const freshnessWeb = (options: { signedIn?: boolean; freshness?: () => Promise<{ revision: number; stage: string }> } = {}) => createTaskWeb({
+    authenticateSession: async () => options.signedIn === false ? undefined : caller,
+    getTaskDocumentView: async () => view,
+    getTaskFreshness: options.freshness ?? (async () => ({ revision: 7, stage: "Pull request" })),
+  });
+
+  it("embeds where the task stood in a hidden banner with a Refresh button, which a page without scripts never shows", async () => {
+    const body = (await render({ revision: 4, stage: "Reviews" })).body;
+    const banner = /<div id="moved-on"[^>]*>[\s\S]*?<\/div>/.exec(body)?.[0];
+    expect(banner).toBeDefined();
+    expect(banner).toMatch(/\shidden[\s>]/);
+    expect(banner).toContain('data-version="4"');
+    expect(banner).toContain('data-stage="Reviews"');
+    expect(banner).toContain(`data-check="/review/${taskId}/task/status"`);
+    expect(banner).toContain('role="status"');
+    expect(banner).toContain("This task has moved on. Refresh to see the latest.");
+    expect(banner).toContain('<button type="button" id="moved-on-refresh">Refresh</button>');
+    expect(TASK_PAGE_STYLE).toContain("[hidden]{display:none");
+    // Still one script and no form.
+    expect(body.match(/<script/g)).toHaveLength(1);
+    expect(body).not.toContain("<form");
+  });
+
+  it("answers the signed-in reader with where the task stands now, never stored", async () => {
+    const answer = await freshnessWeb()(statusRequest(SESSION), statusUrl);
+    expect(answer.statusCode).toBe(200);
+    expect(answer.headers["content-type"]).toContain("application/json");
+    expect(answer.headers["cache-control"]).toContain("no-store");
+    expect(JSON.parse(answer.body)).toEqual({ revision: 7, stage: "Pull request" });
+  });
+
+  it("refuses a signed-out reader without a redirect, hides a task the reader may not see, and answers only GET", async () => {
+    const signedOut = await freshnessWeb({ signedIn: false })(statusRequest(), statusUrl);
+    expect(signedOut.statusCode).toBe(401);
+    expect(signedOut.headers.location).toBeUndefined();
+    expect(signedOut.headers["cache-control"]).toContain("no-store");
+    const hidden = await freshnessWeb({ freshness: async () => { throw Object.assign(new Error("x"), { code: "TASK_NOT_FOUND" }); } })(statusRequest(SESSION), statusUrl);
+    expect(hidden.statusCode).toBe(404);
+    expect(hidden.body).not.toContain("revision");
+    const denied = await freshnessWeb({ freshness: async () => { throw Object.assign(new Error("x"), { code: "TASK_ACCESS_DENIED", owners: ["Maya"] }); } })(statusRequest(SESSION), statusUrl);
+    expect(denied.statusCode).toBe(404);
+    expect(denied.body).not.toContain("Maya");
+    const post = await freshnessWeb()(statusRequest(SESSION, "POST"), statusUrl);
+    expect(post.statusCode).toBe(405);
+  });
+
+  describe("the script", () => {
+    function run(options: { version?: string; stage?: string; answer?: () => Promise<{ status: number; body?: unknown }> } = {}) {
+      const banner = { hidden: true, attributes: { "data-version": options.version ?? "4", "data-stage": options.stage ?? "Reviews", "data-check": `/review/${taskId}/task/status` } as Record<string, string>,
+        getAttribute(name: string) { return this.attributes[name] ?? null; } };
+      const clicks: Array<() => void> = [];
+      const refresh = { addEventListener: (name: string, fn: () => void) => { if (name === "click") clicks.push(fn); } };
+      const intervals: Array<{ fn: () => void; ms: number; cleared: boolean }> = [];
+      const documentListeners = new Map<string, () => void>();
+      const fetches: Array<{ url: string; init: Record<string, unknown> }> = [];
+      const clock = { now: 1_000_000 };
+      const reloads: number[] = [];
+      const document = {
+        hidden: false,
+        getElementById: (id: string) => id === "moved-on" ? banner : id === "moved-on-refresh" ? refresh : null,
+        addEventListener: (name: string, fn: () => void) => { documentListeners.set(name, fn); },
+      };
+      const answer = options.answer ?? (async () => ({ status: 200, body: { revision: 4, stage: "Reviews" } }));
+      const sandbox = {
+        location: { hash: "", search: "", reload: () => { reloads.push(clock.now); } }, document,
+        window: { addEventListener: () => undefined },
+        setTimeout: () => 0,
+        setInterval: (fn: () => void, ms: number) => { intervals.push({ fn, ms, cleared: false }); return intervals.length; },
+        clearInterval: (handle: number) => { intervals[handle - 1]!.cleared = true; },
+        Date: { now: () => clock.now },
+        fetch: (url: string, init: Record<string, unknown>) => {
+          fetches.push({ url, init });
+          return answer().then((reply) => ({ status: reply.status, ok: reply.status >= 200 && reply.status < 300, json: async () => reply.body }));
+        },
+        decodeURIComponent, String,
+      };
+      vm.runInNewContext(TASK_PAGE_SCRIPT, sandbox);
+      const settle = () => new Promise((resolve) => setImmediate(resolve));
+      const tick = async () => { clock.now += 20_000; for (const entry of intervals) if (!entry.cleared) entry.fn(); await settle(); await settle(); };
+      return { banner, clicks, intervals, documentListeners, fetches, clock, reloads, document, tick, settle };
+    }
+
+    it("asks every 20 seconds, same origin and never cached, and leaves the banner hidden while nothing changed", async () => {
+      const page = run();
+      expect(page.intervals).toHaveLength(1);
+      expect(page.intervals[0]!.ms).toBe(20_000);
+      await page.tick();
+      expect(page.fetches.map((entry) => entry.url)).toEqual([`/review/${taskId}/task/status`]);
+      expect(page.fetches[0]!.init).toMatchObject({ credentials: "same-origin", cache: "no-store" });
+      expect(page.banner.hidden).toBe(true);
+    });
+
+    it("shows the banner once the task moved on, stops asking, and reloads only when Refresh is pressed", async () => {
+      const page = run({ answer: async () => ({ status: 200, body: { revision: 5, stage: "Pull request" } }) });
+      await page.tick();
+      expect(page.banner.hidden).toBe(false);
+      expect(page.intervals[0]!.cleared).toBe(true);
+      expect(page.reloads).toEqual([]);
+      page.clicks[0]!();
+      expect(page.reloads).toHaveLength(1);
+    });
+
+    it("does not ask while the page is hidden, asks again when it is shown, and stops after 30 minutes", async () => {
+      const page = run();
+      page.document.hidden = true;
+      await page.tick();
+      expect(page.fetches).toHaveLength(0);
+      page.document.hidden = false;
+      page.documentListeners.get("visibilitychange")!();
+      await page.settle();
+      expect(page.fetches).toHaveLength(1);
+      page.clock.now += 30 * 60 * 1000;
+      await page.tick();
+      expect(page.fetches).toHaveLength(1);
+      expect(page.intervals[0]!.cleared).toBe(true);
+    });
+
+    it("does not ask again on showing the page when it asked under 5 seconds ago", async () => {
+      const page = run();
+      await page.tick();
+      expect(page.fetches).toHaveLength(1);
+      page.clock.now += 4_000;
+      page.documentListeners.get("visibilitychange")!();
+      await page.settle();
+      expect(page.fetches).toHaveLength(1);
+      page.clock.now += 1_000;
+      page.documentListeners.get("visibilitychange")!();
+      await page.settle();
+      expect(page.fetches).toHaveLength(2);
+    });
+
+    it("stops quietly when the sign-in ended or the task is hidden, and ignores a failed answer", async () => {
+      const signedOut = run({ answer: async () => ({ status: 401 }) });
+      await signedOut.tick();
+      expect(signedOut.intervals[0]!.cleared).toBe(true);
+      expect(signedOut.banner.hidden).toBe(true);
+      const failing = run({ answer: async () => { throw new Error("offline"); } });
+      await failing.tick();
+      expect(failing.intervals[0]!.cleared).toBe(false);
+      expect(failing.banner.hidden).toBe(true);
+    });
+  });
+});
+
 describe("the task page through the broker", () => {
   const TEAMMATE: Developer = { developerId: "f".repeat(64), name: "Lee Park", provider: "slack", sessionId: "s-lee", slackUserId: "U0LEE0001" };
   const NEWCOMER: Developer = { developerId: "a".repeat(64), name: "Nia Fox", provider: "slack", sessionId: "s-nia", slackUserId: "U0NIA0001" };
@@ -697,12 +845,12 @@ describe("the task page through the broker", () => {
       harness.db.set({ pk: `DEVELOPER#${who.developerId}`, sk: "META", developerId: who.developerId, provider: who.provider, displayName: who.name,
         ...(who.slackUserId === undefined ? {} : { slackUserId: who.slackUserId }), firstSignInAt: "x", lastSignInAt: "x", revoked: false });
     }
-    const open = async (who: Developer, taskPageId = id) => {
+    const open = async (who: Developer, taskPageId = id, suffix = "") => {
       const sessionId = randomUUID();
       harness.db.set({ pk: `SESSION#${sessionId}`, sk: "META", sessionId, developerId: who.developerId, amr: who.provider,
         startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 600, reviewExpiresAt: Math.floor(Date.now() / 1000) + 600 });
       return await harness.handler({
-        version: "2.0", routeKey: "ANY /review/{proxy+}", rawPath: `/review/${taskPageId}/task`, rawQueryString: "",
+        version: "2.0", routeKey: "ANY /review/{proxy+}", rawPath: `/review/${taskPageId}/task${suffix}`, rawQueryString: "",
         headers: { host: "abc123.execute-api.us-east-1.amazonaws.com", cookie: `__Host-agentx_review_session=${sessionId}` },
         requestContext: { requestId: randomUUID(), http: { method: "GET" } },
       }) as { statusCode: number; headers: Record<string, string>; body: string };
@@ -711,6 +859,20 @@ describe("the task page through the broker", () => {
   }
 
   const digestOf = (text: string) => createHash("sha256").update(text).digest("hex");
+
+  it("answers where the task stands at /task/status for the owner and a teammate, and the page embeds the same", async () => {
+    const { open } = await sharedPlanTask();
+    const owner = await open(MAYA, undefined, "/status");
+    expect(owner.statusCode).toBe(200);
+    expect(owner.headers["cache-control"]).toContain("no-store");
+    expect(JSON.parse(owner.body)).toEqual({ revision: 3, stage: "Coding plan" });
+    expect((await open(MAYA)).body).toContain('data-version="3"');
+    expect((await open(TEAMMATE, undefined, "/status")).statusCode).toBe(200);
+    // Someone who may not see the task learns nothing, not even that it exists.
+    const outsider = await open(NEWCOMER, undefined, "/status");
+    expect(outsider.statusCode).toBe(404);
+    expect(outsider.body).not.toContain("Maya");
+  });
 
   it("answers a teammate 'not found' when Slack can't confirm their membership, and tells them it's the owner's approval", async () => {
     const { open, slack } = await sharedPlanTask();

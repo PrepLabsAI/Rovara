@@ -81,7 +81,8 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
  * readiness, that checks the agent's own test commands), and a publication's reportChecks goes only to one whose /ping lists
  * "publish.reportChecks". A review's workflowReviewChecks goes only to one whose /ping lists "task.workflowReviewChecks";
  * an older one reviews without being told which checks ran, and its workflowReviewPlan goes only to one whose /ping lists
- * "task.workflowReviewPlan"; an older one reviews without seeing the approved plan. A planning run's workflowPhase and planFormat go only to one whose /ping lists
+ * "task.workflowReviewPlan"; an older one reviews without seeing the approved plan, and its workflowReviewFeedback goes only to one whose
+ * /ping lists "task.workflowReviewFeedback"; an older one judges a feedback fix against the plan alone. A planning run's workflowPhase and planFormat go only to one whose /ping lists
  * "task.structuredPlans"; an older one plans without checking the answer's format. A planning prompt asks for anchor lines on
  * code citations only on one whose /ping lists "task.codeAnchors"; for an older one that text is left out of the prompt. The invoke token signs the operation, not the payload, so
  * dropping a field leaves it valid. A ping that fails fails the attempt: the worker journals a hash of
@@ -95,7 +96,8 @@ async function forWorker(
 ): Promise<WorkerInvocation> {
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
-  const carriesReviewChecks = invocation.kind === "task" && (invocation.payload.workflowReviewChecks !== undefined || invocation.payload.workflowReviewPlan !== undefined);
+  const carriesReviewChecks = invocation.kind === "task" && (invocation.payload.workflowReviewChecks !== undefined || invocation.payload.workflowReviewPlan !== undefined
+    || invocation.payload.workflowReviewFeedback !== undefined);
   const carriesWorkflowMode = invocation.kind === "task" && invocation.payload.workflowMode !== undefined;
   const carriesFeedbackReview = invocation.kind === "task" && invocation.payload.workflowMode === "FEEDBACK_REVIEW";
   const carriesFeedbackApproval = invocation.kind === "task" && invocation.payload.workflowFeedbackApproval !== undefined;
@@ -208,8 +210,18 @@ async function forWorker(
       workspaceId: invocation.workspaceId,
     }));
   }
-  const sent = withoutCodeAnchors(withPlan, features);
-  if (sent !== withPlan) {
+  const withFeedback = withoutReviewFeedback(withPlan, features);
+  if (withFeedback !== withPlan) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.review_feedback_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
+  const sent = withoutCodeAnchors(withFeedback, features);
+  if (sent !== withFeedback) {
     console.log(JSON.stringify({
       component: "dispatcher",
       event: "dispatch.code_anchors_omitted",
@@ -255,6 +267,17 @@ function withoutReviewPlan(invocation: WorkerInvocation, features: readonly stri
   if (invocation.kind !== "task" || invocation.payload.workflowReviewPlan === undefined || features.includes("task.workflowReviewPlan")) return invocation;
   const payload = { ...invocation.payload };
   delete payload.workflowReviewPlan;
+  return { ...invocation, payload };
+}
+
+/**
+ * A review without the owner's approved PR feedback, for a worker that does not parse it. It only informs the reviewers'
+ * prompt; such a worker reviews the same change as before, judging it against the plan alone.
+ */
+function withoutReviewFeedback(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || invocation.payload.workflowReviewFeedback === undefined || features.includes("task.workflowReviewFeedback")) return invocation;
+  const payload = { ...invocation.payload };
+  delete payload.workflowReviewFeedback;
   return { ...invocation, payload };
 }
 
