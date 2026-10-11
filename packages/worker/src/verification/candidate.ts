@@ -75,8 +75,9 @@ export async function readCandidateRepositories(
 }
 
 /**
- * Whether the candidate is still the code the task started from: every repository with a recorded base holds its base
- * commit's tree (and at least one has a base). Such a change has nothing to check, review or publish.
+ * Whether the candidate is still the code the task started from: every repository has a recorded base and holds its base
+ * commit's tree. Such a change has nothing to check, review or publish. A repository with no recorded base can't be shown
+ * unchanged, so the candidate is not refused for it.
  */
 export async function candidateUnchangedSinceBase(
   inputs: readonly CandidateRepositoryInput[],
@@ -85,7 +86,8 @@ export async function candidateUnchangedSinceBase(
   let compared = 0;
   for (const candidate of candidates) {
     const input = inputs.find((entry) => entry.repositoryId === candidate.repositoryId);
-    if (input === undefined || candidate.baseCommitSha === undefined) continue;
+    if (candidate.baseCommitSha === undefined) return false;
+    if (input === undefined) continue;
     const directory = resolve(input.directory);
     const env = await gitHardenedEnvironment(directory);
     const { stdout } = await execFile("git", ["-C", directory, "rev-parse", "--verify", `${candidate.baseCommitSha}^{tree}`], { env, encoding: "utf8" });
