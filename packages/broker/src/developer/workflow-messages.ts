@@ -28,8 +28,8 @@ export interface WorkflowMessageContext {
   commentAnswers?: { answered: number; total: number; fromVersion: number } | undefined;
   /** AgentX's own draft pull request did not open; `codeChanged` when the workspace no longer held the checked code. */
   publishFailure?: { category: string; codeChanged?: boolean | undefined } | undefined;
-  /** The step a closed required pull request's reopening started: AgentX follows the pull request again. */
-  pullRequestReopened?: boolean | undefined;
+  /** The step a closed required pull request's reopening started (the numbers reopened; empty when not known). */
+  pullRequestReopened?: readonly number[] | undefined;
 }
 export interface WorkflowMessage { text: string; blocks: Array<Record<string, unknown>> }
 
@@ -47,8 +47,16 @@ const REGRESSED_TEST_MAX = 100;
 /** Said after a failed feedback review or push: the pull request's merge is still tracked. */
 const STILL_WATCHING = "I'm still watching the pull request and will finish this task when it's merged.";
 const GENERIC_REASON = "Something went wrong on AgentX's side.";
-/** Said once per reopening of a closed required pull request (D3). */
+/** Said once per reopening of a closed required pull request (D3) when which one is not known. */
 export const PULL_REQUEST_REOPENED = "The pull request was reopened, so I'm following it again.";
+
+/** Said once per reopening (D3): which pull requests were reopened, by name. */
+function pullRequestReopened(workflow: WorkflowSnapshot, numbers: readonly number[]): string {
+  const reopened = (workflow.pullRequests ?? []).filter((pullRequest) => numbers.includes(pullRequest.number));
+  if (reopened.length === 0) return PULL_REQUEST_REOPENED;
+  const names = pullRequestNames(reopened, (pullRequest) => link(pullRequest.url, `PR #${pullRequest.number}`));
+  return reopened.length === 1 ? `${names} was reopened, so I'm following it again.` : `${names} were reopened, so I'm following them again.`;
+}
 
 type DocumentName = "coding plan" | "requirements" | "design";
 
@@ -668,7 +676,7 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
     case "PULL_REQUEST/BLOCKED": return { text: `${checksAndReviewsPassed} ${plainBlockReason(workflow.blockReason)}`, buttons: [exits.retryPublish, exits.close] };
     // The owner can close the task while its pull request is open (the pull request stays on GitHub).
     case "WAIT_FOR_MERGE/WAITING": {
-      const text = context.pullRequestReopened === true ? PULL_REQUEST_REOPENED : waitingForMerge(workflow);
+      const text = context.pullRequestReopened !== undefined ? pullRequestReopened(workflow, context.pullRequestReopened) : waitingForMerge(workflow);
       return text === undefined ? undefined : { text, buttons: [exits.close] };
     }
     // The feedback review runs before anything is proposed; no button, as nothing is waiting on the owner yet.

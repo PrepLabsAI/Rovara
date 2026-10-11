@@ -1754,7 +1754,7 @@ describe("Slack refusals (Task 19)", () => {
     expect(stale.statusCode).toBe(200);
     expect(JSON.parse(stale.body)).toMatchObject({ refused: true });
     expect(refusals(harness, taskId)).toEqual([expect.objectContaining({ entityType: "WORKFLOW_ACTION_REFUSAL", taskId, slackUserId: MAYA.slackUserId,
-      channelId: thread.channelId, threadTs: thread.threadTs, message: "That approval is out of date. Use the latest message in the thread.", indexExpiresAt: expect.any(Number) as unknown })]);
+      channelId: thread.channelId, threadTs: thread.threadTs, message: "That approval is out of date. Use the latest message in this thread.", indexExpiresAt: expect.any(Number) as unknown })]);
     // Someone else's press: refused the same way, in plain words.
     const teammate = await harness.handler({ ...decision, requestId: randomUUID(), userId: "U0TEAMMATE1" });
     expect(teammate.statusCode).toBe(200);
@@ -1789,7 +1789,7 @@ describe("Slack refusals (Task 19)", () => {
       expectedRevision: waiting.workflow.revision, artifactDigest: createHash("sha256").update(plan).digest("hex"), decision: "APPROVE", reason: "Approved in Slack.", selectedOptionalCheckIds: [] };
     // A stale press is still out of date.
     const stale = await harness.handler({ ...decision, requestId: randomUUID(), expectedRevision: waiting.workflow.revision - 1, selectedOptionalCheckIds: ["optional-1"] });
-    expect(JSON.parse(stale.body)).toMatchObject({ refused: true, message: "That approval is out of date. Use the latest message in the thread." });
+    expect(JSON.parse(stale.body)).toMatchObject({ refused: true, message: "That approval is out of date. Use the latest message in this thread." });
     // A task whose thread is in a Slack workspace this AgentX does not serve: no press from there is taken, whoever presses.
     const elsewhere = { ...thread, teamId: "T0OTHERTEAM" };
     const current = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { share: Record<string, unknown> };

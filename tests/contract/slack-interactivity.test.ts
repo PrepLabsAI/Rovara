@@ -960,7 +960,7 @@ describe("Slack native workflow review controls", () => {
       loaded = { ...task, workflow: { ...workflow, revision: workflow.revision + 1 } };
       const answer = JSON.parse((await handler(signed({ type: "view_submission", user: { id: requester, team_id: thread.teamId }, team: { id: thread.teamId },
         view: { callback_id: "agentx_workflow_review_submission", private_metadata: opened?.private_metadata, state: { values: {} } } }))).body) as { errors: Record<string, string> };
-      expect(answer.errors.workflow_feedback).toBe("That approval is out of date. Use the latest message in the thread.");
+      expect(answer.errors.workflow_feedback).toBe("That approval is out of date. Use the latest message in this thread.");
     });
 
     it("asks for changes to a coding plan without saying its checks are chosen later (Task 19 fix)", async () => {
@@ -1096,7 +1096,7 @@ describe("Slack native workflow review controls", () => {
       const submitted: Array<Record<string, unknown>> = [];
       const handlers = workflowSlackHandlers({ loadTask: async () => ({ ...task, workflow: snapshot }), openView: async () => undefined, submit: async (input) => { submitted.push(input); } });
       await expect(handlers.handleAction(press(snapshot.revision, { userId: other }))).rejects.toThrow(/^Only <@U0123456789> can approve this step\.$/);
-      await expect(handlers.handleAction(press(snapshot.revision - 1))).rejects.toThrow("That approval is out of date. Use the latest message in the thread.");
+      await expect(handlers.handleAction(press(snapshot.revision - 1))).rejects.toThrow("That approval is out of date. Use the latest message in this thread.");
       await expect(handlers.handleAction(press(snapshot.revision, { userTeamId: "T0OTHERORG1" }))).rejects.toThrow(/workspace/);
       expect(submitted).toEqual([]);
     });

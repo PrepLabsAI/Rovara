@@ -34,6 +34,8 @@ export interface Notice {
   workflowRevision?: number;
   /** A workflow notice for the step a closed required pull request's reopening started: AgentX follows it again. */
   pullRequestReopened?: true;
+  /** With `pullRequestReopened`: the numbers of the pull requests that were reopened. */
+  reopenedPullRequests?: number[];
 }
 
 /** Stable key shared by notice production and the owner-decision latency measurement. */
@@ -73,8 +75,12 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
         // The task's first step is not one: the start message (or Slack's Quick or Full answer) already says it.
         const reopened = beforeWorkflow.state === "BLOCKED" && beforeWorkflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestClosed
           && afterWorkflow.stage === "WAIT_FOR_MERGE" && afterWorkflow.state === "WAITING";
+        // Which of the task's pull requests were closed before and are open now.
+        const pullRequests = (value: Record<string, unknown> | undefined) => (Array.isArray(value?.pullRequests) ? value.pullRequests as Array<Record<string, unknown>> : []);
+        const reopenedNumbers = reopened ? pullRequests(afterWorkflow).filter((pr) => pr.state === "OPEN" && pullRequests(beforeWorkflow)
+          .some((earlier) => earlier.repositoryId === pr.repositoryId && earlier.number === pr.number && earlier.state === "CLOSED")).map((pr) => Number(pr.number)) : [];
         notices.push({ id: `${taskId}:workflow:${String(afterWorkflow.revision)}`, kind: "workflow", taskId, at, workflowRevision: Number(afterWorkflow.revision),
-          ...(reopened ? { pullRequestReopened: true as const } : {}) });
+          ...(reopened ? { pullRequestReopened: true as const, reopenedPullRequests: reopenedNumbers } : {}) });
       }
       if (after !== undefined && before === undefined) notices.push({ id: `${taskId}:start`, kind: "start", taskId, at });
       // A mode notice is named by its stream event; without one, two changes would collapse into one ID.

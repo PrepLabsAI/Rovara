@@ -20,4 +20,4 @@ export const WORKFLOW_ACTION_IDS: ReadonlySet<string> = new Set([
 export const WORKFLOW_BUTTON_OUT_OF_DATE = "That button is out of date. Use the latest message in this thread.";
 
 /** What a press on an approval (Approve, Request changes) hears when it is out of date, from the broker or from Slack's handler. */
-export const WORKFLOW_APPROVAL_OUT_OF_DATE = "That approval is out of date. Use the latest message in the thread.";
+export const WORKFLOW_APPROVAL_OUT_OF_DATE = "That approval is out of date. Use the latest message in this thread.";

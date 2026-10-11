@@ -274,7 +274,7 @@ function isCurrentMessage(journey: JourneyView, task: Item, workflow: WorkflowSn
   // The merge step is said once per pull request state (workflowMessageKey), so its buttons keep the revision it was said at.
   const merge = workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING";
   // A closed pull request reopened: its step says so once (D3).
-  if (merge) variants.push({ ...context, pullRequestReopened: true });
+  if (merge) variants.push({ ...context, pullRequestReopened: (workflow.pullRequests ?? []).filter((pullRequest) => pullRequest.state === "OPEN").map((pullRequest) => pullRequest.number) });
   const unrevised = (blocks: unknown[] | undefined) => JSON.stringify(blocks ?? []).replace(/\\"revision\\":\d+/g, "\\\"revision\\\":0");
   return variants.some((variant) => {
     const expected = workflowMessage(variant);

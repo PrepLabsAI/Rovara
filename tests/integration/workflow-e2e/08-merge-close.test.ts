@@ -10,7 +10,7 @@ import { EDITS, FIXED, MERGED, PLAN, TEAMMATE, actionIds, atPlanReview, editsOrF
 
 const OWNER = "U0MAYA001";
 const CLOSING = "Closing this task. Its workspace is being released; I'll post here when it's closed, usually within two minutes.";
-const REOPENED = "The pull request was reopened, so I'm following it again.";
+const REOPENED = "PR #1 was reopened, so I'm following it again.";
 const OUT_OF_DATE = "That button is out of date. Use the latest message in this thread.";
 
 async function waiting(options: Parameters<typeof createWorkflowE2E>[0] = {}) {
@@ -152,7 +152,7 @@ describe("Suite 8: merge and close", () => {
     expect(said(e2e).at(-1)).toBe(MERGED);
   }, 120_000);
 
-  it("8.7 D3: a closed pull request reopened is said once, \"following it again\", even when GitHub redelivers the reopening", async () => {
+  it("8.7 D3: a closed pull request reopened is said once, by name, \"following it again\", even when GitHub redelivers the reopening", async () => {
     const { e2e, pullRequest } = await waiting();
     e2e.github.close(pullRequest.number);
     expect((await e2e.webhook({ kind: "pull_request", action: "closed", number: pullRequest.number, merged: false })).status).toBe(200);
