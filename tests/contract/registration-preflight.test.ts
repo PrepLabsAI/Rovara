@@ -106,7 +106,8 @@ describe("registration preflight", () => {
   });
 
   it("re-accepts an identical revision whose stored maps DynamoDB reads back in another key order", async () => {
-    const { handler } = await createAdminBroker({ mapOrder: "dynamodb" });
+    // The fake table reorders maps on every read by default, as DynamoDB does.
+    const { handler } = await createAdminBroker();
     const overrides = githubConnector(["list_issues"]);
     expect((await register(handler, overrides)).status).toBe(201);
     const again = await register(handler, overrides);

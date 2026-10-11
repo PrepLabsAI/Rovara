@@ -13,7 +13,8 @@ const GitHubWebhookPayloadSchema = z.object({
   installation: z.object({ id: z.number().int().positive() }).passthrough(),
   repository: z.object({ id: z.number().int().positive(), full_name: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(300) }).passthrough(),
   issue: z.object({ number: z.number().int().positive(), state: z.enum(["open", "closed"]).optional(), pull_request: z.object({ url: z.string().url() }).passthrough().optional() }).passthrough().optional(),
-  pull_request: z.object({ number: z.number().int().positive(), state: z.enum(["open", "closed"]).optional(), merged: z.boolean().optional() }).passthrough().optional(),
+  pull_request: z.object({ number: z.number().int().positive(), state: z.enum(["open", "closed"]).optional(), merged: z.boolean().optional(),
+    head: z.object({ sha: z.string() }).passthrough().optional() }).passthrough().optional(),
   review: z.object({ id: z.number().int().positive(), body: z.string().max(65_536).nullable().optional(), html_url: z.string().url(), updated_at: z.string().datetime().optional(), user: z.object({ login: z.string().min(1).max(100) }).passthrough() }).passthrough().optional(),
   comment: z.object({ id: z.number().int().positive(), body: z.string().max(65_536).nullable().optional(), html_url: z.string().url(), updated_at: z.string().datetime().optional(), path: z.string().max(500).optional(), line: z.number().int().positive().optional(), diff_hunk: z.string().max(8_000).optional(), user: z.object({ login: z.string().min(1).max(100) }).passthrough() }).passthrough().optional(),
 }).passthrough();
@@ -61,6 +62,8 @@ export interface ReceivedGithubWebhook {
     repositoryId: number;
     fullName: string;
     number: number;
+    /** A push to the pull request (synchronize): the head GitHub says it now has. A hint, checked against GitHub's own read. */
+    headSha?: string;
     comment?: { id: number; body: string; truncated: boolean; url: string; author: string; updatedAt?: string; path?: string; line?: number; diffHunk?: string; source: "review" | "review_comment" | "pr_discussion" };
   };
 }
@@ -141,7 +144,9 @@ export interface LandedFixPush {
 export interface ReconcileTaskPullRequestFeedbackInput {
   documentClient: { send(command: unknown): Promise<unknown> }; tableName: string;
   repositoryFullName: string; number: number; deliveryId: string;
-  loadTask(taskId: string): Promise<{ project: string; startingRevision: number; workflow?: WorkflowSnapshot } | undefined>;
+  /** The head a push event says the pull request now has (a hint): until GitHub's own read shows it, nothing is decided. */
+  expectedHeadSha?: string;
+  loadTask(taskId: string): Promise<{ project: string; startingRevision: number; closedAt?: string; workflow?: WorkflowSnapshot } | undefined>;
   repositoryUrl(project: string, revision: number, repositoryId: string): Promise<string | undefined>;
   getCurrentFeedback(repositoryUrl: string, number: number): Promise<GitHubPullRequestFeedback>;
   /** Writes exact payload bytes to immutable content-addressed storage; never overwrites an artifact. */
@@ -168,6 +173,10 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const task = await input.loadTask(linked.taskId);
     const current = task?.workflow;
+    // A task whose pull requests all merged is complete, and a closed task no longer follows its pull requests: a later
+    // event (a redelivered merge, a comment, a merge after the owner closed the task) changes nothing, so it is neither
+    // recorded nor said, and is not retried.
+    if (task?.closedAt !== undefined || (current?.stage === "MERGED" && current.state === "COMPLETE")) return false;
     if (!task || !current || !tracksLinkedPullRequests(current)
       || !current.pullRequests?.some(pr => pr.repositoryId === linked.repositoryId && pr.number === linked.number
         && pr.url === linked.url && pr.candidateDigest === linked.candidateDigest)) {
@@ -187,6 +196,18 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       if (feedback.pullRequest.number !== pr.number || feedback.pullRequest.url !== pr.url
         || feedback.comments.some(comment => !comment.url.startsWith(`${pr.url}#`))) throw new GithubWebhookRefusal("current GitHub feedback scope mismatch");
       reads.push({ pr, feedback, url, fullName });
+    }
+    // GitHub moves a pull request's head a moment after a push. A push event whose head GitHub's read does not show yet,
+    // while the read shows the head AgentX recorded or the pushed commit's parent, is read again later (the recovery
+    // sweep): someone else's push is never missed, and AgentX's own push is never taken for someone else's.
+    const pushed = input.expectedHeadSha === undefined ? undefined
+      : reads.find(read => read.pr.number === input.number && read.fullName.toLowerCase() === input.repositoryFullName.toLowerCase());
+    if (pushed !== undefined && input.expectedHeadSha !== undefined && pushed.feedback.pullRequest.state === "open"
+      && pushed.feedback.pullRequest.headCommit !== input.expectedHeadSha) {
+      const shown = pushed.feedback.pullRequest.headCommit;
+      const behind = shown === pushed.pr.headSha
+        || (input.commitParents !== undefined && (await input.commitParents(pushed.url, input.expectedHeadSha).catch(() => [] as string[])).includes(shown));
+      if (behind) throw new GithubWebhookRetryableError("GitHub has not caught up with the pull request's head yet");
     }
     // The head AgentX recorded, holding the tree recorded with it (the checked tree, for a record that has none).
     const headMatchesCandidate = ({ pr, feedback }: Pick<typeof reads[number], "pr" | "feedback">): boolean => pr.headSha !== undefined
@@ -281,7 +302,7 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
           threadIds.add(thread.id);
           const members = thread.commentIds.map(id => comments.find(c => c.id === id && c.threadId === thread.id));
           if (members.some(c => c === undefined) || new Set(thread.commentIds).size !== thread.commentIds.length) throw new GithubWebhookRetryableError("thread comment state is incomplete");
-          const prior = current.feedbackReview?.threadObservations?.find(t => t.repositoryId === pr.repositoryId && t.number === pr.number && t.threadId === thread.id);
+          const prior = (current.feedbackReview?.threadObservations ?? (current.feedbackReview === undefined ? current.feedbackThreadObservations : undefined))?.find(t => t.repositoryId === pr.repositoryId && t.number === pr.number && t.threadId === thread.id);
           const ids = members.flatMap(comment => {
             if (!comment) return [];
             if (!thread.resolved) return [comment.id];
@@ -312,9 +333,22 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
         && p.candidateDigest === b.candidateDigest && p.commentSetDigest === b.commentSetDigest));
       // Unchanged content (comment set, heads, trees and threads) is never collected again: a new bundle would be recorded
       // under another digest only for its delivery ID and time, and an owner's decision bound to the old one would be stale.
+      // No feedback yet and none now (an approval with no summary, a pull request marked ready): nothing to review or say.
+      // Feedback only in resolved review threads is no feedback either: a resolved thread starts excluded.
+      const nothingToReview = prior === undefined && observations.every(o => o.eligibleCommentIds.length === 0) && bundles.every(b => b.comments.length === 0);
       if (same && sameThreadObservations(prior.threadObservations ?? [], observations) && next === current) {
         if (headTrees.length === 0) return false;
+      } else if (nothingToReview) {
+        // Feedback only in resolved threads: nothing to review, but the threads are remembered as seen, so a later reply
+        // in one of them is compared with what was there.
+        if (observations.length > 0 && !sameThreadObservations(current.feedbackThreadObservations ?? [], observations)) {
+          next = WorkflowSnapshotSchema.parse({ ...next, revision: next.revision + 1, feedbackThreadObservations: observations, updatedAt: input.now });
+        }
+        if (next === current && headTrees.length === 0) return false;
       } else {
+        // A step is running (the review of earlier feedback): nothing can be collected now, so nothing is stored. The
+        // delivery is kept, and the recovery sweep collects again once the step is done.
+        if (current.state === "RUNNING") throw new GithubWebhookRetryableError("the task is running a step");
         const refs: WorkflowFeedbackBundleRef[] = [];
         for (const bundle of bundles) {
           const bytes = JSON.stringify(bundle); const sha256 = digest(bytes);
@@ -324,6 +358,7 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
           refs.push(WorkflowFeedbackBundleRefSchema.parse({ ...metadata, sha256, objectKey, comments: comments.map(({ body, ...ref }) => { void body; return ref; }) }));
         }
         next = collectWorkflowFeedbackBundles(next, { bundleRefs: refs, threadObservations: observations }, input.now);
+        if (next.feedbackThreadObservations !== undefined) next = WorkflowSnapshotSchema.parse({ ...next, feedbackThreadObservations: undefined });
       }
     }
     if (headTrees.length > 0) next = recordWorkflowPullRequestHeadTrees(next, headTrees, input.now);
@@ -762,6 +797,7 @@ export async function receiveGithubWebhook(input: ReceiveGithubWebhookInput): Pr
     repositoryId: scope.repositoryId,
     fullName: scope.fullName,
     number,
+    ...(eventName === "pull_request" && object.action === "synchronize" && /^[a-f0-9]{40}$/.test(object.pull_request?.head?.sha ?? "") ? { headSha: object.pull_request!.head!.sha } : {}),
     ...(comment === undefined ? {} : { comment }),
   };
   const reserved = await input.reserveDelivery({

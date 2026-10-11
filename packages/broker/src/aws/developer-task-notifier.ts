@@ -1431,32 +1431,34 @@ export function cachedSlackPoster(loadToken: () => Promise<string>, now: () => n
   return cachedSlackClient(loadToken, now, fetchImplementation).post;
 }
 
-/** The Lambda's own dependencies, built on first use: the environment is read only then. */
-function createAwsNotifierHandler() {
-  const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
-  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
-  const sqs = new SQSClient(awsClientConfiguration);
-  const secretsManager = new SecretsManagerClient(awsClientConfiguration);
-  const s3 = new S3Client(awsClientConfiguration);
-  const queueUrl = () => requiredEnvironment("NOTICE_QUEUE_URL");
-  const slack = cachedSlackClient(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
-    .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken));
+/** What the Canvas closeout store reads and writes: the State table, the artifact bucket and Slack's Canvas delete. */
+export interface CanvasCloseoutStoreDependencies {
+  documentClient: Pick<DynamoDBDocumentClient, "send">;
+  s3: Pick<S3Client, "send">;
+  tableName(): string;
+  bucketName(): string;
+  deleteCanvas(canvasId: string): Promise<"deleted" | "unknown">;
+  now(): string;
+}
+
+/** The Canvas closeout store over the State table and the artifact bucket (the notifier Lambda's, and the E2E harness's fakes). */
+export function createCanvasCloseoutStore(deps: CanvasCloseoutStoreDependencies): CanvasCloseoutStore {
   const closeoutStore: CanvasCloseoutStore = {
     async loadTask(taskId) {
-      const result = await documentClient.send(new GetCommand({ TableName: requiredEnvironment("STATE_TABLE_NAME"), Key: taskKey(taskId), ConsistentRead: true }));
+      const result = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName(), Key: taskKey(taskId), ConsistentRead: true }));
       return (result as unknown as { Item?: TaskCanvasCloseoutTask }).Item;
     },
     async readArtifact(ref) {
-      const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: ref.objectKey }));
+      const response = await deps.s3.send(new GetObjectCommand({ Bucket: deps.bucketName(), Key: ref.objectKey }));
       return response.Body?.transformToString("utf8");
     },
     async readManifest(key) {
-      const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
+      const response = await deps.s3.send(new GetObjectCommand({ Bucket: deps.bucketName(), Key: key }));
       return response.Body?.transformToString("utf8");
     },
     async putManifest(key, digest, bytes) {
       try {
-        await s3.send(new PutObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key, Body: bytes,
+        await deps.s3.send(new PutObjectCommand({ Bucket: deps.bucketName(), Key: key, Body: bytes,
           ContentType: "application/json", Metadata: { sha256: digest }, IfNoneMatch: "*" }));
       } catch (error) {
         if (error instanceof Error && ["PreconditionFailed", "ConditionalRequestConflict"].includes(error.name)) {
@@ -1467,7 +1469,7 @@ function createAwsNotifierHandler() {
       }
     },
     async saveCloseout(taskId, nextCloseout, expectedRevision) {
-      const tableName = requiredEnvironment("STATE_TABLE_NAME");
+      const tableName = deps.tableName();
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const current = await closeoutStore.loadTask(taskId);
         const workflow = current?.workflow;
@@ -1483,7 +1485,7 @@ function createAwsNotifierHandler() {
         const mergedWorkflow = { ...workflowWithoutAttempt, canvasCloseout: merged };
         const version = current.canvasCloseoutVersion ?? 0;
         try {
-          await documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
+          await deps.documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
             UpdateExpression: "SET workflow = :workflow, canvasCloseoutVersion = :next",
             ConditionExpression: `workflow.revision = :revision AND ${version === 0 ? "attribute_not_exists(canvasCloseoutVersion)" : "canvasCloseoutVersion = :version"}`,
             ExpressionAttributeValues: { ":workflow": mergedWorkflow, ":next": version + 1, ":revision": expectedRevision,
@@ -1497,7 +1499,7 @@ function createAwsNotifierHandler() {
       return false;
     },
     async saveCloseoutAttempt(taskId, attemptRecord, expectedRevision) {
-      const tableName = requiredEnvironment("STATE_TABLE_NAME");
+      const tableName = deps.tableName();
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const current = await closeoutStore.loadTask(taskId);
         const workflow = current?.workflow;
@@ -1505,7 +1507,7 @@ function createAwsNotifierHandler() {
         const mergedWorkflow = { ...workflow, canvasCloseoutAttempt: attemptRecord };
         const version = current.canvasCloseoutVersion ?? 0;
         try {
-          await documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
+          await deps.documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
             UpdateExpression: "SET workflow = :workflow, canvasCloseoutVersion = :next",
             ConditionExpression: `workflow.revision = :revision AND ${version === 0 ? "attribute_not_exists(canvasCloseoutVersion)" : "canvasCloseoutVersion = :version"}`,
             ExpressionAttributeValues: { ":workflow": mergedWorkflow, ":next": version + 1, ":revision": expectedRevision,
@@ -1518,13 +1520,48 @@ function createAwsNotifierHandler() {
       }
       return false;
     },
+    deleteCanvas: (canvasId) => deps.deleteCanvas(canvasId),
+    now: () => deps.now(),
+  };
+  return closeoutStore;
+}
+
+/** The notifier's closeTaskCanvases: runs the closeout on `store`, and logs how it ended. */
+export function canvasCloseoutService(store: CanvasCloseoutStore): NonNullable<NotifierDependencies["closeTaskCanvases"]> {
+  return async (taskId, expectedManifestDigest, expectedWorkflowRevision) => {
+    const result = await runTaskCanvasCloseout(store, { taskId,
+      ...(expectedManifestDigest === undefined ? {} : { expectedManifestDigest }),
+      ...(expectedWorkflowRevision === undefined ? {} : { expectedWorkflowRevision }) });
+    if (result.status === "ARCHIVE_PENDING") {
+      console.log(JSON.stringify({ component: "developer-task-closeout", event: "archive_pending", taskId,
+        reason: "reason" in result ? result.reason : "archive_pending" }));
+      return result;
+    }
+    console.log(JSON.stringify({ component: "developer-task-closeout", event: "closeout_complete", taskId,
+      canvasCount: result.canvases.length, outcomes: result.canvases.map((canvas) => canvas.status) }));
+    return result;
+  };
+}
+
+/** The Lambda's own dependencies, built on first use: the environment is read only then. */
+function createAwsNotifierHandler() {
+  const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
+  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
+  const sqs = new SQSClient(awsClientConfiguration);
+  const secretsManager = new SecretsManagerClient(awsClientConfiguration);
+  const s3 = new S3Client(awsClientConfiguration);
+  const queueUrl = () => requiredEnvironment("NOTICE_QUEUE_URL");
+  const slack = cachedSlackClient(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
+    .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken));
+  const closeoutStore = createCanvasCloseoutStore({ documentClient, s3,
+    tableName: () => requiredEnvironment("STATE_TABLE_NAME"), bucketName: () => requiredEnvironment("ARTIFACT_BUCKET_NAME"),
     async deleteCanvas(canvasId) {
       const token = await secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
         .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken);
       return deleteTaskPlanCanvas(token, canvasId);
     },
     now: () => new Date().toISOString(),
-  };
+  });
   return createNotifierHandler({
     documentClient,
     tableName: requiredEnvironment("STATE_TABLE_NAME"),
@@ -1557,19 +1594,7 @@ function createAwsNotifierHandler() {
       return cachedBotToken(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
         .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken))((token) => createTaskPlanCanvas(token, input, fetch, onCreated));
     },
-    async closeTaskCanvases(taskId, expectedManifestDigest, expectedWorkflowRevision) {
-      const result = await runTaskCanvasCloseout(closeoutStore, { taskId,
-        ...(expectedManifestDigest === undefined ? {} : { expectedManifestDigest }),
-        ...(expectedWorkflowRevision === undefined ? {} : { expectedWorkflowRevision }) });
-      if (result.status === "ARCHIVE_PENDING") {
-        console.log(JSON.stringify({ component: "developer-task-closeout", event: "archive_pending", taskId,
-          reason: "reason" in result ? result.reason : "archive_pending" }));
-        return result;
-      }
-      console.log(JSON.stringify({ component: "developer-task-closeout", event: "closeout_complete", taskId,
-        canvasCount: result.canvases.length, outcomes: result.canvases.map((canvas) => canvas.status) }));
-      return result;
-    },
+    closeTaskCanvases: canvasCloseoutService(closeoutStore),
     update: slack.update,
     postEphemeral: slack.postEphemeral,
     now: Date.now,

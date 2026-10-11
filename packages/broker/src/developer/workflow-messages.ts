@@ -381,7 +381,10 @@ function verifyBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof
     const labelOf = (result: { checkId: string }) => cleanLine(checks.find((check) => check.id === result.checkId)?.label ?? result.checkId, 80);
     // A check whose command could not run is not the code failing: rerunning or coding again won't help, so the owner
     // can remove that check or close the task.
-    const broken = failed.filter(workflowCheckResultBroken);
+    const allBroken = failed.filter(workflowCheckResultBroken);
+    // A check whose process never started is not broken: it may start on a retry, so no project admin is needed.
+    const unstarted = allBroken.filter((result) => result.neverStarted === true);
+    const broken = allBroken.filter((result) => result.neverStarted !== true);
     const real = failed.filter((result) => !workflowCheckResultBroken(result));
     // A required project check can't be unticked: only a project admin can fix it, or the task is closed.
     const requiredIds = new Set((workflow.checkPolicy?.required ?? []).map((check) => check.id));
@@ -393,13 +396,15 @@ function verifyBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof
     const requiredNote = brokenRequired.length === 0 ? ""
       : `${brokenRequired.map((result) => `${labelOf(result)} is a project check and couldn't run; ask a project admin to fix it, or close the task.`).join(" ")}${notInstalledFor(brokenRequired)}`;
     const brokenLabels = brokenOther.map(labelOf).join(", ");
+    const unstartedNote = unstarted.length === 0 ? ""
+      : `${unstarted.map(labelOf).join(", ")} couldn't start on the AgentX worker this time. Choose checks and retry to run ${unstarted.length === 1 ? "it" : "them"} again, or close the task.`;
     if (real.length === 0) {
       const optional = brokenOther.length === 0 ? ""
         : `These checks couldn't run because the check itself is broken: ${brokenLabels}.${notInstalledFor(brokenOther)} Untick them with Choose checks and retry, or close the task.`;
-      return { text: [optional, requiredNote].filter((part) => part !== "").join(" "), buttons: [...exits.retryChecks(), exits.close] };
+      return { text: [optional, requiredNote, unstartedNote].filter((part) => part !== "").join(" "), buttons: [...exits.retryChecks(), exits.close] };
     }
     const brokenNote = brokenOther.length === 0 ? "" : ` Couldn't run because the check itself is broken: ${brokenLabels}.${notInstalledFor(brokenOther)}`;
-    return { text: `${real.length} of ${plural(results.length, "check")} didn't pass: ${real.map(labelOf).join(", ")}.${brokenNote}${requiredNote === "" ? "" : ` ${requiredNote}`} Nothing was sent to GitHub.`,
+    return { text: `${real.length} of ${plural(results.length, "check")} didn't pass: ${real.map(labelOf).join(", ")}.${brokenNote}${requiredNote === "" ? "" : ` ${requiredNote}`}${unstartedNote === "" ? "" : ` ${unstartedNote}`} Nothing was sent to GitHub.`,
       buttons: [...exits.sendBack(), ...exits.retryChecks(), exits.close] };
   }
   if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.regressionFound) {
@@ -620,7 +625,8 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
       ? `The saved ${workflowDocumentName(workflow)} couldn't be checked, so I stopped. Close this task and start again.`
       : `I stopped before your approval of the ${workflowDocumentName(workflow)}. ${plainBlockReason(workflow.blockReason)}`, buttons: [exits.close] };
     case "IMPLEMENT/RUNNING": return plain(implementRunning(context));
-    case "IMPLEMENT/BLOCKED": return { text: `Coding stopped before it finished. ${plainBlockReason(workflow.blockReason)}`,
+    case "IMPLEMENT/BLOCKED": return { text: workflow.blockReason === WORKFLOW_BLOCK_REASONS.noCodeChanged ? WORKFLOW_BLOCK_REASONS.noCodeChanged
+      : `Coding stopped before it finished. ${plainBlockReason(workflow.blockReason)}`,
       // Rewritten history can't be coded on again: a new task is the way on.
       buttons: workflow.blockReason === WORKFLOW_HISTORY_REWRITTEN_MESSAGE ? [exits.close] : [exits.button("agentx_workflow_retry_implementation", "Retry coding"), exits.close] };
     case "VERIFY/RUNNING": return plain("Running the selected checks again on the current code. No code is being changed.");
@@ -646,6 +652,7 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
     // pull request ends the following; a failed feedback review or push leaves the merge still tracked.
     case "WAIT_FOR_MERGE/BLOCKED": return { text: workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestChanged
       ? `I stopped following the pull request. ${plainBlockReason(workflow.blockReason)}`
+      : workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestClosed ? plainBlockReason(workflow.blockReason)
       : workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed ? pullRequestUpdateFailed(workflow)
         : `${plainBlockReason(workflow.blockReason)} ${STILL_WATCHING}`, buttons: [exits.close] };
     case "MERGED/COMPLETE": {

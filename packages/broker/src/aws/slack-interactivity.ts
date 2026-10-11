@@ -1002,6 +1002,10 @@ export function workflowSlackHandlers(deps: {
     const review = parsed.success ? parsed.data.feedbackReview : undefined;
     const bundleDigests = review?.bundleRefs.map(bundle => bundle.sha256) ?? [];
     const bundleSetDigest = createHash("sha256").update(JSON.stringify(bundleDigests), "utf8").digest("hex");
+    // The task moved past PR feedback (its pull request merged, or it closed): the card is just old.
+    if (task.closedAt !== undefined || (parsed.success && (parsed.data.stage === "MERGED" || parsed.data.stage === "CLOSED"))) {
+      throw new WorkflowInteractionRefusal("That button is out of date. Use the latest message in this thread.");
+    }
     if (!parsed.success || parsed.data.revision !== value.expectedRevision || parsed.data.stage !== "WAIT_FOR_MERGE"
       || parsed.data.state !== "WAITING" || review?.status !== "PENDING" || review.reviewRef.status !== "COMPLETE"
       || review.reviewRef.sha256 !== value.reviewDigest || review.reviewRef.proposalDigest !== value.proposalDigest

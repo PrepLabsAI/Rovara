@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_PLAN_MAX_BYTES, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, parsePlanDocument, redactText, reportStatus, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation } from "@agentx/contracts";
+import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, parsePlanDocument, redactText, reportStatus, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
@@ -28,7 +28,7 @@ import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
 import type { FeedbackApprovalAuthorizer, FeedbackBundleReader } from "./callback-client.js";
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
-import { readCandidateRepositories, type CandidateRepositoryInput } from "./verification/candidate.js";
+import { candidateUnchangedSinceBase, readCandidateRepositories, type CandidateRepositoryInput } from "./verification/candidate.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, verificationExtension } from "./verification/extension.js";
@@ -74,6 +74,8 @@ export async function runTaskInvocation(
     checkBudgetMs?: () => number;
     /** D-16: the original code for before results; tests supply a fake. Default: each repository's preparation commit. */
     originalCode?: OriginalCode;
+    /** How long a review (each role) and a PR feedback review may take; tests supply short ones. Default: the reviews' own (5 minutes). */
+    timeouts?: { reviewMs?: number; feedbackReviewMs?: number };
   },
 ): Promise<TaskInvocationResult> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
@@ -117,6 +119,7 @@ export async function runTaskInvocation(
         rootPath: dependencies.rootPath, model: dependencies.model, candidate: candidateRepositories,
         repositories: repositoryInputs, bundles: collected.bundles, artifactSink: dependencies.artifactSink,
         ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
+        ...(dependencies.timeouts?.feedbackReviewMs === undefined ? {} : { timeoutMs: dependencies.timeouts.feedbackReviewMs }),
         ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
         onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
       });
@@ -358,7 +361,13 @@ export async function runTaskInvocation(
   const unsubscribe = session.subscribe((event) => {
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(event));
     fileChanges.observe(event);
-    void events.append(eventType(event), event).catch(() => undefined);
+    // A streaming update carries the whole message so far: forwarding each one sends the control plane every prefix of a
+    // long answer or file write (quadratic, and one can outgrow a 400 KB table item). The finished message (message_end)
+    // is what the event log keeps.
+    // A tool's streaming update (tool_execution_update) likewise repeats its arguments and its output so far; the finished
+    // call (tool_execution_end) is kept.
+    const streamed = (event as { type?: unknown } | undefined)?.type;
+    if (streamed !== "message_update" && streamed !== "tool_execution_update") void events.append(eventType(event), event).catch(() => undefined);
     const outcome = assistantOutcome(event);
     if (outcome !== undefined) {
       lastAssistant = outcome;
@@ -522,6 +531,7 @@ export async function runTaskInvocation(
           ...(invocation.payload.workflowReviewChecks === undefined ? {} : { reviewChecks: invocation.payload.workflowReviewChecks }),
           ...(invocation.payload.workflowReviewPlan === undefined ? {} : { reviewPlan: invocation.payload.workflowReviewPlan }),
           ...(invocation.payload.workflowReviewFeedback === undefined ? {} : { reviewFeedback: invocation.payload.workflowReviewFeedback }),
+          ...(dependencies.timeouts?.reviewMs === undefined ? {} : { timeoutMs: dependencies.timeouts.reviewMs }),
           signal: verificationStop.signal,
           ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }),
           onProgress: (message) => { void events.append("progress", { message }).catch(() => undefined); },
@@ -573,6 +583,10 @@ export async function runTaskInvocation(
       const workflowCandidateRepositories = invocation.payload.workflowMode === "IMPLEMENT"
         ? await readCandidateRepositories(workflowRepositories)
         : undefined;
+      // A coding run that left the code as the task started has nothing to check or publish: the owner is told so.
+      if (workflowCandidateRepositories !== undefined && await candidateUnchangedSinceBase(workflowRepositories, workflowCandidateRepositories)) {
+        throw agentXError("CONFIG_INVALID", WORKFLOW_NO_CODE_CHANGE_MESSAGE);
+      }
       await events.append("result", {
         status: "SUCCEEDED",
         conversationId,

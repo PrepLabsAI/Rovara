@@ -38,7 +38,7 @@ const answersBlock = (entries: unknown) => `\`\`\`agentx-comment-answers\n${type
 
 /** A Quick task whose v1 coding plan the owner sent back with three comments: c1 and c3 on claim 2.1, c2 a reply to c1. */
 async function changesRequested() {
-  const harness = await createDeveloperTaskBroker({ mapOrder: "dynamodb" });
+  const harness = await createDeveloperTaskBroker();
   const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test-client", workflow: true, workflowPath: "QUICK" });
   const taskId = String((started.body.task as { taskId: string }).taskId);
   const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workspaceId: string; workflow: WorkflowSnapshot };
