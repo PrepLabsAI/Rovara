@@ -672,6 +672,25 @@ describe("Suite 7: PR feedback loop", () => {
     expect(fixPushes(e2e)).toHaveLength(1);
   }, 120_000);
 
+  it("7.19 Keep the pull request as it is: a press that can't reach AgentX says so plainly, and two presses at once keep it once", async () => {
+    const { e2e, pullRequest } = await feedbackJourney({ model: { plan: PLAN, edits: (latest) => (latest.includes(FEEDBACK_FIX) ? [] : editsOrFix(latest)) } });
+    await commented(e2e, pullRequest.number, "Please trim the name.");
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.fixChangedNothing });
+    const revision = e2e.workflow().revision;
+    e2e.failNextHandOff();
+    await e2e.click("agentx_workflow_keep_pull_requests");
+    expect(e2e.slack.responses.at(-1)?.text).toBe("I couldn't keep the pull request as it is. Use the latest message in this thread and try again.");
+    expect(e2e.workflow().revision).toBe(revision);
+    const posts = e2e.slack.posts.length;
+    await e2e.concurrently(() => e2e.click("agentx_workflow_keep_pull_requests"), () => e2e.click("agentx_workflow_keep_pull_requests"));
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(e2e.workflow().feedbackDecisions?.filter((decision) => decision.decision === "DISMISS")).toHaveLength(1);
+    expect(said(e2e).slice(posts)).toEqual(["Got it. The pull request stays as it is; I'll finish this task when it's merged."]);
+  }, 120_000);
+
   it("7.19 a fix that fails its check, then Send back, then the coder puts the pull request's code back: nothing is pushed, and the merge is still followed", async () => {
     // Found in review: "changed nothing" was judged against the failed fix, not against what the pull request holds, so
     // code identical to the pull request's was checked, reviewed and pushed as an empty commit.

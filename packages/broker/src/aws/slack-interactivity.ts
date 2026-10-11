@@ -464,6 +464,7 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
             : action.actionId === "agentx_workflow_resolve_findings" ? "I couldn't open the findings form. Use the latest AgentX task update and try again."
             : action.actionId === "agentx_workflow_retry_plan" || action.actionId === "agentx_workflow_retry_implementation" ? "I couldn't start the retry. Use the latest AgentX task update and try again."
             : action.actionId === "agentx_workflow_close" ? "I couldn't open the close confirmation. Use the latest AgentX task update and try again."
+            : action.actionId === "agentx_workflow_keep_pull_requests" ? "I couldn't keep the pull request as it is. Use the latest message in this thread and try again."
             : workflowButton ? "I couldn't open those plan controls. Use the latest plan message and try again."
             : CLICK_FAILED_TEXT;
           await dependencies.respondEphemeral?.(action.responseUrl, message);
@@ -913,7 +914,7 @@ function approvedFixNotOnPullRequests(workflow: WorkflowSnapshot): boolean {
 }
 
 /** What the close form says closing does: what is discarded, and what becomes of each pull request on GitHub. */
-function closeConfirmationText(workflow: WorkflowSnapshot): string {
+export function closeConfirmationText(workflow: WorkflowSnapshot): string {
   const pullRequests = (workflow.pullRequests ?? []).filter((pullRequest) => pullRequest.required);
   const lines = ["Closing stops this task and releases its workspace."];
   if (pullRequests.length === 0) return [...lines, "Code that isn't in a pull request is discarded."].join(" ");

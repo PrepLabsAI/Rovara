@@ -108,6 +108,7 @@ import {
   workflowPublicationRetryable,
   workflowKeepPullRequestsOffered,
   keepWorkflowPullRequests,
+  WORKFLOW_KEEP_PULL_REQUESTS_NOTE,
   returnWorkflowToImplementation,
   sendBackProblems,
   WORKFLOW_REGRESSION_INSTRUCTION,
@@ -2866,7 +2867,13 @@ async function keepTaskWorkflowPullRequests(deps: DeveloperTaskRouteDependencies
   const task = await loadOwnedTask(deps, caller, taskId);
   const workflow = task.workflow;
   if (workflow === undefined) throw agentXError("NOT_FOUND", "this task does not have a workflow record");
-  if (workflow.feedbackDecisions?.some((decision) => decision.requestId === request.requestId && decision.decision === "DISMISS")) {
+  // A repeated request answers as the first, but only when that request was this same Keep at this revision.
+  const prior = workflow.feedbackDecisions?.find((decision) => decision.requestId === request.requestId)
+    ?? (workflow.decisions.some((decision) => decision.requestId === request.requestId) ? { decision: "OTHER" as const } : undefined);
+  if (prior !== undefined) {
+    if (!("ownerNote" in prior) || prior.decision !== "DISMISS" || prior.ownerNote !== WORKFLOW_KEEP_PULL_REQUESTS_NOTE || prior.workflowRevision !== request.expectedRevision) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another decision on this task; use a new one");
+    }
     return { task: await taskView(deps, task, { events: 0, details: false }) };
   }
   if (request.expectedRevision !== workflow.revision) throw agentXError("IDEMPOTENCY_CONFLICT", "this request is out of date; refresh the task and try again");

@@ -765,6 +765,12 @@ export async function createWorkflowE2E(options: {
   });
 
   // Slack's interactivity endpoint.
+  /** Set by `failNextHandOff`: the next press the Slack handler hands to the broker fails, as a Lambda invoke can. */
+  let handOffFails = false;
+  const handOff = async (action: string, input: Record<string, unknown>): Promise<void> => {
+    if (handOffFails) { handOffFails = false; throw Object.assign(new Error("the broker invoke failed"), { name: "ServiceException" }); }
+    await brokerEvent(handler, action, input);
+  };
   const interactivity = createSlackInteractivityHandler({
     secrets: async () => ({ signingSecret: SIGNING_SECRET, botToken: "xoxb-e2e" }),
     now: () => Date.now(),
@@ -774,18 +780,18 @@ export async function createWorkflowE2E(options: {
       // A read's own copy, as a DynamoDB read is: the handler must not see (or change) the table's live item.
       loadTask: async (id) => db.reorder(structuredClone(db.get(`DEVTASK#${id}`, "META"))),
       openView: (triggerId, view) => slack.openView(triggerId, view),
-      submit: (input) => brokerEvent(handler, "workflow-decision", input),
-      retryChecks: (input) => brokerEvent(handler, "workflow-retry", input),
-      retryReviews: (input) => brokerEvent(handler, "workflow-review-retry", input),
-      retryPublication: (input) => brokerEvent(handler, "workflow-publish-retry", input),
-      sendBack: (input) => brokerEvent(handler, "workflow-send-back", input),
-      resolveFindings: (input) => brokerEvent(handler, "workflow-resolve-findings", input),
-      retryPlan: (input) => brokerEvent(handler, "workflow-retry", input),
-      retryImplementation: (input) => brokerEvent(handler, "workflow-retry", input),
-      close: (input) => brokerEvent(handler, "workflow-close", input),
-      keepPullRequests: (input) => brokerEvent(handler, "workflow-keep-pull-requests", input),
-      submitFeedback: (input) => brokerEvent(handler, "workflow-feedback-findings-decision", input),
-      retryFeedbackReview: (input) => brokerEvent(handler, "workflow-feedback-review-retry", input),
+      submit: (input) => handOff("workflow-decision", input),
+      retryChecks: (input) => handOff("workflow-retry", input),
+      retryReviews: (input) => handOff("workflow-review-retry", input),
+      retryPublication: (input) => handOff("workflow-publish-retry", input),
+      sendBack: (input) => handOff("workflow-send-back", input),
+      resolveFindings: (input) => handOff("workflow-resolve-findings", input),
+      retryPlan: (input) => handOff("workflow-retry", input),
+      retryImplementation: (input) => handOff("workflow-retry", input),
+      close: (input) => handOff("workflow-close", input),
+      keepPullRequests: (input) => handOff("workflow-keep-pull-requests", input),
+      submitFeedback: (input) => handOff("workflow-feedback-findings-decision", input),
+      retryFeedbackReview: (input) => handOff("workflow-feedback-review-retry", input),
       chooseWorkflowPath,
       answerWorkflowChoice,
       respondEphemeral: (url, text) => slack.respondEphemeral(url, text),
@@ -1103,6 +1109,9 @@ export async function createWorkflowE2E(options: {
       });
       return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
     },
+
+    /** The next Slack press handed to the broker fails to reach it (the asynchronous Lambda invoke is refused). */
+    failNextHandOff(): void { handOffFails = true; },
 
     /** The clock (fake Date only): `now()`, `advance(ms)`, `set(iso)`. Restored when the test ends. */
     clock,

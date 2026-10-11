@@ -272,6 +272,21 @@ describe("Suite 11: MCP parity", () => {
     expect(e2e.github.pushLog.filter((push) => push.during === "maintain")).toEqual([]);
   }, 120_000);
 
+  it("11.5 a request ID already used for a dismissal is refused by agentx_keep_pull_request, never answered as a keep", async () => {
+    // Found in review: any earlier dismissal with the same request ID was taken for this Keep's replay.
+    const { e2e } = await feedbackProposed();
+    const proposal = await tool(e2e, "agentx_get_pr_feedback", { task_id: e2e.taskId() });
+    const { revision, review_digest, proposal_digest, bundle_digests } = proposal.value as { revision: number; review_digest: string; proposal_digest: string; bundle_digests: string[] };
+    const requestId = "11511111-2222-4333-8444-555555555555";
+    await tool(e2e, "agentx_decide_pr_feedback", { task_id: e2e.taskId(), request_id: requestId, decision: "DISMISS", expected_revision: revision, review_digest, proposal_digest, bundle_digests,
+      note: "Not needed." });
+    await e2e.settle();
+    const reused = await e2e.mcp("agentx_keep_pull_request", { task_id: e2e.taskId(), request_id: requestId, expected_revision: revision });
+    expect(reused.isError).toBe(true);
+    expect(reused.error).toMatchObject({ code: "INVALID_REQUEST", message: "this request ID was already used for another decision on this task; use a new one" });
+    expect(e2e.workflow().feedbackDecisions?.filter((decision) => decision.decision === "DISMISS")).toHaveLength(1);
+  }, 120_000);
+
   it("11.6 agentx_get_task's stage and next step match the thread at every stage, through the merge", async () => {
     const { e2e, pullRequest } = await feedbackProposed();
     const at = async () => tool(e2e, "agentx_get_task", { task_id: e2e.taskId() });
