@@ -127,11 +127,9 @@ export function feedbackFixesSection(fixes: readonly FeedbackFix[], maxChars: nu
 export function withFeedbackFixes(body: string, fixes: readonly FeedbackFix[], earlier = false): { body?: string; dropped: boolean } {
   // The first END that has a START after the END before it; the START nearest before it begins the section. A stray
   // START above the section, or a stray END above it, is then never taken for part of it.
-  let endAt = -1;
   let startAt = -1;
-  for (let from = 0, previousEnd = 0; ; from = endAt + END.length) {
-    endAt = body.indexOf(END, from);
-    if (endAt === -1) break;
+  let endAt = body.indexOf(END);
+  for (let previousEnd = 0; endAt !== -1; endAt = body.indexOf(END, previousEnd)) {
     const start = body.lastIndexOf(START, endAt);
     if (start !== -1 && start >= previousEnd) { startAt = start; break; }
     previousEnd = endAt + END.length;
