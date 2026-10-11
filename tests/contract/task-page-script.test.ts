@@ -126,6 +126,28 @@ const posts = (page: Page, path: string) => page.sent.filter((entry) => entry.me
 const commentBoxes = (page: Page) => page.byId("decide-comments-list").querySelectorAll("input[type=checkbox]");
 
 describe("the deciding and commenting script", () => {
+  it("preserves contextual comment labels and target keys when comments refresh", async () => {
+    let seq = 3;
+    const page = boot(await pageHtml({ comments: [comment(1, { target: { kind: "claim", id: "2" } }), comment(3, { target: { kind: "decision", id: "d1" } }), comment(4, { target: { kind: "document" } })] }), { respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: seq, csrf: "n".repeat(43) } };
+      if (entry.url.endsWith("/api/comments")) return { status: 200, body: { comments: [], suggestions: [] } };
+      return { status: 200, body: {} };
+    } });
+    const expected = [["claim:2", "Comment on 2"], ["decision:d1", "Comment on this decision"], ["document", "Comment on this document"]] as const;
+    for (const [target, label] of expected) {
+      const button = page.document.querySelector(`.comment-open[data-target="${target}"]`)!;
+      expect(button.textContent).toBe(label);
+      expect(button.hidden).toBe(false);
+    }
+    seq = 4;
+    await page.advance(20_000);
+    for (const [target, label] of expected) {
+      const button = page.document.querySelector(`.comment-open[data-target="${target}"]`)!;
+      expect(button.textContent).toBe(label);
+      expect(button.hidden).toBe(false);
+    }
+  });
+
   it("the script builds no markup from strings", () => {
     for (const banned of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function", "setAttribute(\"on", "setAttribute('on", ".onclick", "location.href", "location=", "location ="]) {
       expect(TASK_PAGE_DECIDING_SCRIPT, banned).not.toContain(banned);

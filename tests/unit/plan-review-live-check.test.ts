@@ -22,8 +22,13 @@ async function ownerPage(): Promise<string> {
 
 describe("the task page live check", () => {
   it("passes the page the broker renders for an owner", async () => {
-    const results = pageChecks(await ownerPage());
+    const html = await ownerPage();
+    const results = pageChecks(html);
     expect(results.filter((result) => !result.ok)).toEqual([]);
+    expect(html).toContain(".evidence-code pre,.evidence-sketch pre{white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}");
+    expect(html).toContain(".code-line{display:grid;grid-template-columns:auto minmax(0,1fr)}");
+    expect(html).toContain(".checks table{display:block;overflow-x:auto");
+    expect(html).not.toMatch(/(?:^|})pre\{[^}]*white-space/);
     expect(results.map((result) => result.name)).toEqual(expect.arrayContaining([
       "fits a phone screen", "the decide bar clears the home indicator", "controls are thumb-sized", "the dialog is full screen on a phone",
       "long words wrap", "the page script is on the page", "the controls are hidden until the script runs",

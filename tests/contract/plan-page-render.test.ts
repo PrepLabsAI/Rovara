@@ -129,13 +129,26 @@ describe("the plan page renderer", () => {
     const html = await renderPlanDocument(input({ evidence }));
     expect(html).toContain("<figcaption>payments/src/charge.ts, lines 10-12, 0123456</figcaption>");
     expect(html).not.toContain(COMMIT);
-    expect(html).toContain('<span class="ln">10</span>const a = 1 &lt; 2;');
-    expect(html).toContain('<span class="ln">11</span>\n');
-    expect(html).toContain('<span class="ln">12</span>return a;');
+    expect(html).toContain('<span class="ln">10</span><span class="code-text">const a = 1 &lt; 2;</span>');
+    expect(html).toContain('<span class="ln">11</span><span class="code-text"></span>');
+    expect(html).toContain('<span class="ln">12</span><span class="code-text">return a;</span>');
     expect(html).toContain("Today a timeout throws.");
     expect(html).not.toContain("Showing the first 80 lines.");
     const cutHtml = await renderPlanDocument(input({ evidence: { ...evidence, excerpts: [{ ...evidence.excerpts[0]!, cut: true }] } }));
     expect(cutHtml).toContain("Showing the first 80 lines.");
+  });
+
+  it("wraps long evidence rows while preserving source line identity and hostile text", async () => {
+    const source = `${"x".repeat(800)}\t<svg onload=alert(1)>`;
+    const html = await renderPlanDocument(input({ evidence: {
+      schemaVersion: 1,
+      excerpts: [{ claimId: "1", index: 0, path: "src/long.ts", startLine: 41, endLine: 42, status: "ok", lines: [source, "\tsecond\trow"] }],
+    } }));
+    expect(html).toContain('<span class="code-line"><span class="ln">41</span><span class="code-text">');
+    expect(html).toContain('<span class="ln">42</span><span class="code-text">\tsecond\trow</span></span>');
+    expect(html).toContain(`${"x".repeat(800)}\t&lt;svg onload=alert(1)&gt;`);
+    expect(html).not.toContain("<svg onload");
+    expect((html.match(/class="code-line"/g) ?? [])).toHaveLength(2);
   });
 
   it("says Not found at the commit for a wrong line range, from the resolver to the page", async () => {
@@ -163,7 +176,7 @@ describe("the plan page renderer", () => {
     const html = await renderPlanDocument(input({ plan, evidence }));
     expect(html).toContain("<figcaption>repo/app/a.ts, lines 2-3, 0123456</figcaption>");
     expect(html).not.toContain("lines 2-9");
-    expect(html).toContain('<span class="ln">3</span>three');
+    expect(html).toContain('<span class="ln">3</span><span class="code-text">three</span>');
   });
 
   it("says in plain words why an excerpt is not shown", async () => {
@@ -220,7 +233,7 @@ describe("the plan page renderer", () => {
         id: "1",
         text: "Things.",
         evidence: [
-          { kind: "sketch", language: "ts", code: "retry(<T>(x))", note: "Not written yet." },
+          { kind: "sketch", language: "ts", code: "retry(<T>(x))\n\t\nlast()", note: "Not written yet." },
           { kind: "quote", text: "Retries must stop.", author: "Priya" },
           { kind: "flow", participants: ["Customer", "Gateway"], steps: [{ from: "Customer", to: "Gateway", label: "pays" }] },
         ],
@@ -229,7 +242,7 @@ describe("the plan page renderer", () => {
     });
     const html = await renderPlanDocument(input({ plan }));
     expect(html).toContain("Sketch: not in the repository yet");
-    expect(html).toContain("<pre><code>retry(&lt;T&gt;(x))</code></pre>");
+    expect(html).toContain("<pre><code>retry(&lt;T&gt;(x))\n\t\nlast()</code></pre>");
     expect(html).toContain("<blockquote");
     expect(html).toContain("Retries must stop.");
     expect(html).toContain("Priya");
@@ -473,12 +486,33 @@ describe("comments, suggestions and answers on the plan page", () => {
     expect(thread).toContain('<ol class="replies">');
     expect(count(claim, /<ol class="replies">/g)).toBe(1);
     // Without a script, the controls stay hidden; the threads read in full.
-    expect(claim).toMatch(/<button type="button" class="comment-open"[^>]*hidden>Comment<\/button>/);
+    expect(claim).toMatch(/<button type="button" class="comment-open"[^>]*hidden>Comment on 1<\/button>/);
     expect(claim).toMatch(/<button type="button" class="reply-open"[^>]*hidden>Reply<\/button>/);
     const single = await renderPlanDocument(input({ comments: [comment()], access: commenting }));
     expect(single).toContain('<span class="badge badge-comments">1 comment</span>');
     // Someone who may not comment sees the threads and no Comment control.
     expect(await renderPlanDocument(input({ comments: [comment()] }))).not.toContain("comment-open");
+  });
+
+  it("labels comment controls with their visible target and keeps target keys unchanged", async () => {
+    const plan = planDocument({
+      claims: [{ id: "1", text: "Parent", children: [{ id: "1.1", text: "Child", children: [{ id: "1.1.1", text: "Grandchild" }] }] }],
+      decisions: [decision(1)],
+    });
+    const comments = ["1", "1.1", "1.1.1"].map((id) => comment({ target: { kind: "claim", id } }));
+    comments.push(comment({ target: { kind: "decision", id: "d1" } }));
+    const html = await renderPlanDocument(input({ plan, comments, access: commenting, checks: [{ id: "check-1", label: "<img src=x onerror=alert(1)>", proposed: false, status: "ready", proves: [] }] }));
+    for (const [key, label] of [["claim:1", "Comment on 1"], ["claim:1.1", "Comment on 1.1"], ["claim:1.1.1", "Comment on 1.1.1"], ["decision:d1", "Comment on this decision"], ["check:check-1", "Comment on &lt;img src=x onerror=alert(1)&gt;"]] as const) {
+      expect(html).toContain(`<button type="button" class="comment-open" data-target="${key}"`);
+      expect(html).toContain(`>${label}</button>`);
+    }
+    expect(html).not.toContain("<img src=x onerror=alert(1)>");
+    const closed = await renderPlanDocument(input({ plan, comments, access: { ...commenting, canComment: false } }));
+    expect(closed).not.toContain('class="comment-open"');
+    const priorVersion = await renderPlanDocument(input({ plan, comments, current: false, currentVersion: 2, access: commenting }));
+    expect(priorVersion).not.toContain('class="comment-open"');
+    const removed = await renderPlanDocument(input({ plan: planDocument({ claims: [{ id: "9", text: "Current." }], decisions: [] }), comments: [comment({ version: 1 })], version: 2, currentVersion: 2, access: commenting }));
+    expect(removed.slice(removed.indexOf('<section class="removed-claims">'))).not.toContain('class="comment-open"');
   });
 
   it("a comment from v1 shows on the same claim in v2 marked from v1", async () => {
@@ -641,7 +675,7 @@ describe("comments, suggestions and answers on the plan page", () => {
     const onDocument = comment({ target: { kind: "document" } });
     const html = await renderPlanDocument(input({ kind: "plan", anchor: "coding-plan", comments: [{ ...onCheck, document: "plan" }, { ...onDocument, document: "plan" }], access: commenting,
       checks: [{ id: "unit-tests", label: "Unit tests", proposed: true, proves: [], status: "Not run yet" }] }));
-    expect(html).toMatch(/<button type="button" class="comment-open" data-target="check:unit-tests"[^>]*hidden>Comment<\/button>/);
+    expect(html).toMatch(/<button type="button" class="comment-open" data-target="check:unit-tests"[^>]*hidden>Comment on Unit tests<\/button>/);
     expect(html).toContain('data-comments="check:unit-tests"');
     expect(html).toContain("<h3>Comments on this document</h3>");
     expect(html).toContain('data-comments="document"');
