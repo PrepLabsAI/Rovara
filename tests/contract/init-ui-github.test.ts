@@ -19,7 +19,7 @@ async function wizard() {
   open.push(server);
   return { server, origin: `http://127.0.0.1:${server.port}` };
 }
-const page = (redirectUrl: string, nonce?: string) => manifestFormPage({ actionUrl: `https://github.com/settings/apps/new?state=${STATE}`, manifest: githubAppManifest({ appName: "AgentX", redirectUrl }), ...(nonce === undefined ? {} : { nonce }) });
+const page = (redirectUrl: string, nonce?: string) => manifestFormPage({ actionUrl: `https://github.com/settings/apps/new?state=${STATE}`, manifest: githubAppManifest({ appName: "AgentX", redirectUrl, webhookUrl: "https://agentx.example.test/v1/github/webhooks" }), ...(nonce === undefined ? {} : { nonce }) });
 const fromGitHub = { "sec-fetch-site": "cross-site", referer: "https://github.com/" };
 const settled = <T>(promise: Promise<T>) => Promise.race([promise.then(() => "resolved", () => "rejected"), new Promise((resolve) => setTimeout(() => resolve("pending"), 50))]);
 
