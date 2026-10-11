@@ -27,7 +27,6 @@
     "tests/contract/github-app.test.ts": 4,
     "tests/contract/github-mcp-broker.test.ts": 1,
     "tests/contract/init-answers.test.ts": 9,
-    "tests/contract/init-github-app.test.ts": 1,
     "tests/contract/init-prompts.test.ts": 6,
     "tests/contract/init-steps.test.ts": 21,
     "tests/contract/mcp-admin-offer.test.ts": 3,

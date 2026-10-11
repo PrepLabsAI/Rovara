@@ -312,7 +312,7 @@ describe("native developer task workflow", () => {
       expect(raced).toBe(true);
       expect(closed).toMatchObject({ refused: true, message: "That button is out of date. Use the latest message in this thread." });
       const reopened = { ...harness.db.get(`DEVTASK#${taskId}`, "META")!, workflow: before };
-      delete reopened.closedAt;
+      delete (reopened as Record<string, unknown>).closedAt;
       harness.db.set(reopened);
       expect(feedbackReviews()).toHaveLength(1);
     }
