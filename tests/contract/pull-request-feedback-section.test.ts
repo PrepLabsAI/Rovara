@@ -85,12 +85,31 @@ describe("the PR description's Fixes from PR feedback section", () => {
     // A cut never lands inside an address, and a summary that opens with a long one falls back.
     const address = `See https://example.com/${"a".repeat(130)} for the details`;
     expect(shortFixSummary(address)).toBeUndefined();
-    expect(shortFixSummary(`${"word ".repeat(30)}end`)).toBe(`${"word ".repeat(24).trim()}\u2026`);
+    expect(shortFixSummary(`${"word ".repeat(30)}end`)).toBe(`${"word ".repeat(23).trim()}\u2026`);
     // In the section: the short sentence, escaped, then the comment link; the fallback when nothing short can be cut.
     const url = "https://github.com/example/demo/pull/5#issuecomment-1";
     const lines = withFeedbackFixes("Intro.", [{ summary: live, comments: [url] }, { summary: address, comments: [url] }]).body!.split("\n");
     expect(lines).toContain(`- On README.md line 284, replace 'open a GitHub issue' with 'start a GitHub Discussion' so the sentence reads\u2026 (for [this comment](${url}))`);
     expect(lines).toContain(`- Made the change the comment asked for. (for [this comment](${url}))`);
+  });
+
+  it.each([
+    ["a sentence ending inside its closing quote", "Change the greeting to 'Hello.' Then update the test that checks it.", "Change the greeting to 'Hello.'"],
+    ["a sentence ending in an address and a period", "Link the guide at https://example.com/guide. Then remove the old section.", "Link the guide at https://example.com/guide."],
+    ["a common abbreviation", "Ask Dr. Smith about No. 5 in the list. Then fix it.", "Ask Dr. Smith about No. 5 in the list."],
+    ["a link whose address has parentheses", "Link [the page](https://en.example.org/wiki/Foo_(bar)) instead. Then stop.", "Link the page instead."],
+  ])("ends the first sentence correctly at %s", (_name, input, expected) => {
+    expect(shortFixSummary(input)).toBe(expected);
+  });
+
+  it("a cut inside a quote closes it, and the fallback names the comments when there are several", () => {
+    const quoted = `Replace the sentence with '${"very ".repeat(30)}short'`;
+    const cut = shortFixSummary(quoted)!;
+    expect(cut.endsWith("\u2026'")).toBe(true);
+    expect(cut.length).toBeLessThanOrEqual(120);
+    const address = `https://example.com/${"a".repeat(130)}`;
+    const urls = ["https://github.com/example/demo/pull/5#issuecomment-1", "https://github.com/example/demo/pull/5#issuecomment-2"];
+    expect(withFeedbackFixes("Intro.", [{ summary: address, comments: urls }]).body).toContain("- Made the change the comments asked for. (for [comment 1]");
   });
 
   it("a spoofed marker in a summary cannot end the section early", async () => {
