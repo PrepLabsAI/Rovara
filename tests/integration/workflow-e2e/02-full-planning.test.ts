@@ -91,7 +91,8 @@ describe("Suite 2: Full planning", () => {
   // D5 (deciding on the page, spec 061 slice 2): Approve on the page with one changed answer and two comments edits the
   // Slack card to "Approved by <owner> · 1 answer changed · 2 comments included", and the coder's Markdown shows
   // "Owner chose: Above (AgentX recommended: Below)". The page is read only until D5 is decided.
-  it.todo("2.4 (D5) deciding on the page: one changed answer and two comments reach the Slack card and the coder");
+  // 2.4 (D5) deciding on the page is built (spec 061 slice 2): one changed answer and two comments reaching the Slack card
+  // and the coder are covered by plan-review-slice-2-e2e.test.ts, and the page racing Slack by suite 10.
 
   for (const phase of [
     { path: "full", name: "requirements", stage: 0 },
