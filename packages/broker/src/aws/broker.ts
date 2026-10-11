@@ -196,6 +196,7 @@ import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown
 import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, planEvidenceEvent, planEvidenceJobItem, planEvidenceSources, type PlanEvidenceEvent, type PlanEvidenceJob } from "../developer/plan-evidence-jobs.js";
 import { resolvePlanEvidence } from "../developer/plan-evidence.js";
 import { WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
+import { approvedFeedbackFixes, withFeedbackFixes } from "../developer/pull-request-feedback-section.js";
 import { projectKey, requireProject } from "./project-records.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
@@ -4844,7 +4845,29 @@ async function reconcilePullRequestUpdate(
       ":now": new Date().toISOString(),
     },
   }));
+  if (expected.workflowCandidate !== undefined) await describeFeedbackFixes(dependencies, operation, record, remote.body);
   return { url: remote.url, state: remote.state, reconciled: false };
+}
+
+/**
+ * D2: once an approved PR feedback fix is on the pull request, its description lists briefly what was changed for which
+ * comments ("Fixes from PR feedback"), kept up to date across rounds. Best effort: the push is recorded whatever happens
+ * here, and a description that could not be updated is logged.
+ */
+async function describeFeedbackFixes(dependencies: AwsBrokerDependencies, operation: OperationRecord, record: PullRequestRecord, body: string): Promise<void> {
+  try {
+    const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
+    const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+    if (task?.workflow === undefined || task.workspaceId !== operation.workspaceId) return;
+    const fixes = await approvedFeedbackFixes(task.workflow, (key, maxBytes) => readObjectText(dependencies, key, maxBytes),
+      `private/${task.ownerKey}/${task.workspaceId}/feedback-reviews/`);
+    const next = withFeedbackFixes(body, fixes);
+    if (next === undefined) return;
+    await dependencies.githubPullRequests.updatePullRequest(record.repositoryUrl, record.number, { body: next });
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "workflow.pull_request_description_not_updated", operationId: operation.id,
+      error: error instanceof Error ? error.name : "unknown" }));
+  }
 }
 
 /**

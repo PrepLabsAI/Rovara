@@ -353,7 +353,40 @@ describe("Suite 7: PR feedback loop", () => {
     expect(e2e.workflow().verification).toMatchObject({ candidateDigest: e2e.workflow().candidate!.digest });
   }, 120_000);
 
-  it.todo("7.13 D2: the PR body's Checks and Reviews lines are refreshed after a pushed fix (open decision D2; today the body is written once at publish)");
+  it("7.13 D2: after each pushed fix the PR description lists what was changed for which comments, kept up to date and inert", async () => {
+    const HOSTILE = "Trim the name in greet; thanks @octocat, see https://example.com/x and #12 <img src=x>";
+    let round = 0;
+    let fixes = 0;
+    const LOWER = [{ path: "repo/demo/greeting.ts", content: "export function greet(name: string): string {\n  return `hello, ${name.trim()}`;\n}\n" }];
+    const { e2e, pullRequest } = await feedbackJourney({ model: { plan: PLAN, edits: (latest) => {
+      if (!latest.includes(FEEDBACK_FIX)) return editsOrFix(latest);
+      fixes += 1;
+      return fixes === 1 ? FIXED : LOWER;
+    } } }, (prompt) => {
+      round += 1;
+      const reply = JSON.parse(feedbackCriticReply(prompt, { repositoryId: "demo", path: "greeting.ts", testPath: "greeting.test.ts" })) as { findings: Array<{ fixProposal: { summary: string } }> };
+      for (const finding of reply.findings) finding.fixProposal.summary = round === 1 ? HOSTILE : "Greet in lowercase.";
+      return JSON.stringify(reply);
+    });
+    const opened = pullRequest.body ?? "";
+    expect(opened).not.toContain("Fixes from PR feedback");
+    const first = await commented(e2e, pullRequest.number, "Please trim the name.");
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    const url = (comment: { id: string }) => `${pullRequest.url}#issuecomment-${comment.id.slice(comment.id.indexOf(":") + 1)}`;
+    const inert = "Trim the name in greet; thanks @\u200Doctocat, see https://\u200Dexample.com/x and #\u200D12";
+    expect(pullRequest.body).toBe(`${opened}\n\n<!-- agentx:pr-feedback-fixes -->\n### Fixes from PR feedback\n- ${inert} (for [this comment](${url(first)}))\n<!-- /agentx:pr-feedback-fixes -->`);
+    // Round 2: the section is replaced in place, with both fixes, oldest first.
+    const second = await commented(e2e, pullRequest.number, "And greet in lowercase.");
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    expect(pullRequest.body).toBe(`${opened}\n\n<!-- agentx:pr-feedback-fixes -->\n### Fixes from PR feedback\n- ${inert} (for [this comment](${url(first)}))\n`
+      + `- Greet in lowercase. (for [comment 1](${url(first)}), [comment 2](${url(second)}))\n<!-- /agentx:pr-feedback-fixes -->`);
+    expect(pullRequest.body!.split("Fixes from PR feedback")).toHaveLength(2);
+    expect(pullRequest.body!.length).toBeLessThanOrEqual(65_536);
+  }, 120_000);
 
   it("7.14 [LIVE-BUG B3/B7] a comment edited between the card and the press refuses the approval in plain words and reviews again", async () => {
     const { e2e, counts, pullRequest } = await feedbackJourney();
