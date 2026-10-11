@@ -165,6 +165,13 @@ describe("page comments", () => {
     expect(await takeRate(fixture.deps, key, 2, 60_000)).toBe(true);
   });
 
+  it("two first uses of a new window at once both count", async () => {
+    const fixture = waitingTask();
+    const key = { taskId: fixture.taskId, kind: "ask" as const, actor: "task" };
+    expect(await Promise.all([takeRate(fixture.deps, key, 5, 60_000), takeRate(fixture.deps, key, 5, 60_000)])).toEqual([true, true]);
+    expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, "RATE#ask#task")).toMatchObject({ count: 2 });
+  });
+
   it("only the author edits or deletes, and not after it is sent", async () => {
     const fixture = waitingTask();
     const { comment: written } = await comment(fixture, SAM);
@@ -206,6 +213,8 @@ describe("page comments", () => {
     const full = await refusal(comment(fixture, PRIYA));
     expect(full.pageReason).toBe("task_full");
     expect(fixture.db.find((item) => item.entityType === "TASK_COMMENT")).toHaveLength(1);
+    // A refusal for a full task spends none of the writer's limit.
+    expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, `RATE#comment#${PRIYA.developerId}`)).toBeUndefined();
   });
 
   it("one suggestion per person per decision; owners don't suggest", async () => {

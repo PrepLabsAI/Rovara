@@ -185,16 +185,20 @@ export async function takeRate(
 ): Promise<boolean> {
   const window = Math.floor(deps.now() / windowMs) * windowMs;
   const Key = rateKey(key.taskId, key.kind, key.actor);
-  try {
-    await deps.documentClient.send(new UpdateCommand({
-      TableName: deps.tableName, Key, UpdateExpression: "SET #count = #count + :one",
-      ConditionExpression: "windowStart = :window AND #count < :limit",
-      ExpressionAttributeNames: { "#count": "count" }, ExpressionAttributeValues: { ":one": 1, ":window": window, ":limit": limit },
-    }));
-    return true;
-  } catch (error) {
-    if (!isConditional(error)) throw error;
-  }
+  const increment = async (): Promise<boolean> => {
+    try {
+      await deps.documentClient.send(new UpdateCommand({
+        TableName: deps.tableName, Key, UpdateExpression: "SET #count = #count + :one",
+        ConditionExpression: "windowStart = :window AND #count < :limit",
+        ExpressionAttributeNames: { "#count": "count" }, ExpressionAttributeValues: { ":one": 1, ":window": window, ":limit": limit },
+      }));
+      return true;
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      return false;
+    }
+  };
+  if (await increment()) return true;
   try {
     await deps.documentClient.send(new UpdateCommand({
       TableName: deps.tableName, Key, UpdateExpression: "SET entityType = :type, windowStart = :window, #count = :one",
@@ -204,7 +208,8 @@ export async function takeRate(
     return true;
   } catch (error) {
     if (!isConditional(error)) throw error;
-    return false;
+    // Another request started this window between the two writes: count this one in it, once.
+    return increment();
   }
 }
 
@@ -291,6 +296,9 @@ export async function createTaskComment(
     if (loaded === undefined || !targetExists(loaded, input.target, task)) throw pageRefusal("not_here");
     place = { document, version: input.version, target: input.target };
   }
+  // A full task is said before any of the writer's limit is spent; the transaction checks the cap again.
+  const stored = await getItem(deps, commentCounterKey(task.taskId));
+  if (typeof stored?.count === "number" && stored.count >= TASK_COMMENT_ITEMS_MAX) throw pageRefusal("task_full");
   if (!await takeRate(deps, { taskId: task.taskId, kind: "comment", actor: caller.developerId }, COMMENT_RATE.comments, COMMENT_RATE.windowMs)) {
     throw pageRefusal("slow_down");
   }

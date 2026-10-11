@@ -526,6 +526,8 @@ export interface PlanOwnerAnswers {
 
 /** The included comments section of the Markdown copy stays within this many bytes. */
 const OWNER_COMMENTS_SECTION_MAX_BYTES = 8_000;
+/** A comment is never cut shorter than this to fit. */
+const OWNER_COMMENT_MIN_CHARS = 200;
 
 /** Untrusted text on one line with angle brackets that no reader can take for a tag. */
 function inertLine(value: string): string {
@@ -540,14 +542,28 @@ function ownerCommentLines(comments: PlanOwnerAnswers["comments"]): string[] {
   ];
   const bytes = (lines: string[]) => Buffer.byteLength(lines.map((entry) => `${entry}\n`).join(""), "utf8");
   const more = (left: number) => (left === 1 ? "1 more comment is on the task page." : `${left} more comments are on the task page.`);
+  // Each text is cut to max(200, 7000 / n) characters, as the prompt cuts it; a text that still does not fit is cut to the
+  // room left (never under 200 characters) before the rest are left out.
+  const share = Math.max(OWNER_COMMENT_MIN_CHARS, Math.floor(7_000 / comments.length));
+  const cutTo = (text: string, max: number) => {
+    const characters = Array.from(text);
+    return characters.length > max ? `${characters.slice(0, max - 1).join("")}…` : text;
+  };
   for (const [index, comment] of comments.entries()) {
-    const entry = [`> ${inertLine(comment.text)}`, `> (${inertLine(comment.author)}, on ${inertLine(comment.on)})`];
     const left = comments.length - index - 1;
-    if (bytes([...out, ...entry, ...(left === 0 ? [] : [more(left)])]) > OWNER_COMMENTS_SECTION_MAX_BYTES) {
+    const tail = left === 0 ? [] : [more(left)];
+    const quoted = inertLine(comment.text);
+    const by = `> (${inertLine(comment.author)}, on ${inertLine(comment.on)})`;
+    let max = Math.min(share, Array.from(quoted).length);
+    const entry = () => [`> ${cutTo(quoted, max)}`, by];
+    while (bytes([...out, ...entry(), ...tail]) > OWNER_COMMENTS_SECTION_MAX_BYTES && max > OWNER_COMMENT_MIN_CHARS) {
+      max = Math.max(OWNER_COMMENT_MIN_CHARS, Math.floor(max * 0.9));
+    }
+    if (bytes([...out, ...entry(), ...tail]) > OWNER_COMMENTS_SECTION_MAX_BYTES) {
       out.push(more(comments.length - index));
       return out;
     }
-    out.push(...entry);
+    out.push(...entry());
   }
   return out;
 }

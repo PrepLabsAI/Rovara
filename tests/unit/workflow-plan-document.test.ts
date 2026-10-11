@@ -562,6 +562,15 @@ describe("planDocumentMarkdown with the owner's answers and comments", () => {
     expect(section).toMatch(/\n\d+ more comments are on the task page\.\n$/);
   });
 
+  it("an over-long comment is cut to fit, not left out", () => {
+    for (const text of ["x".repeat(9_000), "é".repeat(5_000)]) {
+      const section = (() => { const all = markdown(answers([{ author: "Sam", on: "claim 1", text }])); return all.slice(all.indexOf("## Comments the owner included")); })();
+      expect(Buffer.byteLength(section, "utf8")).toBeLessThanOrEqual(8_000);
+      expect(section).toMatch(/\n> [xé]{200,}…\n> \(Sam, on claim 1\)\n/);
+      expect(section).not.toContain("more comment");
+    }
+  });
+
   it("recommended answers are unchanged byte for byte", () => {
     // Pinned from the output before owner answers existed.
     expect(markdown("recommended")).toBe("# Coding plan v2 (sha256 abcdef012345): Retry failed payments\n## Why\n> Failed payments are dropped without a retry. (from Priya)\n## Claims\n- **1** Payments that fail with a timeout are retried.\n- **2** The retry banner sits on the page.\n  - **2.1** It is placed near the button.\n## Decisions\nThe owner approved AgentX's recommended answer to every decision; treat each as decided.\n- **d1** (on claim 2.1) Where does the banner go?\n  - Above: Seen first.\n  - Below: Less in the way. (AgentX recommends this)\n- **d2** (on claim 1) Retry how often?\n  - Three times: Most clear. (AgentX recommends this)\n  - Five times: Slower.\n## Not changing\n- The refund flow stays as it is.\n## Risks\n- A slow gateway could keep a retry open for a long time.\n");

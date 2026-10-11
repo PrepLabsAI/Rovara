@@ -48,6 +48,13 @@ describe("decideWorkflow with the owner's answers", () => {
     expect(decideWorkflow(waiting(), request({ answers: [] }), actor, markdownOptions).stage).toBe("IMPLEMENT");
   });
 
+  it("a stale decision with answers is refused as stale, before its answers are checked", () => {
+    const stale = () => decideWorkflow(waiting(), request({ expectedRevision: waiting().revision + 5 }), actor, markdownOptions);
+    expect(stale).toThrow("workflow revision is stale");
+    const wrong = () => decideWorkflow(waiting(), request({ expectedRevision: waiting().revision + 5, answers: [{ decisionId: "d1", optionId: "sideways", opened: true }] }), actor, options);
+    expect(wrong).toThrow("workflow revision is stale");
+  });
+
   it("only answers that differ from AgentX's are recorded", () => {
     const decided = decideWorkflow(waiting(), request({
       answers: [{ decisionId: "d2", optionId: "no", opened: true }, { decisionId: "d1", optionId: "above", opened: true }],

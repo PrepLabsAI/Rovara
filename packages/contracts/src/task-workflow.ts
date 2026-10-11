@@ -1899,11 +1899,11 @@ export function decideWorkflow(
   const request = WorkflowDecisionRequestSchema.safeParse(requestInput);
   const actorId = ActorIdSchema.safeParse(actor.actorId);
   if (!request.success || !actorId.success) throw new WorkflowTransitionError("workflow decision is invalid");
-  const answerOverrides = ownerAnswerOverrides(request.data.answers, options.decisions);
   const commentsIncluded = request.data.includedCommentIds?.length ?? 0;
 
   const prior = current.decisions.find((decision) => decision.requestId === request.data.requestId);
   if (prior !== undefined) {
+    const answerOverrides = ownerAnswerOverrides(request.data.answers, options.decisions);
     const selectedOptionalCheckIds = request.data.selectedOptionalCheckIds ?? current.checkPolicy?.selectedOptionalIds ?? [];
     // Stored decisions come back from DynamoDB with their maps in any order: answers are compared by content.
     const duplicate = prior.workflowRevision === request.data.expectedRevision
@@ -1922,6 +1922,8 @@ export function decideWorkflow(
   if (current.stage !== "PLAN_REVIEW" || current.state !== "WAITING") {
     throw new WorkflowTransitionError("workflow is not waiting for a plan decision");
   }
+  // The answers are checked once the decision is known to be current, so a stale one hears that it is stale.
+  const answerOverrides = ownerAnswerOverrides(request.data.answers, options.decisions);
   const selectedOptionalCheckIds = request.data.selectedOptionalCheckIds ?? current.checkPolicy?.selectedOptionalIds ?? [];
   if (current.checkPolicy !== undefined && selectedOptionalCheckIds.some((id) => !current.checkPolicy?.optional.some((check) => check.id === id))) {
     throw new WorkflowTransitionError("decision selected an optional check not approved by project policy");

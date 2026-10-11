@@ -9,6 +9,7 @@ import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broke
 import { finishPlanningWithMarkdown, planAnswer } from "../support/plan-documents.js";
 import { pagePlan } from "../support/page-tasks.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
+import { validatingDocumentClient } from "../support/validating-document-client.js";
 
 type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
 const PREPARED = { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } };
@@ -34,7 +35,7 @@ const commentItem = (harness: Harness, taskId: string, commentId: string) => har
 
 function routeDeps(harness: Harness): DeveloperTaskRouteDependencies {
   return {
-    documentClient: harness.db, tableName: "state", actions: harness.actions,
+    documentClient: validatingDocumentClient(harness.db), tableName: "state", actions: harness.actions,
     checkAccess: async () => ({ revision: 1, policy: {} as never, access: "channel", channelIds: [SLACK_CHANNEL] }),
     projectChannelIds: async () => [SLACK_CHANNEL], now: () => Date.now(), log: () => undefined,
   };
@@ -190,6 +191,25 @@ describe("page decisions", () => {
     expect(workflowOf(t.harness, t.taskId).decisions.at(-1)?.commentsIncluded).toBeUndefined();
     expect(commentItem(t.harness, t.taskId, first)?.lockedBy).toBeUndefined();
     expect(t.harness.db.get(`DEVTASK#${t.taskId}`, `DECISION#${requestId}`)).toBeUndefined();
+  });
+
+  it("Slack request changes never reads the comments, so a failed read cannot stop it", async () => {
+    const t = await waitingPlan();
+    t.seed();
+    const send = t.harness.db.send;
+    t.harness.db.send = async (command) => {
+      if ((command as { constructor: { name: string } }).constructor.name === "QueryCommand" && JSON.stringify((command as { input: unknown }).input).includes("COMMENT#")) {
+        throw Object.assign(new Error("throttled"), { name: "ProvisionedThroughputExceededException" });
+      }
+      return send(command);
+    };
+    try {
+      const answer = await t.plain("REQUEST_CHANGES");
+      expect(answer.status, JSON.stringify(answer.body)).toBe(200);
+    } finally {
+      t.harness.db.send = send;
+    }
+    expect(workflowOf(t.harness, t.taskId).stage).toBe("PLAN");
   });
 
   it("a Slack replay after a new comment is the first decision", async () => {
