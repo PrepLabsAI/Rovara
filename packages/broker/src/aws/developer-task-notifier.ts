@@ -696,12 +696,14 @@ async function commentAnswersFor(deps: NotifierDependencies, task: DeveloperTask
   return { answered: found.filter((item) => item !== undefined).length, total: ids.length, fromVersion: previous.version };
 }
 
-async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot): Promise<Reply | undefined> {
+async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot, pullRequestReopened = false): Promise<Reply | undefined> {
   // A task closed in Slack has its own closed reply; a second "closed" line would say it twice.
   if (workflow.stage === "CLOSED" && task.closedAt !== undefined) return undefined;
   const page = taskPageUrl(deps, task.taskId);
+  // A reopened pull request is said once per reopening (its step's revision), even though its merge step was said before.
+  const reopened = pullRequestReopened && workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING";
   const context: WorkflowMessageContext = { taskId: task.taskId, ownerSlackUserId: task.slackUserId, workflow,
-    ...(page === undefined ? {} : { findingsUrl: `${page}#findings`, taskPageUrl: page }) };
+    ...(page === undefined ? {} : { findingsUrl: `${page}#findings`, taskPageUrl: page }), ...(reopened ? { pullRequestReopened: true } : {}) };
   let approval: WorkflowArtifact | undefined;
   if (workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
     const document = await prepareDocumentLink(deps, task, workflow);
@@ -723,7 +725,7 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
   }
   const message = workflowMessage(context);
   if (message === undefined) return undefined;
-  return { ...message, sameAs: workflowMessageKey(workflow), ...(approval === undefined ? {} : { approval }) };
+  return { ...message, sameAs: reopened ? `reopened:${workflow.revision}` : workflowMessageKey(workflow), ...(approval === undefined ? {} : { approval }) };
 }
 
 async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice): Promise<Reply | undefined> {
@@ -744,7 +746,7 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
       const published = PullRequestResultSchema.safeParse((await operation())?.result);
       return published.success ? said(pullRequestReply(published.data.url)) : undefined;
     }
-    case "workflow": return task.workflow === undefined ? undefined : workflowReply(deps, task, task.workflow);
+    case "workflow": return task.workflow === undefined ? undefined : workflowReply(deps, task, task.workflow, notice.pullRequestReopened === true);
     case "ended": {
       const ended = await operation();
       if (ended === undefined || !ENDED_STATUSES.has(ended.status)) return undefined;

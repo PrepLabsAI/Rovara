@@ -10,6 +10,7 @@ import { EDITS, FIXED, MERGED, PLAN, TEAMMATE, actionIds, atPlanReview, editsOrF
 
 const OWNER = "U0MAYA001";
 const CLOSING = "Closing this task. Its workspace is being released; I'll post here when it's closed, usually within two minutes.";
+const REOPENED = "The pull request was reopened, so I'm following it again.";
 const OUT_OF_DATE = "That button is out of date. Use the latest message in this thread.";
 
 async function waiting(options: Parameters<typeof createWorkflowE2E>[0] = {}) {
@@ -151,7 +152,58 @@ describe("Suite 8: merge and close", () => {
     expect(said(e2e).at(-1)).toBe(MERGED);
   }, 120_000);
 
-  it.todo("8.7 D3: what the thread says when a closed pull request is reopened (open decision D3; today it says \"Draft pull request opened\" again)");
+  it("8.7 D3: a closed pull request reopened is said once, \"following it again\", even when GitHub redelivers the reopening", async () => {
+    const { e2e, pullRequest } = await waiting();
+    e2e.github.close(pullRequest.number);
+    expect((await e2e.webhook({ kind: "pull_request", action: "closed", number: pullRequest.number, merged: false })).status).toBe(200);
+    await e2e.settle();
+    e2e.github.reopen(pullRequest.number);
+    const deliveryId = "87111111-2222-4333-8444-555555555555";
+    e2e.stream.duplicateNext();
+    expect((await e2e.webhook({ kind: "pull_request", action: "reopened", number: pullRequest.number }, { deliveryId })).status).toBe(200);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(said(e2e).at(-1)).toBe(REOPENED);
+    expect(actionIds(e2e.slack.posts.at(-1)!)).toEqual(["agentx_workflow_close"]);
+    const posts = e2e.slack.posts.length;
+    // Redelivered (the same delivery, then a new delivery of the same event): nothing more is said.
+    expect((await e2e.webhook({ kind: "pull_request", action: "reopened", number: pullRequest.number }, { deliveryId })).body).toMatchObject({ delivery: "DUPLICATE" });
+    expect((await e2e.webhook({ kind: "pull_request", action: "reopened", number: pullRequest.number })).status).toBe(200);
+    await e2e.settle();
+    expect(e2e.slack.posts).toHaveLength(posts);
+    expect(said(e2e).filter((text) => text === REOPENED)).toHaveLength(1);
+    expect(said(e2e).filter((text) => text.startsWith("Draft pull request opened"))).toHaveLength(1);
+    // Closed and reopened again: said again, once.
+    e2e.github.close(pullRequest.number);
+    expect((await e2e.webhook({ kind: "pull_request", action: "closed", number: pullRequest.number, merged: false })).status).toBe(200);
+    await e2e.settle();
+    e2e.github.reopen(pullRequest.number);
+    expect((await e2e.webhook({ kind: "pull_request", action: "reopened", number: pullRequest.number })).status).toBe(200);
+    await e2e.settle();
+    expect(said(e2e).filter((text) => text === REOPENED)).toHaveLength(2);
+    await mergeWebhook(e2e, pullRequest.number);
+    await e2e.settle();
+    expect(said(e2e).at(-1)).toBe(MERGED);
+  }, 120_000);
+
+  it("8.7 a pull request closed, pushed to by someone else, then reopened: AgentX stops following it rather than following someone else's code", async () => {
+    const { e2e, pullRequest } = await waiting();
+    e2e.github.close(pullRequest.number);
+    expect((await e2e.webhook({ kind: "pull_request", action: "closed", number: pullRequest.number, merged: false })).status).toBe(200);
+    await e2e.settle();
+    // Someone pushes to the branch while the pull request is closed; reopened, it holds their commit.
+    const foreign = e2e.github.foreignPush(pullRequest.number);
+    e2e.github.reopen(pullRequest.number);
+    expect(pullRequest.commit).toBe(foreign.commit);
+    expect((await e2e.webhook({ kind: "pull_request", action: "reopened", number: pullRequest.number })).status).toBe(200);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.pullRequestChanged });
+    expect(said(e2e).at(-1)).toBe("I stopped following the pull request. The pull request on GitHub no longer holds the checked code, so I won't finish this task from it. Close the task.");
+    expect(said(e2e)).not.toContain(REOPENED);
+    await mergeWebhook(e2e, pullRequest.number);
+    await e2e.settle();
+    expect(e2e.workflow().stage).not.toBe("MERGED");
+  }, 120_000);
 
   it("8.8 closing from Slack while waiting for the merge: confirmed, said, the PR stays open, and a later merge is ignored", async () => {
     const { e2e, pullRequest } = await waiting();

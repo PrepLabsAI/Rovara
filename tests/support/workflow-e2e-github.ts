@@ -251,11 +251,16 @@ export class FakeGitHub {
     this.find(number).state = "closed";
   }
 
-  /** Someone reopens a pull request closed without merging. */
+  /**
+   * Someone reopens a pull request closed without merging. As on GitHub, it reopens at its branch's head: a push made to
+   * the branch while it was closed is its head now.
+   */
   reopen(number: number): void {
     const pullRequest = this.find(number);
     if (pullRequest.state !== "closed") throw new Error(`pull request #${number} is not closed`);
     pullRequest.state = "open";
+    const branch = this.pushes.get(pullRequest.headBranch);
+    if (branch !== undefined && branch.commit !== pullRequest.commit) Object.assign(pullRequest, { commit: branch.commit, tree: branch.tree });
   }
 
   /** Someone merges the pull request on GitHub, at its current head. */
