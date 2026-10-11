@@ -19,7 +19,7 @@ async function published(e2e: WorkflowE2E): Promise<void> {
 }
 
 describe("Suite 6: draft PR", () => {
-  journeySuite();
+  const logged = journeySuite();
 
   it("6.2 the PR body ends with the checks, the reviews, the task page and how it was opened, word for word", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
@@ -96,6 +96,20 @@ describe("Suite 6: draft PR", () => {
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     expect(e2e.workflow().pullRequests).toEqual([expect.objectContaining({ number: 1, headSha: e2e.github.pullRequests[0]!.commit })]);
     expect(said(e2e).at(-1)).toBe(OPENED(1));
+  }, 120_000);
+
+  it("6.4 a head read that fails twice after the open fails closed: PR #1 is closed, nothing is recorded, and Retry opening is offered", async () => {
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
+    e2e.github.failNext("getPullRequest", 502, 2);
+    await published(e2e);
+    expect(e2e.github.pullRequests.map((pullRequest) => [pullRequest.number, pullRequest.state])).toEqual([[1, "closed"]]);
+    expect(e2e.workflow().stage).toBe("PULL_REQUEST");
+    expect(e2e.workflow().pullRequests ?? []).toEqual([]);
+    const card = e2e.slack.lastPostWithAction("agentx_workflow_retry_publish");
+    expect(card.text).toBe(`Checks and reviews passed. ${WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE}`);
+    expect(actionIds(card)).toEqual(["agentx_workflow_retry_publish", "agentx_workflow_close"]);
+    const unreadable = logged().filter((line) => line.includes("workflow.publication_head_unreadable")).map((line) => (JSON.parse(line) as { attempt: number }).attempt);
+    expect(unreadable).toEqual([1, 2]);
   }, 120_000);
 
   it("6.4 [LIVE-BUG B4] [R1] a publication retry while GitHub lags opens one PR of the checked code and keeps it", async () => {
