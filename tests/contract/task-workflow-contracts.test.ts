@@ -948,7 +948,7 @@ describe("proposed checks and review-only verification", () => {
       // Only on the reviewed tree, and only for a task blocked because its push failed.
       expect(() => workflowContracts.recordWorkflowPullRequestUpdate(failed, { updates: [{ repositoryId: "demo", number: 42, headSha: "f".repeat(40), headTreeSha: "1".repeat(40) }], now: at(5) })).toThrow(workflowContracts.WorkflowTransitionError);
       const otherBlock = WorkflowSnapshotSchema.parse({ ...ready(), revision: 12, stage: "WAIT_FOR_MERGE", state: "BLOCKED", blockReason: workflowContracts.WORKFLOW_BLOCK_REASONS.pullRequestChanged,
-        candidate: first, ...passed(first), pullRequests: ready().pullRequests });
+        ...passed(first), pullRequests: ready().pullRequests });
       expect(() => workflowContracts.recordWorkflowPullRequestUpdate(otherBlock, { updates: [{ repositoryId: "demo", number: 42, headSha: "f".repeat(40), headTreeSha: "1".repeat(40) }], now: at(5) })).toThrow(workflowContracts.WorkflowTransitionError);
     });
 

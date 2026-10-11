@@ -617,7 +617,7 @@ describe("PR feedback the reviewer leaves to the owner (0.2.8 live test)", () =>
     const fixture = await sentenceFixture();
     const answer = JSON.parse(ownerDecisionAnswer(fixture.bundleRef.sha256, [])) as { findings: Array<Record<string, unknown>> };
     for (const patch of [{ proposedDisposition: "OWNER_DECISION" }, { proposedDisposition: "SKIP", assessment: "ALREADY_ADDRESSED", confidence: { level: "HIGH", reason: "Done." } }]) {
-      const { fixProposal: _dropped, ...finding } = { ...answer.findings[0]!, ...patch };
+      const { fixProposal: _dropped, ...finding } = { ...answer.findings[0]!, ...patch } as Record<string, unknown>;
       void _dropped;
       const review = await reviewWith(fixture, [JSON.stringify({ findings: [finding] })]);
       expect(review.report.blockReason, String(patch.proposedDisposition)).toBeUndefined();

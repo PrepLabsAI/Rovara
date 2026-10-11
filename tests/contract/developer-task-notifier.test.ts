@@ -1705,7 +1705,7 @@ describe("the PR feedback advisory summary", () => {
     const { feedbackCardCheckChanges } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
     const x = { id: "proposed-1", label: "Sentence present", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "Old.", "README.md"], timeoutSeconds: 30 } };
     const policy = { required: [], optional: [], selectedOptionalIds: [], proposed: [x] };
-    const fix = (fixProposal: Record<string, unknown>) => ({ proposedDisposition: "IMPLEMENT", fixProposal: { summary: "s", fileChanges: [], tests: [], ...fixProposal } });
+    const fix = (fixProposal: { obsoleteChecks?: string[]; replacementChecks?: unknown[] }) => ({ proposedDisposition: "IMPLEMENT", fixProposal: { summary: "s", fileChanges: [], tests: [], ...fixProposal } });
     const xAgain = { label: "Sentence again", cwd: "repo/demo", executable: "grep", args: ["-q", "Old.", "README.md"], timeoutSeconds: 30 };
     expect(feedbackCardCheckChanges(policy, [fix({ obsoleteChecks: ["proposed-1"] }), fix({ replacementChecks: [xAgain] })])).toEqual([
       { obsolete: ["Sentence present"], added: [] },

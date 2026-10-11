@@ -15,7 +15,7 @@ const SENTENCE = { id: "proposed-1", label: "Code of Conduct sentence present in
 const LINKS = { id: "proposed-2", label: "Links still work", command: grep("CODE_OF_CONDUCT.md") };
 const policy = (extra: Partial<WorkflowCheckPolicyInput> = {}): WorkflowCheckPolicyInput => ({ required: [UNIT], optional: [], selectedOptionalIds: [], proposed: [SENTENCE, LINKS], ...extra });
 const replacement = { label: "Shorter sentence present in README.md", cwd: "repo/demo", executable: "grep", args: ["-q", "Be respectful and kind.", "README.md"] };
-const finding = (fixProposal: Record<string, unknown>, proposedDisposition = "IMPLEMENT") => ({ proposedDisposition, fixProposal: { summary: "Shorten it.", fileChanges: [], tests: [], ...fixProposal } });
+const finding = (fixProposal: { obsoleteChecks?: string[]; replacementChecks?: unknown[] }, proposedDisposition = "IMPLEMENT") => ({ proposedDisposition, fixProposal: { summary: "Shorten it.", fileChanges: [], tests: [], ...fixProposal } });
 const workflow = (checkPolicy: WorkflowCheckPolicyInput, feedbackDecisions = 0) => WorkflowSnapshotSchema.parse({
   ...createWorkflowSnapshot({ taskId, ownerId, now, checkPolicy }),
   ...(feedbackDecisions === 0 ? {} : { feedbackDecisions: Array.from({ length: feedbackDecisions }, (_, index) => ({

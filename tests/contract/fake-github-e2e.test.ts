@@ -114,11 +114,11 @@ describe("FakeGitHub v2", () => {
     const { number } = await openPullRequest(github);
     github.files.set("greeting.ts", "x");
     github.failNext("getFileAtCommit", 404);
-    await expect(github.gateway.getFileAtCommit(REPO, "greeting.ts", sha("a"))).resolves.toBeUndefined();
+    await expect(github.gateway.getFileAtCommit(REPO, "greeting.ts")).resolves.toBeUndefined();
     github.failNext("verifyWebhookRepository", 404);
     await expect(github.gateway.verifyWebhookRepository()).resolves.toBe(false);
     github.failNext("getFileAtCommit", 500);
-    await expect(github.gateway.getFileAtCommit(REPO, "greeting.ts", sha("a"))).rejects.toThrow("GitHub getFileAtCommit failed with HTTP 500");
+    await expect(github.gateway.getFileAtCommit(REPO, "greeting.ts")).rejects.toThrow("GitHub getFileAtCommit failed with HTTP 500");
     github.failNext("getPullRequestFeedback", 502);
     await expect(github.gateway.getPullRequestFeedback(REPO, number)).rejects.toThrow("GitHub feedback read refused: head commit lookup HTTP 502");
   });

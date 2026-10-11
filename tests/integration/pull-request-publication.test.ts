@@ -637,7 +637,7 @@ describe("PR feedback review after publication moved HEAD", () => {
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const { sourceDeliveryIds: deliveryIds, ...metadata } = bundle;
     void deliveryIds;
-    const ref: WorkflowFeedbackBundleRef = { ...metadata, sha256, objectKey: `feedback/${sha256}.json` };
+    const ref = { ...metadata, sha256, objectKey: `feedback/${sha256}.json` } as WorkflowFeedbackBundleRef;
     return { ref, bytes };
   };
 

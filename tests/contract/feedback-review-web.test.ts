@@ -590,12 +590,13 @@ describe("broker-backed feedback review data", () => {
       const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
       let refreshes = 0;
       // GitHub has a comment the card did not show: the refresh collects it, which starts a new review.
-      fixture.deps.refreshTaskFeedback = vi.fn(async () => {
-        if (++refreshes !== refreshThatCollects) return;
+      fixture.deps.refreshTaskFeedback = vi.fn(async (): Promise<undefined> => {
+        if (++refreshes !== refreshThatCollects) return undefined;
         const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workflow: WorkflowSnapshot };
         const review = task.workflow.feedbackReview!;
         fixture.harness.db.set({ ...task, workflow: { ...task.workflow, revision: task.workflow.revision + 1,
           feedbackReview: { status: "COLLECTING", bundleRefs: review.bundleRefs, threadObservations: [] } } });
+        return undefined;
       });
       const refusal = await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, { requestId: randomUUID(), expectedRevision: fixture.workflow.revision,
         reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64), bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"] })
