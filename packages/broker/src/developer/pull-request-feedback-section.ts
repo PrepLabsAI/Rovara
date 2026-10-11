@@ -10,7 +10,12 @@ const END = "<!-- /agentx:pr-feedback-fixes -->";
 const HEADING = "### Fixes from PR feedback";
 /** The newest fixes listed; older ones are counted in one line. */
 const FIXES_LISTED = 20;
-const SUMMARY_MAX = 300;
+/** The most characters of a fix's line before its comment link: one short sentence. */
+const SUMMARY_MAX = 120;
+/** The fewest characters a cut summary keeps; a shorter one gives way to the fallback line. */
+const SUMMARY_MIN = 30;
+/** A fix's line when its summary has no short opening that can be cut cleanly. */
+const SUMMARY_FALLBACK = "Made the change the comment asked for.";
 const LINKS_LISTED = 3;
 const REPORT_MAX_BYTES = 1_000_000;
 /** The newest approvals whose reports are read for the section (each report is read from storage). */
@@ -89,15 +94,46 @@ export async function approvedFeedbackFixes(
   return { fixes, earlier: approvals.length > APPROVALS_READ };
 }
 
-function fixLine(fix: FeedbackFix): string {
-  const text = inertGitHubText(redactText(fix.summary));
-  // Cut on a whole character, never inside an escape.
-  let summary = text;
-  if (text.length > SUMMARY_MAX) {
-    summary = text.slice(0, SUMMARY_MAX - 1);
-    if (/(^|[^\\])(\\\\)*\\$/u.test(summary)) summary = summary.slice(0, -1);
-    summary = `${summary}\u2026`;
+/** Spans a line is never cut inside: a Markdown link or image, a code span, and an address (a URL, `//host` or `www.`). */
+const UNCUT = /!?\[[^\]]*\]\([^)]*\)|`[^`]*`|\S*(?:\/\/|\bwww\.)\S*/giu;
+/** Words whose trailing period does not end a sentence. */
+const ABBREVIATION = /(?:^|\s)(?:e\.g|i\.e|etc|vs|cf)$/iu;
+
+/**
+ * A reviewer's summary as one short sentence for the description: its first sentence, or, when that is longer than
+ * SUMMARY_MAX, cut at the last space that fits with an ellipsis, never inside a link, a code span or an address. A
+ * Markdown link is reduced to its text first; a sentence ends only outside quotes.
+ * Undefined when nothing short can be cut cleanly (the summary opens with a long address, say).
+ */
+export function shortFixSummary(summary: string): string | undefined {
+  // A Markdown link or image reads as its text: the description shows no link from a reviewer anyway.
+  const text = summary.replace(/!?\[([^\]]*)\]\([^)]*\)/gu, "$1").replace(/\s+/gu, " ").trim();
+  // Whether a quote opened before `at` is still open there (an apostrophe inside a word is no quote).
+  const quoted = (at: number) => {
+    const before = text.slice(0, at);
+    return (before.match(/(?:^|[\s(])['"\u2018\u201C]/gu)?.length ?? 0) > (before.match(/['"\u2019\u201D](?=[\s.,;:!?)]|$)/gu)?.length ?? 0);
+  };
+  const spans = [...text.matchAll(UNCUT)].map((match) => [match.index, match.index + match[0].length] as const);
+  const inside = (at: number) => spans.some(([start, end]) => at > start && at < end);
+  let sentence = text;
+  for (const match of text.matchAll(/[.!?](?=\s|$)/gu)) {
+    if (inside(match.index) || quoted(match.index) || ABBREVIATION.test(text.slice(0, match.index))) continue;
+    sentence = text.slice(0, match.index + 1);
+    break;
   }
+  if (sentence.length <= SUMMARY_MAX) return sentence === "" ? undefined : sentence;
+  for (let at = sentence.lastIndexOf(" ", SUMMARY_MAX - 1); at > 0; at = sentence.lastIndexOf(" ", at - 1)) {
+    if (inside(at)) continue;
+    const cut = sentence.slice(0, at).replace(/[\s,;:(\-\u2013\u2014'"]+$/u, "");
+    // Too little left to say what changed.
+    return cut.length < SUMMARY_MIN ? undefined : `${cut}\u2026`;
+  }
+  return undefined;
+}
+
+function fixLine(fix: FeedbackFix): string {
+  // Cut before it is escaped, so no cut lands inside an escape.
+  const summary = inertGitHubText(shortFixSummary(redactText(fix.summary)) ?? SUMMARY_FALLBACK);
   if (fix.comments.length === 0) return `- ${summary}`;
   const links = fix.comments.slice(0, LINKS_LISTED).map((url, index) => `[comment ${index + 1}](${url})`);
   const more = fix.comments.length > LINKS_LISTED ? ` and ${fix.comments.length - LINKS_LISTED} more` : "";

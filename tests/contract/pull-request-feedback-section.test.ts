@@ -4,7 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { PULL_REQUEST_BODY_MAX_CHARS, WorkflowFeedbackReviewReportSchema, type WorkflowSnapshot } from "@agentx/contracts";
-import { approvedFeedbackFixes, inertGitHubText, withFeedbackFixes } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
+import { approvedFeedbackFixes, inertGitHubText, shortFixSummary, withFeedbackFixes } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
 
 const ZWJ = "‍";
 const taskId = randomUUID();
@@ -70,6 +70,27 @@ describe("the PR description's Fixes from PR feedback section", () => {
     ["a backslash", "a\\b", "a\\\\b"],
   ])("escapes %s as plain text", (_name, input, expected) => {
     expect(inertGitHubText(input)).toBe(expected);
+  });
+
+  it("lists each fix as one short sentence: the summary's first one, or cut at a word, never inside a link or address (0.2.12 live test)", () => {
+    // The live line: a long first sentence with Markdown links, which was cut inside a link.
+    const live = "On README.md line 284, replace 'open a [GitHub issue](https://github.com/example/demo/issues)' with 'start a [GitHub Discussion](https://github.com/example/demo/discussions)' so the sentence reads: 'Questions? Start a GitHub Discussion.'";
+    const short = shortFixSummary(live)!;
+    // Links read as their text, and the question inside the quote does not end the sentence.
+    expect(short).toBe("On README.md line 284, replace 'open a GitHub issue' with 'start a GitHub Discussion' so the sentence reads\u2026");
+    expect(short.length).toBeLessThanOrEqual(120);
+    expect(shortFixSummary("Point the help link to GitHub Discussions. On README.md line 284, replace the issue link with the discussions link."))
+      .toBe("Point the help link to GitHub Discussions.");
+    expect(shortFixSummary("Use a shorter name, e.g. greet. Then update the test.")).toBe("Use a shorter name, e.g. greet.");
+    // A cut never lands inside an address, and a summary that opens with a long one falls back.
+    const address = `See https://example.com/${"a".repeat(130)} for the details`;
+    expect(shortFixSummary(address)).toBeUndefined();
+    expect(shortFixSummary(`${"word ".repeat(30)}end`)).toBe(`${"word ".repeat(24).trim()}\u2026`);
+    // In the section: the short sentence, escaped, then the comment link; the fallback when nothing short can be cut.
+    const url = "https://github.com/example/demo/pull/5#issuecomment-1";
+    const lines = withFeedbackFixes("Intro.", [{ summary: live, comments: [url] }, { summary: address, comments: [url] }]).body!.split("\n");
+    expect(lines).toContain(`- On README.md line 284, replace 'open a GitHub issue' with 'start a GitHub Discussion' so the sentence reads\u2026 (for [this comment](${url}))`);
+    expect(lines).toContain(`- Made the change the comment asked for. (for [this comment](${url}))`);
   });
 
   it("a spoofed marker in a summary cannot end the section early", async () => {

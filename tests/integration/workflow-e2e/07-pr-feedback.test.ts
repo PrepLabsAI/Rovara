@@ -355,6 +355,8 @@ describe("Suite 7: PR feedback loop", () => {
 
   it("7.13 D2: after each pushed fix the PR description lists what was changed for which comments, kept up to date and inert", async () => {
     const HOSTILE = "Trim the name in greet; thanks @octocat, see https://example.com/x and #12 <img src=x>";
+    // Round 2's summary is long: only its first sentence is listed (0.2.12 live test).
+    const LONG = "Greet in lowercase. In greeting.ts, change the template literal so it reads `hello, ${name.trim()}` as the [second comment](https://github.com/example/demo/pull/1) asks, and keep the trim from the first fix.";
     let round = 0;
     let fixes = 0;
     const LOWER = [{ path: "repo/demo/greeting.ts", content: "export function greet(name: string): string {\n  return `hello, ${name.trim()}`;\n}\n" }];
@@ -365,7 +367,7 @@ describe("Suite 7: PR feedback loop", () => {
     } } }, (prompt) => {
       round += 1;
       const reply = JSON.parse(feedbackCriticReply(prompt, { repositoryId: "demo", path: "greeting.ts", testPath: "greeting.test.ts" })) as { findings: Array<{ fixProposal: { summary: string } }> };
-      for (const finding of reply.findings) finding.fixProposal.summary = round === 1 ? HOSTILE : "Greet in lowercase.";
+      for (const finding of reply.findings) finding.fixProposal.summary = round === 1 ? HOSTILE : LONG;
       return JSON.stringify(reply);
     });
     const opened = pullRequest.body ?? "";
