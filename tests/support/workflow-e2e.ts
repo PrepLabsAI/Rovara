@@ -354,9 +354,14 @@ export async function createWorkflowE2E(options: {
     if (payload.workflowBaseCommit !== baseCommit) throw new Error(`the publish request names base ${String(payload.workflowBaseCommit)}, not the task's base ${baseCommit}`);
     // The worker's own refusal (publish.ts): a workspace still at the base's tree has nothing to publish.
     if (tree === github.commits.get(baseCommit)) throw new Error("repository has no changes to publish");
-    const commit = await git(["commit-tree", tree, "-p", payload.workflowBaseCommit, "-m", `AgentX: ${payload.title}`]);
+    // A retry of a publication that got as far as its commit reuses that commit, as the worker does (publish.ts: the
+    // workspace is on the head branch, clean, its HEAD holds the checked tree on the base).
+    const retrying = (await git(["branch", "--show-current"])) === payload.headBranch && (await git(["status", "--porcelain=v1", "--untracked-files=all"])) === "";
+    const head = await git(["rev-parse", "HEAD"]);
+    const reusable = retrying && (await git(["rev-parse", "HEAD^{tree}"])) === tree && (await git(["rev-parse", "HEAD^"]).catch(() => "")) === payload.workflowBaseCommit;
+    const commit = reusable ? head : await git(["commit-tree", tree, "-p", payload.workflowBaseCommit, "-m", `AgentX: ${payload.title}`]);
     // The worker leaves the workspace on the published commit (same tree, new commit), so later reads see HEAD moved.
-    await git(["checkout", "--force", "-B", payload.headBranch, commit]);
+    if (!reusable) await git(["checkout", "--force", "-B", payload.headBranch, commit]);
     recordPush(invocation.workspaceId, commit);
     github.push(credential.token, payload.headBranch, commit, tree, [payload.workflowBaseCommit]);
     const pullRequest = await callbacks.pullRequestSink({

@@ -219,10 +219,16 @@ export class FakeGitHub {
   /** Someone other than AgentX pushes a commit onto the pull request's branch (with no token AgentX minted). */
   foreignPush(number: number, options: { tree?: string } = {}): { commit: string; tree: string } {
     const pullRequest = this.find(number);
+    return this.foreignPushBranch(pullRequest.headBranch, { ...options, parent: pullRequest.commit });
+  }
+
+  /** Someone other than AgentX force-pushes a commit onto `branch` (with no token AgentX minted), pull request or not. */
+  foreignPushBranch(branch: string, options: { tree?: string; parent?: string } = {}): { commit: string; tree: string } {
     const serial = this.nextId.foreign++;
-    const commit = createHash("sha1").update(`foreign-commit-${number}-${serial}`).digest("hex");
-    const tree = options.tree ?? createHash("sha1").update(`foreign-tree-${number}-${serial}`).digest("hex");
-    this.moveBranch(pullRequest.headBranch, commit, tree, [pullRequest.commit], "ghp_someone_else");
+    const commit = createHash("sha1").update(`foreign-commit-${branch}-${serial}`).digest("hex");
+    const tree = options.tree ?? createHash("sha1").update(`foreign-tree-${branch}-${serial}`).digest("hex");
+    const parent = options.parent ?? this.pushes.get(branch)?.commit;
+    this.moveBranch(branch, commit, tree, parent === undefined ? [] : [parent], "ghp_someone_else");
     return { commit, tree };
   }
 
