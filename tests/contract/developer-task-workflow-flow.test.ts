@@ -1672,7 +1672,10 @@ describe("exits for blocked work (Task 16)", () => {
     expect(operations(harness, workspaceId).find((item) => item.kind === "close")).toMatchObject({ discardUnpublished: true });
   });
 
-  it("closes from Slack without discarding when a pull request is recorded, so the close keeps its check for unpublished work", async () => {
+  // Changed by e2e 8.8: the close modal says code that isn't in a pull request is discarded and the open pull request stays
+  // on GitHub, so the owner's confirmation discards with a pull request too (keeping the check left an unpushed fix
+  // refusing the close, and the thread was never told).
+  it("closes from Slack discarding unpublished work also when a pull request is recorded, as the confirmed modal says", async () => {
     const harness = await createDeveloperTaskBroker();
     const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000086" };
     const started = await harness.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread,
@@ -1688,7 +1691,7 @@ describe("exits for blocked work (Task 16)", () => {
     expect(closed.statusCode).toBe(200);
     const close = operations(harness, workspaceId).find((item) => item.kind === "close");
     expect(close).toBeDefined();
-    expect(close?.discardUnpublished).not.toBe(true);
+    expect(close?.discardUnpublished).toBe(true);
   });
 
   it("sends blocked work back to coding from its Slack thread for the owner only", async () => {
@@ -1751,7 +1754,7 @@ describe("Slack refusals (Task 19)", () => {
     expect(stale.statusCode).toBe(200);
     expect(JSON.parse(stale.body)).toMatchObject({ refused: true });
     expect(refusals(harness, taskId)).toEqual([expect.objectContaining({ entityType: "WORKFLOW_ACTION_REFUSAL", taskId, slackUserId: MAYA.slackUserId,
-      channelId: thread.channelId, threadTs: thread.threadTs, message: "That approval is out of date. Use the latest message in the thread.", indexExpiresAt: expect.any(Number) as unknown })]);
+      channelId: thread.channelId, threadTs: thread.threadTs, message: "That approval is out of date. Use the latest message in this thread.", indexExpiresAt: expect.any(Number) as unknown })]);
     // Someone else's press: refused the same way, in plain words.
     const teammate = await harness.handler({ ...decision, requestId: randomUUID(), userId: "U0TEAMMATE1" });
     expect(teammate.statusCode).toBe(200);
@@ -1786,7 +1789,7 @@ describe("Slack refusals (Task 19)", () => {
       expectedRevision: waiting.workflow.revision, artifactDigest: createHash("sha256").update(plan).digest("hex"), decision: "APPROVE", reason: "Approved in Slack.", selectedOptionalCheckIds: [] };
     // A stale press is still out of date.
     const stale = await harness.handler({ ...decision, requestId: randomUUID(), expectedRevision: waiting.workflow.revision - 1, selectedOptionalCheckIds: ["optional-1"] });
-    expect(JSON.parse(stale.body)).toMatchObject({ refused: true, message: "That approval is out of date. Use the latest message in the thread." });
+    expect(JSON.parse(stale.body)).toMatchObject({ refused: true, message: "That approval is out of date. Use the latest message in this thread." });
     // A task whose thread is in a Slack workspace this AgentX does not serve: no press from there is taken, whoever presses.
     const elsewhere = { ...thread, teamId: "T0OTHERTEAM" };
     const current = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { share: Record<string, unknown> };
@@ -2305,6 +2308,11 @@ describe("checks AgentX proposes in the coding plan", () => {
       expect(blocked.verification?.results).toEqual([{ checkId: "proposed-1", status: "PASS" }, { checkId: "proposed-2", status: "FAILED", programNotFound: true, broken: true }]);
       expect(blocked.blockReason).toBe(WORKFLOW_BLOCK_REASONS.checksBroken);
       expect(workflowMessage({ taskId: blocked.taskId, workflow: blocked })!.text).toContain("npx is not installed on the AgentX worker.");
+    });
+
+    it("marks a check whose process never started (no exit code) as one that may start on a retry, and a check that only printed the same words as failing", async () => {
+      const blocked = await verified([unitTests, typecheck], [entry(0, "failed", "spawn npm EAGAIN"), entry(1, "failed", "spawn npx EAGAIN", 1)]);
+      expect(blocked.verification?.results).toEqual([{ checkId: "proposed-1", status: "FAILED", broken: true, neverStarted: true }, { checkId: "proposed-2", status: "FAILED" }]);
     });
 
     const inline = { label: "Inline check", cwd: "repo/demo", executable: "python3", args: ["-c", "import app"], proves: ["1"] };

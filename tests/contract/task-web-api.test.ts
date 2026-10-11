@@ -60,6 +60,17 @@ describe("task page API", () => {
     expect(TASK_PAGE_API.test(`/review/${taskId}/api/decision`)).toBe(false);
   });
 
+  it("an edit or a delete reaches that comment's edit or delete, never the decision", async () => {
+    const deps = fakeDeps();
+    const id = randomUUID();
+    expect((await call(deps, post(api(`comments/${id}/edit`), { rev: 1, text: "Better words." }))).statusCode).toBe(200);
+    expect((await call(deps, post(api(`comments/${id}/delete`), { rev: 2 }))).statusCode).toBe(200);
+    expect(deps.calls.map((entry) => [entry.name, entry.input])).toEqual([
+      ["editComment", { commentId: id, rev: 1, text: "Better words." }],
+      ["deleteComment", { commentId: id, rev: 2 }],
+    ]);
+  });
+
   it("every POST needs same origin, the CSRF header and its cookie", async () => {
     const deps = fakeDeps();
     const refused = [

@@ -6,6 +6,8 @@ import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckI
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const ActorIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const WORKFLOW_PLAN_MAX_BYTES = 32_768;
+/** The worker's refusal when a coding run leaves every repository as it was when the task started: nothing to check or publish. */
+export const WORKFLOW_NO_CODE_CHANGE_MESSAGE = "the coding run left the code as it was when the task started";
 /** Shown to the owner when the code no longer descends from the commit the task started from. */
 export const WORKFLOW_HISTORY_REWRITTEN_MESSAGE = "The change history was rewritten past where this task started, so AgentX can't compare it. Ask for the change again in a new task.";
 
@@ -32,6 +34,10 @@ export const WORKFLOW_BLOCK_REASONS = {
   /** Review only: AgentX's rerun of the agent's own tests found one that passed before and fails now. */
   regressionFound: "A test that passed before this change fails now. Send it back to coding, or close the task.",
   repositoriesIncomplete: "AgentX couldn't find every repository in the final code. Retry coding, or close the task.",
+  /** The coding run finished, but the code is still what the task started from (WORKFLOW_NO_CODE_CHANGE_MESSAGE). */
+  noCodeChanged: "Coding finished, but no code changed, so there is nothing to check or open as a pull request. Retry coding, or close the task.",
+  /** An approved PR feedback fix left every repository's code as its open pull request holds it: nothing was pushed. */
+  fixChangedNothing: "The approved fix didn't change any code, so nothing was pushed.",
   codeChangedAfterChecks: "The code changed after its checks ran. Run the checks again on the latest code.",
   startUnrecorded: "AgentX could not record where this change started. Close the task and start a new one.",
   startUnconfirmed: "AgentX could not confirm the task's starting commit on GitHub.",
@@ -41,6 +47,8 @@ export const WORKFLOW_BLOCK_REASONS = {
   /** The saved plan is a structured document that could not be read back. */
   planUnreadable: "the plan couldn't be read",
   pullRequestChanged: "The pull request on GitHub no longer holds the checked code, so I won't finish this task from it. Close the task.",
+  /** A required pull request was closed on GitHub without merging; reopened, it is followed again. */
+  pullRequestClosed: "The pull request was closed on GitHub without merging. Reopen it there, or close this task.",
   /** The pull request's feedback review failed; AgentX still watches the pull request for its merge. */
   feedbackReviewFailed: "I couldn't review the feedback on the pull request, so I have nothing to propose from it.",
   /** The approved fix could not be pushed to the pull request; AgentX still watches the pull request for its merge. */
@@ -131,6 +139,8 @@ const VerificationResultsSchema = z.object({
     programNotFound: z.literal(true).optional(),
     /** The check's command could not run (not found, not runnable, or a script that does not parse): the code is not at fault. */
     broken: z.literal(true).optional(),
+    /** The check's process never started (the worker failed to start it, EAGAIN say): nothing is wrong with it, and a retry may run it. */
+    neverStarted: z.literal(true).optional(),
   }).strict()).max(100),
   /** No check was selected for this task: the candidate was validated and goes to review with no check results. */
   reviewOnly: z.boolean().optional(),
@@ -923,6 +933,11 @@ const WorkflowSnapshotShapeSchema = z.object({
   /** Why the latest push of a fix failed, for the owner's message: the pull requests it was for, and a plain cause when known. */
   pullRequestUpdateFailure: WorkflowPullRequestUpdateFailureSchema.optional(),
   feedbackReview: WorkflowFeedbackReviewSchema.optional(),
+  /**
+   * The review threads as last seen when there was nothing to review (feedback only in resolved threads), so a later reply
+   * in a thread seen resolved counts as new feedback. A collected review keeps its own observations instead.
+   */
+  feedbackThreadObservations: FeedbackThreadObservationsSchema.optional(),
   feedbackReviewHistory: z.array(WorkflowFeedbackReviewRefSchema).max(100).optional(),
   feedbackDecisions: z.array(WorkflowFeedbackDecisionSchema).max(100).optional(),
   feedbackDispatchApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
@@ -932,7 +947,7 @@ const WorkflowSnapshotShapeSchema = z.object({
   canvasCloseout: WorkflowCanvasCloseoutSchema.optional(),
   canvasCloseoutAttempt: WorkflowCanvasCloseoutAttemptSchema.optional(),
 }).superRefine((workflow, context) => {
-  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, verificationRetries: workflow.verificationRetries, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout, canvasCloseoutAttempt: workflow.canvasCloseoutAttempt };
+  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, feedbackThreadObservations: workflow.feedbackThreadObservations, verificationRetries: workflow.verificationRetries, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout, canvasCloseoutAttempt: workflow.canvasCloseoutAttempt };
   if (Buffer.byteLength(JSON.stringify(taskMetadata), "utf8") > 262_144) {
     context.addIssue({ code: "custom", message: "workflow metadata exceeds the task snapshot storage budget" });
   }
@@ -1237,18 +1252,25 @@ export function workflowFollowsOnlyMerge(workflow: Pick<WorkflowSnapshot, "stage
 
 /**
  * The task once its pull requests are as observed: complete when every required one merged; otherwise a task that follows
- * them only for their merge stays where it is, and one waiting for the merge waits on.
+ * them only for their merge stays where it is, one whose required pull request was closed without merging stops (until it
+ * is reopened), and one waiting for the merge waits on.
  */
 function withPullRequestsObserved(current: WorkflowSnapshot, pullRequests: WorkflowPullRequest[], now: string): WorkflowSnapshot {
   const complete = pullRequests.filter((pullRequest) => pullRequest.required).every((pullRequest) => pullRequest.state === "MERGED");
   const keep = !complete && workflowFollowsOnlyMerge(current);
+  const closed = !complete && !keep && pullRequests.some((pullRequest) => pullRequest.required && pullRequest.state === "CLOSED");
   const { outcome: _priorOutcome, ...withoutPriorOutcome } = current;
   void _priorOutcome;
+  // Waiting again (a closed pull request reopened) carries no reason to stop.
+  const { blockReason: _priorReason, ...unblocked } = withoutPriorOutcome;
+  void _priorReason;
+  const reopened = !keep && !closed && current.state === "BLOCKED" && current.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestClosed;
   return WorkflowSnapshotSchema.parse({
-    ...(keep ? current : withoutPriorOutcome),
+    ...(keep ? current : reopened ? unblocked : withoutPriorOutcome),
     revision: current.revision + 1,
     stage: complete ? "MERGED" : keep ? current.stage : "WAIT_FOR_MERGE",
-    state: complete ? "COMPLETE" : keep ? current.state : "WAITING",
+    state: complete ? "COMPLETE" : keep ? current.state : closed ? "BLOCKED" : "WAITING",
+    ...(closed ? { blockReason: WORKFLOW_BLOCK_REASONS.pullRequestClosed } : {}),
     ...(complete ? { outcome: "MERGED" as const } : {}),
     pullRequests,
     updatedAt: now,
@@ -1670,6 +1692,84 @@ export function returnWorkflowToImplementation(
     ...unblocked, revision: current.revision + 1, stage: "IMPLEMENT", state: "READY",
     decisions: [...current.decisions, decision], updatedAt: input.now,
   });
+}
+
+/**
+ * The code each repository's pull request holds, by repository, for judging whether an approved fix changed anything:
+ * GitHub's tree for its head as recorded, whatever the pull request's state; else, for a pull request recorded without one,
+ * the tree of the reviewed code it was opened or last updated with when that is the current candidate (or a collected
+ * feedback bundle's). A repository with no pull request keeps the current candidate's tree. Undefined when the task has no
+ * open pull request, or an open one's code is not known.
+ */
+export function workflowPullRequestTrees(workflow: WorkflowSnapshot): Map<string, string> | undefined {
+  const pullRequests = workflow.pullRequests ?? [];
+  if (!pullRequests.some((pullRequest) => pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN")) return undefined;
+  const trees = new Map((workflow.candidate?.repositories ?? []).map((repository) => [repository.repositoryId, repository.treeSha] as const));
+  for (const pullRequest of pullRequests) {
+    const tree = pullRequest.headTreeSha
+      ?? (workflow.candidate?.digest === pullRequest.candidateDigest ? workflow.candidate.repositories.find((repository) => repository.repositoryId === pullRequest.repositoryId)?.treeSha : undefined)
+      ?? workflow.feedbackReview?.bundleRefs.find((bundle) => bundle.repositoryId === pullRequest.repositoryId && bundle.number === pullRequest.number
+        && bundle.candidateDigest === pullRequest.candidateDigest)?.headTreeSha;
+    if (tree !== undefined) trees.set(pullRequest.repositoryId, tree);
+    else if (pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN") return undefined;
+  }
+  return trees;
+}
+
+/** The note recorded with the owner's "Keep the pull request as it is" (a dismissal of the approved fix that changed nothing). */
+export const WORKFLOW_KEEP_PULL_REQUESTS_NOTE = "The owner kept the pull request as it is.";
+
+/** The task waiting for the merge again, its pull requests as they are; throws when that is not where it can go back to. */
+function keptPullRequests(current: WorkflowSnapshot, input: { requestId: string; actorId: string; now: string }): WorkflowSnapshot {
+  const review = current.feedbackReview;
+  if (current.stage !== "IMPLEMENT" || current.state !== "BLOCKED" || current.blockReason !== WORKFLOW_BLOCK_REASONS.fixChangedNothing
+    || review === undefined || review.status !== "APPROVED" || review.reviewRef === undefined || current.candidate === undefined
+    || !(current.pullRequests ?? []).some((pullRequest) => pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN")) {
+    throw new WorkflowTransitionError("the pull request can be kept as it is only after an approved fix changed nothing");
+  }
+  if (current.feedbackDecisions?.some((decision) => decision.requestId === input.requestId) || current.decisions.some((decision) => decision.requestId === input.requestId)) {
+    throw new WorkflowTransitionError("request ID was already used for a different workflow decision");
+  }
+  const decision = WorkflowFeedbackDecisionSchema.parse({
+    schemaVersion: 1, requestId: input.requestId, workflowRevision: current.revision, decision: "DISMISS", actorId: input.actorId, actorRole: "TASK_OWNER",
+    reviewDigest: review.reviewRef.sha256, proposalDigest: review.reviewRef.proposalDigest, bundleDigests: review.bundleRefs.map((bundle) => bundle.sha256),
+    selectedFindingIds: [], selectedCommentIds: [], candidates: [], ownerNote: WORKFLOW_KEEP_PULL_REQUESTS_NOTE, at: input.now,
+  });
+  const { blockReason: _blockReason, feedbackDispatchApproval: _approval, ...rest } = current;
+  void _blockReason;
+  void _approval;
+  // The feedback the fix was for stays recorded as dismissed, so the same comments are not reviewed again.
+  return WorkflowSnapshotSchema.parse({
+    ...rest, revision: current.revision + 1, stage: "WAIT_FOR_MERGE", state: "WAITING",
+    feedbackReview: { ...review, status: "DISMISSED" }, feedbackDecisions: [...(current.feedbackDecisions ?? []), decision].slice(-100), updatedAt: input.now,
+  });
+}
+
+/**
+ * Whether Slack offers "Keep the pull request as it is": an approved fix changed nothing, and the code, checks and reviews
+ * the pull requests hold are still the task's, so it can simply wait for the merge again.
+ */
+export function workflowKeepPullRequestsOffered(workflow: WorkflowSnapshot): boolean {
+  try {
+    keptPullRequests(workflow, { requestId: "00000000-0000-4000-8000-000000000000", actorId: workflow.ownerId, now: workflow.updatedAt });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** The owner keeps the pull requests as they are after an approved fix changed nothing: the task waits for the merge again. */
+export function keepWorkflowPullRequests(currentInput: unknown, input: { requestId: string; actorId: string; now: string }): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  if (!ActorIdSchema.safeParse(input.actorId).success || input.actorId !== current.ownerId) {
+    throw new WorkflowTransitionError("only the task owner can keep the pull request as it is");
+  }
+  try {
+    return keptPullRequests(current, input);
+  } catch (error) {
+    if (error instanceof WorkflowTransitionError) throw error;
+    throw new WorkflowTransitionError("the pull request can no longer be kept as it is");
+  }
 }
 
 const REVIEW_ROLE_NAMES = { CRITIC: "code review", SECURITY: "security review" } as const;

@@ -696,12 +696,24 @@ async function commentAnswersFor(deps: NotifierDependencies, task: DeveloperTask
   return { answered: found.filter((item) => item !== undefined).length, total: ids.length, fromVersion: previous.version };
 }
 
-async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot): Promise<Reply | undefined> {
+/** The reopened pull requests a notice names (repository and number); a malformed entry is left out. */
+function reopenedOf(value: unknown): Array<{ repositoryId: string; number: number }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const record = entry as { repositoryId?: unknown; number?: unknown } | null;
+    return record !== null && typeof record === "object" && typeof record.repositoryId === "string" && Number.isSafeInteger(record.number)
+      ? [{ repositoryId: record.repositoryId, number: record.number as number }] : [];
+  });
+}
+
+async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot, reopenedPullRequests?: ReadonlyArray<{ repositoryId: string; number: number }>): Promise<Reply | undefined> {
   // A task closed in Slack has its own closed reply; a second "closed" line would say it twice.
   if (workflow.stage === "CLOSED" && task.closedAt !== undefined) return undefined;
   const page = taskPageUrl(deps, task.taskId);
+  // A reopened pull request is said once per reopening (its step's revision), even though its merge step was said before.
+  const reopened = reopenedPullRequests !== undefined && workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING";
   const context: WorkflowMessageContext = { taskId: task.taskId, ownerSlackUserId: task.slackUserId, workflow,
-    ...(page === undefined ? {} : { findingsUrl: `${page}#findings`, taskPageUrl: page }) };
+    ...(page === undefined ? {} : { findingsUrl: `${page}#findings`, taskPageUrl: page }), ...(reopened ? { pullRequestReopened: reopenedPullRequests } : {}) };
   let approval: WorkflowArtifact | undefined;
   if (workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
     const document = await prepareDocumentLink(deps, task, workflow);
@@ -723,7 +735,7 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
   }
   const message = workflowMessage(context);
   if (message === undefined) return undefined;
-  return { ...message, sameAs: workflowMessageKey(workflow), ...(approval === undefined ? {} : { approval }) };
+  return { ...message, sameAs: reopened ? `reopened:${workflow.revision}` : workflowMessageKey(workflow), ...(approval === undefined ? {} : { approval }) };
 }
 
 async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice): Promise<Reply | undefined> {
@@ -744,7 +756,7 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
       const published = PullRequestResultSchema.safeParse((await operation())?.result);
       return published.success ? said(pullRequestReply(published.data.url)) : undefined;
     }
-    case "workflow": return task.workflow === undefined ? undefined : workflowReply(deps, task, task.workflow);
+    case "workflow": return task.workflow === undefined ? undefined : workflowReply(deps, task, task.workflow, notice.pullRequestReopened === true ? reopenedOf(notice.reopenedPullRequests) : undefined);
     case "ended": {
       const ended = await operation();
       if (ended === undefined || !ENDED_STATUSES.has(ended.status)) return undefined;
@@ -1431,32 +1443,34 @@ export function cachedSlackPoster(loadToken: () => Promise<string>, now: () => n
   return cachedSlackClient(loadToken, now, fetchImplementation).post;
 }
 
-/** The Lambda's own dependencies, built on first use: the environment is read only then. */
-function createAwsNotifierHandler() {
-  const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
-  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
-  const sqs = new SQSClient(awsClientConfiguration);
-  const secretsManager = new SecretsManagerClient(awsClientConfiguration);
-  const s3 = new S3Client(awsClientConfiguration);
-  const queueUrl = () => requiredEnvironment("NOTICE_QUEUE_URL");
-  const slack = cachedSlackClient(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
-    .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken));
+/** What the Canvas closeout store reads and writes: the State table, the artifact bucket and Slack's Canvas delete. */
+export interface CanvasCloseoutStoreDependencies {
+  documentClient: Pick<DynamoDBDocumentClient, "send">;
+  s3: Pick<S3Client, "send">;
+  tableName(): string;
+  bucketName(): string;
+  deleteCanvas(canvasId: string): Promise<"deleted" | "unknown">;
+  now(): string;
+}
+
+/** The Canvas closeout store over the State table and the artifact bucket (the notifier Lambda's, and the E2E harness's fakes). */
+export function createCanvasCloseoutStore(deps: CanvasCloseoutStoreDependencies): CanvasCloseoutStore {
   const closeoutStore: CanvasCloseoutStore = {
     async loadTask(taskId) {
-      const result = await documentClient.send(new GetCommand({ TableName: requiredEnvironment("STATE_TABLE_NAME"), Key: taskKey(taskId), ConsistentRead: true }));
+      const result = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName(), Key: taskKey(taskId), ConsistentRead: true }));
       return (result as unknown as { Item?: TaskCanvasCloseoutTask }).Item;
     },
     async readArtifact(ref) {
-      const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: ref.objectKey }));
+      const response = await deps.s3.send(new GetObjectCommand({ Bucket: deps.bucketName(), Key: ref.objectKey }));
       return response.Body?.transformToString("utf8");
     },
     async readManifest(key) {
-      const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
+      const response = await deps.s3.send(new GetObjectCommand({ Bucket: deps.bucketName(), Key: key }));
       return response.Body?.transformToString("utf8");
     },
     async putManifest(key, digest, bytes) {
       try {
-        await s3.send(new PutObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key, Body: bytes,
+        await deps.s3.send(new PutObjectCommand({ Bucket: deps.bucketName(), Key: key, Body: bytes,
           ContentType: "application/json", Metadata: { sha256: digest }, IfNoneMatch: "*" }));
       } catch (error) {
         if (error instanceof Error && ["PreconditionFailed", "ConditionalRequestConflict"].includes(error.name)) {
@@ -1467,7 +1481,7 @@ function createAwsNotifierHandler() {
       }
     },
     async saveCloseout(taskId, nextCloseout, expectedRevision) {
-      const tableName = requiredEnvironment("STATE_TABLE_NAME");
+      const tableName = deps.tableName();
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const current = await closeoutStore.loadTask(taskId);
         const workflow = current?.workflow;
@@ -1483,7 +1497,7 @@ function createAwsNotifierHandler() {
         const mergedWorkflow = { ...workflowWithoutAttempt, canvasCloseout: merged };
         const version = current.canvasCloseoutVersion ?? 0;
         try {
-          await documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
+          await deps.documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
             UpdateExpression: "SET workflow = :workflow, canvasCloseoutVersion = :next",
             ConditionExpression: `workflow.revision = :revision AND ${version === 0 ? "attribute_not_exists(canvasCloseoutVersion)" : "canvasCloseoutVersion = :version"}`,
             ExpressionAttributeValues: { ":workflow": mergedWorkflow, ":next": version + 1, ":revision": expectedRevision,
@@ -1497,7 +1511,7 @@ function createAwsNotifierHandler() {
       return false;
     },
     async saveCloseoutAttempt(taskId, attemptRecord, expectedRevision) {
-      const tableName = requiredEnvironment("STATE_TABLE_NAME");
+      const tableName = deps.tableName();
       for (let attempt = 0; attempt < 4; attempt += 1) {
         const current = await closeoutStore.loadTask(taskId);
         const workflow = current?.workflow;
@@ -1505,7 +1519,7 @@ function createAwsNotifierHandler() {
         const mergedWorkflow = { ...workflow, canvasCloseoutAttempt: attemptRecord };
         const version = current.canvasCloseoutVersion ?? 0;
         try {
-          await documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
+          await deps.documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
             UpdateExpression: "SET workflow = :workflow, canvasCloseoutVersion = :next",
             ConditionExpression: `workflow.revision = :revision AND ${version === 0 ? "attribute_not_exists(canvasCloseoutVersion)" : "canvasCloseoutVersion = :version"}`,
             ExpressionAttributeValues: { ":workflow": mergedWorkflow, ":next": version + 1, ":revision": expectedRevision,
@@ -1518,13 +1532,48 @@ function createAwsNotifierHandler() {
       }
       return false;
     },
+    deleteCanvas: (canvasId) => deps.deleteCanvas(canvasId),
+    now: () => deps.now(),
+  };
+  return closeoutStore;
+}
+
+/** The notifier's closeTaskCanvases: runs the closeout on `store`, and logs how it ended. */
+export function canvasCloseoutService(store: CanvasCloseoutStore): NonNullable<NotifierDependencies["closeTaskCanvases"]> {
+  return async (taskId, expectedManifestDigest, expectedWorkflowRevision) => {
+    const result = await runTaskCanvasCloseout(store, { taskId,
+      ...(expectedManifestDigest === undefined ? {} : { expectedManifestDigest }),
+      ...(expectedWorkflowRevision === undefined ? {} : { expectedWorkflowRevision }) });
+    if (result.status === "ARCHIVE_PENDING") {
+      console.log(JSON.stringify({ component: "developer-task-closeout", event: "archive_pending", taskId,
+        reason: "reason" in result ? result.reason : "archive_pending" }));
+      return result;
+    }
+    console.log(JSON.stringify({ component: "developer-task-closeout", event: "closeout_complete", taskId,
+      canvasCount: result.canvases.length, outcomes: result.canvases.map((canvas) => canvas.status) }));
+    return result;
+  };
+}
+
+/** The Lambda's own dependencies, built on first use: the environment is read only then. */
+function createAwsNotifierHandler() {
+  const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
+  const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
+  const sqs = new SQSClient(awsClientConfiguration);
+  const secretsManager = new SecretsManagerClient(awsClientConfiguration);
+  const s3 = new S3Client(awsClientConfiguration);
+  const queueUrl = () => requiredEnvironment("NOTICE_QUEUE_URL");
+  const slack = cachedSlackClient(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
+    .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken));
+  const closeoutStore = createCanvasCloseoutStore({ documentClient, s3,
+    tableName: () => requiredEnvironment("STATE_TABLE_NAME"), bucketName: () => requiredEnvironment("ARTIFACT_BUCKET_NAME"),
     async deleteCanvas(canvasId) {
       const token = await secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
         .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken);
       return deleteTaskPlanCanvas(token, canvasId);
     },
     now: () => new Date().toISOString(),
-  };
+  });
   return createNotifierHandler({
     documentClient,
     tableName: requiredEnvironment("STATE_TABLE_NAME"),
@@ -1557,19 +1606,7 @@ function createAwsNotifierHandler() {
       return cachedBotToken(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
         .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken))((token) => createTaskPlanCanvas(token, input, fetch, onCreated));
     },
-    async closeTaskCanvases(taskId, expectedManifestDigest, expectedWorkflowRevision) {
-      const result = await runTaskCanvasCloseout(closeoutStore, { taskId,
-        ...(expectedManifestDigest === undefined ? {} : { expectedManifestDigest }),
-        ...(expectedWorkflowRevision === undefined ? {} : { expectedWorkflowRevision }) });
-      if (result.status === "ARCHIVE_PENDING") {
-        console.log(JSON.stringify({ component: "developer-task-closeout", event: "archive_pending", taskId,
-          reason: "reason" in result ? result.reason : "archive_pending" }));
-        return result;
-      }
-      console.log(JSON.stringify({ component: "developer-task-closeout", event: "closeout_complete", taskId,
-        canvasCount: result.canvases.length, outcomes: result.canvases.map((canvas) => canvas.status) }));
-      return result;
-    },
+    closeTaskCanvases: canvasCloseoutService(closeoutStore),
     update: slack.update,
     postEphemeral: slack.postEphemeral,
     now: Date.now,

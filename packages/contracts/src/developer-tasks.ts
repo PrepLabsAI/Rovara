@@ -216,6 +216,31 @@ export type CanvasCloseoutRetryRequest = z.infer<typeof CanvasCloseoutRetryReque
 /** The owner asks AgentX to open the task's draft pull request again, at the workflow revision they saw. */
 export const WorkflowPublishRetryRequestSchema = z.object({ requestId: RequestIdSchema, expectedRevision: z.number().int().positive() }).strict();
 export type WorkflowPublishRetryRequest = z.infer<typeof WorkflowPublishRetryRequestSchema>;
+/**
+ * The owner's decision on a pending PR feedback proposal from an AI tool: the same fields the feedback page sends. APPROVE
+ * names the findings to fix; REQUEST_CHANGES and DISMISS carry the owner's note and select nothing.
+ */
+export const WorkflowFeedbackFindingsDecisionRequestSchema = z.object({
+  requestId: RequestIdSchema,
+  expectedRevision: z.number().int().positive(),
+  reviewDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  proposalDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  bundleDigests: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(32),
+  decision: z.enum(["APPROVE", "REQUEST_CHANGES", "DISMISS"]),
+  selectedFindingIds: z.array(z.string().min(1).max(160)).max(128),
+  ownerNote: z.string().trim().min(1).max(2000).optional(),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.bundleDigests).size !== value.bundleDigests.length || new Set(value.selectedFindingIds).size !== value.selectedFindingIds.length) {
+    context.addIssue({ code: "custom", message: "each finding and comment set can be named only once" });
+  }
+  if (value.decision === "APPROVE" && value.selectedFindingIds.length === 0) context.addIssue({ code: "custom", path: ["selectedFindingIds"], message: "name at least one finding to approve" });
+  if (value.decision !== "APPROVE" && value.ownerNote === undefined) context.addIssue({ code: "custom", path: ["ownerNote"], message: "add a short note saying what to change or why" });
+  if (value.decision !== "APPROVE" && value.selectedFindingIds.length > 0) context.addIssue({ code: "custom", path: ["selectedFindingIds"], message: "only an approval names findings" });
+});
+export type WorkflowFeedbackFindingsDecisionRequest = z.infer<typeof WorkflowFeedbackFindingsDecisionRequestSchema>;
+/** The owner's retry of a PR feedback review that could not finish, naming the failed review. */
+export const WorkflowFeedbackReviewRetryRequestSchema = z.object({ reviewDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+export type WorkflowFeedbackReviewRetryRequest = z.infer<typeof WorkflowFeedbackReviewRetryRequestSchema>;
 
 export const DeveloperPullRequestRequestSchema = z
   .object({

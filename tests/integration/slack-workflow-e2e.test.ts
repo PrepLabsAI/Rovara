@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { E2E_BRIEF_LIMIT as BRIEF_LIMIT, E2E_CHECK, FakeGitHub, WORKER_CALLBACK_ROUTE, createWorkflowE2E, type WorkflowE2E } from "../support/workflow-e2e.js";
 import { MAYA } from "../support/developer-task-broker.js";
+import { registerJourneyInvariants } from "../support/workflow-e2e-invariants.js";
 import { SLACK_TEAM } from "../support/slack-broker.js";
 import { visibleSlackText } from "../support/strict-slack.js";
 import { feedbackCriticReply, feedbackMixedReply, feedbackOwnerDecisionReply, firstUserText, reviewerReply } from "../support/faux-scripts.js";
@@ -96,6 +97,8 @@ describe("Slack-only workflow, end to end in one process", () => {
   const logged = () => log.mock.calls.map(([line]) => String(line));
   beforeEach(() => { log = vi.spyOn(console, "log").mockImplementation(() => undefined); });
   afterEach(() => { log.mockRestore(); });
+  // Every journey keeps the suite's invariants (checked before the log spy above is restored, so its lines are read).
+  registerJourneyInvariants({ logs: logged });
 
   it("takes a Quick request from a Slack mention through plan approval, coding, passing checks and automatic reviews to an automatic draft pull request", async () => {
     const OLDER = "farewell takes an untyped name.";

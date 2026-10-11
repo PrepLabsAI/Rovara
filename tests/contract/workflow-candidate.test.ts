@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { AgentXError, WORKFLOW_HISTORY_REWRITTEN_MESSAGE } from "@agentx/contracts";
 import { preparedBaseResult, type PreparationManifest } from "../../packages/worker/src/prepare.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
+import { candidateUnchangedSinceBase, readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
 
 const execFile = promisify(execFileCallback);
 const roots: string[] = [];
@@ -136,5 +136,23 @@ describe("candidate repository capture", () => {
         "support projects whose setup initialises Git submodules, or nested repositories the agent creates.",
     );
     await expect(access(marker)).rejects.toThrow();
+  });
+
+  it("says a candidate is unchanged only when every repository has a recorded base and still holds its tree", async () => {
+    const unchanged = await repository();
+    const other = await repository();
+    const base = await git(unchanged, "rev-parse", "HEAD");
+    const otherBase = await git(other, "rev-parse", "HEAD");
+    const inputs = [{ repositoryId: "payments", directory: unchanged, baseCommitSha: base }, { repositoryId: "ledger", directory: other, baseCommitSha: otherBase }];
+    const candidates = await readCandidateRepositories(inputs);
+    expect(await candidateUnchangedSinceBase(inputs, candidates)).toBe(true);
+    // A repository with no recorded base can't be shown unchanged, so the candidate isn't refused as "no code changed".
+    const withoutBase = candidates.map((candidate) => {
+      if (candidate.repositoryId !== "ledger") return candidate;
+      const { baseCommitSha: _base, ...rest } = candidate;
+      void _base;
+      return rest;
+    });
+    expect(await candidateUnchangedSinceBase(inputs, withoutBase)).toBe(false);
   });
 });

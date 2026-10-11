@@ -22,6 +22,8 @@ import {
   type ShareDeveloperTaskRequest,
   type StartDeveloperTaskRequest,
   type WorkflowDecisionRequest,
+  type WorkflowFeedbackFindingsDecisionRequest,
+  type WorkflowFeedbackReviewRetryRequest,
   type WorkflowPublishRetryRequest,
   type WorkflowResolveFindingsInput,
 } from "@agentx/contracts";
@@ -55,6 +57,14 @@ export interface ControlPlaneClient {
   resolveWorkflowFindings(taskId: string, request: WorkflowResolveFindingsInput): Promise<DeveloperTaskView>;
   /** Task 12/16: asks AgentX to open the workflow's draft pull request again. */
   retryWorkflowPublish(taskId: string, request: WorkflowPublishRetryRequest): Promise<DeveloperTaskView>;
+  /** After an approved PR feedback fix changed nothing: keep the pull request as it is and wait for its merge again. */
+  keepWorkflowPullRequests(taskId: string, request: WorkflowPublishRetryRequest): Promise<DeveloperTaskView>;
+  /** The pending PR feedback proposal, as the feedback page shows it (GitHub and reviewer text: untrusted data). */
+  getWorkflowFeedback(taskId: string): Promise<Record<string, unknown>>;
+  /** The owner's decision on the pending PR feedback proposal, the same transition the Slack buttons make. */
+  decideWorkflowFeedback(taskId: string, request: WorkflowFeedbackFindingsDecisionRequest): Promise<DeveloperTaskView>;
+  /** The owner's Retry review of a PR feedback review that could not finish. */
+  retryWorkflowFeedbackReview(taskId: string, request: WorkflowFeedbackReviewRetryRequest): Promise<{ task: DeveloperTaskView; started: boolean }>;
   cancelTask(taskId: string, requestId: string): Promise<DeveloperTaskView>;
   closeTask(taskId: string, requestId: string, discardUnpublished?: boolean): Promise<DeveloperCloseResponse>;
   openPullRequest(taskId: string, request: DeveloperPullRequestRequest): Promise<DeveloperPullRequestResponse>;
@@ -65,6 +75,8 @@ export interface ControlPlaneClient {
 /** Spec 025 A1: adminApiVersion is absent from a control plane from before 25d. */
 /** Spec 025 E16 (C22): confirm is absent from a control plane from before 25e. */
 const ConfigurationSchema = z.object({ env: z.string(), apiVersion: z.string(), adminApiVersion: z.string().optional(), confirm: AgentXConfigurationConfirmSchema.optional() });
+/** The feedback page's view of a PR feedback proposal; the tool reads only the fields it shows. */
+const FeedbackReviewResponseSchema = z.object({ review: z.record(z.string(), z.unknown()) });
 const UNREADABLE = "AgentX answered with something this version of the CLI cannot read; upgrade it";
 const DEFAULT_SIGN_IN = `npx ${CLI_PACKAGE_NAME} login <your AgentX URL>`;
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -231,6 +243,13 @@ export function httpControlPlaneClient(options: {
     sendWorkflowBack: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/send-back"), request)),
     resolveWorkflowFindings: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/review-findings"), request)),
     retryWorkflowPublish: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/publish-retry"), request)),
+    keepWorkflowPullRequests: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/keep-pull-requests"), request)),
+    getWorkflowFeedback: async (taskId) => (await call(FeedbackReviewResponseSchema, "GET", path(taskId, "/workflow/feedback"))).review,
+    decideWorkflowFeedback: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/feedback-decision"), request)),
+    retryWorkflowFeedbackReview: async (taskId, request) => {
+      const answer = await call(DeveloperTaskResponseSchema.extend({ started: z.boolean() }), "POST", path(taskId, "/workflow/feedback-retry"), request);
+      return { task: answer.task, started: answer.started };
+    },
     cancelTask: async (taskId, requestId) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/cancel"), { requestId })),
     closeTask: (taskId, requestId, discardUnpublished = false) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, true, { busyStep: CLOSE_BUSY_STEP }),
     openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),

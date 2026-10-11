@@ -176,6 +176,8 @@ export class StrictSlackWeb {
   briefLimit: number | undefined;
   readonly posts: Post[] = [];
   readonly updates: Array<{ channel: string; ts: string; text: string; blocks: unknown[] }> = [];
+  /** Every message posted or edited, in the order Slack received them (an edit carries the edited message's ts and thread). */
+  readonly timeline: Array<{ method: "chat.postMessage" | "chat.update"; channel: string; ts: string; threadTs?: string; text: string; blocks?: unknown[] }> = [];
   readonly ephemerals: Array<{ channel: string; threadTs?: string; user: string; text: string; blocks?: unknown[] }> = [];
   readonly views: Array<{ triggerId: string; view: Record<string, unknown> }> = [];
   readonly responses: Array<{ url: string; text: string }> = [];
@@ -213,6 +215,7 @@ export class StrictSlackWeb {
     const digits = String(this.clock);
     const ts = `${digits.slice(0, 10)}.${digits.slice(10)}`;
     this.posts.push({ channel: input.channel, ...(input.threadTs === undefined ? {} : { threadTs: input.threadTs }), text: input.text, ...(input.blocks === undefined ? {} : { blocks: input.blocks }), ts });
+    this.timeline.push({ method, channel: input.channel, ts, ...(input.threadTs === undefined ? {} : { threadTs: input.threadTs }), text: input.text, ...(input.blocks === undefined ? {} : { blocks: input.blocks }) });
     return { ts, channel: input.channel };
   }
 
@@ -228,6 +231,7 @@ export class StrictSlackWeb {
     const original = this.posts.find((post) => post.channel === input.channel && post.ts === input.ts);
     if (original?.threadTs !== undefined) this.enforceBrief(method, input);
     this.updates.push(input);
+    this.timeline.push({ method, channel: input.channel, ts: input.ts, ...(original?.threadTs === undefined ? {} : { threadTs: original.threadTs }), text: input.text, blocks: input.blocks });
   }
 
   postEphemeral(input: { channel: string; threadTs?: string; user: string; text: string; blocks?: unknown[] }): void {
@@ -266,6 +270,13 @@ export class StrictSlackWeb {
     validateMessage("response_url", message);
     this.enforceBrief("response_url", message);
     this.replacements.push({ url, text: message.text, blocks: message.blocks });
+  }
+
+  /** The post `ts`, which must carry action `actionId` (a press on an older card). */
+  postWithAction(actionId: string, ts: string): Post {
+    const found = this.posts.find((post) => post.ts === ts);
+    if (found === undefined || !hasAction(found.blocks, actionId)) throw new Error(`Post ${ts} does not carry action ${actionId}`);
+    return found;
   }
 
   lastPostWithAction(actionId: string): Post {

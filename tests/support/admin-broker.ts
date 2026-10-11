@@ -7,7 +7,7 @@ import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/de
 import type { ConnectorCredentialsConfiguration, CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
 import type { TurnRecordExport } from "../../packages/broker/src/aws/turns.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
-import { FakeDynamoDb } from "./fake-dynamodb.js";
+import { FakeDynamoDb, type FakeDynamoDbOptions } from "./fake-dynamodb.js";
 
 export const adminIssuer = "https://identity.example.test";
 const account = "111122223333";
@@ -52,11 +52,13 @@ export async function createAdminBroker(options: {
   turnRecords?: TurnRecordExport;
   checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
   developer?: DeveloperApiConfiguration;
-  /** "dynamodb" reads each stored map back in another attribute order, as DynamoDB does. */
-  mapOrder?: "insertion" | "dynamodb";
+  /** The fake table's realism (all on by default); see FakeDynamoDbOptions. An opt-out needs a comment saying why. */
+  realism?: FakeDynamoDbOptions["realism"];
+  /** "eventual": a read without ConsistentRead may see an item's previous version once after a write. */
+  consistency?: FakeDynamoDbOptions["consistency"];
 } = {}): Promise<{ db: FakeDynamoDb; handler: AdminHandler; registry: CredentialRegistry | undefined }> {
   const { createAwsBrokerHandler, CredentialRegistry: Registry } = await loadBroker();
-  const db = new FakeDynamoDb(options.mapOrder === undefined ? {} : { mapOrder: options.mapOrder });
+  const db = new FakeDynamoDb({ ...(options.realism === undefined ? {} : { realism: options.realism }), ...(options.consistency === undefined ? {} : { consistency: options.consistency }) });
   const registry = options.connectorCredentials
     ? new Registry({ ...options.connectorCredentials, documentClient: db as never, tableName: "state" })
     : undefined;

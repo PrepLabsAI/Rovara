@@ -1,6 +1,11 @@
 // In-memory DynamoDB document client for broker tests. It evaluates the condition and update
 // expressions the broker uses, and applies transactions all-or-nothing, as DynamoDB does.
 
+import { expect } from "vitest";
+import { assertDynamoExpressionAttributes, assertNoReservedWords } from "./validating-document-client.js";
+
+export { assertNoReservedWords };
+
 type Item = Record<string, unknown>;
 type Names = Record<string, string>;
 type Values = Record<string, unknown>;
@@ -29,24 +34,89 @@ interface InjectedFault {
   remaining: number;
 }
 
+/**
+ * How close to the real service a FakeDynamoDb is. Every realism is on by default; turning one off needs
+ * `{ realism: { <name>: false } }` and a comment at the call site saying why.
+ */
+export interface FakeDynamoDbOptions {
+  realism?: {
+    /** Reads and stream images hand back a map's attributes in DynamoDB's own order, not the write order (default true). */
+    mapOrder?: boolean;
+    /** Refuse unused, undefined or missing ExpressionAttributeValues/Names, and empty maps, as DynamoDB does (default true). */
+    validateExpressions?: boolean;
+  };
+  /**
+   * "eventual": a GetCommand without `ConsistentRead: true` sees an item's previous version once after each write to it,
+   * as an eventually consistent read may. Default "strong".
+   */
+  consistency?: "strong" | "eventual";
+  /** Seeds the map order; two tables with different seeds order the same key set differently. Default: from the test's name. */
+  seed?: number;
+}
+
+/** The map order seed outside a test: fixed, so a failure reproduces run to run. */
+const DEFAULT_MAP_ORDER_SEED = 0x5eed;
+
+/**
+ * The map order seed for a table made in a test: a hash of the test's name, so different tests see different orders and
+ * a failure reproduces when that test is run again.
+ */
+function testSeed(): number {
+  let name: string | undefined;
+  try {
+    name = expect.getState().currentTestName;
+  } catch {
+    name = undefined;
+  }
+  return name === undefined ? DEFAULT_MAP_ORDER_SEED : keyRank(name, DEFAULT_MAP_ORDER_SEED);
+}
+
 export class FakeDynamoDb {
   readonly items = new Map<string, Item>();
   /**
-   * With `mapOrder: "dynamodb"`, reads hand back each map's attributes in another order than they were written, as
-   * DynamoDB does (it does not keep a map's attribute order). Off by default.
+   * Reads (and, through `reorder`, stream images) hand back each map's attributes in an order of the table's own,
+   * which depends only on the map's key set, as DynamoDB does (it does not keep a map's attribute order). On by default.
    */
   private readonly dynamoMapOrder: boolean;
+  private readonly validateExpressions: boolean;
+  private readonly eventual: boolean;
+  private readonly seed: number;
+  /** For eventual consistency: each written item's previous version (undefined: it did not exist), read once. */
+  private readonly staleOnce = new Map<string, Item | undefined>();
 
-  constructor(options: { mapOrder?: "insertion" | "dynamodb" } = {}) {
-    this.dynamoMapOrder = options.mapOrder === "dynamodb";
+  constructor(options: FakeDynamoDbOptions = {}) {
+    this.dynamoMapOrder = options.realism?.mapOrder ?? true;
+    this.validateExpressions = options.realism?.validateExpressions ?? true;
+    this.eventual = options.consistency === "eventual";
+    this.seed = options.seed ?? testSeed();
+  }
+
+  /** `value` with every map's attributes in this table's order (unchanged when map reordering is off). */
+  reorder<T>(value: T): T {
+    return this.dynamoMapOrder ? reorderMaps(value, this.seed) as T : value;
   }
 
   /** A read's copy of an item. */
   private readClone<T>(value: T): T {
-    const copy = structuredClone(value);
-    return this.dynamoMapOrder ? reorderMaps(copy) as T : copy;
+    const read = this.reorder(structuredClone(value));
+    const item = value as { pk?: unknown; sk?: unknown } | undefined;
+    if (item !== null && typeof item === "object" && typeof item.pk === "string" && typeof item.sk === "string") {
+      const kind = `${item.pk.split("#")[0]}#${item.sk.split("#")[0]}`;
+      const counted = this.readOrders.get(kind) ?? { reads: 0, reordered: 0 };
+      counted.reads += 1;
+      if (JSON.stringify(read) !== JSON.stringify(value)) counted.reordered += 1;
+      this.readOrders.set(kind, counted);
+    }
+    return read;
   }
+  /**
+   * Item reads by kind (`DEVTASK#META`: the pk's and sk's first segments): how many, and how many came back with some
+   * map in an order other than the one it was written in.
+   */
+  readonly readOrders = new Map<string, { reads: number; reordered: number }>();
   private readonly listeners = new Set<(change: { before?: Item; after?: Item }) => void>();
+  /** Every request the table refused as DynamoDB would (ValidationException), in order: a correct product causes none. */
+  readonly refusals: Array<{ command: string; message: string }> = [];
   /** Constructor names of every command sent, in order (spec 025 A3: no route scans). */
   private readonly sent: string[] = [];
 
@@ -86,19 +156,43 @@ export class FakeDynamoDb {
 
   send = async (command: Command): Promise<unknown> => {
     this.sent.push(command.constructor.name);
+    // DynamoDB checks a request's expression attributes before it does anything else, each transaction entry on its own.
+    try {
+      if (this.validateExpressions) {
+        if (command.constructor.name === "TransactWriteCommand") {
+          for (const entry of (command.input.TransactItems ?? []) as Array<Record<string, Record<string, unknown>>>) {
+            assertDynamoExpressionAttributes(Object.values(entry)[0] ?? {});
+          }
+        } else {
+          assertDynamoExpressionAttributes(command.input ?? {});
+        }
+      }
+      return await this.execute(command);
+    } catch (error) {
+      if (error instanceof Error && error.name === "ValidationException" && (error as { injected?: boolean }).injected !== true) this.refusals.push({ command: command.constructor.name, message: error.message });
+      throw error;
+    }
+  };
+
+  private execute = async (command: Command): Promise<unknown> => {
     const fault = this.faults.find((candidate) => candidate.remaining > 0
       && (candidate.command === undefined || candidate.command === command.constructor.name)
       && (candidate.match === undefined || candidate.match(command.input)));
     if (fault !== undefined) {
       fault.remaining -= 1;
-      throw Object.assign(new Error(fault.error.message ?? fault.error.name), { name: fault.error.name, $metadata: {}, ...(fault.error.cancellationReasons === undefined ? {} : { CancellationReasons: fault.error.cancellationReasons }) });
+      throw Object.assign(new Error(fault.error.message ?? fault.error.name), { name: fault.error.name, $metadata: {}, injected: true, ...(fault.error.cancellationReasons === undefined ? {} : { CancellationReasons: fault.error.cancellationReasons }) });
     }
     await Promise.resolve();
     const input = command.input;
     switch (command.constructor.name) {
       case "GetCommand": {
         const key = input.Key as { pk: string; sk: string };
-        const item = this.get(key.pk, key.sk);
+        const stored = itemKey(key.pk, key.sk);
+        let item = this.get(key.pk, key.sk);
+        if (this.eventual && input.ConsistentRead !== true && this.staleOnce.has(stored)) {
+          item = this.staleOnce.get(stored);
+          this.staleOnce.delete(stored);
+        }
         return { Item: item === undefined ? undefined : this.readClone(item) };
       }
       case "QueryCommand":
@@ -166,16 +260,21 @@ export class FakeDynamoDb {
     const values = input.ExpressionAttributeValues as Values;
     if (input.IndexName !== undefined) {
       const names = (input.ExpressionAttributeNames ?? {}) as Names;
-      // An index with a sort key range, as the turn and workspace reads send it (spec 025 phase 25d):
-      // `<attribute> = :v AND <sort> >= :a` or `<attribute> = :v AND <sort> BETWEEN :a AND :b`.
+      // An index with a sort key range, as the turn and workspace reads send it (spec 025 phase 25d), and the webhook
+      // recovery sweep's due rows: `<attribute> = :v AND <sort> (>=|>|<=|<) :a` or `<attribute> = :v AND <sort> BETWEEN :a AND :b`.
       const name = (token: string) => (token.startsWith("#") ? names[token]! : token);
       const ranged = INDEX_RANGE.exec(String(input.KeyConditionExpression));
       if (ranged) {
         const [partition, sort] = [name(ranged[1]!), name(ranged[3]!)];
-        const low = values[ranged[5]!] as string;
+        const operator = ranged[4]!;
+        const bound = values[ranged[5]!] as string;
         const high = ranged[6] === undefined ? undefined : values[ranged[6]] as string;
-        const found = this.find((item) => item[partition] === values[ranged[2]!] && typeof item[sort] === "string"
-          && compareKeys(item[sort], low) >= 0 && (high === undefined || compareKeys(item[sort], high) <= 0))
+        const inRange = (value: string): boolean => {
+          const order = compareKeys(value, bound);
+          if (operator === "BETWEEN") return order >= 0 && compareKeys(value, high!) <= 0;
+          return operator === ">=" ? order >= 0 : operator === ">" ? order > 0 : operator === "<=" ? order <= 0 : order < 0;
+        };
+        const found = this.find((item) => item[partition] === values[ranged[2]!] && typeof item[sort] === "string" && inRange(item[sort]))
           // Items that share a sort value keep one order, by table key, so a page boundary between them skips nothing.
           .sort((left, right) => compareTuples(indexOrder(left, sort), indexOrder(right, sort)));
         if (input.ScanIndexForward === false) found.reverse();
@@ -282,6 +381,7 @@ export class FakeDynamoDb {
       const next = nexts[index];
       if (next === undefined) this.items.delete(action.key);
       else this.items.set(action.key, next);
+      if (this.eventual) this.staleOnce.set(action.key, before);
       // Deleting an item that does not exist leaves no stream record, as in DynamoDB.
       if (before === undefined && next === undefined) continue;
       for (const listener of this.listeners) {
@@ -292,7 +392,7 @@ export class FakeDynamoDb {
 }
 
 const INDEX_EQUALS = /^(#?[A-Za-z0-9_]+) = (:[A-Za-z0-9_]+)$/;
-const INDEX_RANGE = /^(#?[A-Za-z0-9_]+) = (:[A-Za-z0-9_]+) AND (#?[A-Za-z0-9_]+) (>=|BETWEEN) (:[A-Za-z0-9_]+)(?: AND (:[A-Za-z0-9_]+))?$/;
+const INDEX_RANGE = /^(#?[A-Za-z0-9_]+) = (:[A-Za-z0-9_]+) AND (#?[A-Za-z0-9_]+) (>=|<=|>|<|BETWEEN) (:[A-Za-z0-9_]+)(?: AND (:[A-Za-z0-9_]+))?$/;
 
 /** An index item's position: its sort value, then its table keys. */
 function indexOrder(item: Record<string, unknown>, sort: string): string[] {
@@ -309,13 +409,32 @@ function compareTuples(left: string[], right: string[]): number {
 
 /**
  * DynamoDB does not keep the order of a map's attributes (an item's top level, or a map inside it): it hands them back
- * in its own order. Reversed here, so code that compares what it read with what it built by their JSON text, rather
- * than by their content, fails in a test as it does live.
+ * in its own order. Here that order is by a hash of each attribute name and `seed`, so it depends only on the key set
+ * (stable across round trips, whatever order the map was written in), and code that compares what it read with what it
+ * built by their JSON text, rather than by their content, fails in a test as it does live.
  */
-export function reorderMaps(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(reorderMaps);
+export function reorderMaps(value: unknown, seed: number = DEFAULT_MAP_ORDER_SEED): unknown {
+  if (Array.isArray(value)) return value.map((entry) => reorderMaps(entry, seed));
   if (value === null || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return value;
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>).reverse().map(([key, entry]) => [key, reorderMaps(entry)]));
+  const given = Object.keys(value);
+  const ordered = Object.entries(value as Record<string, unknown>)
+    .map(([key, entry]) => [key, reorderMaps(entry, seed), keyRank(key, seed)] as const)
+    .sort((left, right) => left[2] - right[2] || (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0))
+    .map(([key, entry]) => [key, entry] as const);
+  // A map that the key set's order would hand back exactly as written (a two-key map, half the time) is handed back
+  // rotated by one, so a read never shows a map of two or more attributes in the order it was written.
+  if (ordered.length > 1 && ordered.every(([key], index) => key === given[index])) ordered.push(ordered.shift()!);
+  return Object.fromEntries(ordered);
+}
+
+/** FNV-1a over the seed and the attribute name. */
+function keyRank(key: string, seed: number): number {
+  let hash = (0x811c9dc5 ^ seed) >>> 0;
+  for (const char of `${key}`) {
+    hash ^= char.codePointAt(0)!;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash;
 }
 
 function itemKey(pk: string, sk: string): string {
@@ -326,30 +445,6 @@ function itemKey(pk: string, sk: string): string {
 function compareKeys(left: string, right: string): number {
   if (left === right) return 0;
   return left < right ? -1 : 1;
-}
-
-/**
- * DynamoDB reserved words that are also likely attribute names. Real DynamoDB refuses an expression
- * that uses one unaliased (ValidationException); spec 043's run result reached production that way
- * because this fake accepted `result = :result`. Not the whole list, which runs to hundreds of words.
- */
-const RESERVED_WORDS: ReadonlySet<string> = new Set([
-  "ACTION", "COMMENT", "CONNECTION", "COUNT", "DATA", "DATE", "HASH", "INDEX", "ITEM", "KEY", "KEYS", "LEVEL",
-  "LIMIT", "MODE", "NAME", "OWNER", "PATH", "RESULT", "ROLE", "SESSION", "SIZE", "SOURCE", "STATE", "STATUS",
-  "TABLE", "TIME", "TIMESTAMP", "TTL", "TYPE", "USER", "VALUE", "YEAR", "ZONE",
-]);
-const EXPRESSION_KEYWORDS: ReadonlySet<string> = new Set(["AND", "OR", "NOT", "SET", "ADD", "REMOVE", "DELETE", "IN", "BETWEEN"]);
-
-/** Throws as DynamoDB does when an expression names a reserved word without an #alias. */
-export function assertNoReservedWords(expression: string | undefined): void {
-  if (expression === undefined) return;
-  // A document-path separator does not make the following attribute name safe:
-  // `workflow.state` still names the reserved DynamoDB word `state`.
-  const words = expression.match(/(?<![#:\w])[A-Za-z_]\w*\b(?!\s*\()/g) ?? [];
-  const reserved = words.find((word) => !EXPRESSION_KEYWORDS.has(word) && RESERVED_WORDS.has(word.toUpperCase()));
-  if (reserved !== undefined) {
-    throw Object.assign(new Error(`Invalid expression: Attribute name is a reserved keyword; reserved keyword: ${reserved}`), { name: "ValidationException" });
-  }
 }
 
 function toAction(kind: WriteAction["kind"], input: Record<string, unknown>): WriteAction {

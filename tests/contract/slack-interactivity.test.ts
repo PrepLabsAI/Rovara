@@ -391,13 +391,13 @@ describe("Slack native workflow review controls", () => {
       requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "review", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" };
     await handlers.handleAction(action);
     expect(retries[0]).toMatchObject({ taskId, userId: requester, thread, expectedRevision: blocked.revision, candidateDigest: candidate.digest });
-    await expect(handlers.handleAction({ ...action, value: JSON.stringify({ taskId, revision: blocked.revision - 1, candidateDigest: candidate.digest }) })).rejects.toThrow(/no longer current/);
+    await expect(handlers.handleAction({ ...action, value: JSON.stringify({ taskId, revision: blocked.revision - 1, candidateDigest: candidate.digest }) })).rejects.toThrow(/out of date/);
     // Task 16: reviews that found problems may be retried too, on the same checked code.
     loaded = { ...loaded, workflow: { ...blocked, reviews: [{ ...blocked.reviews![0]!, status: "FINDINGS", findings: [{ text: "x", origin: "INTRODUCED" }] }] } };
     await handlers.handleAction(action);
     expect(retries).toHaveLength(2);
     loaded = { ...loaded, workflow: { ...blocked, verification: { ...blocked.verification!, results: [{ checkId: "required-1", status: "FAILED" }] } } };
-    await expect(handlers.handleAction(action)).rejects.toThrow(/no longer current/);
+    await expect(handlers.handleAction(action)).rejects.toThrow(/out of date/);
   });
 
   it("retries opening the pull request only for the owner, in the task's thread, at the current revision", async () => {
@@ -419,9 +419,9 @@ describe("Slack native workflow review controls", () => {
     expect(retries).toEqual([expect.objectContaining({ taskId, userId: requester, thread, expectedRevision: ready.revision })]);
     await expect(handlers.handleAction({ ...action, userId: other })).rejects.toThrow(/Only the task owner/);
     await expect(handlers.handleAction({ ...action, thread: { ...thread, threadTs: "1695500009.000009" } })).rejects.toThrow(/another Slack thread/);
-    await expect(handlers.handleAction({ ...action, value: JSON.stringify({ taskId, revision: ready.revision - 1 }) })).rejects.toThrow(/no longer current/);
+    await expect(handlers.handleAction({ ...action, value: JSON.stringify({ taskId, revision: ready.revision - 1 }) })).rejects.toThrow(/out of date/);
     loaded = { ...loaded, workflow: { ...ready, stage: "WAIT_FOR_MERGE", state: "WAITING" } as never };
-    await expect(handlers.handleAction(action)).rejects.toThrow(/no longer current/);
+    await expect(handlers.handleAction(action)).rejects.toThrow(/out of date/);
     expect(retries).toHaveLength(1);
   });
 
@@ -474,7 +474,7 @@ describe("Slack native workflow review controls", () => {
       const handlers = workflowSlackHandlers({ loadTask: async () => loaded, openView: async () => undefined, submit: async () => undefined, sendBack: async (input) => { sent.push(input); } });
       await handlers.handleAction(press("agentx_workflow_send_back", { taskId, revision: reviewBlocked.revision }));
       expect(sent).toEqual([{ taskId, userId: requester, thread, expectedRevision: reviewBlocked.revision, requestId: expect.stringMatching(/^[0-9a-f-]{36}$/) as unknown }]);
-      await expect(handlers.handleAction(press("agentx_workflow_send_back", { taskId, revision: reviewBlocked.revision - 1 }))).rejects.toThrow(/no longer current/);
+      await expect(handlers.handleAction(press("agentx_workflow_send_back", { taskId, revision: reviewBlocked.revision - 1 }))).rejects.toThrow(/out of date/);
       await expect(handlers.handleAction(press("agentx_workflow_send_back", { taskId, revision: reviewBlocked.revision }, other))).rejects.toThrow(/Only/);
       // Failed checks are sent back the same way; reviews with only pre-existing notes are not a reason to.
       const checksFailed = WorkflowSnapshotSchema.parse({ ...reviewBlocked, stage: "VERIFY", reviews: [], verification: { ...verification, results: [{ checkId: "required-1", status: "FAILED" }] } });
@@ -482,7 +482,7 @@ describe("Slack native workflow review controls", () => {
       await handlers.handleAction(press("agentx_workflow_send_back", { taskId, revision: checksFailed.revision }));
       expect(sent).toHaveLength(2);
       loaded = { ...task, workflow: { ...reviewBlocked, reviews: [review("CRITIC", "PASS", [{ text: "old", origin: "PRE_EXISTING" }])] } };
-      await expect(handlers.handleAction(press("agentx_workflow_send_back", { taskId, revision: reviewBlocked.revision }))).rejects.toThrow(/no longer current/);
+      await expect(handlers.handleAction(press("agentx_workflow_send_back", { taskId, revision: reviewBlocked.revision }))).rejects.toThrow(/out of date/);
       expect(sent).toHaveLength(2);
     });
 
@@ -494,12 +494,12 @@ describe("Slack native workflow review controls", () => {
         retryPlan: async (input) => { plans.push(input); }, retryImplementation: async (input) => { codings.push(input); } });
       await handlers.handleAction(press("agentx_workflow_retry_plan", { taskId, revision: 4 }));
       expect(plans).toEqual([expect.objectContaining({ taskId, userId: requester, thread, expectedRevision: 4, step: "plan" })]);
-      await expect(handlers.handleAction(press("agentx_workflow_retry_implementation", { taskId, revision: 4 }))).rejects.toThrow(/no longer current/);
+      await expect(handlers.handleAction(press("agentx_workflow_retry_implementation", { taskId, revision: 4 }))).rejects.toThrow(/out of date/);
       loaded = { ...task, workflow: { ...workflow, revision: 6, stage: "IMPLEMENT", state: "BLOCKED", blockReason: "implementation operation ended failed" } };
       await handlers.handleAction(press("agentx_workflow_retry_implementation", { taskId, revision: 6 }));
       expect(codings).toEqual([expect.objectContaining({ taskId, userId: requester, thread, expectedRevision: 6, step: "coding" })]);
       await expect(handlers.handleAction(press("agentx_workflow_retry_implementation", { taskId, revision: 6 }, other))).rejects.toThrow(/Only/);
-      await expect(handlers.handleAction(press("agentx_workflow_retry_plan", { taskId, revision: 6 }))).rejects.toThrow(/no longer current/);
+      await expect(handlers.handleAction(press("agentx_workflow_retry_plan", { taskId, revision: 6 }))).rejects.toThrow(/out of date/);
     });
 
     it("offers Run checks again on a ready change whose code changed, through the same check choice", async () => {
@@ -712,12 +712,12 @@ describe("Slack native workflow review controls", () => {
       const blocked = blockedOn([PARSER], [TOKEN]);
       const t = setup(blocked);
       await expect(t.handlers.handleAction(press(valueOf(blocked), other))).rejects.toThrow(/Only <@U0123456789>/);
-      await expect(t.handlers.handleAction(press({ ...valueOf(blocked), revision: blocked.revision - 1 }))).rejects.toThrow(/no longer current/);
-      await expect(t.handlers.handleAction(press({ ...valueOf(blocked), candidateDigest: "f".repeat(64) }))).rejects.toThrow(/no longer current/);
-      await expect(t.handlers.handleAction(press({ taskId, revision: "x" }))).rejects.toThrow(/no longer/);
+      await expect(t.handlers.handleAction(press({ ...valueOf(blocked), revision: blocked.revision - 1 }))).rejects.toThrow(/out of date/);
+      await expect(t.handlers.handleAction(press({ ...valueOf(blocked), candidateDigest: "f".repeat(64) }))).rejects.toThrow(/out of date/);
+      await expect(t.handlers.handleAction(press({ taskId, revision: "x" }))).rejects.toThrow(/out of date/);
       await expect(t.handlers.handleAction({ ...press(valueOf(blocked)), workspaceTeamId: "T0OTHER0001" })).rejects.toThrow(/workspace/);
       t.reload(blockedOn([]));
-      await expect(t.handlers.handleAction(press(valueOf(blocked)))).rejects.toThrow(/no longer current/);
+      await expect(t.handlers.handleAction(press(valueOf(blocked)))).rejects.toThrow(/out of date/);
       const many = blockedOn(Array.from({ length: 20 }, (_, index) => finding(`Problem ${index}`)), [TOKEN]);
       t.reload(many);
       await expect(t.handlers.handleAction(press(valueOf(many)))).rejects.toThrow(/more than 20/);
@@ -738,7 +738,7 @@ describe("Slack native workflow review controls", () => {
       expect((t.resolved[1]!.resolutions as Array<{ action: string; note: string }>).map((entry) => [entry.action, entry.note])).toEqual([["FIX", ""], ["FIX", ""]]);
       await expect(t.handlers.handleSubmission(submission(modal, [], other))).rejects.toThrow(/Only/);
       t.reload({ ...blocked, revision: blocked.revision + 1 });
-      await expect(t.handlers.handleSubmission(submission(modal, []))).rejects.toThrow(/no longer current/);
+      await expect(t.handlers.handleSubmission(submission(modal, []))).rejects.toThrow(/out of date/);
       expect(t.resolved).toHaveLength(2);
     });
 
@@ -807,7 +807,7 @@ describe("Slack native workflow review controls", () => {
     expect(approvalBlocks).toContain("Checks are chosen when you approve the coding plan.");
     expect(approvalBlocks).not.toContain("workflow_feedback");
     expect(approvalBlocks).not.toContain("What should change?");
-    await expect(handlers.handleAction({ ...action, value: JSON.stringify({ taskId, revision: fullWorkflow.revision, digest, decision: "APPROVE" }) })).rejects.toThrow(/changed/);
+    await expect(handlers.handleAction({ ...action, value: JSON.stringify({ taskId, revision: fullWorkflow.revision, digest, decision: "APPROVE" }) })).rejects.toThrow(/out of date/);
   });
 
   it("asks for a comment only when the owner requests changes", async () => {
@@ -894,7 +894,7 @@ describe("Slack native workflow review controls", () => {
       await expect(handlers.handleSubmission(form)).resolves.toBeUndefined();
       expect(submitted).toHaveLength(1);
       // A different decision on the moved-on task is still refused as out of date.
-      await expect(handlers.handleSubmission(submission(opened?.private_metadata))).rejects.toThrow(/changed/);
+      await expect(handlers.handleSubmission(submission(opened?.private_metadata))).rejects.toThrow(/out of date/);
     });
 
     it("refuses an approval from a member of another Slack organization, on the button and on the form", async () => {
@@ -960,7 +960,7 @@ describe("Slack native workflow review controls", () => {
       loaded = { ...task, workflow: { ...workflow, revision: workflow.revision + 1 } };
       const answer = JSON.parse((await handler(signed({ type: "view_submission", user: { id: requester, team_id: thread.teamId }, team: { id: thread.teamId },
         view: { callback_id: "agentx_workflow_review_submission", private_metadata: opened?.private_metadata, state: { values: {} } } }))).body) as { errors: Record<string, string> };
-      expect(answer.errors.workflow_feedback).toBe("This approval has changed. Use the latest AgentX message.");
+      expect(answer.errors.workflow_feedback).toBe("That approval is out of date. Use the latest message in this thread.");
     });
 
     it("asks for changes to a coding plan without saying its checks are chosen later (Task 19 fix)", async () => {
@@ -1096,7 +1096,7 @@ describe("Slack native workflow review controls", () => {
       const submitted: Array<Record<string, unknown>> = [];
       const handlers = workflowSlackHandlers({ loadTask: async () => ({ ...task, workflow: snapshot }), openView: async () => undefined, submit: async (input) => { submitted.push(input); } });
       await expect(handlers.handleAction(press(snapshot.revision, { userId: other }))).rejects.toThrow(/^Only <@U0123456789> can approve this step\.$/);
-      await expect(handlers.handleAction(press(snapshot.revision - 1))).rejects.toThrow("This approval has changed. Use the latest AgentX message.");
+      await expect(handlers.handleAction(press(snapshot.revision - 1))).rejects.toThrow("That approval is out of date. Use the latest message in this thread.");
       await expect(handlers.handleAction(press(snapshot.revision, { userTeamId: "T0OTHERORG1" }))).rejects.toThrow(/workspace/);
       expect(submitted).toEqual([]);
     });

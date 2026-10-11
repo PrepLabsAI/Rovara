@@ -54,7 +54,7 @@ let counter = 0;
 /** A Quick task (or Full with `path`) owned by Priya, shared into the channel, with no documents until `addVersion`. */
 export function pageTask(options: { path?: "QUICK" | "FULL"; reviewPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; shared?: boolean } = {}): PageTaskFixture {
   counter += 1;
-  const db = new FakeDynamoDb({ mapOrder: "dynamodb" });
+  const db = new FakeDynamoDb();
   const objects = new Map<string, string>();
   const members = new Set([PRIYA.slackUserId!, SAM.slackUserId!]);
   let now = START;

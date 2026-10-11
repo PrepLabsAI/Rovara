@@ -107,6 +107,12 @@ describe("failure categories (R5)", () => {
     // F18: the worker's devcontainer writes this exact form (packages/worker/src/devcontainer.ts).
     ["task", "FAILED", "timeout:1800000", "timed_out"],
     ["task", "FAILED", "the model call failed: overloaded", "task_failed"],
+    // A worker that ran, and whose pull request callback the control plane refused (GitHub didn't accept it): the step failed.
+    ["publish", "FAILED", "RUNTIME_UNAVAILABLE: worker callback pull-request failed with HTTP 503", "publication_failed"],
+    ["maintain", "FAILED", "RUNTIME_UNAVAILABLE: worker callback pull-request-update failed with HTTP 409", "task_failed"],
+    // Any other refused callback still reads as the worker being unavailable.
+    ["task", "FAILED", "RUNTIME_UNAVAILABLE: worker callback events failed with HTTP 503", "worker_unavailable"],
+    ["task", "FAILED", "RUNTIME_UNAVAILABLE: worker callback result failed with HTTP 500", "worker_unavailable"],
   ] as const)("%s %s %s is %s", (kind, status, error, category) => {
     expect(failureCategory(kind, status, error)).toBe(category);
   });

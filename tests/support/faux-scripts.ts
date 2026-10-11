@@ -4,6 +4,9 @@ import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep, type Transcr
 
 export const DONE = "AgentX result: done";
 
+/** Named, documented model answers for the workflow E2E suites. */
+export * from "./model-fixtures.js";
+
 type Message = TranscriptContext["messages"][number];
 export type WorkflowTurn = { role: "PLAN" | "CODE" | "SECURITY" | "CODER" | "FEEDBACK"; userText: string };
 type ReviewRole = "CODE" | "SECURITY";
@@ -108,8 +111,11 @@ export function workflowModel(script: {
   plan: string | ((latestUserText: string) => string);
   /** The coder's file writes, or a function of the latest user message (a PR feedback fix reaches the coder as a later turn). */
   edits: Array<{ path: string; content: string }> | ((latestUserText: string) => Array<{ path: string; content: string }>);
-  /** The PR feedback critic's answer to its prompt; absent, it recommends fixing every comment in repo/demo's greeting.ts. */
-  feedback?: (prompt: string) => string;
+  /**
+   * The PR feedback critic's answer to its prompt (or a response step, such as `reviewerHangs`); absent, it recommends fixing
+   * every comment in repo/demo's greeting.ts.
+   */
+  feedback?: (prompt: string) => string | FauxResponseStep;
   reviews?: { CODE?: FauxResponseStep[]; SECURITY?: FauxResponseStep[] };
   prompts?: string[];
   /** One entry per model call (not per session): which turn it was and the latest user message it saw. */
@@ -142,7 +148,9 @@ export function workflowModel(script: {
     }
     if (prompt.includes("independent PR-feedback critic")) {
       script.turns?.push({ role: "FEEDBACK", userText: latestUserText });
-      return fauxAssistantMessage(script.feedback?.(prompt) ?? feedbackCriticReply(prompt, { repositoryId: "demo", path: "greeting.ts", testPath: "greeting.test.ts" }));
+      const answer = script.feedback?.(prompt) ?? feedbackCriticReply(prompt, { repositoryId: "demo", path: "greeting.ts", testPath: "greeting.test.ts" });
+      if (typeof answer === "string") return fauxAssistantMessage(answer);
+      return typeof answer === "function" ? answer(context, options, state, model) : answer;
     }
     const role = reviewRole(prompt);
     if (role !== undefined) {

@@ -192,6 +192,15 @@ async function gitWorkspaceRoot(prepared: ProjectCommand[] = []): Promise<string
   return rootPath;
 }
 
+/**
+ * A coder that writes one file and is done: a workflow coding run that leaves the code as the task started is refused
+ * ("the coding run left the code as it was when the task started"), so these runs change one file.
+ */
+const CHANGED_ONE_FILE: FauxResponseStep[] = [
+  fauxAssistantMessage([fauxToolCall("write", { path: "app/notes.md", content: "note\n" }, { id: "write-1" })], { stopReason: "toolUse" }),
+  fauxAssistantMessage(`Wrote a note.\n${DONE}`),
+];
+
 describe("verification-only retries", () => {
   it("runs only selected project checks without opening a model session or editing files", async () => {
     const fake = fakeRunners({ project: [{ exitCode: 0, timedOut: false, stdout: "lint passed\n", stderr: "" }] });
@@ -210,7 +219,7 @@ describe("verification-only retries", () => {
 
   it("names the code a coding run with no checks finished on, so a review-only task can bind it", async () => {
     const fake = fakeRunners();
-    const run = await runTask({ steps: [fauxAssistantMessage(`Changed nothing.\n${DONE}`)], workflowMode: "IMPLEMENT", readiness: [], runners: fake.runners, rootPath: await gitWorkspaceRoot() });
+    const run = await runTask({ steps: CHANGED_ONE_FILE, workflowMode: "IMPLEMENT", readiness: [], runners: fake.runners, rootPath: await gitWorkspaceRoot() });
 
     expect(run.failure).toBeUndefined();
     expect(run.result?.checks).toMatchObject({ status: "not_verified", notVerifiedReason: "no_checks" });
@@ -220,7 +229,7 @@ describe("verification-only retries", () => {
 
   it("names the code a coding run whose checks were stopped finished on, so a review-only task can go on to review", async () => {
     const fake = fakeRunners();
-    const run = await runTask({ steps: [fauxAssistantMessage(`Changed nothing.\n${DONE}`)], workflowMode: "IMPLEMENT", readiness: [lint], runners: fake.runners, budgets: [1], rootPath: await gitWorkspaceRoot() });
+    const run = await runTask({ steps: CHANGED_ONE_FILE, workflowMode: "IMPLEMENT", readiness: [lint], runners: fake.runners, budgets: [1], rootPath: await gitWorkspaceRoot() });
 
     expect(run.failure).toBeUndefined();
     expect(run.result?.checks).toMatchObject({ status: "not_verified", notVerifiedReason: "stopped" });

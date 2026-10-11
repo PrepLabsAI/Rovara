@@ -65,7 +65,8 @@ export function mcpBrokerFetch(harness: Harness, options: McpBrokerFetchOptions 
   };
 }
 
-export interface ToolAnswer { isError: boolean; value: Record<string, unknown>; error?: ParsedToolError }
+/** A tool's answer: its structured content, and the text the AI tool reads (`text`). */
+export interface ToolAnswer { isError: boolean; value: Record<string, unknown>; error?: ParsedToolError; text?: string }
 
 export async function signedInClient(harness: Harness, who: Developer | undefined, onSleep: () => Promise<void> = async () => undefined) {
   const home = await mkdtemp(join(tmpdir(), "agentx-mcp-"));
@@ -84,13 +85,14 @@ export async function signedInClient(harness: Harness, who: Developer | undefine
   const client = new Client({ name: "claude-code", version: "2.1.0" });
   await client.connect(clientSide);
   // Ruling F3: listing first makes the client validate every structuredContent it gets back.
-  expect((await client.listTools()).tools).toHaveLength(18);
+  expect((await client.listTools()).tools).toHaveLength(21);
   const answers: string[] = [];
   const tool = async (name: string, args: Record<string, unknown> = {}): Promise<ToolAnswer> => {
     const result = await client.callTool({ name, arguments: args });
     answers.push(JSON.stringify(result));
     if (result.isError === true) return { isError: true, value: {}, error: toolError(result) };
-    return { isError: false, value: result.structuredContent as Record<string, unknown> };
+    const text = (result.content as Array<{ type: string; text?: string }> | undefined)?.find((part) => part.type === "text")?.text;
+    return { isError: false, value: result.structuredContent as Record<string, unknown>, ...(text === undefined ? {} : { text }) };
   };
   /** FR-026 and the global constraints: neither token appears in any tool result or log line. */
   const expectNoTokenLeaked = () => {

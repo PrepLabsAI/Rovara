@@ -2,6 +2,7 @@
 // Pure: whether the task is shared is decided when a notice is delivered (Task 7).
 import type { AttributeValue } from "@aws-sdk/client-dynamodb";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
+import { WORKFLOW_BLOCK_REASONS } from "@agentx/contracts";
 
 export interface StreamRecord {
   eventID?: string;
@@ -31,6 +32,10 @@ export interface Notice {
   expectedWorkflowRevision?: number;
   /** A workflow notice's revision: delivered only while the task is still at it, so a stale step is never said. */
   workflowRevision?: number;
+  /** A workflow notice for the step a closed required pull request's reopening started: AgentX follows it again. */
+  pullRequestReopened?: true;
+  /** With `pullRequestReopened`: the pull requests that were reopened, by repository and number. */
+  reopenedPullRequests?: Array<{ repositoryId: string; number: number }>;
 }
 
 /** Stable key shared by notice production and the owner-decision latency measurement. */
@@ -68,7 +73,14 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       } else if (afterWorkflow !== undefined && beforeWorkflow !== undefined && afterWorkflow.revision !== beforeWorkflow.revision && eventId !== "") {
         // Gap 5: every step change, keyed by its revision; the notifier words it, or says nothing, when it is delivered.
         // The task's first step is not one: the start message (or Slack's Quick or Full answer) already says it.
-        notices.push({ id: `${taskId}:workflow:${String(afterWorkflow.revision)}`, kind: "workflow", taskId, at, workflowRevision: Number(afterWorkflow.revision) });
+        const reopened = beforeWorkflow.state === "BLOCKED" && beforeWorkflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestClosed
+          && afterWorkflow.stage === "WAIT_FOR_MERGE" && afterWorkflow.state === "WAITING";
+        // Which of the task's pull requests were closed before and are open now.
+        const pullRequests = (value: Record<string, unknown> | undefined) => (Array.isArray(value?.pullRequests) ? value.pullRequests as Array<Record<string, unknown>> : []);
+        const reopenedNumbers = reopened ? pullRequests(afterWorkflow).filter((pr) => pr.state === "OPEN" && pullRequests(beforeWorkflow)
+          .some((earlier) => earlier.repositoryId === pr.repositoryId && earlier.number === pr.number && earlier.state === "CLOSED")).map((pr) => ({ repositoryId: String(pr.repositoryId), number: Number(pr.number) })) : [];
+        notices.push({ id: `${taskId}:workflow:${String(afterWorkflow.revision)}`, kind: "workflow", taskId, at, workflowRevision: Number(afterWorkflow.revision),
+          ...(reopened ? { pullRequestReopened: true as const, reopenedPullRequests: reopenedNumbers } : {}) });
       }
       if (after !== undefined && before === undefined) notices.push({ id: `${taskId}:start`, kind: "start", taskId, at });
       // A mode notice is named by its stream event; without one, two changes would collapse into one ID.

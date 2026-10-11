@@ -127,8 +127,9 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
     if (caller === undefined) return json(401, { error: "sign_in_required" });
     if (route === null) return json(404, { error: "not_found" });
     const taskId = route[1]!.toLowerCase();
-    const endpoint = route[2]!.toLowerCase();
     const commentId = route[3]?.toLowerCase();
+    // `comments/<ID>/edit` and `comments/<ID>/delete` are the comments endpoint, for that comment.
+    const endpoint = commentId === undefined ? route[2]!.toLowerCase() : "comments";
     const action = route[4]?.toLowerCase();
     const method = request.method.toUpperCase();
     // `state` is read, `comments` is read (GET) and written (POST), everything else is written.

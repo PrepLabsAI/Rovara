@@ -42,7 +42,7 @@ describe("the tool list (FR-027, FR-028, SC-010)", () => {
     expect(tools.map((tool) => tool.name)).toEqual([
       "agentx_whoami", "agentx_list_projects", "agentx_start_task", "agentx_start_workflow", "agentx_get_task", "agentx_wait_for_task",
       "agentx_list_tasks", "agentx_continue_task", "agentx_decide_workflow", "agentx_review_workflow_candidate", "agentx_retry_workflow",
-      "agentx_send_workflow_back", "agentx_resolve_review_findings", "agentx_retry_workflow_publish", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request",
+      "agentx_send_workflow_back", "agentx_resolve_review_findings", "agentx_retry_workflow_publish", "agentx_keep_pull_request", "agentx_get_pr_feedback", "agentx_decide_pr_feedback", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request",
     ]);
     for (const tool of tools) expect(tool.outputSchema, tool.name).toBeDefined();
     expect(JSON.stringify(tools)).not.toContain("\u2014");
