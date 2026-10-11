@@ -3070,6 +3070,8 @@ async function taskOperationParts(
     ...input.requester,
   });
   operation.settingsRevision = settings.definition.revision;
+  // A PR feedback review this release starts is given only the owner's notes for its round; its answer is checked against that alone.
+  if (input.workflowFeedbackReview !== undefined) operation.feedbackNotesScoped = true;
   // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
   // Spec 061: every planning step answers with a structured plan document; a Quick plan (no phase) is a whole coding plan.
   const planKind = input.workflowPhase === "REQUIREMENTS" ? "requirements" as const : input.workflowPhase === "DESIGN" ? "design" as const : "plan" as const;
@@ -6387,8 +6389,9 @@ async function completedWorkflowItems(
         if (reportBytes.byteLength > 1_000_000 || createHash("sha256").update(reportBytes).digest("hex") !== resultRecord.outputDigest) throw new Error("critic report bytes failed digest validation");
         const report = WorkflowFeedbackReviewReportSchema.parse(JSON.parse(reportBytes.toString("utf8")));
         const inputs = await readFeedbackBundlesForCritic(dependencies, operation, binding);
-        // The critic's input as this broker builds it, or as an earlier release did for a run it started (deploy skew).
-        const requirementsDigests = inputs.acceptedRequirementsDigests;
+        // The critic's input as this broker builds it; a run an earlier release started (no notes marker) may also have been
+        // given every note, or none (deploy skew), and only such a run.
+        const requirementsDigests = operation.feedbackNotesScoped === true ? inputs.acceptedRequirementsDigests.slice(0, 1) : inputs.acceptedRequirementsDigests;
         const refs = current.feedbackReview.bundleRefs.map(ref => WorkflowFeedbackBundleRefSchema.parse(ref));
         if (operation.workflowMode !== "FEEDBACK_REVIEW" || report.operationMode !== operation.workflowMode
           || report.operationId !== operation.id || report.taskId !== current.taskId

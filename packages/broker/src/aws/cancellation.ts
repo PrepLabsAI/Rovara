@@ -40,6 +40,8 @@ export interface OperationRecord extends Operation {
   settingsRevision?: number;
   workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | undefined;
   workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } | undefined;
+  /** A PR feedback review started by a broker that gives the critic only the owner's notes for its round (absent: an earlier release's run). */
+  feedbackNotesScoped?: true;
   publication?: {
     repository: string;
     repositoryUrl: string;

@@ -412,6 +412,27 @@ describe("Suite 9: resilience", () => {
     expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text)).toMatch(/^PR feedback is ready: 2 comments;/);
   }, 120_000);
 
+  it("9.17 a PR feedback review this broker started is held to its own input: an answer given without the owner's notes is refused, never proposed", async () => {
+    // Found in review: the earlier brokers' inputs were accepted for every run, forever, so a run that dropped the owner's
+    // note would still be taken.
+    const NOTE = "Keep greet's signature; only trim inside it.";
+    const { e2e, counts, pullRequest } = await waiting();
+    const first = e2e.github.comment(pullRequest.number, "octocat", "Please trim the name.");
+    expect(await e2e.githubWebhook(pullRequest.number, { comment: first })).toBe(200);
+    await e2e.settle();
+    await e2e.click("agentx_feedback_review_changes");
+    await e2e.submitView({ feedback_note: { reason: { value: NOTE } } });
+    await e2e.settle();
+    e2e.worker.rewriteNextFeedbackInputs((text) => text.slice(0, text.indexOf("\n\nNotes the task owner left")), { startedBy: "this broker" });
+    const second = e2e.github.comment(pullRequest.number, "octocat", "Also add a test for an empty name.");
+    expect(await e2e.githubWebhook(pullRequest.number, { comment: second })).toBe(200);
+    await e2e.settle();
+    expect(counts.feedback).toBe(2);
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
+    expect(said(e2e).at(-1)).toBe(`I couldn't review the feedback on the pull request, so I have nothing to propose from it. ${STILL_WATCHING}`);
+    expect(posted(e2e, "PR feedback is ready")).toHaveLength(1);
+  }, 120_000);
+
   it("9.17 deploy skew: a PR feedback review an earlier broker started with every note the owner ever left is accepted when it finishes on this one", async () => {
     const NOTE = "Keep greet's signature; only trim inside it.";
     const { e2e, counts, pullRequest } = await waiting();

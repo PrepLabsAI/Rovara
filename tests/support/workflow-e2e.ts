@@ -506,6 +506,8 @@ export async function createWorkflowE2E(options: {
   let workerFeatureList: readonly string[] | undefined;
   /** An old broker's answer to the feedback critic's input read: the next feedback review is given `rewrite(taskRequirements)`. */
   let feedbackInputRewrite: ((taskRequirements: string) => string) | undefined;
+  /** Whether that review run was started by the earlier broker too (its operation then carries no notes marker). */
+  let feedbackInputStartedEarlier = true;
   /** Runs that crashed (no terminal callback), by workspace, until a recovery sweep fails them. */
   const crashed: Array<{ workspaceId: string; operationId: string; kind: WorkerInvocation["kind"] }> = [];
   /** Invocations the dispatcher could not deliver (the worker's /ping lacked a feature), with the error it recorded. */
@@ -580,6 +582,10 @@ export async function createWorkflowE2E(options: {
         feedbackBundleReader: feedbackInputRewrite === undefined ? callbacks.feedbackBundleReader : async (binding) => {
           const rewrite = feedbackInputRewrite!;
           feedbackInputRewrite = undefined;
+          if (feedbackInputStartedEarlier) {
+            const operation = db.get(`WORKSPACE#${invocation.workspaceId}`, `OPERATION#${invocation.operationId}`);
+            if (operation !== undefined) { const { feedbackNotesScoped: _marker, ...earlier } = operation; void _marker; db.set(earlier); }
+          }
           const read = await callbacks.feedbackBundleReader(binding);
           return { ...read, taskRequirements: rewrite(read.taskRequirements) };
         }, authorizeFeedbackApproval: callbacks.authorizeFeedbackApproval, checkRunners,
@@ -1131,9 +1137,13 @@ export async function createWorkflowE2E(options: {
       features: (list: readonly string[] | undefined): void => { workerFeatureList = list; },
       /**
        * Deploy skew: the next feedback review's input reads as an older broker built it (`rewrite` turns this broker's
-       * owner-approved requirements text into that broker's), while its answer is checked by this broker.
+       * owner-approved requirements text into that broker's), while its answer is checked by this broker. By default the run
+       * was started by that older broker too (its operation has no notes marker); `startedBy: "this broker"` keeps the marker.
        */
-      rewriteNextFeedbackInputs: (rewrite: (taskRequirements: string) => string): void => { feedbackInputRewrite = rewrite; },
+      rewriteNextFeedbackInputs: (rewrite: (taskRequirements: string) => string, rewriteOptions: { startedBy?: "earlier broker" | "this broker" } = {}): void => {
+        feedbackInputRewrite = rewrite;
+        feedbackInputStartedEarlier = rewriteOptions.startedBy !== "this broker";
+      },
       /** Runs that crashed and that no sweep has failed yet. */
       crashed,
       /** Invocations the dispatcher failed instead of delivering, with the error it recorded. */
