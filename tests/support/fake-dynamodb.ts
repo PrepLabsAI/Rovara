@@ -1,6 +1,8 @@
 // In-memory DynamoDB document client for broker tests. It evaluates the condition and update
 // expressions the broker uses, and applies transactions all-or-nothing, as DynamoDB does.
 
+import { assertDynamoExpressionAttributes } from "./validating-document-client.js";
+
 type Item = Record<string, unknown>;
 type Names = Record<string, string>;
 type Values = Record<string, unknown>;
@@ -29,22 +31,59 @@ interface InjectedFault {
   remaining: number;
 }
 
+/**
+ * How close to the real service a FakeDynamoDb is. Every realism is on by default; turning one off needs
+ * `{ realism: { <name>: false } }` and a comment at the call site saying why.
+ */
+export interface FakeDynamoDbOptions {
+  /** Legacy spelling of `realism.mapOrder`: "insertion" turns map reordering off. */
+  mapOrder?: "insertion" | "dynamodb";
+  realism?: {
+    /** Reads and stream images hand back a map's attributes in DynamoDB's own order, not the write order (default true). */
+    mapOrder?: boolean;
+    /** Refuse unused, undefined or missing ExpressionAttributeValues/Names, and empty maps, as DynamoDB does (default true). */
+    validateExpressions?: boolean;
+  };
+  /**
+   * "eventual": a GetCommand without `ConsistentRead: true` sees an item's previous version once after each write to it,
+   * as an eventually consistent read may. Default "strong".
+   */
+  consistency?: "strong" | "eventual";
+  /** Seeds the map order; two tables with different seeds order the same key set differently. */
+  seed?: number;
+}
+
+/** The default map order seed: fixed, so a failure reproduces run to run. */
+const DEFAULT_MAP_ORDER_SEED = 0x5eed;
+
 export class FakeDynamoDb {
   readonly items = new Map<string, Item>();
   /**
-   * With `mapOrder: "dynamodb"`, reads hand back each map's attributes in another order than they were written, as
-   * DynamoDB does (it does not keep a map's attribute order). Off by default.
+   * Reads (and, through `reorder`, stream images) hand back each map's attributes in an order of the table's own,
+   * which depends only on the map's key set, as DynamoDB does (it does not keep a map's attribute order). On by default.
    */
   private readonly dynamoMapOrder: boolean;
+  private readonly validateExpressions: boolean;
+  private readonly eventual: boolean;
+  private readonly seed: number;
+  /** For eventual consistency: each written item's previous version (undefined: it did not exist), read once. */
+  private readonly staleOnce = new Map<string, Item | undefined>();
 
-  constructor(options: { mapOrder?: "insertion" | "dynamodb" } = {}) {
-    this.dynamoMapOrder = options.mapOrder === "dynamodb";
+  constructor(options: FakeDynamoDbOptions = {}) {
+    this.dynamoMapOrder = options.realism?.mapOrder ?? options.mapOrder !== "insertion";
+    this.validateExpressions = options.realism?.validateExpressions ?? true;
+    this.eventual = options.consistency === "eventual";
+    this.seed = options.seed ?? DEFAULT_MAP_ORDER_SEED;
+  }
+
+  /** `value` with every map's attributes in this table's order (unchanged when map reordering is off). */
+  reorder<T>(value: T): T {
+    return this.dynamoMapOrder ? reorderMaps(value, this.seed) as T : value;
   }
 
   /** A read's copy of an item. */
   private readClone<T>(value: T): T {
-    const copy = structuredClone(value);
-    return this.dynamoMapOrder ? reorderMaps(copy) as T : copy;
+    return this.reorder(structuredClone(value));
   }
   private readonly listeners = new Set<(change: { before?: Item; after?: Item }) => void>();
   /** Constructor names of every command sent, in order (spec 025 A3: no route scans). */
@@ -86,6 +125,16 @@ export class FakeDynamoDb {
 
   send = async (command: Command): Promise<unknown> => {
     this.sent.push(command.constructor.name);
+    // DynamoDB checks a request's expression attributes before it does anything else, each transaction entry on its own.
+    if (this.validateExpressions) {
+      if (command.constructor.name === "TransactWriteCommand") {
+        for (const entry of (command.input.TransactItems ?? []) as Array<Record<string, Record<string, unknown>>>) {
+          assertDynamoExpressionAttributes(Object.values(entry)[0] ?? {});
+        }
+      } else {
+        assertDynamoExpressionAttributes(command.input ?? {});
+      }
+    }
     const fault = this.faults.find((candidate) => candidate.remaining > 0
       && (candidate.command === undefined || candidate.command === command.constructor.name)
       && (candidate.match === undefined || candidate.match(command.input)));
@@ -98,7 +147,12 @@ export class FakeDynamoDb {
     switch (command.constructor.name) {
       case "GetCommand": {
         const key = input.Key as { pk: string; sk: string };
-        const item = this.get(key.pk, key.sk);
+        const stored = itemKey(key.pk, key.sk);
+        let item = this.get(key.pk, key.sk);
+        if (this.eventual && input.ConsistentRead !== true && this.staleOnce.has(stored)) {
+          item = this.staleOnce.get(stored);
+          this.staleOnce.delete(stored);
+        }
         return { Item: item === undefined ? undefined : this.readClone(item) };
       }
       case "QueryCommand":
@@ -282,6 +336,7 @@ export class FakeDynamoDb {
       const next = nexts[index];
       if (next === undefined) this.items.delete(action.key);
       else this.items.set(action.key, next);
+      if (this.eventual) this.staleOnce.set(action.key, before);
       // Deleting an item that does not exist leaves no stream record, as in DynamoDB.
       if (before === undefined && next === undefined) continue;
       for (const listener of this.listeners) {
@@ -309,13 +364,27 @@ function compareTuples(left: string[], right: string[]): number {
 
 /**
  * DynamoDB does not keep the order of a map's attributes (an item's top level, or a map inside it): it hands them back
- * in its own order. Reversed here, so code that compares what it read with what it built by their JSON text, rather
- * than by their content, fails in a test as it does live.
+ * in its own order. Here that order is by a hash of each attribute name and `seed`, so it depends only on the key set
+ * (stable across round trips, whatever order the map was written in), and code that compares what it read with what it
+ * built by their JSON text, rather than by their content, fails in a test as it does live.
  */
-export function reorderMaps(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(reorderMaps);
+export function reorderMaps(value: unknown, seed: number = DEFAULT_MAP_ORDER_SEED): unknown {
+  if (Array.isArray(value)) return value.map((entry) => reorderMaps(entry, seed));
   if (value === null || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return value;
-  return Object.fromEntries(Object.entries(value as Record<string, unknown>).reverse().map(([key, entry]) => [key, reorderMaps(entry)]));
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .map(([key, entry]) => [key, reorderMaps(entry, seed), keyRank(key, seed)] as const)
+    .sort((left, right) => left[2] - right[2] || (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0))
+    .map(([key, entry]) => [key, entry]));
+}
+
+/** FNV-1a over the seed and the attribute name. */
+function keyRank(key: string, seed: number): number {
+  let hash = (0x811c9dc5 ^ seed) >>> 0;
+  for (const char of `${key}`) {
+    hash ^= char.codePointAt(0)!;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash;
 }
 
 function itemKey(pk: string, sk: string): string {

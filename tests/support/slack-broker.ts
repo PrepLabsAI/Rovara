@@ -7,7 +7,7 @@ import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/de
 import type { ConnectorCredentialsConfiguration, CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
 import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
-import { FakeDynamoDb } from "./fake-dynamodb.js";
+import { FakeDynamoDb, type FakeDynamoDbOptions } from "./fake-dynamodb.js";
 
 export const issuer = "https://identity.example.test";
 export const account = "111122223333";
@@ -62,11 +62,13 @@ export function createBroker(options: {
   s3?: { send: (command: never) => Promise<unknown> };
   /** Spread into the broker input last, for inputs this helper has no option for. */
   extra?: Record<string, unknown>;
-  /** "dynamodb": the table hands a map's attributes back in another order than they were written, as DynamoDB does. */
-  mapOrder?: "insertion" | "dynamodb";
+  /** The fake table's realism (all on by default); see FakeDynamoDbOptions. An opt-out needs a comment saying why. */
+  realism?: FakeDynamoDbOptions["realism"];
+  /** "eventual": a read without ConsistentRead may see an item's previous version once after a write. */
+  consistency?: FakeDynamoDbOptions["consistency"];
 } = {}) {
   if (!loaded) throw new Error("call loadSlackBroker() in a beforeAll before createBroker()");
-  const db = new FakeDynamoDb(options.mapOrder === undefined ? {} : { mapOrder: options.mapOrder });
+  const db = new FakeDynamoDb({ ...(options.realism === undefined ? {} : { realism: options.realism }), ...(options.consistency === undefined ? {} : { consistency: options.consistency }) });
   const deleteEc2Session = options.deleteEc2Session === null ? undefined : vi.fn(options.deleteEc2Session ?? (async () => undefined));
   const brokerInput = {
     documentClient: db,

@@ -22,6 +22,9 @@ export function assertDynamoExpressionAttributes(input: Record<string, unknown>)
   const usedNames = new Set(text.match(/#[A-Za-z0-9_]+/g) ?? []);
   const values = (input.ExpressionAttributeValues ?? {}) as Record<string, unknown>;
   const names = (input.ExpressionAttributeNames ?? {}) as Record<string, unknown>;
+  // DynamoDB refuses an empty map outright, before it compares keys.
+  if (input.ExpressionAttributeValues !== undefined && Object.keys(values).length === 0) throw validationError("ExpressionAttributeValues must not be empty");
+  if (input.ExpressionAttributeNames !== undefined && Object.keys(names).length === 0) throw validationError("ExpressionAttributeNames must not be empty");
   for (const [key, value] of Object.entries(values)) {
     if (value === undefined) throw validationError(`ExpressionAttributeValues contains an undefined value for ${key}`);
     if (!usedValues.has(key)) throw validationError(`Value provided in ExpressionAttributeValues unused in expressions: keys: {${key}}`);

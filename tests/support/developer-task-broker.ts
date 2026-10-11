@@ -9,7 +9,7 @@ import type { DeveloperTaskActions } from "../../packages/broker/src/aws/develop
 import type { StreamRecord } from "../../packages/broker/src/developer/notifications.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { localSigner } from "./developer-fakes.js";
-import type { FakeDynamoDb } from "./fake-dynamodb.js";
+import type { FakeDynamoDb, FakeDynamoDbOptions } from "./fake-dynamodb.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, orchestratorPrincipal, registerSlackProject, type Handler } from "./slack-broker.js";
 
 export const DEV_ISSUER = "https://abc123.execute-api.us-east-1.amazonaws.com/v1/auth";
@@ -71,8 +71,10 @@ export async function createDeveloperTaskBroker(options: {
   developerExtra?: Partial<DeveloperApiConfiguration>;
   /** Passed to createBroker as its `extra` broker input. */
   brokerExtra?: Record<string, unknown>;
-  /** How the table hands a map's attributes back: "dynamodb" (the default here, another order than written) or "insertion". */
-  mapOrder?: "insertion" | "dynamodb";
+  /** The fake table's realism (all on by default); see FakeDynamoDbOptions. An opt-out needs a comment saying why. */
+  realism?: FakeDynamoDbOptions["realism"];
+  /** "eventual": a read without ConsistentRead may see an item's previous version once after a write. */
+  consistency?: FakeDynamoDbOptions["consistency"];
 } = {}) {
   const module = await loadSlackBroker() as unknown as { createDeveloperTaskActions: (input: never) => DeveloperTaskActions };
   const channelMembers = vi.fn(options.channelMembers ?? (async (request: ChannelMembersRequest): Promise<ChannelMembersResponse> => ({ ok: true, memberOf: request.slackUserId === MAYA.slackUserId ? request.channelIds.filter((id) => id === SLACK_CHANNEL) : [] })));
@@ -90,8 +92,8 @@ export async function createDeveloperTaskBroker(options: {
     ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.organizationLimit === undefined ? {} : { organizationLimit: options.organizationLimit }),
     developer, turnRecordsTableName: "turns", slackThreadsTableName: "threads",
-    // A developer task's records come back as DynamoDB hands them: a map's attributes in its own order.
-    mapOrder: options.mapOrder ?? "dynamodb",
+    ...(options.realism === undefined ? {} : { realism: options.realism }),
+    ...(options.consistency === undefined ? {} : { consistency: options.consistency }),
     ...(options.brokerExtra === undefined ? {} : { extra: options.brokerExtra }),
   });
   const actions = module.createDeveloperTaskActions(brokerInput as never);
@@ -195,14 +197,19 @@ export function teammate(handler: Handler, subject: string, slackUserId: string,
   });
 }
 
-/** Every committed write since the last take(), as the state table's stream would deliver it. */
-export function recordStream(db: FakeDynamoDb): { take(): StreamRecord[] } {
+/**
+ * Every committed write since the last take(), as the state table's stream would deliver it: images carry maps in the
+ * table's own attribute order (as DynamoDB's stream does), and `duplicateNext()` delivers the next record twice, as a
+ * stream's at-least-once delivery may.
+ */
+export function recordStream(db: FakeDynamoDb): { take(): StreamRecord[]; duplicateNext(): void } {
   let records: StreamRecord[] = [];
   let sequence = 0;
-  const image = (item: Record<string, unknown>) => marshall(item, { removeUndefinedValues: true, convertClassInstanceToMap: true });
+  let duplicates = 0;
+  const image = (item: Record<string, unknown>) => marshall(db.reorder(item), { removeUndefinedValues: true, convertClassInstanceToMap: true });
   db.onWrite(({ before, after }) => {
     sequence += 1;
-    records.push({
+    const record: StreamRecord = {
       eventID: `event-${sequence}`,
       eventName: before === undefined ? "INSERT" : after === undefined ? "REMOVE" : "MODIFY",
       dynamodb: {
@@ -210,7 +217,15 @@ export function recordStream(db: FakeDynamoDb): { take(): StreamRecord[] } {
         ...(after === undefined ? {} : { NewImage: image(after) }),
         ...(before === undefined ? {} : { OldImage: image(before) }),
       },
-    });
+    };
+    records.push(record);
+    if (duplicates > 0) {
+      duplicates -= 1;
+      records.push(structuredClone(record));
+    }
   });
-  return { take: () => { const taken = records; records = []; return taken; } };
+  return {
+    take: () => { const taken = records; records = []; return taken; },
+    duplicateNext: () => { duplicates += 1; },
+  };
 }
