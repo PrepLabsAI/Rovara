@@ -696,7 +696,17 @@ async function commentAnswersFor(deps: NotifierDependencies, task: DeveloperTask
   return { answered: found.filter((item) => item !== undefined).length, total: ids.length, fromVersion: previous.version };
 }
 
-async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot, reopenedPullRequests?: readonly number[]): Promise<Reply | undefined> {
+/** The reopened pull requests a notice names (repository and number); a malformed entry is left out. */
+function reopenedOf(value: unknown): Array<{ repositoryId: string; number: number }> {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const record = entry as { repositoryId?: unknown; number?: unknown } | null;
+    return record !== null && typeof record === "object" && typeof record.repositoryId === "string" && Number.isSafeInteger(record.number)
+      ? [{ repositoryId: record.repositoryId, number: record.number as number }] : [];
+  });
+}
+
+async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot, reopenedPullRequests?: ReadonlyArray<{ repositoryId: string; number: number }>): Promise<Reply | undefined> {
   // A task closed in Slack has its own closed reply; a second "closed" line would say it twice.
   if (workflow.stage === "CLOSED" && task.closedAt !== undefined) return undefined;
   const page = taskPageUrl(deps, task.taskId);
@@ -746,7 +756,7 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
       const published = PullRequestResultSchema.safeParse((await operation())?.result);
       return published.success ? said(pullRequestReply(published.data.url)) : undefined;
     }
-    case "workflow": return task.workflow === undefined ? undefined : workflowReply(deps, task, task.workflow, notice.pullRequestReopened === true ? (Array.isArray(notice.reopenedPullRequests) ? notice.reopenedPullRequests.filter((number) => Number.isSafeInteger(number)) : []) : undefined);
+    case "workflow": return task.workflow === undefined ? undefined : workflowReply(deps, task, task.workflow, notice.pullRequestReopened === true ? reopenedOf(notice.reopenedPullRequests) : undefined);
     case "ended": {
       const ended = await operation();
       if (ended === undefined || !ENDED_STATUSES.has(ended.status)) return undefined;

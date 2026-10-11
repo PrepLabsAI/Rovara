@@ -388,6 +388,31 @@ describe("Suite 7: PR feedback loop", () => {
     expect(pullRequest.body!.length).toBeLessThanOrEqual(65_536);
   }, 120_000);
 
+  it("7.13 D2: a description update that runs past its time limit is abandoned and never writes later", async () => {
+    // Found in review: the time limit stopped the wait, not the update, which could still write an old description later.
+    const { e2e, pullRequest } = await feedbackJourney({ descriptionUpdateMaxMs: 50 });
+    await commented(e2e, pullRequest.number, "Please trim the name.");
+    const opened = pullRequest.body;
+    const read = e2e.github.gateway.getPullRequest;
+    let slow: Promise<unknown> | undefined;
+    let afterPush = 0;
+    // GitHub answers the description read slowly once the fix is pushed: the second read after the push (the first is the
+    // push's own check), just before the description is written.
+    e2e.github.gateway.getPullRequest = async (url, number) => {
+      if (e2e.github.during !== "maintain" || fixPushes(e2e).length === 0 || slow !== undefined || ++afterPush < 2) return read(url, number);
+      slow = new Promise((resolve) => setTimeout(resolve, 300));
+      await slow;
+      return read(url, number);
+    };
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    expect(slow).toBeDefined();
+    await slow;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(pullRequest.body).toBe(opened);
+  }, 120_000);
+
   it("7.14 [LIVE-BUG B3/B7] a comment edited between the card and the press refuses the approval in plain words and reviews again", async () => {
     const { e2e, counts, pullRequest } = await feedbackJourney();
     const comment = await commented(e2e, pullRequest.number, "Please trim the name.");

@@ -34,8 +34,8 @@ export interface Notice {
   workflowRevision?: number;
   /** A workflow notice for the step a closed required pull request's reopening started: AgentX follows it again. */
   pullRequestReopened?: true;
-  /** With `pullRequestReopened`: the numbers of the pull requests that were reopened. */
-  reopenedPullRequests?: number[];
+  /** With `pullRequestReopened`: the pull requests that were reopened, by repository and number. */
+  reopenedPullRequests?: Array<{ repositoryId: string; number: number }>;
 }
 
 /** Stable key shared by notice production and the owner-decision latency measurement. */
@@ -78,7 +78,7 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
         // Which of the task's pull requests were closed before and are open now.
         const pullRequests = (value: Record<string, unknown> | undefined) => (Array.isArray(value?.pullRequests) ? value.pullRequests as Array<Record<string, unknown>> : []);
         const reopenedNumbers = reopened ? pullRequests(afterWorkflow).filter((pr) => pr.state === "OPEN" && pullRequests(beforeWorkflow)
-          .some((earlier) => earlier.repositoryId === pr.repositoryId && earlier.number === pr.number && earlier.state === "CLOSED")).map((pr) => Number(pr.number)) : [];
+          .some((earlier) => earlier.repositoryId === pr.repositoryId && earlier.number === pr.number && earlier.state === "CLOSED")).map((pr) => ({ repositoryId: String(pr.repositoryId), number: Number(pr.number) })) : [];
         notices.push({ id: `${taskId}:workflow:${String(afterWorkflow.revision)}`, kind: "workflow", taskId, at, workflowRevision: Number(afterWorkflow.revision),
           ...(reopened ? { pullRequestReopened: true as const, reopenedPullRequests: reopenedNumbers } : {}) });
       }

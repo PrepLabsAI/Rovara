@@ -330,6 +330,8 @@ interface AwsBrokerDependencies {
   githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
   /** Reads the GitHub webhook HMAC key from the configured GitHub App secret; `refresh` asks for a fresh read of the secret. */
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
+  /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
+  descriptionUpdateMaxMs?: number;
   /** Refuses, with CONFIG_INVALID, a repository its credential cannot reach; checked at registration. */
   checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
   codeBuild: CodeBuildGateway;
@@ -4850,7 +4852,7 @@ async function reconcilePullRequestUpdate(
       ":now": new Date().toISOString(),
     },
   }));
-  if (expected.workflowCandidate !== undefined) await describeFeedbackFixes(dependencies, operation, record, remote.body);
+  if (expected.workflowCandidate !== undefined) await describeFeedbackFixes(dependencies, operation, record);
   return { url: remote.url, state: remote.state, reconciled: false };
 }
 
@@ -4861,28 +4863,41 @@ const DESCRIPTION_UPDATE_MAX_MS = 5_000;
  * D2: once an approved PR feedback fix is on the pull request, its description lists briefly what was changed for which
  * of that pull request's comments ("Fixes from PR feedback"), kept up to date across rounds. Best effort and bounded in
  * time (at most the newest approvals' reports are read): the push is recorded whatever happens here, and a description
- * that could not be updated, or whose section no longer fits, is logged. `body` is GitHub's description when the caller
- * already read the pull request; otherwise it is read here.
+ * that could not be updated, or whose section no longer fits, is logged. GitHub's description is read just before the write.
  */
-async function describeFeedbackFixes(dependencies: AwsBrokerDependencies, operation: Pick<OperationRecord, "id" | "workspaceId">, record: PullRequestRecord, body?: string): Promise<void> {
+async function describeFeedbackFixes(dependencies: AwsBrokerDependencies, operation: Pick<OperationRecord, "id" | "workspaceId">, record: PullRequestRecord): Promise<void> {
   const log = (event: string, error?: unknown) => console.log(JSON.stringify({ component: "broker", event, operationId: operation.id,
     ...(error === undefined ? {} : { error: error instanceof Error ? error.name : "unknown" }) }));
+  // Past the time limit the update is abandoned: it must never write later (Lambda may resume a frozen promise in a
+  // later invocation), so the flag and the deadline are checked again right before the write, after a fresh read.
+  const deadline = Date.now() + (dependencies.descriptionUpdateMaxMs ?? DESCRIPTION_UPDATE_MAX_MS);
+  let abandoned = false;
+  const late = () => abandoned || Date.now() > deadline;
   const update = async (): Promise<void> => {
     const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
     const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
-    if (task?.workflow === undefined || task.workspaceId !== operation.workspaceId) return;
+    if (late() || task?.workflow === undefined || task.workspaceId !== operation.workspaceId) return;
     const { fixes, earlier } = await approvedFeedbackFixes(task.workflow, { repositoryId: record.repository, number: record.number },
-      (key, maxBytes) => readObjectText(dependencies, key, maxBytes), `private/${task.ownerKey}/${task.workspaceId}/feedback-reviews/`);
-    const current = body ?? (await dependencies.githubPullRequests.getPullRequest(record.repositoryUrl, record.number)).body;
+      (key, maxBytes) => (late() ? Promise.resolve(undefined) : readObjectText(dependencies, key, maxBytes)), `private/${task.ownerKey}/${task.workspaceId}/feedback-reviews/`);
+    if (late()) return;
+    // The description as GitHub has it now, read just before the write, so a person's edit since is kept.
+    const current = (await dependencies.githubPullRequests.getPullRequest(record.repositoryUrl, record.number)).body;
     const next = withFeedbackFixes(current, fixes, earlier);
     if (next.dropped) log("workflow.pull_request_description_section_dropped");
     if (next.body === undefined) return;
+    if (late()) {
+      log("workflow.pull_request_description_abandoned");
+      return;
+    }
     await dependencies.githubPullRequests.updatePullRequest(record.repositoryUrl, record.number, { body: next.body });
   };
   let timer: NodeJS.Timeout | undefined;
   try {
     await Promise.race([update(), new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(Object.assign(new Error("the description update took too long"), { name: "DescriptionUpdateTimeout" })), DESCRIPTION_UPDATE_MAX_MS);
+      timer = setTimeout(() => {
+        abandoned = true;
+        reject(Object.assign(new Error("the description update took too long"), { name: "DescriptionUpdateTimeout" }));
+      }, dependencies.descriptionUpdateMaxMs ?? DESCRIPTION_UPDATE_MAX_MS);
     })]);
   } catch (error) {
     log("workflow.pull_request_description_not_updated", error);

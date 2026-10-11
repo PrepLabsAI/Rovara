@@ -245,6 +245,8 @@ export async function createWorkflowE2E(options: {
   webhookSecret?: string | null;
   /** The worker's review timeouts (the run-task seam); absent, the reviews' own 5 minutes. */
   workerTimeouts?: { reviewMs?: number; feedbackReviewMs?: number };
+  /** How long the broker's PR description update (D2) may take; absent, the broker's own 5 seconds. */
+  descriptionUpdateMaxMs?: number;
   /** "eventual": a read without ConsistentRead may see an item's previous version once after each write (DynamoDB's default read). */
   consistency?: "strong" | "eventual";
 } = {}) {
@@ -272,6 +274,7 @@ export async function createWorkflowE2E(options: {
       githubPullRequests,
       startPlanEvidenceJob: async (event: PlanEvidenceEvent) => { planEvidenceJobs.push(event); },
       githubWebhookSecret,
+      ...(options.descriptionUpdateMaxMs === undefined ? {} : { descriptionUpdateMaxMs: options.descriptionUpdateMaxMs }),
       repositoryGrants: new RepositoryGrantService(Buffer.alloc(32, 4), (reference, url, access) => github.resolveCredential(reference, url, access)),
     },
   });

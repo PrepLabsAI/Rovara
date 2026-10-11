@@ -125,8 +125,17 @@ export function feedbackFixesSection(fixes: readonly FeedbackFix[], maxChars: nu
  * date (`dropped`). `body` undefined: nothing changes.
  */
 export function withFeedbackFixes(body: string, fixes: readonly FeedbackFix[], earlier = false): { body?: string; dropped: boolean } {
-  const endAt = body.indexOf(END);
-  const startAt = endAt === -1 ? -1 : body.lastIndexOf(START, endAt);
+  // The first END that has a START after the END before it; the START nearest before it begins the section. A stray
+  // START above the section, or a stray END above it, is then never taken for part of it.
+  let endAt = -1;
+  let startAt = -1;
+  for (let from = 0, previousEnd = 0; ; from = endAt + END.length) {
+    endAt = body.indexOf(END, from);
+    if (endAt === -1) break;
+    const start = body.lastIndexOf(START, endAt);
+    if (start !== -1 && start >= previousEnd) { startAt = start; break; }
+    previousEnd = endAt + END.length;
+  }
   const found = startAt !== -1;
   const strip = (text: string) => (text.includes(START) || text.includes(END) ? text.replaceAll(START, "").replaceAll(END, "").replace(/\n{3,}/gu, "\n\n") : text);
   const before = strip(found ? body.slice(0, startAt) : body).replace(/\s+$/u, "");

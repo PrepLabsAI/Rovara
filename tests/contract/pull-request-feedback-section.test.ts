@@ -91,6 +91,14 @@ describe("the PR description's Fixes from PR feedback section", () => {
     expect(second.split(START)).toHaveLength(2);
   });
 
+  it("a stray END marker above the section is removed, and the section is replaced in place, never repeated", () => {
+    const section = withFeedbackFixes("Intro.", [{ summary: "Old fix.", comments: [] }]).body!.slice("Intro.\n\n".length);
+    const body = `Intro.\n\n${END}\nNotes.\n\n${section}`;
+    const next = withFeedbackFixes(body, [{ summary: "New fix.", comments: [] }]).body!;
+    expect(next).toBe(`Intro.\n\nNotes.\n\n${START}\n### Fixes from PR feedback\n- New fix.\n${END}`);
+    expect(next).not.toContain("Old fix.");
+  });
+
   it("near GitHub's limit an old section is shortened, and removed when nothing fits, never left out of date", () => {
     const old = withFeedbackFixes("Intro.", [{ summary: "Old fix.", comments: [] }]).body!;
     const fixes = Array.from({ length: 5 }, (_, index) => ({ summary: `Fix ${index + 1}.`, comments: [] }));
