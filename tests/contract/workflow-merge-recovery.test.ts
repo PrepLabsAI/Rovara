@@ -8,6 +8,7 @@ import {
   type MergeRecoveryDependencies,
   type MergeRecoveryResult,
 } from "../../packages/broker/src/aws/workflow-merge-recovery.js";
+import { releaseItems } from "../../packages/broker/src/developer/limits.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const TABLE = "state";
@@ -306,6 +307,35 @@ describe("workflow merge recovery outcomes", () => {
     expect(h.reconcile).not.toHaveBeenCalled();
   });
 
+  it("quarantines an out-of-range timestamp and still reconciles the next healthy due row", async () => {
+    const h = harness();
+    const poisoned = uuid(1);
+    const healthy = uuid(2);
+    h.db.set({
+      pk: RECOVERY_PK,
+      sk: `TASK#${poisoned}`,
+      entityType: RECOVERY_PK,
+      taskId: poisoned,
+      attempts: 0,
+      nextAttemptAt: 1e20,
+      dispatchDuePk: RECOVERY_PK,
+      dispatchDueSk: `${new Date(h.now() - 2_000).toISOString()}#${poisoned}`,
+    });
+    const poisonedTask = taskRecord(poisoned, { title: "poisoned recovery must not change this task" });
+    h.db.set(poisonedTask);
+    h.db.set(taskRecord(healthy));
+    await enroll(h.db, healthy, h.now() - 1_000);
+
+    expect(await runDueWorkflowMergeRecovery(h.dependencies)).toEqual({ attempted: 1, reconciled: 1, deferred: 1 });
+    expect(h.db.get(RECOVERY_PK, `TASK#${poisoned}`)).toMatchObject({
+      recoveryStatus: "QUARANTINED",
+      recoveryErrorClass: "MALFORMED_DISCOVERY",
+    });
+    expect(h.db.get(taskKey(poisoned).pk, taskKey(poisoned).sk)).toEqual(poisonedTask);
+    expect(h.reconcile).toHaveBeenCalledOnce();
+    expect(h.reconcile).toHaveBeenCalledWith(healthy, expect.any(Object));
+  });
+
   it("never writes quarantine fields onto a malformed discovery item outside the recovery partition", async () => {
     const h = harness();
     const taskId = uuid(1);
@@ -391,8 +421,15 @@ describe("workflow merge recovery outcomes", () => {
     const task = taskRecord(taskId, { closedAt: new Date(h.now()).toISOString() });
     h.db.set(task);
     h.db.set({ pk: `WORKSPACE#workspace-${taskId}`, sk: "META", status: "CLOSED" });
-    h.db.set({ pk: "SLACK_LIMIT#team", sk: `MEMBER#${taskId}`, count: 0, tasks: new Set<string>() });
-    h.db.set({ pk: "SLACK_LIMIT#team", sk: "ORGANIZATION", count: 0 });
+    h.db.set({ pk: "SLACK_LIMIT#team", sk: `MEMBER#${taskId}`, count: 1, tasks: new Set([taskId]) });
+    h.db.set({ pk: "SLACK_LIMIT#team", sk: "ORGANIZATION", count: 1 });
+    await h.db.send(new TransactWriteCommand({
+      TransactItems: releaseItems(TABLE, {
+        member: { pk: "SLACK_LIMIT#team", sk: `MEMBER#${taskId}` },
+        organization: { pk: "SLACK_LIMIT#team", sk: "ORGANIZATION" },
+      }, taskId),
+    }));
+    expect(h.db.get("SLACK_LIMIT#team", `MEMBER#${taskId}`)).not.toHaveProperty("tasks");
     await enroll(h.db, taskId, h.now() - 1);
 
     expect(await runDueWorkflowMergeRecovery(h.dependencies)).toEqual({ attempted: 1, reconciled: 1, deferred: 0 });
@@ -412,9 +449,34 @@ describe("workflow merge recovery outcomes", () => {
     expect(await runDueWorkflowMergeRecovery(h.dependencies)).toEqual({ attempted: 1, reconciled: 0, deferred: 1 });
     expect(h.db.get(RECOVERY_PK, `TASK#${taskId}`)).not.toHaveProperty("indexExpiresAt");
   });
+
+  it("keeps a closed task pending when its charged member counter is unreadable", async () => {
+    const taskId = uuid(1);
+    const h = harness({ reconcile: async () => ({ kind: "TERMINAL", release: "confirmed" }) });
+    const task = taskRecord(taskId, { closedAt: new Date(h.now()).toISOString() });
+    h.db.set(task);
+    h.db.set({ pk: `WORKSPACE#workspace-${taskId}`, sk: "META", status: "CLOSED" });
+    h.db.set({ pk: "SLACK_LIMIT#team", sk: `MEMBER#${taskId}`, count: "zero" });
+    h.db.set({ pk: "SLACK_LIMIT#team", sk: "ORGANIZATION", count: 0 });
+    await enroll(h.db, taskId, h.now() - 1);
+
+    expect(await runDueWorkflowMergeRecovery(h.dependencies)).toEqual({ attempted: 1, reconciled: 0, deferred: 1 });
+    expect(h.db.get(RECOVERY_PK, `TASK#${taskId}`)).not.toHaveProperty("indexExpiresAt");
+  });
 });
 
 describe("workflow merge recovery global cooldown and request budget", () => {
+  it.each(["task", "github-global"] as const)("keeps an unrepresentable %s retry time safely retryable", async (scope) => {
+    const taskId = uuid(1);
+    const h = harness({ reconcile: async () => ({ kind: "RETRY", retryAt: 1e20, scope }) });
+    h.db.set(taskRecord(taskId));
+    await enroll(h.db, taskId, h.now() - 1);
+
+    expect(await runDueWorkflowMergeRecovery(h.dependencies)).toEqual({ attempted: 1, reconciled: 0, deferred: 1 });
+    expect(h.db.get(RECOVERY_PK, `TASK#${taskId}`)).toMatchObject({ nextAttemptAt: h.now() + FIVE_MINUTES });
+    expect(h.db.get(RECOVERY_PK, `TASK#${taskId}`)).not.toHaveProperty("indexExpiresAt");
+  });
+
   it("persists a global cooldown before stopping and admits no request at the ordinary five-minute tick", async () => {
     const first = uuid(1);
     const second = uuid(2);

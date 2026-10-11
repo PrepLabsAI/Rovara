@@ -83,6 +83,10 @@ function validTaskId(taskId: string): boolean {
   return UUID.test(taskId);
 }
 
+function representableDateMilliseconds(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && Number.isFinite(new Date(value).getTime());
+}
+
 function dueKey(at: number, taskId: string): string {
   return `${new Date(at).toISOString()}#${taskId}`;
 }
@@ -120,8 +124,7 @@ function recoveryRow(item: Record<string, unknown> | undefined): RecoveryRow | u
     || typeof item.attempts !== "number"
     || !Number.isInteger(item.attempts)
     || item.attempts < 0
-    || typeof item.nextAttemptAt !== "number"
-    || !Number.isFinite(item.nextAttemptAt)
+    || !representableDateMilliseconds(item.nextAttemptAt)
     || item.dispatchDuePk !== RECOVERY_PK
     || typeof item.dispatchDueSk !== "string"
     || item.dispatchDueSk !== dueKey(item.nextAttemptAt, item.taskId)
@@ -144,7 +147,7 @@ function retryDelay(attempts: number): number {
 export function mergeRecoveryItem(tableName: string, taskId: string, now: string): TransactItems[number] {
   if (!validTaskId(taskId)) throw new Error("workflow merge recovery taskId must be a lowercase UUID");
   const at = Date.parse(now);
-  if (!Number.isFinite(at)) throw new Error("workflow merge recovery now must be an ISO timestamp");
+  if (!representableDateMilliseconds(at)) throw new Error("workflow merge recovery now must be a representable ISO timestamp");
   return { Update: {
     TableName: tableName,
     Key: { pk: RECOVERY_PK, sk: `TASK#${taskId}` },
@@ -409,7 +412,9 @@ async function terminalReceipt(
     const member = await readItem(dependencies, { pk: task.charge.member.pk, sk: task.charge.member.sk });
     const organization = await readItem(dependencies, { pk: task.charge.organization.pk, sk: task.charge.organization.sk });
     const tasks = member?.tasks;
-    const memberReleased = typeof member?.count === "number" && member.count >= 0 && tasks instanceof Set && !tasks.has(taskId);
+    const readableTasks = tasks === undefined || tasks instanceof Set;
+    const memberReleased = typeof member?.count === "number" && member.count >= 0 && readableTasks
+      && (tasks === undefined || !tasks.has(taskId));
     const organizationReleased = typeof organization?.count === "number" && organization.count >= 0
       && (!(organization.tasks instanceof Set) || !organization.tasks.has(taskId));
     return workspace?.status === "CLOSED" && memberReleased && organizationReleased ? "confirmed" : "unproven";
@@ -536,6 +541,13 @@ export async function runDueWorkflowMergeRecovery(
       }
 
       const now = dependencies.now();
+      if (outcome.kind === "RETRY" && !representableDateMilliseconds(outcome.retryAt)) {
+        const settlement = await settleActive(dependencies, claimed, rowToken, now, now + retryDelay(claimed.attempts), claimed.attempts);
+        result.deferred += 1;
+        if (settlement === "unknown") keepGlobalLease = true;
+        if (outcome.scope === "github-global" || settlement === "unknown") return result;
+        continue;
+      }
       if (outcome.kind === "MISSING") {
         const settlement = await quarantine(dependencies, claimed as unknown as Record<string, unknown>, now, "RECONCILE_MISSING", rowToken);
         result.deferred += 1;
