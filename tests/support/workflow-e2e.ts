@@ -55,6 +55,7 @@ import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-cl
 import { createDefaultPiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { createRepositoryCredentialProvider } from "../../packages/worker/src/repository-credentials.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
+import { inspectWorkspaceForClose } from "../../packages/worker/src/close-workspace.js";
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import type { CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
@@ -537,6 +538,11 @@ export async function createWorkflowE2E(options: {
         preparedBase: [{ repositoryId: "demo", baseCommitSha: baseCommit }] } });
       return;
     }
+    if (invocation.kind === "close") {
+      // The worker's own close preflight on the workspace, as worker/main.ts runs it.
+      await callbacks.terminalSink({ operationId, status: "SUCCEEDED", result: await inspectWorkspaceForClose(root) });
+      return;
+    }
     if (invocation.kind !== "task" && invocation.kind !== "publish" && invocation.kind !== "maintain") throw new Error(`the E2E worker does not run ${invocation.kind} invocations`);
     let result: unknown;
     github.during = invocation.kind;
@@ -670,6 +676,8 @@ export async function createWorkflowE2E(options: {
   };
   const ingress = createSlackIngressHandler({
     secrets: async () => ({ signingSecret: SIGNING_SECRET, botToken: "xoxb-e2e" }),
+    // The test's clock (e2e.clock), which Slack's signed timestamps also come from.
+    now: () => Date.now(),
     getBinding: async (teamId, channelId) => {
       const item = db.get(`SLACK_BINDING#${teamId}`, `CHANNEL#${channelId}`);
       return item === undefined ? undefined : SlackChannelBindingSchema.parse({ teamId: item.teamId, channelId: item.channelId, projectName: item.projectName, updatedAt: item.updatedAt });
@@ -719,6 +727,7 @@ export async function createWorkflowE2E(options: {
   // Slack's interactivity endpoint.
   const interactivity = createSlackInteractivityHandler({
     secrets: async () => ({ signingSecret: SIGNING_SECRET, botToken: "xoxb-e2e" }),
+    now: () => Date.now(),
     handlers: [],
     respondEphemeral: (url, text) => slack.respondEphemeral(url, text),
     workflow: workflowSlackHandlers({
