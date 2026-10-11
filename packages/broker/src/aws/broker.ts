@@ -6085,6 +6085,15 @@ async function completedWorkflowItems(
           verificationFailure = WORKFLOW_BLOCK_REASONS.repositoriesIncomplete;
           throw new Error("candidate repositories are incomplete");
         }
+        // An approved fix to an open pull request that leaves every repository's code as the pull request holds it changed
+        // nothing: there is nothing to check again or push, so the thread must not say a fix was pushed.
+        const prior = task.workflow.candidate;
+        if (operation.workflowMode === "IMPLEMENT" && prior !== undefined
+          && (task.workflow.pullRequests ?? []).some((pullRequest) => pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN")
+          && candidate.repositories.every((repository) => prior.repositories.some((entry) => entry.repositoryId === repository.repositoryId && entry.treeSha === repository.treeSha))) {
+          verificationFailure = WORKFLOW_BLOCK_REASONS.noCodeChanged;
+          throw new Error("the fix left the pull request's code as it was");
+        }
         if (checkedCandidate.digest !== candidate.digest) {
           verificationFailure = WORKFLOW_BLOCK_REASONS.codeChangedAfterChecks;
           throw new Error("checked candidate is stale");
@@ -6154,7 +6163,8 @@ async function completedWorkflowItems(
         });
       } catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "workflow.verification_blocked", taskId: task.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown", reason: verificationFailure, ...(verificationDetail === undefined ? {} : { detail: verificationDetail }) }));
-        next = blockWorkflow(verifying, verificationFailure, now, regressedChecks === undefined ? {} : { regressedChecks });
+        next = verificationFailure === WORKFLOW_BLOCK_REASONS.noCodeChanged ? blockWorkflow(task.workflow, verificationFailure, now)
+          : blockWorkflow(verifying, verificationFailure, now, regressedChecks === undefined ? {} : { regressedChecks });
       }
     }
   } else if (operation.workflowMode === "REVIEW") {
