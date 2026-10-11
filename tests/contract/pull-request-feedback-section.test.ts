@@ -186,6 +186,14 @@ describe("the PR description's checks and reviews lines after a pushed fix (0.2.
     expect(withStatusLines(body, accepted)).toBe(`Add a link.\n\n${accepted.join("\n")}\nAgentX task: https://x.example`);
   });
 
+  it("matches lines saved with CRLF endings (GitHub's website) and keeps those endings", () => {
+    const crlf = (text: string) => text.replaceAll("\n", "\r\n");
+    const old = crlf(`Add a link.\n\n${OLD.join("\n")}\nAgentX task: https://x.example\n\nTesting notes.`);
+    expect(withStatusLines(old, NEW)).toBe(crlf(`Add a link.\n\n${NEW.join("\n")}\nAgentX task: https://x.example\n\nTesting notes.`));
+    const marked = crlf(`Add a link.\n\n${block(OLD)}\nAgentX task: https://x.example`);
+    expect(withStatusLines(marked, NEW)).toBe(crlf(`Add a link.\n\n${block(NEW)}\nAgentX task: https://x.example`));
+  });
+
   it("in an older description, never touches a line a person reworded", () => {
     // The person added to AgentX's Checks line: it is no longer AgentX's shape, so nothing is replaced.
     expect(withStatusLines(`Intro.\n\nChecks: npm test passed, manual QA by Dana\n${OLD[1]}`, NEW)).toBeUndefined();

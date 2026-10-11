@@ -227,14 +227,19 @@ export function withStatusLines(body: string, lines: readonly string[]): string 
     // Exactly one pair, in order; anything else is not AgentX's block as it wrote it.
     if (start === -1 || end === -1 || end < start || body.indexOf(PULL_REQUEST_STATUS_START, start + 1) !== -1
       || body.indexOf(PULL_REQUEST_STATUS_END, end + 1) !== -1) return undefined;
-    const next = `${body.slice(0, start)}${[PULL_REQUEST_STATUS_START, ...lines, PULL_REQUEST_STATUS_END].join("\n")}${body.slice(end + PULL_REQUEST_STATUS_END.length)}`;
+    // A description saved from GitHub's website has CRLF line endings: the block keeps them.
+    const eol = body.includes("\r\n") ? "\r\n" : "\n";
+    const next = `${body.slice(0, start)}${[PULL_REQUEST_STATUS_START, ...lines, PULL_REQUEST_STATUS_END].join(eol)}${body.slice(end + PULL_REQUEST_STATUS_END.length)}`;
     return next === body ? undefined : next;
   }
   // An older description: its lines outside the PR feedback section, which is AgentX's too but never holds these.
   const sectionStart = body.indexOf(START);
   const sectionEnd = body.indexOf(END);
   const outside = sectionStart !== -1 && sectionEnd > sectionStart ? body.slice(0, sectionStart) : body;
-  const own = outside.split("\n");
+  // Lines are matched without a trailing CR (GitHub's website saves CRLF), and written back with the same ending.
+  const raw = outside.split("\n");
+  const own = raw.map((line) => line.replace(/\r$/u, ""));
+  const cr = raw.some((line) => line.endsWith("\r")) ? "\r" : "";
   const checksAt = own.flatMap((line, index) => (CHECKS_LINE.test(line) ? [index] : []));
   const reviewsAt = own.flatMap((line, index) => (REVIEWS_LINE.test(line) ? [index] : []));
   const newChecks = lines.filter((line) => CHECKS_LINE.test(line));
@@ -248,7 +253,7 @@ export function withStatusLines(body: string, lines: readonly string[]): string 
     while (ACCEPTED_ITEM.test(own[to] ?? "")) to += 1;
   }
   if (own[to] === PULL_REQUEST_PARTIAL_REVIEW_LINE) to += 1;
-  const replaced = [...own.slice(0, from), ...lines, ...own.slice(to)].join("\n");
+  const replaced = [...raw.slice(0, from), ...lines.map((line) => `${line}${cr}`), ...raw.slice(to)].join("\n");
   const next = `${replaced}${body.slice(outside.length)}`;
   return next === body ? undefined : next;
 }
