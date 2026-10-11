@@ -298,6 +298,8 @@ export async function createWorkflowE2E(options: {
   await git(["commit", "--quiet", "-m", "base"]);
   const baseCommit = await git(["rev-parse", "HEAD"]);
   github.commits.set(baseCommit, await git(["rev-parse", "HEAD^{tree}"]));
+  // The workspace is a clone: its remote-tracking branch holds the base, as preparation's checkout leaves it.
+  await git(["update-ref", "refs/remotes/origin/main", baseCommit]);
   const now = new Date().toISOString();
   await mkdir(join(root, ".agentx"), { recursive: true });
   await writeFile(join(root, MANIFEST_PATH), JSON.stringify({
@@ -364,6 +366,8 @@ export async function createWorkflowE2E(options: {
     if (!reusable) await git(["checkout", "--force", "-B", payload.headBranch, commit]);
     recordPush(invocation.workspaceId, commit);
     github.push(credential.token, payload.headBranch, commit, tree, [payload.workflowBaseCommit]);
+    // git push updates the remote-tracking branch.
+    await git(["update-ref", `refs/remotes/origin/${payload.headBranch}`, commit]);
     const pullRequest = await callbacks.pullRequestSink({
       repository: "demo", repositoryUrl: REPOSITORY_URL, headBranch: payload.headBranch, baseBranch: "main", commit, title: payload.title,
       ...(payload.body ? { body: payload.body } : {}),
@@ -393,6 +397,7 @@ export async function createWorkflowE2E(options: {
     await git(["checkout", "--force", "-B", payload.headBranch, commit]);
     recordPush(invocation.workspaceId, commit);
     github.push(credential.token, payload.headBranch, commit, tree, [remoteHead]);
+    await git(["update-ref", `refs/remotes/origin/${payload.headBranch}`, commit]);
     const updated = await callbacks.pullRequestUpdateSink({ repository: payload.repository, pullRequestNumber: payload.pullRequestNumber, action: "append",
       headBranch: payload.headBranch, baseBranch: payload.baseBranch, previousCommit: remoteHead, commit });
     return { action: "append", repository: payload.repository, number: payload.pullRequestNumber, url: updated.url, state: updated.state,
