@@ -2363,6 +2363,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "SLACK_ORGANIZATION_WORKSPACE_LIMIT": {
               "Ref": "SlackOrganizationWorkspaceLimit",
             },
+            "SLACK_REQUEST_QUEUE_URL": {
+              "Ref": "SlackRequestQueueCC82C864",
+            },
             "SLACK_TEAM_ID": {
               "Ref": "SlackTeamId",
             },
@@ -3009,6 +3012,20 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   ],
                 },
               ],
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackRequestQueueCC82C864",
+                  "Arn",
+                ],
+              },
             },
             {
               "Action": "dynamodb:Query",

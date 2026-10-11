@@ -71,6 +71,8 @@ export interface TaskDocumentView {
   commentSeq?: number;
   /** The coding plan's optional checks, and whether each is chosen now. */
   optionalChecks?: Array<{ id: string; label: string; selected: boolean }>;
+  /** Whether AgentX can answer comments on this task (started in Slack, and the Slack service is set up). */
+  askAvailable?: boolean;
 }
 
 export interface TaskWebDependencies {
@@ -314,7 +316,8 @@ function pageData(view: TaskDocumentView, csrf: string): Record<string, unknown>
   };
   return {
     taskId: view.taskId, csrf, revision: view.revision ?? 0, role: access.role, canDecide: access.canDecide, canComment: access.canComment,
-    canSuggest: access.canSuggest, canAsk: access.canAsk, ...(current === undefined ? {} : { current }), commentSeq: view.commentSeq ?? 0,
+    canSuggest: access.canSuggest, canAsk: access.canAsk, ...(view.askAvailable === undefined ? {} : { askAvailable: view.askAvailable }),
+    ...(current === undefined ? {} : { current }), commentSeq: view.commentSeq ?? 0,
   };
 }
 

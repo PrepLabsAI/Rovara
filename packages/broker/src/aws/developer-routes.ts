@@ -2,6 +2,7 @@
 // routes use. /v1/dev/* has no API Gateway authorizer (D17): the broker verifies the developer
 // access token itself, then checks the environment, the method and the sign-in session on every
 // request (R12, R13), so a revoked session stops at once.
+import type { SlackRequestQueue } from "../developer/page-comments.js";
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
   AgentXNameSchema,
@@ -63,6 +64,8 @@ export interface DeveloperApiConfiguration {
   channelByName?: (request: ChannelByNameRequest) => Promise<ChannelByNameResponse>;
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
   verifyAccessToken(authorization: string | undefined): Promise<Record<string, unknown>>;
+  /** Spec 061 slice 2: the Slack service's request queue, set only with SLACK_REQUEST_QUEUE_URL; "Ask AgentX to answer" needs it. */
+  slackRequestQueue?: SlackRequestQueue;
 }
 export interface DeveloperRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -582,6 +585,7 @@ export function developerTaskRouteDependencies(
       return answer.memberOf.includes(channelId);
     },
     projectChannelIds: async (project) => (await bindingsOf(deps)).filter((binding) => binding.projectName === project).map((binding) => binding.channelId).sort(),
+    ...(deps.developer.slackRequestQueue === undefined ? {} : { slackRequestQueue: deps.developer.slackRequestQueue }),
     ...(deps.developer.channelInfo === undefined ? {} : {
       boundChannels: async (channelIds: readonly string[]) => {
         const known = await channelNames(deps, channelIds);

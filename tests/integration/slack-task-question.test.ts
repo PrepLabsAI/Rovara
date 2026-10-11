@@ -260,6 +260,14 @@ describe("the task-mode answer turn", () => {
     for (const absent of ["worker", "connectors", "repositories", "gate", "actionPolicy", "recoverableOperations", "computePrepared", "recorder"]) expect(inputs[0]).not.toHaveProperty(absent);
   });
 
+  it("thread questions are unchanged", async () => {
+    // A thread question asks for the task's context with the task only: no page comment rides along.
+    const args: unknown[][] = [];
+    const api = { taskAnswerWorkspace: async (...given: unknown[]) => { args.push(given); return workspace; } } as unknown as ThreadServiceApi;
+    await runTaskAnswer(message, route, "why?", { api, runTurn: async () => "Because." });
+    expect(args).toEqual([[expect.any(String) as string, taskId]]);
+  });
+
   it("fails when the hand-off signal was aborted by the time the turn returned, whatever text it gave", async () => {
     const handoff = new AbortController();
     const api = apiWith(workspace).api;

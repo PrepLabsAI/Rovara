@@ -1,10 +1,12 @@
 // Spec 061 slice 2: comments, replies and suggestions on a task page. Each is its own item in the task's partition
 // (`DEVTASK#<taskId>`), never inside the task item, and every write is conditional: comments on `rev`, the comment counter
 // on its cap, rate items on their window. The writer's name and owner flag come from the session and its role.
+import { createHash } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  COMMENT_RATE, COMMENT_THREAD_REPLIES_MAX, NUDGE_WINDOW_MS, TASK_COMMENT_ITEMS_MAX, TaskCommentSchema, TaskSuggestionSchema, agentXError,
-  cleanCommentText, diffPlanDocuments, pageCommentId, planClaimIds, plannerReplyCommentId,
+  AGENTX_ANSWER_MAX_CHARS, AGENTX_ASK_RATE, COMMENT_RATE, COMMENT_THREAD_REPLIES_MAX, NUDGE_WINDOW_MS, SlackPageCommentMessageSchema, TASK_COMMENT_ITEMS_MAX, TaskCommentSchema,
+  TaskSuggestionSchema, agentXError, agentxAnswerCommentId, cleanCommentText, diffPlanDocuments, pageCommentAttributes, pageCommentEventId, pageCommentId,
+  planClaimIds, plannerReplyCommentId, redactText, sharedTaskKey,
   type AgentXError, type AgentXErrorCode, type CommentAnswer, type CommentDocument, type CommentTarget, type PlanDocument, type TaskComment,
   type TaskSuggestion, type WorkflowDecisionDetail, type WorkflowSnapshot,
 } from "@agentx/contracts";
@@ -533,4 +535,144 @@ function classify(error: unknown): "duplicate" | "full" {
     if (codes[1] === "ConditionalCheckFailed") return "full";
   }
   throw error;
+}
+
+/** Where a page comment's question goes: the Slack service's request queue (FIFO). */
+export interface SlackRequestQueue {
+  send(message: { body: string; groupId: string; deduplicationId: string; attributes: Record<string, { DataType: "String"; StringValue: string }> }): Promise<void>;
+}
+
+type AskDependencies = CommentDependencies & { slackRequestQueue?: SlackRequestQueue | undefined };
+
+/** Records what became of a question to AgentX on the comment, conditioned on the comment being the one the page wrote. */
+async function setAsk(deps: CommentDependencies, comment: TaskComment, state: NonNullable<TaskComment["ask"]>["state"], expected?: NonNullable<TaskComment["ask"]>["state"]): Promise<TaskComment> {
+  const ask = { state, at: iso(deps) };
+  await deps.documentClient.send(new TransactWriteCommand({
+    TransactItems: [
+      {
+        Update: {
+          TableName: deps.tableName, Key: commentKey(comment.taskId, comment.commentId),
+          UpdateExpression: "SET #ask = :ask",
+          ConditionExpression: expected === undefined ? "#rev = :rev AND attribute_not_exists(deletedAt)" : "#ask.#state = :expected",
+          ExpressionAttributeNames: { "#ask": "ask", ...(expected === undefined ? { "#rev": "rev" } : { "#state": "state" }) },
+          ExpressionAttributeValues: { ":ask": ask, ...(expected === undefined ? { ":rev": comment.rev } : { ":expected": expected }) },
+        },
+      },
+      counterTouch(deps, comment.taskId),
+    ] as never,
+  }));
+  return { ...comment, ask };
+}
+
+/**
+ * "Ask AgentX to answer" (spec 061 slice 2): queues the comment's question for the Slack service, which answers it in
+ * task mode with no tools and writes the answer back. Only for a task started in Slack (its own thread) when the queue is
+ * set up; otherwise the comment says AgentX can answer only there. Limited per person (6 an hour), per task (20 an hour)
+ * and per thread (5 AgentX answers); a limited ask leaves the comment as it is. A queue that refuses the message marks the
+ * question failed; the comment always stands. Answers on one task run one at a time and never queue behind the thread.
+ */
+export async function queueCommentAnswer(
+  deps: AskDependencies,
+  input: { task: DeveloperTaskRecord; comment: TaskComment; caller: DeveloperCaller },
+): Promise<{ outcome: "queued" | "limited" | "unavailable" | "failed"; comment: TaskComment }> {
+  const { task, comment, caller } = input;
+  const share = task.share;
+  const userId = caller.slackUserId ?? task.slackUserId;
+  const threadTs = share?.threadTs;
+  const shared = share === undefined || threadTs === undefined ? undefined
+    : await getItem(deps, sharedTaskKey({ teamId: share.teamId, channelId: share.channelId, threadTs }));
+  const startedInSlack = shared?.taskId === task.taskId && shared.workflowThread === true && shared.closedAt === undefined;
+  if (deps.slackRequestQueue === undefined || share === undefined || threadTs === undefined || !startedInSlack || userId === undefined || comment.author.kind !== "person") {
+    return { outcome: "unavailable", comment: await setAsk(deps, comment, "unavailable") };
+  }
+  // The thread's AgentX answers first (no limit is spent on a refused ask), then the person's and the task's hourly limits.
+  const threadId = comment.parentId ?? comment.commentId;
+  const answers = (await listTaskComments(deps, task.taskId)).filter((item) => item.author.kind === "agentx" && item.author.source === "answer" && item.parentId === threadId);
+  if (answers.length >= AGENTX_ASK_RATE.perThread) return { outcome: "limited", comment };
+  if (!await takeRate(deps, { taskId: task.taskId, kind: "ask", actor: caller.developerId }, AGENTX_ASK_RATE.perPersonPerHour, HOUR_MS)) return { outcome: "limited", comment };
+  if (!await takeRate(deps, { taskId: task.taskId, kind: "ask", actor: "task" }, AGENTX_ASK_RATE.perTaskPerHour, HOUR_MS)) return { outcome: "limited", comment };
+  const answering = await setAsk(deps, comment, "answering");
+  const message = SlackPageCommentMessageSchema.parse({
+    version: 1, eventId: pageCommentEventId(comment.commentId), thread: { teamId: share.teamId, channelId: share.channelId, threadTs }, userId,
+    text: comment.text, receivedAt: iso(deps), pageComment: { taskId: task.taskId, commentId: comment.commentId },
+  });
+  try {
+    await deps.slackRequestQueue.send({
+      body: JSON.stringify(message),
+      groupId: createHash("sha256").update(`page-comment\0${task.taskId}`, "utf8").digest("hex"),
+      deduplicationId: message.eventId,
+      attributes: pageCommentAttributes(),
+    });
+  } catch (error) {
+    log(deps, { event: "developer.comment_answer_queue_failed", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" });
+    return { outcome: "failed", comment: await setAsk(deps, answering, "failed", "answering").catch(() => answering) };
+  }
+  log(deps, { event: "developer.comment_answer_queued", taskId: task.taskId });
+  return { outcome: "queued", comment: answering };
+}
+
+const HOUR_MS = 3_600_000;
+
+/**
+ * AgentX's answer to an asked comment, from the task's own thread identity (checked by the caller): ANSWERED writes
+ * AgentX's reply under the comment's thread (redacted, at most 3,000 characters; it counts toward the task's 300 items)
+ * and marks the question answered; FAILED marks it failed. Only a question still waiting takes an answer; a repeat of an
+ * outcome already recorded answers the same and writes nothing.
+ */
+export async function writeCommentAnswer(
+  deps: CommentDependencies,
+  input: { taskId: string; commentId: string; outcome: "ANSWERED" | "FAILED"; text?: string },
+): Promise<"answered" | "failed"> {
+  const comment = await getComment(deps, input.taskId, input.commentId);
+  if (comment === undefined || comment.author.kind !== "person" || comment.ask === undefined) throw pageRefusal("changed");
+  const state = comment.ask.state;
+  if (state === "answered" || state === "failed") return state;
+  if (state !== "answering") throw pageRefusal("changed");
+  if (input.outcome === "FAILED") {
+    await setAsk(deps, comment, "failed", "answering");
+    return "failed";
+  }
+  // Model text: redacted, direction and control characters removed (line breaks kept), at most 3,000 characters.
+  const text = Array.from(redactText(input.text ?? "").replace(/\r\n?/gu, "\n").replace(/[\u202A-\u202E\u2066-\u2069\u200E\u200F\u061C]/gu, "")
+    // eslint-disable-next-line no-control-regex -- removing control characters is the point
+    .replace(/[\u0000-\u0009\u000B-\u001F\u007F]/gu, " ").trim()).slice(0, AGENTX_ANSWER_MAX_CHARS).join("").trim();
+  if (text === "") {
+    await setAsk(deps, comment, "failed", "answering");
+    return "failed";
+  }
+  const reply = TaskCommentSchema.parse({
+    schemaVersion: 1, taskId: input.taskId, commentId: agentxAnswerCommentId(comment.commentId), parentId: comment.parentId ?? comment.commentId,
+    document: comment.document, version: comment.version, target: comment.target, author: { kind: "agentx", source: "answer" },
+    text, createdAt: iso(deps), rev: 1,
+  });
+  const ask = { state: "answered" as const, at: iso(deps) };
+  try {
+    await deps.documentClient.send(new TransactWriteCommand({
+      TransactItems: [
+        { Put: { TableName: deps.tableName, Item: { ...commentKey(input.taskId, reply.commentId), entityType: "TASK_COMMENT", ...reply }, ConditionExpression: "attribute_not_exists(pk)" } },
+        counterAdd(deps, input.taskId),
+        {
+          Update: {
+            TableName: deps.tableName, Key: commentKey(input.taskId, comment.commentId), UpdateExpression: "SET #ask = :ask",
+            ConditionExpression: "#ask.#state = :answering", ExpressionAttributeNames: { "#ask": "ask", "#state": "state" },
+            ExpressionAttributeValues: { ":ask": ask, ":answering": "answering" },
+          },
+        },
+      ] as never,
+    }));
+  } catch (error) {
+    const codes = cancellationCodes(error);
+    if (error instanceof Error && error.name === "TransactionCanceledException") {
+      const now = await getComment(deps, input.taskId, input.commentId);
+      if (now?.ask?.state === "answered" || now?.ask?.state === "failed") return now.ask.state;
+      // The task holds 300 items: the answer cannot be kept, so the question reads as not answered.
+      if (codes[1] === "ConditionalCheckFailed") {
+        log(deps, { event: "developer.comment_answer_full", taskId: input.taskId });
+        await setAsk(deps, comment, "failed", "answering");
+        return "failed";
+      }
+    }
+    throw error;
+  }
+  return "answered";
 }

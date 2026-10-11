@@ -37,7 +37,7 @@ function comment(n: number, extra: Partial<PageCommentView> = {}): PageCommentVi
   };
 }
 
-interface PageOptions { version?: number; body?: PlanDocument; comments?: PageCommentView[]; access?: typeof owner | typeof commenter; waiting?: boolean; optionalChecks?: TaskDocumentView["optionalChecks"] }
+interface PageOptions { version?: number; body?: PlanDocument; comments?: PageCommentView[]; access?: typeof owner | typeof commenter; waiting?: boolean; optionalChecks?: TaskDocumentView["optionalChecks"]; askAvailable?: boolean }
 async function pageHtml(options: PageOptions = {}): Promise<string> {
   const version = options.version ?? 2;
   const documents = [doc(1, plan(), false), ...(version > 2 ? [doc(2, plan(), false)] : []), doc(version, options.body ?? plan())];
@@ -48,6 +48,7 @@ async function pageHtml(options: PageOptions = {}): Promise<string> {
     pageSuggestions: [],
     ...(options.waiting === false ? {} : { waiting: { kind: "coding plan", version, artifactDigest: digest } }),
     optionalChecks: options.optionalChecks ?? [{ id: "lint", label: "Lint", selected: false }],
+    ...(options.askAvailable === undefined ? {} : { askAvailable: options.askAvailable }),
   };
   const web = createTaskWeb({ authenticateSession: async () => caller, getTaskDocumentView: async () => view });
   const answer = await web({ method: "GET", path: `/review/${taskId}/task`, headers: { cookie: SESSION }, requestId: "r" }, new URL(`https://agentx.example.test/review/${taskId}/task`));
@@ -462,6 +463,14 @@ describe("the deciding and commenting script", () => {
     await page.settle();
     expect(error.textContent).toBe("Keep comments under 2,000 characters.");
     expect(posts(page, "/api/comments")).toHaveLength(1);
+  });
+
+  it("no Ask AgentX box where AgentX cannot answer (a task not started in Slack)", async () => {
+    const page = boot(await pageHtml({ askAvailable: false }));
+    page.document.querySelector('.comment-open[data-target="document"]')!.click();
+    const form = page.document.querySelector('[data-comments="document"] .comment-form')!;
+    expect(form.querySelectorAll("input[type=checkbox]")).toHaveLength(0);
+    expect(form.visibleText).not.toContain("Ask AgentX");
   });
 
   it("posting, replying, editing and deleting use the API and show the answer", async () => {
