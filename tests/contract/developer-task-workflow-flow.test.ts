@@ -4025,16 +4025,17 @@ describe("pushing an approved PR feedback fix to the same pull request (item 7)"
   });
 
   it("does not take a push as landed when the pull request's head branch is no longer the one AgentX pushed to", async () => {
-    for (const status of ["SUCCEEDED", "FAILED"] as const) {
+    // With the update callback, the pull request's record already names the pushed commit: only the branch check refuses it.
+    for (const [status, callback] of [["SUCCEEDED", true], ["SUCCEEDED", false], ["FAILED", false]] as const) {
       const t = await fixPassed();
       await t.pass();
-      const maintain = await pushLands(t, { callback: false });
+      const maintain = await pushLands(t, { callback });
       // The pull request now shows the reviewed tree, but from another branch.
       t.gh.branch.name = "someone-else/branch";
       await t.harness.finish(t.workspaceId, maintain.id, status, status === "SUCCEEDED" ? appendResult(maintain) : { error: "CODEBUILD_FAILED: a validation gate did not pass" });
       const workflow = taskWorkflow(t.harness, t.taskId);
-      expect(workflow, status).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
-      expect(workflow.pullRequests, status).toEqual([expect.objectContaining({ headSha: "d".repeat(40), candidateDigest: t.first.digest })]);
+      expect(workflow, `${status} ${String(callback)}`).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
+      expect(workflow.pullRequests, `${status} ${String(callback)}`).toEqual([expect.objectContaining({ headSha: "d".repeat(40), candidateDigest: t.first.digest })]);
     }
   });
 
