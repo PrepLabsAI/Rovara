@@ -364,7 +364,10 @@ export async function runTaskInvocation(
     // A streaming update carries the whole message so far: forwarding each one sends the control plane every prefix of a
     // long answer or file write (quadratic, and one can outgrow a 400 KB table item). The finished message (message_end)
     // is what the event log keeps.
-    if ((event as { type?: unknown } | undefined)?.type !== "message_update") void events.append(eventType(event), event).catch(() => undefined);
+    // A tool's streaming update (tool_execution_update) likewise repeats its arguments and its output so far; the finished
+    // call (tool_execution_end) is kept.
+    const streamed = (event as { type?: unknown } | undefined)?.type;
+    if (streamed !== "message_update" && streamed !== "tool_execution_update") void events.append(eventType(event), event).catch(() => undefined);
     const outcome = assistantOutcome(event);
     if (outcome !== undefined) {
       lastAssistant = outcome;

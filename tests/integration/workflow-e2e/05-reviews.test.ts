@@ -170,5 +170,10 @@ describe("Suite 5: reviews", () => {
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     expect(said(e2e)).toContain("Checks and reviews passed. Opening a draft pull request. The change was too large to show the reviewers in full, so they reviewed only part of it.");
     expect(e2e.github.pullRequests[0]!.body ?? "").toContain("The change was too large to show the reviewers in full, so the reviews covered only part of it. Review the rest by hand.");
+    // The run's event log stayed small: no event near DynamoDB's 400 KB item limit, and no streamed copy of every prefix
+    // of the 200 KB file write (that sent about 600 MB for a 40 KB file).
+    const stored = e2e.db.find((item) => typeof item.sk === "string" && item.sk.startsWith("EVENT#")).map((item) => Buffer.byteLength(JSON.stringify(item), "utf8"));
+    expect(Math.max(...stored)).toBeLessThan(80 * 1024);
+    expect(stored.reduce((total, size) => total + size, 0)).toBeLessThan(512 * 1024);
   }, 120_000);
 });
