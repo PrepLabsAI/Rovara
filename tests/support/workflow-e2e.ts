@@ -7,6 +7,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
 import {
   SharedTaskRecordSchema,
   SlackChannelBindingSchema,
@@ -14,24 +15,35 @@ import {
   WorkerInvocationSchema,
   WorkflowSnapshotSchema,
   sharedTaskKey,
+  slackThreadSubject,
   type ProjectCommand,
   type SlackRequestMessage,
   type SlackThread,
+  type TaskQuestionRoute,
   type WorkerInvocation,
   type WorkflowOptionalCheck,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
+import type { AttributeValue } from "@aws-sdk/client-dynamodb";
 import type { InvokeCommand } from "@aws-sdk/client-lambda";
+import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 import type { HttpApiV2Event } from "../../packages/broker/src/aws/lambda.js";
 import { createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { captureFeedbackNoteThroughBroker, createSlackIngressHandler, recordThreadNoteThroughBroker, startWorkflowThroughBroker } from "../../packages/broker/src/aws/slack-ingress.js";
 import { createSlackInteractivityHandler, invokeWorkflowDecision, workflowSlackHandlers } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { answerChosenRequest, createDynamoWorkflowChoiceStore, offerWorkflowChoice, startChosenWorkflow, type SlackWorkflowStartInput } from "../../packages/broker/src/aws/slack-workflow-choice.js";
 import { createChoiceOffer, routeSlackRequest } from "../../packages/slack-service/src/request-routing.js";
+import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
+import { handleTaskQuestion, runTaskAnswer } from "../../packages/slack-service/src/task-question.js";
+import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";
+import { runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
+import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import type { RequestRoute } from "../../packages/orchestrator/src/request-router.js";
-import type { Notice } from "../../packages/broker/src/developer/notifications.js";
-import type { GitHubPullRequestDetails, GitHubPullRequestFeedback, GitHubPullRequestInput, GitHubPullRequestResult, GitHubPullRequestUpdate } from "../../packages/broker/src/github-app.js";
+import type { Notice, StreamRecord } from "../../packages/broker/src/developer/notifications.js";
+import type { GitHubFeedbackComment, GitHubFeedbackThread, GitHubPullRequestDetails, GitHubPullRequestFeedback, GitHubPullRequestInput, GitHubPullRequestResult, GitHubPullRequestUpdate } from "../../packages/broker/src/github-app.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
+import { runPlanEvidenceJob, type PlanEvidenceRunOutcome } from "../../packages/broker/src/aws/plan-evidence-handler.js";
+import type { PlanEvidenceEvent } from "../../packages/broker/src/developer/plan-evidence-jobs.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
 import { createDefaultPiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { createRepositoryCredentialProvider } from "../../packages/worker/src/repository-credentials.js";
@@ -39,10 +51,11 @@ import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import type { CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
-import { MAYA, createDeveloperTaskBroker, recordStream } from "./developer-task-broker.js";
+import { MAYA, createDeveloperTaskBroker, recordStream, type Developer } from "./developer-task-broker.js";
 import { FAUX_MODEL, fauxModelRuntime } from "./faux-model.js";
 import { workflowModel, type WorkflowTurn } from "./faux-scripts.js";
-import { SLACK_CHANNEL, SLACK_TEAM, registerSlackProject, type Handler } from "./slack-broker.js";
+import { planAnswer, planDocument, turnPlanIntoMarkdown } from "./plan-documents.js";
+import { SLACK_CHANNEL, SLACK_TEAM, call, orchestratorPrincipal, registerSlackProject, type Handler } from "./slack-broker.js";
 import { SlackPostError } from "../../packages/broker/src/aws/slack-web.js";
 import { StrictSlackWeb } from "./strict-slack.js";
 
@@ -59,8 +72,10 @@ const REPOSITORY_URL = "https://github.com/example/demo.git";
 const RESPONSE_URL = "https://hooks.slack.com/actions/T0BSHLLUGBD/1/e2e";
 const MANIFEST_PATH = ".agentx/preparation-manifest.json";
 const MAX_SETTLE_STEPS = 40;
+/** The GitHub App's webhook secret, as the broker reads it; the test signs its deliveries with it. */
+const WEBHOOK_SECRET = "e2e-github-webhook-secret-0123456789abcdef";
 
-type FakePullRequest = { number: number; url: string; headBranch: string; baseBranch: string; title: string; body?: string; draft?: boolean; commit: string; tree: string; state: "open" | "closed" | "merged" };
+type FakePullRequest = { number: number; url: string; headBranch: string; baseBranch: string; title: string; body?: string; draft?: boolean; commit: string; tree: string; state: "open" | "closed" | "merged"; comments: GitHubFeedbackComment[]; threads?: GitHubFeedbackThread[] };
 
 /**
  * GitHub as the broker and worker see it: tokens it issued (and for which access), pushes made with them,
@@ -73,6 +88,8 @@ export class FakeGitHub {
   /** Each pushed commit's parents. */
   readonly parents = new Map<string, string[]>();
   readonly pullRequests: FakePullRequest[] = [];
+  /** The repository's files by path (as GitHub names them, inside the repository), for the plan's cited code. */
+  readonly files = new Map<string, string>();
   /** Every token minted, with the kind of worker invocation running when it was (set by the harness). */
   readonly minted: Array<{ token: string; access: "clone" | "push"; during: string | undefined }> = [];
   /** The kind of worker invocation now running, or undefined between invocations. */
@@ -90,6 +107,36 @@ export class FakeGitHub {
     this.pushes.set(headBranch, { commit, tree, token });
     this.commits.set(commit, tree);
     this.parents.set(commit, [...parents]);
+    // An open pull request from the branch now has the pushed commit as its head.
+    for (const pullRequest of this.pullRequests) {
+      if (pullRequest.headBranch === headBranch && pullRequest.state === "open") Object.assign(pullRequest, { commit, tree });
+    }
+  }
+
+  /** Someone comments on the pull request's conversation on GitHub. */
+  comment(number: number, author: string, body: string): GitHubFeedbackComment {
+    const pullRequest = this.find(number);
+    const id = String(1000 + this.pullRequests.reduce((count, entry) => count + entry.comments.length, 0));
+    const comment: GitHubFeedbackComment = { id, kind: "DISCUSSION", url: `${pullRequest.url}#issuecomment-${id}`, author, updatedAt: new Date().toISOString(), body };
+    pullRequest.comments.push(comment);
+    return comment;
+  }
+
+  /** Someone comments on a line of the pull request's diff on GitHub, which opens a review thread of its own. */
+  reviewComment(number: number, author: string, body: string, path: string, line: number): GitHubFeedbackComment {
+    const pullRequest = this.find(number);
+    const databaseId = String(4000 + this.pullRequests.reduce((count, entry) => count + entry.comments.length, 0));
+    const threadId = `PRRT_e2e${databaseId}`;
+    const comment: GitHubFeedbackComment = { id: `review_comment:${databaseId}`, threadId, kind: "REVIEW_COMMENT", url: `${pullRequest.url}#discussion_r${databaseId}`,
+      author, updatedAt: new Date().toISOString(), body, path, line };
+    pullRequest.comments.push(comment);
+    (pullRequest.threads ??= []).push({ id: threadId, resolved: false, commentIds: [comment.id] });
+    return comment;
+  }
+
+  /** Someone merges the pull request on GitHub, at its current head. */
+  merge(number: number): void {
+    this.find(number).state = "merged";
   }
 
   private find(number: number): FakePullRequest {
@@ -116,7 +163,7 @@ export class FakeGitHub {
       this.pullRequests.push({
         number, url, headBranch: input.headBranch, baseBranch: input.baseBranch, title: input.title,
         ...(input.body === undefined ? {} : { body: input.body }), ...(input.draft === undefined ? {} : { draft: input.draft }),
-        commit: pushed.commit, tree: pushed.tree, state: "open",
+        commit: pushed.commit, tree: pushed.tree, state: "open", comments: [],
       });
       return { number, url, reconciled: false };
     },
@@ -139,6 +186,7 @@ export class FakeGitHub {
       if (tree === undefined) throw new Error(`GitHub has no commit ${commit}`);
       return tree;
     },
+    getFileAtCommit: async (_repositoryUrl: string, path: string): Promise<string | undefined> => this.files.get(path),
     getCommitParents: async (_repositoryUrl: string, commit: string): Promise<string[]> => {
       const parents = this.parents.get(commit);
       if (parents === undefined) throw new Error(`GitHub has no commit ${commit}`);
@@ -146,7 +194,8 @@ export class FakeGitHub {
     },
     getPullRequestFeedback: async (_repositoryUrl: string, number: number): Promise<GitHubPullRequestFeedback> => {
       const pullRequest = this.find(number);
-      return { pullRequest: { ...this.details(pullRequest), headTreeSha: pullRequest.tree }, comments: [], threads: [] };
+      return { pullRequest: { ...this.details(pullRequest), headTreeSha: pullRequest.tree }, comments: [...pullRequest.comments],
+        threads: (pullRequest.threads ?? []).map((thread) => ({ ...thread, commentIds: [...thread.commentIds] })) };
     },
   };
 }
@@ -222,8 +271,18 @@ export async function createWorkflowE2E(options: {
   briefLimit?: number | null;
   /** "unavailable": this Slack workspace cannot create a Canvas, so approval cards link the task page. */
   canvas?: "available" | "unavailable";
+  /**
+   * The project's own checks (its readiness). Absent: the one check E2E_CHECK. An empty list is a project with no
+   * checks, so a coding plan's proposed checks (or none, for review only) are all that the owner approves.
+   */
+  readiness?: ProjectCommand[];
   /** Project-approved optional checks the owner may select when approving the coding plan. */
   optionalChecks?: WorkflowOptionalCheck[];
+  /**
+   * What a project command's run returns, by command. Absent (or undefined for a command): it passes with "ok". Lets a test
+   * make a check fail, or be broken (exit 126 or 127, a python SyntaxError), as the worker's own check runner would report it.
+   */
+  checkResult?: (command: ProjectCommand) => { exitCode: number | null; stdout: string; stderr: string } | undefined;
   /** Runs in the worker just before it publishes, with the repository's directory (to change the workspace, say). */
   beforePublish?: (repositoryDirectory: string) => Promise<void>;
   /**
@@ -231,17 +290,27 @@ export async function createWorkflowE2E(options: {
    * classifier is unavailable, so every plain mention gets the Just answer / Quick / Full card.
    */
   route?: (text: string) => RequestRoute | Promise<RequestRoute>;
+  /**
+   * A task started before plans became structured: the first planning step's stored document is this Markdown, with no
+   * format and no evidence, as the table, the storage and the notifier's stream all see it.
+   */
+  legacyPlanMarkdown?: string;
 } = {}) {
   const github = new FakeGitHub();
+  // The plan evidence jobs the broker started: the background Lambda is run by the test, with `runPlanEvidenceJobs`.
+  const planEvidenceJobs: PlanEvidenceEvent[] = [];
   const harness = await createDeveloperTaskBroker({
     register: false,
     brokerExtra: {
       githubPullRequests: github.gateway,
+      startPlanEvidenceJob: async (event: PlanEvidenceEvent) => { planEvidenceJobs.push(event); },
+      githubWebhookSecret: async () => WEBHOOK_SECRET,
       repositoryGrants: new RepositoryGrantService(Buffer.alloc(32, 4), (reference, url, access) => github.resolveCredential(reference, url, access)),
     },
   });
   const { db, s3 } = harness;
-  await registerSlackProject(harness.handler, { readiness: [E2E_CHECK],
+  const readiness = options.readiness ?? [E2E_CHECK];
+  await registerSlackProject(harness.handler, { readiness,
     ...(options.optionalChecks === undefined ? {} : { developerTasks: { optionalWorkflowChecks: options.optionalChecks } }) });
   // After setup, every call that reaches the broker is recorded: an HTTP route, or an event's source and action.
   const brokerCalls: string[] = [];
@@ -262,7 +331,8 @@ export async function createWorkflowE2E(options: {
   await git(["init", "--quiet", "-b", "main"]);
   await git(["config", "user.email", "e2e@example.invalid"]);
   await git(["config", "user.name", "AgentX E2E"]);
-  await writeFile(join(repoDirectory, "greeting.ts"), "export const placeholder = true;\n");
+  // Three lines, as the fake GitHub holds them for the quick-plan test: the worker checks cited lines against this checkout.
+  await writeFile(join(repoDirectory, "greeting.ts"), "export const placeholder = true;\nexport const greeting = 'Hello';\nexport const punctuation = '!';\n");
   // A file the change never touches: a finding in it can only be an older problem.
   await writeFile(join(repoDirectory, "farewell.ts"), "export const farewell = (name) => 'Bye ' + name;\n");
   await git(["add", "greeting.ts", "farewell.ts"]);
@@ -274,14 +344,14 @@ export async function createWorkflowE2E(options: {
   await writeFile(join(root, MANIFEST_PATH), JSON.stringify({
     schemaVersion: 2, projectName: "payments", projectRevision: 1,
     repositories: [{ name: "demo", path: "repo/demo", defaultBranch: "main", resolvedCommit: baseCommit, resolvedAt: now, completedAt: now }],
-    completedSetupSteps: [], readinessResults: [], readinessCommandKeys: [projectCheckKey(E2E_CHECK)], creationIdentity: "e2e", complete: true, updatedAt: now,
+    completedSetupSteps: [], readinessResults: [], readinessCommandKeys: readiness.map(projectCheckKey), creationIdentity: "e2e", complete: true, updatedAt: now,
   }));
 
   // The worker: the real run-task on the scripted model, with check runners that pass.
   const prompts: string[] = options.model?.prompts ?? [];
   const turns: WorkflowTurn[] = options.model?.turns ?? [];
   const { modelRuntime, faux } = await fauxModelRuntime();
-  const step = workflowModel({ ...(options.model ?? { plan: "# Coding plan\n\n1. Change nothing.", edits: [] }), prompts, turns });
+  const step = workflowModel({ ...(options.model ?? { plan: planAnswer(planDocument()), edits: [] }), prompts, turns });
   faux.setResponses(Array.from({ length: 500 }, () => step));
   const piAdapter = createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) });
 
@@ -297,17 +367,18 @@ export async function createWorkflowE2E(options: {
     }
   };
 
-  /** Every project command a check round ran, with the workspace tree it ran on; each passes. */
+  /** Every project command a check round ran, with the workspace tree it ran on; each passes unless `checkResult` says otherwise. */
   const checkRuns: Array<{ command: ProjectCommand; tree: string }> = [];
   const checkRunners: CheckRunners = {
     runAgentCommand: async () => ({ exitCode: 0, timedOut: false, output: "ok\n" }),
     runProjectCommand: async (command) => {
       checkRuns.push({ command, tree: await workspaceTree("check") });
-      return { exitCode: 0, timedOut: false, stdout: "ok\n", stderr: "" };
+      const scripted = options.checkResult?.(command);
+      return { timedOut: false, ...(scripted ?? { exitCode: 0, stdout: "ok\n", stderr: "" }) };
     },
   };
 
-  /** The worker's publication, simulated: the workspace tree, committed onto the base and pushed with a push-scoped token. */
+  /** The worker's publication, simulated: the workspace tree, committed onto the base, checked out as the head branch and pushed with a push-scoped token. */
   const publish = async (invocation: Extract<WorkerInvocation, { kind: "publish" }>, callbacks: ReturnType<typeof createWorkerCallbackSinks>): Promise<unknown> => {
     const { payload } = invocation;
     const repository = payload.project.repositories.find((entry) => entry.name === payload.repository);
@@ -323,12 +394,41 @@ export async function createWorkflowE2E(options: {
     // The commit goes on the base the broker pinned for the task, as the worker builds it.
     if (payload.workflowBaseCommit !== baseCommit) throw new Error(`the publish request names base ${String(payload.workflowBaseCommit)}, not the task's base ${baseCommit}`);
     const commit = await git(["commit-tree", tree, "-p", payload.workflowBaseCommit, "-m", `AgentX: ${payload.title}`]);
+    // The worker leaves the workspace on the published commit (same tree, new commit), so later reads see HEAD moved.
+    await git(["checkout", "--force", "-B", payload.headBranch, commit]);
     github.push(credential.token, payload.headBranch, commit, tree, [payload.workflowBaseCommit]);
     const pullRequest = await callbacks.pullRequestSink({
       repository: "demo", repositoryUrl: REPOSITORY_URL, headBranch: payload.headBranch, baseBranch: "main", commit, title: payload.title,
       ...(payload.body ? { body: payload.body } : {}),
     });
     return { repository: "demo", number: pullRequest.number, url: pullRequest.url, headBranch: payload.headBranch, baseBranch: "main", commit, checks: [], reconciled: false };
+  };
+
+  /**
+   * The worker's push of a reviewed fix to an existing pull request, simulated as the worker does it: the workspace must
+   * still hold the reviewed tree, GitHub's branch head must be the one the broker expects (and the workspace must descend
+   * from it), and the commit (the reviewed tree on that head) is pushed as a fast-forward with a push-scoped token.
+   */
+  const maintain = async (invocation: Extract<WorkerInvocation, { kind: "maintain" }>, callbacks: ReturnType<typeof createWorkerCallbackSinks>): Promise<unknown> => {
+    const { payload } = invocation;
+    const repository = payload.project.repositories.find((entry) => entry.name === payload.repository);
+    if (repository === undefined) throw new Error(`the project has no repository ${payload.repository}`);
+    if (payload.action !== "append" || payload.workflowCandidateTreeSha === undefined) throw new Error("the E2E worker pushes only a reviewed fix");
+    if (payload.workflowBaseCommit !== baseCommit) throw new Error(`the fix names base ${String(payload.workflowBaseCommit)}, not the task's base ${baseCommit}`);
+    const tree = await workspaceTree(invocation.operationId);
+    if (tree !== payload.workflowCandidateTreeSha) throw new Error(`the workspace tree ${tree} is not the reviewed tree ${payload.workflowCandidateTreeSha}`);
+    const credential = await createRepositoryCredentialProvider({ controlPlaneUrl: CONTROL_PLANE_URL, invocation, fetchImplementation: workerFetch(handler) })(repository);
+    const remoteHead = github.pushes.get(payload.headBranch)?.commit;
+    if (remoteHead !== payload.expectedHeadCommit) throw new Error(`STALE_FENCE: pull request head changed outside AgentX`);
+    await git(["merge-base", "--is-ancestor", remoteHead, "HEAD"]);
+    await git(["merge-base", "--is-ancestor", baseCommit, "HEAD"]);
+    const commit = await git(["commit-tree", tree, "-p", remoteHead, "-m", "AgentX: address PR feedback"]);
+    await git(["checkout", "--force", "-B", payload.headBranch, commit]);
+    github.push(credential.token, payload.headBranch, commit, tree, [remoteHead]);
+    const updated = await callbacks.pullRequestUpdateSink({ repository: payload.repository, pullRequestNumber: payload.pullRequestNumber, action: "append",
+      headBranch: payload.headBranch, baseBranch: payload.baseBranch, previousCommit: remoteHead, commit });
+    return { action: "append", repository: payload.repository, number: payload.pullRequestNumber, url: updated.url, state: updated.state,
+      headBranch: payload.headBranch, baseBranch: payload.baseBranch, previousCommit: remoteHead, commit, treeSha: tree, checks: [], reconciled: updated.reconciled };
   };
 
   /**
@@ -371,7 +471,38 @@ export async function createWorkflowE2E(options: {
     if (own !== undefined) grants.push(own);
   };
 
+  /** Set once the planning step's stored document has been turned into Markdown (`legacyPlanMarkdown`). */
+  let legacyPlan: ReturnType<typeof turnPlanIntoMarkdown> | undefined;
+  /**
+   * A stream record written before that turn still shows the structured document; the stream would have delivered the
+   * state as the table now holds it, so the record's task images are given the same Markdown document.
+   */
+  const legacyRecord = (record: StreamRecord): StreamRecord => {
+    const found = legacyPlan;
+    if (found === undefined) return record;
+    const legacyImage = (image: Record<string, AttributeValue> | undefined): Record<string, AttributeValue> | undefined => {
+      if (image === undefined) return image;
+      const item = unmarshall(image) as { entityType?: unknown; workflow?: { artifacts?: Array<Record<string, unknown>> } };
+      if (item.entityType !== "DEVELOPER_TASK" || item.workflow?.artifacts === undefined) return image;
+      const artifacts = item.workflow.artifacts.map((artifact) => {
+        if (artifact.id !== found.artifactId) return artifact;
+        const { format: _format, evidence: _evidence, ...legacy } = artifact;
+        void _format;
+        void _evidence;
+        return { ...legacy, objectKey: found.objectKey, sha256: found.sha256 };
+      });
+      return marshall({ ...item, workflow: { ...item.workflow, artifacts } }, { removeUndefinedValues: true });
+    };
+    const { NewImage, OldImage, ...rest } = record.dynamodb ?? {};
+    const newImage = legacyImage(NewImage);
+    const oldImage = legacyImage(OldImage);
+    return { ...record, dynamodb: { ...rest, ...(newImage === undefined ? {} : { NewImage: newImage }), ...(oldImage === undefined ? {} : { OldImage: oldImage }) } };
+  };
+
+  /** Every invocation the worker was given, as the broker queued it. */
+  const invocations: WorkerInvocation[] = [];
   const runInvocation = async (invocation: WorkerInvocation): Promise<void> => {
+    invocations.push(invocation);
     const callbacks = createWorkerCallbackSinks({ controlPlaneUrl: CONTROL_PLANE_URL, invocation, fetchImplementation: workerFetch(handler) });
     const { operationId } = invocation;
     await probeCredentials(invocation);
@@ -380,11 +511,11 @@ export async function createWorkflowE2E(options: {
         preparedBase: [{ repositoryId: "demo", baseCommitSha: baseCommit }] } });
       return;
     }
-    if (invocation.kind !== "task" && invocation.kind !== "publish") throw new Error(`the E2E worker does not run ${invocation.kind} invocations`);
+    if (invocation.kind !== "task" && invocation.kind !== "publish" && invocation.kind !== "maintain") throw new Error(`the E2E worker does not run ${invocation.kind} invocations`);
     let result: unknown;
     github.during = invocation.kind;
     try {
-      result = invocation.kind === "publish" ? await publish(invocation, callbacks) : await runTaskInvocation(invocation, {
+      result = invocation.kind === "publish" ? await publish(invocation, callbacks) : invocation.kind === "maintain" ? await maintain(invocation, callbacks) : await runTaskInvocation(invocation, {
         rootPath: root, model: FAUX_MODEL, piAdapter, eventSink: callbacks.eventSink, artifactSink: callbacks.artifactSink,
         feedbackBundleReader: callbacks.feedbackBundleReader, authorizeFeedbackApproval: callbacks.authorizeFeedbackApproval, checkRunners,
       });
@@ -395,6 +526,9 @@ export async function createWorkflowE2E(options: {
       github.during = undefined;
     }
     await callbacks.terminalSink({ operationId, status: "SUCCEEDED", result });
+    if (options.legacyPlanMarkdown !== undefined && legacyPlan === undefined && invocation.kind === "task" && invocation.payload.workflowMode === "PLAN") {
+      legacyPlan = turnPlanIntoMarkdown({ db, s3 }, invocation.workspaceId, operationId, options.legacyPlanMarkdown);
+    }
   };
 
   const processed = new Set<string>();
@@ -432,7 +566,7 @@ export async function createWorkflowE2E(options: {
   });
   /** Stream to queue, then every queued notice once; failed ones stay queued. */
   const pumpNotices = async () => {
-    await notify({ Records: stream.take().map((record) => ({ ...record, eventSource: "aws:dynamodb" })) });
+    await notify({ Records: stream.take().map((record) => ({ ...legacyRecord(record), eventSource: "aws:dynamodb" })) });
     const batch = queue.splice(0, queue.length);
     const answer = await notify({ Records: batch.map((entry, index) => ({ eventSource: "aws:sqs", messageId: `m${index}`, receiptHandle: `r${index}`, body: JSON.stringify(entry.notice), attributes: { ApproximateReceiveCount: String(entry.attempt + 1) } })) });
     const failed = new Set(answer.batchItemFailures.map((failure) => failure.itemIdentifier));
@@ -455,6 +589,9 @@ export async function createWorkflowE2E(options: {
     updateQuestion: async (question) => { slack.update(question); } }, input);
   // Task 21: the Slack service's side of a plain top-level mention: route it, then answer it or post its card.
   const routedQueue: SlackRequestMessage[] = [];
+  const taskQuestions: SlackRequestMessage[] = [];
+  /** The route the ingress sent with each parked task question (its task, saved note and `chat:` mark), in the same order. */
+  const taskQuestionRoutes: TaskQuestionRoute[] = [];
   const routeLogs: Array<{ event: string; fields: Readonly<Record<string, string | number | boolean>> }> = [];
   const routeCalls: string[] = [];
   const offerChoice = createChoiceOffer({ documentClient: db, tableName: "slack-threads",
@@ -490,7 +627,11 @@ export async function createWorkflowE2E(options: {
     requestWorkflowChoice: (input) => offerWorkflowChoice({ store: choices, postMessage: async (message) => slack.post(message) }, input),
     chooseWorkflowPath,
     pendingWorkflowChoice: (thread) => choices.pending(thread),
-    routeRequest: async (message) => { routedQueue.push(message); },
+    // A task-thread mention goes to the service's question check (built in a later task); a top-level request is routed.
+    routeRequest: async (message, _groupId, taskQuestion) => {
+      if (taskQuestion === undefined) routedQueue.push(message);
+      else { taskQuestions.push(message); taskQuestionRoutes.push(taskQuestion); }
+    },
     answerWorkflowChoice,
     // The production adapters: a reply in the task's thread goes to the broker's thread-note event, and its
     // private acknowledgement through the strict Slack double.
@@ -528,10 +669,12 @@ export async function createWorkflowE2E(options: {
       retryReviews: (input) => brokerEvent(handler, "workflow-review-retry", input),
       retryPublication: (input) => brokerEvent(handler, "workflow-publish-retry", input),
       sendBack: (input) => brokerEvent(handler, "workflow-send-back", input),
+      resolveFindings: (input) => brokerEvent(handler, "workflow-resolve-findings", input),
       retryPlan: (input) => brokerEvent(handler, "workflow-retry", input),
       retryImplementation: (input) => brokerEvent(handler, "workflow-retry", input),
       close: (input) => brokerEvent(handler, "workflow-close", input),
       submitFeedback: (input) => brokerEvent(handler, "workflow-feedback-findings-decision", input),
+      retryFeedbackReview: (input) => brokerEvent(handler, "workflow-feedback-review-retry", input),
       chooseWorkflowPath,
       answerWorkflowChoice,
       respondEphemeral: (url, text) => slack.respondEphemeral(url, text),
@@ -543,9 +686,73 @@ export async function createWorkflowE2E(options: {
     return JSON.parse(response.body) as Record<string, unknown>;
   };
 
+  /**
+   * The Slack service's control-plane client as it reaches the broker: a `/v1` request goes to the IAM-signed
+   * `/v1/service` route as the orchestrator role, acting for the thread and member (the signing fetch's rewrite).
+   */
+  const serviceFetch = (thread: SlackThread, userId: string): typeof fetch => async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    const response = await call(handler, {
+      method: init?.method ?? "GET", path: `/v1/service${url.pathname.slice("/v1".length)}${url.search}`,
+      service: { principal: orchestratorPrincipal, thread: slackThreadSubject(thread), slackUser: userId },
+      ...(typeof init?.body === "string" ? { body: JSON.parse(init.body) as unknown } : {}),
+    });
+    return new Response(JSON.stringify(response.body), { status: response.status, headers: { "content-type": "application/json" } });
+  };
+  /** What each chat-agent answer turn was given: the text the model saw, and the tools it could use. */
+  const taskAnswerTurns: Array<{ question: string; modelInput: string; tools: string[] }> = [];
+
   let sequence = 0;
   return {
-    db, handler, slack, github, repoDirectory, baseCommit, prompts, turns, chatQueue, checkRuns, brokerCalls, credentialAttempts, routeCalls, routeLogs,
+    /** Runs, as the PlanEvidence Lambda would, every job the broker started since the last call; answers what each did. */
+    async runPlanEvidenceJobs(): Promise<PlanEvidenceRunOutcome[]> {
+      const outcomes: PlanEvidenceRunOutcome[] = [];
+      for (const event of planEvidenceJobs.splice(0)) {
+        outcomes.push(await runPlanEvidenceJob({ documentClient: db as never, s3, tableName: "state", bucketName: "artifacts", github: github.gateway, now: Date.now, log: () => undefined }, event));
+      }
+      return outcomes;
+    },
+    /**
+     * The Slack service's side of the task-thread mentions parked so far, on its real code: the question check
+     * (`handleTaskQuestion`, with `route` as the scripted classifier, absent for none), the broker's task-answer workspace
+     * and answered-note routes, and a chat-agent turn with no tools on a scripted model that says `answer`.
+     */
+    async answerTaskQuestions(answerOptions: { route?: (text: string) => RequestRoute | Promise<RequestRoute>; answer: string | ((question: string) => string) }): Promise<void> {
+      const messages = taskQuestions.splice(0, taskQuestions.length);
+      const routes = taskQuestionRoutes.splice(0, taskQuestionRoutes.length);
+      for (const [index, message] of messages.entries()) {
+        const route = routes[index]!;
+        const api = createThreadApi({ controlPlaneUrl: CONTROL_PLANE_URL, signedFetch: serviceFetch(message.thread, message.userId) });
+        const route_ = answerOptions.route;
+        await handleTaskQuestion(message, route, {
+          ...(route_ === undefined ? {} : { route: async (text: string) => { routeCalls.push(text); return route_(text); } }),
+          answer: (question) => runTaskAnswer(message, route, question, {
+            api,
+            runTurn: async (input) => {
+              const { modelRuntime: answerRuntime, faux: answerFaux } = await fauxModelRuntime();
+              let modelInput = "";
+              answerFaux.setResponses([(context) => {
+                modelInput = JSON.stringify(context.messages);
+                return fauxAssistantMessage([fauxText(typeof answerOptions.answer === "string" ? answerOptions.answer : answerOptions.answer(question))]);
+              }]);
+              const unused = new Proxy({}, { get: () => () => { throw new Error("a task answer turn used a control-plane tool"); } }) as OrchestrationApi;
+              const runtime = await createHostedSlackRuntime(input, { stateDirectory: await createFixtureDirectory("agentx-e2e-answer-"), api: unused, model: FAUX_MODEL, modelRuntime: answerRuntime });
+              try {
+                const reply = await runOrchestratorTurn(runtime, input.message.text);
+                taskAnswerTurns.push({ question: input.message.text, modelInput, tools: runtime.session.getActiveToolNames() });
+                return reply;
+              } finally { await runtime.dispose(); }
+            },
+          }),
+          post: async (target, text) => { slack.post({ channel: target.channelId, threadTs: target.threadTs, text }); },
+          postPrivate: async (target, user, text) => { slack.postEphemeral({ channel: target.channelId, threadTs: target.threadTs, user, text }); },
+          markAnswered: (input) => api.markThreadNoteAnswered!(input),
+          finish: async () => undefined,
+          log: (event, fields) => { routeLogs.push({ event, fields }); },
+        });
+      }
+    },
+    db, s3, handler, slack, github, repoDirectory, baseCommit, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs,
 
     /** A signed Events API callback for a message in the test thread; answers the HTTP status. */
     async mention(text: string, mentionOptions: { user?: string; threadTs?: string; type?: "app_mention" | "message"; ts?: string } = {}): Promise<number> {
@@ -568,6 +775,32 @@ export async function createWorkflowE2E(options: {
       return status;
     },
 
+    /**
+     * A GitHub webhook delivery for the task's pull request `number`, signed with the App's secret and sent to the broker's
+     * real route: a new comment on its conversation, or (merged) the pull request closing merged. Answers the HTTP status.
+     */
+    async githubWebhook(number: number, event: { comment: GitHubFeedbackComment } | { merged: true }): Promise<number> {
+      const pullRequest = github.pullRequests.find((entry) => entry.number === number)!;
+      const repository = { id: 4242, full_name: "example/demo" };
+      const inline = "comment" in event && event.comment.kind === "REVIEW_COMMENT";
+      const payload = "comment" in event
+        ? inline
+          ? { action: "created", installation: { id: 77 }, repository, pull_request: { number, state: "open", html_url: pullRequest.url },
+            comment: { id: Number(event.comment.id.replace("review_comment:", "")), body: event.comment.body, html_url: event.comment.url, updated_at: event.comment.updatedAt,
+              path: event.comment.path, line: event.comment.line, user: { login: event.comment.author } } }
+          : { action: "created", installation: { id: 77 }, repository, issue: { number, state: "open", pull_request: { url: `https://api.github.com/repos/example/demo/pulls/${number}` } },
+            comment: { id: Number(event.comment.id), body: event.comment.body, html_url: event.comment.url, updated_at: event.comment.updatedAt, user: { login: event.comment.author } } }
+        : { action: "closed", installation: { id: 77 }, repository, pull_request: { number, state: "closed", merged: true, html_url: pullRequest.url } };
+      const body = JSON.stringify(payload);
+      const response = await harness.handler({
+        version: "2.0", rawPath: "/v1/github/webhooks", rawQueryString: "", body, isBase64Encoded: false,
+        headers: { "x-hub-signature-256": `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(body, "utf8").digest("hex")}`,
+          "x-github-delivery": randomUUID(), "x-github-event": inline ? "pull_request_review_comment" : "comment" in event ? "issue_comment" : "pull_request" },
+        requestContext: { requestId: randomUUID(), http: { method: "POST" } },
+      });
+      return response.statusCode;
+    },
+
     /** Presses the button `actionId` on the latest message that carries it. */
     async click(actionId: string, clickOptions: { user?: string } = {}): Promise<void> {
       const post = slack.lastPostWithAction(actionId);
@@ -585,7 +818,7 @@ export async function createWorkflowE2E(options: {
       if (opened === undefined) throw new Error("no modal is open");
       const answer = await interact({
         type: "view_submission", user: { id: submitOptions.user ?? MAYA.slackUserId, team_id: SLACK_TEAM }, team: { id: SLACK_TEAM },
-        view: { callback_id: opened.view.callback_id, private_metadata: opened.view.private_metadata, state: { values } },
+        view: { callback_id: opened.view.callback_id, private_metadata: opened.view.private_metadata, blocks: opened.view.blocks, state: { values } },
       });
       if (answer.response_action === "errors") throw new Error(`the modal refused the submission: ${JSON.stringify(answer.errors)}`);
     },
@@ -613,7 +846,30 @@ export async function createWorkflowE2E(options: {
       return WorkflowSnapshotSchema.parse(db.get(`DEVTASK#${this.taskId()}`, "META")?.workflow);
     },
 
+    /**
+     * The task page, fetched through the broker's real route with a browser sign-in as `reader` (the owner by
+     * default), exactly as a browser sends it. Not counted in `brokerCalls`: it is a person's page view, not part of the Slack journey.
+     */
+    async taskPage(search = "", reader: Developer = MAYA): Promise<{ status: number; body: string }> {
+      // A browser review sign-in is its own session record (a UUID, with a review expiry), not the CLI session.
+      const browserSession = "b0b0b0b0-0000-4000-8000-000000000001";
+      db.set({ pk: `SESSION#${browserSession}`, sk: "META", sessionId: browserSession, developerId: reader.developerId, amr: reader.provider,
+        startedAt: new Date().toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800, reviewExpiresAt: Math.floor(Date.now() / 1000) + 604_800 });
+      const response = await harness.handler({
+        version: "2.0", routeKey: "ANY /review/{proxy+}", rawPath: `/review/${this.taskId()}/task`, rawQueryString: search.replace(/^\?/, ""),
+        headers: { cookie: `__Host-agentx_review_session=${browserSession}` },
+        requestContext: { requestId: randomUUID(), http: { method: "GET" } },
+      });
+      return { status: response.statusCode, body: response.body };
+    },
+
     repoFile: (path: string): Promise<string> => readFile(join(repoDirectory, path), "utf8"),
+
+    /** Sends the broker a Slack ingress event directly, as the AWS wiring's invoke does, and answers its status and parsed reply. */
+    async brokerEvent(action: string, input: Record<string, unknown>): Promise<{ statusCode: number; body: Record<string, unknown> }> {
+      const response = await handler({ source: "agentx.slack-ingress", action, ...input });
+      return { statusCode: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
+    },
   };
 }
 

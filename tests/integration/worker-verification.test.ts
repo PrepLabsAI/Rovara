@@ -102,7 +102,7 @@ type Request = Array<{ role: string; content: unknown }>;
 async function runTask(options: {
   steps: FauxResponseStep[];
   readiness?: ProjectCommand[];
-  workflowMode?: "CHECKS";
+  workflowMode?: "CHECKS" | "IMPLEMENT";
   prepared?: ProjectCommand[];
   runners?: CheckRunners;
   shell?: ReturnType<typeof scriptedShell>;
@@ -176,21 +176,27 @@ const failedRun = (output: string): AgentResult => ({ exitCode: 1, timedOut: fal
 const passedRun: AgentResult = { exitCode: 0, timedOut: false, output: "1 passed\n" };
 const lint: ProjectCommand = { cwd: "app", executable: "npm", args: ["run", "lint"], timeoutSeconds: 60 };
 
+/** A workspace root whose manifest names one committed repository, `app`. */
+async function gitWorkspaceRoot(prepared: ProjectCommand[] = []): Promise<string> {
+  const rootPath = await workspaceRoot(prepared);
+  const repositoryPath = join(rootPath, "app");
+  await writeFile(join(repositoryPath, "README.md"), "fixture\n");
+  execFileSync("git", ["init", "-q", repositoryPath]);
+  execFileSync("git", ["-C", repositoryPath, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", "add", "."]);
+  execFileSync("git", ["-C", repositoryPath, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"]);
+  const resolvedCommit = execFileSync("git", ["-C", repositoryPath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const manifestPath = join(rootPath, ".agentx/preparation-manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+  manifest.repositories = [{ name: "app", path: "app", defaultBranch: "main", resolvedCommit, resolvedAt: new Date().toISOString(), completedAt: new Date().toISOString() }];
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  return rootPath;
+}
+
 describe("verification-only retries", () => {
   it("runs only selected project checks without opening a model session or editing files", async () => {
     const fake = fakeRunners({ project: [{ exitCode: 0, timedOut: false, stdout: "lint passed\n", stderr: "" }] });
     const shell = scriptedShell();
-    const rootPath = await workspaceRoot([lint]);
-    const repositoryPath = join(rootPath, "app");
-    await writeFile(join(repositoryPath, "README.md"), "fixture\n");
-    execFileSync("git", ["init", "-q", repositoryPath]);
-    execFileSync("git", ["-C", repositoryPath, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", "add", "."]);
-    execFileSync("git", ["-C", repositoryPath, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"]);
-    const resolvedCommit = execFileSync("git", ["-C", repositoryPath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
-    const manifestPath = join(rootPath, ".agentx/preparation-manifest.json");
-    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
-    manifest.repositories = [{ name: "app", path: "app", defaultBranch: "main", resolvedCommit, resolvedAt: new Date().toISOString(), completedAt: new Date().toISOString() }];
-    await writeFile(manifestPath, JSON.stringify(manifest));
+    const rootPath = await gitWorkspaceRoot([lint]);
     const run = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fake.runners, shell, rootPath });
 
     expect(run.failure).toBeUndefined();
@@ -201,26 +207,50 @@ describe("verification-only retries", () => {
     expect(fake.projectCalls).toEqual([lint]);
     expect(run.result?.workflowCandidateRepositories).toEqual(run.result?.workflowCheckCandidateRepositories);
   });
+
+  it("names the code a coding run with no checks finished on, so a review-only task can bind it", async () => {
+    const fake = fakeRunners();
+    const run = await runTask({ steps: [fauxAssistantMessage(`Changed nothing.\n${DONE}`)], workflowMode: "IMPLEMENT", readiness: [], runners: fake.runners, rootPath: await gitWorkspaceRoot() });
+
+    expect(run.failure).toBeUndefined();
+    expect(run.result?.checks).toMatchObject({ status: "not_verified", notVerifiedReason: "no_checks" });
+    expect(run.result?.workflowCandidateRepositories).toHaveLength(1);
+    expect(run.result?.workflowCheckCandidateRepositories).toEqual(run.result?.workflowCandidateRepositories);
+  });
+
+  it("names the code a coding run whose checks were stopped finished on, so a review-only task can go on to review", async () => {
+    const fake = fakeRunners();
+    const run = await runTask({ steps: [fauxAssistantMessage(`Changed nothing.\n${DONE}`)], workflowMode: "IMPLEMENT", readiness: [lint], runners: fake.runners, budgets: [1], rootPath: await gitWorkspaceRoot() });
+
+    expect(run.failure).toBeUndefined();
+    expect(run.result?.checks).toMatchObject({ status: "not_verified", notVerifiedReason: "stopped" });
+    expect(run.result?.workflowCandidateRepositories).toHaveLength(1);
+    expect(run.result?.workflowCheckCandidateRepositories).toEqual(run.result?.workflowCandidateRepositories);
+  });
 });
 
-async function feedbackReviewFixture() {
+async function feedbackReviewFixture(files: Record<string, string> = { "src.ts": "export function parse(input: string) { return input.trim(); }\n" },
+  supplied: Array<{ id: string; body: string; path: string; line: number }> = [{ id: "review-comment-1", body: "Handle empty input before trimming.", path: "src.ts", line: 1 }]) {
   const rootPath = await createFixtureDirectory("agentx-feedback-review-");
   const repository = join(rootPath, "app");
   await mkdir(repository, { recursive: true });
-  await writeFile(join(repository, "src.ts"), "export function parse(input: string) { return input.trim(); }\n");
+  for (const [path, content] of Object.entries(files)) {
+    await mkdir(join(repository, path, ".."), { recursive: true });
+    await writeFile(join(repository, path), content);
+  }
   execFileSync("git", ["init", "-q", repository]);
   execFileSync("git", ["-C", repository, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", "add", "."]);
   execFileSync("git", ["-C", repository, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"]);
   const repositories = [{ repositoryId: "app", directory: repository }];
   const candidate = await readCandidateRepositories(repositories);
-  const body = "Handle empty input before trimming.";
-  const bodyDigest = createHash("sha256").update(body).digest("hex");
   const bundle: WorkflowFeedbackBundle = {
     schemaVersion: 1, taskId: randomUUID(), repositoryId: "app", number: 42,
-    headSha: candidate[0]!.commitSha, candidateDigest: createCandidateManifest(candidate).digest,
+    // The published commit is not the commit the candidate was read at; its tree is the same.
+    headSha: "b".repeat(40), headTreeSha: candidate[0]!.treeSha, candidateDigest: createCandidateManifest(candidate).digest,
     commentSetDigest: "a".repeat(64), producer: "agentx-github-reconciler", version: "1", recordedAt: new Date().toISOString(),
-    comments: [{ id: "review-comment-1", threadId: "thread-1", kind: "REVIEW_COMMENT", url: "https://github.com/acme/app/pull/42#discussion_r1",
-      author: "reviewer", updatedAt: new Date().toISOString(), bodyDigest, bodyBytes: Buffer.byteLength(body), path: "src.ts", line: 1, body }],
+    comments: supplied.map(({ id, body, path, line }, index) => ({ id, threadId: `thread-${String(index + 1)}`, kind: "REVIEW_COMMENT" as const,
+      url: `https://github.com/acme/app/pull/42#discussion_r${String(index + 1)}`, author: "reviewer", updatedAt: new Date().toISOString(),
+      bodyDigest: createHash("sha256").update(body).digest("hex"), bodyBytes: Buffer.byteLength(body), path, line, body })),
     sourceDeliveryIds: ["delivery-1"],
   };
   const normalized = WorkflowFeedbackBundleSchema.parse({ ...bundle, commentSetDigest: createHash("sha256").update(JSON.stringify(bundle.comments), "utf8").digest("hex") });
@@ -258,6 +288,47 @@ function feedbackReviewerAdapter(response: string, beforePrompt?: () => Promise<
   };
 }
 
+/** A reviewer that gives each answer in turn (the last repeats) and records every prompt it is sent. */
+function feedbackReviewerSequence(responses: string[], prompts: string[]): PiSessionAdapter {
+  return {
+    async create(input) {
+      let notify: ((event: unknown) => void) | undefined;
+      const sessionFile = join(input.sessionDirectory, "feedback-review.json");
+      return {
+        conversationId: randomUUID(), sessionFile,
+        async prompt(prompt) {
+          const response = responses[Math.min(prompts.length, responses.length - 1)]!;
+          prompts.push(prompt);
+          notify?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: response }] } });
+        }, async abort() {},
+        getModel: () => ({ provider: "test-provider", modelId: "read-only-critic-v1" }),
+        getSessionStats: () => ({ sessionFile, sessionId: "feedback-review", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0,
+          totalMessages: 2, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }),
+        subscribe(listener) { notify = listener; return () => { notify = undefined; }; },
+        dispose() {},
+      };
+    },
+  };
+}
+
+/** One IMPLEMENT finding on the fixture's single comment, with the given proposal. */
+function implementFinding(bundleDigest: string, fixProposal: Record<string, unknown>) {
+  return {
+    id: "finding-1", bundleDigest, commentIds: ["review-comment-1"], priority: "SHOULD_FIX", assessment: "ACTIONABLE", recommended: true,
+    evidence: [{ source: "candidate", reference: "app/src.ts:1" }], rationale: "The comment asks for a change the code does not have yet.",
+    confidence: { level: "HIGH", reason: "The comment and the code name the same thing." }, proposedDisposition: "IMPLEMENT", fixProposal,
+  };
+}
+
+async function reviewWith(fixture: Awaited<ReturnType<typeof feedbackReviewFixture>>, responses: string[], prompts: string[] = [], artifacts: WorkerArtifact[] = []) {
+  return runWorkflowFeedbackReview({
+    operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
+    taskRequirements: "Return a safe result for empty input.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
+    candidate: fixture.candidate, repositories: fixture.repositories, bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }],
+    piAdapter: feedbackReviewerSequence(responses, prompts), artifactSink: async (artifact) => { artifacts.push(artifact); },
+  });
+}
+
 describe("AI-generated PR feedback advisory", () => {
   it("reviews every supplied bundle comment on the exact candidate in a read-only session and persists a digested report", async () => {
     const fixture = await feedbackReviewFixture();
@@ -283,7 +354,7 @@ describe("AI-generated PR feedback advisory", () => {
     };
     const review = await runWorkflowFeedbackReview({
       operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
-      taskRequirements: "Return a safe result for empty input.",
+      taskRequirements: "Return a safe result for empty input.", candidateDigest: fixture.bundle.candidateDigest,
       rootPath: fixture.rootPath, model: FAUX_MODEL, candidate: fixture.candidate, repositories: fixture.repositories,
       bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }], piAdapter: adapter,
       artifactSink: async (artifact) => { capturedArtifacts.push(artifact); },
@@ -318,15 +389,266 @@ describe("AI-generated PR feedback advisory", () => {
     };
     const review = await runWorkflowFeedbackReview({
       operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
-      taskRequirements: "Return a safe result for empty input.", rootPath: fixture.rootPath, model: FAUX_MODEL,
+      taskRequirements: "Return a safe result for empty input.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
       candidate: fixture.candidate, repositories: fixture.repositories,
       bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }],
       piAdapter: feedbackReviewerAdapter(JSON.stringify({ findings: [finding] })),
       artifactSink: async () => undefined,
     });
     expect(review.report.status).toBe("FAILED");
-    expect(review.report.blockReason).toMatch(/malformed|account for every comment/);
+    expect(review.report.blockReason).toBe("reviewer output: fixProposal path does not match the code (MODIFY of a missing file or ADD of an existing one)");
     expect(review.report.findings).toEqual([]);
+  });
+
+  it("reads an answer wrapped in a code fence", async () => {
+    const fixture = await feedbackReviewFixture();
+    const finding = implementFinding(fixture.bundleRef.sha256, { summary: "Guard empty input.",
+      fileChanges: [{ repositoryId: "app", path: "src.ts", operation: "MODIFY", change: "Return early for empty input." }],
+      tests: [{ repositoryId: "app", path: "src.test.ts", operation: "ADD", behavior: "Empty input returns an empty result." }] });
+    const prompts: string[] = [];
+    const review = await reviewWith(fixture, ["```json\n" + JSON.stringify({ findings: [finding] }) + "\n```"], prompts);
+    expect(review.report.blockReason).toBeUndefined();
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings).toHaveLength(1);
+    expect(prompts).toHaveLength(1);
+  });
+
+  it("asks once more, naming the failed check, when a code change in a repository with tests names no tests", async () => {
+    const fixture = await feedbackReviewFixture({ "src.ts": "export const parse = (input: string) => input.trim();\n", "src.test.ts": "// existing test\n" });
+    const changes = [{ repositoryId: "app", path: "src.ts", operation: "MODIFY", change: "Return early for empty input." }];
+    const first = implementFinding(fixture.bundleRef.sha256, { summary: "Guard empty input.", fileChanges: changes, tests: [] });
+    const second = implementFinding(fixture.bundleRef.sha256, { summary: "Guard empty input.", fileChanges: changes,
+      tests: [{ repositoryId: "app", path: "src.test.ts", operation: "MODIFY", behavior: "Empty input returns an empty result." }] });
+    const prompts: string[] = [];
+    const review = await reviewWith(fixture, [JSON.stringify({ findings: [first] }), JSON.stringify({ findings: [second] })], prompts);
+    expect(review.report.blockReason).toBeUndefined();
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings[0]?.fixProposal?.tests).toHaveLength(1);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("reviewer output: fixProposal.tests is empty");
+    expect(prompts[1]).toContain("review-comment-1");
+    expect(prompts[1]).toMatch(/plain JSON/i);
+  });
+
+  it("fails with the check that failed when the second answer is also unusable, and keeps the answer privately", async () => {
+    const fixture = await feedbackReviewFixture();
+    const prompts: string[] = [];
+    const artifacts: WorkerArtifact[] = [];
+    const review = await reviewWith(fixture, ["I think the comment is fine.", "Still prose, sorry."], prompts, artifacts);
+    expect(prompts).toHaveLength(2);
+    expect(review.report.status).toBe("FAILED");
+    expect(review.report.blockReason).toBe("reviewer output: not valid JSON");
+    expect(JSON.stringify(review.report)).not.toContain("Still prose");
+    const kept = artifacts.find((artifact) => artifact.name === "workflow-feedback-review-answer.txt");
+    expect(kept?.content).toBe("Still prose, sorry.");
+    expect(artifacts.some((artifact) => artifact.name === review.artifactName)).toBe(true);
+  });
+
+  it("names a comment the answer left out", async () => {
+    const fixture = await feedbackReviewFixture();
+    const review = await reviewWith(fixture, [JSON.stringify({ findings: [] })]);
+    expect(review.report.status).toBe("FAILED");
+    expect(review.report.blockReason).toBe("reviewer output: comment review-comment-1 not accounted for");
+  });
+
+  it("accepts a documentation-only change with no tests in a repository that has no tests", async () => {
+    const fixture = await feedbackReviewFixture({ "README.md": "# App\n\nThis sentence is much longer than it needs to be.\n" });
+    const finding = implementFinding(fixture.bundleRef.sha256, { summary: "Shorten the sentence.",
+      fileChanges: [{ repositoryId: "app", path: "README.md", operation: "MODIFY", change: "Shorten the second sentence." }], tests: [] });
+    const prompts: string[] = [];
+    const review = await reviewWith(fixture, [JSON.stringify({ findings: [finding] })], prompts);
+    expect(review.report.blockReason).toBeUndefined();
+    expect(review.report.status).toBe("COMPLETE");
+    expect(prompts).toHaveLength(1);
+  });
+
+  it("accepts a documentation-only change with no tests in a repository that has tests", async () => {
+    const fixture = await feedbackReviewFixture({ "docs/guide.txt": "Long words.\n", "src.ts": "export {};\n", "tests/app.test.ts": "// test\n" });
+    const finding = implementFinding(fixture.bundleRef.sha256, { summary: "Shorten the guide.",
+      fileChanges: [{ repositoryId: "app", path: "docs/guide.txt", operation: "MODIFY", change: "Shorten it." }], tests: [] });
+    const review = await reviewWith(fixture, [JSON.stringify({ findings: [finding] })]);
+    expect(review.report.blockReason).toBeUndefined();
+    expect(review.report.status).toBe("COMPLETE");
+  });
+
+  it("accepts a code change with no tests in a repository that has no test files", async () => {
+    const fixture = await feedbackReviewFixture();
+    const finding = implementFinding(fixture.bundleRef.sha256, { summary: "Guard empty input.",
+      fileChanges: [{ repositoryId: "app", path: "src.ts", operation: "MODIFY", change: "Return early for empty input." }], tests: [] });
+    const review = await reviewWith(fixture, [JSON.stringify({ findings: [finding] })]);
+    expect(review.report.blockReason).toBeUndefined();
+    expect(review.report.status).toBe("COMPLETE");
+  });
+
+  it("tells the reviewer tests are needed only for code changes in a repository with tests", async () => {
+    const fixture = await feedbackReviewFixture();
+    const prompts: string[] = [];
+    await reviewWith(fixture, [JSON.stringify({ findings: [] })], prompts);
+    expect(prompts[0]).not.toContain("Tests must name a concrete test file");
+    expect(prompts[0]).toContain("tests may be an empty list");
+  });
+
+  it("gives the follow-up its own time limit, so a slow first answer does not use up the second's", async () => {
+    const fixture = await feedbackReviewFixture();
+    const finding = implementFinding(fixture.bundleRef.sha256, { summary: "Guard empty input.",
+      fileChanges: [{ repositoryId: "app", path: "src.ts", operation: "MODIFY", change: "Return early for empty input." }], tests: [] });
+    const responses = ["Not JSON yet.", JSON.stringify({ findings: [finding] })];
+    let calls = 0;
+    const adapter: PiSessionAdapter = {
+      async create(input) {
+        let notify: ((event: unknown) => void) | undefined;
+        const sessionFile = join(input.sessionDirectory, "feedback-review.json");
+        return {
+          conversationId: randomUUID(), sessionFile,
+          async prompt() {
+            const response = responses[Math.min(calls++, 1)]!;
+            await new Promise((resolve) => setTimeout(resolve, 250));
+            notify?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: response }] } });
+          }, async abort() {},
+          getModel: () => ({ provider: "test-provider", modelId: "read-only-critic-v1" }),
+          getSessionStats: () => ({ sessionFile, sessionId: "feedback-review", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0,
+            totalMessages: 2, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }),
+          subscribe(listener) { notify = listener; return () => { notify = undefined; }; },
+          dispose() {},
+        };
+      },
+    };
+    const review = await runWorkflowFeedbackReview({
+      operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7, timeoutMs: 400,
+      taskRequirements: "Return a safe result for empty input.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
+      candidate: fixture.candidate, repositories: fixture.repositories, bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }],
+      piAdapter: adapter, artifactSink: async () => undefined,
+    });
+    expect(review.report.blockReason).toBeUndefined();
+    expect(review.report.status).toBe("COMPLETE");
+    expect(calls).toBe(2);
+  });
+
+  it("redacts a kept answer before cutting it to its byte limit", async () => {
+    const fixture = await feedbackReviewFixture();
+    const token = `ghp_${"A".repeat(36)}`;
+    // Two-byte characters, then a token that straddles the one-megabyte cut.
+    const answer = `${"é".repeat(499_995)}${token} trailing words`;
+    const artifacts: WorkerArtifact[] = [];
+    await reviewWith(fixture, [answer], [], artifacts);
+    const kept = artifacts.find((artifact) => artifact.name === "workflow-feedback-review-answer.txt")!;
+    expect(Buffer.byteLength(kept.content, "utf8")).toBeLessThanOrEqual(1_000_000);
+    expect(kept.content).not.toContain("ghp_");
+    expect(kept.content).not.toContain("AAAAAAAA");
+  });
+
+  it("counts only real documentation as documentation: manifests and code under docs/ need tests", async () => {
+    const files = { "src.ts": "export {};\n", "tests/app.test.ts": "// test\n", "requirements.txt": "flask\n", "docs/conf.py": "x = 1\n",
+      "docs/requirements.txt": "sphinx\n", "CMakeLists.txt": "project(x)\n", "notes.txt": "n\n", "README.txt": "r\n", "CHANGELOG.md": "c\n", "docs/guide.txt": "g\n" };
+    const fixture = await feedbackReviewFixture(files);
+    const proposalFor = (path: string) => [JSON.stringify({ findings: [implementFinding(fixture.bundleRef.sha256, { summary: "Change it.",
+      fileChanges: [{ repositoryId: "app", path, operation: "MODIFY", change: "Change it." }], tests: [] })] })];
+    for (const path of ["requirements.txt", "docs/conf.py", "docs/requirements.txt", "CMakeLists.txt", "notes.txt"]) {
+      expect((await reviewWith(fixture, proposalFor(path))).report.blockReason, path).toBe("reviewer output: fixProposal.tests is empty");
+    }
+    for (const path of ["README.txt", "CHANGELOG.md", "docs/guide.txt"]) {
+      expect((await reviewWith(fixture, proposalFor(path))).report.status, path).toBe("COMPLETE");
+    }
+  });
+
+  it("sees spec/, e2e/ and *_spec.* files as tests", async () => {
+    for (const testFile of ["spec/app_spec.rb", "e2e/flow.ts", "lib/thing_spec.rb"]) {
+      const fixture = await feedbackReviewFixture({ "src.ts": "export {};\n", [testFile]: "// test\n" });
+      const review = await reviewWith(fixture, [JSON.stringify({ findings: [implementFinding(fixture.bundleRef.sha256, { summary: "Change it.",
+        fileChanges: [{ repositoryId: "app", path: "src.ts", operation: "MODIFY", change: "Change it." }], tests: [] })] })]);
+      expect(review.report.blockReason, testFile).toBe("reviewer output: fixProposal.tests is empty");
+    }
+  });
+});
+
+
+/**
+ * The 0.2.8 live test: two identical "Make the sentence shorter." comments on README.md, and the two answers the reviewer gave
+ * (ids and digests fitted to this fixture). Both left the choice to the owner, citing the approved plan.
+ */
+async function sentenceFixture() {
+  const readme = `# App\n\n${"Filler line.\n".repeat(277)}This sentence explains the feature in far more words than anyone needs to read before moving on.\n`;
+  return feedbackReviewFixture({ "README.md": readme }, [
+    { id: "comment-a", body: "Make the sentence shorter.", path: "README.md", line: 280 },
+    { id: "comment-b", body: "Make the sentence shorter.", path: "README.md", line: 280 },
+  ]);
+}
+function ownerDecisionAnswer(bundleDigest: string, fileChanges: unknown[]) {
+  return JSON.stringify({ findings: [{
+    id: "finding-1", bundleDigest, commentIds: ["comment-a", "comment-b"], priority: "SHOULD_FIX", assessment: "CONFLICTING", recommended: false,
+    evidence: [{ source: "candidate", reference: "README.md:280" }, { source: "plan", reference: "decision d1" }],
+    rationale: "The sentence was approved by the owner in the plan (decision d1) and the comment gives no replacement wording.",
+    confidence: { level: "MEDIUM", reason: "The comment is clear but names no wording." }, proposedDisposition: "OWNER_DECISION",
+    fixProposal: { summary: "Owner must decide whether to change the approved sentence and what the shorter wording should be.", fileChanges, tests: [] },
+  }] });
+}
+
+describe("PR feedback the reviewer leaves to the owner (0.2.8 live test)", () => {
+  it("accepts an owner decision with no file changes (answer A)", async () => {
+    const fixture = await sentenceFixture();
+    const prompts: string[] = [];
+    const review = await reviewWith(fixture, [ownerDecisionAnswer(fixture.bundleRef.sha256, [])], prompts);
+    expect(review.report.blockReason).toBeUndefined();
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings[0]).toMatchObject({ proposedDisposition: "OWNER_DECISION", commentIds: ["comment-a", "comment-b"], recommended: false });
+    expect(prompts).toHaveLength(1);
+  });
+
+  it("accepts an owner decision that sketches a change to make once the owner answers (answer B)", async () => {
+    const fixture = await sentenceFixture();
+    const prompts: string[] = [];
+    const review = await reviewWith(fixture, [ownerDecisionAnswer(fixture.bundleRef.sha256, [{ repositoryId: "app", path: "README.md", operation: "MODIFY",
+      change: "Replace the sentence on line 280 with the shorter wording once that text is confirmed." }])], prompts);
+    expect(review.report.blockReason).toBeUndefined();
+    expect(review.report.status).toBe("COMPLETE");
+    expect(prompts).toHaveLength(1);
+  });
+
+  it("accepts an owner decision or a skip with no proposal at all", async () => {
+    const fixture = await sentenceFixture();
+    const answer = JSON.parse(ownerDecisionAnswer(fixture.bundleRef.sha256, [])) as { findings: Array<Record<string, unknown>> };
+    for (const patch of [{ proposedDisposition: "OWNER_DECISION" }, { proposedDisposition: "SKIP", assessment: "ALREADY_ADDRESSED", confidence: { level: "HIGH", reason: "Done." } }]) {
+      const { fixProposal: _dropped, ...finding } = { ...answer.findings[0]!, ...patch };
+      void _dropped;
+      const review = await reviewWith(fixture, [JSON.stringify({ findings: [finding] })]);
+      expect(review.report.blockReason, String(patch.proposedDisposition)).toBeUndefined();
+      expect(review.report.status).toBe("COMPLETE");
+    }
+  });
+
+  it("still refuses an IMPLEMENT with no file changes, by name, after the one follow-up", async () => {
+    const fixture = await sentenceFixture();
+    const finding = { ...implementFinding(fixture.bundleRef.sha256, { summary: "Shorten the sentence.", fileChanges: [], tests: [] }), commentIds: ["comment-a", "comment-b"] };
+    const prompts: string[] = [];
+    const review = await reviewWith(fixture, [JSON.stringify({ findings: [finding] })], prompts);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain("fixProposal.fileChanges");
+    expect(review.report.status).toBe("FAILED");
+    expect(review.report.blockReason).toBe("reviewer output: fixProposal.fileChanges is empty for an IMPLEMENT finding");
+  });
+
+  it("keeps the review but clears recommended on a finding that is not an IMPLEMENT, so nothing is approved without the owner's answer", async () => {
+    const fixture = await sentenceFixture();
+    const answer = JSON.parse(ownerDecisionAnswer(fixture.bundleRef.sha256, [])) as { findings: Array<Record<string, unknown>> };
+    const prompts: string[] = [];
+    const review = await reviewWith(fixture, [JSON.stringify({ findings: [{ ...answer.findings[0], recommended: true }] })], prompts);
+    expect(prompts).toHaveLength(1);
+    expect(review.report.blockReason).toBeUndefined();
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings[0]).toMatchObject({ proposedDisposition: "OWNER_DECISION", recommended: false });
+    expect(review.report.findingRefs[0]).toMatchObject({ recommended: false });
+  });
+
+  it("tells the reviewer the owner's comments supersede the plan, and when to ask instead of proposing", async () => {
+    const fixture = await sentenceFixture();
+    const prompts: string[] = [];
+    await reviewWith(fixture, [ownerDecisionAnswer(fixture.bundleRef.sha256, [])], prompts);
+    const prompt = prompts[0]!;
+    expect(prompt).toContain("The owner's PR comments come after the approved plan and supersede its decisions");
+    expect(prompt).toContain("is not a conflict to escalate");
+    expect(prompt).toMatch(/clear but unspecific request.*propose the exact wording or code.*IMPLEMENT/s);
+    expect(prompt).toMatch(/OWNER_DECISION only when the comment cannot be acted on without a real choice between options.*the question and the options in fixProposal\.summary/s);
+    expect(prompt).toContain("Comments with identical bodies are one request");
   });
 });
 

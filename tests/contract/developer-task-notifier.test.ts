@@ -10,6 +10,7 @@ import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/s
 import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import type { Notice } from "../../packages/broker/src/developer/notifications.js";
 import { MAYA, createDeveloperTaskBroker, recordStream } from "../support/developer-task-broker.js";
+import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
@@ -119,7 +120,7 @@ describe("cards whose step is over lose their buttons (Task 19)", () => {
     { name: "Retry planning", actionId: "agentx_workflow_retry_plan", workflow: { stage: "PLAN", state: "BLOCKED", blockReason: "planning operation ended failed" } },
     { name: "Retry coding", actionId: "agentx_workflow_retry_implementation", workflow: { stage: "IMPLEMENT", state: "BLOCKED", blockReason: "implementation operation ended failed" } },
     { name: "Retry reviews", actionId: "agentx_workflow_retry_reviews", workflow: { stage: "REVIEW", state: "BLOCKED", candidate: { digest: candidateDigest }, verification: passed, reviews: [review("UNKNOWN")] } },
-    { name: "Send back to coding", actionId: "agentx_workflow_send_back", workflow: { stage: "REVIEW", state: "BLOCKED", candidate: { digest: candidateDigest }, verification: passed,
+    { name: "Resolve findings", actionId: "agentx_workflow_resolve_findings", workflow: { stage: "REVIEW", state: "BLOCKED", candidate: { digest: candidateDigest }, verification: passed,
       reviews: [review("FINDINGS", [{ text: "The parser drops the last line.", origin: "INTRODUCED" }])] } },
     { name: "Retry opening the pull request", actionId: "agentx_workflow_retry_publish", workflow: { stage: "PULL_REQUEST", state: "BLOCKED", blockReason: "GitHub refused the pull request",
       candidate: { digest: candidateDigest }, verification: passed, reviews: [review("PASS")] } },
@@ -162,6 +163,25 @@ describe("cards whose step is over lose their buttons (Task 19)", () => {
     await h.pump();
     const card = h.strict.lastPostWithAction("agentx_workflow_close");
     await setWorkflow({ revision: 10, stage: "CLOSED", state: "COMPLETE", outcome: "CLOSED" });
+    await h.pump();
+    const edits = h.strict.updates.filter((update) => update.ts === card.ts);
+    expect(edits).toHaveLength(1);
+    expect(edits[0]!.blocks.some((block) => (block as { type: string }).type === "actions")).toBe(false);
+    expect(edits[0]!.blocks.at(-1)).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: "This task is closed." }] });
+  });
+
+  it("takes the buttons off the current step's card when the task is closed without its step moving on", async () => {
+    // Close task records closedAt only; the workflow keeps its stage and revision (the live case: a draft PR waiting for merge).
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    await h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now", ExpressionAttributeValues: { ":now": now(),
+        ":workflow": { artifacts: [], revision: 9, stage: "IMPLEMENT", state: "BLOCKED", blockReason: "implementation operation ended failed" } } }));
+    await h.pump();
+    const card = h.strict.lastPostWithAction("agentx_workflow_close");
+    const closedAt = now();
+    await h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+      UpdateExpression: "SET closedAt = :closedAt, updatedAt = :closedAt", ExpressionAttributeValues: { ":closedAt": closedAt } }));
     await h.pump();
     const edits = h.strict.updates.filter((update) => update.ts === card.ts);
     expect(edits).toHaveLength(1);
@@ -368,7 +388,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     expect(h.queue).toEqual([]);
   });
 
-  it("shows the problems the reviews found briefly, escaped, with Send back to coding, Retry reviews and Close task", async () => {
+  it("shows the problems the reviews found briefly, escaped, with Resolve findings, Retry reviews and Close task", async () => {
     const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
     await h.pump();
     await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
@@ -400,8 +420,8 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     expect(message.text).not.toMatch(/candidate|revision|digest|operation|workflow|FAILED|SUCCEEDED/i);
     expect(visibleSlackText(message.text).length).toBeLessThanOrEqual(1_200);
     const actions = (message.blocks as Array<{ type: string; elements?: Array<{ action_id: string; value: string; style?: string }> }>).find((block) => block.type === "actions")!;
-    expect(actions.elements!.map((button) => button.action_id)).toEqual(["agentx_workflow_send_back", "agentx_workflow_retry_reviews", "agentx_workflow_close"]);
-    expect(actions.elements![0]).toMatchObject({ style: "primary", value: JSON.stringify({ taskId: h.taskId, revision: 11 }) });
+    expect(actions.elements!.map((button) => button.action_id)).toEqual(["agentx_workflow_resolve_findings", "agentx_workflow_retry_reviews", "agentx_workflow_close"]);
+    expect(actions.elements![0]).toMatchObject({ style: "primary", value: JSON.stringify({ taskId: h.taskId, revision: 11, candidateDigest }) });
     expect(actions.elements!.filter((button) => button.style === "primary")).toHaveLength(1);
   });
 
@@ -548,8 +568,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.finish(h.workspaceId, preparation, "SUCCEEDED");
     await h.pump();
     const planning = h.active();
-    await h.artifact(h.workspaceId, planning, "plan.md", plan);
-    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await finishPlanningWithMarkdown(h, h.workspaceId, planning, plan);
     await h.pump();
 
     const message = h.posts.at(-1)!;
@@ -589,8 +608,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.finish(h.workspaceId, prepare, "SUCCEEDED");
     await h.pump();
     const planning = h.active();
-    await h.artifact(h.workspaceId, planning, "plan.md", plan);
-    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await finishPlanningWithMarkdown(h, h.workspaceId, planning, plan);
     await h.pump();
 
     const approvalCard = h.posts.at(-1)!;
@@ -631,8 +649,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
     await h.pump();
     const planning = h.active();
-    await h.artifact(h.workspaceId, planning, "plan.md", plan);
-    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await finishPlanningWithMarkdown(h, h.workspaceId, planning, plan);
     await h.pump();
     const saved = h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: { revision: number; artifacts: Array<{ sha256: string }> } };
     // Slack lost the card (it was deleted): editing it fails with Slack's own error, which no retry would fix.
@@ -658,8 +675,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
     await h.pump();
     const planning = h.active();
-    await h.artifact(h.workspaceId, planning, "plan.md", plan);
-    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await finishPlanningWithMarkdown(h, h.workspaceId, planning, plan);
     await h.pump();
     const saved = h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: { revision: number; artifacts: Array<{ sha256: string }> } };
     h.strict.failNext("chat.update", "ratelimited");
@@ -699,8 +715,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.finish(h.workspaceId, preparation, "SUCCEEDED");
     await h.pump();
     const planning = h.active();
-    await h.artifact(h.workspaceId, planning, "plan.md", plan);
-    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await finishPlanningWithMarkdown(h, h.workspaceId, planning, plan);
     await h.pump();
 
     const approvalCard = h.posts.at(-1)!;
@@ -732,14 +747,103 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.finish(h.workspaceId, preparation, "SUCCEEDED");
     await h.pump();
     const planning = h.active();
-    await h.artifact(h.workspaceId, planning, "plan.md", plan);
+    await finishPlanningWithMarkdown(h, h.workspaceId, planning, plan);
+    await h.pump();
+
+    const message = h.posts.at(-1)!;
+    expect(message.text).toBe(`*Coding plan v1 is ready for your approval.* No code has changed yet.\n> Fix retry handling.\n> Run the retry regression test.\nNo automated checks apply. Review only.\n<https://agentx.example.test/review/${h.taskId}/task|Read the full coding plan>`);
+    const actions = (message.blocks?.at(-1) as { elements: Array<{ action_id: string }> }).elements;
+    expect(actions.map((button) => button.action_id)).toEqual(["agentx_workflow_approve", "agentx_workflow_changes", "agentx_workflow_close"]);
+  });
+
+  it("makes no Canvas for a structured plan: the card has its top claims, inert, and the task page link", async () => {
+    const createPlanCanvas = vi.fn(async () => ({ canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" }));
+    const plan = planDocument({ claims: [
+      { id: "1", text: "Payments that time out are retried." },
+      { id: "2", text: "Tell <!channel> and <@U0TEAMMATE1> now, <https://evil.example|click here>." },
+      { id: "3", text: "A payment is never charged twice." },
+      { id: "4", text: "The fourth claim is not in the card." },
+    ], decisions: [] });
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
+      readArtifact: async (key) => String(h.s3.objects.get(key)), createPlanCanvas, reviewUrlBase: "https://agentx.example.test",
+    });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const planning = h.active();
+    await h.artifact(h.workspaceId, planning, "plan.md", planAnswer(plan));
     await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
     await h.pump();
 
     const message = h.posts.at(-1)!;
-    expect(message.text).toBe(`*Coding plan v1 is ready for your approval.* No code has changed yet.\n> Fix retry handling.\n> Run the retry regression test.\n<https://agentx.example.test/review/${h.taskId}/task|Read the full coding plan>`);
-    const actions = (message.blocks?.at(-1) as { elements: Array<{ action_id: string }> }).elements;
-    expect(actions.map((button) => button.action_id)).toEqual(["agentx_workflow_approve", "agentx_workflow_changes", "agentx_workflow_close"]);
+    expect(createPlanCanvas).not.toHaveBeenCalled();
+    expect(message.text.startsWith("*Coding plan v1 is ready for your approval.* No code has changed yet.\n> Payments that time out are retried.\n> ")).toBe(true);
+    expect(message.text).toContain("> A payment is never charged twice.");
+    expect(message.text).not.toContain("fourth claim");
+    expect(message.text).toContain("\nAnd 1 more claim.\n");
+    expect(message.text).not.toContain("decision");
+    // The link opens the task page at this document and version.
+    const opening = `https://agentx.example.test/review/${h.taskId}/task?doc=coding-plan&from=1#coding-plan`;
+    expect(message.text).toContain(`<${opening.replaceAll("&", "&amp;")}|Open the full coding plan>`);
+    // Model text never mentions anyone or links anywhere.
+    expect(message.text).not.toMatch(/<!channel>|<@U0TEAMMATE1>|<https:\/\/evil\.example/);
+    const saved = h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: { canvasLineage?: unknown[]; stage: string; state: string } };
+    expect(saved.workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    expect(saved.workflow.canvasLineage ?? []).toEqual([]);
+    const actions = (message.blocks?.at(-1) as { elements: Array<{ action_id: string; url?: string }> }).elements;
+    expect(actions.map((button) => button.action_id)).toEqual(["agentx_open_review", "agentx_workflow_approve", "agentx_workflow_changes", "agentx_workflow_close"]);
+    expect(actions[0]!.url).toBe(opening);
+  });
+
+  it("lists every claim of a tiny structured plan, and keeps a plan of fifty long claims and twenty decisions within the brief limit", async () => {
+    const tiny = planDocument({ decisions: [], claims: [{ id: "1", text: "Payments are retried.", children: [{ id: "1.1", text: "The retry waits longer." }] }, { id: "2", text: "Nothing is charged twice." }] });
+    const long = (index: number) => `${"Claim ".repeat(40)}${index}`;
+    const big = planDocument({
+      claims: Array.from({ length: 50 }, (_, index) => ({ id: String(index + 1), text: long(index + 1) })),
+      decisions: Array.from({ length: 20 }, (_, index) => ({ id: `d${index + 1}`, claimId: "1", question: `Question ${index + 1}?`,
+        options: [{ id: "yes", label: "Yes", consequence: "It happens." }, { id: "no", label: "No", consequence: "It does not." }], recommended: "yes" })),
+    });
+    for (const [plan, check] of [[tiny, (text: string) => {
+      expect(text).toContain("\n> Payments are retried.\n>   The retry waits longer.\n> Nothing is charged twice.\n");
+      expect(text).toContain("|Open the coding plan>");
+      expect(text).not.toMatch(/more claim|decision/);
+    }], [big, (text: string) => {
+      expect(text).toContain("\nAnd 47 more claims.\n20 decisions: approving here uses AgentX's recommended answers.\n");
+      expect(text.split("\n").filter((line) => line.startsWith("> "))).toHaveLength(3);
+    }]] as const) {
+      const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
+        readArtifact: async (key) => String(h.s3.objects.get(key)), reviewUrlBase: "https://agentx.example.test",
+      });
+      h.strict.briefLimit = 1_200;
+      await h.pump();
+      await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+      await h.pump();
+      const planning = h.active();
+      await h.artifact(h.workspaceId, planning, "plan.md", planAnswer(plan));
+      await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+      await h.pump();
+      const message = h.posts.at(-1)!;
+      expect(visibleSlackText(message.text).length).toBeLessThanOrEqual(1_200);
+      check(message.text);
+    }
+  });
+
+  it("does not summarise or link a structured plan whose bytes changed", async () => {
+    const createPlanCanvas = vi.fn(async () => ({ canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" }));
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
+      readArtifact: async (key) => `${String(h.s3.objects.get(key))} `, createPlanCanvas, reviewUrlBase: "https://agentx.example.test",
+    });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const planning = h.active();
+    await h.artifact(h.workspaceId, planning, "plan.md", planAnswer(planDocument()));
+    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await h.pump();
+    expect(createPlanCanvas).not.toHaveBeenCalled();
+    expect(h.posts.at(-1)!.text).not.toContain("Payments that fail with a timeout");
+    expect(h.posts.at(-1)!.text).not.toContain("/review/");
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.document_link_unavailable", reason: "integrity_check_failed" }));
   });
 
   it("posts a three-line summary and a link to the AgentX task page when Canvas is unavailable", async () => {
@@ -750,8 +854,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
     await h.pump();
     const planning = h.active();
-    await h.artifact(h.workspaceId, planning, "plan.md", plan);
-    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await finishPlanningWithMarkdown(h, h.workspaceId, planning, plan);
     await h.pump();
     const message = h.posts.at(-1)!;
     expect(message.text).toContain(`<https://agentx.example.test/review/${h.taskId}/task|Read the full coding plan>`);
@@ -782,10 +885,9 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
     await h.pump();
     const planning = h.active();
-    await h.artifact(h.workspaceId, planning, "plan.md", plan);
-    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await finishPlanningWithMarkdown(h, h.workspaceId, planning, plan);
     await h.pump();
-    expect(h.posts.at(-1)!.text).toBe("*Coding plan v1 is ready for your approval.* No code has changed yet.\n> Fix retry handling.\nI couldn't link the full coding plan; ask an AgentX admin to check the task page.");
+    expect(h.posts.at(-1)!.text).toBe("*Coding plan v1 is ready for your approval.* No code has changed yet.\n> Fix retry handling.\nNo automated checks apply. Review only.\nI couldn't link the full coding plan; ask an AgentX admin to check the task page.");
     expect(JSON.stringify(h.posts.at(-1)!.blocks)).toContain("agentx_workflow_approve");
   });
 
@@ -803,8 +905,27 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
         truncated: false, receivedAt: new Date(h.now()).toISOString(), workflowRevision: 1 });
     }
     const planning = h.active();
-    await h.artifact(h.workspaceId, planning, "plan.md", plan);
-    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await finishPlanningWithMarkdown(h, h.workspaceId, planning, plan);
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toContain("\n2 thread replies since the last step will be included.\n");
+  });
+
+  it("does not count a reply that was answered as a question on the approval card", async () => {
+    const plan = "# Goal\nFix retry handling.";
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, { readArtifact: async () => plan,
+      createPlanCanvas: async () => ({ canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" }) });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const task = h.db.get(`DEVTASK#${h.taskId}`, "META") as { share: { teamId: string; channelId: string; threadTs: string } };
+    for (const messageTs of ["1695500001.000001", "1695500002.000001", "1695500003.000001"]) {
+      h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `NOTE#${messageTs}`, entityType: "WORKFLOW_THREAD_NOTE", schemaVersion: 1, taskId: h.taskId, slackUserId: "U0TEAMMATE1", isOwner: false,
+        teamId: task.share.teamId, channelId: task.share.channelId, threadTs: task.share.threadTs, messageTs, eventId: `Ev${messageTs}`, text: "Please also handle empty names.",
+        truncated: false, receivedAt: new Date(h.now()).toISOString(), workflowRevision: 1,
+        ...(messageTs === "1695500002.000001" ? { answeredAt: new Date(h.now()).toISOString() } : {}) });
+    }
+    const planning = h.active();
+    await finishPlanningWithMarkdown(h, h.workspaceId, planning, plan);
     await h.pump();
     expect(h.posts.at(-1)!.text).toContain("\n2 thread replies since the last step will be included.\n");
   });
@@ -841,8 +962,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.finish(h.workspaceId, preparation, "SUCCEEDED");
     await h.pump();
     const planning = h.active();
-    await h.artifact(h.workspaceId, planning, "plan.md", requirements);
-    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await finishPlanningWithMarkdown(h, h.workspaceId, planning, requirements);
     await h.pump();
 
     const message = h.posts.at(-1)!;
@@ -878,13 +998,13 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await saveWorkflow({ ...first, revision: 3 });
     await h.pump();
     expect(h.posts).toHaveLength(before);
-    // Approved PR feedback re-published the same pull requests with new heads: that is said.
+    // Approved PR feedback was pushed to the same pull requests, with new heads: that is said.
     const feedback = (decision: string, workflowRevision: number) => ({ schemaVersion: 1, requestId: randomUUID(), workflowRevision, decision, actorId: "a".repeat(64), actorRole: "TASK_OWNER",
       reviewDigest: "f".repeat(64), proposalDigest: "f".repeat(64), bundleDigests: ["f".repeat(64)], selectedFindingIds: [], selectedCommentIds: [], candidates: [], at: new Date().toISOString() });
-    const republished = { ...first, pullRequests: first.pullRequests.map((pr) => ({ ...pr, headSha: "9".repeat(40) })), feedbackDecisions: [feedback("APPROVE", 3)] };
+    const republished = { ...first, pullRequests: first.pullRequests.map((pr) => ({ ...pr, headSha: "9".repeat(40) })), feedbackDecisions: [feedback("APPROVE", 3)], pullRequestUpdatedAt: new Date().toISOString() };
     await saveWorkflow({ ...republished, revision: 4 });
     await h.pump();
-    expect(h.posts.at(-1)!.text).toMatch(/^Pull requests updated with the approved PR feedback: /);
+    expect(h.posts.at(-1)!.text).toBe("Pushed the fix to PRs <https://github.com/example/api/pull/12|#12> and <https://github.com/example/web/pull/13|#13>. Review them and merge them on GitHub; I'll finish this task when they're all merged.");
     // The owner dismissed the next round of PR feedback: a short answer, and nothing else.
     await saveWorkflow({ ...republished, revision: 5, feedbackDecisions: [...republished.feedbackDecisions, feedback("DISMISS", 4)] });
     await h.pump();
@@ -895,6 +1015,97 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await saveWorkflow({ ...first, revision: 7, stage: "MERGED", state: "COMPLETE", outcome: "MERGED", pullRequests: first.pullRequests.map((pr) => ({ ...pr, state: "MERGED" })) });
     await h.pump();
     expect(h.posts.at(-1)!.text).toBe("All 2 pull requests are merged. This task is complete.");
+  });
+
+  it("says once that it is reviewing PR feedback when the review starts, and says nothing more while it runs", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    h.advance(10_000);
+    const taskKey = `DEVTASK#${h.taskId}`;
+    const saveWorkflow = async (workflow: Record<string, unknown>) => h.db.send(new UpdateCommand({
+      TableName: "state", Key: { pk: taskKey, sk: "META" }, UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ExpressionAttributeValues: { ":workflow": workflow, ":now": new Date(h.now()).toISOString() },
+    }));
+    const pullRequest = { repositoryId: "api", number: 12, url: "https://github.com/example/api/pull/12", required: true, state: "OPEN", candidateDigest: "a".repeat(64) };
+    const comment = { id: "1", kind: "DISCUSSION", url: "https://github.com/example/api/pull/12#issuecomment-1", author: "mia", updatedAt: new Date().toISOString(), bodyDigest: "b".repeat(64), bodyBytes: 20 };
+    const bundle = { schemaVersion: 1, taskId: h.taskId, repositoryId: "api", number: 12, headSha: "d".repeat(40), candidateDigest: "a".repeat(64), commentSetDigest: "c".repeat(64),
+      producer: "p", version: "1", recordedAt: new Date().toISOString(), comments: [comment, { ...comment, id: "2" }], sha256: "e".repeat(64), objectKey: `private/o/w/feedback-${"e".repeat(64)}.json` };
+    const waiting = { stage: "WAIT_FOR_MERGE", state: "WAITING", revision: 2, artifacts: [], pullRequests: [pullRequest] };
+    await saveWorkflow(waiting);
+    await h.pump();
+    const before = h.posts.length;
+    // Collecting the comments changes nothing about the pull requests: still silent. Starting the review is said.
+    await saveWorkflow({ ...waiting, revision: 3, feedbackReview: { status: "COLLECTING", bundleRefs: [bundle], threadObservations: [] } });
+    await h.pump();
+    expect(h.posts).toHaveLength(before);
+    await saveWorkflow({ ...waiting, revision: 4, state: "RUNNING", feedbackReview: { status: "COLLECTING", bundleRefs: [bundle], threadObservations: [] } });
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    expect(h.posts.at(-1)!.text).toBe("Reviewing the feedback on <https://github.com/example/api/pull/12|PR #12> (1 comment). I'll propose a fix here before changing any code.");
+    expect(JSON.stringify(h.posts.at(-1)!.blocks)).not.toContain("agentx_workflow_");
+    // The same revision seen again is not posted twice.
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+  });
+
+  it("says a PR feedback review that timed out with Retry review too", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    h.advance(10_000);
+    const saveWorkflow = async (workflow: Record<string, unknown>) => h.db.send(new UpdateCommand({
+      TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" }, UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ExpressionAttributeValues: { ":workflow": workflow, ":now": new Date(h.now()).toISOString() },
+    }));
+    const pullRequest = { repositoryId: "api", number: 12, url: "https://github.com/example/api/pull/12", required: true, state: "OPEN", candidateDigest: "a".repeat(64) };
+    const bundle = { schemaVersion: 1, taskId: h.taskId, repositoryId: "api", number: 12, headSha: "d".repeat(40), candidateDigest: "a".repeat(64), commentSetDigest: "c".repeat(64),
+      producer: "p", version: "1", recordedAt: new Date().toISOString(), comments: [], sha256: "e".repeat(64), objectKey: `private/o/w/feedback-${"e".repeat(64)}.json` };
+    const waiting = { stage: "WAIT_FOR_MERGE", state: "WAITING", artifacts: [], pullRequests: [pullRequest] };
+    await saveWorkflow({ ...waiting, revision: 4, state: "RUNNING", feedbackReview: { status: "COLLECTING", bundleRefs: [bundle], threadObservations: [] } });
+    await h.pump();
+    await saveWorkflow({ ...waiting, revision: 5, feedbackReview: { status: "PENDING", bundleRefs: [bundle], reviewRef: { status: "BLOCKED", sha256: "7".repeat(64), blockReason: "review timed out" } } });
+    await h.pump();
+    expect(h.strict.lastPostWithAction("agentx_feedback_review_retry").text).toBe("I couldn't review the feedback on <https://github.com/example/api/pull/12|PR #12>: the review timed out. You can retry the review, or merge or close the pull request on GitHub.");
+  });
+
+  it("says once that the PR feedback review failed, with Retry review, and takes the button off once the retry moved on", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    h.advance(10_000);
+    const taskKey = `DEVTASK#${h.taskId}`;
+    const saveWorkflow = async (workflow: Record<string, unknown>) => h.db.send(new UpdateCommand({
+      TableName: "state", Key: { pk: taskKey, sk: "META" }, UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ExpressionAttributeValues: { ":workflow": workflow, ":now": new Date(h.now()).toISOString() },
+    }));
+    const pullRequest = { repositoryId: "api", number: 12, url: "https://github.com/example/api/pull/12", required: true, state: "OPEN", candidateDigest: "a".repeat(64) };
+    const comment = { id: "1", kind: "DISCUSSION", url: "https://github.com/example/api/pull/12#issuecomment-1", author: "mia", updatedAt: new Date().toISOString(), bodyDigest: "b".repeat(64), bodyBytes: 20 };
+    const bundle = { schemaVersion: 1, taskId: h.taskId, repositoryId: "api", number: 12, headSha: "d".repeat(40), candidateDigest: "a".repeat(64), commentSetDigest: "c".repeat(64),
+      producer: "p", version: "1", recordedAt: new Date().toISOString(), comments: [comment], sha256: "e".repeat(64), objectKey: `private/o/w/feedback-${"e".repeat(64)}.json` };
+    const waiting = { stage: "WAIT_FOR_MERGE", state: "WAITING", revision: 2, artifacts: [], pullRequests: [pullRequest] };
+    await saveWorkflow({ ...waiting, revision: 4, state: "RUNNING", feedbackReview: { status: "COLLECTING", bundleRefs: [bundle], threadObservations: [] } });
+    await h.pump();
+    const before = h.posts.length;
+    const reviewDigest = "9".repeat(64);
+    const reviewRef = { status: "FAILED", sha256: reviewDigest, blockReason: "reviewer output: fixProposal.tests is empty", operationId: "44444444-4444-4444-8444-444444444444" };
+    await saveWorkflow({ ...waiting, revision: 5, feedbackReview: { status: "PENDING", bundleRefs: [bundle], reviewRef } });
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    const card = h.strict.lastPostWithAction("agentx_feedback_review_retry");
+    expect(card.text).toBe("I couldn't review the feedback on <https://github.com/example/api/pull/12|PR #12>: the reviewer's proposal was incomplete. You can retry the review, or merge or close the pull request on GitHub.");
+    expect(card.text).not.toContain("fixProposal");
+    expect(card.threadTs).toBeDefined();
+    // Seen again, it is not said twice.
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    // Another change while the same report is still pending (a saved note, say) keeps the button.
+    await saveWorkflow({ ...waiting, revision: 6, feedbackReview: { status: "PENDING", bundleRefs: [bundle], reviewRef }, feedbackNotes: [] });
+    await h.pump();
+    expect(h.strict.updates.filter((update) => update.ts === card.ts)).toEqual([]);
+    // The owner pressed Retry review: the review collects the same comments again, so the card loses its button.
+    await saveWorkflow({ ...waiting, revision: 7, feedbackReview: { status: "COLLECTING", bundleRefs: [bundle], threadObservations: [] } });
+    await h.pump();
+    const edits = h.strict.updates.filter((update) => update.ts === card.ts);
+    expect(edits).toHaveLength(1);
+    expect(edits[0]!.blocks.some((block) => (block as { type: string }).type === "actions")).toBe(false);
   });
 
   it("posts the start message in the channel and records the thread", async () => {
@@ -1408,7 +1619,7 @@ describe("the PR feedback advisory summary", () => {
     const blocks = message.blocks as Array<{ elements?: Array<{ action_id: string; value: string }> }>;
     const actions = blocks.flatMap(block => block.elements ?? []);
     expect(actions.map(action => action.action_id)).toEqual([
-      "agentx_feedback_review_recommended", "agentx_feedback_review_changes",
+      "agentx_feedback_review_recommended", "agentx_feedback_review_changes", "agentx_feedback_review_dismiss",
     ]);
     const feedbackActionValue = parseAction(actions[0]!.value);
     expect(feedbackActionValue).toMatchObject({
@@ -1434,7 +1645,80 @@ describe("the PR feedback advisory summary", () => {
     });
     expect(message.text).toContain("No fixes are recommended");
     const actions = (message.blocks as Array<{ elements?: Array<{ action_id: string; text: { text: string } }> }>).flatMap(block => block.elements ?? []);
-    expect(actions.map(action => action.action_id)).toEqual(["agentx_feedback_review_changes"]);
-    expect(actions[0]?.text.text).toBe("Request changes");
+    // The owner always has a way on: a note for the next round, or dismissing the proposal.
+    expect(actions.map(action => action.action_id)).toEqual(["agentx_feedback_review_changes", "agentx_feedback_review_dismiss"]);
+    expect(actions.map(action => action.text.text)).toEqual(["Request changes", "Dismiss"]);
+  });
+
+  it("asks the reviewer's question when a finding is left to the owner, and offers an answer in words instead of Approve (0.2.8 live test)", async () => {
+    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const BANNED = /\b(candidate|revision|digest|operation|artifact|workflow|invalid json)\b|\b(SUCCEEDED|FAILED|INTERRUPTED|CANCELLED)\b/i;
+    const message = feedbackReviewSlackMessage({
+      taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+      totalComments: 2, recommendedFindingIds: [], highestPriority: undefined,
+      ownerQuestions: [{ findingId: "finding-1", question: "Which shorter wording should replace the sentence? Options: drop the second clause; or keep only the first five words." },
+        { findingId: "finding-2", question: "Shall I <!channel> see https://evil.example/x & *bold*? ghp_" + "A".repeat(36) }],
+      detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111",
+    });
+    const visible = visibleSlackText(message.text);
+    expect(visible).toContain("The reviewer needs your answer before changing any code:");
+    expect(visible).toContain("Which shorter wording should replace the sentence? Options: drop the second clause; or keep only the first five words.");
+    expect(visible).toContain("Answer with instructions and I'll make that change.");
+    expect(visible).not.toMatch(BANNED);
+    // The reviewer's words are inert: escaped, redacted, and never a link or a mention.
+    expect(message.text).not.toContain("<!channel>");
+    expect(message.text).toContain("&lt;!channel&gt;");
+    expect(message.text).not.toContain("https://evil");
+    expect(message.text).not.toContain("ghp_AAAA");
+    expect(visible.length).toBeLessThanOrEqual(1_200);
+    const actions = (message.blocks as Array<{ elements?: Array<{ action_id: string; text: { text: string }; value: string }> }>).flatMap(block => block.elements ?? []);
+    expect(actions.map(action => action.action_id)).toEqual(["agentx_feedback_review_changes", "agentx_feedback_review_dismiss"]);
+    expect(actions.map(action => action.text.text)).toEqual(["Answer with instructions", "Dismiss"]);
+    expect(actions.map(action => action.text.text).join(" ")).not.toMatch(BANNED);
+    // The answer is bound to exactly the questions the card shows.
+    expect(parseAction(actions[0]!.value)).toMatchObject({ selection: "ANSWER", findingIds: ["finding-1", "finding-2"], expectedRevision: 8, reviewDigest: "a".repeat(64) });
+    expect(parseAction(actions[1]!.value)).toMatchObject({ selection: "RECOMMENDED" });
+    new StrictSlackWeb({ briefLimit: 1_200 }).post({ channel: "C0123456789", threadTs: "1695500000.000001", ...message });
+
+    // Recommended fixes beside a question: Approve stays for them, and an answer is sent with them.
+    const mixed = feedbackReviewSlackMessage({
+      taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+      totalComments: 3, recommendedFindingIds: ["finding-2"], highestPriority: "SHOULD_FIX", ownerQuestions: [{ findingId: "finding-1", question: "Keep the old name?" }],
+      detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111",
+    });
+    const mixedActions = (mixed.blocks as Array<{ elements?: Array<{ action_id: string; text: { text: string }; value: string }> }>).flatMap(block => block.elements ?? []);
+    expect(mixedActions.map(action => action.action_id)).toEqual(["agentx_feedback_review_recommended", "agentx_feedback_review_changes", "agentx_feedback_review_dismiss"]);
+    // Answering covers the question only; approving the recommended fixes leaves the question open.
+    expect(visibleSlackText(mixed.text)).toContain("Your answer covers only the question. Approve 1 recommended makes only the recommended fix and leaves the question open.");
+    expect(parseAction(mixedActions[1]!.value)).toMatchObject({ selection: "ANSWER", findingIds: ["finding-1"] });
+  });
+
+  it("shows at most three questions, binds the answer to those, and keeps escaped text within Slack's limits", async () => {
+    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    // Every character escapes to several: three questions at their visible limit would pass 3,000 characters in one section.
+    const hostile = "<&>".repeat(200);
+    const message = feedbackReviewSlackMessage({
+      taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+      totalComments: 4, recommendedFindingIds: [], highestPriority: undefined,
+      ownerQuestions: ["q1", "q2", "q3", "q4"].map(findingId => ({ findingId, question: `${findingId} ${hostile}` })),
+      detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111",
+    });
+    const visible = visibleSlackText(message.text);
+    expect(visible).toContain("> q3 ");
+    expect(visible).not.toContain("q4");
+    expect(visible).toContain("(1 more question is on the details page; your answer here covers only the ones shown.)");
+    const blocks = message.blocks as Array<{ type: string; text?: { text: string }; elements?: Array<{ action_id: string; value: string }> }>;
+    const sections = blocks.filter(block => block.type === "section");
+    for (const section of sections) expect(section.text!.text.length).toBeLessThanOrEqual(3_000);
+    expect(sections.map(section => section.text!.text).join("\n")).toBe(message.text);
+    // Each question is budgeted by its escaped length, so escaping cannot make the card longer than it reads.
+    for (const line of message.text.split("\n").filter(line => line.startsWith("> "))) expect(line.length - 2).toBeLessThanOrEqual(280);
+    expect(message.text.length).toBeLessThanOrEqual(1_200);
+    const answer = blocks.flatMap(block => block.elements ?? []).find(element => element.action_id === "agentx_feedback_review_changes")!;
+    expect(parseAction(answer.value)).toMatchObject({ selection: "ANSWER", findingIds: ["q1", "q2", "q3"] });
+    new StrictSlackWeb({ briefLimit: 1_200 }).post({ channel: "C0123456789", threadTs: "1695500000.000001", ...message });
   });
 });

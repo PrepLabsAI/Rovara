@@ -148,14 +148,21 @@ describe("browser sign-in for an AgentX feedback review", () => {
     const taskPage = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(`${reviewPath}/task`)}`));
     expect(taskPage.statusCode).toBe(302);
     expect(new URL(taskPage.headers.location!).origin).toBe("https://slack.com");
-    for (const returnTo of ["https://evil.test/review/a", "//evil.test/review/a", "/v1/admin", "/review/../v1/admin", `${reviewPath}/task/../x`, `${reviewPath}/tasks`]) {
+    // The link to one document, and the older version it came from, survives sign-in; nothing else in a query does.
+    for (const query of ["?doc=coding-plan&from=2", "?doc=requirements", "?doc=design&from=999"]) {
+      const kept = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(`${reviewPath}/task${query}`)}`));
+      expect(kept.statusCode).toBe(302);
+    }
+    for (const returnTo of ["https://evil.test/review/a", "//evil.test/review/a", "/v1/admin", "/review/../v1/admin", `${reviewPath}/task/../x`, `${reviewPath}/tasks`,
+      `${reviewPath}/task?doc=other`, `${reviewPath}/task?from=2`, `${reviewPath}/task?doc=design&from=0`, `${reviewPath}/task?doc=design&from=1000`, `${reviewPath}/task?doc=design&from=2&x=1`,
+      `${reviewPath}/task?x=1&doc=design`, `${reviewPath}/task?doc=design#top`, `${reviewPath}?doc=design`, `${reviewPath}/task?`]) {
       const refused = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(returnTo)}`));
       expect(refused.statusCode).toBe(400);
       expect(refused.headers.location).toBeUndefined();
     }
   });
 
-  it("sets a short-lived opaque secure session cookie only after state and PKCE-bound Slack sign-in", async () => {
+  it("sets an opaque secure 30-day session cookie only after state and PKCE-bound Slack sign-in", async () => {
     const h = identityHarness({ slackUsers: [maya] });
     const start = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(reviewPath)}`));
     const providerUrl = new URL(start.headers.location!);
@@ -167,14 +174,27 @@ describe("browser sign-in for an AgentX feedback review", () => {
     expect(result.headers.location).toBe(reviewPath);
     expect(providerUrl.searchParams.get("state")).not.toBeNull();
     expect(result.cookies).toHaveLength(2);
-    expect(result.cookies?.find(cookie => cookie.startsWith("__Host-agentx_review_session="))).toMatch(/__Host-agentx_review_session=[0-9a-f-]{36}; Secure; HttpOnly; SameSite=Lax; Path=\/; Max-Age=900/);
+    expect(result.cookies?.find(cookie => cookie.startsWith("__Host-agentx_review_session="))).toMatch(/__Host-agentx_review_session=[0-9a-f-]{36}; Secure; HttpOnly; SameSite=Lax; Path=\/; Max-Age=2592000/);
     expect(result.cookies?.find(cookie => cookie.startsWith("__Host-agentx_review_pkce="))).toContain("Max-Age=0");
     expect(result.headers.location).not.toContain("code=");
     const sessionCookie = result.cookies?.find(cookie => cookie.startsWith("__Host-agentx_review_session="));
     if (sessionCookie === undefined) throw new Error("browser review session cookie is required");
     const sessionId = sessionCookie.split("=", 2)[1]!.split(";", 1)[0]!;
-    expect(h.db.get(`SESSION#${sessionId}`, "META")).toMatchObject({ developerId: mayaId, amr: "slack", reviewExpiresAt: Math.floor(h.now() / 1000) + 900 });
+    const signedInAt = Math.floor(h.now() / 1000);
+    // A fixed 30 days from sign-in, with the stored record's clean-up time kept in step with it.
+    expect(h.db.get(`SESSION#${sessionId}`, "META")).toMatchObject({ developerId: mayaId, amr: "slack", reviewExpiresAt: signedInAt + 30 * 86_400, endsAt: signedInAt + 30 * 86_400, expiresAt: signedInAt + 31 * 86_400 });
     expect(h.logs.some(line => JSON.stringify(line).includes(sessionId))).toBe(false);
+  });
+
+  it("lands on the same document after sign-in when the link named one", async () => {
+    const h = identityHarness({ slackUsers: [maya] });
+    const target = `${reviewPath}/task?doc=coding-plan&from=2`;
+    const start = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(target)}`));
+    const callbackEvent = httpEvent("GET", h.slack.approve(start.headers.location!, maya.userId));
+    callbackEvent.headers = { cookie: start.cookies!.find(cookie => cookie.startsWith("__Host-agentx_review_pkce="))!.split(";", 1)[0] };
+    const result = await h.http(callbackEvent);
+    expect(result.statusCode).toBe(302);
+    expect(result.headers.location).toBe(target);
   });
 
   it("refuses the callback if its browser PKCE verifier is missing or incorrect", async () => {

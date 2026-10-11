@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { WorkerInvocationSchema, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { createDispatcherHandler, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
 import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
+import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
 import type { Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import { appendOperationEvent } from "../../packages/broker/src/aws/operation-events.js";
 import { SessionManager, workspaceBinding } from "../../packages/broker/src/aws/sessions.js";
@@ -116,6 +117,85 @@ describe("ec2-ebs delivery", () => {
       expect(postedPayload(accepted.post).workflowBase).toEqual(workflowBase);
     });
 
+    it("tells reviewers which checks ran only on a worker that lists it; an older worker reviews without that note", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const workflowBase = [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }];
+      const workflowReviewChecks = { reviewOnly: false, checks: [{ label: "Unit tests", command: "npm test (in repo/demo)" }] };
+      const record = taskRecord({ workflowMode: "REVIEW", workflowBase, workflowReviewChecks });
+      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowReview", "task.workflowBase", "task.workflowReviewChecks"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post).workflowReviewChecks).toEqual(workflowReviewChecks);
+      const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowReview", "task.workflowBase"] });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post)).not.toHaveProperty("workflowReviewChecks");
+      expect(postedPayload(older.post).workflowBase).toEqual(workflowBase);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.review_checks_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
+    it("gives reviewers the approved plan only on a worker that lists it; an older worker reviews without it and keeps the other fields", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const workflowBase = [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }];
+      const workflowReviewChecks = { reviewOnly: false, checks: [{ label: "Unit tests", command: "npm test (in repo/demo)" }] };
+      const workflowReviewPlan = { markdown: "# Plan\n\nDo the thing.", sha256: "b".repeat(64) };
+      const record = taskRecord({ workflowMode: "REVIEW", workflowBase, workflowReviewChecks, workflowReviewPlan });
+      const base = ["task.workflowMode", "task.workflowReview", "task.workflowBase", "task.workflowReviewChecks"];
+      const capable = delivery({ workerFeatures: async () => [...base, "task.workflowReviewPlan"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post).workflowReviewPlan).toEqual(workflowReviewPlan);
+      const older = delivery({ workerFeatures: async () => base });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post)).not.toHaveProperty("workflowReviewPlan");
+      expect(postedPayload(older.post).workflowReviewChecks).toEqual(workflowReviewChecks);
+      expect(postedPayload(older.post).workflowBase).toEqual(workflowBase);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.review_plan_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
+    it("tells a planning run its document kind and structured format only on a worker that lists them; an older worker plans without them", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const record = taskRecord({ workflowMode: "PLAN", workflowPhase: "DESIGN", planFormat: "structured" });
+      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post)).toMatchObject({ workflowPhase: "DESIGN", planFormat: "structured" });
+      const older = delivery({ workerFeatures: async () => ["task.workflowMode"] });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post)).not.toHaveProperty("workflowPhase");
+      expect(postedPayload(older.post)).not.toHaveProperty("planFormat");
+      // A Quick plan carries only the format.
+      const quick = taskRecord({ workflowMode: "PLAN", planFormat: "structured" });
+      const olderQuick = delivery({ workerFeatures: async () => ["task.workflowMode"] });
+      expect(await olderQuick.deliver(quick, quick.invocation)).toBe("DELIVERED");
+      expect(postedPayload(olderQuick.post)).not.toHaveProperty("planFormat");
+      expect(postedPayload(older.post).workflowMode).toBe("PLAN");
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.structured_plans_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
+    it("asks a planning run for anchor lines only on a worker that lists task.codeAnchors; an older worker is sent the prompt without them", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const anchored = planDocumentInstructions({ kind: "plan", path: "QUICK", anchors: true });
+      const plain = planDocumentInstructions({ kind: "plan", path: "QUICK" });
+      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", prompt: `Planning phase only.\n\n${anchored}\n\nRequest:\nadd it` });
+      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.codeAnchors"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post).prompt).toContain("anchor?: string");
+      const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post).prompt).toBe(`Planning phase only.\n\n${plain}\n\nRequest:\nadd it`);
+      expect(postedPayload(older.post)).toMatchObject({ planFormat: "structured" });
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.code_anchors_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
     it("sends a workflow mode only to a worker that advertises the read-only tool boundary", async () => {
       const { deliver, post } = delivery({ workerFeatures: async () => ["task.workflowMode"] });
       const record = taskRecord({ workflowMode: "PLAN" });
@@ -212,6 +292,23 @@ describe("ec2-ebs delivery", () => {
       const accepted = delivery({ workerFeatures: async () => ["publish.candidateTree"] });
       expect(await accepted.deliver(record, record.invocation)).toBe("DELIVERED");
       expect(postedPayload(accepted.post).candidateTreeSha).toBe("b".repeat(40));
+    });
+
+    it("refuses a reviewed fix for a pull request before POST unless the worker advertises pushing it", async () => {
+      const record = recordFor();
+      const invocation = { ...record.invocation, kind: "maintain", payload: {
+        action: "append", project: { name: "demo", revision: 1, setup: [], readiness: [], orchestratorInstructions: "x",
+          repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }] },
+        repository: "demo", pullRequestNumber: 42, headBranch: `agentx/${randomUUID()}`, baseBranch: "main", expectedHeadCommit: "d".repeat(40), repositoryGrant: "g",
+        workflowCandidateTreeSha: "b".repeat(40), workflowBaseCommit: "e".repeat(40),
+      } } as WorkerInvocation;
+      const fix = { ...record, invocation };
+      const refused = delivery({ workerFeatures: async () => ["publish.candidateTree", "publish.workflowBase"] });
+      await expect(refused.deliver(fix, fix.invocation)).rejects.toThrow(/pushing a reviewed fix needs a worker that pushes exactly the reviewed tree/);
+      expect(refused.post).not.toHaveBeenCalled();
+      const accepted = delivery({ workerFeatures: async () => ["task.workflowPullRequestUpdate"] });
+      expect(await accepted.deliver(fix, fix.invocation)).toBe("DELIVERED");
+      expect(postedPayload(accepted.post)).toMatchObject({ workflowCandidateTreeSha: "b".repeat(40), workflowBaseCommit: "e".repeat(40) });
     });
 
     it("refuses a publication carrying the task's pinned base before POST unless the worker advertises it, and never drops it", async () => {

@@ -161,6 +161,51 @@ describe("native task workflow contracts", () => {
     expect(WorkflowReviewReportSchema.parse(report("CRITIC", "FINDINGS", ["legacy string"])).findings).toEqual([{ text: "legacy string", origin: "INTRODUCED" }]);
   });
 
+  it("never blocks on an advisory finding, and still blocks on a non-advisory one", () => {
+    const current = { ...createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z" }), stage: "VERIFY" as const, state: "BLOCKED" as const };
+    const candidate = createCandidateManifest([{ repositoryId: "payments", commitSha: "a".repeat(40), treeSha: "1".repeat(40) }]);
+    const reviewing = recordWorkflowVerification(current, { candidate, now: "2026-10-05T12:02:00.000Z",
+      checks: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: "2026-10-05T12:01:00.000Z", results: [{ checkId: "unit", status: "PASS" as const }] } });
+    const report = (role: "CRITIC" | "SECURITY", status: "PASS" | "FINDINGS", findings: unknown[]) => ({ operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role, provider: "scripted", version: "1", status, findings, readOnly: true, recordedAt: "2026-10-05T12:03:00.000Z" });
+    const advisory = { text: "The plan asks for a long timeout, which looks unwise.", origin: "INTRODUCED" as const, advisory: true as const };
+    // An advisory introduced finding lets a review pass, and counts for nothing that blocks.
+    expect(WorkflowReviewReportSchema.parse(report("CRITIC", "PASS", [advisory])).findings).toEqual([advisory]);
+    expect(workflowContracts.blockingFindings(WorkflowReviewReportSchema.parse(report("CRITIC", "PASS", [advisory])))).toEqual([]);
+    // A review whose only introduced finding is advisory cannot claim FINDINGS; one real finding still can.
+    expect(() => WorkflowReviewReportSchema.parse(report("CRITIC", "FINDINGS", [advisory]))).toThrow();
+    const real = { text: "New parser drops the last line.", origin: "INTRODUCED" as const };
+    expect(workflowContracts.blockingFindings(WorkflowReviewReportSchema.parse(report("CRITIC", "FINDINGS", [advisory, real])))).toEqual([real]);
+    expect(() => WorkflowReviewReportSchema.parse(report("CRITIC", "PASS", [advisory, real]))).toThrow();
+    // advisory: false is the same as not saying so.
+    expect(() => WorkflowReviewReportSchema.parse(report("CRITIC", "PASS", [{ ...real, advisory: false }]))).toThrow();
+    expect(() => WorkflowReviewReportSchema.parse(report("CRITIC", "PASS", [{ ...real, advisory: "yes" }]))).toThrow();
+    // The flag is never honoured on a SECURITY finding: only the owner's accept waives one. It blocks, is sent back, and a passing security review cannot carry it.
+    const securityNote = { text: "Token is logged.", origin: "INTRODUCED" as const, advisory: true as const };
+    expect(() => WorkflowReviewReportSchema.parse(report("SECURITY", "PASS", [securityNote]))).toThrow();
+    expect(workflowContracts.blockingFindings(WorkflowReviewReportSchema.parse(report("SECURITY", "FINDINGS", [securityNote])))).toEqual([securityNote]);
+    const withSecurity = WorkflowSnapshotSchema.parse({ ...reviewing, stage: "REVIEW", state: "BLOCKED", blockReason: "the security review did not pass",
+      reviews: [report("CRITIC", "PASS", [advisory]), report("SECURITY", "FINDINGS", [securityNote])] });
+    expect(workflowContracts.workflowSendBackOffered(withSecurity)).toBe(true);
+    expect(workflowContracts.sendBackProblems(withSecurity)).toEqual([{ source: "security review", text: "Token is logged." }]);
+    // Both reviews passing, the code review with an advisory note, reaches PR readiness.
+    const withAdvisory = submitWorkflowReview(reviewing, report("SECURITY", "PASS", [{ text: "Old logger prints emails", origin: "PRE_EXISTING" }]), "2026-10-05T12:03:00.000Z");
+    expect(withAdvisory).toMatchObject({ stage: "REVIEW", state: "WAITING" });
+    const ready = submitWorkflowReview(withAdvisory, report("CRITIC", "PASS", [advisory]), "2026-10-05T12:04:00.000Z");
+    expect(ready).toMatchObject({ stage: "PULL_REQUEST", state: "READY" });
+    expect(workflowContracts.sendBackProblems(ready)).toEqual([]);
+    // Send back is offered and sent for the real finding only.
+    const blocked = WorkflowSnapshotSchema.parse({ ...ready, stage: "REVIEW", state: "BLOCKED", blockReason: "the critic review did not pass",
+      reviews: [report("CRITIC", "FINDINGS", [advisory, real]), report("SECURITY", "PASS", [])] });
+    expect(workflowContracts.workflowSendBackOffered(blocked)).toBe(true);
+    expect(workflowContracts.sendBackProblems(blocked)).toEqual([{ source: "code review", text: "New parser drops the last line." }]);
+    // Where every introduced finding is an advisory code-review note, nothing is sent back.
+    const onlyAdvisory = WorkflowSnapshotSchema.parse({ ...blocked, reviews: [report("CRITIC", "PASS", [advisory]), report("SECURITY", "PASS", [])] });
+    expect(workflowContracts.workflowSendBackOffered(onlyAdvisory)).toBe(false);
+    expect(workflowContracts.sendBackProblems(onlyAdvisory)).toEqual([]);
+    // A report stored before the flag existed behaves as before.
+    expect(workflowContracts.blockingFindings(WorkflowReviewReportSchema.parse(report("CRITIC", "FINDINGS", ["legacy string", { text: "x", origin: "INTRODUCED" }])))).toHaveLength(2);
+  });
+
   it("pins the base commit on the first verified candidate and refuses a later candidate with another base", () => {
     const current = { ...createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z" }), stage: "VERIFY" as const, state: "BLOCKED" as const };
     const base = "e".repeat(40);
@@ -447,6 +492,54 @@ describe("immutable multi-PR feedback reviews", () => {
       operationId: "22222222-2222-4222-8222-222222222222", bundleRefs, reviewRef,
     }, now)).toThrow(WorkflowTransitionError);
   });
+  describe("a failed review and its retry", () => {
+    const failedRun = (status: "FAILED" | "BLOCKED" | "INTERRUPTED" = "FAILED", blockReason = "reviewer output: not valid JSON") => {
+      const { current, bundleRefs, reviewRef } = fixture();
+      const collected = workflowContracts.collectWorkflowFeedbackBundles(current, { bundleRefs, threadObservations: [] }, now);
+      const running = { ...collected, revision: collected.revision + 1, state: "RUNNING" as const };
+      const failedRef = { ...reviewRef, status, blockReason, findingRefs: [] };
+      const failed = completeWorkflowFeedbackReview(running, { expectedRevision: running.revision, taskId, candidateDigest: current.candidate!.digest,
+        operationId: reviewRef.operationId, bundleRefs, reviewRef: failedRef }, now);
+      return { failed, failedRef, bundleRefs, reviewRef, current };
+    };
+    const owner = { actorId: ownerId, role: "TASK_OWNER" as const };
+
+    it("keeps the task waiting for merge with the failed report pending", () => {
+      const { failed, failedRef } = failedRun();
+      expect(failed).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", feedbackReview: { status: "PENDING", reviewRef: failedRef } });
+    });
+
+    it("moves a failed review back to collecting on the same comments, one revision on", () => {
+      const { failed, failedRef, bundleRefs } = failedRun();
+      const retried = workflowContracts.retryWorkflowFeedbackReview(failed, { reviewDigest: failedRef.sha256, actor: owner, now });
+      expect(retried).toMatchObject({ revision: failed.revision + 1, stage: "WAIT_FOR_MERGE", state: "WAITING",
+        feedbackReview: { status: "COLLECTING", bundleRefs, threadObservations: [] } });
+      expect(retried.feedbackReview?.reviewRef).toBeUndefined();
+      expect(retried.feedbackReviewHistory).toContainEqual(failedRef);
+    });
+
+    it("retries a review that timed out or was interrupted the same way", () => {
+      for (const [status, reason] of [["BLOCKED", "review timed out"], ["INTERRUPTED", "review was cancelled"]] as const) {
+        const { failed, failedRef } = failedRun(status, reason);
+        expect(workflowContracts.retryWorkflowFeedbackReview(failed, { reviewDigest: failedRef.sha256, actor: owner, now }).feedbackReview, status)
+          .toMatchObject({ status: "COLLECTING" });
+      }
+    });
+
+    it("refuses a retry of a complete report, of another report, by someone else, or once the task moved", () => {
+      const { failed, failedRef, current, bundleRefs, reviewRef } = failedRun();
+      const retry = (snapshot: unknown, digest = failedRef.sha256, actor: { actorId: string; role: "TASK_OWNER" | "PROJECT_ADMIN" } = owner) =>
+        () => workflowContracts.retryWorkflowFeedbackReview(snapshot, { reviewDigest: digest, actor, now });
+      const complete = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+      expect(retry(complete, reviewRef.sha256)).toThrow(workflowContracts.WorkflowTransitionError);
+      expect(retry(failed, "9".repeat(64))).toThrow(workflowContracts.WorkflowTransitionError);
+      expect(retry(failed, failedRef.sha256, { actorId: "f".repeat(64), role: "TASK_OWNER" })).toThrow(workflowContracts.WorkflowTransitionError);
+      expect(retry(failed, failedRef.sha256, { actorId: ownerId, role: "PROJECT_ADMIN" })).toThrow(workflowContracts.WorkflowTransitionError);
+      expect(retry({ ...failed, state: "RUNNING" })).toThrow(workflowContracts.WorkflowTransitionError);
+      const retried = workflowContracts.retryWorkflowFeedbackReview(failed, { reviewDigest: failedRef.sha256, actor: owner, now });
+      expect(retry(retried)).toThrow(workflowContracts.WorkflowTransitionError);
+    });
+  });
   it("serializes artifact bodies before hashing and validates storage envelopes after round-trip", () => {
     const { bundleRefs, reviewRef } = fixture();
     const { sha256: _bundleDigest, objectKey: _bundleKey, ...bundleMetadata } = bundleRefs[0]!;
@@ -498,6 +591,29 @@ describe("immutable multi-PR feedback reviews", () => {
         expect(() => decideWorkflowFeedbackFindings(reviewed, noteRequest, { actorId: hash("f"), role: "TASK_OWNER" }, now)).toThrow();
       }
     }
+  });
+  it("keeps the reviewed tree of a pull request recorded without one when the owner approves a fix", () => {
+    const { current, bundleRefs, reviewRef, request } = fixture();
+    expect(current.pullRequests?.every(pr => pr.headTreeSha === undefined)).toBe(true);
+    const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+    const approved = decideWorkflowFeedbackFindings(reviewed, request, { actorId: ownerId, role: "TASK_OWNER" }, now);
+    expect(approved).toMatchObject({ stage: "IMPLEMENT", pullRequests: [{ repositoryId: "api", headTreeSha: "1".repeat(40) }, { repositoryId: "ui", headTreeSha: "2".repeat(40) }] });
+    // Another decision changes no pull request.
+    const dismissed = decideWorkflowFeedbackFindings(reviewed, { ...request, decision: "DISMISS", selectedFindingIds: [], ownerNote: "Not now." }, { actorId: ownerId, role: "TASK_OWNER" }, now);
+    expect(dismissed.pullRequests?.every(pr => pr.headTreeSha === undefined)).toBe(true);
+  });
+  it("records a pull request's head tree without a new revision, only for its recorded head and reviewed code", () => {
+    const { current } = fixture();
+    const recorded = workflowContracts.recordWorkflowPullRequestHeadTrees(current, [{ repositoryId: "api", number: 1, headSha: "d".repeat(40), headTreeSha: "1".repeat(40) }], now);
+    expect(recorded.revision).toBe(current.revision);
+    expect(recorded.pullRequests?.map(pr => pr.headTreeSha)).toEqual(["1".repeat(40), undefined]);
+    for (const wrong of [{ headSha: "e".repeat(40) }, { headTreeSha: "2".repeat(40) }, { number: 9 }]) {
+      expect(() => workflowContracts.recordWorkflowPullRequestHeadTrees(current, [{ repositoryId: "api", number: 1, headSha: "d".repeat(40), headTreeSha: "1".repeat(40), ...wrong }], now))
+        .toThrow(workflowContracts.WorkflowTransitionError);
+    }
+    // A tree already recorded is never replaced.
+    expect(() => workflowContracts.recordWorkflowPullRequestHeadTrees(recorded, [{ repositoryId: "api", number: 1, headSha: "d".repeat(40), headTreeSha: "1".repeat(40) }], now))
+      .toThrow(workflowContracts.WorkflowTransitionError);
   });
   it("rejects a complete review omitting any currently open linked PR", () => {
     const { current, bundleRefs, reviewRef } = fixture();
@@ -567,7 +683,8 @@ describe("immutable multi-PR feedback reviews", () => {
     expect(approved.feedbackDecisions?.[0]).toMatchObject({ selectedFindingIds: ["finding-0"], selectedCommentIds: ["api-0", "api-1"], reviewDigest: reviewRef.sha256, proposalDigest: reviewRef.proposalDigest, actorId: ownerId });
     expect(approved.feedbackDecisions?.[0]?.candidates).toEqual([{ repositoryId: "api", number: 1, headSha: "d".repeat(40), candidateDigest: current.candidate!.digest, commentSetDigest: hash("c"), bundleDigest: hash("e") }]);
     expect(approved.feedbackReview?.reviewRef?.findingRefs).toHaveLength(2);
-    expect(approved.pullRequests).toEqual(current.pullRequests);
+    // The same pull requests, which now keep the reviewed tree they were opened with.
+    expect(approved.pullRequests).toEqual(current.pullRequests!.map(pr => ({ ...pr, headTreeSha: current.candidate!.repositories.find(repo => repo.repositoryId === pr.repositoryId)!.treeSha })));
     expect(() => decideWorkflowFeedbackFindings(approved, request, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
   });
   it("rejects stale or invalid digests, unknown selections, incomplete reports and cross-candidate groups", () => {
@@ -647,6 +764,33 @@ describe("sending blocked work back to coding (Task 16)", () => {
     expect(workflowContracts.sendBackInstructions(WorkflowSnapshotSchema.parse(ready()))).toBe("- No check or review problems were recorded; follow the owner note.");
   });
 
+  it("lists the tests a review-only rerun found regressed as problems, with what to do about them, until new results replace them", () => {
+    const regressed = workflowContracts.blockWorkflow({ ...ready(), stage: "VERIFY", state: "RUNNING", reviews: [], verification: undefined },
+      workflowContracts.WORKFLOW_BLOCK_REASONS.regressionFound, "2026-10-05T12:02:00.000Z", { regressedChecks: ["npm test -- retry"] });
+    expect(regressed.regressedChecks).toEqual(["npm test -- retry"]);
+    expect(workflowContracts.sendBackProblems(regressed)).toEqual([{ source: "check", text: "npm test -- retry passed before this change and fails now", regressed: true }]);
+    expect(workflowContracts.sendBackInstructions(regressed)).toBe(
+      `- check npm test -- retry passed before this change and fails now\n${workflowContracts.WORKFLOW_REGRESSION_INSTRUCTION}`);
+    expect(workflowContracts.WORKFLOW_REGRESSION_INSTRUCTION).toBe("These tests passed before this change and fail now. If the task intentionally changes this behaviour, update the tests to match it; otherwise fix the code.");
+    // Sent back, the coding step still knows what regressed; the next block or verification replaces it.
+    const sent = workflowContracts.returnWorkflowToImplementation(regressed, sendBack);
+    expect(workflowContracts.sendBackProblems(sent)).toHaveLength(1);
+    expect(workflowContracts.blockWorkflow(sent, "implementation operation ended failed", "2026-10-05T12:03:00.000Z").regressedChecks).toBeUndefined();
+    expect(() => workflowContracts.blockWorkflow(regressed, "x", "2026-10-05T12:03:00.000Z", { regressedChecks: Array.from({ length: 9 }, (_, index) => `t${index}`) })).toThrow();
+  });
+
+  it("never sends a broken check to the coder, and offers Send back only for a real failure", () => {
+    const verification = (results: Array<Record<string, unknown>>) => WorkflowSnapshotSchema.parse({ ...ready(), stage: "VERIFY", state: "BLOCKED", blockReason: "x", reviews: [],
+      verification: { candidateDigest: candidate.digest, producer: "t", environmentId: "w", recordedAt: "2026-10-05T12:01:00.000Z", results } });
+    const allBroken = verification([{ checkId: "unit", status: "FAILED", broken: true }, { checkId: "lint", status: "FAILED", programNotFound: true }]);
+    expect(workflowContracts.workflowSendBackOffered(allBroken)).toBe(false);
+    expect(workflowContracts.sendBackProblems(allBroken)).toEqual([]);
+    const mixed = verification([{ checkId: "unit", status: "FAILED", broken: true }, { checkId: "lint", status: "FAILED" }]);
+    expect(workflowContracts.workflowSendBackOffered(mixed)).toBe(true);
+    expect(workflowContracts.sendBackProblems(mixed)).toEqual([{ source: "check", text: "lint failed" }]);
+    expect(workflowContracts.WORKFLOW_BLOCK_REASONS.checksBroken).toBe("the checks couldn't run");
+  });
+
   it("counts only evidence about the current code: older checks and reviews neither offer a send-back nor reach the coder", () => {
     const older = "f".repeat(64);
     const staleChecks = WorkflowSnapshotSchema.parse({ ...ready(), stage: "VERIFY", state: "BLOCKED", blockReason: "AgentX could not read a valid check report.", reviews: [],
@@ -660,5 +804,198 @@ describe("sending blocked work back to coding (Task 16)", () => {
     const current = WorkflowSnapshotSchema.parse({ ...staleReview, reviews: [review("CRITIC", "FINDINGS", [{ text: "Live code.", origin: "INTRODUCED" }])] });
     expect(workflowContracts.workflowSendBackOffered(current)).toBe(true);
     expect(workflowContracts.sendBackProblems(current)).toEqual([{ source: "code review", text: "Live code." }]);
+  });
+});
+
+describe("proposed checks and review-only verification", () => {
+  const now = "2026-10-05T12:00:00.000Z";
+  const command = { cwd: "workspace/payments", executable: "npx", args: ["vitest", "run"], timeoutSeconds: 600 };
+  const proposal = { proposed: [{ id: "proposed-1", label: "Retry tests", command }], noneReason: "Only docs change otherwise." };
+  const empty = { required: [], optional: [], selectedOptionalIds: [] };
+  const actor = { actorId: ownerId, role: "TASK_OWNER" as const };
+  const decide = (workflow: unknown, decision: "APPROVE" | "REQUEST_CHANGES", digest: string, requestId: string) => decideWorkflow(workflow, {
+    requestId, expectedRevision: (workflow as { revision: number }).revision, decision, artifactDigest: digest, reason: "Owner decision",
+  }, actor, { now, allowedSkipStages: [] });
+  const candidate = createCandidateManifest([{ repositoryId: "payments", commitSha: "a".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]);
+  const reviewOnly = { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci-local", recordedAt: now, results: [], reviewOnly: true };
+  const verifying = (checkPolicy: unknown) => ({ ...createWorkflowSnapshot({ taskId, ownerId, now }), checkPolicy, stage: "VERIFY" as const, state: "WAITING" as const });
+
+  it("keeps a stored check policy without proposed checks readable, as an empty proposal", () => {
+    const legacy = { ...createWorkflowSnapshot({ taskId, ownerId, now }), checkPolicy: empty };
+    expect(WorkflowSnapshotSchema.parse(legacy).checkPolicy).toEqual({ ...empty, proposed: [] });
+    expect(WorkflowSnapshotSchema.parse(legacy).checkPolicy).not.toHaveProperty("proposalNote");
+  });
+
+  it("refuses duplicate ids across project and proposed checks, and a proposal over the limits", () => {
+    const required = [{ id: "proposed-1", label: "npm test", command }];
+    expect(workflowContracts.WorkflowCheckPolicySchema.safeParse({ ...empty, required, proposed: proposal.proposed }).success).toBe(false);
+    expect(workflowContracts.WorkflowCheckPolicySchema.safeParse({ ...empty, proposed: Array.from({ length: 9 }, (_, index) => ({ id: `proposed-${index + 1}`, label: "x", command })) }).success).toBe(false);
+    expect(workflowContracts.WorkflowCheckPolicySchema.safeParse({ ...empty, proposed: [], noneReason: "x".repeat(301) }).success).toBe(false);
+    expect(workflowContracts.WorkflowCheckPolicySchema.safeParse({ ...empty, proposed: [], proposalNote: "x".repeat(201) }).success).toBe(false);
+  });
+
+  it("stores a coding plan's proposal and clears it, with the optional choice, when a new plan version arrives", () => {
+    const initial = createWorkflowSnapshot({ taskId, ownerId, now, checkPolicy: { ...empty, optional: [{ id: "lint", label: "Lint", command }] } });
+    const waiting = submitWorkflowArtifact(initial, { expectedRevision: initial.revision, artifact: plan, now, proposal });
+    expect(waiting.checkPolicy).toMatchObject({ proposed: proposal.proposed, noneReason: proposal.noneReason });
+    const changes = decide(waiting, "REQUEST_CHANGES", plan.sha256, "d532a6e0-3de1-44e3-a6d2-e8c635d77f20");
+    const plan2 = { ...plan, id: "plan-v2", version: 2, sha256: "c".repeat(64), objectKey: `tasks/${taskId}/plan-v2.md` };
+    const revised = submitWorkflowArtifact({ ...changes, stage: "PLAN", state: "RUNNING", checkPolicy: { ...changes.checkPolicy, selectedOptionalIds: ["lint"], selectedProposedIds: [] } },
+      { expectedRevision: changes.revision, artifact: plan2, now });
+    expect(revised.checkPolicy).toEqual({ required: [], optional: [{ id: "lint", label: "Lint", command }], selectedOptionalIds: [], proposed: [] });
+    const unreadable = submitWorkflowArtifact({ ...changes, stage: "PLAN", state: "RUNNING" },
+      { expectedRevision: changes.revision, artifact: plan2, now, proposal: { proposed: [], proposalNote: "AgentX could not read the proposed checks" } });
+    expect(unreadable.checkPolicy).toMatchObject({ proposed: [], proposalNote: "AgentX could not read the proposed checks" });
+    expect(unreadable.checkPolicy).not.toHaveProperty("noneReason");
+  });
+
+  it("takes a proposal only with a coding plan", () => {
+    const full = createWorkflowSnapshot({ taskId, ownerId, now, path: "FULL", checkPolicy: empty });
+    const requirements = { ...plan, id: "requirements-v1", type: "requirements" as const, objectKey: `tasks/${taskId}/requirements-v1.md` };
+    expect(() => submitWorkflowArtifact(full, { expectedRevision: full.revision, artifact: requirements, now, proposal })).toThrow(WorkflowTransitionError);
+    expect(submitWorkflowArtifact(full, { expectedRevision: full.revision, artifact: requirements, now }).checkPolicy).toMatchObject({ proposed: [] });
+  });
+
+  it("ignores a proposal for a task stored without a check policy, which keeps running the project's checks", () => {
+    const bare = createWorkflowSnapshot({ taskId, ownerId, now });
+    expect(submitWorkflowArtifact(bare, { expectedRevision: bare.revision, artifact: plan, now, proposal }).checkPolicy).toBeUndefined();
+  });
+
+  it("approves a coding plan with no checks to run, and still refuses a stale approval", () => {
+    const initial = createWorkflowSnapshot({ taskId, ownerId, now, checkPolicy: empty });
+    const waiting = submitWorkflowArtifact(initial, { expectedRevision: initial.revision, artifact: plan, now });
+    expect(() => decideWorkflow(waiting, { requestId: "d532a6e0-3de1-44e3-a6d2-e8c635d77f21", expectedRevision: waiting.revision - 1, decision: "APPROVE",
+      artifactDigest: plan.sha256, reason: "Old press" }, actor, { now, allowedSkipStages: [] })).toThrow(/stale/);
+    expect(decide(waiting, "APPROVE", plan.sha256, "d532a6e0-3de1-44e3-a6d2-e8c635d77f22")).toMatchObject({ stage: "IMPLEMENT", state: "READY", outcome: "PASSED" });
+    // A legacy task with no check policy at all approves the same way.
+    const bare = createWorkflowSnapshot({ taskId, ownerId, now });
+    const bareWaiting = submitWorkflowArtifact(bare, { expectedRevision: bare.revision, artifact: plan, now });
+    expect(decide(bareWaiting, "APPROVE", plan.sha256, "d532a6e0-3de1-44e3-a6d2-e8c635d77f23")).toMatchObject({ stage: "IMPLEMENT" });
+  });
+
+  it("records a review-only verification only when no check was selected, and only with no results", () => {
+    expect(recordWorkflowVerification(verifying(empty), { candidate, checks: reviewOnly, now })).toMatchObject({ stage: "REVIEW", state: "WAITING", verification: { reviewOnly: true, results: [] } });
+    // A task stored without a check policy runs the project's checks, so it is never review only.
+    expect(() => recordWorkflowVerification(verifying(undefined), { candidate, checks: reviewOnly, now })).toThrow(WorkflowTransitionError);
+    expect(() => recordWorkflowVerification(verifying({ ...empty, proposed: proposal.proposed }), { candidate, checks: reviewOnly, now })).toThrow(WorkflowTransitionError);
+    expect(() => recordWorkflowVerification(verifying({ ...empty, required: [{ id: "required-1", label: "npm test", command }] }), { candidate, checks: reviewOnly, now })).toThrow(WorkflowTransitionError);
+    expect(() => recordWorkflowVerification(verifying({ ...empty, optional: [{ id: "lint", label: "Lint", command }], selectedOptionalIds: ["lint"] }), { candidate, checks: reviewOnly, now })).toThrow(WorkflowTransitionError);
+    expect(() => recordWorkflowVerification(verifying(empty), { candidate, checks: { ...reviewOnly, reviewOnly: undefined }, now })).toThrow(WorkflowTransitionError);
+    expect(() => recordWorkflowVerification(verifying(empty), { candidate, checks: { ...reviewOnly, results: [{ checkId: "x", status: "PASS" as const }] }, now })).toThrow(WorkflowTransitionError);
+    // The candidate is still validated exactly as with checks.
+    expect(() => recordWorkflowVerification(verifying(empty), { candidate, checks: { ...reviewOnly, candidateDigest: "f".repeat(64) }, now })).toThrow(WorkflowTransitionError);
+    const pinned = { ...verifying(empty), reviewBase: [{ repositoryId: "payments", baseCommitSha: "d".repeat(40) }] };
+    expect(() => recordWorkflowVerification(pinned, { candidate, checks: reviewOnly, now })).toThrow(/base/);
+  });
+
+  it("lets a review-only change reach pull request readiness only when no check was selected", () => {
+    const review = (role: "CRITIC" | "SECURITY") => ({ operationId: "33333333-3333-4333-8333-333333333333", candidateDigest: candidate.digest, role,
+      provider: "t", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now });
+    const ready = (checkPolicy: unknown, verification: unknown) => ({ ...createWorkflowSnapshot({ taskId, ownerId, now }), checkPolicy, revision: 7,
+      stage: "PULL_REQUEST", state: "READY", candidate, verification, reviews: [review("CRITIC"), review("SECURITY")] });
+    expect(WorkflowSnapshotSchema.safeParse(ready(empty, reviewOnly)).success).toBe(true);
+    expect(WorkflowSnapshotSchema.safeParse(ready(undefined, reviewOnly)).success).toBe(false);
+    expect(WorkflowSnapshotSchema.safeParse(ready({ ...empty, proposed: proposal.proposed }, reviewOnly)).success).toBe(false);
+    expect(WorkflowSnapshotSchema.safeParse(ready(empty, { ...reviewOnly, reviewOnly: undefined })).success).toBe(false);
+    const passed = { ...reviewOnly, reviewOnly: undefined, results: [{ checkId: "proposed-1", status: "PASS" }] };
+    expect(WorkflowSnapshotSchema.safeParse(ready({ ...empty, proposed: proposal.proposed }, passed)).success).toBe(true);
+    expect(WorkflowSnapshotSchema.safeParse(ready({ ...empty, proposed: proposal.proposed }, { ...passed, results: [{ checkId: "proposed-1", status: "FAILED" }] })).success).toBe(false);
+  });
+
+  describe("pushing an approved PR feedback fix to the existing pull request", () => {
+    const at = (minute: number) => `2026-10-05T12:${String(minute).padStart(2, "0")}:00.000Z`;
+    const first = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "e".repeat(40) }]);
+    const fix = createCandidateManifest([{ repositoryId: "demo", commitSha: "c".repeat(40), treeSha: "2".repeat(40), baseCommitSha: "e".repeat(40) }]);
+    const passed = (candidate: typeof fix) => ({
+      candidate,
+      verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: at(1), results: [{ checkId: "unit", status: "PASS" as const }] },
+      reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: at(2) })),
+    });
+    /** The fix passed its checks and reviews; the pull request still holds the first reviewed code. */
+    const ready = () => WorkflowSnapshotSchema.parse({
+      ...createWorkflowSnapshot({ taskId, ownerId, now: at(0) }), revision: 9, stage: "PULL_REQUEST", state: "READY", ...passed(fix),
+      pullRequests: [{ repositoryId: "demo", number: 42, url: "https://github.com/example/demo/pull/42", headSha: "d".repeat(40), headTreeSha: "1".repeat(40), candidateDigest: first.digest, required: true, state: "OPEN" }],
+    });
+
+    it("records a pushed fix on the existing pull request and returns to waiting for merge", () => {
+      expect(workflowContracts.workflowPullRequestUpdateDue(ready())).toBe(true);
+      const running = workflowContracts.startWorkflowPullRequestUpdate(ready(), at(3));
+      expect(running).toMatchObject({ stage: "PULL_REQUEST", state: "RUNNING", revision: 10 });
+      const waiting = workflowContracts.recordWorkflowPullRequestUpdate(running, { updates: [{ repositoryId: "demo", number: 42, headSha: "f".repeat(40), headTreeSha: "2".repeat(40) }], now: at(4) });
+      expect(waiting).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", revision: 11, pullRequestUpdatedAt: at(4),
+        pullRequests: [{ number: 42, headSha: "f".repeat(40), headTreeSha: "2".repeat(40), candidateDigest: fix.digest, state: "OPEN" }] });
+      expect(workflowContracts.workflowPullRequestUpdateDue(waiting)).toBe(false);
+      // A second update of the same push is refused: the task is no longer pushing.
+      expect(() => workflowContracts.recordWorkflowPullRequestUpdate(waiting, { updates: [{ repositoryId: "demo", number: 42, headSha: "f".repeat(40), headTreeSha: "2".repeat(40) }], now: at(5) })).toThrow(workflowContracts.WorkflowTransitionError);
+      // Nothing to push when the pull request already holds the current code.
+      expect(() => workflowContracts.startWorkflowPullRequestUpdate({ ...waiting, stage: "PULL_REQUEST", state: "READY" }, at(5))).toThrow(workflowContracts.WorkflowTransitionError);
+      // A pull request may hold earlier code only while its fix is pushed or after its push failed.
+      expect(WorkflowSnapshotSchema.safeParse({ ...ready(), stage: "WAIT_FOR_MERGE", state: "WAITING" }).success).toBe(false);
+      const failed = workflowContracts.blockWorkflowPullRequestUpdate(running, { numbers: [42], cause: "HEAD_MOVED", now: at(4) });
+      expect(failed).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED", blockReason: workflowContracts.WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed,
+        pullRequestUpdateFailure: { numbers: [42], cause: "HEAD_MOVED" }, pullRequests: [{ headSha: "d".repeat(40), candidateDigest: first.digest }] });
+      expect(WorkflowSnapshotSchema.safeParse({ ...failed, blockReason: workflowContracts.WORKFLOW_BLOCK_REASONS.feedbackReviewFailed }).success).toBe(false);
+    });
+
+    it("records a fix whose push was taken for failed but landed, from the blocked task, back to waiting for merge", () => {
+      const running = workflowContracts.startWorkflowPullRequestUpdate(ready(), at(3));
+      const failed = workflowContracts.blockWorkflowPullRequestUpdate(running, { numbers: [42], cause: "PUSH_REFUSED", now: at(4) });
+      const waiting = workflowContracts.recordWorkflowPullRequestUpdate(failed, { updates: [{ repositoryId: "demo", number: 42, headSha: "f".repeat(40), headTreeSha: "2".repeat(40) }], now: at(5) });
+      expect(waiting).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", revision: failed.revision + 1, pullRequestUpdatedAt: at(5),
+        pullRequests: [{ number: 42, headSha: "f".repeat(40), headTreeSha: "2".repeat(40), candidateDigest: fix.digest, state: "OPEN" }] });
+      expect(waiting.blockReason).toBeUndefined();
+      expect(waiting.pullRequestUpdateFailure).toBeUndefined();
+      // Only on the reviewed tree, and only for a task blocked because its push failed.
+      expect(() => workflowContracts.recordWorkflowPullRequestUpdate(failed, { updates: [{ repositoryId: "demo", number: 42, headSha: "f".repeat(40), headTreeSha: "1".repeat(40) }], now: at(5) })).toThrow(workflowContracts.WorkflowTransitionError);
+      const otherBlock = WorkflowSnapshotSchema.parse({ ...ready(), revision: 12, stage: "WAIT_FOR_MERGE", state: "BLOCKED", blockReason: workflowContracts.WORKFLOW_BLOCK_REASONS.pullRequestChanged,
+        candidate: first, ...passed(first), pullRequests: ready().pullRequests });
+      expect(() => workflowContracts.recordWorkflowPullRequestUpdate(otherBlock, { updates: [{ repositoryId: "demo", number: 42, headSha: "f".repeat(40), headTreeSha: "1".repeat(40) }], now: at(5) })).toThrow(workflowContracts.WorkflowTransitionError);
+    });
+
+    it("refuses a pull request update whose tree is not the reviewed tree", () => {
+      const running = workflowContracts.startWorkflowPullRequestUpdate(ready(), at(3));
+      expect(() => workflowContracts.recordWorkflowPullRequestUpdate(running, { updates: [{ repositoryId: "demo", number: 42, headSha: "f".repeat(40), headTreeSha: "1".repeat(40) }], now: at(4) })).toThrow(workflowContracts.WorkflowTransitionError);
+      expect(() => workflowContracts.recordWorkflowPullRequestUpdate(running, { updates: [{ repositoryId: "demo", number: 43, headSha: "f".repeat(40), headTreeSha: "2".repeat(40) }], now: at(4) })).toThrow(workflowContracts.WorkflowTransitionError);
+      expect(() => workflowContracts.recordWorkflowPullRequestUpdate(ready(), { updates: [{ repositoryId: "demo", number: 42, headSha: "f".repeat(40), headTreeSha: "2".repeat(40) }], now: at(4) })).toThrow(workflowContracts.WorkflowTransitionError);
+    });
+
+    it("observes a merge while a fix is being pushed", () => {
+      const running = workflowContracts.startWorkflowPullRequestUpdate(ready(), at(3));
+      const open = workflowContracts.observeWorkflowPullRequest(running, { repositoryId: "demo", number: 42, candidateDigest: first.digest, state: "OPEN", source: "GITHUB_API", observedAt: at(4) }, at(4));
+      // Still pushing: an open pull request changes nothing about the push.
+      expect(open).toMatchObject({ stage: "PULL_REQUEST", state: "RUNNING" });
+      const merged = workflowContracts.observeWorkflowPullRequest(open, { repositoryId: "demo", number: 42, candidateDigest: first.digest, state: "MERGED", source: "GITHUB_API", observedAt: at(5) }, at(5));
+      expect(merged).toMatchObject({ stage: "MERGED", state: "COMPLETE", outcome: "MERGED", pullRequests: [{ state: "MERGED", headSha: "d".repeat(40) }] });
+      // And after the push failed.
+      const failed = workflowContracts.blockWorkflowPullRequestUpdate(running, { numbers: [42], cause: "PUSH_REFUSED", now: at(4) });
+      expect(workflowContracts.observeWorkflowPullRequest(failed, { repositoryId: "demo", number: 42, candidateDigest: first.digest, state: "OPEN", source: "GITHUB_API", observedAt: at(5) }, at(5)))
+        .toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
+      expect(workflowContracts.observeWorkflowPullRequest(failed, { repositoryId: "demo", number: 42, candidateDigest: first.digest, state: "MERGED", source: "GITHUB_API", observedAt: at(5) }, at(5)))
+        .toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+    });
+
+    it("observes a merge while the fix is still being coded or reviewed, with the pull request's earlier reviewed code", () => {
+      // The fix is in review: its candidate has no reviews yet, and the pull request holds the first reviewed code.
+      const reviewing = WorkflowSnapshotSchema.parse({ ...ready(), stage: "REVIEW", state: "RUNNING", reviews: [] });
+      const merged = workflowContracts.observeWorkflowPullRequest(reviewing, { repositoryId: "demo", number: 42, candidateDigest: first.digest, state: "MERGED", source: "GITHUB_API", observedAt: at(4) }, at(4));
+      expect(merged).toMatchObject({ stage: "MERGED", state: "COMPLETE", outcome: "MERGED", pullRequests: [{ candidateDigest: first.digest, state: "MERGED" }] });
+      // Only a merge moves it: an open pull request leaves the fix where it is, and nothing is observed for a closed task.
+      expect(workflowContracts.observeWorkflowPullRequest(reviewing, { repositoryId: "demo", number: 42, candidateDigest: first.digest, state: "OPEN", source: "GITHUB_API", observedAt: at(4) }, at(4)))
+        .toMatchObject({ stage: "REVIEW", state: "RUNNING" });
+      // A merged stage with the fix's own code still needs the fix's checks and reviews.
+      expect(WorkflowSnapshotSchema.safeParse({ ...merged, pullRequests: merged.pullRequests!.map((pullRequest) => ({ ...pullRequest, candidateDigest: fix.digest })) }).success).toBe(false);
+    });
+
+    it("records a merge of the pushed fix before the push was recorded, only on the fix's reviewed tree", () => {
+      const running = workflowContracts.startWorkflowPullRequestUpdate(ready(), at(3));
+      expect(workflowContracts.observeWorkflowPullRequestMergedWithFix(running, { repositoryId: "demo", number: 42, headSha: "f".repeat(40), headTreeSha: "2".repeat(40), observedAt: at(4) }, at(4)))
+        .toMatchObject({ stage: "MERGED", state: "COMPLETE", pullRequests: [{ headSha: "f".repeat(40), headTreeSha: "2".repeat(40), candidateDigest: fix.digest, state: "MERGED" }] });
+      expect(() => workflowContracts.observeWorkflowPullRequestMergedWithFix(running, { repositoryId: "demo", number: 42, headSha: "f".repeat(40), headTreeSha: "1".repeat(40), observedAt: at(4) }, at(4)))
+        .toThrow(workflowContracts.WorkflowTransitionError);
+      // A fix still in review was never pushed.
+      const reviewing = WorkflowSnapshotSchema.parse({ ...ready(), stage: "REVIEW", state: "RUNNING", reviews: [] });
+      expect(() => workflowContracts.observeWorkflowPullRequestMergedWithFix(reviewing, { repositoryId: "demo", number: 42, headSha: "f".repeat(40), headTreeSha: "2".repeat(40), observedAt: at(4) }, at(4)))
+        .toThrow(workflowContracts.WorkflowTransitionError);
+    });
   });
 });

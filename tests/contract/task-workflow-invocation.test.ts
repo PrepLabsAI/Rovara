@@ -80,15 +80,17 @@ describe("workflow-mode worker invocation", () => {
     };
     const parse = (extra: Record<string, unknown>, action = "append") => WorkerInvocationSchema.safeParse({ ...maintain, payload: { ...maintain.payload, action, ...extra } }).success;
     expect(parse({})).toBe(true);
-    expect(parse({ workflowCandidateTreeSha: "a".repeat(40) })).toBe(true);
-    expect(parse({ workflowCandidateTreeSha: "a".repeat(40), workflowBaseCommit: "c".repeat(40) })).toBe(true);
-    expect(parse({ workflowCandidateTreeSha: "A".repeat(40) })).toBe(false);
-    expect(parse({ workflowCandidateTreeSha: "a".repeat(39) })).toBe(false);
-    expect(parse({ workflowCandidateTreeSha: "a".repeat(64) })).toBe(false);
-    expect(parse({ workflowCandidateTreeSha: "g".repeat(40) })).toBe(false);
-    expect(parse({ workflowBaseCommit: "c".repeat(40) })).toBe(false);
+    const pinned = { workflowBaseCommit: "c".repeat(40) };
+    // The reviewed tree always comes with the task's base, so the worker always checks base ancestry.
+    expect(parse({ workflowCandidateTreeSha: "a".repeat(40) })).toBe(false);
+    expect(parse({ workflowCandidateTreeSha: "a".repeat(40), ...pinned })).toBe(true);
+    expect(parse({ workflowCandidateTreeSha: "A".repeat(40), ...pinned })).toBe(false);
+    expect(parse({ workflowCandidateTreeSha: "a".repeat(39), ...pinned })).toBe(false);
+    expect(parse({ workflowCandidateTreeSha: "a".repeat(64), ...pinned })).toBe(false);
+    expect(parse({ workflowCandidateTreeSha: "g".repeat(40), ...pinned })).toBe(false);
+    expect(parse(pinned)).toBe(false);
     expect(parse({ workflowBaseCommit: "c".repeat(41), workflowCandidateTreeSha: "a".repeat(40) })).toBe(false);
-    expect(parse({ workflowCandidateTreeSha: "a".repeat(40) }, "sync")).toBe(false);
+    expect(parse({ workflowCandidateTreeSha: "a".repeat(40), ...pinned }, "sync")).toBe(false);
     expect(parse({ somethingElse: true })).toBe(false);
     expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowPullRequestUpdate");
   });

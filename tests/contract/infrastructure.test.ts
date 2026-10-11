@@ -101,8 +101,10 @@ describe("hosted Slack control-plane infrastructure", () => {
       expect((role as { Properties: { AssumeRolePolicyDocument: { Statement: unknown[] } } }).Properties.AssumeRolePolicyDocument.Statement).toEqual([expect.objectContaining({
         Principal: { Service: "scheduler.amazonaws.com" },
         Condition: {
-          StringEquals: { "aws:SourceAccount": { Ref: "AWS::AccountId" } },
-          ArnLike: { "aws:SourceArn": { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":scheduler:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":schedule/*"]] } },
+          StringEquals: {
+            "aws:SourceAccount": { Ref: "AWS::AccountId" },
+            "aws:SourceArn": { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":scheduler:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":schedule-group/default"]] },
+          },
         },
       })]);
     }

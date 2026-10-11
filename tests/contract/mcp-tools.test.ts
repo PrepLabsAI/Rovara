@@ -2,7 +2,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
-import { WORKFLOW_REVIEW_FAILURE_REASONS, type DeveloperTaskView } from "@agentx/contracts";
+import { WORKFLOW_REVIEW_FAILURE_REASONS, workflowFindingFingerprint, type DeveloperTaskView } from "@agentx/contracts";
 import {
   DEVELOPER_TOOLS, NEXT_STEPS, REQUIRED_SERVER_MINOR, ToolError, UPGRADE_AGENTX_STEP, compatibilityChecker, createAgentXMcpServer, httpControlPlaneClient,
   type ControlPlaneClient, type ToolContext,
@@ -42,7 +42,7 @@ describe("the tool list (FR-027, FR-028, SC-010)", () => {
     expect(tools.map((tool) => tool.name)).toEqual([
       "agentx_whoami", "agentx_list_projects", "agentx_start_task", "agentx_start_workflow", "agentx_get_task", "agentx_wait_for_task",
       "agentx_list_tasks", "agentx_continue_task", "agentx_decide_workflow", "agentx_review_workflow_candidate", "agentx_retry_workflow",
-      "agentx_send_workflow_back", "agentx_retry_workflow_publish", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request",
+      "agentx_send_workflow_back", "agentx_resolve_review_findings", "agentx_retry_workflow_publish", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request",
     ]);
     for (const tool of tools) expect(tool.outputSchema, tool.name).toBeDefined();
     expect(JSON.stringify(tools)).not.toContain("\u2014");
@@ -331,6 +331,23 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
       expect(changedText).toContain("agentx_retry_workflow and expected_revision 9");
     });
 
+    it("points a blocked review-only task at sending it back, never at a check retry the broker refuses", async () => {
+      const candidateDigest = "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad";
+      const base = { path: "QUICK", artifacts: [], revision: 9, checkPolicy: { required: [], optional: [], selectedOptionalIds: [], proposed: [] },
+        candidate: { schemaVersion: 1, digest: candidateDigest, repositories: [{ repositoryId: "repo-1", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }] } };
+      for (const blockReason of ["A test that passed before this change fails now. Send it back to coding, or close the task.", "The code changed after its checks ran. Run the checks again on the latest code."]) {
+        const blocked = { ...base, stage: "VERIFY", state: "BLOCKED", blockReason } as unknown as NonNullable<DeveloperTaskView["workflow"]>;
+        const blockedText = text(await (await connect({ getTask: async () => view("SUCCEEDED", { workflow: blocked }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } }));
+        expect(blockedText).toContain("agentx_send_workflow_back with expected_revision 9");
+        expect(blockedText).not.toContain("agentx_retry_workflow");
+      }
+      const ready = { ...base, stage: "PULL_REQUEST", state: "READY" } as unknown as NonNullable<DeveloperTaskView["workflow"]>;
+      const changed = view("FAILED", { workflow: ready, failure: { category: "publication_failed", message: "the code changed after its checks and reviews; AgentX did not publish it" } });
+      const changedText = text(await (await connect({ getTask: async () => changed })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } }));
+      expect(changedText).toContain("agentx_send_workflow_back with expected_revision 9");
+      expect(changedText).not.toContain("agentx_retry_workflow ");
+    });
+
     it("points a task blocked by review findings at sending it back to coding", async () => {
       const candidateDigest = "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad";
       const workflow = {
@@ -343,6 +360,79 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
       const result = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
       expect(text(result)).toContain("agentx_send_workflow_back");
       expect(text(result)).toContain("expected_revision 15");
+    });
+
+    describe("resolving review findings", () => {
+      const candidateDigest = "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad";
+      const parser = { text: "The new parser drops the last line.", origin: "INTRODUCED", file: "src/parse.ts", line: 40 };
+      const token = { text: "The token is written to the log.\u0007 xoxb-3333333333-planted-secret", origin: "INTRODUCED" };
+      const review = (role: "CRITIC" | "SECURITY", status: string, findings: unknown[]) => ({ operationId: "88888888-8888-4888-8888-888888888888", candidateDigest, role, provider: "test", version: "1", status, findings, readOnly: true, recordedAt: "2026-10-07T20:01:00.000Z" });
+      const blocked = (extra: Record<string, unknown> = {}) => ({
+        stage: "REVIEW", state: "BLOCKED", revision: 15, path: "QUICK", blockReason: "the critic review did not pass", artifacts: [],
+        candidate: { schemaVersion: 1, digest: candidateDigest, repositories: [{ repositoryId: "repo-1", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }] },
+        verification: { candidateDigest, producer: "broker", environmentId: "test", recordedAt: "2026-10-07T20:00:00.000Z", results: [{ checkId: "unit", status: "PASS" }] },
+        reviews: [review("CRITIC", "FINDINGS", [parser, { text: "Advisory remark.", origin: "INTRODUCED", advisory: true }, { text: "Old code.", origin: "PRE_EXISTING" }]), review("SECURITY", "FINDINGS", [token])],
+        ...extra,
+      }) as unknown as NonNullable<DeveloperTaskView["workflow"]>;
+
+      it("lists each blocking finding with its stable finding_id, and says how to resolve them", async () => {
+        const mcp = await connect({ getTask: async () => view("SUCCEEDED", { workflow: blocked() }) });
+        const result = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+        const findings = (result.structuredContent as { workflow: { blocking_findings: Array<Record<string, unknown>> } }).workflow.blocking_findings;
+        expect(findings.map((finding) => ({ ...finding, text: String(finding.text).split(" ").slice(0, 6).join(" ") }))).toEqual([
+          { finding_id: workflowFindingFingerprint("CRITIC", parser), source: "code review", text: "The new parser drops the last", file: "src/parse.ts", line: 40 },
+          { finding_id: workflowFindingFingerprint("SECURITY", token), source: "security review", text: "The token is written to the" },
+        ]);
+        // Reviewer text is made safe to show: no control character, and the planted secret is redacted.
+        expect(JSON.stringify(findings)).not.toContain("xoxb-3333333333-planted-secret");
+        expect(JSON.stringify(findings)).not.toContain("\u0007");
+        expect(text(result)).toContain("agentx_resolve_review_findings");
+        expect(text(result)).toContain("expected_revision 15");
+        expect(text(result)).toContain(`candidate_digest ${candidateDigest}`);
+        expect(text(result)).toContain("agentx_send_workflow_back");
+      });
+
+      it("leaves out findings the owner accepted for this candidate, and lists none elsewhere", async () => {
+        const accepted = [{ candidateDigest, role: "SECURITY", fingerprint: workflowFindingFingerprint("SECURITY", token), text: token.text, reason: "ok", actorId: "a".repeat(64), at: "2026-10-07T20:02:00.000Z" }];
+        const result = await (await connect({ getTask: async () => view("SUCCEEDED", { workflow: blocked({ acceptedFindings: accepted }) }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+        expect((result.structuredContent as { workflow: { blocking_findings: Array<{ source: string }> } }).workflow.blocking_findings.map((finding) => finding.source)).toEqual(["code review"]);
+        const none = await (await connect({ getTask: async () => view("SUCCEEDED", { workflow: blocked({ reviews: [] }) }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+        expect((none.structuredContent as { workflow: Record<string, unknown> }).workflow.blocking_findings).toBeUndefined();
+        const running = await (await connect({ getTask: async () => view("RUNNING", { workflow: blocked({ stage: "IMPLEMENT", state: "RUNNING" }) }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+        expect((running.structuredContent as { workflow: Record<string, unknown> }).workflow.blocking_findings).toBeUndefined();
+      });
+
+      it("resolves findings through the review-findings route, with the request ID, revision, candidate and each answer", async () => {
+        const { fetch, client } = fetchClient();
+        const mcp = await connect(client);
+        const result = await mcp.callTool({ name: "agentx_resolve_review_findings", arguments: {
+          task_id: TASK, request_id: "77777777-7777-4777-8777-777777777777", expected_revision: 15, candidate_digest: candidateDigest,
+          resolutions: [
+            { finding_id: workflowFindingFingerprint("CRITIC", parser), action: "fix", note: "Keep the footer line." },
+            { finding_id: workflowFindingFingerprint("SECURITY", token), action: "accept", note: "Test token only." },
+            { finding_id: "f".repeat(64), action: "fix" },
+          ] } });
+        expect(result.isError).toBeFalsy();
+        expect(sent(fetch)).toEqual({ url: `https://agentx.example.test/v1/dev/tasks/${TASK}/workflow/review-findings`, method: "POST",
+          body: { requestId: "77777777-7777-4777-8777-777777777777", expectedRevision: 15, candidateDigest,
+            resolutions: [
+              { findingId: workflowFindingFingerprint("CRITIC", parser), action: "FIX", note: "Keep the footer line." },
+              { findingId: workflowFindingFingerprint("SECURITY", token), action: "ACCEPT", note: "Test token only." },
+              { findingId: "f".repeat(64), action: "FIX", note: "" },
+            ] } });
+        expect(result.structuredContent).toMatchObject({ request_id: "77777777-7777-4777-8777-777777777777" });
+      });
+
+      it("refuses an unknown action, a malformed finding_id, and more than 20 answers before calling AgentX", async () => {
+        const { fetch, client } = fetchClient();
+        const mcp = await connect(client);
+        const call = (resolutions: unknown) => mcp.callTool({ name: "agentx_resolve_review_findings", arguments: { task_id: TASK, expected_revision: 15, candidate_digest: candidateDigest, resolutions } });
+        expect((await call([{ finding_id: "f".repeat(64), action: "keep" }])).isError).toBe(true);
+        expect((await call([{ finding_id: "nope", action: "fix" }])).isError).toBe(true);
+        expect((await call([])).isError).toBe(true);
+        expect((await call(Array.from({ length: 21 }, () => ({ finding_id: "f".repeat(64), action: "fix" })))).isError).toBe(true);
+        expect(fetch).not.toHaveBeenCalled();
+      });
     });
   });
 

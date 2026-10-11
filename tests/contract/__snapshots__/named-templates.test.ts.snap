@@ -2345,6 +2345,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "OIDC_ISSUER": {
               "Ref": "OidcIssuer",
             },
+            "PLAN_EVIDENCE_FUNCTION_NAME": {
+              "Ref": "PlanEvidence3615C4CB",
+            },
             "PROVISIONER_ARN": {
               "Ref": "SessionsProvisioner9C44055B",
             },
@@ -2980,6 +2983,32 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   ],
                 ],
               },
+            },
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "PlanEvidence3615C4CB",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "PlanEvidence3615C4CB",
+                          "Arn",
+                        ],
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
             },
             {
               "Action": "dynamodb:Query",
@@ -5534,7 +5563,10 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             {
               "Action": "sts:AssumeRole",
               "Condition": {
-                "ArnLike": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
                   "aws:SourceArn": {
                     "Fn::Join": [
                       "",
@@ -5551,14 +5583,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                         {
                           "Ref": "AWS::AccountId",
                         },
-                        ":schedule/*",
+                        ":schedule-group/default",
                       ],
                     ],
-                  },
-                },
-                "StringEquals": {
-                  "aws:SourceAccount": {
-                    "Ref": "AWS::AccountId",
                   },
                 },
               },
@@ -6341,6 +6368,269 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         ],
       },
       "Type": "AWS::Lambda::EventSourceMapping",
+    },
+    "PlanEvidence3615C4CB": {
+      "DependsOn": [
+        "PlanEvidenceServiceRoleDefaultPolicy3BD5AD38",
+        "PlanEvidenceServiceRole37E37FA4",
+      ],
+      "Properties": {
+        "Code": {
+          "S3Bucket": {
+            "Fn::Sub": "cdk-hnb659fds-assets-\${AWS::AccountId}-\${AWS::Region}",
+          },
+          "S3Key": "<asset-hash>.zip",
+        },
+        "Environment": {
+          "Variables": {
+            "ARTIFACT_BUCKET_NAME": {
+              "Ref": "Artifacts82DD59A1",
+            },
+            "GITHUB_APP_CREDENTIAL_REF": {
+              "Ref": "GitHubAppCredentialRef",
+            },
+            "GITHUB_APP_ID": {
+              "Ref": "GitHubAppId",
+            },
+            "GITHUB_APP_PRIVATE_KEY_SECRET_ARN": {
+              "Ref": "GitHubAppPrivateKeySecretArn",
+            },
+            "STATE_TABLE_NAME": {
+              "Ref": "State1C20CC9A",
+            },
+          },
+        },
+        "Handler": "index.handler",
+        "LoggingConfig": {
+          "LogGroup": {
+            "Ref": "PlanEvidenceLogs593ECA1D",
+          },
+        },
+        "MemorySize": 1024,
+        "Role": {
+          "Fn::GetAtt": [
+            "PlanEvidenceServiceRole37E37FA4",
+            "Arn",
+          ],
+        },
+        "Runtime": "nodejs22.x",
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+        "Timeout": 150,
+        "TracingConfig": {
+          "Mode": "Active",
+        },
+      },
+      "Type": "AWS::Lambda::Function",
+    },
+    "PlanEvidenceLogs593ECA1D": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "RetentionInDays": 30,
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "PlanEvidenceServiceRole37E37FA4": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "lambda.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Join": [
+              "",
+              [
+                "arn:",
+                {
+                  "Ref": "AWS::Partition",
+                },
+                ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
+              ],
+            ],
+          },
+        ],
+        "Path": "/agentx/staging/",
+        "PermissionsBoundary": {
+          "Fn::If": [
+            "HasPermissionsBoundary",
+            {
+              "Ref": "PermissionsBoundaryArn",
+            },
+            {
+              "Fn::Join": [
+                "",
+                [
+                  "arn:",
+                  {
+                    "Ref": "AWS::Partition",
+                  },
+                  ":iam::",
+                  {
+                    "Ref": "AWS::AccountId",
+                  },
+                  ":policy/agentx/staging/agentx-staging-boundary",
+                ],
+              ],
+            },
+          ],
+        },
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "PlanEvidenceServiceRoleDefaultPolicy3BD5AD38": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "xray:PutTraceSegments",
+                "xray:PutTelemetryRecords",
+              ],
+              "Effect": "Allow",
+              "Resource": "*",
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "DEVTASK#*",
+                    "PLAN_EVIDENCE",
+                    "PROJECT#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "ReadTaskJobAndProject",
+            },
+            {
+              "Action": "dynamodb:PutItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "DEVTASK#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "PutEvidencePointer",
+            },
+            {
+              "Action": [
+                "dynamodb:UpdateItem",
+                "dynamodb:DeleteItem",
+              ],
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "PLAN_EVIDENCE",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+              "Sid": "ClaimAndCloseJobRow",
+            },
+            {
+              "Action": "s3:GetObject",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/private/*",
+                  ],
+                ],
+              },
+              "Sid": "ReadPlanDocuments",
+            },
+            {
+              "Action": "s3:PutObject",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/private/*/plan-documents/*.evidence.*.json",
+                  ],
+                ],
+              },
+              "Sid": "WriteEvidenceBundles",
+            },
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "GitHubAppPrivateKeySecretArn",
+              },
+              "Sid": "GitHubAppKey",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "PlanEvidenceServiceRoleDefaultPolicy3BD5AD38",
+        "Roles": [
+          {
+            "Ref": "PlanEvidenceServiceRole37E37FA4",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
     },
     "ProxyRoute": {
       "Properties": {
@@ -10536,7 +10826,10 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             {
               "Action": "sts:AssumeRole",
               "Condition": {
-                "ArnLike": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
                   "aws:SourceArn": {
                     "Fn::Join": [
                       "",
@@ -10553,14 +10846,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                         {
                           "Ref": "AWS::AccountId",
                         },
-                        ":schedule/*",
+                        ":schedule-group/default",
                       ],
                     ],
-                  },
-                },
-                "StringEquals": {
-                  "aws:SourceAccount": {
-                    "Ref": "AWS::AccountId",
                   },
                 },
               },

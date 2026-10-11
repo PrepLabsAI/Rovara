@@ -5,6 +5,7 @@ import {
   CONFIRMATION_TTL_MS,
   createWorkflowSnapshot,
   createCandidateManifest,
+  openReviewFindings,
   WorkflowSnapshotSchema,
   submitWorkflowArtifact,
   answeredConfirmationBlocks,
@@ -12,6 +13,7 @@ import {
   confirmationClickEventId,
   type PendingConfirmation,
   type SlackRequestMessage,
+  type WorkflowSnapshot,
 } from "../../packages/contracts/src/index.js";
 import {
   UNKNOWN_BUTTON_TEXT,
@@ -19,6 +21,7 @@ import {
   confirmationActionHandler,
   createSlackInteractivityHandler,
   respondEphemeral,
+  respondReplace,
   slackApi,
   type ConfirmationClickDependencies,
   type SlackActionHandler,
@@ -300,7 +303,7 @@ describe("Slack native workflow review controls", () => {
     await handlers.handleAction({ actionId: "agentx_workflow_approve", value: JSON.stringify({ taskId, revision: workflow.revision, digest, decision: "APPROVE" }), userId: requester, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "", requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "plan", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" });
     expect(opened).toMatchObject({ callback_id: "agentx_workflow_review_submission" });
     const blocks = opened?.blocks as Array<Record<string, unknown>>;
-    expect(JSON.stringify(blocks)).toContain("Always run these project checks:");
+    expect(JSON.stringify(blocks)).toContain("Project checks, always run:");
     expect(JSON.stringify(blocks)).toContain("Coverage report");
     expect(JSON.stringify(blocks)).not.toContain("required-1");
     await handlers.handleSubmission({ user: { id: requester, team_id: thread.teamId }, team: { id: thread.teamId }, view: {
@@ -449,6 +452,22 @@ describe("Slack native workflow review controls", () => {
       expect(closes).toHaveLength(1);
     });
 
+    it("tells the owner at once that the close is under way, since the thread hears only once the workspace is released", async () => {
+      const acks: Array<{ url: string; text: string }> = [];
+      let opened: Record<string, unknown> | undefined;
+      const blockedTask = { ...task, workflow: { ...workflow, stage: "REVIEW", state: "BLOCKED" } };
+      const handlers = workflowSlackHandlers({ loadTask: async () => blockedTask, openView: async (_trigger, view) => { opened = view; }, submit: async () => undefined,
+        close: async () => undefined, respondEphemeral: async (url, text) => { acks.push({ url, text }); } });
+      await handlers.handleAction(press("agentx_workflow_close", { taskId, revision: workflow.revision }));
+      expect(acks).toEqual([]);
+      await handlers.handleSubmission({ user: { id: requester, team_id: thread.teamId }, team: { id: thread.teamId }, view: { callback_id: "agentx_workflow_close_submission", private_metadata: opened?.private_metadata, state: { values: {} } } });
+      expect(acks).toEqual([{ url: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", text: expect.stringMatching(/^Closing this task\./) as unknown }]);
+      // The close was handed off: an acknowledgement Slack would not take does not turn it into an error.
+      const failing = workflowSlackHandlers({ loadTask: async () => blockedTask, openView: async () => undefined, submit: async () => undefined,
+        close: async () => undefined, respondEphemeral: async () => { throw new Error("expired"); } });
+      await expect(failing.handleSubmission({ user: { id: requester, team_id: thread.teamId }, team: { id: thread.teamId }, view: { callback_id: "agentx_workflow_close_submission", private_metadata: opened?.private_metadata, state: { values: {} } } })).resolves.toBeUndefined();
+    });
+
     it("routes Send back to coding for blocked reviews and failed checks to the broker with the exact revision", async () => {
       let loaded: Record<string, unknown> = { ...task, workflow: reviewBlocked };
       const sent: Array<Record<string, unknown>> = [];
@@ -527,6 +546,243 @@ describe("Slack native workflow review controls", () => {
     });
   });
 
+  describe("Resolve findings (Task 6)", () => {
+    const at = new Date(nowSeconds * 1_000).toISOString();
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "c".repeat(40), treeSha: "d".repeat(40) }]);
+    const verification = { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "test", recordedAt: at, results: [{ checkId: "required-1", status: "PASS" as const }] };
+    const report = (role: "CRITIC" | "SECURITY", findings: unknown[]) => ({ operationId: "33333333-3333-4333-8333-333333333333", candidateDigest: candidate.digest, role, provider: "test", version: "1",
+      status: findings.length > 0 ? "FINDINGS" : "PASS", findings, readOnly: true, recordedAt: at });
+    const finding = (text: string, extra: Record<string, unknown> = {}) => ({ text, origin: "INTRODUCED", ...extra });
+    const blockedOn = (critic: unknown[], security: unknown[] = []) => WorkflowSnapshotSchema.parse({ ...workflow, revision: 12, stage: "REVIEW", state: "BLOCKED", candidate, verification,
+      reviews: [report("CRITIC", critic), report("SECURITY", security)] });
+    const PARSER = finding("The new parser drops the last line <!channel> & more.", { file: "src/parse.ts", line: 40 });
+    const TOKEN = finding("The token is written to the log.");
+    const press = (value: Record<string, unknown>, userId = requester): SlackBlockAction => ({ actionId: "agentx_workflow_resolve_findings", value: JSON.stringify(value),
+      userId, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "",
+      requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "blocked", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3", actionTs: "1695500001.000009" });
+    const valueOf = (blocked: WorkflowSnapshot) => ({ taskId, revision: blocked.revision, candidateDigest: candidate.digest });
+    type Modal = { callback_id: string; private_metadata: string; blocks: Array<Record<string, unknown>>; title: { text: string }; submit: { text: string } };
+    const setup = (blocked: WorkflowSnapshot) => {
+      const opened: Modal[] = [];
+      const resolved: Array<Record<string, unknown>> = [];
+      const web = new StrictSlackWeb();
+      const acks: Array<{ url: string; text: string }> = [];
+      let ackFails = false;
+      let loaded: Record<string, unknown> = { ...task, workflow: blocked };
+      const handlers = workflowSlackHandlers({ loadTask: async () => loaded, submit: async () => undefined,
+        openView: async (trigger, view) => { await web.openView(trigger, view); opened.push(view as unknown as Modal); },
+        resolveFindings: async (input) => { resolved.push(input); },
+        respondEphemeral: async (url, text) => { if (ackFails) throw new Error("expired_url"); acks.push({ url, text }); await web.respondEphemeral(url, text); } });
+      return { handlers, opened, resolved, acks, failAcks: () => { ackFails = true; }, reload: (next: WorkflowSnapshot) => { loaded = { ...task, workflow: next }; } };
+    };
+    /** Everything the form shows as text: the introduction and each finding. */
+    const modalText = (modal: Modal) => modal.blocks.filter((block) => block.type === "section").map((block) => (block.text as { text: string }).text).join("\n");
+    const inputs = (modal: Modal) => modal.blocks.filter((block) => block.type === "input");
+    const actionBlocks = (modal: Modal) => inputs(modal).filter((block) => String(block.block_id).startsWith("finding_action_"));
+    const noteBlocks = (modal: Modal) => inputs(modal).filter((block) => String(block.block_id).startsWith("finding_note_"));
+    /** The submission Slack sends: each finding's radio and text, by its block, with the owner's picks by position (Fix and no text unless given). */
+    const submission = (modal: Modal, picks: Array<{ action?: "FIX" | "ACCEPT"; note?: string } | undefined>, userId = requester) => ({
+      type: "view_submission", team: { id: thread.teamId }, user: { id: userId, team_id: thread.teamId },
+      view: { callback_id: modal.callback_id, private_metadata: modal.private_metadata, blocks: modal.blocks, state: { values: Object.fromEntries([
+        ...actionBlocks(modal).map((block, index): [string, unknown] => [String(block.block_id), { action: { type: "radio_buttons", selected_option: { value: picks[index]?.action ?? "FIX" } } }]),
+        ...noteBlocks(modal).map((block, index): [string, unknown] => [String(block.block_id), { note: { type: "plain_text_input", value: picks[index]?.note ?? null } }]),
+      ]) } },
+    });
+
+    it("opens a form listing each blocking finding (escaped), with a Fix or Accept choice defaulting to Fix and a text box", async () => {
+      const blocked = blockedOn([PARSER], [TOKEN]);
+      const t = setup(blocked);
+      await t.handlers.handleAction(press(valueOf(blocked)));
+      const modal = t.opened[0]!;
+      expect(modal).toMatchObject({ callback_id: "agentx_workflow_resolve_findings_submission", title: { text: "Resolve findings" }, submit: { text: "Save" } });
+      const listed = JSON.stringify(modal.blocks.filter((block) => block.type === "section"));
+      expect(listed).toContain("The new parser drops the last line &lt;!channel&gt; &amp; more.");
+      expect(listed).toContain("src/parse.ts:40");
+      expect(listed).toContain("The token is written to the log.");
+      expect(listed).not.toContain("<!channel>");
+      const radios = actionBlocks(modal).map((block) => block.element as { type: string; options: Array<{ text: { text: string }; value: string }>; initial_option: { value: string } });
+      expect(radios).toHaveLength(2);
+      for (const radio of radios) {
+        expect(radio.type).toBe("radio_buttons");
+        expect(radio.options.map((option) => [option.text.text, option.value])).toEqual([["Fix", "FIX"], ["Accept", "ACCEPT"]]);
+        expect(radio.initial_option.value).toBe("FIX");
+      }
+      for (const block of noteBlocks(modal)) {
+        expect(block.optional).toBe(true);
+        expect((block.label as { text: string }).text).toBe("Instructions (optional) / Reason (required if you accept)");
+        expect(block.element).toMatchObject({ type: "plain_text_input", multiline: true, max_length: 1_000 });
+      }
+      // The form names the exact revision and code, and a request ID that stays the same for this form.
+      const metadata = JSON.parse(modal.private_metadata) as Record<string, unknown>;
+      expect(metadata).toEqual({ taskId, revision: blocked.revision, candidateDigest: candidate.digest, requestId: expect.stringMatching(/^[0-9a-f-]{36}$/) as unknown, thread,
+        responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc" });
+    });
+
+    it("redacts a secret and defuses a link in a finding's text and path, as the card does", async () => {
+      const token = `ghp_${"a1B2c3D4e5".repeat(4)}`;
+      const blocked = blockedOn([finding(`Logs the token ${token} and fetches https://evil.example/x and www.evil.example/y`, { file: "src/https://host.example/www.deep/file.ts", line: 3 })]);
+      const t = setup(blocked);
+      await t.handlers.handleAction(press(valueOf(blocked)));
+      const listed = modalText(t.opened[0]!);
+      expect(listed).not.toContain(token);
+      expect(listed).toContain("Logs the token");
+      // No bare address is left for Slack to link: a zero-width joiner follows each "://" and the "www" of "www.".
+      expect(listed).not.toContain("://evil");
+      expect(listed).not.toContain("://host");
+      expect(listed).toContain("https://\u200devil.example/x");
+      expect(listed).toContain("www\u200d.evil.example/y");
+      expect(listed).toContain("www\u200d.deep");
+      // A secret-looking token in a path is redacted too.
+      const pathBlocked = blockedOn([finding("Leaks it", { file: `config/${token}.env` })]);
+      const u = setup(pathBlocked);
+      await u.handlers.handleAction(press(valueOf(pathBlocked)));
+      expect(modalText(u.opened[0]!)).not.toContain(token);
+    });
+
+    it("tells the owner privately what was saved: findings sent back to coding, or accepted and on to the pull request", async () => {
+      const blocked = blockedOn([PARSER], [TOKEN]);
+      const url = "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc";
+      const cases: Array<[Array<{ action?: "FIX" | "ACCEPT"; note?: string }>, string]> = [
+        [[{ action: "FIX" }, { action: "FIX" }], "Sending 2 findings back to coding."],
+        [[{ action: "ACCEPT", note: "Known." }, { action: "FIX" }], "Sending 1 finding back to coding."],
+        [[{ action: "ACCEPT", note: "Known." }, { action: "ACCEPT", note: "Test token." }], "Accepted 2 findings; the change goes on to its draft pull request."],
+      ];
+      for (const [picks, text] of cases) {
+        const t = setup(blocked);
+        await t.handlers.handleAction(press(valueOf(blocked)));
+        await t.handlers.handleSubmission(submission(t.opened[0]!, picks));
+        expect(t.resolved).toHaveLength(1);
+        expect(t.acks).toEqual([{ url, text }]);
+      }
+      const single = blockedOn([PARSER]);
+      const one = setup(single);
+      await one.handlers.handleAction(press(valueOf(single)));
+      await one.handlers.handleSubmission(submission(one.opened[0]!, [{ action: "ACCEPT", note: "Known." }]));
+      expect(one.acks.map((entry) => entry.text)).toEqual(["Accepted 1 finding; the change goes on to its draft pull request."]);
+      // Nothing is said when the answers were refused (a form error, or the step moved on).
+      const refused = setup(blocked);
+      await refused.handlers.handleAction(press(valueOf(blocked)));
+      await expect(refused.handlers.handleSubmission(submission(refused.opened[0]!, [{ action: "ACCEPT" }]))).rejects.toThrow();
+      expect(refused.acks).toEqual([]);
+    });
+
+    it("saves even when the private acknowledgement cannot be sent, or the form carries no usable response URL", async () => {
+      const blocked = blockedOn([PARSER], [TOKEN]);
+      const t = setup(blocked);
+      await t.handlers.handleAction(press(valueOf(blocked)));
+      t.failAcks();
+      await expect(t.handlers.handleSubmission(submission(t.opened[0]!, []))).resolves.toBeUndefined();
+      expect(t.resolved).toHaveLength(1);
+      // A response URL that is not Slack's is never used.
+      const metadata = { ...(JSON.parse(t.opened[0]!.private_metadata) as Record<string, unknown>), responseUrl: "https://attacker.example/hooks.slack.com/" };
+      const u = setup(blocked);
+      await u.handlers.handleAction(press(valueOf(blocked)));
+      await u.handlers.handleSubmission(submission({ ...u.opened[0]!, private_metadata: JSON.stringify(metadata) }, []));
+      expect(u.resolved).toHaveLength(1);
+      expect(u.acks).toEqual([]);
+    });
+
+    it("fits Slack's limits with 20 findings of the longest text, file and reason", async () => {
+      const long = (index: number) => finding(`${"A very long finding <!here> & <https://x.example|link> ".repeat(12).slice(0, 599)}${index % 10}`, { file: `src/${"deep/".repeat(90).slice(0, 480)}f${index}.ts`, line: 99_999 });
+      const blocked = blockedOn(Array.from({ length: 20 }, (_, index) => long(index)));
+      const t = setup(blocked);
+      // StrictSlackWeb refuses the form if any block, label, option or the metadata is over Slack's limits.
+      await t.handlers.handleAction(press(valueOf(blocked)));
+      const modal = t.opened[0]!;
+      expect(actionBlocks(modal)).toHaveLength(20);
+      expect(noteBlocks(modal)).toHaveLength(20);
+      expect(modal.blocks.length).toBeLessThanOrEqual(100);
+      expect(modal.private_metadata.length).toBeLessThanOrEqual(3_000);
+      // Each finding's text is cut to fit, never the whole 600 characters plus a 480-character path.
+      for (const block of modal.blocks.filter((entry) => entry.type === "section")) expect((block.text as { text: string }).text.length).toBeLessThanOrEqual(800);
+      expect(JSON.stringify(modal.blocks)).not.toContain("<!here>");
+      // 20 answered at once reach the broker, each exactly once.
+      await t.handlers.handleSubmission(submission(modal, Array.from({ length: 20 }, () => ({ action: "ACCEPT" as const, note: "Known and tracked." }))));
+      expect(t.resolved).toHaveLength(1);
+      expect((t.resolved[0]!.resolutions as unknown[]).length).toBe(20);
+      expect(new Set((t.resolved[0]!.resolutions as Array<{ findingId: string }>).map((entry) => entry.findingId)).size).toBe(20);
+    });
+
+    it("refuses another member, a stale revision, other code, a change with nothing to resolve, and more than 20 findings", async () => {
+      const blocked = blockedOn([PARSER], [TOKEN]);
+      const t = setup(blocked);
+      await expect(t.handlers.handleAction(press(valueOf(blocked), other))).rejects.toThrow(/Only <@U0123456789>/);
+      await expect(t.handlers.handleAction(press({ ...valueOf(blocked), revision: blocked.revision - 1 }))).rejects.toThrow(/no longer current/);
+      await expect(t.handlers.handleAction(press({ ...valueOf(blocked), candidateDigest: "f".repeat(64) }))).rejects.toThrow(/no longer current/);
+      await expect(t.handlers.handleAction(press({ taskId, revision: "x" }))).rejects.toThrow(/no longer/);
+      await expect(t.handlers.handleAction({ ...press(valueOf(blocked)), workspaceTeamId: "T0OTHER0001" })).rejects.toThrow(/workspace/);
+      t.reload(blockedOn([]));
+      await expect(t.handlers.handleAction(press(valueOf(blocked)))).rejects.toThrow(/no longer current/);
+      const many = blockedOn(Array.from({ length: 20 }, (_, index) => finding(`Problem ${index}`)), [TOKEN]);
+      t.reload(many);
+      await expect(t.handlers.handleAction(press(valueOf(many)))).rejects.toThrow(/more than 20/);
+      expect(t.opened).toEqual([]);
+    });
+
+    it("hands each answer to the broker with the exact revision, code and request, and refuses it from another member or after the step moved on", async () => {
+      const blocked = blockedOn([PARSER], [TOKEN]);
+      const t = setup(blocked);
+      await t.handlers.handleAction(press(valueOf(blocked)));
+      const modal = t.opened[0]!;
+      const open = openReviewFindings(blocked);
+      await t.handlers.handleSubmission(submission(modal, [{ action: "ACCEPT", note: "  Known; tracked in #12.  " }, { action: "FIX", note: "Keep the token out of the log." }]));
+      expect(t.resolved).toEqual([{ taskId, userId: requester, thread, requestId: (JSON.parse(modal.private_metadata) as { requestId: string }).requestId, expectedRevision: blocked.revision, candidateDigest: candidate.digest,
+        resolutions: [{ findingId: open[0]!.findingId, action: "ACCEPT", note: "Known; tracked in #12." }, { findingId: open[1]!.findingId, action: "FIX", note: "Keep the token out of the log." }] }]);
+      // Fix with no text is fine, and the default.
+      await t.handlers.handleSubmission(submission(modal, []));
+      expect((t.resolved[1]!.resolutions as Array<{ action: string; note: string }>).map((entry) => [entry.action, entry.note])).toEqual([["FIX", ""], ["FIX", ""]]);
+      await expect(t.handlers.handleSubmission(submission(modal, [], other))).rejects.toThrow(/Only/);
+      t.reload({ ...blocked, revision: blocked.revision + 1 });
+      await expect(t.handlers.handleSubmission(submission(modal, []))).rejects.toThrow(/no longer current/);
+      expect(t.resolved).toHaveLength(2);
+    });
+
+    it("shows each missing reason in the form on that finding, hands nothing over, and keeps the others' answers (signed endpoint)", async () => {
+      const blocked = blockedOn([PARSER], [TOKEN]);
+      const t = setup(blocked);
+      await t.handlers.handleAction(press(valueOf(blocked)));
+      const modal = t.opened[0]!;
+      const { handler, ephemeral } = harness({ workflow: t.handlers });
+      const [codeNote, securityNote] = noteBlocks(modal).map((block) => String(block.block_id));
+      // Accept without a reason (empty, or only spaces): an error on that finding's own text box.
+      const response = await handler(signed(submission(modal, [{ action: "ACCEPT", note: "   " }, { action: "ACCEPT" }])));
+      expect(response.statusCode).toBe(200);
+      expect(JSON.parse(response.body)).toEqual({ response_action: "errors", errors: { [codeNote!]: "Give a reason to accept this finding.", [securityNote!]: "Give a reason to accept this finding." } });
+      // Only the finding with the problem gets an error, and a too-long reason or instruction is told too.
+      const one = await handler(signed(submission(modal, [{ action: "FIX", note: "x".repeat(1_001) }, { action: "ACCEPT", note: "r".repeat(501) }])));
+      expect(JSON.parse(one.body)).toEqual({ response_action: "errors", errors: { [codeNote!]: "Instructions are at most 1,000 characters.", [securityNote!]: "A reason is at most 500 characters." } });
+      expect(t.resolved).toEqual([]);
+      expect(ephemeral).toEqual([]);
+      // A good answer clears the form.
+      const good = await handler(signed(submission(modal, [{ action: "ACCEPT", note: "Known." }, { action: "FIX" }])));
+      expect(JSON.parse(good.body)).toEqual({ response_action: "clear" });
+      expect(t.resolved).toHaveLength(1);
+    });
+
+    it("tells a refused submission in the form (first finding), as a refusal rather than a failed save", async () => {
+      const blocked = blockedOn([PARSER], [TOKEN]);
+      const t = setup(blocked);
+      await t.handlers.handleAction(press(valueOf(blocked)));
+      const modal = t.opened[0]!;
+      const { handler } = harness({ workflow: t.handlers });
+      const firstBlock = String(modal.blocks.find((block) => block.type === "input")!.block_id);
+      const refused = await handler(signed(submission(modal, [], other)));
+      expect(JSON.parse(refused.body)).toEqual({ response_action: "errors", errors: { [firstBlock]: expect.stringMatching(/^Only <@U0123456789>/) as unknown } });
+      const noWorkflow = harness({});
+      expect(JSON.parse((await noWorkflow.handler(signed(submission(modal, [])))).body)).toEqual({ response_action: "errors", errors: { [firstBlock]: "Workflow approvals are temporarily unavailable. Try again shortly." } });
+      expect(t.resolved).toEqual([]);
+    });
+
+    it("is routed as a workflow button, and says privately when the form could not be opened", async () => {
+      expect(WORKFLOW_ACTION_IDS.has("agentx_workflow_resolve_findings")).toBe(true);
+      const blocked = blockedOn([PARSER], [TOKEN]);
+      const failing = workflowSlackHandlers({ loadTask: async () => ({ ...task, workflow: blocked }), submit: async () => undefined, openView: async () => { throw new Error("expired_trigger_id"); } });
+      const { handler, ephemeral } = harness({ workflow: failing });
+      expect((await handler(signed(payload({ actionId: "agentx_workflow_resolve_findings", value: JSON.stringify(valueOf(blocked)) })))).statusCode).toBe(200);
+      expect(ephemeral).toEqual(["I couldn't open the findings form. Use the latest AgentX task update and try again."]);
+    });
+  });
+
   it("binds a Full path approval button to the current requirements artifact", async () => {
     const now = new Date(nowSeconds * 1_000).toISOString();
     const fullRequirementsDigest = "c".repeat(64);
@@ -597,9 +853,9 @@ describe("Slack native workflow review controls", () => {
     it("keeps ten or fewer optional checks as checkboxes, and asks for none before the coding plan", () => {
       const command = { cwd: "workspace", executable: "npm", args: ["test"], timeoutSeconds: 60 };
       const optional = Array.from({ length: 10 }, (_, index) => ({ id: `extra-${index}`, label: `Optional ${index}`, command }));
-      const controls = workflowCheckControls({ required: [], optional, selectedOptionalIds: [] }, { codingPlan: true });
+      const controls = workflowCheckControls({ required: [], optional, selectedOptionalIds: [], proposed: [] }, { codingPlan: true });
       expect(controls.find((block) => block.block_id === "workflow_checks")).toMatchObject({ element: { type: "checkboxes" } });
-      expect(workflowCheckControls({ required: [], optional, selectedOptionalIds: [] }, { codingPlan: false }).some((block) => block.block_id === "workflow_checks")).toBe(false);
+      expect(workflowCheckControls({ required: [], optional, selectedOptionalIds: [], proposed: [] }, { codingPlan: false }).some((block) => block.block_id === "workflow_checks")).toBe(false);
     });
 
     it("escapes check labels that would read as a broadcast or a disguised link", async () => {
@@ -769,6 +1025,180 @@ describe("Slack native workflow review controls", () => {
       expect(handed).toEqual(["coding", "send back", "publish"]);
     });
   });
+
+  describe("one Approve covers the coding plan and its checks", () => {
+    const at = new Date(nowSeconds * 1_000).toISOString();
+    const command = (name: string) => ({ cwd: "workspace", executable: "npm", args: ["run", name], timeoutSeconds: 60 });
+    const check = (id: string, label = id) => ({ id, label, command: command(id) });
+    const planned = (policy: { required?: ReturnType<typeof check>[]; optional?: ReturnType<typeof check>[] },
+      proposal?: { proposed: ReturnType<typeof check>[]; noneReason?: string }) => submitWorkflowArtifact(createWorkflowSnapshot({ taskId, ownerId: "b".repeat(64), now: at,
+      checkPolicy: { required: policy.required ?? [], optional: policy.optional ?? [], selectedOptionalIds: [] } }),
+    { expectedRevision: 1, now: at, artifact: { id: "plan-1", type: "plan", version: 1, sha256: digest, producer: "p", objectKey: "private/o/w/op/plan.md", createdAt: at },
+      ...(proposal === undefined ? {} : { proposal }) });
+    const press = (revision: number, overrides: Partial<SlackBlockAction> = {}): SlackBlockAction => ({ actionId: "agentx_workflow_approve",
+      value: JSON.stringify({ taskId, revision, digest, decision: "APPROVE" }), userId: requester, userTeamId: thread.teamId, workspaceTeamId: thread.teamId,
+      enterpriseId: "", userEnterpriseId: "", requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "plan",
+      responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3", ...overrides });
+    /** A coding plan form submitted with these answers, whether or not a form was opened. */
+    const form = (revision: number, values: Record<string, unknown> = {}) => ({ user: { id: requester, team_id: thread.teamId }, team: { id: thread.teamId },
+      view: { callback_id: "agentx_workflow_review_submission", private_metadata: JSON.stringify({ taskId, revision, digest, decision: "APPROVE", thread }), state: { values } } });
+    const mrkdwnOf = (view: Record<string, unknown> | undefined) => (view?.blocks as Array<{ text?: { type: string; text: string }; elements?: Array<{ text: string }> }>)
+      .flatMap((block) => [block.text?.type === "mrkdwn" ? block.text.text : "", ...(block.elements ?? []).map((element) => element.text)]).join("\n");
+
+    const oneClick: Array<[string, Record<string, unknown>]> = [
+      ["only AgentX's proposed checks", planned({}, { proposed: [check("proposed-1", "Run the greeting tests")] })],
+      ["only the project's required checks", planned({ required: [check("required-1")] })],
+      ["no checks at all (review only)", planned({}, { proposed: [], noneReason: "Only the README changes." })],
+      // A task saved before proposals existed: its policy has no `proposed` field.
+      ["a stored policy from before proposals, with no checks", (() => {
+        const stored = planned({});
+        const { proposed: _proposed, ...legacy } = stored.checkPolicy!;
+        void _proposed;
+        return { ...stored, checkPolicy: legacy };
+      })()],
+    ];
+    for (const [name, snapshot] of oneClick) {
+      it(`approves a coding plan with ${name} in one click, as the same decision the form would submit`, async () => {
+        let loaded: Record<string, unknown> = { ...task, workflow: snapshot };
+        const revision = Number(snapshot.revision);
+        const opened: Array<Record<string, unknown>> = [];
+        const submitted: Array<Record<string, unknown>> = [];
+        const acks: string[] = [];
+        const handlers = workflowSlackHandlers({ loadTask: async () => loaded, openView: async (_t, view) => { opened.push(view); },
+          submit: async (input) => { submitted.push(input); }, respondEphemeral: async (_url, text) => { acks.push(text); } });
+        await handlers.handleAction(press(revision));
+        expect(opened).toEqual([]);
+        expect(submitted).toEqual([expect.objectContaining({ taskId, userId: requester, thread, expectedRevision: revision, artifactDigest: digest,
+          decision: "APPROVE", reason: "Approved in Slack.", selectedOptionalCheckIds: [] })]);
+        expect(acks).toEqual(["Approving the coding plan."]);
+        // A second press before the decision is saved is the same decision; so is the form with nothing chosen.
+        await handlers.handleAction(press(revision, { actionTs: "1695500100.000009" }));
+        await handlers.handleSubmission(form(revision));
+        expect(submitted).toHaveLength(3);
+        expect(submitted[1]).toEqual(submitted[0]);
+        expect(submitted[2]).toEqual(submitted[0]);
+        // Once it is saved, another press is quiet: nothing is sent and nothing is refused.
+        loaded = { ...task, workflow: { ...snapshot, revision: revision + 1, stage: "IMPLEMENT", state: "RUNNING", decisions: [{
+          requestId: String(submitted[0]?.requestId), workflowRevision: revision, decision: "APPROVE", actorId: "b".repeat(64), actorRole: "TASK_OWNER",
+          reason: "Approved in Slack.", artifactDigest: digest, selectedOptionalCheckIds: [], at }] } };
+        await expect(handlers.handleAction(press(revision))).resolves.toBeUndefined();
+        expect(submitted).toHaveLength(3);
+      });
+    }
+
+    it("still refuses a one-click approval from anyone but the owner, and on an older plan version", async () => {
+      const snapshot = planned({}, { proposed: [check("proposed-1")] });
+      const submitted: Array<Record<string, unknown>> = [];
+      const handlers = workflowSlackHandlers({ loadTask: async () => ({ ...task, workflow: snapshot }), openView: async () => undefined, submit: async (input) => { submitted.push(input); } });
+      await expect(handlers.handleAction(press(snapshot.revision, { userId: other }))).rejects.toThrow(/^Only <@U0123456789> can approve this step\.$/);
+      await expect(handlers.handleAction(press(snapshot.revision - 1))).rejects.toThrow("This approval has changed. Use the latest AgentX message.");
+      await expect(handlers.handleAction(press(snapshot.revision, { userTeamId: "T0OTHERORG1" }))).rejects.toThrow(/workspace/);
+      expect(submitted).toEqual([]);
+    });
+
+    it("shows the project's checks, AgentX's proposed checks and an optional chooser when there are optional checks", async () => {
+      const snapshot = planned({ required: [check("required-1", "Unit tests")], optional: [check("coverage", "Coverage report")] },
+        { proposed: [check("proposed-1", "Run the greeting tests")] });
+      let opened: Record<string, unknown> | undefined;
+      const submitted: Array<Record<string, unknown>> = [];
+      const handlers = workflowSlackHandlers({ loadTask: async () => ({ ...task, workflow: snapshot }), openView: async (trigger, view) => { await strict.openView(trigger, view); opened = view; },
+        submit: async (input) => { submitted.push(input); } });
+      await handlers.handleAction(press(snapshot.revision));
+      const text = mrkdwnOf(opened);
+      expect(text).toContain("Project checks, always run:\n• Unit tests");
+      expect(text).toContain("Proposed by AgentX for this change:\n• Run the greeting tests");
+      expect(text).not.toContain("review only");
+      expect((opened?.blocks as Array<Record<string, unknown>>).find((block) => block.block_id === "workflow_checks"))
+        .toMatchObject({ optional: true, label: { text: "Optional checks" }, element: { type: "checkboxes", options: [{ value: "coverage" }] } });
+      await handlers.handleSubmission(form(snapshot.revision));
+      expect(submitted[0]).toMatchObject({ decision: "APPROVE", selectedOptionalCheckIds: [] });
+    });
+
+    it("says plainly when no automated check applies, and approves with no check chosen as review only", async () => {
+      for (const [noneReason, sentence] of [
+        ["Only the README changes.", "No automated checks apply: Only the README changes. If you approve without choosing a check, this change is checked by review only and the draft PR will say so."],
+        [undefined, "No automated checks apply. If you approve without choosing a check, this change is checked by review only and the draft PR will say so."],
+      ] as const) {
+        const snapshot = planned({ optional: [check("lint", "Lint")] }, { proposed: [], ...(noneReason === undefined ? {} : { noneReason }) });
+        let opened: Record<string, unknown> | undefined;
+        const submitted: Array<Record<string, unknown>> = [];
+        const handlers = workflowSlackHandlers({ loadTask: async () => ({ ...task, workflow: snapshot }), openView: async (trigger, view) => { await strict.openView(trigger, view); opened = view; },
+          submit: async (input) => { submitted.push(input); } });
+        await handlers.handleAction(press(snapshot.revision));
+        const text = mrkdwnOf(opened);
+        expect(text).toContain(sentence);
+        expect(text).not.toContain("Choose at least one check");
+        expect((opened?.blocks as Array<Record<string, unknown>>).find((block) => block.block_id === "workflow_checks")).toMatchObject({ optional: true });
+        await handlers.handleSubmission(form(snapshot.revision));
+        expect(submitted).toEqual([expect.objectContaining({ decision: "APPROVE", selectedOptionalCheckIds: [] })]);
+      }
+    });
+
+    it("escapes AgentX's proposed check labels and its reason for proposing none", async () => {
+      const withProposal = planned({ optional: [check("lint")] }, { proposed: [check("proposed-1", "<!channel> & <https://evil|Approve>")] });
+      const withReason = planned({ optional: [check("lint")] }, { proposed: [], noneReason: "<!here> see <https://evil|docs>" });
+      for (const snapshot of [withProposal, withReason]) {
+        let opened: Record<string, unknown> | undefined;
+        const handlers = workflowSlackHandlers({ loadTask: async () => ({ ...task, workflow: snapshot }), openView: async (trigger, view) => { await strict.openView(trigger, view); opened = view; }, submit: async () => undefined });
+        await handlers.handleAction(press(snapshot.revision));
+        const text = mrkdwnOf(opened);
+        expect(text).not.toMatch(/<!channel>|<!here>|<https:\/\/evil\|/);
+        expect(text).toContain(snapshot === withProposal ? "&lt;!channel&gt; &amp; &lt;https://evil|Approve&gt;" : "&lt;!here&gt; see &lt;https://evil|docs&gt;");
+      }
+    });
+
+    it("keeps a reordered choice of optional checks the same decision alongside proposed checks", async () => {
+      const snapshot = planned({ optional: [check("lint"), check("coverage")] }, { proposed: [check("proposed-1")] });
+      const submitted: Array<Record<string, unknown>> = [];
+      const handlers = workflowSlackHandlers({ loadTask: async () => ({ ...task, workflow: snapshot }), openView: async () => undefined, submit: async (input) => { submitted.push(input); } });
+      const choose = (order: string[]) => form(snapshot.revision, { workflow_checks: { selected_options: { selected_options: order.map((value) => ({ value })) } } });
+      await handlers.handleSubmission(choose(["lint", "coverage"]));
+      await handlers.handleSubmission(choose(["coverage", "lint", "proposed-1"]));
+      expect(submitted[0]?.selectedOptionalCheckIds).toEqual(["coverage", "lint"]);
+      expect(submitted[1]).toEqual(submitted[0]);
+    });
+
+    it("retries verification with the proposed checks ticked and removable, the optional checks chosen before, and still needs one check", async () => {
+      const blockedAt = (snapshot: ReturnType<typeof planned>, selectedOptionalIds: string[] = []) => WorkflowSnapshotSchema.parse({ ...snapshot, stage: "VERIFY", state: "BLOCKED",
+        checkPolicy: { ...snapshot.checkPolicy, selectedOptionalIds } });
+      const retryPress = (revision: number) => press(revision, { actionId: "agentx_workflow_retry_checks", value: JSON.stringify({ taskId, revision }) });
+      const retryForm = (view: Record<string, unknown> | undefined, values: Record<string, unknown> = {}) => ({ user: { id: requester, team_id: thread.teamId }, team: { id: thread.teamId },
+        view: { callback_id: "agentx_workflow_checks_retry_submission", private_metadata: view?.private_metadata, state: { values } } });
+      // Proposed checks run again as they were approved; the optional ones chosen before start out chosen.
+      const proposedRun = blockedAt(planned({ optional: [check("lint", "Lint")] }, { proposed: [check("proposed-1", "Run the greeting tests")] }), ["lint"]);
+      let opened: Record<string, unknown> | undefined;
+      const retried: Array<Record<string, unknown>> = [];
+      let loaded = proposedRun;
+      const handlers = workflowSlackHandlers({ loadTask: async () => ({ ...task, workflow: loaded }), openView: async (trigger, view) => { await strict.openView(trigger, view); opened = view; },
+        submit: async () => undefined, retryChecks: async (input) => { retried.push(input); } });
+      await handlers.handleAction(retryPress(proposedRun.revision));
+      expect((opened?.blocks as Array<Record<string, unknown>>).find((block) => block.block_id === "workflow_proposed_checks"))
+        .toMatchObject({ optional: true, label: { text: "Proposed by AgentX" }, element: { type: "checkboxes", options: [{ value: "proposed-1" }], initial_options: [{ value: "proposed-1" }] } });
+      expect((opened?.blocks as Array<Record<string, unknown>>).find((block) => block.block_id === "workflow_checks"))
+        .toMatchObject({ optional: true, element: { initial_options: [{ value: "lint" }] } });
+      const keep = (proposedIds: string[], optionalIds: string[]) => ({
+        workflow_proposed_checks: { selected_options: { selected_options: [...proposedIds, "proposed-9"].map((value) => ({ value })) } },
+        workflow_checks: { selected_options: { selected_options: optionalIds.map((value) => ({ value })) } } });
+      await handlers.handleSubmission(retryForm(opened, keep(["proposed-1"], [])));
+      await handlers.handleSubmission(retryForm(opened, keep([], ["lint"])));
+      expect(retried).toEqual([expect.objectContaining({ selectedOptionalCheckIds: [], selectedProposedCheckIds: ["proposed-1"] }),
+        expect.objectContaining({ selectedOptionalCheckIds: ["lint"], selectedProposedCheckIds: [] })]);
+      // Removing every check is refused in the form.
+      await expect(handlers.handleSubmission(retryForm(opened, keep([], [])))).rejects.toThrow("Keep at least one check, or close the task.");
+      // The proposed checks a previous retry kept start out ticked.
+      loaded = WorkflowSnapshotSchema.parse({ ...proposedRun, checkPolicy: { ...proposedRun.checkPolicy, proposed: [check("proposed-1", "A"), check("proposed-2", "B")], selectedProposedIds: ["proposed-2"] } });
+      await handlers.handleAction(retryPress(loaded.revision));
+      expect((opened?.blocks as Array<Record<string, unknown>>).find((block) => block.block_id === "workflow_proposed_checks"))
+        .toMatchObject({ element: { initial_options: [{ value: "proposed-2" }] } });
+      retried.length = 1;
+      // With no project or proposed check, a retry must choose one.
+      loaded = blockedAt(planned({ optional: [check("lint", "Lint")] }, { proposed: [] }));
+      await handlers.handleAction(retryPress(loaded.revision));
+      expect((opened?.blocks as Array<Record<string, unknown>>).find((block) => block.block_id === "workflow_checks")).toMatchObject({ optional: false, label: { text: "Choose a check" } });
+      await expect(handlers.handleSubmission(retryForm(opened))).rejects.toThrow("Choose at least one check before retrying verification.");
+      expect(retried).toHaveLength(1);
+    });
+  });
 });
 
 function feedbackReviewWorkflow(taskId: string) {
@@ -822,7 +1252,7 @@ describe("Slack PR feedback review actions", () => {
     await handlers.handleAction(action);
     expect(submitted).toHaveLength(1);
     expect(submitted[0]).toMatchObject({ taskId, userId: requester, thread, expectedRevision: 4,
-      reviewDigest: review.reviewDigest, proposalDigest: review.proposalDigest, bundleDigests: review.bundleDigests,
+      reviewDigest: review.reviewDigest, proposalDigest: review.proposalDigest, bundleDigests: review.bundleDigests, bundleSetDigest,
       selection: "RECOMMENDED", decision: "APPROVE" });
     expect(submitted[0]?.requestId).toEqual(expect.any(String));
     expect(submitted[0]).not.toHaveProperty("findingIds");
@@ -855,6 +1285,52 @@ describe("Slack PR feedback review actions", () => {
       selection: "RECOMMENDED", decision: "REQUEST_CHANGES", ownerNote: "Please reconsider the edge case.", requestId: metadata.requestId });
   });
 
+  it("answers a question the reviewer left to the owner: the owner's words are sent as the approval of the fix (0.2.8 live test)", async () => {
+    let opened: Record<string, unknown> | undefined;
+    const submitted: Array<Record<string, unknown>> = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => task,
+      openView: async (trigger, view) => { await strict.openView(trigger, view); opened = view; }, submit: async () => undefined,
+      submitFeedback: async input => { submitted.push(input); } });
+    const answer = JSON.stringify({ ...JSON.parse(value) as Record<string, unknown>, selection: "ANSWER", findingIds: ["finding-1"] });
+    // An answer must name the questions it answers; one that names none (or too many) is out of date.
+    for (const findingIds of [undefined, [], ["a", "b", "c", "d"], ["a", "a"], [""]]) {
+      await expect(handlers.handleAction({ ...action, actionId: "agentx_feedback_review_changes",
+        value: JSON.stringify({ ...JSON.parse(value) as Record<string, unknown>, selection: "ANSWER", ...(findingIds === undefined ? {} : { findingIds }) }) }), JSON.stringify(findingIds)).rejects.toThrow(/no longer available/);
+    }
+    // The recommended selection names no questions.
+    await expect(handlers.handleAction({ ...action, actionId: "agentx_feedback_review_changes",
+      value: JSON.stringify({ ...JSON.parse(value) as Record<string, unknown>, findingIds: ["finding-1"] }) })).rejects.toThrow(/no longer available/);
+    expect(opened).toBeUndefined();
+    await handlers.handleAction({ ...action, actionId: "agentx_feedback_review_changes", value: answer });
+    expect(opened).toMatchObject({ callback_id: "agentx_feedback_review_changes_submission", title: { text: "Answer the reviewer" },
+      submit: { text: "Make the change" } });
+    const shown = JSON.stringify((opened as { blocks: unknown[] }).blocks);
+    expect(shown).toContain("What should AgentX do?");
+    // The form says what the answer does.
+    expect(shown).toContain("AgentX makes the change you describe for the question on the card. Recommended fixes are not included; approve them from the card.");
+    const modal = opened as Record<string, unknown>;
+    const metadata = JSON.parse(String(modal.private_metadata)) as Record<string, unknown>;
+    expect(metadata.selection).toBe("ANSWER");
+    await handlers.handleSubmission({ team: { id: thread.teamId }, user: { id: requester, team_id: thread.teamId }, view: { callback_id: modal.callback_id,
+      private_metadata: modal.private_metadata, state: { values: { feedback_note: { reason: { value: "  Use the first five words only.  " } } } } } });
+    expect(submitted).toEqual([expect.objectContaining({ taskId, userId: requester, thread, expectedRevision: 4,
+      reviewDigest: review.reviewDigest, proposalDigest: review.proposalDigest, bundleDigests: review.bundleDigests, bundleSetDigest,
+      selection: "ANSWER", questionFindingIds: ["finding-1"], decision: "APPROVE", ownerNote: "Use the first five words only.", requestId: metadata.requestId })]);
+  });
+
+  it("dismisses the proposal from its card, with no form to fill", async () => {
+    const submitted: Array<Record<string, unknown>> = [];
+    const said: string[] = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => task, openView: async () => { throw new Error("no form"); },
+      submit: async () => undefined, submitFeedback: async input => { submitted.push(input); }, respondEphemeral: async (_url, text) => { said.push(text); } });
+    await handlers.handleAction({ ...action, actionId: "agentx_feedback_review_dismiss" });
+    expect(submitted).toEqual([expect.objectContaining({ taskId, userId: requester, thread, expectedRevision: 4, reviewDigest: review.reviewDigest,
+      bundleSetDigest, selection: "RECOMMENDED", decision: "DISMISS", ownerNote: "Dismissed in Slack." })]);
+    // The thread says it once ("PR feedback dismissed. The pull request stays as it is."); nothing is said privately too.
+    expect(said).toEqual([]);
+    await expect(handlers.handleAction({ ...action, actionId: "agentx_feedback_review_dismiss", userId: other })).rejects.toThrow(/Only/);
+  });
+
   it("rejects missing, mismatched, or Slack Connect modal workspace identities", async () => {
     let opened: Record<string, unknown> | undefined;
     const submitted: Array<Record<string, unknown>> = [];
@@ -872,6 +1348,69 @@ describe("Slack PR feedback review actions", () => {
     await expect(submit({ team: { id: "T9999999999" }, user: { id: requester, team_id: thread.teamId } })).rejects.toThrow(/workspace/);
     await expect(submit({ team: { id: thread.teamId }, user: { id: requester, team_id: "T9999999999" } })).rejects.toThrow(/workspace/);
     expect(submitted).toHaveLength(0);
+  });
+});
+
+describe("Slack Retry review on a failed PR feedback review", () => {
+  const taskId = "11111111-1111-4111-8111-111111111111";
+  const complete = feedbackReviewWorkflow(taskId);
+  const pending = complete.workflow.feedbackReview;
+  if (pending?.status !== "PENDING") throw new Error("the fixture's review is pending");
+  const failedRef = { ...pending.reviewRef, status: "FAILED" as const, blockReason: "reviewer output: not valid JSON", findingRefs: [] };
+  const failed = WorkflowSnapshotSchema.parse({ ...complete.workflow, feedbackReview: { ...pending, reviewRef: failedRef } });
+  const retried = WorkflowSnapshotSchema.parse({ ...failed, revision: failed.revision + 1, feedbackReviewHistory: [failedRef],
+    feedbackReview: { status: "COLLECTING", bundleRefs: pending.bundleRefs, threadObservations: [] } });
+  const value = JSON.stringify({ taskId, revision: failed.revision, reviewDigest: failedRef.sha256 });
+  const action: SlackBlockAction = { actionId: "agentx_feedback_review_retry", value, userId: requester,
+    userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "",
+    requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "I couldn't review the feedback",
+    responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3", actionTs: "1695500002.000003" };
+  const handlersFor = (workflow: WorkflowSnapshot) => {
+    const sent: Array<Record<string, unknown>> = [];
+    const acks: string[] = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => ({ slackUserId: requester, share: thread, workflow }), openView: async () => undefined,
+      submit: async () => undefined, retryFeedbackReview: async (input) => { sent.push(input); }, respondEphemeral: async (_url, text) => { acks.push(text); } });
+    return { handlers, sent, acks };
+  };
+
+  it("hands the owner's press to the broker, bound to the task and the failed report, and leaves saying it started to the broker", async () => {
+    const { handlers, sent, acks } = handlersFor(failed);
+    await handlers.handleAction(action);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ taskId, userId: requester, thread, reviewDigest: failedRef.sha256 });
+    expect(sent[0]?.requestId).toEqual(expect.any(String));
+    // Only the broker knows whether the review started; it says so then.
+    expect(acks).toEqual([]);
+  });
+
+  it("hands a press on a review that timed out to the broker too", async () => {
+    const timedOut = WorkflowSnapshotSchema.parse({ ...complete.workflow, feedbackReview: { ...pending, reviewRef: { ...failedRef, status: "BLOCKED", blockReason: "review timed out" } } });
+    const { handlers, sent } = handlersFor(timedOut);
+    await handlers.handleAction(action);
+    expect(sent).toHaveLength(1);
+  });
+
+  it("refuses someone else, another thread, another report, and a review that did not fail", async () => {
+    const { handlers, sent } = handlersFor(failed);
+    await expect(handlers.handleAction({ ...action, userId: other })).rejects.toThrow(/Only/);
+    await expect(handlers.handleAction({ ...action, thread: { ...thread, channelId: "C9999999999" } })).rejects.toThrow(/another Slack/);
+    await expect(handlers.handleAction({ ...action, value: JSON.stringify({ taskId, revision: failed.revision, reviewDigest: "9".repeat(64) }) })).rejects.toThrow(/changed/);
+    await expect(handlersFor(complete.workflow).handlers.handleAction({ ...action, value: JSON.stringify({ taskId, revision: 4, reviewDigest: complete.reviewDigest }) })).rejects.toThrow(/changed/);
+    expect(sent).toEqual([]);
+  });
+
+  it("does nothing more on a second press once the retried review is running", async () => {
+    const { handlers, sent, acks } = handlersFor(WorkflowSnapshotSchema.parse({ ...retried, revision: retried.revision + 1, state: "RUNNING" }));
+    await handlers.handleAction(action);
+    expect(sent).toEqual([]);
+    expect(acks).toEqual(["Already reviewing the feedback again."]);
+  });
+
+  it("hands a press to the broker when the retried review is still waiting to start, so it can be started", async () => {
+    const { handlers, sent, acks } = handlersFor(retried);
+    await handlers.handleAction(action);
+    expect(sent).toHaveLength(1);
+    expect(acks).toEqual([]);
   });
 });
 
@@ -1000,6 +1539,23 @@ describe("Slack interactivity never loses a click silently (spec 014 D2, review 
     expect(seen[0]).toMatchObject({ redirect: "error" });
   });
 
+  it("replaces the button's own message through its response_url, refusing redirects and giving up after 2 seconds", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    const okFetch = (async (_url: unknown, init?: RequestInit) => { bodies.push(JSON.parse(init?.body as string) as Record<string, unknown>); return new Response("ok", { status: 200 }); }) as typeof fetch;
+    const message = { text: "Starting this on Full…", blocks: [{ type: "section", text: { type: "mrkdwn", text: "Starting this on Full…" } }] };
+    await respondReplace("https://hooks.slack.com/actions/T/1/abc", message, okFetch);
+    expect(bodies).toEqual([{ replace_original: true, text: message.text, blocks: message.blocks }]);
+    await expect(respondReplace("https://hooks.slack.com/actions/T/1/abc", message, (async () => new Response("nope", { status: 404 })))).rejects.toThrow(/HTTP 404/);
+    const timeout = fakeTimeoutSignals();
+    const seen: RequestInit[] = [];
+    const answer = respondReplace("https://hooks.slack.com/actions/T/1/abc", message, hungFetch(seen));
+    const settled = expect(answer).rejects.toMatchObject({ name: "TimeoutError" });
+    await vi.advanceTimersByTimeAsync(2_000);
+    await settled;
+    expect(timeout).toHaveBeenCalledWith(2_000);
+    expect(seen[0]).toMatchObject({ redirect: "error" });
+  });
+
   it("gives up on a hung Slack API call after 2 seconds, and the click is still queued", async () => {
     const timeout = fakeTimeoutSignals();
     const seen: RequestInit[] = [];
@@ -1029,11 +1585,11 @@ describe("Quick or Full buttons (gap 3)", () => {
   }
   const press = (actionId: string, user = requester, value = JSON.stringify({ choiceId })) => signed(payload({ actionId, user, value }));
 
-  it("hands the requester's choice over with the question's message, and leaves the question as it is until the task starts (Task 19)", async () => {
+  it("hands the requester's choice over with the question's message, and acknowledges privately (Task 19; the card is edited by the choice, Task 6)", async () => {
     const { handler, choices, acks, ephemeral, updates } = buttons("started");
     expect((await handler(press("agentx_workflow_path_quick"))).statusCode).toBe(200);
     expect(choices).toEqual([{ thread, userId: requester, workflowPath: "QUICK", choiceId, responseUrl, messageTs: "1695500001.000002" }]);
-    // Only a private acknowledgement: the buttons and the "reply quick or full" hint stay until the start succeeds.
+    // The handler only acknowledges privately; the card itself is edited by the choice (it reads "Starting this on ..." from the press, and gets its buttons back if the start fails).
     expect(acks).toEqual(["Starting this on Quick."]);
     expect(updates).toEqual([]);
     expect(ephemeral).toEqual([]);
