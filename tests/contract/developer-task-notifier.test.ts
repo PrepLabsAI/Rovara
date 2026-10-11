@@ -2,9 +2,9 @@
 // Spec 025 FR-032, FR-034, C7 to C9: the notifier, fed from the fake table's writes, posting to a
 // fake Slack. The queue is an array; a failed notice stays in it with its attempt count.
 import { createHash, randomUUID } from "node:crypto";
-import { TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt } from "@agentx/contracts";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId } from "@agentx/contracts";
 import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
 import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds } from "../../packages/broker/src/aws/developer-task-notifier.js";
@@ -828,7 +828,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
       expect(text).toContain("|Open the coding plan>");
       expect(text).not.toMatch(/more claim|decision/);
     }], [big, (text: string) => {
-      expect(text).toContain("\nAnd 47 more claims.\n20 decisions: approving here uses AgentX's recommended answers.\n");
+      expect(text).toContain("\nAnd 47 more claims.\nApprove here uses AgentX's answers for 20 decisions and includes every open comment from the task page.\n");
       expect(text.split("\n").filter((line) => line.startsWith("> "))).toHaveLength(3);
     }]] as const) {
       const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
@@ -1798,5 +1798,156 @@ describe("the PR feedback advisory summary", () => {
     const answer = blocks.flatMap(block => block.elements ?? []).find(element => element.action_id === "agentx_feedback_review_changes")!;
     expect(parseAction(answer.value)).toMatchObject({ selection: "ANSWER", findingIds: ["q1", "q2", "q3"] });
     new StrictSlackWeb({ briefLimit: 1_200 }).post({ channel: "C0123456789", threadTs: "1695500000.000001", ...message });
+  });
+});
+
+describe("page decisions and comments in Slack (spec 061 slice 2)", () => {
+  const REVIEW = "https://agentx.example.test";
+
+  async function approvedWith(extras: { answerOverrides?: Array<{ decisionId: string; optionId: string }>; commentsIncluded?: number }, decision: "APPROVE" | "REQUEST_CHANGES" = "APPROVE") {
+    const plan = "# Plan\nAdd a retry regression test.";
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
+      readArtifact: async () => plan, createPlanCanvas: async () => ({ canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" }),
+    });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    await finishPlanningWithMarkdown(h, h.workspaceId, h.active(), plan);
+    await h.pump();
+    const saved = h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: { revision: number; artifacts: Array<{ sha256: string }> } };
+    const answer = await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/workflow/decision`, {
+      requestId: randomUUID(), expectedRevision: saved.workflow.revision, decision, reason: "Looks good.", artifactDigest: saved.workflow.artifacts.at(-1)?.sha256,
+    });
+    expect(answer.status).toBe(200);
+    // What a page decision records on the decision itself.
+    const record = h.db.get(`DEVTASK#${h.taskId}`, "META") as Record<string, unknown> & { workflow: { decisions: Array<Record<string, unknown>> } };
+    const decisions = record.workflow.decisions;
+    decisions[decisions.length - 1] = { ...decisions.at(-1), ...extras };
+    h.db.set(record);
+    await h.pump();
+    return h;
+  }
+
+  it("the card edit says who decided, answers changed and comments included", async () => {
+    const approved = await approvedWith({ answerOverrides: [{ decisionId: "d1", optionId: "five" }], commentsIncluded: 2 });
+    expect(approved.updates[0]!.blocks.at(-1)).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: `Approved by <@${MAYA.slackUserId}> · 1 answer changed · 2 comments included` }] });
+    const two = await approvedWith({ answerOverrides: [{ decisionId: "d1", optionId: "five" }, { decisionId: "d2", optionId: "x" }] });
+    expect(two.updates[0]!.blocks.at(-1)).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: `Approved by <@${MAYA.slackUserId}> · 2 answers changed` }] });
+    const changes = await approvedWith({ commentsIncluded: 1 }, "REQUEST_CHANGES");
+    expect(changes.updates[0]!.blocks.at(-1)).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: `Changes requested by <@${MAYA.slackUserId}> · 1 comment included` }] });
+  });
+
+  it("a decision with no extras keeps today's line", async () => {
+    const plain = await approvedWith({});
+    expect(plain.updates[0]!.blocks.at(-1)).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: `Approved by <@${MAYA.slackUserId}>.` }] });
+    const zero = await approvedWith({ commentsIncluded: 0, answerOverrides: [] });
+    expect(zero.updates[0]!.blocks.at(-1)).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: `Approved by <@${MAYA.slackUserId}>.` }] });
+  });
+
+  it("the next version's card says how many sent comments AgentX answered", async () => {
+    const plan = "# Plan\nAdd a retry regression test.";
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
+      readArtifact: async () => plan, createPlanCanvas: async () => ({ canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" }),
+    });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    await finishPlanningWithMarkdown(h, h.workspaceId, h.active(), plan);
+    await h.pump();
+    const saved = h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: { revision: number; artifacts: Array<{ sha256: string }> } };
+    const requestId = randomUUID();
+    const v1 = saved.workflow.artifacts.at(-1)!.sha256;
+    expect((await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/workflow/decision`, {
+      requestId, expectedRevision: saved.workflow.revision, decision: "REQUEST_CHANGES", reason: "See the included comments.", artifactDigest: v1,
+    })).status).toBe(200);
+    const [c1, c2] = [randomUUID(), randomUUID()];
+    const record = h.db.get(`DEVTASK#${h.taskId}`, "META") as Record<string, unknown> & { workflow: { decisions: Array<Record<string, unknown>> } };
+    record.workflow.decisions[record.workflow.decisions.length - 1] = { ...record.workflow.decisions.at(-1), commentsIncluded: 2 };
+    h.db.set(record);
+    h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `DECISION#${requestId}`, entityType: "WORKFLOW_DECISION_DETAIL", taskId: h.taskId, requestId, decision: "REQUEST_CHANGES",
+      artifactSha256: v1, answers: [], includedCommentIds: [c1, c2], at: new Date().toISOString() });
+    await h.pump();
+    await finishPlanningWithMarkdown(h, h.workspaceId, h.active(), "# Plan\nAdd a retry regression test, and one for empty input.");
+    const v2 = (h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: { artifacts: Array<{ id: string; version: number }> } }).workflow.artifacts.at(-1)!;
+    expect(v2.version).toBe(2);
+    h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `COMMENT#${plannerReplyCommentId(c1, v2.id)}`, entityType: "TASK_COMMENT", schemaVersion: 1, taskId: h.taskId,
+      commentId: plannerReplyCommentId(c1, v2.id), parentId: c1, document: "plan", version: 1, target: { kind: "document" },
+      author: { kind: "agentx", source: "planner", outcome: "done", forVersion: 2 }, text: "Added it.", createdAt: new Date().toISOString(), rev: 1 });
+    await h.pump();
+    const card = h.posts.at(-1)!;
+    expect(card.text).toContain("Coding plan v2 is ready for your approval.");
+    expect(card.text).toContain("AgentX answered 1 of 2 comments from v1.");
+  });
+
+  const LEE = "f".repeat(64);
+  /** A shared task with Lee's comments in one nudge window; the window opened when the first was written. */
+  async function nudged(body: Record<string, unknown> = { shareToChannel: true }, texts: { name?: string; text?: string } = {}) {
+    const h = await notifierHarness(body, { reviewUrlBase: REVIEW });
+    await h.pump();
+    // The window opens after the task was shared (the broker stamps the share with the real clock).
+    h.advance(Math.max(0, Date.now() - h.now()) + 1_000);
+    const start = h.now();
+    const at = (minutes: number) => new Date(start + minutes * 60_000).toISOString();
+    const put = (item: Record<string, unknown>) => h.db.send(new PutCommand({ TableName: "state", Item: item }));
+    const comment = async (extra: Record<string, unknown>) => {
+      const commentId = randomUUID();
+      await put({ pk: `DEVTASK#${h.taskId}`, sk: `COMMENT#${commentId}`, entityType: "TASK_COMMENT", schemaVersion: 1, taskId: h.taskId, commentId, document: "plan", version: 1,
+        target: { kind: "document" }, author: { kind: "person", developerId: LEE, name: "Lee Park", owner: false }, text: texts.text ?? "Looks fine.", createdAt: at(0), rev: 1, ...extra });
+      return commentId;
+    };
+    const first = await comment({});
+    await comment({ parentId: first, createdAt: at(2) });
+    await comment({ createdAt: at(3), version: 2 });
+    await comment({ createdAt: at(4), deletedAt: at(5), text: "" });
+    await comment({ createdAt: at(4), author: { kind: "agentx", source: "answer" } });
+    await comment({ createdAt: at(4), author: { kind: "person", developerId: "5".repeat(64), name: "Sam", owner: false } });
+    await comment({ createdAt: at(12) });
+    await put({ pk: `DEVTASK#${h.taskId}`, sk: `NUDGE#${LEE}`, entityType: "TASK_COMMENT_NUDGE", taskId: h.taskId, developerId: LEE, name: texts.name ?? "Lee Park",
+      windowStart: at(0), nudgeId: first, dueAt: at(10) });
+    return { h, first };
+  }
+
+  it("a comment nudge waits for its window, counts replies, and posts once", async () => {
+    const { h, first } = await nudged();
+    const before = h.posts.length;
+    await h.pump();
+    // Delivered before its window ended: held again until then.
+    expect(h.posts).toHaveLength(before);
+    expect(h.queue).toHaveLength(1);
+    expect(h.queue[0]!.notice).toMatchObject({ id: `${h.taskId}:nudge:${first}`, kind: "comment_nudge", notBefore: new Date(Date.parse(h.queue[0]!.notice.notBefore!)).toISOString() });
+    h.advance(10 * 60_000);
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+    const nudge = h.posts.at(-1)!;
+    expect(nudge.threadTs).toBeDefined();
+    expect(nudge.text).toBe(`Lee Park left 3 comments on Coding plan v1 and Coding plan v2. <${REVIEW}/review/${h.taskId}/task?doc=coding-plan#coding-plan|Open review>`);
+    // The same notice again posts nothing more.
+    h.queue.push({ notice: { id: `${h.taskId}:nudge:${first}`, kind: "comment_nudge", taskId: h.taskId, at: new Date(h.now()).toISOString() }, attempt: 0 });
+    await h.pump();
+    expect(h.posts).toHaveLength(before + 1);
+  });
+
+  it("a comment nudge carries no comment text", async () => {
+    const { h } = await nudged({ shareToChannel: true }, { name: "Lee <!channel> *bold*", text: `Ship it <!here> ${SECRET}` });
+    h.advance(10 * 60_000);
+    await h.pump();
+    await h.pump();
+    const nudge = h.posts.at(-1)!;
+    expect(nudge.text).toContain("left 3 comments on");
+    expect(nudge.text).not.toContain("Ship it");
+    expect(nudge.text).not.toContain(SECRET);
+    expect(nudge.text).not.toContain("<!channel>");
+    expect(nudge.text).not.toContain("<!here>");
+    expect(visibleSlackText(nudge.text)).toContain("Lee");
+  });
+
+  it("no nudge for a task without a Slack thread", async () => {
+    const { h } = await nudged({ shareToChannel: false });
+    const before = h.posts.length;
+    h.advance(10 * 60_000);
+    await h.pump();
+    await h.pump();
+    expect(h.posts).toHaveLength(before);
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "comment_nudge", outcome: "not_shared" }));
   });
 });

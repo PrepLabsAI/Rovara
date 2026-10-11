@@ -24,6 +24,8 @@ export interface WorkflowMessageContext {
   taskPageUrl?: string | undefined;
   /** Thread replies saved and not yet given to a step. */
   newReplies?: number | undefined;
+  /** After Request changes that sent comments: how many of them the planner answered, and the version they were sent on. */
+  commentAnswers?: { answered: number; total: number; fromVersion: number } | undefined;
   /** AgentX's own draft pull request did not open; `codeChanged` when the workspace no longer held the checked code. */
   publishFailure?: { category: string; codeChanged?: boolean | undefined } | undefined;
 }
@@ -320,6 +322,8 @@ function planReview(context: WorkflowMessageContext, exits: ReturnType<typeof ex
   const checks = planChecksLine(workflow);
   if (checks !== undefined) tail.push(checks);
   if ((context.newReplies ?? 0) > 0) tail.push(`${plural(context.newReplies!, "thread reply", "thread replies")} since the last step will be included.`);
+  const answered = context.commentAnswers;
+  if (answered !== undefined && answered.total > 0) tail.push(`AgentX answered ${answered.answered} of ${answered.total} comments from v${answered.fromVersion}.`);
   const unlinked = `I couldn't link the full ${name}; ask an AgentX admin to check the task page.`;
   if (structured === undefined) {
     // A Markdown document: its first lines, and where the whole text reads.
@@ -328,9 +332,10 @@ function planReview(context: WorkflowMessageContext, exits: ReturnType<typeof ex
     lines.push(...tail, context.documentLink === undefined ? unlinked : link(context.documentLink.url, `Read the full ${name}`));
     return { text: lines.join("\n"), buttons: decisions };
   }
+  // FR-036: what Approve in Slack takes. A tiny plan (FR-037) is approved in Slack as it is, so its card is unchanged.
   if (structured.decisionCount > 0) {
-    tail.unshift(`${plural(structured.decisionCount, "decision")}: approving here uses AgentX's recommended ${structured.decisionCount === 1 ? "answer" : "answers"}.`);
-  }
+    tail.unshift(`Approve here uses AgentX's answers for ${plural(structured.decisionCount, "decision")} and includes every open comment from the task page.`);
+  } else if (!structured.tiny) tail.unshift("Approve here includes every open comment from the task page.");
   tail.push(context.documentLink === undefined ? unlinked : link(context.documentLink.url, structured.tiny ? `Open the ${name}` : `Open the full ${name}`));
   const buttons: Button[] = context.documentLink === undefined ? decisions
     : [{ type: "button", action_id: "agentx_open_review", text: { type: "plain_text", text: "Open review" }, url: context.documentLink.url }, ...decisions];

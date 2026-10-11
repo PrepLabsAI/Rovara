@@ -9,7 +9,7 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, NUDGE_WINDOW_MS, plannerReplyCommentId, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
@@ -67,7 +67,7 @@ class CanvasCloseoutPending extends Error {
 /** 30, 60, 120, 240, 480, then 900 seconds, by the delivery attempt that failed. */
 export const retryDelaySeconds = (attempt: number): number => Math.min(900, 30 * 2 ** Math.max(0, Math.min(attempt - 1, 5)));
 
-const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "canvas_closeout", "admin_change_dm", "admin_change_outcome", "admin_change_expiry", "workflow_refusal"]);
+const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "canvas_closeout", "admin_change_dm", "admin_change_outcome", "admin_change_expiry", "workflow_refusal", "comment_nudge"]);
 
 /**
  * #217: how long after a change's expiry its message is edited. The broker refuses a claim at or
@@ -260,9 +260,17 @@ const PASSING_SLACK_ERRORS = new Set(["ratelimited", "internal_error", "fatal_er
 const passingSlackError = (error: unknown) => !(error instanceof SlackPostError) || postMayHaveLanded(error) || PASSING_SLACK_ERRORS.has(error.slackError);
 
 /** The short line an answered approval card shows in place of its buttons. */
-function decisionStatusLine(decision: { decision: string; actorRole: string }, slackUserId: string | undefined): string {
+function decisionStatusLine(decision: { decision: string; actorRole: string; answerOverrides?: unknown[] | undefined; commentsIncluded?: number | undefined }, slackUserId: string | undefined): string {
   const by = decision.actorRole === "TASK_OWNER" && slackUserId !== undefined ? ` by <@${slackUserId}>` : "";
-  return decision.decision === "APPROVE" ? `Approved${by}.` : decision.decision === "REQUEST_CHANGES" ? `Changes requested${by}.` : `Closed${by}.`;
+  const said = decision.decision === "APPROVE" ? `Approved${by}` : decision.decision === "REQUEST_CHANGES" ? `Changes requested${by}` : `Closed${by}`;
+  // FR-038: what a decision changed and sent, when it did; with nothing extra, today's line.
+  const changed = decision.answerOverrides?.length ?? 0;
+  const included = decision.commentsIncluded ?? 0;
+  const extras = [
+    ...(changed > 0 ? [`${changed} ${changed === 1 ? "answer" : "answers"} changed`] : []),
+    ...(included > 0 ? [`${included} ${included === 1 ? "comment" : "comments"} included`] : []),
+  ];
+  return extras.length === 0 ? `${said}.` : [said, ...extras].join(" · ");
 }
 
 /**
@@ -669,6 +677,22 @@ async function newThreadReplies(deps: NotifierDependencies, task: DeveloperTaskR
   return count;
 }
 
+/**
+ * After Request changes that sent comments on the version before `approval`: how many of those comments the planner
+ * answered in `approval` (each answer is a reply with an ID made from the comment and this version).
+ */
+async function commentAnswersFor(deps: NotifierDependencies, task: DeveloperTaskRecord, workflow: WorkflowSnapshot, approval: WorkflowArtifact): Promise<WorkflowMessageContext["commentAnswers"]> {
+  const previous = workflow.artifacts.find((artifact) => artifact.type === approval.type && artifact.version === approval.version - 1);
+  if (previous === undefined) return undefined;
+  const decision = [...workflow.decisions].reverse().find((entry) => entry.artifactDigest === previous.sha256 && (entry.source ?? "GATE") === "GATE");
+  if (decision?.decision !== "REQUEST_CHANGES" || (decision.commentsIncluded ?? 0) === 0) return undefined;
+  const detail = await getItem<{ includedCommentIds?: unknown }>(deps, { pk: `DEVTASK#${task.taskId}`, sk: `DECISION#${decision.requestId}` });
+  const ids = Array.isArray(detail?.includedCommentIds) ? detail.includedCommentIds.filter((id): id is string => typeof id === "string") : [];
+  if (ids.length === 0) return undefined;
+  const found = await Promise.all(ids.map((id) => getItem(deps, { pk: `DEVTASK#${task.taskId}`, sk: `COMMENT#${plannerReplyCommentId(id, approval.id)}` })));
+  return { answered: found.filter((item) => item !== undefined).length, total: ids.length, fromVersion: previous.version };
+}
+
 async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot): Promise<Reply | undefined> {
   // A task closed in Slack has its own closed reply; a second "closed" line would say it twice.
   if (workflow.stage === "CLOSED" && task.closedAt !== undefined) return undefined;
@@ -683,6 +707,13 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
     if (document.url !== undefined) context.documentLink = { url: document.url };
     context.newReplies = await newThreadReplies(deps, task);
     approval = workflow.artifacts.filter((artifact) => artifact.type === workflowDocumentType(workflow)).at(-1);
+    if (approval !== undefined) {
+      const answered = await commentAnswersFor(deps, task, workflow, approval).catch((error: unknown) => {
+        deps.log({ event: "developer_notifier.comment_answers_unavailable", taskId: task.taskId, error: errorName(error) });
+        return undefined;
+      });
+      if (answered !== undefined) context.commentAnswers = answered;
+    }
   } else if (workflow.state === "BLOCKED" || (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING")) {
     // Replies that came in after the plan and that no step has taken: said, with where to read them.
     context.newReplies = await newThreadReplies(deps, task);
@@ -800,7 +831,7 @@ export function feedbackCardCheckChanges(
   }));
 }
 
-type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale";
+type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale" | "scheduled";
 
 /** Another delivery of an admin change's message holds the claim: this one is retried (C9). */
 class DmPending extends Error {
@@ -1055,6 +1086,69 @@ async function deliverRefusal(deps: NotifierDependencies, notice: Notice): Promi
   return "posted";
 }
 
+const NUDGE_DOCUMENTS: Record<string, { label: string; anchor: string }> = {
+  requirements: { label: "Requirements", anchor: "requirements" }, design: { label: "Design", anchor: "design" }, plan: { label: "Coding plan", anchor: "coding-plan" },
+};
+
+/**
+ * Spec 061 FR-044: one batched nudge per commenter per 10-minute window, in the task's thread. It names the person and
+ * how many comments and replies they left on which document versions (AgentX's items and deleted comments never count),
+ * never what they said, and links the task page. Delivered early, it is held again until the window ends; with nothing
+ * left to count (all deleted), nothing is posted.
+ */
+async function deliverNudge(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice): Promise<Outcome> {
+  const prefix = `${task.taskId}:nudge:`;
+  if (!notice.id.startsWith(prefix)) return "stale";
+  const share = task.share;
+  if (share.threadTs === undefined) return share.postFailedAt !== undefined ? "no_thread" : "not_shared";
+  const marker = noticeMarker(task.taskId, notice.id);
+  if ((await getItem<NoticeMarker>(deps, marker))?.deliveredAt !== undefined) return "delivered";
+  const first = await getItem<Record<string, unknown>>(deps, { pk: `DEVTASK#${task.taskId}`, sk: `COMMENT#${notice.id.slice(prefix.length)}` });
+  const author = first?.author as { kind?: unknown; developerId?: unknown; name?: unknown } | undefined;
+  const windowStart = typeof first?.createdAt === "string" ? Date.parse(first.createdAt) : Number.NaN;
+  if (first?.entityType !== "TASK_COMMENT" || author?.kind !== "person" || typeof author.developerId !== "string" || Number.isNaN(windowStart)) return "stale";
+  const dueAt = windowStart + NUDGE_WINDOW_MS;
+  if (deps.now() < dueAt) {
+    await deps.enqueue([{ ...notice, notBefore: new Date(dueAt).toISOString() }]);
+    return "scheduled";
+  }
+  const counts = new Map<string, number>();
+  let start: Record<string, unknown> | undefined;
+  do {
+    const page = await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+      ExpressionAttributeValues: { ":pk": `DEVTASK#${task.taskId}`, ":prefix": "COMMENT#" }, ConsistentRead: true,
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+    for (const item of page.Items ?? []) {
+      const by = item.author as { kind?: unknown; developerId?: unknown } | undefined;
+      const at = typeof item.createdAt === "string" ? Date.parse(item.createdAt) : Number.NaN;
+      if (by?.kind !== "person" || by.developerId !== author.developerId || item.deletedAt !== undefined || !(at >= windowStart && at < dueAt)) continue;
+      const document = NUDGE_DOCUMENTS[String(item.document)];
+      if (document === undefined || typeof item.version !== "number") continue;
+      const key = `${String(item.document)}#${item.version}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    start = page.LastEvaluatedKey;
+  } while (start !== undefined);
+  const total = [...counts.values()].reduce((sum, count) => sum + count, 0);
+  if (total === 0) {
+    await putMarker(deps, marker);
+    return "stale";
+  }
+  const places = [...counts.keys()].map((key) => { const [document, version] = key.split("#"); return { document: NUDGE_DOCUMENTS[document!]!, version: Number(version) }; })
+    .sort((left, right) => left.document.label.localeCompare(right.document.label) || left.version - right.version);
+  const where = places.map((place) => `${place.document.label} v${place.version}`);
+  const joined = where.length === 1 ? where[0]! : `${where.slice(0, -1).join(", ")} and ${where.at(-1)!}`;
+  const name = escapedLine(typeof author.name === "string" && author.name.trim() !== "" ? author.name : "A teammate", 80);
+  const page = taskPageUrl(deps, task.taskId);
+  const anchor = places[0]!.document.anchor;
+  const link = page === undefined ? "" : ` <${slackText(`${page}?doc=${anchor}#${anchor}`)}|Open review>`;
+  await deps.post({ channel: share.channelId, threadTs: share.threadTs, text: `${name} left ${total === 1 ? "a comment" : `${total} comments`} on ${joined}.${link}` });
+  await putMarker(deps, marker);
+  return "posted";
+}
+
 async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outcome> {
   if (notice.kind === "workflow_refusal") return deliverRefusal(deps, notice);
   const task = await noticeTask(deps, notice);
@@ -1071,6 +1165,7 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
   // Q3: a close posts "closed", then the thread stops.
   if (notice.kind !== "start" && notice.kind !== "closed" && task.closedAt !== undefined
     && (Date.parse(notice.at) > Date.parse(task.closedAt) || await getItem(deps, noticeMarker(task.taskId, `${task.taskId}:closed`)) !== undefined)) return "after_close";
+  if (notice.kind === "comment_nudge") return deliverNudge(deps, { ...task, share }, notice);
   const marker = noticeMarker(task.taskId, notice.id);
   const delivered = await getItem<NoticeMarker>(deps, marker);
   if (delivered?.deliveredAt !== undefined) {
