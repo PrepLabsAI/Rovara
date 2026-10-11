@@ -301,7 +301,7 @@ describe("authenticated PR feedback review web journey", () => {
 
 describe("broker-backed feedback review data", () => {
   /** `firstFinding` changes the first finding (and its reference): for example, to leave it to the owner as a question. */
-  async function preparedReview(prCount = 1, firstFinding: Record<string, unknown> = {}, checkPolicy?: WorkflowCheckPolicyInput) {
+  async function preparedReview(prCount = 1, firstFinding: Record<string, unknown> = {}, checkPolicy?: WorkflowCheckPolicyInput, secondFinding: Record<string, unknown> = {}) {
     const now = "2026-10-05T12:00:00.000Z";
     const repositories = prCount === 1 ? [{ repositoryId: "demo", number: 42 }] : [
       { repositoryId: "demo", number: 42 }, { repositoryId: "ui", number: 43 },
@@ -357,6 +357,10 @@ describe("broker-backed feedback review data", () => {
     const refFields = ["assessment", "recommended", "priority"];
     bundles[0]!.finding = { ...bundles[0]!.finding, ...firstFinding };
     bundles[0]!.findingRef = { ...bundles[0]!.findingRef, ...Object.fromEntries(Object.entries(firstFinding).filter(([key]) => refFields.includes(key))) };
+    if (bundles[1] !== undefined) {
+      bundles[1].finding = { ...bundles[1].finding, ...secondFinding };
+      bundles[1].findingRef = { ...bundles[1].findingRef, ...Object.fromEntries(Object.entries(secondFinding).filter(([key]) => refFields.includes(key))) };
+    }
     const report = WorkflowFeedbackReviewReportSchema.parse({ schemaVersion: 1, taskId, workflowRevision: 2, operationMode: "FEEDBACK_REVIEW", qualification: "AI_GENERATED_ADVISORY",
       proposalDigest: "b".repeat(64), taskRequirementsDigest: "d".repeat(64), candidateBindings: bundles.map(({ ref, commentSetDigest, digest }) => ({ repositoryId: ref.repositoryId, number: ref.number,
         headSha: ref.headSha, candidateDigest: candidate.digest, commentSetDigest, bundleDigest: digest })),
@@ -477,6 +481,33 @@ describe("broker-backed feedback review data", () => {
     const data = JSON.parse(prompt.split("\n\n").find((part) => part.startsWith("{\"findings\""))!) as { findings: Array<Record<string, unknown>> };
     expect(data.findings[0]).toMatchObject({ id: "finding-1", fix: { summary: "Shorten the sentence.",
       fileChanges: [{ repositoryId: "demo", operation: "MODIFY", path: "README.md", change: "Use the shorter sentence." }] } });
+  });
+
+  it("applies the approved findings' check changes in report order, as the card shows them, not in the page's priority order", async () => {
+    const grep = (text: string) => ({ cwd: "repo/demo", executable: "grep", args: ["-q", text, "README.md"], timeoutSeconds: 30 });
+    const sentence = { id: "proposed-1", label: "Sentence present", command: grep("Old sentence.") };
+    const replacement = (label: string) => ({ label, cwd: "repo/demo", executable: "grep", args: ["-q", "New.", "README.md"] });
+    const fix = (label: string) => ({ fixProposal: { summary: "Shorten the sentence.",
+      fileChanges: [{ repositoryId: "demo", path: "README.md", operation: "MODIFY", change: "Use the shorter sentence." }], tests: [], replacementChecks: [replacement(label)] } });
+    // The report lists finding-1 first; the page lists finding-2 first, because it is a must fix and finding-1 only a should fix.
+    const fixture = await preparedReview(2, { priority: "SHOULD_FIX", ...fix("First label") }, { required: [], optional: [], selectedOptionalIds: [], proposed: [sentence] }, fix("Second label"));
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    const review = await getWorkflowFeedbackReview(fixture.deps, owner, fixture.taskId);
+    expect((review.findings as Array<{ id: string }>).map(finding => finding.id)).toEqual(["finding-2", "finding-1"]);
+    expect(review.reportOrder).toEqual(["finding-1", "finding-2"]);
+    // What the card shows for the same two recommended fixes: the earlier finding's label is the one added.
+    const { feedbackCardCheckChanges } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workflow: WorkflowSnapshot };
+    expect(review.recommendedCheckChanges).toMatchObject([{ added: [{ label: "First label" }] }]);
+    expect(feedbackCardCheckChanges(task.workflow.checkPolicy, [fix("First label"), fix("Second label")].map(item => ({ proposedDisposition: "IMPLEMENT", ...item })))
+      .map(entry => entry.added.map(check => check.label))).toEqual([["First label"], []]);
+
+    await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: fixture.bundleDigests, decision: "APPROVE", selectedFindingIds: ["finding-1", "finding-2"],
+    });
+    const stored = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workflow: WorkflowSnapshot };
+    expect(stored.workflow.checkPolicy?.proposed.map(check => check.label)).toEqual(["Sentence present", "First label"]);
   });
 
   it("refuses, in plain words, approving a fix whose corrected check runs outside the task's repositories or drops a project check, and applies nothing (0.2.12)", async () => {

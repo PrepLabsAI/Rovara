@@ -453,6 +453,8 @@ export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependen
     } }),
     qualification: report.qualification, reviewDigest: reportRef.sha256, proposalDigest: report.proposalDigest,
     bundleDigests: report.bundleDigests, candidates, findings,
+    // The report's own order, which the card follows and an approval applies check changes in; the page lists by priority.
+    reportOrder: report.findings.map(finding => finding.id),
     recommendedFindingIds: findings.filter(finding => finding.recommended).map(finding => finding.id), checks,
     // What Approve recommended applies to the checks, split by finding: the computation the approval itself uses.
     recommendedCheckChanges: workflowFeedbackCheckChanges(workflow.checkPolicy, report.findings.filter(finding => finding.recommended)).byFinding
@@ -518,7 +520,11 @@ export async function submitWorkflowFeedbackDecision(
   }
   if (input.decision === "APPROVE") {
     const verified = await getWorkflowFeedbackReview(deps, caller, taskId);
-    const selected = (verified.findings as Array<Record<string, unknown>>).filter(finding => input.selectedFindingIds.includes(String(finding.id)));
+    // In the report's order, as the card shows the changes: the page lists by priority, and where two fixes add the same
+    // command the earlier finding's check is the one kept.
+    const reportOrder = verified.reportOrder as string[];
+    const selected = (verified.findings as Array<Record<string, unknown>>).filter(finding => input.selectedFindingIds.includes(String(finding.id)))
+      .sort((left, right) => reportOrder.indexOf(String(left.id)) - reportOrder.indexOf(String(right.id)));
     if (selected.length !== input.selectedFindingIds.length) throw agentXError("CONFIG_INVALID", "the approved finding set changed; reload the review");
     // The owner's approval covers the approved fixes' check changes: from now on the task runs the updated checks
     // (required project checks always stay), for this fix and for every later step and feedback round.
