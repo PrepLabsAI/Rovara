@@ -7,6 +7,7 @@ import {
   CHANNEL_PRIVACY_NOT_SET_UP,
   PRIVATE_CHANNEL_NOT_A_MEMBER,
   AdminShareModeRequestSchema,
+  CanvasCloseoutRetryRequestSchema,
   AgentXError,
   workflowReviewsSawPartialDiff,
   CHANNEL_TURNS_MAX,
@@ -336,6 +337,9 @@ export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependen
   return {
     taskId, title: task.title, revision: workflow.revision, status: review.status,
     workflowStatus: workflow.state, workflowStage: workflow.stage, ...(workflow.outcome === undefined ? {} : { workflowOutcome: workflow.outcome }),
+    ...(workflow.state === "COMPLETE" && (workflow.stage === "MERGED" || workflow.stage === "CLOSED")
+      ? { canvasCleanupStatus: workflow.canvasCloseout?.status === "COMPLETE" ? "COMPLETE" : "RETRYING" }
+      : {}),
     ...(workflow.blockReason === undefined ? {} : { blockReason: workflow.blockReason }),
     ...(activeOperation === undefined ? {} : { activeOperation }), nextAction,
     ...(decision === undefined ? {} : { decision: {
@@ -1370,6 +1374,54 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
   const next: WorkflowSnapshot = { ...returned, revision: returned.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   return queueWorkflowCoding(deps, caller, { ...task, workflow }, { requestId: request.requestId, prompt, next,
     request: request.instructions, response: "AgentX sent the change back to coding" });
+}
+
+/** Re-drive only the task's current terminal revision and, when present, its exact manifest candidate. */
+async function retryTaskCanvasCloseout(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ status: "retry_requested"; workflowRevision: number; manifestDigest?: string }> {
+  const request = parse(CanvasCloseoutRetryRequestSchema, value, deps, "canvas-closeout-retry");
+  const task = await loadOwnedTask(deps, caller, taskId);
+  const closeout = task.workflow?.canvasCloseout;
+  const attempt = task.workflow?.canvasCloseoutAttempt;
+  const workflowRevision = task.workflow?.revision;
+  if (task.workflow === undefined || workflowRevision !== request.workflowRevision) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "the requested closeout workflow revision is no longer current");
+  }
+  const terminal = (task.workflow.stage === "MERGED" && task.workflow.state === "COMPLETE" && task.workflow.outcome === "MERGED")
+    || (task.workflow.stage === "CLOSED" && task.workflow.state === "COMPLETE" && task.workflow.outcome === "CLOSED")
+    || (task.closedAt !== undefined && task.workflow.stage !== "MERGED");
+  if (!terminal) throw agentXError("CONFIG_INVALID", "Canvas closeout can only be retried for a terminal task");
+  if (closeout !== undefined) {
+    if (closeout.status !== "ARCHIVE_PENDING" || request.manifestDigest !== closeout.manifestDigest) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "the requested closeout manifest is not the task's current pending snapshot");
+    }
+  } else if (attempt === undefined || attempt.workflowRevision !== request.workflowRevision
+    || (attempt.candidateManifestDigest === undefined ? request.manifestDigest !== undefined : request.manifestDigest !== attempt.candidateManifestDigest)) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "the requested closeout preparation attempt is no longer current");
+  }
+  const existing = task.canvasCloseoutRetry;
+  if (existing?.requestId === request.requestId && (existing.manifestDigest !== request.manifestDigest || existing.workflowRevision !== workflowRevision)) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "this request_id was already used for a different closeout snapshot");
+  }
+  const retry = { requestId: request.requestId, workflowRevision, ...(request.manifestDigest === undefined ? {} : { manifestDigest: request.manifestDigest }),
+    actorId: task.workflow.ownerId, requestedAt: iso(deps), dispatchAttempt: (existing?.dispatchAttempt ?? 0) + 1 };
+  try {
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: taskKey(taskId),
+      UpdateExpression: "SET canvasCloseoutRetry = :retry",
+      ConditionExpression: `workflow.revision = :revision AND ${task.canvasCloseoutVersion === undefined ? "attribute_not_exists(canvasCloseoutVersion)" : "canvasCloseoutVersion = :version"}`,
+      ExpressionAttributeValues: { ":retry": retry, ":revision": workflowRevision,
+        ...(task.canvasCloseoutVersion === undefined ? {} : { ":version": task.canvasCloseoutVersion }) },
+    }));
+    return { status: "retry_requested", workflowRevision, ...(request.manifestDigest === undefined ? {} : { manifestDigest: request.manifestDigest }) };
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const fresh = await loadOwnedTask(deps, caller, taskId);
+    if (fresh.canvasCloseoutRetry?.requestId === request.requestId && fresh.canvasCloseoutRetry.workflowRevision === workflowRevision
+      && fresh.canvasCloseoutRetry.manifestDigest === request.manifestDigest
+      && fresh.canvasCloseoutRetry.dispatchAttempt >= retry.dispatchAttempt) {
+      return { status: "retry_requested", workflowRevision, ...(request.manifestDigest === undefined ? {} : { manifestDigest: request.manifestDigest }) };
+    }
+    throw agentXError("WORKSPACE_BUSY", "the task closeout changed while requesting its retry; refresh the task and try again");
+  }
 }
 
 async function startTaskWorkflowReview(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
@@ -2707,13 +2759,14 @@ export async function adminShareMode(deps: ShareModeDependencies, admin: ShareAd
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/send-back))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/send-back|canvas-closeout\/retry))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "continue") return continueTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/decision") return decideTaskWorkflow(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/retry") return retryTaskWorkflow(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "canvas-closeout/retry") return retryTaskCanvasCloseout(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/review") return startTaskWorkflowReview(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/publish-retry") return retryTaskWorkflowPublication(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/send-back") return sendTaskWorkflowBackToCoding(deps, caller, taskId, body(request));

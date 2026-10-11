@@ -74,6 +74,12 @@ export class DeveloperTaskNotifier extends Construct {
       actions: ["s3:GetObject"],
       resources: [props.artifactBucket.arnForObjects("private/*/*/*/*")],
     }));
+    // Verified closeout manifests are content-addressed, private task artifacts. The notifier may
+    // read/conditionally write only this dedicated prefix; user plan artifacts remain read-only.
+    this.function.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["s3:GetObject", "s3:PutObject"],
+      resources: [props.artifactBucket.arnForObjects("private/task-closeouts/*/*")],
+    }));
     props.artifactBucket.encryptionKey?.grantEncryptDecrypt(this.function);
     props.state.grantStreamRead(this.function);
     this.queue.grantSendMessages(this.function);

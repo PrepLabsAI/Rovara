@@ -58,6 +58,8 @@ export interface DeveloperTaskRecord {
   shareVersion?: number;
   /** Serializes append-only task Canvas lineage mutations without advancing workflow revision. */
   canvasLineageVersion?: number;
+  canvasCloseoutVersion?: number;
+  canvasCloseoutRetry?: { requestId: string; workflowRevision: number; manifestDigest?: string; actorId: string; requestedAt: string; dispatchAttempt: number };
   createdAt: string;
   updatedAt: string;
   closedAt?: string;

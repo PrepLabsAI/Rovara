@@ -443,12 +443,19 @@ describe("broker-backed feedback review data", () => {
     if (candidate === undefined) throw new Error("fixture workflow must retain its candidate");
     const completed = observeWorkflowPullRequest(waitingForMerge, { repositoryId: "demo", number: 42,
       candidateDigest: candidate.digest, state: "MERGED", source: "GITHUB_API", observedAt: "2026-10-05T12:05:00.000Z" }, "2026-10-05T12:05:00.000Z");
-    fixture.harness.db.set({ ...beforeMerge, workflow: completed });
+    fixture.harness.db.set({ ...beforeMerge, workflow: { ...completed, canvasCloseout: {
+      status: "ARCHIVE_PENDING", terminalState: "MERGED", manifestDigest: "c".repeat(64),
+      manifestRef: `private/task-closeouts/${fixture.taskId}/${"c".repeat(64)}.json`, preparedAt: "2026-10-05T12:06:00.000Z",
+      canvases: [{ lineageKey: "plan:1", canvasId: "F12345678", status: "UNKNOWN", attempts: 1, errorCategory: "canvas_not_found" }],
+    } } });
     pageAfterRestart = await requestPage();
     expect(pageAfterRestart.body).toContain("Current workflow status: COMPLETE");
     expect(pageAfterRestart.body).toContain("Current stage: MERGED");
     expect(pageAfterRestart.body).toContain("All required pull requests are merged.");
-    expect(pageAfterRestart.body).not.toContain('aria-label="Slack cleanup status"');
+    expect(pageAfterRestart.body).toContain('aria-label="Slack cleanup status"');
+    expect(pageAfterRestart.body).toContain("Work complete.");
+    expect(pageAfterRestart.body).toContain("AgentX is retrying Slack Canvas cleanup in the background.");
+    expect(pageAfterRestart.body).toContain("No action is needed.");
   });
 
   it("refuses a queued implementation at the broker worker-start callback after approval is invalidated", async () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createTaskPlanCanvas } from "../../packages/broker/src/aws/slack-web.js";
+import { createTaskPlanCanvas, deleteTaskPlanCanvas } from "../../packages/broker/src/aws/slack-web.js";
 
 const CHANNEL = "C12345678";
 
@@ -55,5 +55,23 @@ describe("task plan Slack Canvas", () => {
       async (canvasId) => { saved.push(canvasId); });
     expect(saved).toEqual(["F12345678"]);
     expect(calls).toEqual(["canvases.create", "canvases.access.set", "files.info?file=F12345678"]);
+  });
+
+  it("deletes only a validated exact Canvas ID and treats canvas_not_found as ambiguous", async () => {
+    const calls: Array<{ url: string; body?: string }> = [];
+    let error: string | undefined;
+    const fetcher = vi.fn(async (input: unknown, init?: RequestInit) => {
+      calls.push({ url: String(input), ...(typeof init?.body === "string" ? { body: init.body } : {}) });
+      return Response.json(error === undefined ? { ok: true } : { ok: false, error });
+    });
+    await expect(deleteTaskPlanCanvas("xoxb-test", "F12345678", fetcher)).resolves.toBe("deleted");
+    expect(JSON.parse(calls[0]!.body ?? "")).toEqual({ canvas_id: "F12345678" });
+    error = "canvas_not_found";
+    await expect(deleteTaskPlanCanvas("xoxb-test", "F12345678", fetcher)).resolves.toBe("unknown");
+    error = "missing_scope";
+    await expect(deleteTaskPlanCanvas("xoxb-test", "F12345678", fetcher)).rejects.toMatchObject({ slackError: "missing_scope" });
+    const callCount = calls.length;
+    await expect(deleteTaskPlanCanvas("xoxb-test", "not-a-canvas", fetcher)).rejects.toThrow();
+    expect(calls).toHaveLength(callCount);
   });
 });

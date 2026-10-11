@@ -50,7 +50,10 @@ describe("notices from the stream (C7, C8)", () => {
     stream.take();
     await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
     const closing = noticesFromStream(stream.take());
-    expect(closing).toEqual([{ id: `${taskId}:closed`, kind: "closed", taskId, at: closing[0]?.at }]);
+    expect(closing).toEqual([
+      { id: `${taskId}:closed`, kind: "closed", taskId, at: closing[0]?.at },
+      { id: `${taskId}:canvas_closeout:closed`, kind: "canvas_closeout", taskId, at: closing[1]?.at },
+    ]);
     expect(Number.isNaN(Date.parse(String(closing[0]?.at)))).toBe(false);
   });
 
@@ -108,6 +111,41 @@ describe("notices from the stream (C7, C8)", () => {
     expect(noticesOf(running, { ...running, workflow: { revision: 6, state: "RUNNING", stage: "REVIEW" } }, "t", "")).toEqual([]);
   });
 
+  it("creates closeout work only when a task reaches a terminal workflow or explicit close", () => {
+    const taskId = randomUUID();
+    const waiting = { entityType: "DEVELOPER_TASK", taskId, workflow: { revision: 2, stage: "WAIT_FOR_MERGE", state: "WAITING" } };
+    const merged = { ...waiting, workflow: { revision: 3, stage: "MERGED", state: "COMPLETE", outcome: "MERGED" } };
+    expect(noticesOf(waiting, merged, "2026-10-05T12:00:00.000Z", "merge")).toContainEqual({
+      id: `${taskId}:canvas_closeout:3`, kind: "canvas_closeout", taskId, at: "2026-10-05T12:00:00.000Z",
+    });
+    expect(noticesOf(waiting, waiting, "2026-10-05T12:00:00.000Z", "retry")).not.toContainEqual(expect.objectContaining({ kind: "canvas_closeout" }));
+    expect(noticesOf({ ...waiting, closedAt: null }, { ...waiting, closedAt: "2026-10-05T12:01:00.000Z" }, "2026-10-05T12:01:00.000Z", "close"))
+      .toContainEqual(expect.objectContaining({ id: `${taskId}:canvas_closeout:closed`, kind: "canvas_closeout", taskId }));
+  });
+
+  it("re-emits owner closeout retries even when the request ID is reused", () => {
+    const taskId = randomUUID();
+    const before = { entityType: "DEVELOPER_TASK", taskId,
+      canvasCloseoutRetry: { requestId: "same-request", workflowRevision: 4, manifestDigest: "a".repeat(64), dispatchAttempt: 1 } };
+    const after = { ...before, canvasCloseoutRetry: { ...before.canvasCloseoutRetry, dispatchAttempt: 2 } };
+    expect(noticesOf(before, after, "2026-10-05T12:02:00.000Z", "retry-again")).toEqual([{
+      id: `${taskId}:canvas_closeout_retry:same-request:2`, kind: "canvas_closeout", taskId, at: "2026-10-05T12:02:00.000Z",
+      expectedWorkflowRevision: 4,
+      manifestDigest: "a".repeat(64),
+    }]);
+  });
+
+  it("dispatches a preparation retry with its workflow revision before a manifest exists", () => {
+    const taskId = randomUUID();
+    const before = { entityType: "DEVELOPER_TASK", taskId };
+    const after = { ...before, canvasCloseoutRetry: { requestId: "prepare-retry", workflowRevision: 9, actorId: "owner",
+      requestedAt: "2026-10-05T12:03:00.000Z", dispatchAttempt: 1 } };
+    expect(noticesOf(before, after, "2026-10-05T12:03:00.000Z", "retry")).toEqual([{
+      id: `${taskId}:canvas_closeout_retry:prepare-retry:1`, kind: "canvas_closeout", taskId, at: "2026-10-05T12:03:00.000Z",
+      expectedWorkflowRevision: 9,
+    }]);
+  });
+
   it("records no stream event for deleting an item that does not exist", async () => {
     const { db, stream } = await started({});
     stream.take();
@@ -157,7 +195,7 @@ describe("notices from the stream (C7, C8)", () => {
 
   it("treats a stored NULL close or cancel time as unset", () => {
     const task = { entityType: "DEVELOPER_TASK", taskId: "t1" };
-    expect(noticesOf({ ...task, closedAt: null }, { ...task, closedAt: "2026-09-29T10:00:00.000Z" }, "t", "e1").map((notice) => notice.kind)).toEqual(["closed"]);
+    expect(noticesOf({ ...task, closedAt: null }, { ...task, closedAt: "2026-09-29T10:00:00.000Z" }, "t", "e1").map((notice) => notice.kind)).toEqual(["closed", "canvas_closeout"]);
     expect(noticesOf(task, { ...task, closedAt: null }, "t", "e2")).toEqual([]);
     const pointer = { entityType: "DEVELOPER_TASK_POINTER", taskId: "t1" };
     expect(noticesOf({ ...pointer, cancelledAt: null }, { ...pointer, cancelledAt: "2026-09-29T10:00:00.000Z" }, "t", "e3").map((notice) => notice.kind)).toEqual(["cancelled"]);

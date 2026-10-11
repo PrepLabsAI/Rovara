@@ -351,6 +351,16 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
     expect(queue.Properties.RedrivePolicy).toMatchObject({ maxReceiveCount: 100 });
   });
 
+  it("limits closeout manifest access to the dedicated private task-closeout prefix", () => {
+    const statements = statementsOfRole(named, "DeveloperTaskNotifierFunctionServiceRole");
+    const closeout = statements.filter((statement) => JSON.stringify(statement.Resource).includes("private/task-closeouts"));
+    expect(closeout).toHaveLength(1);
+    expect(actionsOf(closeout[0]!).sort()).toEqual(["s3:GetObject", "s3:PutObject"]);
+    expect(JSON.stringify(closeout[0]!.Resource)).toContain("private/task-closeouts/*/*");
+    // The existing notice DLQ alarm is the exhausted closeout-work alarm; no new queue/service is introduced.
+    expect(ofType(named, "AWS::CloudWatch::Alarm").some(([, alarm]) => alarm.Properties.AlarmName === "agentx-staging-DeveloperNoticeDeadLetters")).toBe(true);
+  });
+
   it("gives the notifier only key-limited item access on the state table: no scan, no delete", () => {
     const statements = statementsOfRole(named, "DeveloperTaskNotifierFunctionServiceRole").filter((statement) => reaches(named, statement, stateId(), "arn:aws:dynamodb:us-east-1:111122223333:table/state"));
     const dynamo = statements.filter((statement) => touches(statement, "dynamodb") && !actionsOf(statement).some((action) => action.startsWith("dynamodb:DescribeStream") || action.startsWith("dynamodb:GetRecords") || action.startsWith("dynamodb:GetShardIterator") || action.startsWith("dynamodb:ListStreams")));

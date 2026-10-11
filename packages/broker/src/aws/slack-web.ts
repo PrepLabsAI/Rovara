@@ -106,6 +106,22 @@ export async function createTaskPlanCanvas(
   return { canvasId, permalink: parsed.toString() };
 }
 
+/** Deletes only a Canvas ID already durably recorded for the task; Slack's not-found is ambiguous. */
+export async function deleteTaskPlanCanvas(
+  botToken: string,
+  canvasId: string,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<"deleted" | "unknown"> {
+  if (!/^F[A-Z0-9]{8,}$/.test(canvasId)) throw new Error("task Canvas ID is invalid");
+  try {
+    await callSlack("canvases.delete", botToken, { canvas_id: canvasId }, fetchImplementation);
+    return "deleted";
+  } catch (error) {
+    if (error instanceof SlackPostError && error.slackError === "canvas_not_found") return "unknown";
+    throw error;
+  }
+}
+
 export async function chatPostMessage(
   botToken: string,
   input: { channel: string; threadTs?: string | undefined; text: string; blocks?: unknown[] | undefined },
