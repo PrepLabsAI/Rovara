@@ -2,7 +2,7 @@
 // first level, with evidence, decisions, badges and what changed. A pure function of its input apart from the
 // drawing of diagrams. All model text is redacted and escaped here; the markup carries class names only (the page
 // owns the styles) and no inline style or event handler.
-import { diffPlanDocuments, redactText, type PlanClaim, type PlanDecision, type PlanDocument, type PlanDocumentKind, type PlanEvidenceBundle, type PlanEvidenceInput } from "@agentx/contracts";
+import { commentRefInAuthor, diffPlanDocuments, plainCommentAuthor, redactText, type PlanClaim, type PlanDecision, type PlanDocument, type PlanDocumentKind, type PlanEvidenceBundle, type PlanEvidenceInput } from "@agentx/contracts";
 import { escapeHtml } from "../web-session.js";
 import { renderDiagram } from "./diagrams.js";
 import { commentCountBadge, renderThreads, suggestionLines, targetKey, type PageCommentView, type PageSuggestionView } from "./comments.js";
@@ -33,6 +33,8 @@ export interface RenderPlanInput {
   deciding?: boolean;
   /** Every structured version of this document by number, to quote a removed claim's words. */
   plans?: ReadonlyMap<number, PlanDocument>;
+  /** The comments a quote's author names by ref ("comment c1"): who wrote each, and whether it is the reader's, so the quote reads "Your comment". */
+  commentRefs?: Record<string, { id: string; name: string; you: boolean }>;
 }
 
 /** How many claims, per level, and how many decisions in all, show before the rest fold away. */
@@ -119,6 +121,18 @@ function codeEvidence(context: Context, claim: PlanClaim, index: number, item: E
   return `<figure class="evidence evidence-code evidence-missing"><figcaption>${range}</figcaption>${note}<p class="evidence-status">${sentence}</p></figure>`;
 }
 
+/**
+ * Who a quote credits. A planner credits a page comment by its ref ("owner (comment c1)"): the page says "Your comment"
+ * or "Sam's comment", linked to the comment's thread, and never shows the ref. A ref it cannot place reads "A comment".
+ */
+function quoteAuthor(context: Context, author: string): string {
+  const ref = commentRefInAuthor(author);
+  if (ref === undefined) return t(author);
+  const comment = context.input.commentRefs?.[ref];
+  if (comment === undefined) return t(plainCommentAuthor(author));
+  return `<a href="#comment-${escapeHtml(comment.id)}">${comment.you ? "Your comment" : `${t(comment.name)}'s comment`}</a>`;
+}
+
 async function evidenceHtml(context: Context, claim: PlanClaim, index: number, item: PlanEvidenceInput): Promise<string> {
   switch (item.kind) {
     case "code":
@@ -126,7 +140,7 @@ async function evidenceHtml(context: Context, claim: PlanClaim, index: number, i
     case "sketch":
       return `<figure class="evidence evidence-sketch"><figcaption>Sketch: not in the repository yet <span class="lang">${t(item.language)}</span></figcaption>${item.note === undefined ? "" : `<p class="evidence-note">${t(item.note)}</p>`}<pre><code>${t(item.code)}</code></pre></figure>`;
     case "quote":
-      return `<blockquote class="evidence evidence-quote"><p>${t(item.text)}</p><footer>${t(item.author)}</footer></blockquote>`;
+      return `<blockquote class="evidence evidence-quote"><p>${t(item.text)}</p><footer>${quoteAuthor(context, item.author)}</footer></blockquote>`;
     case "flow":
     case "schema":
     case "stateMachine": {

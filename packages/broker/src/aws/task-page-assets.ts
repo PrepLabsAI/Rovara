@@ -170,7 +170,8 @@ dialog::backdrop{background:rgba(0,0,0,.4)}
 .comment-author{color:var(--fg);font-weight:600}
 .comment-text{margin:.2rem 0;white-space:pre-wrap;overflow-wrap:anywhere}
 .comment-state,.comment-sent,.comment-deleted,.from-version,.comment-edited{color:var(--muted);font-size:.9rem}
-.comment-state,.comment-sent,.comment-deleted{margin:.2rem 0}
+.comment-state,.comment-sent,.comment-deleted,.comment-link{margin:.2rem 0}
+.comment-link{font-size:.9rem}
 .chip{display:inline-block;border-radius:999px;padding:0 .5rem;font-size:.8rem;font-weight:600;background:var(--focus);color:var(--bg)}
 .tag-owner{font-size:.75rem}
 .badge-comments{color:var(--muted)}
@@ -217,7 +218,7 @@ export const TASK_PAGE_DECIDING_COPY = {
   movedOn: "This task moved on.",
   isReady: " is ready.",
   yourComment: "Your comment",
-  ask: "Ask AgentX to answer",
+  ask: "Ask AgentX to reply to this comment",
   post: "Post",
   cancel: "Cancel",
   save: "Save",
@@ -235,8 +236,18 @@ export const TASK_PAGE_DECIDING_COPY = {
   answeringWho: "· answering ",
   skipped: "Edited after it was asked, so AgentX didn't answer.",
   reply: "Reply",
-  done: "Done: ",
-  notChanged: "Not changed because: ",
+  done: "Done",
+  notChanged: "Not changed",
+  becauseColon: " because: ",
+  because: " because ",
+  doneIn: " in ",
+  plannerResult: "· result",
+  seeClaim: "See ",
+  claimWord: "claim ",
+  inRequirements: "the requirements",
+  inDesign: "the design",
+  inPlan: "the coding plan",
+  sentToCoding: "Sent to coding with the owner's approval.",
   answering: "AgentX is answering…",
   couldnt: "AgentX couldn't answer this one.",
   notAnswered: "Not answered",
@@ -411,7 +422,10 @@ function containerFor(section,key){
 }
 
 /* ---------- showing a comment ---------- */
-var STATES={answering:COPY.answering,couldnt:COPY.couldnt,not_answered:COPY.notAnswered,unavailable:COPY.askUnavailable,skipped:COPY.skipped};
+var STATES={answering:COPY.answering,couldnt:COPY.couldnt,not_answered:COPY.notAnswered,unavailable:COPY.askUnavailable,skipped:COPY.skipped,sent_to_coding:COPY.sentToCoding};
+var DOC_ANCHORS={requirements:"requirements",design:"design",plan:"coding-plan"};
+var IN_DOCS={requirements:COPY.inRequirements,design:COPY.inDesign,plan:COPY.inPlan};
+var CLAIM_ID=/^[1-9][0-9]{0,2}(?:\.[1-9][0-9]{0,2}){0,2}$/;
 function shortTime(at){var d=new Date(at);if(isNaN(d.getTime()))return "";var iso=d.toISOString();return iso.slice(0,10)+" "+iso.slice(11,16)+" UTC";}
 function validComment(c){return c&&typeof c==="object"&&UUID.test(str(c.id))&&(c.parentId===undefined||UUID.test(str(c.parentId)))&&c.author&&typeof c.author==="object"&&typeof c.version==="number";}
 function commentNode(c,shownVersion,isReply){
@@ -424,6 +438,12 @@ function commentNode(c,shownVersion,isReply){
     meta.appendChild(document.createTextNode(" "));
     meta.appendChild(make("span",{"class":"answering"},COPY.answeringWho+c.answering));
   }
+  else if(agentx&&c.planner&&typeof c.planner==="object"){
+    // The planner's outcome, apart from AgentX's own answer to a question.
+    meta.appendChild(make("span",{"class":"chip chip-agentx"},COPY.agentx));
+    meta.appendChild(document.createTextNode(" "));
+    meta.appendChild(make("span",{"class":"answering"},COPY.plannerResult));
+  }
   else if(agentx){meta.appendChild(make("span",{"class":"chip chip-agentx"},COPY.agentx));}
   else{
     meta.appendChild(make("span",{"class":"comment-author"},str(c.author.name)||COPY.someone));
@@ -435,7 +455,21 @@ function commentNode(c,shownVersion,isReply){
   if(c.edited===true&&c.deleted!==true){meta.appendChild(document.createTextNode(" "));meta.appendChild(make("span",{"class":"comment-edited"},COPY.edited));}
   article.appendChild(meta);
   if(c.deleted===true)article.appendChild(make("p",{"class":"comment-deleted"},COPY.removed));
-  else if(agentx&&c.planner&&typeof c.planner==="object")article.appendChild(make("p",{"class":"comment-text"},(c.planner.outcome==="done"?COPY.done:COPY.notChanged)+str(c.text)));
+  else if(agentx&&c.planner&&typeof c.planner==="object"){
+    // After an Approve the comment was handled in the next document; after Request changes, in the same one again.
+    var handledIn=has(DOC_ANCHORS,c.planner.in)?c.planner.in:"";
+    var handled=handledIn===""?"":COPY.doneIn+IN_DOCS[handledIn];
+    var lead=c.planner.outcome==="done"?COPY.done+handled+": ":handled===""?COPY.notChanged+COPY.becauseColon:COPY.notChanged+handled+COPY.because;
+    article.appendChild(make("p",{"class":"comment-text"},lead+str(c.text)));
+    var claim=typeof c.planner.claim==="string"&&CLAIM_ID.test(c.planner.claim)?c.planner.claim:"";
+    var where=handledIn!==""?handledIn:has(DOC_ANCHORS,c.document)?c.document:"";
+    if(claim!==""&&where!==""){
+      var seen=make("p",{"class":"comment-link"},COPY.seeClaim);
+      seen.appendChild(make("a",{"class":"claim-link",href:"#"+DOC_ANCHORS[where]+"/"+claim},COPY.claimWord+claim));
+      seen.appendChild(document.createTextNode(handled+"."));
+      article.appendChild(seen);
+    }
+  }
   else article.appendChild(make("p",{"class":"comment-text"},str(c.text)));
   if(typeof c.agentx==="string"&&has(STATES,c.agentx))article.appendChild(make("p",{"class":"comment-state"},STATES[c.agentx]));
   var yours=!agentx&&c.author.you===true&&c.deleted!==true;

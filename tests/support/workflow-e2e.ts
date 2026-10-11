@@ -234,7 +234,7 @@ export async function createWorkflowE2E(options: {
   legacyPlanMarkdown?: string;
   /** Spec 061 slice 2: who the Slack channel lookup says is in which channel. Absent: only Maya is in the project's channel. */
   channelMembers?: (request: ChannelMembersRequest) => Promise<ChannelMembersResponse>;
-  /** Spec 061 slice 2: the Slack service's request queue as the broker sends to it ("Ask AgentX to answer"). Absent: not set up. */
+  /** Spec 061 slice 2: the Slack service's request queue as the broker sends to it ("Ask AgentX to reply to this comment"). Absent: not set up. */
   slackRequestQueue?: SlackRequestQueue;
   /**
    * GitHub's realism (head lag is on by default; `realism: { lag: false }` needs a comment saying why). `wire: true`: the

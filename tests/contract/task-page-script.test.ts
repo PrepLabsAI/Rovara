@@ -556,7 +556,7 @@ describe("the deciding and commenting script", () => {
     page.document.querySelector('.comment-open[data-target="document"]')!.click();
     const form = page.document.querySelector('[data-comments="document"] .comment-form')!;
     expect(form.querySelector("label")!.textContent).toBe("Your comment");
-    const ask = form.querySelectorAll("label").find((label) => label.textContent.includes("Ask AgentX to answer"));
+    const ask = form.querySelectorAll("label").find((label) => label.textContent.includes("Ask AgentX to reply to this comment"));
     expect(ask).toBeDefined();
     form.querySelector("textarea")!.type_("One more thought.");
     form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();

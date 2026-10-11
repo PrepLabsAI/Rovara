@@ -47,7 +47,7 @@ export function stateChecks(state: Record<string, unknown>): LiveCheckResult[] {
 
 /** What a person tries by hand and records: each needs a real phone, a screen reader or a second person. */
 export const LIVE_CHECKLIST: readonly string[] = [
-  "iPhone, in Slack's in-app browser, at 390 px wide: answer a decision, post a comment with Ask AgentX to answer ticked, and Approve. Nothing scrolls sideways.",
+  "iPhone, in Slack's in-app browser, at 390 px wide: answer a decision, post a comment with Ask AgentX to reply to this comment ticked, and Approve. Nothing scrolls sideways.",
   "Android in dark mode: the page, the comment threads and the Approve dialog are readable, and the bar sits above the system buttons.",
   "Keyboard only, on a laptop: Tab to the answers, pick one with the arrow keys, open Approve, and send it with Enter. Focus returns to the button after Cancel.",
   "VoiceOver on iPhone: the Approve dialog's title, its sections and the Send button are read out, and errors are announced.",

@@ -22,11 +22,14 @@ export interface PageCommentView {
   sent: boolean;
   rev: number;
   /** A person's comment that asked AgentX, or was sent with Request changes: what became of the answer. */
-  agentx?: "answering" | "answered" | "couldnt" | "not_answered" | "unavailable" | "skipped";
+  agentx?: "answering" | "answered" | "couldnt" | "not_answered" | "unavailable" | "skipped" | "sent_to_coding";
   /** AgentX's answer to an asked comment: the asker's name, from that stored comment (never from the answer). */
   answering?: string;
-  /** A planner reply: what the planner did, and in which version. */
-  planner?: { outcome: "done" | "not_changed"; version: number };
+  /**
+   * A planner reply: what the planner did, and in which version. `in`: after an Approve, the document that handled the
+   * comment (it is not the one the comment sits on). `claim`: the claim of that version that cites the comment.
+   */
+  planner?: { outcome: "done" | "not_changed"; version: number; in?: CommentDocument; claim?: string };
 }
 
 /** A name as a comment shows it: one line, redacted, at most 80 characters. */
@@ -67,6 +70,8 @@ export function pageCommentViews(comments: readonly TaskComment[], context: Comm
       const later = context.artifacts.filter((artifact) => artifact.type === comment.document && artifact.version > comment.version);
       if (later.length > 0 && !later.some((artifact) => ids.has(plannerReplyCommentId(comment.commentId, artifact.id)))) agentx = "not_answered";
     }
+    // A comment sent with the coding plan's approval goes to coding, which gives no replies of its own.
+    if (person !== undefined && comment.document === "plan" && comment.lockedBy?.decision === "APPROVE" && agentx !== "answering") agentx = "sent_to_coding";
     return {
       id: comment.commentId,
       ...(comment.parentId === undefined ? {} : { parentId: comment.parentId }),
@@ -83,7 +88,11 @@ export function pageCommentViews(comments: readonly TaskComment[], context: Comm
       ...(agentx === undefined ? {} : { agentx }),
       ...(agentxAuthor?.source === "answer" && askers.has(comment.commentId) ? { answering: askers.get(comment.commentId)! } : {}),
       ...(agentxAuthor?.source === "planner" && agentxAuthor.outcome !== undefined
-        ? { planner: { outcome: agentxAuthor.outcome, version: agentxAuthor.forVersion ?? comment.version } } : {}),
+        ? { planner: {
+          outcome: agentxAuthor.outcome, version: agentxAuthor.forVersion ?? comment.version,
+          ...(agentxAuthor.handledIn === undefined ? {} : { in: agentxAuthor.handledIn }),
+          ...(agentxAuthor.claim === undefined ? {} : { claim: agentxAuthor.claim }),
+        } } : {}),
     };
   });
 }
@@ -111,7 +120,16 @@ const AGENTX_STATES: Record<NonNullable<PageCommentView["agentx"]>, string> = {
   not_answered: "Not answered",
   unavailable: "AgentX can answer comments only on tasks started in Slack.",
   skipped: "Edited after it was asked, so AgentX didn't answer.",
+  sent_to_coding: "Sent to coding with the owner's approval.",
 };
+
+/** The document a planner reply names ("in the coding plan") and the page anchor its claim links go to. */
+const HANDLED_IN: Record<CommentDocument, { name: string; anchor: string }> = {
+  requirements: { name: "the requirements", anchor: "requirements" },
+  design: { name: "the design", anchor: "design" },
+  plan: { name: "the coding plan", anchor: "coding-plan" },
+};
+const CLAIM_ID = /^[1-9][0-9]{0,2}(\.[1-9][0-9]{0,2}){0,2}$/;
 
 const shortTime = (at: string): string => {
   const date = new Date(at);
@@ -126,6 +144,8 @@ const shortTime = (at: string): string => {
 function commentHtml(comment: PageCommentView, context: { shownVersion: number; canComment: boolean }, reply: boolean): string {
   const author = comment.author.kind === "agentx" && comment.answering !== undefined
     ? `<span class="chip chip-agentx">AgentX (AI)</span> <span class="answering">· answering ${t(comment.answering)}</span>`
+    : comment.author.kind === "agentx" && comment.planner !== undefined
+    ? '<span class="chip chip-agentx">AgentX</span> <span class="answering">· result</span>'
     : comment.author.kind === "agentx"
     ? '<span class="chip chip-agentx">AgentX</span>'
     : `<span class="comment-author">${t(comment.author.name)}</span>${comment.author.owner ? ' <span class="tag tag-owner">Owner</span>' : ""}`;
@@ -135,7 +155,14 @@ function commentHtml(comment: PageCommentView, context: { shownVersion: number; 
   let body: string;
   if (comment.deleted) body = '<p class="comment-deleted">Comment deleted</p>';
   else if (comment.author.kind === "agentx" && comment.planner !== undefined) {
-    body = `<p class="comment-text">${comment.planner.outcome === "done" ? "Done: " : "Not changed because: "}${t(comment.text)}</p>`;
+    const { outcome, claim } = comment.planner;
+    // After an Approve the comment was handled in the next document; after Request changes, in the same one again.
+    const handled = comment.planner.in === undefined ? "" : ` in ${HANDLED_IN[comment.planner.in].name}`;
+    const lead = outcome === "done" ? `Done${handled}: ` : handled === "" ? "Not changed because: " : `Not changed${handled} because `;
+    const where = comment.planner.in ?? comment.document;
+    const link = claim === undefined || !CLAIM_ID.test(claim) ? ""
+      : `<p class="comment-link">See <a class="claim-link" href="#${HANDLED_IN[where].anchor}/${escapeHtml(claim)}">claim ${escapeHtml(claim)}</a>${handled}.</p>`;
+    body = `<p class="comment-text">${lead}${t(comment.text)}</p>${link}`;
   } else body = `<p class="comment-text">${t(comment.text)}</p>`;
   const state = comment.agentx === undefined || AGENTX_STATES[comment.agentx] === "" ? "" : `<p class="comment-state">${AGENTX_STATES[comment.agentx]}</p>`;
   const yours = comment.author.kind === "person" && comment.author.you && !comment.deleted;

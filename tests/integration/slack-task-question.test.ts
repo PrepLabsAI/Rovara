@@ -327,8 +327,8 @@ describe("a hosted task-mode turn", () => {
     const runtime = await createHostedSlackRuntime(input, { stateDirectory: await createFixtureDirectory("agentx-task-answer-"), api, model: FAUX_MODEL, modelRuntime });
     try {
       expect(runtime.session.systemPrompt).toContain(ANSWER_ONLY_INSTRUCTIONS);
-      // The real options only: a reply without a mention is used at the next step, Request changes edits the document, and nothing is promised.
-      expect(ANSWER_ONLY_INSTRUCTIONS).toBe("You are answering a question about this AgentX task. You cannot change the task, start work, or read code. If the question needs code investigation, say so. A reply without @mentioning AgentX is used at the next step; Request changes on the card changes the current document. Never promise to change anything yourself.");
+      // The real options only: a reply without a mention is used at the next step, Request changes in Slack or a comment before approving changes the document, and nothing is promised.
+      expect(ANSWER_ONLY_INSTRUCTIONS).toBe("You are answering a question about this AgentX task. You cannot change the task, start work, or read code. If the question needs code investigation, say so. A reply without @mentioning AgentX is used at the next step. To change the current document, the owner can press Request changes in Slack, or add a comment on the task page before approving. Name a decision by its question and a comment by who wrote it; never use internal labels such as d1 or c1. Never promise to change anything yourself.");
       expect(ANSWER_ONLY_INSTRUCTIONS).not.toMatch(/suggest (asking|posting)/);
       // No capabilities list of tools and repositories is shown either.
       expect(runtime.session.systemPrompt).not.toContain("What this channel can do");

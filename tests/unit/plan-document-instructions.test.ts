@@ -16,6 +16,11 @@ describe("planDocumentInstructions", () => {
     expect(text).not.toContain("previous document");
   });
 
+  it("asks that a quoted page comment be credited by its ref alone, which the page turns into who wrote it", () => {
+    const text = planDocumentInstructions({ kind: "plan", path: "FULL" });
+    expect(text).toContain('To quote a comment from the task page, write its author as "comment c1" (the comment\'s ref, nothing else); AgentX shows who wrote it.');
+  });
+
   it("gives each kind its own job, and the checks member to the coding plan and the Quick plan only", () => {
     const requirements = planDocumentInstructions({ kind: "requirements", path: "FULL" });
     const design = planDocumentInstructions({ kind: "design", path: "FULL" });

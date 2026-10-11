@@ -33,7 +33,11 @@ import {
   submitWorkflowArtifact,
   parsePlanDocument,
   parseCommentAnswers,
+  commentRefInAuthor,
+  plainPageRefs,
   type CommentAnswer,
+  type CommentDocument,
+  type PlanClaim,
   type WorkflowDecisionDetail,
   retiredClaimIds,
   canonicalPlanJson,
@@ -2566,7 +2570,7 @@ async function markCommentAnswered(dependencies: AwsBrokerDependencies, identity
   try {
     state = await writeCommentAnswer(
       { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: developerTaskActions(dependencies), now: Date.now },
-      { taskId: body.taskId, commentId: body.commentId, outcome: body.outcome, ...(body.outcome === "ANSWERED" ? { text: body.text } : {}) },
+      { taskId: body.taskId, commentId: body.commentId, outcome: body.outcome, ...(body.outcome === "ANSWERED" ? { text: await withPlainRefs(dependencies, body.taskId, body.text) } : {}) },
     );
   } catch (error) {
     if (isPageRefusal(error)) throw agentXError("IDEMPOTENCY_CONFLICT", "that comment is not waiting for an answer");
@@ -2574,6 +2578,28 @@ async function markCommentAnswered(dependencies: AwsBrokerDependencies, identity
   }
   console.log(JSON.stringify({ component: "broker", event: "developer.comment_answer_written", taskId: body.taskId, outcome: state }));
   return { outcome: state === "answered" ? "ANSWERED" : "FAILED" };
+}
+
+/**
+ * AgentX's answer to a page comment with the plan's labels made plain: "decision d1" names the decision by its question
+ * (read from the task's own documents), and "comment c1" reads "that comment". The model is told not to use them; this
+ * is for the one that slips through. An unreadable document leaves the labels it would have named plain but unnamed.
+ */
+async function withPlainRefs(dependencies: AwsBrokerDependencies, taskId: string, text: string): Promise<string> {
+  if (!/\b[dc][1-9][0-9]{0,2}\b/u.test(text)) return text;
+  const decisions = new Map<string, string>();
+  try {
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+    for (const entry of task?.workflow?.artifacts ?? []) {
+      if (entry.format !== "structured") continue;
+      const loaded = await loadWorkflowDocument((key) => readObjectText(dependencies, key, EARLIER_PLAN_MAX_BYTES), entry, {}).catch(() => undefined);
+      // A later version's question for the same number is the one that stands.
+      if (loaded?.format === "structured") for (const decision of loaded.plan.decisions) decisions.set(decision.id, decision.question);
+    }
+  } catch {
+    // The labels are still removed below, only without the decision's words.
+  }
+  return plainPageRefs(text, { decisions });
 }
 
 const SHARED_VIEW_ONLY = "this thread follows a task started from an AI tool and is view only";
@@ -6590,7 +6616,7 @@ async function storePlanAnswer(
       format: "structured",
     },
   });
-  const replies = await plannerRepliesFor(dependencies, task, artifactType, content, { artifactId, version: next.artifacts.at(-1)?.version ?? 1 });
+  const replies = await plannerRepliesFor(dependencies, task, artifactType, content, plan, { artifactId, version: next.artifacts.at(-1)?.version ?? 1 });
   const withReplies = replies === undefined ? {} : { plannerReplies: replies };
   if (!planCitesCode(plan)) return { next, planUnreadable: null, ...withReplies };
   const artifactSha256 = sha(canonical);
@@ -6613,32 +6639,70 @@ async function storePlanAnswer(
   return { next, planUnreadable: null, inlineEvidence: { artifactId, artifactSha256, bundle, prefix }, ...withReplies };
 }
 
-/** The planner's answers to the comments the owner sent back with Request changes, for the version just stored. */
-interface PlannerReplies { taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: CommentAnswer[] }
+/** The planner's answers to the comments the owner sent with a decision, for the version just stored. */
+interface PlannerReplies {
+  taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: CommentAnswer[];
+  /** After an Approve: the document that handled the comments, which is not the one they were made on. */
+  handledIn?: CommentDocument;
+  /** The claim of the new document that cites each comment (by ref), when one does. */
+  claims?: ReadonlyMap<string, string>;
+}
+
+const DOCUMENT_ORDER: readonly string[] = ["requirements", "design", "plan"];
+
+/** The first claim (in document order) whose evidence quotes the comment with this ref, by comment ref in the quote's author. */
+function claimsCitingComments(plan: PlanDocument): Map<string, string> {
+  const found = new Map<string, string>();
+  const walk = (claims: readonly PlanClaim[]) => {
+    for (const claim of claims) {
+      for (const evidence of claim.evidence ?? []) {
+        const ref = evidence.kind === "quote" ? commentRefInAuthor(evidence.author) : undefined;
+        if (ref !== undefined && !found.has(ref)) found.set(ref, claim.id);
+      }
+      walk(claim.children ?? []);
+    }
+  };
+  walk(plan.claims);
+  return found;
+}
 
 /**
- * Spec 061 slice 2: when this planning step follows a Request changes that sent comments, the planner's
- * `agentx-comment-answers` block read against that decision's comments (refs c1, c2 and so on). Undefined when the step
- * did not follow such a decision, or its record cannot be read; a missing or unreadable block is no answers.
+ * Spec 061 slice 2: when this planning step follows a decision that sent comments, the planner's `agentx-comment-answers`
+ * block read against that decision's comments (refs c1, c2 and so on). Request changes: the same document, rewritten.
+ * Approve: the next document, which builds on the approved one and handles the comments sent with the approval. Undefined
+ * when the step did not follow such a decision, or its record cannot be read; a missing or unreadable block (an older
+ * worker never writes one) is no answers.
  */
 async function plannerRepliesFor(
-  dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord & { workflow: WorkflowSnapshot }, artifactType: string, content: string,
+  dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord & { workflow: WorkflowSnapshot }, artifactType: string, content: string, plan: PlanDocument,
   stored: { artifactId: string; version: number },
 ): Promise<PlannerReplies | undefined> {
   const workflow = task.workflow;
   const last = [...workflow.decisions].reverse().find((decision) => (decision.source ?? "GATE") === "GATE");
-  if (last?.decision !== "REQUEST_CHANGES" || (last.commentsIncluded ?? 0) === 0) return undefined;
-  if (!workflow.artifacts.some((artifact) => artifact.sha256 === last.artifactDigest && artifact.type === artifactType)) return undefined;
+  if ((last?.decision !== "REQUEST_CHANGES" && last?.decision !== "APPROVE") || (last.commentsIncluded ?? 0) === 0) return undefined;
+  const decided = workflow.artifacts.find((artifact) => artifact.sha256 === last.artifactDigest);
+  if (decided === undefined) return undefined;
+  // Request changes is answered by the same kind of document again; an approval by the one that follows the approved one.
+  const approved = last.decision === "APPROVE";
+  if (approved ? DOCUMENT_ORDER.indexOf(artifactType) <= DOCUMENT_ORDER.indexOf(decided.type) : decided.type !== artifactType) return undefined;
   try {
     const detail = await readDecisionDetail(dependencies, task.taskId, last.requestId);
     if (detail === undefined || detail.includedCommentIds.length === 0) return undefined;
     const refs = new Set(detail.includedCommentIds.map((_, index) => `c${index + 1}`));
-    return { taskId: task.taskId, ...stored, detail, answers: parseCommentAnswers(content, refs) };
+    // Refs and decision numbers are the planner's; the reply says them in words.
+    const decisions = new Map(plan.decisions.map((decision) => [decision.id, decision.question]));
+    const answers = parseCommentAnswers(content, refs).map((answer) => ({ ...answer, reason: plainPageRefs(answer.reason, { decisions, bareComments: true }) }));
+    return {
+      taskId: task.taskId, ...stored, detail, answers, claims: claimsCitingComments(plan),
+      ...(approved && isCommentDocument(artifactType) ? { handledIn: artifactType } : {}),
+    };
   } catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "developer.planner_replies_unread", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }));
     return undefined;
   }
 }
+
+const isCommentDocument = (type: string): type is CommentDocument => DOCUMENT_ORDER.includes(type);
 
 /** Writes the planner's answers as replies from AgentX, after the plan committed. Best effort: a failure is logged with counts only. */
 async function writeAllPlannerReplies(dependencies: AwsBrokerDependencies, entries: readonly PlannerReplies[]): Promise<void> {
@@ -7756,7 +7820,7 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
   const functionName = requiredEnvironment("DEVELOPER_IDENTITY_FUNCTION_ARN");
   const teamId = process.env.SLACK_TEAM_ID ?? "";
   return {
-    // Spec 061 slice 2: "Ask AgentX to answer" queues on the Slack service's request queue; set only where that service runs.
+    // Spec 061 slice 2: "Ask AgentX to reply to this comment" queues on the Slack service's request queue; set only where that service runs.
     ...(process.env.SLACK_REQUEST_QUEUE_URL ? { slackRequestQueue: slackRequestQueue(process.env.SLACK_REQUEST_QUEUE_URL) } : {}),
     issuer,
     env: requiredEnvironment("AGENTX_ENV"),
@@ -7778,7 +7842,7 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
     }),
   };
 }
-/** The Slack request queue (FIFO) as "Ask AgentX to answer" sends to it. */
+/** The Slack request queue (FIFO) as "Ask AgentX to reply to this comment" sends to it. */
 function slackRequestQueue(queueUrl: string): SlackRequestQueue {
   const client = new SQSClient(awsClientConfiguration);
   return {

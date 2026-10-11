@@ -491,15 +491,21 @@ export function suggestionsFor(
 }
 
 /**
- * The planner's answers to the comments a Request changes sent (refs c1, c2 and so on, in the decision's order), written
- * as replies from AgentX under each comment's thread. Each reply has an ID derived from the comment and the new version,
+ * The planner's answers to the comments a Request changes or an Approve sent (refs c1, c2 and so on, in the decision's
+ * order), written as replies from AgentX under each comment's thread, on the document the comment was made on. Each reply has an ID derived from the comment and the new version,
  * so a repeat finds it already there. Each one counts toward the task's 300 items; once the cap is reached the rest are
  * left out and logged (counts only, never text). A write that meets another in flight is tried once more; any other
  * failure skips that one reply (logged) and the rest are still written.
  */
 export async function writePlannerReplies(
   deps: TableDependencies & Pick<DeveloperTaskRouteDependencies, "now" | "log">,
-  input: { taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: readonly CommentAnswer[] },
+  input: {
+    taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: readonly CommentAnswer[];
+    /** After an Approve: the document that handled the comments (they were made on the one before it). */
+    handledIn?: CommentDocument;
+    /** The claim of the new document that cites each comment, by ref. */
+    claims?: ReadonlyMap<string, string>;
+  },
 ): Promise<{ written: number }> {
   const { taskId } = input;
   let written = 0;
@@ -511,7 +517,11 @@ export async function writePlannerReplies(
     const reply = TaskCommentSchema.parse({
       schemaVersion: 1, taskId, commentId: plannerReplyCommentId(commentId, input.artifactId), parentId: comment.parentId ?? comment.commentId,
       document: comment.document, version: comment.version, target: comment.target,
-      author: { kind: "agentx", source: "planner", outcome: answer.outcome, forVersion: input.version },
+      author: {
+        kind: "agentx", source: "planner", outcome: answer.outcome, forVersion: input.version,
+        ...(input.handledIn === undefined ? {} : { handledIn: input.handledIn }),
+        ...(input.claims?.get(answer.ref) === undefined ? {} : { claim: input.claims.get(answer.ref)! }),
+      },
       text: answer.reason, createdAt: iso(deps), rev: 1,
     });
     const send = () => deps.documentClient.send(new TransactWriteCommand({
@@ -578,7 +588,7 @@ async function setAsk(deps: CommentDependencies, comment: TaskComment, state: No
 }
 
 /**
- * "Ask AgentX to answer" (spec 061 slice 2): queues the comment's question for the Slack service, which answers it in
+ * "Ask AgentX to reply to this comment" (spec 061 slice 2): queues the comment's question for the Slack service, which answers it in
  * task mode with no tools and writes the answer back. Only for a task started in Slack (its own thread) when the queue is
  * set up; otherwise the comment says AgentX can answer only there. Limited per person (6 an hour), per task (20 an hour)
  * and per thread (5 AgentX answers); a limited ask leaves the comment as it is. A queue that refuses the message marks the

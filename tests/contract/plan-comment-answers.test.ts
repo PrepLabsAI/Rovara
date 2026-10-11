@@ -2,13 +2,13 @@
 // replies from AgentX under the comments, written once, never past the task's comment cap, and never in the plan's way.
 import { randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { parseCommentAnswers, plannerReplyCommentId, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@agentx/contracts";
+import { parseCommentAnswers, plainPageRefs, plannerReplyCommentId, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@agentx/contracts";
 import { decideTaskWorkflow, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { readDecisionDetail } from "../../packages/broker/src/developer/owner-answers.js";
 import { writePlannerReplies } from "../../packages/broker/src/developer/page-comments.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
-import { planAnswer } from "../support/plan-documents.js";
+import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { pagePlan } from "../support/page-tasks.js";
 import { SLACK_CHANNEL } from "../support/slack-broker.js";
 import { validatingDocumentClient } from "../support/validating-document-client.js";
@@ -188,3 +188,144 @@ async function changesRequestedAgainWith(prefix: string): Promise<{ stored: bool
   await t.replan(prefix);
   return { stored: workflowOf(t.harness, t.taskId).artifacts.at(-1)?.version === 2, replies: agentxReplies(t.harness, t.taskId).length };
 }
+
+/**
+ * A Full task whose design v1 the owner approved with two comments (c1 an instruction, c2 a question), so the coding plan
+ * is being written. The comments sit on the design; `plan` writes the coding plan's answer.
+ */
+async function designApproved(options: { comments?: number } = {}) {
+  const harness = await createDeveloperTaskBroker();
+  const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test-client", workflow: true, workflowPath: "FULL" });
+  const taskId = String((started.body.task as { taskId: string }).taskId);
+  const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workspaceId: string; workflow: WorkflowSnapshot };
+  const workspaceId = record.workspaceId;
+  harness.db.set({ ...record, workflow: { ...record.workflow, checkPolicy: { required: [REQUIRED_CHECK], optional: [], selectedOptionalIds: [] } } });
+  await harness.finish(workspaceId, String(operations(harness, workspaceId).find((item) => item.kind === "prepare")?.id), "SUCCEEDED", PREPARED);
+  const step = async (document: PlanDocument) => {
+    const running = operations(harness, workspaceId).find((item) => item.workflowMode === "PLAN" && item.status === "ACCEPTED")!;
+    await harness.artifact(workspaceId, String(running.id), "plan.md", planAnswer(document));
+    await harness.finish(workspaceId, String(running.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+  };
+  const approve = async (includedCommentIds?: string[]) => {
+    const workflow = workflowOf(harness, taskId);
+    const requestId = randomUUID();
+    await decideTaskWorkflow(routeDeps(harness), maya, taskId, {
+      requestId, expectedRevision: workflow.revision, decision: "APPROVE", artifactDigest: workflow.artifacts.at(-1)!.sha256, reason: "Approved on the task page.",
+      answers: [], ...(includedCommentIds === undefined ? {} : { includedCommentIds }),
+    }, { via: "PAGE" });
+    return requestId;
+  };
+  const requirements = planDocument({ title: "Retry banner requirements", decisions: [] });
+  await step(requirements);
+  await approve();
+  await step({ ...requirements, title: "Retry banner design" });
+  let minute = 0;
+  const seed = (text: string, extra: Partial<TaskComment> = {}): string => {
+    const commentId = randomUUID();
+    minute += 1;
+    harness.db.set({
+      pk: `DEVTASK#${taskId}`, sk: `COMMENT#${commentId}`, entityType: "TASK_COMMENT", schemaVersion: 1, taskId, commentId, document: "design", version: 1,
+      target: { kind: "document" }, author: { kind: "person", developerId: MAYA.developerId, name: "Maya Chen", owner: true },
+      text, createdAt: new Date(Date.parse("2026-10-11T09:00:00.000Z") + minute * 60_000).toISOString(), rev: 1, ...extra,
+    });
+    return commentId;
+  };
+  const ids = Array.from({ length: options.comments ?? 2 }, (_, index) => seed(index === 0 ? "Keep each item to one line." : "Why two steps?"));
+  harness.db.set({ pk: `DEVTASK#${taskId}`, sk: "COMMENTS", entityType: "TASK_COMMENT_COUNTER", taskId, count: ids.length, seq: ids.length });
+  const requestId = await approve(ids);
+  const plan = async (prefix: string, document: PlanDocument = planDocument({ title: "Retry banner coding plan", decisions: [] })) => {
+    const running = operations(harness, workspaceId).find((item) => item.workflowMode === "PLAN" && item.status === "ACCEPTED")!;
+    await harness.artifact(workspaceId, String(running.id), "plan.md", `${prefix}${planAnswer(document)}`);
+    await harness.finish(workspaceId, String(running.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    return running;
+  };
+  /** What the coding plan's planner was asked, while its step is running. */
+  const prompt = () => {
+    const running = operations(harness, workspaceId).find((item) => item.workflowMode === "PLAN" && item.status === "ACCEPTED")!;
+    return String((harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === running.id)[0]?.invocation as { payload: { prompt: string } } | undefined)?.payload.prompt);
+  };
+  return { harness, taskId, workspaceId, requestId, ids, plan, prompt };
+}
+
+describe("planner answers to comments sent with an Approve", () => {
+  const cited = (ref: string) => planDocument({ title: "Retry banner coding plan", decisions: [], claims: [{ id: "1", text: "Each bullet stays on one line.",
+    evidence: [{ kind: "quote", text: "Keep each item to one line.", author: `owner (comment ${ref})` }] }, { id: "2", text: "A payment is never charged twice." }] });
+
+  it("the coding plan's answers become replies on the design's comments, saying which document handled them and where", async () => {
+    const t = await designApproved();
+    await t.plan(answersBlock([
+      { comment: "c1", outcome: "done", reason: "Each bullet stays on one line." },
+      { comment: "c2", outcome: "not_changed", reason: "The steps stay as they are." },
+    ]), cited("c1"));
+    const workflow = workflowOf(t.harness, t.taskId);
+    const coding = workflow.artifacts.at(-1)!;
+    expect(coding.type).toBe("plan");
+    const replies = agentxReplies(t.harness, t.taskId);
+    expect(replies).toHaveLength(2);
+    // On the document the comment was made on (the design), under that comment, for the version of the coding plan.
+    expect(replies.find((reply) => reply.commentId === plannerReplyCommentId(t.ids[0]!, coding.id))).toMatchObject({
+      parentId: t.ids[0], document: "design", version: 1, target: { kind: "document" }, text: "Each bullet stays on one line.",
+      author: { kind: "agentx", source: "planner", outcome: "done", forVersion: 1, handledIn: "plan", claim: "1" },
+    });
+    const kept = replies.find((reply) => reply.commentId === plannerReplyCommentId(t.ids[1]!, coding.id))!;
+    expect(kept).toMatchObject({ parentId: t.ids[1], document: "design", author: { outcome: "not_changed", handledIn: "plan" } });
+    expect(kept.author).not.toHaveProperty("claim");
+  });
+
+  it("the planner is asked for the answers after an Approve with comments, and not when the approval has none", async () => {
+    const t = await designApproved();
+    expect(t.prompt()).toContain("agentx-comment-answers");
+    expect(t.prompt()).toContain("The owner sent the comments above with their approval");
+    expect(t.prompt()).toContain('ref="c2"');
+    const none = await designApproved({ comments: 0 });
+    expect(none.prompt()).not.toContain("agentx-comment-answers");
+  });
+
+  it("an older worker that gives no answers block still stores the coding plan and writes no replies", async () => {
+    const t = await designApproved();
+    await t.plan("", cited("c1"));
+    expect(workflowOf(t.harness, t.taskId)).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    expect(workflowOf(t.harness, t.taskId).artifacts.at(-1)?.type).toBe("plan");
+    expect(agentxReplies(t.harness, t.taskId)).toHaveLength(0);
+  });
+
+  it("a resent callback writes each reply once", async () => {
+    const t = await designApproved();
+    const running = await t.plan(answersBlock([{ comment: "c1", outcome: "done", reason: "Done." }, { comment: "c2", outcome: "done", reason: "Answered." }]));
+    await t.harness.finish(t.workspaceId, String(running.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    expect(agentxReplies(t.harness, t.taskId)).toHaveLength(2);
+    const workflow = workflowOf(t.harness, t.taskId);
+    const detail = (await readDecisionDetail(routeDeps(t.harness), t.taskId, t.requestId))!;
+    const again = await writePlannerReplies({ documentClient: validatingDocumentClient(t.harness.db), tableName: "state", now: () => Date.now(), log: () => undefined }, {
+      taskId: t.taskId, artifactId: workflow.artifacts.at(-1)!.id, version: 1, detail, handledIn: "plan",
+      answers: parseCommentAnswers(answersBlock([{ comment: "c1", outcome: "done", reason: "Done." }]), new Set(["c1", "c2"])),
+    });
+    expect(again).toEqual({ written: 0 });
+    expect(agentxReplies(t.harness, t.taskId)).toHaveLength(2);
+  });
+
+  it("no replies are written for a Request changes on the coding plan that follows, from the approval's comments", async () => {
+    const t = await designApproved();
+    await t.plan("");
+    const workflow = workflowOf(t.harness, t.taskId);
+    await decideTaskWorkflow(routeDeps(t.harness), maya, t.taskId, {
+      requestId: randomUUID(), expectedRevision: workflow.revision, decision: "REQUEST_CHANGES", artifactDigest: workflow.artifacts.at(-1)!.sha256, reason: "Shorter, please.",
+    }, { via: "PAGE", note: "Shorter, please." });
+    await t.plan(answersBlock([{ comment: "c1", outcome: "done", reason: "Shortened." }]));
+    expect(agentxReplies(t.harness, t.taskId)).toHaveLength(0);
+  });
+});
+
+describe("plain references in AgentX text", () => {
+  const decisions = new Map([["d1", "Where does the banner go?"], ["d2", "How many times should a payment be retried and for how long before it is given up on for good?"]]);
+  it("names a decision by its question and a comment by what it is", () => {
+    expect(plainPageRefs("This was confirmed by you in decision d1.", { decisions })).toBe('This was confirmed by you in decision "Where does the banner go".');
+    expect(plainPageRefs("You settled decision d1 (Algorithms expansion + more) earlier.", { decisions })).toBe("You settled the decision (Algorithms expansion + more) earlier.");
+    expect(plainPageRefs("See d2.", { decisions })).toBe('See "How many times should a payment be retried and for how long…".');
+    expect(plainPageRefs("As comment c1 asked, and c2 too.", { decisions })).toBe("As that comment asked, and c2 too.");
+    expect(plainPageRefs("As comment c1 asked, and c2 too.", { decisions, bareComments: true })).toBe("As that comment asked, and that comment too.");
+  });
+  it("makes a decision the plan does not have plain, and leaves other text alone", () => {
+    expect(plainPageRefs("Decision d9 is not here; d9 stays, and a3 or d100 are left.", { decisions })).toBe("a decision is not here; d9 stays, and a3 or d100 are left.");
+  });
+});

@@ -172,7 +172,7 @@ export function planDocumentInstructions(input: {
     kindLine,
     "Claims: rank them by importance at every level, most important first. Write as many claims as the task needs and no more, and scale the plan to the task: a one-line change gets a tiny plan. Level 1 says what someone can do or see, level 2 says how it works, level 3 says where in the code. How deep the tree goes follows the task. Keep each claim to about 15 words.",
     input.anchors === true ? `${CITE_SENTENCE} ${CODE_ANCHOR_SENTENCE}` : CITE_SENTENCE,
-    "Evidence: add it when it proves the claim. A `code` item must cite a real file you read, by workspace path and line range, at most 80 lines. Code that does not exist yet is a `sketch`. Use `flow`, `schema` and `stateMachine` for behaviour that has a flow, a data shape or states. A `quote` credits its author.",
+    "Evidence: add it when it proves the claim. A `code` item must cite a real file you read, by workspace path and line range, at most 80 lines. Code that does not exist yet is a `sketch`. Use `flow`, `schema` and `stateMachine` for behaviour that has a flow, a data shape or states. A `quote` credits its author. To quote a comment from the task page, write its author as \"comment c1\" (the comment's ref, nothing else); AgentX shows who wrote it.",
     "Decisions: include only real choices the owner should make, ranked by impact, each on the claim it changes, with 2 to 4 options that each say what follows from choosing them, and exactly one recommended. No decisions is fine.",
     "Every decision option must be something AgentX can carry out; custom wording goes through Request changes, never an option.",
     "`notChanging` and `risks` are required: say \"None\" when there is nothing to list.",

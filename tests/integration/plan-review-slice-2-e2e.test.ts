@@ -383,7 +383,7 @@ describe("deciding and commenting on the task page, end to end", () => {
     const posts = e2e.slack.posts.length;
     const sam = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
     const form = await sam.comment("claim:2.1", "Why is Below the recommended place?", { ask: true });
-    expect(readable(form)).toContain("Ask AgentX to answer");
+    expect(readable(form)).toContain("Ask AgentX to reply to this comment");
     expect(queue.sent).toHaveLength(1);
     const waiting = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
     expect(readable(waiting.document.querySelector('[data-comments="claim:2.1"]')!)).toContain("AgentX is answering…");

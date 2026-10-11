@@ -59,11 +59,15 @@ const PersonAuthorSchema = z.object({
 
 const AgentXAuthorSchema = z.object({
   kind: z.literal("agentx"),
-  /** "answer": AgentX answered a question asked on the page; "planner": the planner's answer after Request changes. */
+  /** "answer": AgentX answered a question asked on the page; "planner": the planner's answer to a comment sent with a decision. */
   source: z.enum(["answer", "planner"]),
   outcome: z.enum(["done", "not_changed"]).optional(),
   /** Planner replies: the version written in answer. */
   forVersion: z.number().int().positive().optional(),
+  /** Planner replies after an Approve: the next document that handled the comment (the comment sits on the one before). */
+  handledIn: CommentDocumentSchema.optional(),
+  /** Planner replies: the claim of that document that cites the comment, so the page can link to it. */
+  claim: ClaimIdSchema.optional(),
 }).strict();
 
 export const TaskCommentSchema = z.object({
@@ -224,4 +228,43 @@ export function sameIdSet(a: readonly string[], b: readonly string[]): boolean {
   const left = [...a].sort();
   const right = [...b].sort();
   return left.every((id, index) => id === right[index]);
+}
+
+/** The ref ("c1") a quote's author names a comment by, in any of the ways a planner writes it: "owner (comment c1)", "comment c1", "Maya (c2)". */
+export function commentRefInAuthor(author: string): string | undefined {
+  return /\b(?:comment\s+)?(c[1-9][0-9]{0,2})\b/iu.exec(author)?.[1]?.toLowerCase();
+}
+
+/** What a quote's author reads as when the page cannot say whose comment it is: the ref is never shown. */
+export function plainCommentAuthor(author: string): string {
+  const role = /^\s*(owner|teammate)\b/iu.exec(author)?.[1]?.toLowerCase();
+  return role === "owner" ? "Owner's comment" : role === "teammate" ? "A teammate's comment" : "A comment";
+}
+
+const SHOWN_DECISION_MAX_CHARS = 60;
+
+/**
+ * AgentX-written page text with the plan's own references made plain: "decision d1" names the decision by its question
+ * (a decision the plan does not have becomes "a decision"), and "comment c1" reads "that comment". A bare "d1" is
+ * replaced only when the plan has that decision; a bare "c1" only when `bareComments` is set (a planner's answer, where
+ * refs are what it was given). Nothing else is touched.
+ */
+export function plainPageRefs(text: string, input: { decisions: ReadonlyMap<string, string>; bareComments?: boolean }): string {
+  const label = (id: string): string | undefined => {
+    const question = input.decisions.get(id.toLowerCase());
+    if (question === undefined) return undefined;
+    const flat = question.replace(/\s+/gu, " ").trim().replace(/[?.!]+$/u, "");
+    const characters = Array.from(flat);
+    return `"${characters.length > SHOWN_DECISION_MAX_CHARS ? `${characters.slice(0, SHOWN_DECISION_MAX_CHARS - 1).join("").trimEnd()}…` : flat}"`;
+  };
+  let plain = text
+    .replace(/\b(decisions?)\s+(d[1-9][0-9]?)\b(\s*\()?/giu, (_match, word: string, id: string, open?: string) => {
+      const shown = label(id);
+      if (open !== undefined) return `the decision (`;
+      return shown === undefined ? "a decision" : `${word} ${shown}`;
+    })
+    .replace(/\bcomments?\s+c[1-9][0-9]{0,2}\b/giu, "that comment")
+    .replace(/\bd[1-9][0-9]?\b/gu, (id) => label(id) ?? id);
+  if (input.bareComments === true) plain = plain.replace(/\bc[1-9][0-9]{0,2}\b/gu, "that comment");
+  return plain;
 }

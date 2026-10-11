@@ -1,4 +1,4 @@
-// Spec 061 slice 2, Task 9: "Ask AgentX to answer" on a task page comment. The broker queues the question for the Slack
+// Spec 061 slice 2, Task 9: "Ask AgentX to reply to this comment" on a task page comment. The broker queues the question for the Slack
 // service (never for a task without a Slack thread, never past the limits), gives the tool-less answer turn the comment's
 // place and thread as untrusted data, and writes the answer back only for the task's own thread.
 import { createHash, randomUUID } from "node:crypto";

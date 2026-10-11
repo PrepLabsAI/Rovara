@@ -20,7 +20,8 @@ export type TaskDocumentKind = "requirements" | "design" | "coding plan";
 /** One saved version of a document: older Markdown copies and structured plans read through the same list. */
 export type TaskDocumentEntry =
   | { kind: TaskDocumentKind; version: number; approved: boolean; current: boolean; format: "markdown"; markdown: string }
-  | { kind: TaskDocumentKind; version: number; approved: boolean; current: boolean; format: "structured"; plan: PlanDocument; evidence?: PlanEvidenceBundle; /** When the document was stored. */ createdAt?: string };
+  | { kind: TaskDocumentKind; version: number; approved: boolean; current: boolean; format: "structured"; plan: PlanDocument; evidence?: PlanEvidenceBundle; /** When the document was stored. */ createdAt?: string;
+    /** The comment each ref a quote's author names ("comment c1") stands for, from the decision that sent the comments to this document. */ commentRefs?: Record<string, string> };
 
 export interface TaskDocumentView {
   taskId: string;
@@ -221,8 +222,14 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
         deciding: view.access.canDecide && view.waiting?.kind === entry.kind && view.waiting.version === document.version,
         plans: new Map(versions.flatMap((item) => item.format === "structured" ? [[item.version, item.plan] as const] : [])),
       };
+      // A quote that credits "comment c1" names the comment's author and links its thread (the ref itself is never shown).
+      const commentRefs = Object.fromEntries(Object.entries(document.commentRefs ?? {}).flatMap(([ref, id]) => {
+        const comment = (view.pageComments ?? []).find((item) => item.id === id && item.author.kind === "person");
+        return comment === undefined ? [] : [[ref, { id, name: comment.author.name, you: comment.author.you }]];
+      }));
       return await renderPlanDocument({
         ...slice2,
+        ...(Object.keys(commentRefs).length === 0 ? {} : { commentRefs }),
         anchor: entry.anchor, kind: entry.planKind, version: document.version, approved: document.approved, current: document === currentDocument,
         currentVersion: currentDocument.version, plan: document.plan, ...(document.evidence === undefined ? {} : { evidence: document.evidence }),
         ...(document.createdAt === undefined ? {} : { createdAt: document.createdAt }), ...(view.now === undefined ? {} : { now: view.now }),

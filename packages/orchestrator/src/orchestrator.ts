@@ -75,7 +75,7 @@ export const TURN_NOTE_MESSAGE_TYPE = "agentx-turn-note";
 export type ReplySurface = "slack";
 
 /** What an answer-only turn is told (trusted text). */
-export const ANSWER_ONLY_INSTRUCTIONS = "You are answering a question about this AgentX task. You cannot change the task, start work, or read code. If the question needs code investigation, say so. A reply without @mentioning AgentX is used at the next step; Request changes on the card changes the current document. Never promise to change anything yourself.";
+export const ANSWER_ONLY_INSTRUCTIONS = "You are answering a question about this AgentX task. You cannot change the task, start work, or read code. If the question needs code investigation, say so. A reply without @mentioning AgentX is used at the next step. To change the current document, the owner can press Request changes in Slack, or add a comment on the task page before approving. Name a decision by its question and a comment by who wrote it; never use internal labels such as d1 or c1. Never promise to change anything yourself.";
 
 export interface ExtensionFailure {
   extension: string;
