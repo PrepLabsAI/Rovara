@@ -593,6 +593,26 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     })]);
   });
 
+  it("does not rewrite the Canvas record when a step records what is already stored (maps read back in another order)", async () => {
+    const plan = "# Goal\nFix retry handling.";
+    // Slack's created callback runs twice with the same Canvas: the second record changes nothing and writes nothing.
+    const createPlanCanvas = vi.fn(async (_input, onCreated?: (canvasId: string) => Promise<void>) => {
+      await onCreated?.("F12345678");
+      await onCreated?.("F12345678");
+      return { canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" };
+    });
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, { readArtifact: async () => plan, createPlanCanvas });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    await finishPlanningWithMarkdown(h, h.workspaceId, h.active(), plan);
+    await h.pump();
+    const saved = h.db.get(`DEVTASK#${h.taskId}`, "META") as { canvasLineageVersion?: number; workflow: { canvasLineage?: Array<Record<string, unknown>> } };
+    expect(saved.workflow.canvasLineage).toEqual([expect.objectContaining({ state: "CREATED", canvasId: "F12345678" })]);
+    // Prepared, attempt fenced, created, linked: four writes.
+    expect(saved.canvasLineageVersion).toBe(4);
+  });
+
   it("updates the original approval card after an owner decision and removes its buttons", async () => {
     const plan = "# Plan\nAdd a retry regression test.";
     const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {

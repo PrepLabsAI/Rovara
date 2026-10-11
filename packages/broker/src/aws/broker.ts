@@ -159,6 +159,7 @@ import {
   INDEX_EXPIRY_ATTRIBUTE,
   indexExpiresAt,
   WORKFLOW_RESOLVE_FINDINGS_MAX,
+  sameJsonContent,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
@@ -1369,10 +1370,8 @@ async function registerProject(
   const key = projectKey(definition.name, definition.revision);
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
-    if (
-      JSON.stringify(existing.definition) !== JSON.stringify(definition) ||
-      JSON.stringify(existing.runtimeBinding) !== JSON.stringify(runtimeBinding)
-    ) {
+    // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
+    if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding)) {
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
     }
     // A revision stored before the static checks existed stays idempotent: report, never refuse.

@@ -9,7 +9,7 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
@@ -496,7 +496,8 @@ async function mutateCanvasLineage(
     const updated = mutate(existing, artifact, task);
     if (updated.key !== key || updated.artifactId !== artifact.id || updated.artifactRef !== artifact.objectKey
       || updated.artifactDigest !== artifact.sha256) return undefined;
-    if (existing !== undefined && JSON.stringify(existing) === JSON.stringify(updated)) return existing;
+    // The stored record is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
+    if (existing !== undefined && sameJsonContent(existing, updated)) return existing;
     const version = task.canvasLineageVersion ?? 0;
     const next = [...records.filter((entry) => entry.key !== key), updated];
     const nextWorkflow = { ...workflow, canvasLineage: next, canvasLineageVersion: version + 1, updatedAt: new Date(deps.now()).toISOString() };

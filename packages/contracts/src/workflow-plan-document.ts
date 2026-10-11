@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { RelativeWorkspacePathSchema } from "./project.js";
+import { canonicalJson, sortKeys } from "./canonical-json.js";
 import { redactText } from "./redaction.js";
 import { WorkflowCheckSchema, WORKFLOW_PROPOSED_CHECKS_MAX, type WorkflowCheck, type WorkflowCheckProposal } from "./task-workflow.js";
 import { extractProposedChecks, hasControlCharacter, isNotChangingReference, lastFencedBlock, notChangingReference, proposedCheckTextIssues } from "./workflow-proposed-checks.js";
@@ -221,14 +222,6 @@ export function retiredClaimIds(earlier: PlanDocument[]): Set<string> {
   if (last === undefined) return new Set();
   const current = new Set(planClaimIds(last));
   return new Set(earlier.flatMap(planClaimIds).filter((id) => !current.has(id)));
-}
-
-function sortKeys(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortKeys);
-  if (isRecord(value)) {
-    return Object.fromEntries(Object.keys(value).sort().filter((key) => value[key] !== undefined).map((key) => [key, sortKeys(value[key])]));
-  }
-  return value;
 }
 
 /** The bytes that are hashed and stored: keys in alphabetical order at every level, no whitespace. */
@@ -586,7 +579,6 @@ function compareById<T extends { id: string }>(previous: T[], next: T[], same: (
   };
 }
 
-const canonicalJson = (value: unknown): string => JSON.stringify(sortKeys(value));
 const claimWithoutChildren = (claim: PlanClaim): string => canonicalJson({ ...claim, children: undefined });
 
 /** Compares two versions of a plan by ID. A claim is "changed" when its text or evidence differs; its children are compared as claims of their own. */
