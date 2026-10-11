@@ -4828,12 +4828,20 @@ async function reconcilePullRequest(
     let headCommit: string | undefined;
     let headTree: string | undefined;
     let headOnBase = false;
-    try {
-      headCommit = (await github.getPullRequest(expected.repositoryUrl, pullRequest.number)).headCommit;
-      headTree = headCommit === input.commit ? await github.getCommitTree!(expected.repositoryUrl, headCommit) : undefined;
-      headOnBase = headCommit === input.commit && await onPinnedBase(headCommit);
-    } catch (error) {
-      console.log(JSON.stringify({ component: "broker", event: "workflow.publication_head_unreadable", operationId: operation.id, error: error instanceof Error ? error.name : "unknown" }));
+    // A read GitHub fails once (a 502) is read again before the pull request is judged: closing it over one blip left a
+    // closed pull request and a second one on retry. A head that still can't be read is closed, as one that differs is.
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        headCommit = (await github.getPullRequest(expected.repositoryUrl, pullRequest.number)).headCommit;
+        headTree = headCommit === input.commit ? await github.getCommitTree!(expected.repositoryUrl, headCommit) : undefined;
+        headOnBase = headCommit === input.commit && await onPinnedBase(headCommit);
+        break;
+      } catch (error) {
+        headCommit = undefined;
+        headTree = undefined;
+        headOnBase = false;
+        console.log(JSON.stringify({ component: "broker", event: "workflow.publication_head_unreadable", operationId: operation.id, attempt, error: error instanceof Error ? error.name : "unknown" }));
+      }
     }
     if (headCommit !== input.commit || headTree !== expectedTree || !headOnBase) {
       await github.updatePullRequest(expected.repositoryUrl, pullRequest.number, { state: "closed" }).catch((error: unknown) => {
