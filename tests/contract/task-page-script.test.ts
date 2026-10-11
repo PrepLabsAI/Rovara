@@ -60,7 +60,7 @@ interface Reply { status: number; body?: unknown }
 interface Sent { url: string; method: string; headers: Record<string, string>; body: Record<string, string> }
 
 /** Boots both of the page's scripts against the parsed page. Replies come from `respond`, or wait when it returns undefined. */
-function boot(html: string, options: { storage?: ReturnType<typeof fakeStorage>; respond?: (sent: Sent) => Reply | Promise<Reply> | undefined } = {}) {
+function boot(html: string, options: { storage?: ReturnType<typeof fakeStorage>; local?: ReturnType<typeof fakeStorage>; respond?: (sent: Sent) => Reply | Promise<Reply> | undefined } = {}) {
   const document: FakeDocument = parseHtml(html);
   const storage = options.storage ?? fakeStorage();
   const sent: Sent[] = [];
@@ -94,8 +94,11 @@ function boot(html: string, options: { storage?: ReturnType<typeof fakeStorage>;
     },
     decodeURIComponent, encodeURIComponent,
   };
-  sandbox.window = { addEventListener: () => undefined, localStorage: storage };
-  sandbox.localStorage = storage;
+  // Drafts belong in the tab's sessionStorage; localStorage is there too, and must stay untouched.
+  const local = options.local ?? fakeStorage();
+  sandbox.window = { addEventListener: () => undefined, sessionStorage: storage, localStorage: local };
+  sandbox.sessionStorage = storage;
+  sandbox.localStorage = local;
   for (const script of document.querySelectorAll("script")) {
     if (script.getAttribute("nonce") !== null) vm.runInNewContext(script.textContent, sandbox);
   }
@@ -334,6 +337,90 @@ describe("the deciding and commenting script", () => {
     const stale = boot(await pageHtml(), { storage });
     expect(radio(stale, "d1", "above").checked).toBe(false);
     expect(storage.getItem(`agentx:${taskId}:coding-plan`)).toBeNull();
+  });
+
+  it("drafts live in the tab's sessionStorage, never localStorage, and a sign-in that ended clears them", async () => {
+    const storage = fakeStorage();
+    const local = fakeStorage();
+    const page = boot(await pageHtml(), { storage, local, respond: (entry) => entry.method === "POST" ? { status: 401, body: { error: "sign_in_required" } } : { status: 200, body: {} } });
+    radio(page, "d1", "above").click();
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("A thought.");
+    expect([...storage.map.keys()]).toEqual([`agentx:${taskId}:coding-plan`]);
+    expect(local.map.size).toBe(0);
+    form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await page.settle();
+    expect(form.querySelector(".comment-error")!.textContent).toBe("Your sign-in ended. Open the link from Slack again, then try once more.");
+    expect(storage.map.size).toBe(0);
+  });
+
+  it("one poll at a time, and two hours with no input stop it until the reader is back", async () => {
+    const state = { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43) };
+    const page = boot(await pageHtml(), { respond: (entry) => entry.url.endsWith("/api/state") ? { status: 200, body: state } : { status: 200, body: {} } });
+    const states = () => page.sent.filter((entry) => entry.url.endsWith("/api/state")).length;
+    await page.advance(10_000);
+    // Shown again while a poll is due: one poll now, and the one that was due does not also run.
+    page.document.setVisibility("hidden");
+    page.document.setVisibility("visible");
+    await page.settle();
+    expect(states()).toBe(1);
+    await page.advance(10_000);
+    expect(states()).toBe(1);
+    await page.advance(10_000);
+    expect(states()).toBe(2);
+    expect(page.timers).toHaveLength(1);
+    await page.advance(2 * 3600_000);
+    const quiet = states();
+    await page.advance(3600_000);
+    expect(states()).toBe(quiet);
+    expect(page.timers).toHaveLength(0);
+    // The reader is back: polling starts again.
+    page.document.body.click();
+    await page.advance(60_000);
+    expect(states()).toBeGreaterThan(quiet);
+  });
+
+  it("an open comment form, even empty, keeps its thread from being redrawn", async () => {
+    let seq = 3;
+    const page = boot(await pageHtml(), { respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: seq, csrf: "n".repeat(43) } };
+      if (entry.url.endsWith("/api/comments")) return { status: 200, body: { comments: [comment(1), comment(8, { text: "New one." })], suggestions: [] } };
+      return { status: 200, body: {} };
+    } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    seq = 4;
+    await page.advance(20_000);
+    const thread = page.document.querySelector('[data-comments="claim:2"]')!;
+    expect(thread.querySelector(".comment-form")).not.toBeNull();
+    expect(thread.querySelector(`#comment-${id(8)}`)).toBeNull();
+  });
+
+  it("past 25 comments only the boxes the owner unticked are remembered", async () => {
+    const storage = fakeStorage();
+    const many = Array.from({ length: 27 }, (_, index) => comment(index + 1));
+    const page = boot(await pageHtml({ comments: many }), { storage });
+    page.byId("decide-approve").click();
+    commentBoxes(page)[0]!.click();
+    page.byId("decide-cancel").click();
+    const saved = JSON.parse(storage.getItem(`agentx:${taskId}:coding-plan`)!) as { excluded: string[] };
+    expect(saved.excluded).toEqual([id(1)]);
+    page.byId("decide-approve").click();
+    const boxes = commentBoxes(page);
+    expect(boxes[0]!.checked).toBe(false);
+    expect(boxes.slice(1, 26).every((box) => box.checked)).toBe(true);
+    expect(boxes[26]!.checked).toBe(false);
+  });
+
+  it("a comment the page cannot describe still gets a readable label, and the delete question names itself", async () => {
+    const mine = comment(2, { author: { kind: "person", name: "Priya", owner: false, you: true }, version: 2, target: { kind: "document" } });
+    const html = (await pageHtml({ comments: [comment(1), mine] })).replace(`id="comment-${id(1)}"`, 'id="elsewhere"');
+    const page = boot(html);
+    page.byId("decide-approve").click();
+    expect(page.byId("decide-comments-list").querySelectorAll("label")[0]!.visibleText).toBe("A comment");
+    page.byId("decide-cancel").click();
+    page.document.querySelector(`#comment-${id(2)} .comment-delete`)!.click();
+    expect(page.document.querySelector(`#comment-${id(2)} .comment-confirm`)!.getAttribute("aria-label")).toBe("Delete this comment?");
   });
 
   it("polling stops while hidden and shows the new version banner", async () => {

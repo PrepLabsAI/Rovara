@@ -62,7 +62,7 @@ async function fetchPage(host: PageHost, jar: Jar, search: string): Promise<{ st
 
 /**
  * Opens the task page in a new tab as `reader`. With `scripts: false` the tab is the page with JavaScript off: the HTML
- * only. `storage` is the tab's localStorage (share one between tabs of the same browser).
+ * only. `storage` is the tab's sessionStorage.
  */
 export async function openTaskPage(host: PageHost, reader: PageReader | Developer, options: { search?: string; scripts?: boolean; storage?: ReturnType<typeof fakeStorage> } = {}) {
   const who: PageReader = "provider" in reader && (reader.provider === "slack" || reader.provider === "oidc")
@@ -118,8 +118,8 @@ export async function openTaskPage(host: PageHost, reader: PageReader | Develope
       },
       decodeURIComponent, encodeURIComponent,
     };
-    sandbox.window = { addEventListener: () => undefined, localStorage: storage };
-    sandbox.localStorage = storage;
+    sandbox.window = { addEventListener: () => undefined, sessionStorage: storage };
+    sandbox.sessionStorage = storage;
     for (const script of document.querySelectorAll("script")) {
       if (script.getAttribute("nonce") !== null) vm.runInNewContext(script.textContent, sandbox);
     }

@@ -224,6 +224,7 @@ export const TASK_PAGE_DECIDING_COPY = {
   edit: "Edit",
   remove: "Delete",
   confirmRemove: "Delete this comment?",
+  aComment: "A comment",
   removed: "Comment deleted",
   sentLocked: "Sent with a decision, so it can't be changed.",
   fromVersion: "from v",
@@ -255,7 +256,7 @@ export const TASK_PAGE_DECIDING_COPY = {
  * It reads the page's JSON data island and builds everything with createElement and textContent: no markup from strings,
  * no handlers in attributes, no navigation built from data (only reload). It turns on the owner's sticky bar ("N to
  * answer", Approve, Request changes) and the one confirmation dialog; the Comment, Reply, Edit, Delete and Suggest
- * controls; drafts kept per document in localStorage (a convenience: any storage failure is ignored, and drafts older
+ * controls; drafts kept per document in the tab's sessionStorage (a convenience: any storage failure is ignored, a sign-in that ended clears them, and drafts older
  * than 7 days are dropped); and the page's one poll of `api/state` (every 20 s while visible, every 60 s after 10 quiet
  * minutes), which refreshes the CSRF token, shows the "moved on" banner and re-renders threads when comments change.
  */
@@ -305,6 +306,8 @@ function call(method,path,body,retried){
   return fetch(API+path,init).then(function(reply){
     return reply.json().then(function(json){return json;},function(){return {};}).then(function(json){
       var answer={status:reply.status,body:json&&typeof json==="object"?json:{}};
+      /* The sign-in ended: what this tab kept is dropped, as on a shared device it should be. */
+      if(answer.status===401)clearDrafts();
       if(method==="POST"&&answer.status===403&&answer.body.error==="request_refused"&&!retried){
         return readState().then(function(){return call(method,path,body,true);});
       }
@@ -321,7 +324,17 @@ function said(answer){
 
 /* ---------- drafts ---------- */
 var store=null;
-try{store=window.localStorage;if(store){var probe="agentx:probe";store.setItem(probe,"1");store.removeItem(probe);}}catch(e){store=null;}
+/* The tab's own storage: drafts survive a refresh, never the tab, and never reach another tab or a later reader. */
+try{store=window.sessionStorage;if(store){var probe="agentx:probe";store.setItem(probe,"1");store.removeItem(probe);}}catch(e){store=null;}
+function clearDrafts(){
+  drafts={};
+  try{
+    if(!store)return;
+    var mine=[];
+    for(var i=0;i<store.length;i++){var k=store.key(i);if(k&&k.indexOf("agentx:")===0)mine.push(k);}
+    for(i=0;i<mine.length;i++)store.removeItem(mine[i]);
+  }catch(e){}
+}
 var drafts={};
 function draftKey(anchor){return "agentx:"+taskId+":"+anchor;}
 function emptyDraft(){return {v:1,at:Date.now(),answers:{},opened:[],drafts:{},excluded:[],note:""};}
@@ -462,7 +475,7 @@ var known=null; /* the last list from the API */
 var openIds=arr(current&&current.openCommentIds).filter(function(x){return UUID.test(str(x));});
 function describe(id){
   var article=document.getElementById("comment-"+id);
-  if(!article)return "";
+  if(!article)return COPY.aComment;
   var author=article.querySelector(".comment-author");
   var text=article.querySelector(".comment-text");
   var words=text?text.textContent:"";
@@ -472,9 +485,7 @@ function describe(id){
 
 /* Re-renders every thread on the current versions from the API's list; a thread with an open form waits until the form closes. */
 function busy(container){
-  var forms=container.querySelectorAll(".comment-form textarea");
-  for(var i=0;i<forms.length;i++)if(forms[i].value!=="")return true;
-  return false;
+  return container.querySelector(".comment-form")!==null||container.querySelector(".comment-confirm")!==null;
 }
 function renderContainer(container){
   if(!known)return;
@@ -692,7 +703,7 @@ function editComment(article){
 function deleteComment(article,trigger){
   if(article.querySelector(".comment-confirm"))return;
   var id=article.getAttribute("data-comment");
-  var box=make("p",{"class":"comment-confirm",role:"group"});
+  var box=make("p",{"class":"comment-confirm",role:"group","aria-label":COPY.confirmRemove});
   box.appendChild(make("span",null,COPY.confirmRemove+" "));
   var yes=make("button",{type:"button"},COPY.remove);
   var no=make("button",{type:"button"},COPY.cancel);
@@ -904,8 +915,10 @@ function openDialog(kind,button){
     (function(box,id){box.addEventListener("change",function(){
       if(box.checked&&tickedIds().length>=25){box.checked=false;el("decide-cap").hidden=false;return;}
       ticked[id]=box.checked;
+      /* Only what the owner unticked is remembered; a comment left out by the cap of 25 is not. */
       var draft=loadDraft(current.anchor);
-      draft.excluded=openIds.filter(function(x){return ticked[x]!==true;});
+      draft.excluded=draft.excluded.filter(function(x){return x!==id;});
+      if(!box.checked)draft.excluded.push(id);
       saveDraft(current.anchor);
       commentsTitle();
     });})(box,id);
@@ -982,7 +995,7 @@ function submit(){
 
 /* ---------- the page's one poll ---------- */
 var banner=document.getElementById("moved-on");
-var EVERY=20000,QUIET_EVERY=60000,QUIET_AFTER=600000;
+var EVERY=20000,QUIET_EVERY=60000,QUIET_AFTER=600000,IDLE_STOP=7200000;
 var lastInput=Date.now(),timer=null,asking=false,stopped=false;
 function readState(){
   return call("GET","state").then(function(answer){
@@ -1006,8 +1019,8 @@ function showBanner(state){
   banner.hidden=false;
 }
 function poll(){
-  timer=null;
-  if(asking||stopped||document.visibilityState==="hidden")return;
+  if(timer!==null){clearTimeout(timer);timer=null;}
+  if(asking||stopped||document.visibilityState==="hidden"||Date.now()-lastInput>=IDLE_STOP)return;
   asking=true;
   readState().then(function(state){
     if(!state)return;
@@ -1018,7 +1031,8 @@ function poll(){
 }
 function schedule(){
   if(timer!==null){clearTimeout(timer);timer=null;}
-  if(stopped||document.visibilityState==="hidden")return;
+  /* Two hours with no input: no more polls until the reader is back. */
+  if(stopped||document.visibilityState==="hidden"||Date.now()-lastInput>=IDLE_STOP)return;
   timer=setTimeout(poll,Date.now()-lastInput>=QUIET_AFTER?QUIET_EVERY:EVERY);
 }
 function touched(){
@@ -1031,6 +1045,7 @@ document.addEventListener("click",touched);
 document.addEventListener("keydown",touched);
 document.addEventListener("visibilitychange",function(){
   if(document.visibilityState==="hidden"){if(timer!==null){clearTimeout(timer);timer=null;}return;}
+  lastInput=Date.now();
   if(!asking)poll();
 });
 var refresh=document.getElementById("moved-on-refresh");
