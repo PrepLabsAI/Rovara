@@ -931,7 +931,11 @@ export function submitWorkflowReview(currentInput: unknown, reportInput: unknown
   const reviews = [...(current.reviews ?? []).filter((entry) => entry.role !== report.data.role), report.data];
   // A review also stands when the owner accepted every finding that blocked it, for this candidate.
   const complete = (["CRITIC", "SECURITY"] as const).every((role) => reviews.some((entry) => entry.role === role && reviewCleared(entry, current.acceptedFindings)));
-  const failed = reviews.some((entry) => !reviewCleared(entry, current.acceptedFindings));
+  // The reviews that hold the change back, named as the owner knows them, whichever review was recorded last.
+  const notCleared = (["CRITIC", "SECURITY"] as const).filter((role) => reviews.some((entry) => entry.role === role && !reviewCleared(entry, current.acceptedFindings)));
+  const failed = notCleared.length > 0;
+  const blockReason = notCleared.length === 2 ? "the code and security reviews did not pass"
+    : `the ${notCleared[0] === "CRITIC" ? "code" : "security"} review did not pass`;
   const { blockReason: _priorBlockReason, ...withoutBlockReason } = current;
   void _priorBlockReason;
   return WorkflowSnapshotSchema.parse({
@@ -939,7 +943,7 @@ export function submitWorkflowReview(currentInput: unknown, reportInput: unknown
     revision: current.revision + 1,
     stage: complete ? "PULL_REQUEST" : "REVIEW",
     state: complete ? "READY" : failed ? "BLOCKED" : "WAITING",
-    ...(complete ? {} : failed ? { blockReason: `the ${report.data.role.toLowerCase()} review did not pass` } : {}),
+    ...(complete ? {} : failed ? { blockReason } : {}),
     reviews,
     updatedAt: now,
   });
