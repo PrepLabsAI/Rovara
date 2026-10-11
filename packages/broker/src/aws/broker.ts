@@ -206,6 +206,7 @@ import { RepositoryGrantService } from "../repository-access.js";
 import { publicWorkspace } from "../workspaces.js";
 import { SessionManager } from "./sessions.js";
 import { STUCK_SETUP_MESSAGE } from "./stuck-setup.js";
+import { workflowRunEndedReason } from "./outbox-failure.js";
 import {
   adaptHttpApiEvent,
   identityFromJwtClaims,
@@ -6000,7 +6001,7 @@ async function completedWorkflowItems(
   if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") {
     if (terminalStatus !== "SUCCEEDED") {
       next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_HISTORY_REWRITTEN_MESSAGE) === true ? WORKFLOW_HISTORY_REWRITTEN_MESSAGE
-        : `${operation.workflowMode === "CHECKS" ? "verification retry" : "implementation"} operation ended ${terminalStatus.toLowerCase()}`, now);
+        : workflowRunEndedReason(operation.workflowMode, terminalStatus), now);
     } else {
       const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
       const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
@@ -6119,7 +6120,7 @@ async function completedWorkflowItems(
     }
   } else if (operation.workflowMode === "REVIEW") {
     if (terminalStatus !== "SUCCEEDED") {
-      next = blockWorkflow(task.workflow, `independent review operation ended ${terminalStatus.toLowerCase()}`, now);
+      next = blockWorkflow(task.workflow, workflowRunEndedReason("REVIEW", terminalStatus), now);
     } else {
       const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
       const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
@@ -6209,7 +6210,7 @@ async function completedWorkflowItems(
       if (stored.inlineEvidence !== undefined) inlineEvidence?.push({ ...stored.inlineEvidence, taskId: task.taskId });
     }
   } else {
-    next = blockWorkflow(task.workflow, `planning operation ended ${terminalStatus.toLowerCase()}`, now);
+    next = blockWorkflow(task.workflow, workflowRunEndedReason("PLAN", terminalStatus), now);
   }
   // Gap 6: checks that passed make the reviews due. The intent commits with the result; the broker runs it
   // right after this commit, and the recovery sweep runs it if that is lost.
