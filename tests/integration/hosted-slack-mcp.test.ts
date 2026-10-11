@@ -4,7 +4,7 @@ import { ControlPlaneApi } from "../../packages/orchestrator/src/control-plane-a
 import { ORCHESTRATION_TOOL_NAMES, RECOVERY_TOOL_NAMES } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { ConnectorCallRequestSchema, type ConnectorCatalog } from "../../packages/contracts/src/index.js";
 import { SlackThreadWorkspaceResultSchema, type SlackRequestMessage } from "../../packages/contracts/src/slack.js";
-import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies, type ThreadServiceApi, type ThreadStore } from "../../packages/slack-service/src/processor.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
@@ -48,6 +48,10 @@ describe("hosted Slack processor and MCP runtime", () => {
     });
     const api = new ControlPlaneApi("https://agentx.example.test", "slack-service", workspaceId, signedFetch);
     const post = vi.fn(async () => undefined);
+    const startClose = vi.fn<ThreadServiceApi["startClose"]>(async () => { throw new Error("unexpected close lifecycle call"); });
+    const completeClose = vi.fn<ThreadServiceApi["completeClose"]>(async () => { throw new Error("unexpected close lifecycle call"); });
+    const saveSettingsRevision = vi.fn<ThreadStore["saveSettingsRevision"]>(async () => { throw new Error("unexpected settings revision save"); });
+    const closeThread = vi.fn<ThreadStore["close"]>(async () => { throw new Error("unexpected thread close"); });
     let turn = 0;
     const dependencies: ProcessorDependencies = {
       api: () => ({
@@ -57,8 +61,9 @@ describe("hosted Slack processor and MCP runtime", () => {
           repositories: ["demo"], connectors: enabled ? [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true }] : [],
         }),
         createConversation: async () => randomUUID(), waitForOperation: vi.fn(),
+        startClose, completeClose,
       }),
-      threads: { load: async () => ({ workspaceId, conversationId: "11111111-1111-4111-8111-111111111111" }), saveConversation: vi.fn(), finish: vi.fn() },
+      threads: { load: async () => ({ workspaceId, conversationId: "11111111-1111-4111-8111-111111111111" }), saveConversation: vi.fn(), saveSettingsRevision, close: closeThread, finish: vi.fn() },
       runTurn: async (input) => {
         const runtime = await createHostedSlackRuntime(input, {
           stateDirectory: await createFixtureDirectory("agentx-slack-mcp-"), api,
@@ -87,6 +92,10 @@ describe("hosted Slack processor and MCP runtime", () => {
       expect(new Set(invocationIds).size).toBe(2);
     } else expect(baseFetch).not.toHaveBeenCalled();
     expect(post).toHaveBeenLastCalledWith(message.thread, enabled ? "Issue created." : "Integration is not enabled.");
+    expect(startClose).not.toHaveBeenCalled();
+    expect(completeClose).not.toHaveBeenCalled();
+    expect(saveSettingsRevision).not.toHaveBeenCalled();
+    expect(closeThread).not.toHaveBeenCalled();
   });
 
   it("activates the recovery tools and names the operation when the thread workspace reports one as recoverable", async () => {
@@ -99,6 +108,10 @@ describe("hosted Slack processor and MCP runtime", () => {
     const operation = randomUUID();
     const api = new ControlPlaneApi("https://agentx.example.test", "slack-service", workspaceId, vi.fn<typeof fetch>());
     const post = vi.fn(async () => undefined);
+    const startClose = vi.fn<ThreadServiceApi["startClose"]>(async () => { throw new Error("unexpected close lifecycle call"); });
+    const completeClose = vi.fn<ThreadServiceApi["completeClose"]>(async () => { throw new Error("unexpected close lifecycle call"); });
+    const saveSettingsRevision = vi.fn<ThreadStore["saveSettingsRevision"]>(async () => { throw new Error("unexpected settings revision save"); });
+    const closeThread = vi.fn<ThreadStore["close"]>(async () => { throw new Error("unexpected thread close"); });
     let observed: { tools: string[]; prompt: string } | undefined;
     const dependencies: ProcessorDependencies = {
       api: () => ({
@@ -107,9 +120,9 @@ describe("hosted Slack processor and MCP runtime", () => {
           outcome: "WORKSPACE", workspaceId, status: "BUSY", operationId: operation, created: false,
           orchestratorInstructions: "Delegate coding.", repositories: ["demo"], connectors: [], recoverableOperations: [operation],
         }),
-        createConversation: async () => randomUUID(), waitForOperation: vi.fn(),
+        createConversation: async () => randomUUID(), waitForOperation: vi.fn(), startClose, completeClose,
       }),
-      threads: { load: async () => ({ workspaceId, conversationId: "11111111-1111-4111-8111-111111111111" }), saveConversation: vi.fn(), finish: vi.fn() },
+      threads: { load: async () => ({ workspaceId, conversationId: "11111111-1111-4111-8111-111111111111" }), saveConversation: vi.fn(), saveSettingsRevision, close: closeThread, finish: vi.fn() },
       runTurn: async (input) => {
         const runtime = await createHostedSlackRuntime(input, {
           stateDirectory: await createFixtureDirectory("agentx-slack-recovery-"), api,
@@ -127,5 +140,9 @@ describe("hosted Slack processor and MCP runtime", () => {
     for (const name of RECOVERY_TOOL_NAMES) expect(observed?.tools).toContain(name);
     expect(observed?.prompt).toContain(operation);
     expect(post).toHaveBeenLastCalledWith(message.thread, "Checked.");
+    expect(startClose).not.toHaveBeenCalled();
+    expect(completeClose).not.toHaveBeenCalled();
+    expect(saveSettingsRevision).not.toHaveBeenCalled();
+    expect(closeThread).not.toHaveBeenCalled();
   });
 });

@@ -27,7 +27,10 @@ function encode(value: unknown): string {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
 }
 
-function exporter(source: TurnRecordSource, projectOf = vi.fn(async (): Promise<string | undefined> => "payments"), log = vi.fn()) {
+function exporter(source: TurnRecordSource, projectOf: (workspaceId: string) => Promise<string | undefined> = vi.fn(async (workspaceId: string): Promise<string | undefined> => {
+  void workspaceId;
+  return "payments";
+}), log = vi.fn()) {
   return { exporter: new TurnRecordExport({ source, projectOf, now: () => now, log }), projectOf, log };
 }
 
@@ -58,8 +61,9 @@ describe("turn record export", () => {
     const item = stored("EvTURN00010", "2026-09-24T08:00:00.000Z", { recordingErrors: ["observer_failed"], usageError: "usage_unavailable" });
     const { exporter: turns } = exporter({ page: async () => ({ items: [item] }) });
     const [turn] = (await turns.page(new URLSearchParams({ since: "2026-09-17T00:00:00Z" }))).turns;
-    expect(turn?.recordingErrors).toEqual(["observer_failed"]);
-    expect(turn?.usageError).toBe("usage_unavailable");
+    if (turn === undefined || !isSlackTurnRecord(turn)) throw new Error("expected a Slack turn record");
+    expect(turn.recordingErrors).toEqual(["observer_failed"]);
+    expect(turn.usageError).toBe("usage_unavailable");
   });
 
   it("skips a malformed item and an expired one still waiting for DynamoDB's TTL, logging the count and key but no contents", async () => {

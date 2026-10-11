@@ -9,7 +9,7 @@ import {
   WORKSPACE_UNCONFIRMED_MESSAGE,
   limitMessage,
 } from "../../packages/slack-service/src/messages.js";
-import { processSlackRequest, type ProcessorDependencies, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type ProcessorDependencies, type ThreadServiceApi, type TurnInput } from "../../packages/slack-service/src/processor.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { escapeText, slackReplyText } from "../../packages/slack-service/src/slack-format.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
@@ -42,7 +42,7 @@ function lazyHarness(
     if (prepare instanceof Error) throw prepare;
     return prepare;
   });
-  const waitForOperation = vi.fn(options.wait ?? (async () => ({ status: waited })));
+  const waitForOperation = vi.fn<ThreadServiceApi["waitForOperation"]>(options.wait ?? (async () => ({ status: waited })));
   const worker = createLazyWorker({
     api: { prepareWorkspace, waitForOperation },
     post: async (text) => {
@@ -257,7 +257,7 @@ function processorHarness(result: SlackThreadWorkspaceResult, turn: (input: Turn
   const saved: Array<{ workspaceId: string; conversationId: string }> = [];
   const records: TurnRecord[] = [];
   const prepareWorkspace = vi.fn(async () => prepare);
-  const waitForOperation = vi.fn(async () => ({ status: "SUCCEEDED" }));
+  const waitForOperation = vi.fn<ThreadServiceApi["waitForOperation"]>(async () => ({ status: "SUCCEEDED" }));
   const dependencies: ProcessorDependencies = {
     api: () => ({
       ensureWorkspace: async () => result,

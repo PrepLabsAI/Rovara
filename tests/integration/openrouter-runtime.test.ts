@@ -84,7 +84,10 @@ describe("OpenRouter through the installed Pi transport", () => {
         return response(textChunks);
       },
     });
-    expect((await result.completeSimple(result.getModel(qwen.provider, qwen.modelId)!, context, { reasoning: "off" })).stopReason).toBe("stop");
+    const qwenModel = result.getModel(qwen.provider, qwen.modelId)!;
+    // This legacy call-level value is preserved only to prove the transport omits reasoning parameters.
+    const legacyOff = "off" as Exclude<NonNullable<Parameters<typeof result.completeSimple>[2]>["reasoning"], undefined>;
+    expect((await result.completeSimple(qwenModel, context, { reasoning: legacyOff })).stopReason).toBe("stop");
     expect(requests[0]).toMatchObject({ model: qwen.modelId, provider: { only: ["deepinfra/turbo"] } });
     expect(requests[0]).not.toHaveProperty("reasoning");
     await expect(createConfiguredModelRuntime({ ...qwen, thinkingLevel: "high" }, { environment })).rejects.toMatchObject({

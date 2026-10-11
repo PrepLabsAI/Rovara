@@ -1,6 +1,7 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { createPiSessionRuntime, runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
+import { TurnRecorder as HostedTurnRecorder } from "@agentx/orchestrator/turn-recorder";
 import { TurnRecorder } from "../../packages/orchestrator/src/turn-recorder.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
@@ -12,7 +13,7 @@ const secret = "SECRET-in-error-message-and-stack";
 describe("Pi extension error reporting", () => {
   it("wires hosted failures to the host callback and the current turn recorder", async () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
-    const recorder = new TurnRecorder();
+    const recorder = new HostedTurnRecorder();
     const failures = vi.fn();
     vi.spyOn(recorder, "extension").mockReturnValue({ name: "agentx-turn-recorder", factory: (pi) => {
       pi.on("agent_end", () => { throw new Error(secret); });
@@ -31,7 +32,7 @@ describe("Pi extension error reporting", () => {
     });
     try {
       faux.setResponses([fauxAssistantMessage("Hello.")]);
-      expect(await runOrchestratorTurn(runtime, "hello", recorder)).toBe("Hello.");
+      expect(await runOrchestratorTurn(runtime, "hello")).toBe("Hello.");
       expect(failures).toHaveBeenCalledExactlyOnceWith({ extension: "agentx-turn-recorder", event: "agent_end", errorName: "unknown" });
       expect(recorder.observation().recordingErrors).toEqual(["handler_failed:agentx-turn-recorder:agent_end"]);
     } finally { await runtime.dispose(); }
