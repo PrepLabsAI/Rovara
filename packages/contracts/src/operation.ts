@@ -190,6 +190,8 @@ export const PullRequestLifecycleResultSchema = z
     baseBranch: z.string().min(1).max(255),
     previousCommit: z.string().regex(/^[a-f0-9]{40,64}$/).optional(),
     commit: z.string().regex(/^[a-f0-9]{40,64}$/),
+    /** The pushed commit's tree: set by a workflow task's pull request update. An older worker omits it. */
+    treeSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
     checks: z.array(PublicationCheckResultSchema).max(64),
     codeBuildChecks: z.array(CodeBuildCheckResultSchema).max(8).default([]),
     reconciled: z.boolean(),

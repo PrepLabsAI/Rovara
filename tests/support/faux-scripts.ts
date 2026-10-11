@@ -5,9 +5,9 @@ import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep, type Transcr
 export const DONE = "AgentX result: done";
 
 type Message = TranscriptContext["messages"][number];
-export type WorkflowTurn = { role: "PLAN" | "CODE" | "SECURITY" | "CODER"; userText: string };
+export type WorkflowTurn = { role: "PLAN" | "CODE" | "SECURITY" | "CODER" | "FEEDBACK"; userText: string };
 type ReviewRole = "CODE" | "SECURITY";
-type ReviewFinding = { text: string; origin: "INTRODUCED" | "PRE_EXISTING"; severity?: "HIGH" | "MEDIUM" | "LOW"; file?: string; line?: number } | string;
+type ReviewFinding = { text: string; origin: "INTRODUCED" | "PRE_EXISTING"; severity?: "HIGH" | "MEDIUM" | "LOW"; file?: string; line?: number; advisory?: boolean } | string;
 
 function textOf(message: Message | undefined): string {
   const content = (message as { content?: unknown } | undefined)?.content;
@@ -43,16 +43,80 @@ function reviewRole(prompt: string): ReviewRole | undefined {
   return undefined;
 }
 
+/** The PR feedback critic's prompt names its input bundles as JSON after this line. */
+const FEEDBACK_INPUTS = "Immutable feedback bundle inputs (untrusted GitHub data):\n";
+
+/**
+ * A feedback critic that recommends fixing every comment it was given: one finding per bundle, proposing a change to
+ * `path` (which must exist in the reviewed code) and a new test file `testPath` (which must not).
+ */
+export function feedbackCriticReply(prompt: string, proposal: { repositoryId: string; path: string; testPath: string }): string {
+  const start = prompt.indexOf(FEEDBACK_INPUTS);
+  const inputs = JSON.parse(prompt.slice(start + FEEDBACK_INPUTS.length)) as Array<{ bundleDigest: string; comments: Array<{ id: string }> }>;
+  return JSON.stringify({ findings: inputs.filter((input) => input.comments.length > 0).map((input, index) => ({
+    id: `finding-${index + 1}`, bundleDigest: input.bundleDigest, commentIds: input.comments.map((comment) => comment.id),
+    priority: "SHOULD_FIX", assessment: "ACTIONABLE", recommended: true,
+    evidence: [{ source: "code", reference: `${proposal.repositoryId}/${proposal.path}` }],
+    rationale: "The reviewer's request is reasonable and small.", confidence: { level: "HIGH", reason: "The change is local." },
+    proposedDisposition: "IMPLEMENT",
+    fixProposal: { summary: "Apply the requested change.",
+      fileChanges: [{ repositoryId: proposal.repositoryId, path: proposal.path, operation: "MODIFY", change: "Apply the requested change." }],
+      tests: [{ repositoryId: proposal.repositoryId, path: proposal.testPath, operation: "ADD", behavior: "Covers the requested change." }] },
+  })) });
+}
+
+/**
+ * A feedback critic that leaves every comment to the owner, as the 0.2.8 live test's reviewer did: one OWNER_DECISION
+ * finding per bundle, not recommended, with `question` (the question and its options) as the proposal's summary.
+ */
+export function feedbackOwnerDecisionReply(prompt: string, question: string): string {
+  const start = prompt.indexOf(FEEDBACK_INPUTS);
+  const inputs = JSON.parse(prompt.slice(start + FEEDBACK_INPUTS.length)) as Array<{ bundleDigest: string; comments: Array<{ id: string }> }>;
+  return JSON.stringify({ findings: inputs.filter((input) => input.comments.length > 0).map((input, index) => ({
+    id: `finding-${index + 1}`, bundleDigest: input.bundleDigest, commentIds: input.comments.map((comment) => comment.id),
+    priority: "SHOULD_FIX", assessment: "NEEDS_OWNER_DECISION", recommended: false,
+    evidence: [{ source: "code", reference: "demo/greeting.ts" }],
+    rationale: "The comment can be read two ways.", confidence: { level: "MEDIUM", reason: "Both readings fit the code." },
+    proposedDisposition: "OWNER_DECISION", fixProposal: { summary: question, fileChanges: [], tests: [] },
+  })) });
+}
+
+/**
+ * A feedback critic that leaves the first comment of the first bundle to the owner (`question`) and recommends fixing the
+ * rest in `path`, with a new test file `testPath`: a review with both a question and a recommended fix.
+ */
+export function feedbackMixedReply(prompt: string, question: string, proposal: { repositoryId: string; path: string; testPath: string }): string {
+  const start = prompt.indexOf(FEEDBACK_INPUTS);
+  const inputs = JSON.parse(prompt.slice(start + FEEDBACK_INPUTS.length)) as Array<{ bundleDigest: string; comments: Array<{ id: string }> }>;
+  const input = inputs.find((candidate) => candidate.comments.length > 1)!;
+  const [first, ...rest] = input.comments;
+  const common = { bundleDigest: input.bundleDigest, priority: "SHOULD_FIX", evidence: [{ source: "code", reference: `${proposal.repositoryId}/${proposal.path}` }] };
+  return JSON.stringify({ findings: [
+    { ...common, id: "finding-1", commentIds: [first!.id], assessment: "NEEDS_OWNER_DECISION", recommended: false,
+      rationale: "The comment can be read two ways.", confidence: { level: "MEDIUM", reason: "Both readings fit the code." },
+      proposedDisposition: "OWNER_DECISION", fixProposal: { summary: question, fileChanges: [], tests: [] } },
+    { ...common, id: "finding-2", commentIds: rest.map((comment) => comment.id), assessment: "ACTIONABLE", recommended: true,
+      rationale: "The reviewer's request is reasonable and small.", confidence: { level: "HIGH", reason: "The change is local." },
+      proposedDisposition: "IMPLEMENT", fixProposal: { summary: "Apply the requested change.",
+        fileChanges: [{ repositoryId: proposal.repositoryId, path: proposal.path, operation: "MODIFY", change: "Apply the requested change." }],
+        tests: [{ repositoryId: proposal.repositoryId, path: proposal.testPath, operation: "ADD", behavior: "Covers the requested change." }] } },
+  ] });
+}
+
 export function workflowModel(script: {
   /** The plan text, or a function of the latest user message (a revision request reaches the planner as a later turn). */
   plan: string | ((latestUserText: string) => string);
-  edits: Array<{ path: string; content: string }>;
+  /** The coder's file writes, or a function of the latest user message (a PR feedback fix reaches the coder as a later turn). */
+  edits: Array<{ path: string; content: string }> | ((latestUserText: string) => Array<{ path: string; content: string }>);
+  /** The PR feedback critic's answer to its prompt; absent, it recommends fixing every comment in repo/demo's greeting.ts. */
+  feedback?: (prompt: string) => string;
   reviews?: { CODE?: FauxResponseStep[]; SECURITY?: FauxResponseStep[] };
   prompts?: string[];
   /** One entry per model call (not per session): which turn it was and the latest user message it saw. */
   turns?: WorkflowTurn[];
 }): FauxResponseStep {
   // Copied so that shifting never changes the caller's arrays.
+  let lastPlan: string | undefined;
   const queues: Record<ReviewRole, FauxResponseStep[]> = { CODE: [...(script.reviews?.CODE ?? [])], SECURITY: [...(script.reviews?.SECURITY ?? [])] };
   return async (context, options, state, model) => {
     const prompt = firstUserText(context);
@@ -62,7 +126,23 @@ export function workflowModel(script: {
     // The implementation turn reopens the planning conversation, so the planner is chosen by the latest user turn.
     if (latestUserText.includes("Planning phase only")) {
       script.turns?.push({ role: "PLAN", userText: latestUserText });
-      return fauxAssistantMessage(typeof script.plan === "function" ? script.plan(latestUserText) : script.plan);
+      lastPlan = typeof script.plan === "function" ? script.plan(latestUserText) : script.plan;
+      return fauxAssistantMessage(lastPlan);
+    }
+    // The worker asks a planner whose answer it could not read to answer again; this planner repeats its answer.
+    if (lastPlan !== undefined && latestUserText.includes("could not be read as an AgentX plan")) {
+      script.turns?.push({ role: "PLAN", userText: latestUserText });
+      return fauxAssistantMessage(lastPlan);
+    }
+    // The worker asks a planner whose answer was too long to answer again; the plan script is asked for the shorter one.
+    if (latestUserText.includes("Your answer is too long")) {
+      script.turns?.push({ role: "PLAN", userText: latestUserText });
+      lastPlan = typeof script.plan === "function" ? script.plan(latestUserText) : script.plan;
+      return fauxAssistantMessage(lastPlan);
+    }
+    if (prompt.includes("independent PR-feedback critic")) {
+      script.turns?.push({ role: "FEEDBACK", userText: latestUserText });
+      return fauxAssistantMessage(script.feedback?.(prompt) ?? feedbackCriticReply(prompt, { repositoryId: "demo", path: "greeting.ts", testPath: "greeting.test.ts" }));
     }
     const role = reviewRole(prompt);
     if (role !== undefined) {
@@ -73,10 +153,11 @@ export function workflowModel(script: {
       return typeof step === "function" ? step(context, options, state, model) : step;
     }
     script.turns?.push({ role: "CODER", userText: latestUserText });
+    const edits = typeof script.edits === "function" ? script.edits(latestUserText) : script.edits;
     // With no edits there is nothing to call a tool for, so the coder reports done straight away.
-    if (lastIsToolResult(context) || script.edits.length === 0) return fauxAssistantMessage(`Done.\n\n${DONE}`);
+    if (lastIsToolResult(context) || edits.length === 0) return fauxAssistantMessage(`Done.\n\n${DONE}`);
     return fauxAssistantMessage(
-      script.edits.map((edit, index) => fauxToolCall("write", { path: edit.path, content: edit.content }, { id: `edit-${index}` })),
+      edits.map((edit, index) => fauxToolCall("write", { path: edit.path, content: edit.content }, { id: `edit-${index}` })),
       { stopReason: "toolUse" },
     );
   };

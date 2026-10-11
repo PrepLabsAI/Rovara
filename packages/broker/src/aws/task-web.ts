@@ -1,30 +1,53 @@
 // Task 18 (gap 4): the read-only AgentX task page. A brief Slack message links here for the full document; the page
-// shows the task's current documents, where it stands, its checks, the current code's review findings, its pull
-// requests and the thread's replies. GET only, no script, no forms. Every value is escaped; model and reviewer text is
-// plain text in the page, so a link in it is never a link.
+// shows the task's documents (every version), where it stands, its checks, the current code's review findings, its pull
+// requests and its history. GET only, no forms, and one small script (by nonce) that only opens and scrolls to a deep
+// link. Every value is escaped; model and reviewer text is plain text in the page, so a link in it is never a link.
 import { randomBytes } from "node:crypto";
-import { redactText } from "@agentx/contracts";
+import { redactText, type PlanDocument, type PlanEvidenceBundle } from "@agentx/contracts";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
+import { checksAnchor, renderPlanDocument, type PlanAnchor } from "./plan-page/render-plan.js";
+import { TASK_PAGE_SCRIPT, TASK_PAGE_STYLE } from "./task-page-assets.js";
 import { SESSION_COOKIE, canonicalGithubUrl, escapeHtml, parseCookie, safeResponse, signInLocation, type WebResponse } from "./web-session.js";
 
 export type TaskDocumentKind = "requirements" | "design" | "coding plan";
 
+/** One saved version of a document: older Markdown copies and structured plans read through the same list. */
+export type TaskDocumentEntry =
+  | { kind: TaskDocumentKind; version: number; approved: boolean; current: boolean; format: "markdown"; markdown: string }
+  | { kind: TaskDocumentKind; version: number; approved: boolean; current: boolean; format: "structured"; plan: PlanDocument; evidence?: PlanEvidenceBundle; /** When the document was stored. */ createdAt?: string };
+
 export interface TaskDocumentView {
   taskId: string;
+  /** The time the page was read (epoch milliseconds), so a document stored a moment ago can say its code is still loading. */
+  now?: number;
   title: string;
   /** Where the task stands, in plain words. */
   status: string;
   nextStep: string;
-  documents: Array<{ kind: TaskDocumentKind; version: number; markdown: string; approved: boolean }>;
+  /** For the progress strip. */
+  path: "QUICK" | "FULL";
+  /** The current step's name as the progress strip spells it (`Requirements`, `Design`, `Coding plan`, `Coding`, `Checks`, `Reviews`, `Pull request`); `Complete` when every step is done (merged); empty when no step is current. */
+  stage: string;
+  /** Whether the reader is the task's owner. */
+  role: "owner" | "reader";
+  /** Every saved version of each document, oldest first within a kind. */
+  documents: TaskDocumentEntry[];
   /** Documents whose saved copy failed its check: named, never shown. */
   unverified?: TaskDocumentKind[];
-  /** `unclear`: the check ran but its result couldn't be told. */
-  checks: Array<{ label: string; passed: boolean | undefined; unclear?: true }>;
-  /** The current code's review findings. */
-  findings: Array<{ role: "code" | "security"; text: string; origin: "INTRODUCED" | "PRE_EXISTING"; file?: string; line?: number }>;
+  /** `unclear`: the check ran but its result couldn't be told; `proposed`: AgentX proposed it in the coding plan; `proves`: the claims a structured coding plan says it proves. */
+  checks: Array<{ label: string; passed: boolean | undefined; unclear?: true; proposed?: true; proves?: string[] }>;
+  /** One plain sentence about the checks: that none apply (review only), or that the proposed ones could not be read. */
+  checksNote?: string;
+  /** Whether the checks have run on the current code. When left out, the page reads it from the checks' own results. */
+  checksRan?: boolean;
+  /** The current code's open review findings. `advisory`: the reviewer marked it advisory (never set on a security finding), so it is a note and never blocks. */
+  findings: Array<{ role: "code" | "security"; text: string; origin: "INTRODUCED" | "PRE_EXISTING"; file?: string; line?: number; advisory?: true }>;
+  /** Blocking findings the owner accepted for the current code, with the reason and who accepted them. */
+  acceptedFindings?: Array<{ role: "code" | "security"; text: string; reason: string; owner: string; at: string }>;
   pullRequests: Array<{ url: string; number: number; state: string }>;
-  replies: Array<{ author: "owner" | "teammate"; text: string; at: string }>;
+  /** What happened to the task's documents, newest first. `link` is a link inside this page. */
+  history: Array<{ at: string; text: string; link?: string }>;
 }
 
 export interface TaskWebDependencies {
@@ -38,9 +61,9 @@ export interface TaskWebDependencies {
 export const TASK_PAGE = /^\/review\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/task$/i;
 const HIDDEN = new Set(["FORBIDDEN", "TASK_NOT_FOUND", "NOT_FOUND"]);
 
-/** This page's policy: its one style element, and nothing else; no script runs and nothing is submitted. */
+/** This page's policy: its one style element and its one script, each by nonce, and nothing else; nothing is fetched or submitted. */
 const policy = (nonce: string) =>
-  `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'none'; img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
+  `default-src 'none'; style-src 'nonce-${nonce}'; script-src 'nonce-${nonce}'; img-src 'none'; connect-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'`;
 
 /**
  * A reviewer's file path, shown only when it is a plain relative path inside the repository: no leading slash or
@@ -54,10 +77,8 @@ export function safeFindingPath(file: string | undefined): string | undefined {
   return path.split("/").some((segment) => segment === ".." || segment === "." || segment === "") ? undefined : path;
 }
 
-const plural = (count: number, one: string, many = `${one}s`) => `${count} ${count === 1 ? one : many}`;
 const PULL_REQUEST_STATES: Record<string, string> = { OPEN: "open", CLOSED: "closed", MERGED: "merged" };
 const checkWords = (check: TaskDocumentView["checks"][number]) => (check.passed === true ? "Passed" : check.passed === false ? "Didn't pass" : check.unclear === true ? "Couldn't tell" : "Not run yet");
-const capitalized = (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 
 function findingItem(finding: TaskDocumentView["findings"][number]): string {
   const file = safeFindingPath(finding.file);
@@ -65,45 +86,212 @@ function findingItem(finding: TaskDocumentView["findings"][number]): string {
   return `<li><span class="tag">${finding.role === "security" ? "Security review" : "Code review"}</span> ${escapeHtml(finding.text)}${where}</li>`;
 }
 
-function page(view: TaskDocumentView, nonce: string): string {
-  const documents = view.documents.map((document) => `<section aria-label="${escapeHtml(capitalized(document.kind))}"><h2>${escapeHtml(capitalized(document.kind))} v${escapeHtml(document.version)}</h2>`
-    + `<p class="muted">${document.approved ? "Approved" : "Not approved yet"}</p><pre class="doc">${escapeHtml(document.markdown)}</pre></section>`).join("");
+/** A blocking finding the owner accepted: the finding, then who accepted it and why. The owner's name and reason are redacted and escaped. */
+function acceptedItem(finding: NonNullable<TaskDocumentView["acceptedFindings"]>[number]): string {
+  return `<li><span class="tag">${finding.role === "security" ? "Security review" : "Code review"}</span> ${escapeHtml(redactText(finding.text))} `
+    + `<span class="accepted-by">Accepted by ${escapeHtml(redactText(finding.owner))}: ${escapeHtml(redactText(finding.reason))}</span></li>`;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const two = (value: number): string => String(value).padStart(2, "0");
+/** A History time as "Oct 9, 22:20 UTC"; a value that is not a time is shown as it came. */
+function historyTime(at: string): string {
+  const date = new Date(at);
+  return Number.isNaN(date.getTime()) ? at : `${MONTHS[date.getUTCMonth()]} ${date.getUTCDate()}, ${two(date.getUTCHours())}:${two(date.getUTCMinutes())} UTC`;
+}
+
+/** `stage` once the pull request is merged: every step is done and none is current. */
+const COMPLETE_STEP = "Complete";
+
+/** The steps from which "No checks are set up" can be said: the checks step has been reached. */
+const CHECKS_REACHED = new Set(["Checks", "Reviews", "Pull request", COMPLETE_STEP]);
+
+const ANCHORS: Array<{ kind: TaskDocumentKind; anchor: PlanAnchor; label: string; planKind: "requirements" | "design" | "plan" }> = [
+  { kind: "requirements", anchor: "requirements", label: "Requirements", planKind: "requirements" },
+  { kind: "design", anchor: "design", label: "Design", planKind: "design" },
+  { kind: "coding plan", anchor: "coding-plan", label: "Coding plan", planKind: "plan" },
+];
+const FULL_STEPS = ["Requirements", "Design", "Coding plan", "Coding", "Checks", "Reviews", "Pull request"];
+const QUICK_STEPS = FULL_STEPS.slice(2);
+const STEP_DOCUMENT: Record<string, TaskDocumentKind> = { Requirements: "requirements", Design: "design", "Coding plan": "coding plan" };
+
+/** What the reader asked for in the link: a document and the older version they came from. Anything else is ignored. */
+interface TaskPageRequest { doc?: PlanAnchor; from?: number }
+
+function pageRequest(url: URL): TaskPageRequest {
+  const doc = url.searchParams.get("doc");
+  const from = url.searchParams.get("from");
+  return {
+    ...(doc === "requirements" || doc === "design" || doc === "coding-plan" ? { doc } : {}),
+    ...(from !== null && /^[1-9][0-9]{0,8}$/.test(from) ? { from: Number(from) } : {}),
+  };
+}
+
+/** The part of the link that must survive sign-in: only a known document, and only an earlier version that sign-in accepts (1 to 999). */
+function signInQuery(url: URL): string {
+  const doc = url.searchParams.get("doc");
+  if (doc !== "requirements" && doc !== "design" && doc !== "coding-plan") return "";
+  const from = url.searchParams.get("from");
+  return `?doc=${doc}${from !== null && /^[1-9][0-9]{0,2}$/.test(from) ? `&from=${from}` : ""}`;
+}
+
+function markdownDocument(anchor: PlanAnchor, label: string, document: Extract<TaskDocumentEntry, { format: "markdown" }>, currentVersion: number): string {
+  const status = document.current ? "" : ` <span class="not-current">This is v${document.version}. v${currentVersion} is the current one.</span>`;
+  return `<section id="${anchor}-v${document.version}" class="doc doc-${anchor}"><header class="doc-header"><h3>${label} v${document.version}</h3>`
+    + `<p class="doc-status"><span class="status ${document.approved ? "approved" : "pending"}">${document.approved ? "Approved" : "Not approved yet"}</span>${status}</p></header>`
+    + `<pre class="doc-text">${escapeHtml(document.markdown)}</pre></section>`;
+}
+
+async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): Promise<string> {
+  const byKind = new Map(ANCHORS.map((entry) => [entry.kind, view.documents.filter((document) => document.kind === entry.kind).sort((left, right) => left.version - right.version)]));
+  const present = ANCHORS.filter((entry) => (byKind.get(entry.kind) ?? []).length > 0);
+  const requested = present.find((entry) => entry.anchor === request.doc);
+  const forStep = STEP_DOCUMENT[view.stage] ?? "coding plan";
+  const opened = requested ?? present.find((entry) => entry.kind === forStep) ?? present.at(-1);
+  const sections: string[] = [];
+  for (const entry of present) {
+    const versions = byKind.get(entry.kind) ?? [];
+    const currentDocument = versions.find((document) => document.current) ?? versions.at(-1)!;
+    const earlier = versions.filter((document) => document !== currentDocument).reverse();
+    const fromEarlier = requested === entry && request.from !== undefined && request.from < currentDocument.version;
+    // The latest approved structured document of the nearest earlier step: a claim reworded since is badged.
+    let approvedEarlier: PlanDocument | undefined;
+    for (const prior of ANCHORS.slice(0, ANCHORS.indexOf(entry)).reverse()) {
+      const approved = (byKind.get(prior.kind) ?? []).filter((candidate) => candidate.approved).at(-1);
+      if (approved?.format === "structured") { approvedEarlier = approved.plan; break; }
+    }
+    const render = async (document: TaskDocumentEntry): Promise<string> => {
+      if (document.format === "markdown") return markdownDocument(entry.anchor, entry.label, document, currentDocument.version);
+      const before = versions[versions.indexOf(document) - 1];
+      const checks = entry.kind === "coding plan" && document === currentDocument
+        ? view.checks.map((check) => ({ label: check.label, proposed: check.proposed === true, proves: check.proves ?? [], status: checkWords(check) })) : undefined;
+      return await renderPlanDocument({
+        anchor: entry.anchor, kind: entry.planKind, version: document.version, approved: document.approved, current: document === currentDocument,
+        currentVersion: currentDocument.version, plan: document.plan, ...(document.evidence === undefined ? {} : { evidence: document.evidence }),
+        ...(document.createdAt === undefined ? {} : { createdAt: document.createdAt }), ...(view.now === undefined ? {} : { now: view.now }),
+        ...(before?.format === "structured" ? { previous: { version: before.version, plan: before.plan } } : {}),
+        ...(approvedEarlier === undefined ? {} : { approvedEarlier }),
+        ...(checks === undefined ? {} : { checks }), openWhatChanged: document === currentDocument && fromEarlier,
+      });
+    };
+    // The title is shown once, in the document's own header; the fold says only which version and whether it is approved.
+    const summary = `${entry.label} v${currentDocument.version} · ${currentDocument.approved ? "approved" : "not approved yet"}`;
+    // "What changed" compares the current version with the one before it, and shows only when both are structured.
+    const beforeCurrent = versions[versions.indexOf(currentDocument) - 1];
+    const comparison = currentDocument.format === "structured" && beforeCurrent?.format === "structured" ? beforeCurrent.version : undefined;
+    const note = !fromEarlier ? ""
+      : `<p class="from-note">You opened this from v${request.from}. ${comparison === undefined ? `v${currentDocument.version} is the current version.` : `Here's what changed since v${comparison}.`}</p>`;
+    const older = earlier.length === 0 ? ""
+      : `<details class="versions"><summary>Earlier versions (${earlier.length})</summary>${(await Promise.all(earlier.map(render))).join("")}</details>`;
+    sections.push(`<section id="${entry.anchor}" class="kind" data-current="${currentDocument.version}"><details class="document"${entry === opened ? " open" : ""}>`
+      + `<summary>${escapeHtml(summary)}</summary>${note}${await render(currentDocument)}${older}</details></section>`);
+  }
+  return sections.join("");
+}
+
+/** What each progress chip may link to; a step with no content on the page yet gets no entry and shows as plain text. */
+interface ChipTargets { checks: boolean }
+
+/** The task's pull request chip: the one pull request on GitHub, the list when there are several, nothing without one. */
+function pullRequestChipTarget(view: TaskDocumentView): { href: string; external: boolean } | undefined {
+  const urls = view.pullRequests.map((pullRequest) => canonicalGithubUrl(pullRequest.url));
+  if (urls.length === 0 || urls.some((url) => url === undefined)) return undefined;
+  return urls.length === 1 ? { href: urls[0]!, external: true } : { href: "#pull-requests", external: false };
+}
+
+function progressStrip(view: TaskDocumentView, targets: ChipTargets): string {
+  const steps = view.path === "FULL" ? FULL_STEPS : QUICK_STEPS;
+  const complete = view.stage === COMPLETE_STEP;
+  const at = complete ? steps.length : steps.indexOf(view.stage);
+  const documents = new Set(view.documents.map((document) => document.kind));
+  const hasFindings = view.findings.length > 0 || (view.acceptedFindings ?? []).length > 0;
+  const pullRequest = pullRequestChipTarget(view);
+  const target = (step: string, index: number): { href: string; external: boolean } | undefined => {
+    const entry = ANCHORS.find((candidate) => candidate.label === step);
+    if (entry !== undefined) return documents.has(entry.kind) ? { href: `#${entry.anchor}`, external: false } : undefined;
+    if (step === "Coding" || step === "Checks") return targets.checks ? { href: "#checks", external: false } : undefined;
+    if (step === "Reviews") return at >= 0 && index <= at || hasFindings ? { href: "#findings", external: false } : undefined;
+    return step === "Pull request" ? pullRequest : undefined;
+  };
+  const items = steps.map((step, index) => {
+    const state = index === at ? "step current" : at >= 0 && index < at ? "step done" : "step";
+    const link = target(step, index);
+    const label = link === undefined ? escapeHtml(step)
+      : `<a href="${escapeHtml(link.href)}"${link.external ? ' rel="noopener noreferrer nofollow"' : ""}>${escapeHtml(step)}</a>`;
+    return `<li class="${state}"${index === at ? ' aria-current="step"' : ""}>${label}</li>`;
+  });
+  return `<nav aria-label="Progress"><ol class="progress">${items.join("")}</ol></nav>`;
+}
+
+async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequest): Promise<string> {
   const unverified = (view.unverified ?? []).map((kind) => `<p><strong>The saved ${escapeHtml(kind)} couldn't be verified, so it isn't shown.</strong></p>`).join("");
   const noDocuments = view.documents.length === 0 && unverified === "" ? "<p class=\"muted\">No document has been written yet.</p>" : "";
-  const checks = view.checks.length === 0 ? "<p class=\"muted\">No checks are set up for this task.</p>"
-    : `<ul>${view.checks.map((check) => `<li>${escapeHtml(check.label)}: ${checkWords(check)}</li>`).join("")}</ul>`;
-  const introduced = view.findings.filter((finding) => finding.origin === "INTRODUCED");
+  const documents = await documentsHtml(view, request);
+  const note = view.checksNote === undefined ? "" : `<p>${escapeHtml(view.checksNote)}</p>`;
+  // The checks table is part of the current coding plan when that plan is structured; the page says so once, not twice.
+  const codingPlans = view.documents.filter((document) => document.kind === "coding plan").sort((left, right) => left.version - right.version);
+  const currentCodingPlan = codingPlans.find((document) => document.current) ?? codingPlans.at(-1);
+  // The Checks section waits until the checks have run: before that the coding plan's own table lists them. A note (review
+  // only, or the proposal could not be read) always shows. "No checks are set up" is said only once the checks step is reached.
+  const ran = view.checksRan ?? view.checks.some((check) => check.passed !== undefined || check.unclear === true);
+  const checks: string | undefined = !ran && view.checksNote === undefined
+    ? (view.checks.length === 0 && CHECKS_REACHED.has(view.stage) ? "<p class=\"muted\">No checks are set up for this task.</p>" : undefined)
+    : view.checks.length > 0 && currentCodingPlan?.format === "structured"
+      ? `${note}<p><a href="#${escapeHtml(checksAnchor(currentCodingPlan.version))}">See the checks in the coding plan.</a></p>`
+      : view.checks.length === 0 ? note
+      : `${note}<ul>${view.checks.map((check) => `<li>${escapeHtml(check.label)}${check.proposed === true ? " (proposed by AgentX)" : ""}: ${checkWords(check)}</li>`).join("")}</ul>`;
+  const introduced = view.findings.filter((finding) => finding.origin === "INTRODUCED" && finding.advisory !== true);
+  const notes = view.findings.filter((finding) => finding.origin === "INTRODUCED" && finding.advisory === true);
   const older = view.findings.filter((finding) => finding.origin === "PRE_EXISTING");
-  const findings = view.findings.length === 0 ? "<p class=\"muted\">No review findings for the current code.</p>"
-    : `<h3>Caused by this change</h3>${introduced.length === 0 ? "<p class=\"muted\">None.</p>" : `<ul>${introduced.map(findingItem).join("")}</ul>`}`
-      + `<h3>Already in the code (advisory)</h3>${older.length === 0 ? "<p class=\"muted\">None.</p>" : `<ul>${older.map(findingItem).join("")}</ul>`}`;
+  const accepted = view.acceptedFindings ?? [];
+  const findings = view.findings.length === 0 && accepted.length === 0 ? "<p class=\"muted\">No review findings for the current code.</p>"
+    : (view.findings.length === 0 ? "" : `<h3>Caused by this change</h3>${introduced.length === 0 ? "<p class=\"muted\">None.</p>" : `<ul>${introduced.map(findingItem).join("")}</ul>`}`
+      + (notes.length === 0 ? "" : `<h3>Notes (advisory)</h3><ul>${notes.map(findingItem).join("")}</ul>`)
+      + `<h3>Already in the code (advisory)</h3>${older.length === 0 ? "<p class=\"muted\">None.</p>" : `<ul>${older.map(findingItem).join("")}</ul>`}`)
+      + (accepted.length === 0 ? "" : `<h3>Accepted by the owner</h3><ul>${accepted.map(acceptedItem).join("")}</ul>`);
   const pullRequests = view.pullRequests.length === 0 ? "<p class=\"muted\">No pull request yet.</p>"
     : `<ul>${view.pullRequests.map((pullRequest) => {
       const url = canonicalGithubUrl(pullRequest.url);
       const name = `Pull request #${escapeHtml(pullRequest.number)}`;
       return `<li>${url === undefined ? name : `<a href="${escapeHtml(url)}" rel="noopener noreferrer nofollow">${name}</a>`}: ${PULL_REQUEST_STATES[pullRequest.state] ?? "status not known yet"}</li>`;
     }).join("")}</ul>`;
-  const replies = view.replies.length === 0 ? "<p class=\"muted\">No thread replies.</p>"
-    : `<ul>${view.replies.map((reply) => `<li><span class="tag">${reply.author === "owner" ? "Task owner" : "Teammate"}</span> <span class="muted">${escapeHtml(reply.at)}</span><p>${escapeHtml(reply.text)}</p></li>`).join("")}</ul>`;
-  const style = ":root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:52rem;margin:0 auto;padding:clamp(1rem,4vw,2.5rem);line-height:1.55}"
-    + "h1,h2,h3{line-height:1.2}.muted{opacity:.8}.tag{display:inline-block;border:1px solid currentColor;border-radius:999px;padding:0 .5rem;font-size:.85rem}"
-    + "pre.doc{white-space:pre-wrap;overflow-wrap:anywhere;font-family:ui-monospace,monospace;border-left:3px solid #888;padding:.5rem 1rem}"
-    + "section{border-top:1px solid #888;padding:.5rem 0}a:focus{outline:3px solid #478cff;outline-offset:2px}@media(max-width:35rem){body{padding:1rem}code{overflow-wrap:anywhere}}";
+  // Newest first, whatever order the view listed them in.
+  const history = [...view.history].sort((left, right) => right.at.localeCompare(left.at));
+  const historyHtml = history.length === 0 ? "<p class=\"muted\">Nothing has happened yet.</p>"
+    : `<ol class="history">${history.map((entry) => {
+      const text = escapeHtml(entry.text);
+      const linked = entry.link !== undefined && /^#[A-Za-z0-9-]+$/.test(entry.link);
+      return `<li><time datetime="${escapeHtml(entry.at)}">${escapeHtml(historyTime(entry.at))}</time> ${linked ? `<a href="${escapeHtml(entry.link)}">${text}</a>` : text}</li>`;
+    }).join("")}</ol>`;
+  const role = view.role === "owner" ? "You're the task owner." : "You can read this task.";
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AgentX task · ${escapeHtml(view.title)}</title>`
-    + `<style nonce="${nonce}">${style}</style></head><body><main><h1>${escapeHtml(view.title)}</h1>`
-    + `<section aria-label="Where this task stands"><p><strong>${escapeHtml(view.status)}</strong></p><p>Next: ${escapeHtml(view.nextStep)}</p><p class="muted">Read only. Decisions are made in Slack.</p></section>`
-    + `${unverified}${documents}${noDocuments}`
-    + `<section aria-label="Checks"><h2>Checks</h2>${checks}</section>`
+    + `<style nonce="${nonce}">${TASK_PAGE_STYLE}</style></head><body>`
+    + `<header><h1>${escapeHtml(view.title)}</h1><p class="muted">${role}</p>${progressStrip(view, { checks: checks !== undefined && checks !== "" })}`
+    + `<p><strong>${escapeHtml(view.status)}</strong></p><p>Next: ${escapeHtml(view.nextStep)}</p><p class="muted">Decisions are made in Slack.</p></header>`
+    + `<main>${unverified}${documents}${noDocuments}`
+    + (checks === undefined || checks === "" ? "" : `<section id="checks" aria-label="Checks"><h2>Checks</h2>${checks}</section>`)
     + `<section id="findings" aria-label="Review findings"><h2>Review findings</h2>${findings}</section>`
-    + `<section aria-label="Pull requests"><h2>Pull requests</h2>${pullRequests}</section>`
-    + `<section aria-label="Thread replies"><h2>Thread replies</h2><p>${plural(view.replies.length, "thread reply", "thread replies")}</p>${replies}</section>`
-    + "</main></body></html>";
+    + `<section id="pull-requests" aria-label="Pull requests"><h2>Pull requests</h2>${pullRequests}</section>`
+    + `<section id="history" aria-label="History"><h2>History</h2>${historyHtml}</section>`
+    + `</main><script nonce="${nonce}">${TASK_PAGE_SCRIPT}</script></body></html>`;
 }
+
 
 function htmlResponse(statusCode: number, body: string, nonce: string): WebResponse {
   const response = safeResponse(statusCode, body, nonce);
   response.headers["content-security-policy"] = policy(nonce);
   return response;
+}
+
+const NO_ACCESS_HEADING = "No access";
+const NO_ACCESS = "You don't have access to this task.";
+
+/** A person's name as it reads inside a sentence: one line, redacted, cut short. messagePage escapes it. */
+function plainName(name: unknown): string | undefined {
+  if (typeof name !== "string") return undefined;
+  const characters = Array.from(redactText(name).replace(/[\p{Cc}\s]+/gu, " ").trim());
+  if (characters.length === 0) return undefined;
+  return characters.length <= 80 ? characters.join("") : `${characters.slice(0, 79).join("")}…`;
 }
 
 function messagePage(statusCode: number, heading: string, text: string): WebResponse {
@@ -127,15 +315,22 @@ export function createTaskWeb(deps: TaskWebDependencies): (request: AdaptedHttpR
     const caller = sessionId === undefined ? undefined : await deps.authenticateSession(sessionId);
     if (caller === undefined) {
       const redirect = safeResponse(302, "");
-      return { ...redirect, headers: { ...redirect.headers, "content-security-policy": policy(""), location: signInLocation(`/review/${taskId}/task`) } };
+      return { ...redirect, headers: { ...redirect.headers, "content-security-policy": policy(""), location: signInLocation(`/review/${taskId}/task${signInQuery(url)}`) } };
     }
     try {
       const view = await deps.getTaskDocumentView(caller, taskId);
       const nonce = randomBytes(18).toString("base64url");
-      return htmlResponse(200, page(view, nonce), nonce);
+      return htmlResponse(200, await page(view, nonce, pageRequest(url)), nonce);
     } catch (error) {
+      const code = String((error as { code?: unknown })?.code);
+      // Only a reader the broker found eligible is told whom to ask; with no name to give, the answer is the generic one.
+      if (code === "TASK_ACCESS_DENIED") {
+        const owners = (error as { owners?: unknown }).owners;
+        const names = (Array.isArray(owners) ? owners : []).map(plainName).filter((name): name is string => name !== undefined);
+        if (names.length > 0) return messagePage(403, NO_ACCESS_HEADING, `${NO_ACCESS} Ask ${names.join(" or ")} to add you.`);
+      }
       // Not yours, and no such task, read the same: the page never confirms that a task exists.
-      if (HIDDEN.has(String((error as { code?: unknown })?.code))) return messagePage(404, "Task not found", "There's no task here that you can see. Open it from its Slack thread.");
+      if (code === "TASK_ACCESS_DENIED" || HIDDEN.has(code)) return messagePage(404, NO_ACCESS_HEADING, NO_ACCESS);
       return messagePage(503, "Task page unavailable", "AgentX couldn't load this task right now. Try again shortly.");
     }
   };

@@ -23,6 +23,7 @@ import {
   type StartDeveloperTaskRequest,
   type WorkflowDecisionRequest,
   type WorkflowPublishRetryRequest,
+  type WorkflowResolveFindingsInput,
 } from "@agentx/contracts";
 import { z } from "zod";
 import { CLOSE_BUSY_STEP, NEXT_STEPS, SHARE_BUSY_STEP, START_BUSY_STEP, ToolError, isMeaningfulCode, plainText, signInStep, toolErrorFromResponse } from "./errors.js";
@@ -50,6 +51,8 @@ export interface ControlPlaneClient {
   retryWorkflowTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
   /** Task 16: sends blocked work back to coding with the problems found; expectedRevision is required. */
   sendWorkflowBack(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
+  /** Accepts (with a reason) or sends to coding each blocking review finding; expectedRevision and candidateDigest are required. */
+  resolveWorkflowFindings(taskId: string, request: WorkflowResolveFindingsInput): Promise<DeveloperTaskView>;
   /** Task 12/16: asks AgentX to open the workflow's draft pull request again. */
   retryWorkflowPublish(taskId: string, request: WorkflowPublishRetryRequest): Promise<DeveloperTaskView>;
   cancelTask(taskId: string, requestId: string): Promise<DeveloperTaskView>;
@@ -226,6 +229,7 @@ export function httpControlPlaneClient(options: {
     startWorkflowReviewTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/review"), request)),
     retryWorkflowTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/retry"), request)),
     sendWorkflowBack: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/send-back"), request)),
+    resolveWorkflowFindings: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/review-findings"), request)),
     retryWorkflowPublish: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/publish-retry"), request)),
     cancelTask: async (taskId, requestId) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/cancel"), { requestId })),
     closeTask: (taskId, requestId, discardUnpublished = false) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, true, { busyStep: CLOSE_BUSY_STEP }),

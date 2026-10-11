@@ -280,6 +280,252 @@ describe("GitHub App repository credentials", () => {
     await expect(provider.getCommitTree("https://github.com/ps06756/personal-website-test.git", "../x")).rejects.toThrow(/invalid/);
   });
 
+  it("reads a file at a commit with a contents-read token and the raw media type", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const sha = "e".repeat(40);
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const provider = appProvider({
+      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
+      fetchImplementation: async (url, init) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        requests.push({ url: requestUrl, init });
+        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
+        if (requestUrl.includes("/contents/src/a%20b.ts?")) return new Response("line one\nline two\n", { status: 200 });
+        if (requestUrl.includes("/contents/big.txt?")) return new Response("x", { status: 200, headers: { "content-length": "20971521" } });
+        if (requestUrl.includes("/contents/broken.txt?")) return new Response("oops", { status: 500 });
+        return new Response("not found", { status: 404 });
+      },
+    });
+    const url = "https://github.com/ps06756/personal-website-test.git";
+    await expect(provider.getFileAtCommit(url, "src/a b.ts", sha)).resolves.toBe("line one\nline two\n");
+    const tokenBody = requests[0]?.init?.body;
+    if (typeof tokenBody !== "string") throw new Error("expected token body");
+    expect((JSON.parse(tokenBody) as { permissions: unknown }).permissions).toEqual({ contents: "read" });
+    expect(requests[1]?.url).toBe(`https://api.github.com/repos/ps06756/personal-website-test/contents/src/a%20b.ts?ref=${sha}`);
+    const headers = requests[1]?.init?.headers as Record<string, string>;
+    expect(headers.accept).toBe("application/vnd.github.raw+json");
+    expect(headers.authorization).toBe("Bearer lookup-token");
+    expect(requests[1]?.init?.redirect).toBe("error");
+    await expect(provider.getFileAtCommit(url, "missing.ts", sha)).resolves.toBeUndefined();
+    await expect(provider.getFileAtCommit(url, "broken.txt", sha)).rejects.toThrow(/HTTP 500/);
+    await expect(provider.getFileAtCommit(url, "big.txt", sha)).rejects.toThrow(/file too large/);
+  });
+
+  it("reads a directory as not found: GitHub answers a directory with a JSON listing, which is never shown as code", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const sha = "e".repeat(40);
+    const provider = appProvider({
+      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
+      fetchImplementation: async (url) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
+        if (requestUrl.includes("/contents/src?")) return new Response(JSON.stringify([{ name: "a.ts", type: "file" }]), { status: 200, headers: { "content-type": "application/json; charset=utf-8" } });
+        // A file read with the raw media type keeps its text, even when that text is JSON.
+        return new Response("{\"name\":\"demo\"}\n", { status: 200, headers: { "content-type": "application/vnd.github.raw+json; charset=utf-8" } });
+      },
+    });
+    const url = "https://github.com/ps06756/personal-website-test.git";
+    await expect(provider.getFileAtCommit(url, "src", sha)).resolves.toBeUndefined();
+    await expect(provider.getFileAtCommit(url, "package.json", sha)).resolves.toBe("{\"name\":\"demo\"}\n");
+  });
+
+  it("reads a cited file only up to the last line it needs and cancels the stream just past it", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const sha = "e".repeat(40);
+    const state = { bytes: 0, cancelled: false };
+    const lineText = (number: number) => `line ${number} ${"x".repeat(90 - String(number).length)}\n`;
+    // A 3 MB file of numbered lines, handed out 64 KB at a time.
+    const stream = (): ReadableStream<Uint8Array> => {
+      const whole = new TextEncoder().encode(Array.from({ length: 30_000 }, (_, index) => lineText(index + 1)).join(""));
+      let sent = 0;
+      return new ReadableStream<Uint8Array>({
+        pull(controller) {
+          const chunk = whole.slice(sent, sent + 65_536);
+          if (chunk.byteLength === 0) { controller.close(); return; }
+          sent += chunk.byteLength;
+          state.bytes += chunk.byteLength;
+          controller.enqueue(chunk);
+        },
+        cancel() { state.cancelled = true; },
+      }, { highWaterMark: 0 });
+    };
+    const provider = appProvider({
+      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
+      fetchImplementation: async (url) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
+        if (requestUrl.includes("/contents/short.txt?")) return new Response("one\ntwo\nthree", { status: 200 });
+        return new Response(stream(), { status: 200 });
+      },
+    });
+    const url = "https://github.com/ps06756/personal-website-test.git";
+    const text = await provider.getFileAtCommit(url, "large.txt", sha, { untilLine: 60 });
+    expect(text).toBe(Array.from({ length: 60 }, (_, index) => lineText(index + 1)).join(""));
+    expect(state.cancelled).toBe(true);
+    expect(state.bytes).toBeLessThan(3_000_000);
+    expect(state.bytes).toBeLessThanOrEqual(131_072);
+    // A file that ends before the wanted line comes back whole.
+    await expect(provider.getFileAtCommit(url, "short.txt", sha, { untilLine: 60 })).resolves.toBe("one\ntwo\nthree");
+    // A line that ends exactly on a chunk boundary or without a newline at the very end is still returned.
+    await expect(provider.getFileAtCommit(url, "short.txt", sha, { untilLine: 3 })).resolves.toBe("one\ntwo\nthree");
+    await expect(provider.getFileAtCommit(url, "short.txt", sha, { untilLine: 2 })).resolves.toBe("one\ntwo\n");
+  });
+
+  it("keeps the text it read when closing the stream fails after the wanted line", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const provider = appProvider({
+      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
+      fetchImplementation: async (url) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
+        const body = new ReadableStream<Uint8Array>({
+          pull(controller) { controller.enqueue(new TextEncoder().encode("one\ntwo\nthree\nfour\n")); },
+          cancel() { throw new Error("the stream would not close"); },
+        }, { highWaterMark: 0 });
+        return new Response(body, { status: 200 });
+      },
+    });
+    await expect(provider.getFileAtCommit("https://github.com/ps06756/personal-website-test.git", "a.txt", "e".repeat(40), { untilLine: 2 })).resolves.toBe("one\ntwo\n");
+  });
+
+  it("gives a file read 8 seconds unless the caller allows longer", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const provider = appProvider({
+      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
+      fetchImplementation: async (url) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
+        return new Response("one\n", { status: 200 });
+      },
+    });
+    const timeout = vi.spyOn(AbortSignal, "timeout");
+    try {
+      const url = "https://github.com/ps06756/personal-website-test.git";
+      await provider.getFileAtCommit(url, "a.txt", "e".repeat(40));
+      await provider.getFileAtCommit(url, "a.txt", "e".repeat(40), { untilLine: 1, timeoutMs: 27_000 });
+      // The installation and token lookups use their own 5 s limit; the file reads are the last two requests.
+      expect(timeout.mock.calls.map(([ms]) => ms).slice(-2)).toEqual([8_000, 27_000]);
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it("holds a file to 20 MB by its declared size without a last line and by the bytes that arrive, without reading past the cap", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const sha = "e".repeat(40);
+    const cap = 20_971_520;
+    const state = { pulls: 0, cancelled: false };
+    const stream = (bytes: number): ReadableStream<Uint8Array> => {
+      let sent = 0;
+      return new ReadableStream<Uint8Array>({
+        pull(controller) {
+          state.pulls += 1;
+          const size = Math.min(65_536, bytes - sent);
+          if (size === 0) { controller.close(); return; }
+          sent += size;
+          controller.enqueue(new Uint8Array(size).fill(97));
+        },
+        cancel() { state.cancelled = true; },
+      }, { highWaterMark: 0 });
+    };
+    const provider = appProvider({
+      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
+      fetchImplementation: async (url) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
+        if (requestUrl.includes("/contents/declared.txt?")) return new Response(stream(10), { status: 200, headers: { "content-length": String(cap + 1) } });
+        if (requestUrl.includes("/contents/exact.txt?")) return new Response(stream(cap), { status: 200 });
+        if (requestUrl.includes("/contents/over.txt?")) return new Response(stream(cap * 2), { status: 200 });
+        return new Response("not found", { status: 404 });
+      },
+    });
+    const url = "https://github.com/ps06756/personal-website-test.git";
+    await expect(provider.getFileAtCommit(url, "declared.txt", sha)).rejects.toThrow(/file too large/);
+    expect(state).toEqual({ pulls: 0, cancelled: true });
+    const exact = await provider.getFileAtCommit(url, "exact.txt", sha);
+    expect(exact?.length).toBe(cap);
+    state.pulls = 0;
+    state.cancelled = false;
+    await expect(provider.getFileAtCommit(url, "over.txt", sha)).rejects.toThrow(/file too large/);
+    expect(state.cancelled).toBe(true);
+    expect(state.pulls).toBeLessThanOrEqual(322);
+    // Twenty megabytes with no line break reached before the wanted line is too large to read up to that line.
+    state.pulls = 0;
+    state.cancelled = false;
+    await expect(provider.getFileAtCommit(url, "over.txt", sha, { untilLine: 5 })).rejects.toThrow(/file too large to read up to the cited line/);
+    expect(state.cancelled).toBe(true);
+    expect(state.pulls).toBeLessThanOrEqual(322);
+    // A declared size over 20 MB does not refuse a read that stops at a line.
+    await expect(provider.getFileAtCommit(url, "declared.txt", sha, { untilLine: 5 })).resolves.toBe("a".repeat(10));
+  });
+
+  it("refuses a body one byte over 20 MB and keeps encoded separators and punctuation inside one path segment", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const sha = "e".repeat(40);
+    const urls: string[] = [];
+    const provider = appProvider({
+      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
+      fetchImplementation: async (url) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
+        urls.push(requestUrl);
+        return new Response(requestUrl.includes("/contents/one-over.txt?") ? new Uint8Array(20_971_521) : "ok", { status: 200 });
+      },
+    });
+    const url = "https://github.com/ps06756/personal-website-test.git";
+    await expect(provider.getFileAtCommit(url, "one-over.txt", sha)).rejects.toThrow(/file too large/);
+    await provider.getFileAtCommit(url, "a%2Fb/c?d#e.ts", sha);
+    await provider.getFileAtCommit(url, `${"a/".repeat(255)}bc`, sha);
+    expect(urls[1]).toBe(`https://api.github.com/repos/ps06756/personal-website-test/contents/a%252Fb/c%3Fd%23e.ts?ref=${sha}`);
+    expect(urls).toHaveLength(3);
+    await expect(provider.getFileAtCommit(url, `${"a/".repeat(255)}bcd`, sha)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+  });
+
+  it("mints one contents-read token for a run of file reads in a repository and a new one after five minutes", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const sha = "e".repeat(40);
+    let minted = 0;
+    let clock = 1_000_000;
+    const provider = appProvider({
+      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem, now: () => clock,
+      fetchImplementation: async (url) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) { minted += 1; return new Response(JSON.stringify({ token: `token-${minted}` }), { status: 201 }); }
+        return new Response("ok", { status: 200 });
+      },
+    });
+    const url = "https://github.com/ps06756/personal-website-test.git";
+    await Promise.all([provider.getFileAtCommit(url, "a.ts", sha), provider.getFileAtCommit(url, "b.ts", sha)]);
+    await provider.getFileAtCommit(url, "c.ts", sha);
+    await provider.getFileAtCommit("https://github.com/PS06756/Personal-Website-Test.git", "d.ts", sha);
+    expect(minted).toBe(1);
+    clock += 5 * 60_000 + 1;
+    await provider.getFileAtCommit(url, "e.ts", sha);
+    expect(minted).toBe(2);
+  });
+
+  it("refuses an unsafe file path or commit before any request", async () => {
+    const fetchImplementation = vi.fn(async () => new Response("never", { status: 200 }));
+    const provider = appProvider({ credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => "unused", fetchImplementation });
+    const url = "https://github.com/ps06756/personal-website-test.git";
+    const sha = "e".repeat(40);
+    for (const path of ["/etc/passwd", "../x", "a/../x", "a/./x", "a//x", "", "a\\b", "a/", `${"a/".repeat(256)}b`]) {
+      await expect(provider.getFileAtCommit(url, path, sha), path).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    }
+    for (const commit of ["main", "E".repeat(40), "e".repeat(39), "../x"]) {
+      await expect(provider.getFileAtCommit(url, "a.ts", commit), commit).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    }
+    expect(fetchImplementation).not.toHaveBeenCalled();
+  });
+
   it("reads a publication branch's head commit with a contents-read token and refuses other branch names", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -619,7 +865,7 @@ function pullRequestFixture(): Record<string, unknown> {
 
 
 describe("current PR feedback API reads", () => {
-  function fixture(options: { wrongScope?: boolean; changedHead?: boolean; nested?: boolean; exactReviewTime?: boolean } = {}) {
+  function fixture(options: { wrongScope?: boolean; changedHead?: boolean; nested?: boolean; exactReviewTime?: boolean; numericIds?: boolean; emptyReview?: boolean } = {}) {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const root = "https://github.com/ps06756/personal-website-test/pull/42";
     const api = "https://api.github.com/repos/ps06756/personal-website-test";
@@ -627,6 +873,8 @@ describe("current PR feedback API reads", () => {
     const requests: string[] = [];
     const page = (nodes: unknown[], hasNextPage = false, endCursor: string | null = null) => ({ nodes, pageInfo: { hasNextPage, endCursor } });
     const comment = (id: number, anchor: string) => ({ id, body: `comment ${id}`, html_url: `${root}#${anchor}${id}`, user: { login: "reviewer" }, updated_at: "2026-10-05T12:00:00Z", submitted_at: "2026-10-05T12:00:00Z", path: "src/file.ts", line: 3, pull_request_url: `${api}/pulls/42`, issue_url: `${api}/issues/42` });
+    // GitHub serializes GraphQL fullDatabaseId (a BigInt) as a string. Numbers stay supported.
+    const gid = (id: number): string | number => options.numericIds ? id : String(id);
     const provider = appProvider({ credentialRef: "github-app", appId: "123", getPrivateKey: async () => privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
       fetchImplementation: async (url, init) => {
         const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url; requests.push(requestUrl);
@@ -637,14 +885,16 @@ describe("current PR feedback API reads", () => {
           const requestBody = typeof init?.body === "string" ? init.body : "";
           const request = JSON.parse(requestBody) as { variables: Record<string, unknown>; query: string };
           const variables = request.variables;
-          if (request.query.includes("reviews(first")) return Response.json({ data: { repository: { nameWithOwner: "ps06756/personal-website-test", pullRequest: { number: 42, headRefOid: "a".repeat(40), reviews: page([{ fullDatabaseId: 1, body: "comment 1", updatedAt: "2026-10-05T13:00:00Z", url: `${root}#pullrequestreview-1` }]) } } } });
+          if (request.query.includes("reviews(first")) return Response.json({ data: { repository: { nameWithOwner: "ps06756/personal-website-test", pullRequest: { number: 42, headRefOid: "a".repeat(40), reviews: page(options.emptyReview
+            ? [{ fullDatabaseId: "5480349109", body: "", updatedAt: "2026-10-05T13:00:00Z", url: `${root}#pullrequestreview-5480349109` }]
+            : [{ fullDatabaseId: gid(1), body: "comment 1", updatedAt: "2026-10-05T13:00:00Z", url: `${root}#pullrequestreview-1` }]) } } } });
           const threadId = typeof variables.threadId === "string" ? variables.threadId : undefined;
-          const connection = page([{ fullDatabaseId: 2 }], !!options.nested && !threadId, "comment-next");
-          const thread = { id: "thread-1", isResolved: true, repository: { nameWithOwner: "ps06756/personal-website-test" }, pullRequest: { number: 42 }, comments: threadId ? page([{ fullDatabaseId: 4 }]) : connection };
+          const connection = page([{ fullDatabaseId: gid(2) }], !!options.nested && !threadId, "comment-next");
+          const thread = { id: "thread-1", isResolved: !options.emptyReview, repository: { nameWithOwner: "ps06756/personal-website-test" }, pullRequest: { number: 42 }, comments: threadId ? page([{ fullDatabaseId: gid(4) }]) : connection };
           return Response.json({ data: threadId ? { node: thread } : { repository: { nameWithOwner: "ps06756/personal-website-test", pullRequest: { number: 42, headRefOid: "a".repeat(40), reviewThreads: page([thread]) } } } });
         }
         if (requestUrl.includes("/reviews?")) {
-          const review = comment(1, "pullrequestreview-");
+          const review = options.emptyReview ? { ...comment(5480349109, "pullrequestreview-"), body: "", state: "COMMENTED" } : comment(1, "pullrequestreview-");
           if (options.exactReviewTime) { const { updated_at: _updatedAt, ...withoutUpdatedAt } = review; void _updatedAt; return Response.json([withoutUpdatedAt]); }
           return Response.json([review]);
         }
@@ -667,6 +917,18 @@ describe("current PR feedback API reads", () => {
     expect(result.comments[1]).toMatchObject({ threadId: "thread-1", body: "comment 2", path: "src/file.ts", line: 3 });
     expect(result.threads).toEqual([{ id: "thread-1", resolved: true, commentIds: ["review_comment:2", "review_comment:4"] }]);
     expect(requests).toContain("https://api.github.com/repos/ps06756/personal-website-test/issues/42/comments?per_page=100&page=2");
+  });
+  it("reads GraphQL string review IDs and skips an empty-body review while keeping the inline comment", async () => {
+    const { provider } = fixture({ emptyReview: true });
+    const result = await provider.getPullRequestFeedback("https://github.com/ps06756/personal-website-test.git", 42);
+    expect(result.comments.map(c => c.id)).toEqual(["review_comment:2", "discussion:3"]);
+    expect(result.comments[0]).toMatchObject({ threadId: "thread-1", path: "src/file.ts", line: 3 });
+    expect(result.threads).toEqual([{ id: "thread-1", resolved: false, commentIds: ["review_comment:2"] }]);
+  });
+  it("still accepts numeric GraphQL database IDs", async () => {
+    const { provider } = fixture({ numericIds: true });
+    const result = await provider.getPullRequestFeedback("https://github.com/ps06756/personal-website-test.git", 42);
+    expect(result.comments.map(c => c.id)).toEqual(["review:1", "review_comment:2", "discussion:3"]);
   });
   it("binds review bodies to their current edit time when REST exposes only submitted_at", async () => {
     const { provider } = fixture({ exactReviewTime: true });

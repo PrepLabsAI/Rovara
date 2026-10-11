@@ -151,7 +151,7 @@ export async function runChecks(
   const startedAt = now();
   const entries: CheckEntry[] = [];
   for (const check of plannedChecks(plan, runners)) {
-    const entry = (after: CheckOutcome, output: string, durationMs = 0): CheckEntry => ({
+    const entry = (after: CheckOutcome, output: string, durationMs = 0, exitCode?: number | null): CheckEntry => ({
       id: check.id,
       label: check.label,
       source: check.source,
@@ -160,6 +160,7 @@ export async function runChecks(
       class: classifyCheck(check.before, after),
       output: storedCheckOutput(output),
       durationMs: Math.max(0, Math.round(durationMs)),
+      ...(exitCode === undefined ? {} : { exitCode }),
     });
     if (signal.aborted) {
       entries.push(entry("not_run", "AgentX stopped before this check ran."));
@@ -181,7 +182,7 @@ export async function runChecks(
           ? entry("not_run", `AgentX stopped this check when the time budget for checks ran out.\n${result.output}`, duration)
           : entry("timed_out", result.output, duration));
       } else {
-        entries.push(entry(result.exitCode === 0 ? "passed" : "failed", result.output, duration));
+        entries.push(entry(result.exitCode === 0 ? "passed" : "failed", result.output, duration, result.exitCode));
       }
     } catch (error) {
       const duration = now() - began;

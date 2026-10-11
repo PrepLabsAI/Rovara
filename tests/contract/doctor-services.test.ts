@@ -1,11 +1,12 @@
 import { AgentXError } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
-import { githubChecks } from "../../packages/cli/src/doctor/github.js";
+import { githubChecks, githubWebhookChecks } from "../../packages/cli/src/doctor/github.js";
+import { githubAppSecretName, githubWebhookUrl } from "../../packages/cli/src/init/github-app.js";
 import { secretChecks } from "../../packages/cli/src/doctor/secrets.js";
 import { slackChecks, slackSigningSecret } from "../../packages/cli/src/doctor/slack.js";
 import { probeSlackUrls, SlackSignatureRefusedError } from "../../packages/cli/src/init/slack-app.js";
 import { SlackRateLimitedError } from "../../packages/cli/src/setup/channel-add.js";
-import { doctorContext, doctorServices, SECRETS, SIGNING_KEY } from "../support/doctor-fakes.js";
+import { doctorContext, doctorServices, SECRETS, SETTINGS, SIGNING_KEY, WEBHOOK_SECRET } from "../support/doctor-fakes.js";
 import { fakeGitHubApi, fakeSlackApi, memoryInitSecrets, T0, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET } from "../support/init-fakes.js";
 import { fakeSlackChannels } from "../support/setup-fakes.js";
 
@@ -273,5 +274,61 @@ describe("doctor: Slack and GitHub (Task 6 polish)", () => {
     const other = (await githubChecks(failing("GitHub repository list failed with HTTP 502")))[0]!;
     expect(other.status).toBe("fail");
     expect(other.fix).not.toContain("suspended");
+  });
+});
+
+describe("doctor: GitHub webhook", () => {
+  const EXPECTED_URL = githubWebhookUrl(SETTINGS.controlPlaneUrl);
+  const SECRET_ID = githubAppSecretName("staging");
+  const appSecret = (extra: Record<string, unknown>) => JSON.stringify({ appId: "123", slug: "agentx-acme", account: "acme", privateKey: TEST_PRIVATE_KEY, ...extra });
+  const contextWith = (github: Parameters<typeof fakeGitHubApi>[0], secret = SECRETS[SECRET_ID]!) =>
+    doctorContext({ services: doctorServices({ github: fakeGitHubApi({ installationId: 456, ...github }), secrets: memoryInitSecrets({ ...SECRETS, [SECRET_ID]: secret }) }) });
+
+  it("is ok when the hook points at the control plane, the events are on and the secret is stored", async () => {
+    const checks = await githubWebhookChecks(doctorContext());
+    expect(checks.map((entry) => [entry.name, entry.status, entry.detail])).toEqual([
+      ["GitHub webhook", "ok", `the App sends events to ${EXPECTED_URL}`],
+      ["GitHub webhook", "ok", "subscribed to pull request and comment events; check that Active is on at https://github.com/organizations/acme/settings/apps/agentx-acme-staging"],
+      ["GitHub webhook secret", "ok", "stored"],
+    ]);
+    expect(text(checks)).not.toContain(WEBHOOK_SECRET);
+  });
+
+  it("warns, with the fix, when the App's webhook points somewhere else or nowhere", async () => {
+    for (const hookUrl of ["https://old.example.test/hook", undefined]) {
+      const found = (await githubWebhookChecks(contextWith({ ...(hookUrl === undefined ? {} : { hookUrl }) })))[0]!;
+      expect(found).toMatchObject({ name: "GitHub webhook", status: "warn" });
+      expect(found.detail).toContain(EXPECTED_URL);
+      expect(found.fix).toBe("run agentx --env staging upgrade: it points the App's webhook at the control plane");
+    }
+  });
+
+  it("warns when the App is not subscribed to every event, and names them and the settings page", async () => {
+    const found = (await githubWebhookChecks(contextWith({ hookUrl: EXPECTED_URL, events: ["pull_request", "issue_comment"] })))[1]!;
+    expect(found).toMatchObject({ name: "GitHub webhook", status: "warn" });
+    expect(found.detail).toContain("pull_request_review, pull_request_review_comment");
+    expect(found.fix).toContain("https://github.com/organizations/acme/settings/apps/agentx-acme-staging/permissions");
+  });
+
+  it("warns when no usable webhook secret is stored, without showing any secret", async () => {
+    for (const secret of [appSecret({}), appSecret({ webhookSecret: "short-secret-value" })]) {
+      const checks = await githubWebhookChecks(contextWith({ hookUrl: EXPECTED_URL }, secret));
+      const found = checks[2]!;
+      expect(found).toMatchObject({ name: "GitHub webhook secret", status: "warn", fix: "run agentx --env staging upgrade: it stores a webhook secret and gives it to GitHub" });
+      expect(text(checks)).not.toContain("short-secret-value");
+    }
+  });
+
+  it("warns, and does not fail, when GitHub cannot be asked", async () => {
+    const api = fakeGitHubApi({ installationId: 456 });
+    api.getHookConfig = async () => { throw new AgentXError("RUNTIME_UNAVAILABLE", "GitHub webhook lookup failed with HTTP 500", 503); };
+    const checks = await githubWebhookChecks(doctorContext({ services: doctorServices({ github: api }) }));
+    expect(checks[0]).toMatchObject({ status: "warn" });
+    expect(checks[0]!.detail).toContain("HTTP 500");
+    expect(checks.every((entry) => entry.status !== "fail")).toBe(true);
+  });
+
+  it("adds nothing when the GitHub App secret cannot be read (the GitHub App check says why)", async () => {
+    expect(await githubWebhookChecks(doctorContext({ services: doctorServices({ secrets: memoryInitSecrets({}) }) }))).toEqual([]);
   });
 });

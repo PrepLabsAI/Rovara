@@ -62,9 +62,11 @@ export function createBroker(options: {
   s3?: { send: (command: never) => Promise<unknown> };
   /** Spread into the broker input last, for inputs this helper has no option for. */
   extra?: Record<string, unknown>;
+  /** "dynamodb": the table hands a map's attributes back in another order than they were written, as DynamoDB does. */
+  mapOrder?: "insertion" | "dynamodb";
 } = {}) {
   if (!loaded) throw new Error("call loadSlackBroker() in a beforeAll before createBroker()");
-  const db = new FakeDynamoDb();
+  const db = new FakeDynamoDb(options.mapOrder === undefined ? {} : { mapOrder: options.mapOrder });
   const deleteEc2Session = options.deleteEc2Session === null ? undefined : vi.fn(options.deleteEc2Session ?? (async () => undefined));
   const brokerInput = {
     documentClient: db,

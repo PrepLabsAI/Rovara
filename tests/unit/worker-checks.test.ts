@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { ProjectCommand } from "@agentx/contracts";
+import { CheckEntrySchema, type ProjectCommand } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import {
   createCheckRunners,
@@ -193,6 +193,23 @@ describe("runChecks", () => {
     expect(Buffer.byteLength(entries[1]!.output)).toBeLessThanOrEqual(65_536);
     // Each project check keeps its own timeout.
     expect(runners.project.map((entry) => entry.timeoutSeconds)).toEqual([600, 120]);
+  });
+
+  it("keeps each finished project check's exit code, and none for a check that did not finish", async () => {
+    const runners = fakeRunners({
+      runProjectCommand: async (entry) => entry.executable === "ok" ? { exitCode: 0, timedOut: false, stdout: "", stderr: "" }
+        : entry.executable === "gone" ? { exitCode: 127, timedOut: false, stdout: "", stderr: "gone: command not found" }
+          : { exitCode: null, timedOut: true, stdout: "", stderr: "" },
+    });
+    const { entries } = await runChecks(planProject([command("ok"), command("gone"), command("slow")]), runners, budget());
+    expect(entries.map((entry) => ({ after: entry.after, exitCode: entry.exitCode }))).toEqual([
+      { after: "passed", exitCode: 0 }, { after: "failed", exitCode: 127 }, { after: "timed_out", exitCode: undefined },
+    ]);
+    expect(CheckEntrySchema.parse(entries[1]).exitCode).toBe(127);
+    // A report from an older worker has no exit code and still reads.
+    const older: Record<string, unknown> = { ...entries[1] };
+    delete older["exitCode"];
+    expect(CheckEntrySchema.parse(older)).not.toHaveProperty("exitCode");
   });
 
   it("an agent command that failed before the first edit and passes now is fixed (FR-003, FR-004)", async () => {

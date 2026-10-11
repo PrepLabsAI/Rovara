@@ -45,7 +45,7 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
     `- IAM roles ${environmentCloudFormationRoleName(env)} (CloudFormation deploys through it) and ${environmentOperatorRoleName(env)} (day-2 commands), and the permission boundary ${boundary}, which every AgentX role carries; the stacks' own roles live under the IAM path ${environmentRolePath(env)}`,
     `- Secrets ${secrets.join(", ")}`,
     `- Settings under /agentx/${env}/`,
-    `- In GitHub: an app named "${answers.github.appName}" owned by ${answers.github.account}, with read and write access to contents, pull requests and issues, and read access to metadata. No webhook.`,
+    `- In GitHub: an app named "${answers.github.appName}" owned by ${answers.github.account}, with read and write access to contents, pull requests and issues, and read access to metadata, and a webhook that sends pull request and comment events to the control plane.`,
     `- In Slack: an app named "${answers.slack.appName}".`,
     `- Models: main model ${modelName(answers.models.orchestrator)} (${provider("orchestrator")}), safety check model ${modelName(answers.models.classifier)} (${provider("classifier")}), coding model ${modelName(answers.models.worker)} (${provider("worker")})`,
     ...(answers.models.openRouter ? [`- OpenRouter: read existing secret ${answers.models.openRouter.secretArn}; ${routing(answers.models.openRouter.providers)}`] : []),

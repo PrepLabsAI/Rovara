@@ -23,8 +23,13 @@ export const WORKFLOW_BLOCK_REASONS = {
   checksUnconfirmed: "AgentX couldn't confirm the selected checks ran on the final code. Choose checks and retry.",
   checkRetryStale: "This check run no longer matches the task's current step. Use the latest update in the thread.",
   checkReportUnreadable: "AgentX couldn't read the check results for the final code. Choose checks and retry.",
-  noChecksConfigured: "No checks ran: this project has no required checks and the task selected no optional checks. Configure or select at least one check, then retry.",
+  /** The task has checks to run (project, proposed or chosen), but the worker reported none ran. */
+  noChecksConfigured: "AgentX ran none of this task's checks on the final code. Choose checks and retry, or close the task.",
+  /** Every failed check could not run: the check itself is broken, so coding again would not help. */
+  checksBroken: "the checks couldn't run",
   checkRunnerFailed: "AgentX couldn't run the selected checks. Retry once the check runner is working.",
+  /** Review only: AgentX's rerun of the agent's own tests found one that passed before and fails now. */
+  regressionFound: "A test that passed before this change fails now. Send it back to coding, or close the task.",
   repositoriesIncomplete: "AgentX couldn't find every repository in the final code. Retry coding, or close the task.",
   codeChangedAfterChecks: "The code changed after its checks ran. Run the checks again on the latest code.",
   startUnrecorded: "AgentX could not record where this change started. Close the task and start a new one.",
@@ -32,13 +37,28 @@ export const WORKFLOW_BLOCK_REASONS = {
   startChanged: "The code's starting point changed. Send the task back to coding or close it.",
   noCheckResults: "No required or selected optional checks ran. Configure or select at least one check, then retry.",
   planNotSaved: "The planning run finished without saving a document. Retry planning.",
+  /** The saved plan is a structured document that could not be read back. */
+  planUnreadable: "the plan couldn't be read",
   pullRequestChanged: "The pull request on GitHub no longer holds the checked code, so I won't finish this task from it. Close the task.",
+  /** The pull request's feedback review failed; AgentX still watches the pull request for its merge. */
+  feedbackReviewFailed: "I couldn't review the feedback on the pull request, so I have nothing to propose from it.",
+  /** The approved fix could not be pushed to the pull request; AgentX still watches the pull request for its merge. */
+  pullRequestUpdateFailed: "I couldn't push the fix to the pull request.",
   /** Shown only in a task view, never stored: the document waiting for approval failed its digest check. */
   documentUnverified: "The saved document couldn't be checked, so I stopped. Close this task and start again.",
 } as const;
 
+/** What the coder is told about tests a review-only rerun found regressed (`regressedChecks`). */
+export const WORKFLOW_REGRESSION_INSTRUCTION = "These tests passed before this change and fail now. If the task intentionally changes this behaviour, update the tests to match it; otherwise fix the code.";
+/** At most this many regressed tests are kept on a blocked workflow, each cut to WORKFLOW_REGRESSED_CHECK_MAX characters. */
+export const WORKFLOW_REGRESSED_CHECKS_MAX = 8;
+export const WORKFLOW_REGRESSED_CHECK_MAX = 120;
+
 /** The worker's refusal when the workspace no longer holds the tree its checks and reviews passed on. */
 export const WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE = "the code changed after its checks and reviews; AgentX did not publish it";
+
+/** Why an AgentX worker refused, before running, to push a reviewed fix: it is too old to push exactly the reviewed tree. */
+export const WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED = "pushing a reviewed fix needs a worker that pushes exactly the reviewed tree";
 
 /** Whether the owner may ask AgentX to open the draft pull request again: it is ready, or AgentX gave up on its own. */
 export function workflowPublicationRetryable(workflow: { stage: string; state: string; blockReason?: string | undefined }): boolean {
@@ -93,6 +113,11 @@ export const CandidateManifestSchema = z.object({
 });
 export type CandidateManifest = z.infer<typeof CandidateManifestSchema>;
 
+/** Whether a check result is of a command that could not run. A not-installed program always is, also in results recorded before `broken` existed. */
+export function workflowCheckResultBroken(result: { status: string; broken?: boolean | undefined; programNotFound?: boolean | undefined }): boolean {
+  return result.status === "FAILED" && (result.broken === true || result.programNotFound === true);
+}
+
 const VerificationResultsSchema = z.object({
   candidateDigest: DigestSchema,
   producer: z.string().trim().min(1).max(120),
@@ -101,24 +126,42 @@ const VerificationResultsSchema = z.object({
   results: z.array(z.object({
     checkId: z.string().trim().min(1).max(120),
     status: z.enum(["PASS", "FAILED", "UNKNOWN"]),
-  }).strict()).min(1).max(100),
-}).strict();
+    /** The check failed because its program could not be started: it is not installed on the AgentX worker. */
+    programNotFound: z.literal(true).optional(),
+    /** The check's command could not run (not found, not runnable, or a script that does not parse): the code is not at fault. */
+    broken: z.literal(true).optional(),
+  }).strict()).max(100),
+  /** No check was selected for this task: the candidate was validated and goes to review with no check results. */
+  reviewOnly: z.boolean().optional(),
+}).strict().superRefine((verification, context) => {
+  if (verification.reviewOnly === true ? verification.results.length > 0 : verification.results.length === 0) {
+    context.addIssue({ code: "custom", path: ["results"], message: "verification has results unless it is review only, and none when it is" });
+  }
+});
 export type WorkflowVerificationResults = z.infer<typeof VerificationResultsSchema>;
 
 const WorkflowVerificationRetrySchema = z.object({
   requestId: z.string().uuid(), actorId: ActorIdSchema,
   selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20),
+  /** The approved plan's proposed checks the owner kept for this retry. Older retries: all of them. */
+  selectedProposedCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(8).optional(),
   at: z.string().datetime(),
-}).strict().refine(retry => new Set(retry.selectedOptionalCheckIds).size === retry.selectedOptionalCheckIds.length,
-  "verification retry check IDs must be unique");
+}).strict().refine(retry => new Set(retry.selectedOptionalCheckIds).size === retry.selectedOptionalCheckIds.length
+  && new Set(retry.selectedProposedCheckIds ?? []).size === (retry.selectedProposedCheckIds ?? []).length,
+"verification retry check IDs must be unique");
 
-/** One reviewer finding; only findings the change INTRODUCED block, PRE_EXISTING ones are advisory. */
+/**
+ * One reviewer finding; only findings the change INTRODUCED block, PRE_EXISTING ones are advisory. A finding the reviewer
+ * marks `advisory` never blocks and never goes to the coder, whatever its origin (for example a remark about something the
+ * approved plan asked for, or about how well the checks cover the change).
+ */
 export const WorkflowReviewFindingSchema = z.object({
   text: z.string().trim().min(1).max(600),
   origin: z.enum(["INTRODUCED", "PRE_EXISTING"]),
   severity: z.enum(["HIGH", "MEDIUM", "LOW"]).optional(),
   file: z.string().trim().min(1).max(500).optional(),
   line: z.number().int().positive().optional(),
+  advisory: z.boolean().optional(),
 }).strict();
 export type WorkflowReviewFinding = z.infer<typeof WorkflowReviewFindingSchema>;
 
@@ -149,15 +192,65 @@ export const WorkflowReviewReportSchema = z.object({
   /** The base-to-candidate diff the reviewer saw was cut to fit its limit: the review covered only part of the change. */
   partialDiff: z.literal(true).optional(),
 }).strict().superRefine((report, context) => {
-  const introduced = report.findings.some((finding) => finding.origin === "INTRODUCED");
+  const introduced = report.findings.some((finding) => findingBlocks(finding, report.role));
   if (report.status === "PASS" && introduced) context.addIssue({ code: "custom", path: ["findings"], message: "a passing review cannot report an introduced finding" });
   if (report.status === "FINDINGS" && !introduced) context.addIssue({ code: "custom", path: ["findings"], message: "a review with findings must report at least one introduced finding" });
 });
 export type WorkflowReviewReport = z.infer<typeof WorkflowReviewReportSchema>;
 
-/** The findings that block a review: those the change introduced. Pre-existing findings are advisory. */
-export function blockingFindings(report: WorkflowReviewReport): WorkflowReviewFinding[] {
-  return report.findings.filter((finding) => finding.origin === "INTRODUCED");
+/** Whether a finding blocks: the change introduced it and the reviewer did not mark it advisory. */
+function findingBlocks(finding: { origin?: string; advisory?: boolean | undefined } | string, role: string | undefined): boolean {
+  // A security finding is never advisory: the flag is ignored on it, and only the owner's accept waives one.
+  return typeof finding === "string" || (finding.origin === "INTRODUCED" && (finding.advisory !== true || role === "SECURITY"));
+}
+
+/**
+ * The stable ID of a review finding: the SHA-256 of its review role, text, file and line. The same finding of the same
+ * review role always has the same ID, so the owner's answer for it can be matched again later.
+ */
+export function workflowFindingFingerprint(role: "CRITIC" | "SECURITY", finding: { text: string; file?: string | undefined; line?: number | undefined }): string {
+  return createHash("sha256").update(JSON.stringify([role, finding.text, finding.file ?? "", finding.line ?? 0]), "utf8").digest("hex");
+}
+
+/** A blocking review finding the owner accepted, for one candidate: it never blocks that candidate again. */
+export const WorkflowAcceptedFindingSchema = z.object({
+  candidateDigest: DigestSchema,
+  role: z.enum(["CRITIC", "SECURITY"]),
+  fingerprint: DigestSchema,
+  text: z.string().trim().min(1).max(600),
+  reason: z.string().trim().min(1).max(500),
+  actorId: ActorIdSchema,
+  at: z.string().datetime(),
+}).strict();
+export type WorkflowAcceptedFinding = z.infer<typeof WorkflowAcceptedFindingSchema>;
+export const WORKFLOW_ACCEPTED_FINDINGS_MAX = 100;
+/** How many findings one resolution may answer. */
+export const WORKFLOW_RESOLVE_FINDINGS_MAX = 20;
+
+type AcceptedFindingRef = { candidateDigest: string; role: string; fingerprint: string };
+
+/** Whether the owner accepted this finding of this review role for this candidate. */
+function findingAccepted(
+  finding: { text?: string | undefined; file?: string | undefined; line?: number | undefined } | string, role: string | undefined,
+  candidateDigest: string | undefined, accepted: readonly AcceptedFindingRef[] | undefined,
+): boolean {
+  if ((role !== "CRITIC" && role !== "SECURITY") || candidateDigest === undefined || accepted === undefined || accepted.length === 0) return false;
+  const fingerprint = workflowFindingFingerprint(role, typeof finding === "string" ? { text: finding } : { text: finding.text ?? "", file: finding.file, line: finding.line });
+  return accepted.some((entry) => entry.candidateDigest === candidateDigest && entry.role === role && entry.fingerprint === fingerprint);
+}
+
+/**
+ * The findings that block a review: those the change introduced that are not marked advisory (a security finding is
+ * never advisory), and, when the owner's accepted findings are given, not accepted for this review's candidate.
+ * Pre-existing and advisory findings never block.
+ */
+export function blockingFindings(report: WorkflowReviewReport, accepted?: readonly AcceptedFindingRef[]): WorkflowReviewFinding[] {
+  return report.findings.filter((finding) => findingBlocks(finding, report.role) && !findingAccepted(finding, report.role, report.candidateDigest, accepted));
+}
+
+/** Whether a review no longer holds the change back: it passed, or every finding that blocked it was accepted by the owner. */
+function reviewCleared(review: WorkflowReviewReport, accepted: readonly AcceptedFindingRef[] | undefined): boolean {
+  return review.status === "PASS" || (review.status === "FINDINGS" && blockingFindings(review, accepted).length === 0);
 }
 
 const WorkflowPullRequestSchema = z.object({
@@ -167,6 +260,12 @@ const WorkflowPullRequestSchema = z.object({
   /** Exact GitHub head commit returned by the broker-verified publication callback. */
   /** Present on newly published workflow PRs; absent only on pre-feature persisted snapshots. */
   headSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+  /**
+   * GitHub's tree for headSha, recorded with the head: merge tracking matches it, so a merge of the head GitHub has is
+   * observed while a fix is being pushed or after its push failed. Absent on older records (the candidate's tree then).
+   */
+  headTreeSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+  /** The reviewed code the head holds: the current candidate, or an earlier one while its fix is pushed or after that push failed. */
   candidateDigest: DigestSchema,
   required: z.boolean(),
   state: z.enum(["UNKNOWN", "OPEN", "CLOSED", "MERGED"]),
@@ -228,11 +327,14 @@ export const WorkflowFeedbackFindingSchema = WorkflowFeedbackFindingRefSchema.ex
   confidence: z.object({ level: z.enum(["HIGH", "MEDIUM", "LOW", "UNKNOWN"]), reason: z.string().trim().min(1).max(2000) }).strict(),
   proposedDisposition: z.enum(["IMPLEMENT", "SKIP", "OWNER_DECISION"]),
   fixProposal: z.object({
+    // For an OWNER_DECISION this is the question for the owner and its options.
     summary: z.string().trim().min(1).max(2000),
+    // May be empty: only an IMPLEMENT must name its changes (the worker checks that); an owner decision or a skip may name none.
     fileChanges: z.array(z.object({ repositoryId: z.string().trim().min(1).max(200), path: z.string().trim().min(1).max(1000),
-      operation: z.enum(["MODIFY", "ADD"]), change: z.string().trim().min(1).max(4000) }).strict()).min(1).max(32),
+      operation: z.enum(["MODIFY", "ADD"]), change: z.string().trim().min(1).max(4000) }).strict()).max(32),
+    // May be empty: the worker, which can see the candidate tree, requires tests only for a code change in a repository that has tests.
     tests: z.array(z.object({ repositoryId: z.string().trim().min(1).max(200), path: z.string().trim().min(1).max(1000),
-      operation: z.enum(["MODIFY", "ADD"]), behavior: z.string().trim().min(1).max(2000) }).strict()).min(1).max(32),
+      operation: z.enum(["MODIFY", "ADD"]), behavior: z.string().trim().min(1).max(2000) }).strict()).max(32),
   }).strict().optional(),
 }).strict();
 export type WorkflowFeedbackFinding = z.infer<typeof WorkflowFeedbackFindingSchema>;
@@ -265,6 +367,8 @@ export const WorkflowFeedbackReviewRefSchema = WorkflowFeedbackReviewMetadataSch
   sha256: DigestSchema, objectKey: FeedbackObjectKeySchema,
 }).refine(r => r.objectKey.includes(r.sha256), "review artifact key must contain its content digest");
 export type WorkflowFeedbackReviewRef = z.infer<typeof WorkflowFeedbackReviewRefSchema>;
+/** The private artifact a feedback review keeps a rejected reviewer answer in, beside its report. */
+export const WORKFLOW_FEEDBACK_REVIEW_ANSWER_ARTIFACT = "workflow-feedback-review-answer.txt";
 export const WorkflowFeedbackReviewReportSchema = WorkflowFeedbackReviewMetadataSchema.safeExtend({
   findings: z.array(WorkflowFeedbackFindingSchema).max(128),
 }).superRefine((report, context) => {
@@ -301,6 +405,8 @@ export const WorkflowThreadNoteSchema = z.object({
   schemaVersion: z.literal(1), taskId: z.string().uuid(), slackUserId: z.string().regex(/^[UW][A-Z0-9]{2,31}$/), isOwner: z.boolean(),
   teamId: z.string(), channelId: z.string(), threadTs: z.string().regex(/^\d{10}\.\d{6}$/), messageTs: z.string().regex(/^\d{10}\.\d{6}$/), eventId: z.string().min(1).max(128),
   text: z.string().trim().min(1).max(WORKFLOW_THREAD_NOTE_MAX_CHARS), truncated: z.boolean(), receivedAt: z.string().datetime(), workflowRevision: z.number().int().positive(),
+  /** Set when the chat agent answered this reply as a question: the next step then skips it (it still counts toward the cap). */
+  answeredAt: z.string().datetime().optional(),
 }).strict();
 export type WorkflowThreadNote = z.infer<typeof WorkflowThreadNoteSchema>;
 export const WorkflowFeedbackDecisionSchema = z.object({
@@ -432,15 +538,21 @@ export type WorkflowStage = z.infer<typeof WorkflowStageSchema>;
 export const WorkflowStateSchema = z.enum(["READY", "RUNNING", "WAITING", "BLOCKED", "COMPLETE"]);
 export type WorkflowState = z.infer<typeof WorkflowStateSchema>;
 
+const WorkflowObjectKeySchema = z.string().min(1).max(1024).refine((key) => !key.startsWith("/") && !key.split("/").includes(".."));
+
 export const WorkflowArtifactSchema = z.object({
   id: z.string().min(1).max(128),
   type: z.enum(["requirements", "design", "plan", "test_plan", "review_report"]),
   version: z.number().int().positive(),
   sha256: DigestSchema,
   producer: z.string().min(1).max(120),
-  objectKey: z.string().min(1).max(1024).refine((key) => !key.startsWith("/") && !key.split("/").includes("..")),
+  objectKey: WorkflowObjectKeySchema,
   createdAt: z.string().datetime(),
-});
+  /** How the document is stored: Markdown (the default for older artifacts) or a structured plan document (canonical JSON). */
+  format: z.enum(["markdown", "structured"]).optional(),
+  /** Structured documents only: the verified evidence (code excerpts) saved beside the document. */
+  evidence: z.object({ objectKey: WorkflowObjectKeySchema, sha256: DigestSchema }).strict().optional(),
+}).refine((artifact) => artifact.evidence === undefined || artifact.format === "structured", { message: "evidence belongs only to a structured document", path: ["evidence"] });
 export type WorkflowArtifact = z.infer<typeof WorkflowArtifactSchema>;
 
 export const WorkflowDecisionSchema = z.object({
@@ -452,30 +564,75 @@ export const WorkflowDecisionSchema = z.object({
   reason: z.string().trim().min(1).max(500),
   artifactDigest: DigestSchema.optional(),
   selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20).optional(),
-  /** Where the decision was made: an approval gate (the default), or the owner sending blocked work back to coding. */
-  source: z.enum(["GATE", "SEND_BACK"]).optional(),
+  /** Where the decision was made: an approval gate (the default), the owner sending blocked work back to coding, or the owner resolving review findings. */
+  source: z.enum(["GATE", "SEND_BACK", "FINDINGS"]).optional(),
   at: z.string().datetime(),
 }).strict();
 export type WorkflowDecision = z.infer<typeof WorkflowDecisionSchema>;
 
-const WorkflowCheckSchema = z.object({
+export const WorkflowCheckSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
   label: z.string().trim().min(1).max(80),
   command: ProjectCommandSchema,
 }).strict();
+export type WorkflowCheck = z.infer<typeof WorkflowCheckSchema>;
+export const WORKFLOW_PROPOSED_CHECKS_MAX = 8;
+/** The checks a coding plan proposed (`parseProposedChecks`), with why it proposed none or why they could not be read. */
+export const WorkflowCheckProposalSchema = z.object({
+  proposed: z.array(WorkflowCheckSchema).max(WORKFLOW_PROPOSED_CHECKS_MAX),
+  proposalNote: z.string().min(1).max(200).optional(),
+  noneReason: z.string().min(1).max(300).optional(),
+}).strict();
+export type WorkflowCheckProposal = z.infer<typeof WorkflowCheckProposalSchema>;
 export const WorkflowCheckPolicySchema = z.object({
   required: z.array(WorkflowCheckSchema).max(64),
   optional: z.array(WorkflowCheckSchema).max(20),
   selectedOptionalIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20),
+  /** Checks the current coding plan proposed; they run only once the owner approves that plan. Older snapshots: none. */
+  proposed: WorkflowCheckProposalSchema.shape.proposed.default([]),
+  /**
+   * The proposed checks still run: the owner may remove some when retrying verification, never add one. Absent: all of
+   * them. Each new plan version proposes afresh, so it is cleared with the proposal.
+   */
+  selectedProposedIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(WORKFLOW_PROPOSED_CHECKS_MAX).optional(),
+  proposalNote: WorkflowCheckProposalSchema.shape.proposalNote,
+  noneReason: WorkflowCheckProposalSchema.shape.noneReason,
 }).strict().superRefine((policy, context) => {
-  const ids = [...policy.required, ...policy.optional].map((check) => check.id);
+  const ids = [...policy.required, ...policy.optional, ...policy.proposed].map((check) => check.id);
   if (new Set(ids).size !== ids.length) context.addIssue({ code: "custom", path: ["optional"], message: "workflow check IDs must be unique" });
+  if (policy.selectedProposedIds !== undefined && (new Set(policy.selectedProposedIds).size !== policy.selectedProposedIds.length
+    || policy.selectedProposedIds.some((id) => !policy.proposed.some((check) => check.id === id)))) {
+    context.addIssue({ code: "custom", path: ["selectedProposedIds"], message: "kept proposed checks must be unique and come from the approved plan" });
+  }
   if (new Set(policy.selectedOptionalIds).size !== policy.selectedOptionalIds.length
     || policy.selectedOptionalIds.some((id) => !policy.optional.some((check) => check.id === id))) {
     context.addIssue({ code: "custom", path: ["selectedOptionalIds"], message: "selected optional checks must be unique and project-approved" });
   }
 });
 export type WorkflowCheckPolicy = z.infer<typeof WorkflowCheckPolicySchema>;
+/** A check policy as it may be written or stored: `proposed` may be left out. */
+export type WorkflowCheckPolicyInput = z.input<typeof WorkflowCheckPolicySchema>;
+
+/**
+ * The checks a task runs, in the worker's `readiness:<index>` order: the project's required checks, then the approved
+ * plan's proposed checks the owner kept (all, unless a retry removed some) in proposal order, then the selected
+ * optional checks in project order.
+ */
+export function workflowSelectedChecks(policy: WorkflowCheckPolicy | undefined): WorkflowCheck[] {
+  if (policy === undefined) return [];
+  // A task record read straight from storage and written before proposals has no `proposed`; it proposed nothing.
+  const kept = policy.selectedProposedIds;
+  const proposed = (policy.proposed ?? []).filter((check) => kept === undefined || kept.includes(check.id));
+  return [...policy.required, ...proposed, ...policy.optional.filter((check) => policy.selectedOptionalIds.includes(check.id))];
+}
+
+/**
+ * Whether a task may be verified as review only: it has a stored check policy and that policy selects no check. A task
+ * with no stored policy runs the project's checks, so it is never review only.
+ */
+export function workflowIsReviewOnly(policy: WorkflowCheckPolicy | undefined): boolean {
+  return policy !== undefined && workflowSelectedChecks(policy).length === 0;
+}
 
 export const WorkflowPathSchema = z.enum(["QUICK", "FULL"]);
 export const WorkflowReviewPhaseSchema = z.enum(["REQUIREMENTS", "DESIGN", "IMPLEMENTATION_PLAN"]);
@@ -553,6 +710,14 @@ export const WorkflowReviewBaseSchema = z.array(z.object({
 }).strict()).min(1).max(32).refine((base) => new Set(base.map((entry) => entry.repositoryId)).size === base.length,
   "base repositories must be unique");
 
+/** Why pushing a fix to a pull request failed: its head moved on GitHub, GitHub refused it, or the worker cannot push a reviewed fix. */
+export const WORKFLOW_PULL_REQUEST_UPDATE_CAUSES = ["HEAD_MOVED", "PUSH_REFUSED", "WORKER_OUTDATED"] as const;
+export type WorkflowPullRequestUpdateCause = typeof WORKFLOW_PULL_REQUEST_UPDATE_CAUSES[number];
+const WorkflowPullRequestUpdateFailureSchema = z.object({
+  numbers: z.array(z.number().int().positive()).min(1).max(32),
+  cause: z.enum(WORKFLOW_PULL_REQUEST_UPDATE_CAUSES).optional(),
+}).strict();
+
 const WorkflowSnapshotShapeSchema = z.object({
   schemaVersion: z.literal(1),
   definitionId: z.literal("agentx-task-to-pr"),
@@ -565,6 +730,11 @@ const WorkflowSnapshotShapeSchema = z.object({
   stage: WorkflowStageSchema,
   state: WorkflowStateSchema,
   blockReason: z.string().max(500).optional(),
+  /**
+   * Review only: the tests (labels or commands, worker output, untrusted) AgentX's rerun found passed before this change
+   * and fail now. Kept through a send-back so the coder hears of them; the next block or verification replaces them.
+   */
+  regressedChecks: z.array(z.string().trim().min(1).max(WORKFLOW_REGRESSED_CHECK_MAX)).min(1).max(WORKFLOW_REGRESSED_CHECKS_MAX).optional(),
   outcome: z.enum(["PASSED", "SKIPPED", "CHANGES_REQUESTED", "REJECTED", "MERGED", "CLOSED"]).optional(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
@@ -577,7 +747,13 @@ const WorkflowSnapshotShapeSchema = z.object({
   reviewBase: WorkflowReviewBaseSchema.optional(),
   verification: VerificationResultsSchema.optional(),
   reviews: z.array(WorkflowReviewReportSchema).max(2).optional(),
+  /** Blocking review findings the owner accepted, each for the candidate it was found on; the newest 100. */
+  acceptedFindings: z.array(WorkflowAcceptedFindingSchema).max(WORKFLOW_ACCEPTED_FINDINGS_MAX).optional(),
   pullRequests: z.array(WorkflowPullRequestSchema).max(32).optional(),
+  /** When an approved fix was last pushed to the existing pull requests. */
+  pullRequestUpdatedAt: z.string().datetime().optional(),
+  /** Why the latest push of a fix failed, for the owner's message: the pull requests it was for, and a plain cause when known. */
+  pullRequestUpdateFailure: WorkflowPullRequestUpdateFailureSchema.optional(),
   feedbackReview: WorkflowFeedbackReviewSchema.optional(),
   feedbackReviewHistory: z.array(WorkflowFeedbackReviewRefSchema).max(100).optional(),
   feedbackDecisions: z.array(WorkflowFeedbackDecisionSchema).max(100).optional(),
@@ -608,27 +784,37 @@ const WorkflowSnapshotShapeSchema = z.object({
   if (workflow.path === "FULL" && workflow.reviewPhase === undefined) {
     context.addIssue({ code: "custom", path: ["reviewPhase"], message: "full workflow must name the current approval phase" });
   }
-  const atOrAfterPrReady = ["PULL_REQUEST", "WAIT_FOR_MERGE", "MERGED"].includes(workflow.stage);
+  // A pull request that merged while its approved fix was still being made holds earlier reviewed code: its checks and
+  // reviews were recorded with that code (and its head and tree with the pull request), not with the fix's candidate.
+  const mergedEarlierCode = workflow.stage === "MERGED" && workflow.candidate !== undefined
+    && !(workflow.pullRequests ?? []).some((pullRequest) => pullRequest.required && pullRequest.candidateDigest === workflow.candidate?.digest);
+  const atOrAfterPrReady = ["PULL_REQUEST", "WAIT_FOR_MERGE", "MERGED"].includes(workflow.stage) && !mergedEarlierCode;
   if (atOrAfterPrReady) {
     const currentDigest = workflow.candidate?.digest;
-    const checksPass = currentDigest !== undefined && workflow.verification?.candidateDigest === currentDigest
-      && workflow.verification.results.length > 0
-      && workflow.verification.results.every((result) => result.status === "PASS");
+    const verification = currentDigest !== undefined && workflow.verification?.candidateDigest === currentDigest ? workflow.verification : undefined;
+    // Passing results, or a review-only verification of a task with no check to run.
+    const checksPass = verification !== undefined && (verification.results.length > 0
+      ? verification.results.every((result) => result.status === "PASS")
+      : verification.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy));
     const reviewsPass = currentDigest !== undefined && (["CRITIC", "SECURITY"] as const).every((role) =>
-      workflow.reviews?.some((review) => review.role === role && review.status === "PASS" && review.candidateDigest === currentDigest) === true);
+      workflow.reviews?.some((review) => review.role === role && review.candidateDigest === currentDigest && reviewCleared(review, workflow.acceptedFindings)) === true);
     if (!checksPass) context.addIssue({ code: "custom", path: ["verification"], message: "PR readiness requires passing checks for the current candidate" });
     if (!reviewsPass) context.addIssue({ code: "custom", path: ["reviews"], message: "PR readiness requires critic and security passes for the current candidate" });
   }
-  // Ready, or blocked only because AgentX gave up opening the draft pull request on its own (the owner retries it).
+  // Ready, or blocked only because AgentX gave up opening the draft pull request on its own (the owner retries it), or
+  // running only while a fix is pushed to the pull requests already open.
   if (workflow.stage === "PULL_REQUEST" && workflow.state !== "READY"
-    && !(workflow.state === "BLOCKED" && workflow.blockReason === WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE)) {
+    && !(workflow.state === "BLOCKED" && workflow.blockReason === WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE)
+    && !(workflow.state === "RUNNING" && (workflow.pullRequests ?? []).length > 0)) {
     context.addIssue({ code: "custom", path: ["state"], message: "pull request stage must be ready" });
   }
   if (workflow.stage === "WAIT_FOR_MERGE" || workflow.stage === "MERGED") {
     const pullRequests = workflow.pullRequests ?? [];
     const required = pullRequests.filter((pullRequest) => pullRequest.required);
+    // A pull request holds earlier reviewed code only after pushing its fix failed, or when it merged before the fix was pushed.
+    const earlierAllowed = workflow.stage === "MERGED" || (workflow.state === "BLOCKED" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed);
     if (required.length === 0 || workflow.candidate === undefined
-      || pullRequests.some((pullRequest) => pullRequest.candidateDigest !== workflow.candidate?.digest)
+      || (!earlierAllowed && pullRequests.some((pullRequest) => pullRequest.candidateDigest !== workflow.candidate?.digest))
       || workflow.candidate.repositories.some((repository) => !required.some((pullRequest) => pullRequest.repositoryId === repository.repositoryId))) {
       context.addIssue({ code: "custom", path: ["pullRequests"], message: "merge tracking requires candidate-bound required pull requests" });
     }
@@ -699,6 +885,9 @@ export function recordWorkflowVerification(
   if (!checks.success || checks.data.candidateDigest !== candidate.digest) {
     throw new WorkflowTransitionError("verification results do not match the current candidate");
   }
+  if (checks.data.reviewOnly === true && !workflowIsReviewOnly(current.checkPolicy)) {
+    throw new WorkflowTransitionError("verification cannot be review only when checks were selected");
+  }
   if (current.reviewBase !== undefined && candidate.repositories.some((repository) =>
     current.reviewBase?.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha !== repository.baseCommitSha
       || repository.baseCommitSha === undefined)) {
@@ -708,15 +897,19 @@ export function recordWorkflowVerification(
     ? candidate.repositories.map((repository) => ({ repositoryId: repository.repositoryId, baseCommitSha: repository.baseCommitSha as string }))
     : undefined);
   const passed = checks.data.results.every((result) => result.status === "PASS");
+  const failedResults = checks.data.results.filter((result) => result.status === "FAILED");
+  // Every failed check could not run: coding again would not help, so the owner is told that, not "checks failed".
+  const allBroken = failedResults.length > 0 && failedResults.every(workflowCheckResultBroken);
   const candidateChanged = current.candidate?.digest !== candidate.digest;
-  const { blockReason: _priorBlockReason, ...withoutBlockReason } = current;
+  const { blockReason: _priorBlockReason, regressedChecks: _priorRegressions, ...withoutBlockReason } = current;
   void _priorBlockReason;
+  void _priorRegressions;
   return WorkflowSnapshotSchema.parse({
     ...withoutBlockReason,
     revision: current.revision + 1,
     state: passed ? "WAITING" : "BLOCKED",
     stage: passed ? "REVIEW" : "VERIFY",
-    ...(passed ? {} : { blockReason: "candidate checks failed or have unknown results" }),
+    ...(passed ? {} : { blockReason: allBroken ? WORKFLOW_BLOCK_REASONS.checksBroken : "candidate checks failed or have unknown results" }),
     candidate,
     ...(reviewBase === undefined ? {} : { reviewBase }),
     verification: checks.data,
@@ -736,8 +929,9 @@ export function submitWorkflowReview(currentInput: unknown, reportInput: unknown
     throw new WorkflowTransitionError("review report does not match the current verified candidate");
   }
   const reviews = [...(current.reviews ?? []).filter((entry) => entry.role !== report.data.role), report.data];
-  const complete = (["CRITIC", "SECURITY"] as const).every((role) => reviews.some((entry) => entry.role === role && entry.status === "PASS"));
-  const failed = reviews.some((entry) => entry.status !== "PASS");
+  // A review also stands when the owner accepted every finding that blocked it, for this candidate.
+  const complete = (["CRITIC", "SECURITY"] as const).every((role) => reviews.some((entry) => entry.role === role && reviewCleared(entry, current.acceptedFindings)));
+  const failed = reviews.some((entry) => !reviewCleared(entry, current.acceptedFindings));
   const { blockReason: _priorBlockReason, ...withoutBlockReason } = current;
   void _priorBlockReason;
   return WorkflowSnapshotSchema.parse({
@@ -814,7 +1008,9 @@ export function observeWorkflowPullRequest(currentInput: unknown, observationInp
     source: z.literal("GITHUB_API"),
     observedAt: z.string().datetime(),
   }).strict().safeParse(observationInput);
-  if (!observation.success || (current.stage !== "WAIT_FOR_MERGE" && current.stage !== "MERGED") || current.pullRequests === undefined) {
+  // A merge is tracked from the first pull request on, in every stage after it opened (an approved fix being coded,
+  // checked, reviewed or pushed included), until the task is closed.
+  if (!observation.success || current.pullRequests === undefined || current.pullRequests.length === 0 || current.stage === "CLOSED") {
     throw new WorkflowTransitionError("workflow is not waiting for GitHub pull request observations");
   }
   const existing = current.pullRequests.find((pullRequest) => pullRequest.repositoryId === observation.data.repositoryId
@@ -825,17 +1021,163 @@ export function observeWorkflowPullRequest(currentInput: unknown, observationInp
   const pullRequests = current.pullRequests.map((pullRequest) => pullRequest === existing
     ? { ...pullRequest, state: observation.data.state, observedAt: observation.data.observedAt }
     : pullRequest);
+  return withPullRequestsObserved(current, pullRequests, now);
+}
+
+/**
+ * Records the tree GitHub reports for the head of a pull request recorded without one (an earlier release), when that
+ * head is the one recorded and its tree is the reviewed code the pull request was opened with. It is a fact about code
+ * already recorded, so the revision stays: an owner's pending decision on this revision is still current.
+ */
+export function recordWorkflowPullRequestHeadTrees(currentInput: unknown, trees: ReadonlyArray<{ repositoryId: string; number: number; headSha: string; headTreeSha: string }>, now: string): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const pullRequests = (current.pullRequests ?? []).map((pullRequest) => {
+    const tree = trees.find((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number);
+    if (tree === undefined) return pullRequest;
+    if (pullRequest.headTreeSha !== undefined || pullRequest.headSha !== tree.headSha || !/^[a-f0-9]{40}$/.test(tree.headTreeSha)
+      || pullRequest.candidateDigest !== current.candidate?.digest
+      || current.candidate.repositories.find((repository) => repository.repositoryId === pullRequest.repositoryId)?.treeSha !== tree.headTreeSha) {
+      throw new WorkflowTransitionError("pull request head tree does not match its recorded head and reviewed code");
+    }
+    return { ...pullRequest, headTreeSha: tree.headTreeSha };
+  });
+  if (trees.some((tree) => !pullRequests.some((pullRequest) => pullRequest.repositoryId === tree.repositoryId && pullRequest.number === tree.number))) {
+    throw new WorkflowTransitionError("pull request head tree names no recorded pull request");
+  }
+  return WorkflowSnapshotSchema.parse({ ...current, pullRequests, updatedAt: now });
+}
+
+/** Whether the task follows its pull requests only for their merge: an approved fix is being made or pushed, or its push failed. */
+export function workflowFollowsOnlyMerge(workflow: Pick<WorkflowSnapshot, "stage" | "state" | "blockReason">): boolean {
+  return (workflow.stage !== "WAIT_FOR_MERGE" && workflow.stage !== "MERGED")
+    || (workflow.state === "BLOCKED" && workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed);
+}
+
+/**
+ * The task once its pull requests are as observed: complete when every required one merged; otherwise a task that follows
+ * them only for their merge stays where it is, and one waiting for the merge waits on.
+ */
+function withPullRequestsObserved(current: WorkflowSnapshot, pullRequests: WorkflowPullRequest[], now: string): WorkflowSnapshot {
   const complete = pullRequests.filter((pullRequest) => pullRequest.required).every((pullRequest) => pullRequest.state === "MERGED");
+  const keep = !complete && workflowFollowsOnlyMerge(current);
   const { outcome: _priorOutcome, ...withoutPriorOutcome } = current;
   void _priorOutcome;
   return WorkflowSnapshotSchema.parse({
-    ...withoutPriorOutcome,
+    ...(keep ? current : withoutPriorOutcome),
     revision: current.revision + 1,
-    stage: complete ? "MERGED" : "WAIT_FOR_MERGE",
-    state: complete ? "COMPLETE" : "WAITING",
+    stage: complete ? "MERGED" : keep ? current.stage : "WAIT_FOR_MERGE",
+    state: complete ? "COMPLETE" : keep ? current.state : "WAITING",
     ...(complete ? { outcome: "MERGED" as const } : {}),
     pullRequests,
     updatedAt: now,
+  });
+}
+
+/**
+ * GitHub merged a pull request at the approved fix AgentX pushed to it, before AgentX recorded that push (its result was
+ * late, lost or failed after the push): the head GitHub merged holds exactly the fix's reviewed tree. The pull request is
+ * recorded with that head and the fix's code, merged.
+ */
+export function observeWorkflowPullRequestMergedWithFix(currentInput: unknown, input: { repositoryId: string; number: number; headSha: string; headTreeSha: string; observedAt: string }, now: string): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const candidate = current.candidate;
+  // Only a fix whose checks and reviews passed is pushed: while it is pushed, or after its push failed.
+  const pushed = current.stage === "PULL_REQUEST" || (current.state === "BLOCKED" && current.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed);
+  if (!/^[a-f0-9]{40}$/.test(input.headSha) || candidate === undefined || !pushed
+    || candidate.repositories.find((repository) => repository.repositoryId === input.repositoryId)?.treeSha !== input.headTreeSha
+    || !stalePullRequests(current).some((pullRequest) => pullRequest.repositoryId === input.repositoryId && pullRequest.number === input.number)) {
+    throw new WorkflowTransitionError("merged pull request does not hold the reviewed fix");
+  }
+  const pullRequests = (current.pullRequests ?? []).map((pullRequest) => pullRequest.repositoryId === input.repositoryId && pullRequest.number === input.number
+    ? { ...pullRequest, headSha: input.headSha, headTreeSha: input.headTreeSha, candidateDigest: candidate.digest, state: "MERGED" as const, observedAt: input.observedAt }
+    : pullRequest);
+  return withPullRequestsObserved(current, pullRequests, now);
+}
+
+/** The open pull requests that still hold earlier reviewed code than the current candidate: an approved fix is due on them. */
+function stalePullRequests(workflow: WorkflowSnapshot): WorkflowPullRequest[] {
+  const candidate = workflow.candidate;
+  if (candidate === undefined) return [];
+  return (workflow.pullRequests ?? []).filter((pullRequest) => pullRequest.candidateDigest !== candidate.digest
+    && (pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN")
+    && candidate.repositories.some((repository) => repository.repositoryId === pullRequest.repositoryId));
+}
+
+/** Whether a fix whose checks and reviews passed is due on the pull requests already open, instead of opening new ones. */
+export function workflowPullRequestUpdateDue(workflow: WorkflowSnapshot): boolean {
+  return workflow.stage === "PULL_REQUEST" && stalePullRequests(workflow).length > 0;
+}
+
+/** The pull request a fix is pushed to next: the first by repository that still holds earlier code. */
+export function nextWorkflowPullRequestUpdate(workflow: WorkflowSnapshot): WorkflowPullRequest | undefined {
+  return [...stalePullRequests(workflow)].sort((left, right) => left.repositoryId.localeCompare(right.repositoryId))[0];
+}
+
+/** AgentX starts pushing the fix whose checks and reviews passed to the pull requests already open. */
+export function startWorkflowPullRequestUpdate(currentInput: unknown, now: string): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  if (current.stage !== "PULL_REQUEST" || current.state !== "READY" || !workflowPullRequestUpdateDue(current)) {
+    throw new WorkflowTransitionError("workflow has no reviewed fix to push to its pull requests");
+  }
+  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, state: "RUNNING", updatedAt: now });
+}
+
+/**
+ * The fix was pushed: each updated pull request now holds the current candidate, as GitHub confirmed (its head commit, and
+ * that commit's tree, which must be the reviewed tree). Once every open pull request holds it the task waits for the merge
+ * again, its feedback round finished (the owner's decisions are kept); until then the next push is due. A task blocked
+ * because its push was taken for failed records the push the same way once GitHub shows it landed.
+ */
+export function recordWorkflowPullRequestUpdate(currentInput: unknown, input: { updates: ReadonlyArray<{ repositoryId: string; number: number; headSha: string; headTreeSha: string }>; now: string }): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const updates = z.array(z.object({
+    repositoryId: z.string().trim().min(1).max(200), number: z.number().int().positive(),
+    headSha: z.string().regex(/^[a-f0-9]{40}$/), headTreeSha: z.string().regex(/^[a-f0-9]{40}$/),
+  }).strict()).min(1).max(32).safeParse(input.updates);
+  const candidate = current.candidate;
+  // Or the push was taken for failed but landed: GitHub shows it later, and the blocked task records it.
+  const pushFailed = current.stage === "WAIT_FOR_MERGE" && current.state === "BLOCKED" && current.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed;
+  if (!updates.success || !((current.stage === "PULL_REQUEST" && current.state === "RUNNING") || pushFailed) || candidate === undefined
+    || updates.data.some((update) => candidate.repositories.find((repository) => repository.repositoryId === update.repositoryId)?.treeSha !== update.headTreeSha
+      || !stalePullRequests(current).some((pullRequest) => pullRequest.repositoryId === update.repositoryId && pullRequest.number === update.number))) {
+    throw new WorkflowTransitionError("pull request update does not match the reviewed fix being pushed");
+  }
+  const pullRequests = (current.pullRequests ?? []).map((pullRequest) => {
+    const update = updates.data.find((entry) => entry.repositoryId === pullRequest.repositoryId && entry.number === pullRequest.number);
+    return update === undefined ? pullRequest
+      : { ...pullRequest, headSha: update.headSha, headTreeSha: update.headTreeSha, candidateDigest: candidate.digest, state: "OPEN" as const };
+  });
+  if (stalePullRequests({ ...current, pullRequests }).length > 0) {
+    // A blocked task stays blocked for the pull requests its fix has not reached.
+    return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, ...(pushFailed ? {} : { state: "READY" }), pullRequests, updatedAt: input.now });
+  }
+  const { blockReason: _blockReason, pullRequestUpdateFailure: _failure, feedbackReview, feedbackDispatchApproval: _approval, ...rest } = current;
+  void _blockReason;
+  void _failure;
+  void _approval;
+  const history = [...(current.feedbackReviewHistory ?? [])];
+  const report = feedbackReview?.reviewRef;
+  if (report !== undefined && !history.some((entry) => entry.sha256 === report.sha256)) history.push(report);
+  return WorkflowSnapshotSchema.parse({
+    ...rest, revision: current.revision + 1, stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests,
+    ...(history.length === 0 ? {} : { feedbackReviewHistory: history.slice(-100) }),
+    pullRequestUpdatedAt: input.now, updatedAt: input.now,
+  });
+}
+
+/**
+ * Pushing the fix failed (or could not start): the task waits for the merge, blocked, with the pull requests it was for and
+ * a plain cause when known. Each pull request keeps the head and reviewed code it had, which merge tracking matches.
+ */
+export function blockWorkflowPullRequestUpdate(currentInput: unknown, input: { numbers: readonly number[]; cause?: WorkflowPullRequestUpdateCause | undefined; now: string }): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const failure = WorkflowPullRequestUpdateFailureSchema.safeParse({ numbers: [...input.numbers], ...(input.cause === undefined ? {} : { cause: input.cause }) });
+  if (!failure.success || current.stage !== "PULL_REQUEST" || (current.state !== "READY" && current.state !== "RUNNING") || (current.pullRequests ?? []).length === 0) {
+    throw new WorkflowTransitionError("workflow is not pushing a fix to its pull requests");
+  }
+  return WorkflowSnapshotSchema.parse({
+    ...current, revision: current.revision + 1, stage: "WAIT_FOR_MERGE", state: "BLOCKED",
+    blockReason: WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed, pullRequestUpdateFailure: failure.data, updatedAt: input.now,
   });
 }
 
@@ -911,6 +1253,31 @@ export function completeWorkflowFeedbackReview(currentInput: unknown, input: {
     feedbackReview: { ...review.data, threadObservations: current.feedbackReview.threadObservations }, updatedAt: now });
 }
 
+/**
+ * The owner asks AgentX to review the same PR comments again after the review failed, timed out or was interrupted.
+ * Allowed only while the task waits for merge with that report (any report but a complete one) pending: the review goes back to COLLECTING on the same bundles (the failed report
+ * is kept in the history), so the feedback dispatcher starts a new read-only review. A complete report, another
+ * report, or a task that moved on is refused.
+ */
+export function retryWorkflowFeedbackReview(currentInput: unknown, input: {
+  reviewDigest: string; actor: { actorId: string; role: "TASK_OWNER" | "PROJECT_ADMIN" }; now: string;
+}): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const review = current.feedbackReview;
+  if (input.actor.role !== "TASK_OWNER" || input.actor.actorId !== current.ownerId) {
+    throw new WorkflowTransitionError("only the task owner can retry the PR feedback review");
+  }
+  if (current.stage !== "WAIT_FOR_MERGE" || current.state !== "WAITING" || review === undefined || review.status !== "PENDING"
+    || review.reviewRef.status === "COMPLETE" || review.reviewRef.sha256 !== input.reviewDigest) {
+    throw new WorkflowTransitionError("this PR feedback review is not a failed review waiting for a retry");
+  }
+  const history = [...(current.feedbackReviewHistory ?? [])];
+  if (!history.some(ref => ref.sha256 === review.reviewRef.sha256)) history.push(review.reviewRef);
+  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1,
+    feedbackReview: { status: "COLLECTING", bundleRefs: review.bundleRefs, threadObservations: review.threadObservations ?? [] },
+    feedbackReviewHistory: history, updatedAt: input.now });
+}
+
 /** Requires fresh bindings supplied by the reconciler; dispatch must independently reconcile again. */
 export function decideWorkflowFeedbackFindings(currentInput: unknown, input: {
   requestId: string; expectedRevision: number; reviewDigest: string; proposalDigest: string;
@@ -955,7 +1322,12 @@ export function decideWorkflowFeedbackFindings(currentInput: unknown, input: {
     sourceId: input.requestId, text: input.ownerNote, at: now,
   })];
   // Retain source PR identities and the old candidate for reconciliation; new verification invalidates its evidence.
-  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1,
+  // A pull request recorded without its head's tree (an earlier release) keeps the reviewed tree it was opened with: once
+  // the fix is coded the candidate is the fix, so a merge of the reviewed head would no longer be recognised.
+  const pullRequests = input.decision !== "APPROVE" ? current.pullRequests : current.pullRequests?.map(pr => pr.headTreeSha !== undefined
+    || pr.candidateDigest !== current.candidate?.digest ? pr
+    : { ...pr, headTreeSha: current.candidate.repositories.find(repo => repo.repositoryId === pr.repositoryId)?.treeSha });
+  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, ...(pullRequests === undefined ? {} : { pullRequests }),
     ...(input.decision === "APPROVE" ? { stage: "IMPLEMENT", state: "READY" } : {}),
     feedbackReview: { ...review, status: input.decision === "APPROVE" ? "APPROVED" : input.decision === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "DISMISSED" },
     feedbackDecisions: [...(current.feedbackDecisions ?? []), decision.data], feedbackNotes, updatedAt: now,
@@ -968,7 +1340,7 @@ function validSnapshot(input: unknown): WorkflowSnapshot {
   return parsed.data;
 }
 
-export function createWorkflowSnapshot(input: { taskId: string; ownerId: string; now: string; path?: WorkflowPath; checkPolicy?: WorkflowCheckPolicy }): WorkflowSnapshot {
+export function createWorkflowSnapshot(input: { taskId: string; ownerId: string; now: string; path?: WorkflowPath; checkPolicy?: WorkflowCheckPolicyInput }): WorkflowSnapshot {
   const parsed = WorkflowSnapshotSchema.safeParse({
     schemaVersion: 1,
     definitionId: "agentx-task-to-pr",
@@ -992,32 +1364,47 @@ export function createWorkflowSnapshot(input: { taskId: string; ownerId: string;
 
 export function submitWorkflowArtifact(
   currentInput: unknown,
-  input: { expectedRevision: number; artifact: WorkflowArtifact; now: string },
+  input: { expectedRevision: number; artifact: WorkflowArtifact; now: string; proposal?: WorkflowCheckProposal },
 ): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   const artifact = WorkflowArtifactSchema.safeParse(input.artifact);
   if (!artifact.success) throw new WorkflowTransitionError("workflow artifact is invalid");
+  const proposal = input.proposal === undefined ? undefined : WorkflowCheckProposalSchema.safeParse(input.proposal);
+  if (proposal !== undefined && !proposal.success) throw new WorkflowTransitionError("proposed checks are invalid");
   if (current.revision !== input.expectedRevision) throw new WorkflowTransitionError("workflow revision is stale");
   const expectedType = current.path === "QUICK" || current.reviewPhase === "IMPLEMENTATION_PLAN" ? "plan"
     : current.reviewPhase === "REQUIREMENTS" ? "requirements" : "design";
   if (current.stage !== "PLAN" || current.state !== "RUNNING" || artifact.data.type !== expectedType) {
     throw new WorkflowTransitionError("the current workflow phase is not expecting this artifact");
   }
+  if (proposal !== undefined && expectedType !== "plan") throw new WorkflowTransitionError("only a coding plan can propose checks");
+  // A new document version clears the previous version's proposal and optional choice, then takes its own proposal. A
+  // task stored without a check policy runs the project's checks, so a proposal is ignored there.
+  const policy: WorkflowCheckPolicyInput | undefined = current.checkPolicy === undefined ? undefined : {
+    required: current.checkPolicy.required, optional: current.checkPolicy.optional, selectedOptionalIds: [], proposed: [],
+    ...(proposal === undefined ? {} : proposal.data),
+  };
   const next = WorkflowSnapshotSchema.parse({
     ...current,
     revision: current.revision + 1,
     stage: "PLAN_REVIEW",
     state: "WAITING",
     artifacts: [...current.artifacts, artifact.data],
-    ...(current.checkPolicy === undefined ? {} : { checkPolicy: { ...current.checkPolicy, selectedOptionalIds: [] } }),
+    ...(policy === undefined ? {} : { checkPolicy: policy }),
     updatedAt: input.now,
   });
   return next;
 }
 
-export function blockWorkflow(currentInput: unknown, reason: string, now: string): WorkflowSnapshot {
+/** Blocks the current step with `reason`; `regressedChecks` names the tests a review-only rerun found regressed. */
+export function blockWorkflow(currentInput: unknown, reason: string, now: string, detail: { regressedChecks?: readonly string[] } = {}): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
-  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, state: "BLOCKED", blockReason: reason.slice(0, 500), updatedAt: now });
+  const { regressedChecks: _prior, ...withoutRegressions } = current;
+  void _prior;
+  return WorkflowSnapshotSchema.parse({
+    ...withoutRegressions, revision: current.revision + 1, state: "BLOCKED", blockReason: reason.slice(0, 500), updatedAt: now,
+    ...(detail.regressedChecks === undefined || detail.regressedChecks.length === 0 ? {} : { regressedChecks: detail.regressedChecks }),
+  });
 }
 
 /** The owner's retry after AgentX gave up opening the draft pull request: ready to publish again. */
@@ -1039,24 +1426,32 @@ function sendBackAllowedFrom(workflow: { stage: string; state: string; blockReas
 
 /**
  * Whether Slack offers Send back to coding: the reviews found a problem the change introduced, a selected check
- * failed, coding itself stopped, or the change is ready to publish (for example, its code changed after its checks).
+ * failed, a review-only task's verification stopped (it has no check to retry), coding itself stopped, or the change is
+ * ready to publish (for example, its code changed after its checks).
  */
 export function workflowSendBackOffered(workflow: {
   stage: string; state: string; blockReason?: string | undefined; pullRequests?: readonly unknown[] | undefined;
+  checkPolicy?: WorkflowCheckPolicy | undefined;
   candidate?: { digest?: string } | undefined;
-  reviews?: ReadonlyArray<{ candidateDigest?: string; findings?: ReadonlyArray<{ origin?: string } | string> | undefined }> | undefined;
-  verification?: { candidateDigest?: string; results?: ReadonlyArray<{ status: string }> | undefined } | undefined;
+  reviews?: ReadonlyArray<{ candidateDigest?: string; role?: string; findings?: ReadonlyArray<{ text?: string; file?: string | undefined; line?: number | undefined; origin?: string; advisory?: boolean | undefined } | string> | undefined }> | undefined;
+  acceptedFindings?: ReadonlyArray<{ candidateDigest: string; role: string; fingerprint: string }> | undefined;
+  verification?: { candidateDigest?: string; results?: ReadonlyArray<{ status: string; broken?: boolean | undefined; programNotFound?: boolean | undefined }> | undefined } | undefined;
 }): boolean {
   if (!sendBackAllowedFrom(workflow)) return false;
   // Only evidence about the current code counts: a review or check of older code describes code that is gone.
   const current = workflow.candidate?.digest;
   if (workflow.stage === "REVIEW") {
     return current !== undefined && workflow.reviews?.some((review) => review.candidateDigest === current
-      && review.findings?.some((finding) => typeof finding === "string" || finding.origin === "INTRODUCED")) === true;
+      && review.findings?.some((finding) => findingBlocks(finding, review.role)
+        && !findingAccepted(finding, review.role, review.candidateDigest, workflow.acceptedFindings))) === true;
   }
   if (workflow.stage === "VERIFY") {
+    // Review only: a rerun of the agent's own tests regressed, and no result was recorded for it.
+    if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.regressionFound) return true;
+    // Review only: there is no check to retry, so coding again is the way on, except from rewritten history.
+    if (workflowIsReviewOnly(workflow.checkPolicy)) return workflow.blockReason !== WORKFLOW_HISTORY_REWRITTEN_MESSAGE;
     return current !== undefined && workflow.verification?.candidateDigest === current
-      && workflow.verification.results?.some((result) => result.status === "FAILED") === true;
+      && workflow.verification.results?.some((result) => result.status === "FAILED" && !workflowCheckResultBroken(result)) === true;
   }
   return true;
 }
@@ -1069,7 +1464,7 @@ export function workflowSendBackOffered(workflow: {
  */
 export function returnWorkflowToImplementation(
   currentInput: unknown,
-  input: { requestId: string; actorId: string; reason: string; now: string },
+  input: { requestId: string; actorId: string; reason: string; now: string; source?: "SEND_BACK" | "FINDINGS" },
 ): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   if (!ActorIdSchema.safeParse(input.actorId).success || input.actorId !== current.ownerId) {
@@ -1085,7 +1480,7 @@ export function returnWorkflowToImplementation(
   if (current.decisions.length >= 100) throw new WorkflowTransitionError("workflow decision history is full");
   const decision = WorkflowDecisionSchema.parse({
     requestId: input.requestId, workflowRevision: current.revision, decision: "REQUEST_CHANGES", actorId: input.actorId,
-    actorRole: "TASK_OWNER", reason: input.reason.trim().slice(0, 500), source: "SEND_BACK", at: input.now,
+    actorRole: "TASK_OWNER", reason: input.reason.trim().slice(0, 500), source: input.source ?? "SEND_BACK", at: input.now,
   });
   const { blockReason: _blockReason, ...unblocked } = current;
   void _blockReason;
@@ -1097,31 +1492,169 @@ export function returnWorkflowToImplementation(
 
 const REVIEW_ROLE_NAMES = { CRITIC: "code review", SECURITY: "security review" } as const;
 
-/** One problem a send-back asks the coder to fix. `text` from a review is reviewer output: untrusted. */
-export interface WorkflowSendBackProblem { source: "code review" | "security review" | "check"; text: string }
+/**
+ * One problem a send-back asks the coder to fix. `text` from a review, or naming a regressed test, is untrusted output.
+ * `regressed`: a test that passed before this change and fails now (WORKFLOW_REGRESSION_INSTRUCTION says what to do).
+ */
+export interface WorkflowSendBackProblem { source: "code review" | "security review" | "check"; text: string; regressed?: true }
+
+/** A review finding as a send-back problem: its text, then "(file:line)" when the reviewer named where. */
+export function workflowFindingProblem(role: "CRITIC" | "SECURITY", finding: { text: string; file?: string | undefined; line?: number | undefined }): WorkflowSendBackProblem {
+  const where = finding.file === undefined ? "" : ` (${finding.file}${finding.line === undefined ? "" : `:${finding.line}`})`;
+  return { source: REVIEW_ROLE_NAMES[role], text: `${finding.text}${where}` };
+}
 
 /**
  * The problems a send-back asks the coder to fix, about the current code only: each review finding the change
- * introduced, as "text (file:line)", and each selected check that failed, as "<label> failed". Pre-existing findings,
- * and reviews or checks of older code, are left out.
+ * introduced, as "text (file:line)", each selected check that failed, as "<label> failed", and each test a review-only
+ * rerun found regressed, as "<test> passed before this change and fails now". Pre-existing findings, and reviews or
+ * checks of older code, are left out.
  */
 export function sendBackProblems(workflow: WorkflowSnapshot): WorkflowSendBackProblem[] {
+  const regressed = (workflow.regressedChecks ?? []).map((test) => ({ source: "check" as const, text: `${test} passed before this change and fails now`, regressed: true as const }));
   const current = workflow.candidate?.digest;
-  if (current === undefined) return [];
-  const findings = (workflow.reviews ?? []).filter((review) => review.candidateDigest === current).flatMap((review) => blockingFindings(review).map((finding) => {
-    const where = finding.file === undefined ? "" : ` (${finding.file}${finding.line === undefined ? "" : `:${finding.line}`})`;
-    return { source: REVIEW_ROLE_NAMES[review.role], text: `${finding.text}${where}` };
-  }));
-  const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.optional ?? [])];
-  const failed = workflow.verification?.candidateDigest !== current ? [] : workflow.verification.results.filter((result) => result.status === "FAILED")
+  if (current === undefined) return regressed;
+  const findings = (workflow.reviews ?? []).filter((review) => review.candidateDigest === current).flatMap((review) => blockingFindings(review, workflow.acceptedFindings)
+    .map((finding) => workflowFindingProblem(review.role, finding)));
+  const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.proposed ?? []), ...(workflow.checkPolicy?.optional ?? [])];
+  const failed = workflow.verification?.candidateDigest !== current ? [] : workflow.verification.results.filter((result) => result.status === "FAILED" && !workflowCheckResultBroken(result))
     .map((result) => ({ source: "check" as const, text: `${checks.find((check) => check.id === result.checkId)?.label ?? result.checkId} failed` }));
-  return [...findings, ...failed];
+  return [...findings, ...failed, ...regressed];
 }
 
 /** The problems as plain lines, "- [code review] text (file:line)" and "- check <label> failed", for people to read. */
 export function sendBackInstructions(workflow: WorkflowSnapshot): string {
-  const problems = sendBackProblems(workflow).map((problem) => problem.source === "check" ? `- check ${problem.text}` : `- [${problem.source}] ${problem.text}`);
-  return problems.length > 0 ? problems.join("\n") : "- No check or review problems were recorded; follow the owner note.";
+  const problems = sendBackProblems(workflow);
+  const lines = problems.map((problem) => problem.source === "check" ? `- check ${problem.text}` : `- [${problem.source}] ${problem.text}`);
+  if (problems.some((problem) => problem.regressed === true)) lines.push(WORKFLOW_REGRESSION_INSTRUCTION);
+  return lines.length > 0 ? lines.join("\n") : "- No check or review problems were recorded; follow the owner note.";
+}
+
+/** A blocking review finding as the owner sees it, to accept or send back: `findingId` is its fingerprint. */
+export interface WorkflowOpenFinding { findingId: string; role: "CRITIC" | "SECURITY"; text: string; file?: string; line?: number }
+
+/**
+ * The blocking review findings of the current code the owner has not accepted yet, in review order (code review, then
+ * security review), each once. Pre-existing and advisory findings, and those of reviews of older code, are not listed.
+ */
+export function openReviewFindings(workflow: WorkflowSnapshot): WorkflowOpenFinding[] {
+  const current = workflow.candidate?.digest;
+  if (current === undefined) return [];
+  const open = new Map<string, WorkflowOpenFinding>();
+  for (const role of ["CRITIC", "SECURITY"] as const) {
+    for (const review of (workflow.reviews ?? []).filter((entry) => entry.role === role && entry.candidateDigest === current)) {
+      for (const finding of blockingFindings(review, workflow.acceptedFindings)) {
+        const findingId = workflowFindingFingerprint(role, finding);
+        if (!open.has(findingId)) {
+          open.set(findingId, { findingId, role, text: finding.text, ...(finding.file === undefined ? {} : { file: finding.file }), ...(finding.line === undefined ? {} : { line: finding.line }) });
+        }
+      }
+    }
+  }
+  return [...open.values()];
+}
+
+/** Whether the owner accepted this finding of this review role for the workflow's current candidate. */
+export function workflowFindingAccepted(
+  workflow: Pick<WorkflowSnapshot, "candidate" | "acceptedFindings">, role: "CRITIC" | "SECURITY",
+  finding: { text: string; file?: string | undefined; line?: number | undefined },
+): boolean {
+  return findingAccepted(finding, role, workflow.candidate?.digest, workflow.acceptedFindings);
+}
+
+/** Whether Slack offers Resolve findings: the reviews are blocked and a finding the change introduced is still open. */
+export function workflowResolveFindingsOffered(workflow: WorkflowSnapshot): boolean {
+  return workflow.stage === "REVIEW" && workflow.state === "BLOCKED" && openReviewFindings(workflow).length > 0;
+}
+
+/** The owner's answer for one finding: accept it with a reason (1 to 500 characters), or send it to coding with optional instructions (up to 1,000). */
+export const WorkflowFindingResolutionSchema = z.object({
+  findingId: DigestSchema,
+  action: z.enum(["ACCEPT", "FIX"]),
+  note: z.string().trim().max(1_000, "instructions are at most 1,000 characters"),
+}).strict().superRefine((resolution, context) => {
+  if (resolution.action === "ACCEPT" && resolution.note === "") context.addIssue({ code: "custom", path: ["note"], message: "give a reason for each finding you accept" });
+  if (resolution.action === "ACCEPT" && resolution.note.length > 500) context.addIssue({ code: "custom", path: ["note"], message: "a reason is at most 500 characters" });
+});
+export type WorkflowFindingResolution = z.infer<typeof WorkflowFindingResolutionSchema>;
+
+/** The resolution of every blocking finding, at the workflow revision and candidate the owner saw. */
+export const WorkflowResolveFindingsInputSchema = z.object({
+  requestId: z.string().uuid(),
+  expectedRevision: z.number().int().positive(),
+  candidateDigest: DigestSchema,
+  resolutions: z.array(WorkflowFindingResolutionSchema).min(1, "choose what to do with each blocking finding")
+    .max(WORKFLOW_RESOLVE_FINDINGS_MAX, `resolve at most ${WORKFLOW_RESOLVE_FINDINGS_MAX} findings at once`),
+}).strict();
+export type WorkflowResolveFindingsInput = z.infer<typeof WorkflowResolveFindingsInputSchema>;
+
+/**
+ * The owner resolves every blocking review finding of the current code: each is accepted with a reason (recorded for
+ * this candidate, so it never blocks it again) or sent to coding. Owner only, at the exact revision and candidate. Any
+ * fix returns the task to coding (the accepted ones are recorded as well); with every finding accepted and no other
+ * review problem the change is ready for its pull request. A repeated request ID changes nothing.
+ */
+export function resolveWorkflowReviewFindings(
+  currentInput: unknown,
+  rawInput: unknown,
+  actor: { actorId: string },
+  options: { now: string },
+): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  if (!ActorIdSchema.safeParse(actor.actorId).success || actor.actorId !== current.ownerId) {
+    throw new WorkflowTransitionError("only the task owner can resolve review findings");
+  }
+  const parsed = WorkflowResolveFindingsInputSchema.safeParse(rawInput);
+  if (!parsed.success) throw new WorkflowTransitionError(parsed.error.issues[0]?.message ?? "the review finding resolution is invalid");
+  const input = parsed.data;
+  const prior = current.decisions.find((decision) => decision.requestId === input.requestId);
+  if (prior !== undefined) {
+    if (prior.source === "FINDINGS" && prior.workflowRevision === input.expectedRevision && prior.actorId === actor.actorId) return current;
+    throw new WorkflowTransitionError("request ID was already used for a different workflow decision");
+  }
+  if (current.stage !== "REVIEW" || current.state !== "BLOCKED" || current.candidate === undefined) {
+    throw new WorkflowTransitionError("there are no blocked review findings to resolve");
+  }
+  if (current.revision !== input.expectedRevision) throw new WorkflowTransitionError("workflow revision is stale");
+  if (current.candidate.digest !== input.candidateDigest) throw new WorkflowTransitionError("the candidate changed; refresh the task and try again");
+  const open = openReviewFindings(current);
+  if (open.length === 0) throw new WorkflowTransitionError("there are no blocking review findings to resolve");
+  if (open.length > WORKFLOW_RESOLVE_FINDINGS_MAX) {
+    throw new WorkflowTransitionError(`there are ${open.length} blocking findings and AgentX resolves at most ${WORKFLOW_RESOLVE_FINDINGS_MAX} at once; send the change back to coding instead`);
+  }
+  const answered = new Set<string>();
+  for (const resolution of input.resolutions) {
+    if (!open.some((finding) => finding.findingId === resolution.findingId)) throw new WorkflowTransitionError("a finding in this request is not a current blocking finding; refresh the task and try again");
+    if (answered.has(resolution.findingId)) throw new WorkflowTransitionError("each finding can be answered only once");
+    answered.add(resolution.findingId);
+  }
+  if (open.some((finding) => !answered.has(finding.findingId))) throw new WorkflowTransitionError("choose what to do with every blocking finding");
+  if (current.decisions.length >= 100) throw new WorkflowTransitionError("workflow decision history is full");
+
+  const candidateDigest = current.candidate.digest;
+  const accepts = input.resolutions.filter((resolution) => resolution.action === "ACCEPT").map((resolution): WorkflowAcceptedFinding => {
+    const finding = open.find((entry) => entry.findingId === resolution.findingId)!;
+    return { candidateDigest, role: finding.role, fingerprint: finding.findingId, text: finding.text, reason: resolution.note, actorId: actor.actorId, at: options.now };
+  });
+  const fixes = input.resolutions.length - accepts.length;
+  const acceptedFindings = [...(current.acceptedFindings ?? []), ...accepts].slice(-WORKFLOW_ACCEPTED_FINDINGS_MAX);
+  const summary = `${accepts.length} accepted, ${fixes} to fix`;
+  const withAccepted = WorkflowSnapshotSchema.parse({ ...current, acceptedFindings });
+  if (fixes > 0) {
+    return returnWorkflowToImplementation(withAccepted, { requestId: input.requestId, actorId: actor.actorId, reason: summary, now: options.now, source: "FINDINGS" });
+  }
+  const decision = WorkflowDecisionSchema.parse({
+    requestId: input.requestId, workflowRevision: current.revision, decision: "APPROVE", actorId: actor.actorId,
+    actorRole: "TASK_OWNER", reason: summary, source: "FINDINGS", at: options.now,
+  });
+  const reviewsClear = (["CRITIC", "SECURITY"] as const).every((role) => (current.reviews ?? []).some((review) =>
+    review.role === role && review.candidateDigest === candidateDigest && reviewCleared(review, acceptedFindings)));
+  const { blockReason, ...unblocked } = withAccepted;
+  return WorkflowSnapshotSchema.parse({
+    ...(reviewsClear ? unblocked : withAccepted), revision: current.revision + 1,
+    ...(reviewsClear ? { stage: "PULL_REQUEST", state: "READY" } : { blockReason }),
+    decisions: [...current.decisions, decision], updatedAt: options.now,
+  });
 }
 
 export function decideWorkflow(
@@ -1164,11 +1697,6 @@ export function decideWorkflow(
   }
   if (request.data.decision === "SKIP" && !options.allowedSkipStages.includes(current.stage)) {
     throw new WorkflowTransitionError("workflow policy does not allow skipping this stage");
-  }
-  const codingPlanApproval = request.data.decision === "APPROVE"
-    && (current.path === "QUICK" || current.reviewPhase === "IMPLEMENTATION_PLAN");
-  if (codingPlanApproval && (current.checkPolicy?.required.length ?? 0) === 0 && selectedOptionalCheckIds.length === 0) {
-    throw new WorkflowTransitionError("select at least one check before approving the coding plan");
   }
 
   const decision = WorkflowDecisionSchema.parse({

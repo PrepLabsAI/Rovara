@@ -10,6 +10,17 @@ import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatche
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
 
 describe("AWS control-plane handlers", () => {
+  it("reads browser cookies from the HTTP API's cookies field, where payload 2.0 puts them", () => {
+    const request = adaptHttpApiEvent({
+      version: "2.0",
+      rawPath: "/v1/auth/callback/slack",
+      headers: { host: "api.example" },
+      cookies: ["__Host-agentx_review_pkce=verifier", "other=1"],
+      requestContext: { requestId: "request-1", http: { method: "GET" } },
+    });
+    expect(request.headers.cookie).toBe("__Host-agentx_review_pkce=verifier; other=1");
+  });
+
   it("adapts HTTP API events and derives identity only from verified JWT claims", () => {
     const request = adaptHttpApiEvent({
       version: "2.0",

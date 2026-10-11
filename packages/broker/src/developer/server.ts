@@ -32,6 +32,7 @@ import {
   type SlackUserByEmailResponse,
 } from "@agentx/contracts";
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
+import { SESSION_MAX_AGE_SECONDS } from "../aws/web-session.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
@@ -54,11 +55,10 @@ export interface HttpResult { statusCode: number; headers: Record<string, string
 export type ChannelMembersResult = ChannelMembersResponse | { ok: false; error: "invalid_request" };
 
 const CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
-// The PR-feedback review page, or (Task 18) the read-only task page.
-const REVIEW_RETURN_TO = /^\/review\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/task)?$/i;
+// The PR-feedback review page, or the read-only task page, which may name one document and the earlier version it came from.
+const REVIEW_RETURN_TO = /^\/review\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/task(?:\?doc=(?:requirements|design|coding-plan)(?:&from=[1-9][0-9]{0,2})?)?)?$/i;
 const REVIEW_PKCE_COOKIE = "__Host-agentx_review_pkce";
 const REVIEW_SESSION_COOKIE = "__Host-agentx_review_session";
-const REVIEW_SESSION_MAX_AGE_SECONDS = 900;
 const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store", pragma: "no-cache" };
 const HTML_HEADERS = {
   "content-type": "text/html; charset=utf-8",
@@ -245,7 +245,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     body: "",
     cookies: [
       `${REVIEW_PKCE_COOKIE}=; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`,
-      ...(signedIn && sessionId !== undefined ? [`${REVIEW_SESSION_COOKIE}=${sessionId}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${REVIEW_SESSION_MAX_AGE_SECONDS}`] : []),
+      ...(signedIn && sessionId !== undefined ? [`${REVIEW_SESSION_COOKIE}=${sessionId}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}`] : []),
     ],
   });
 
@@ -315,9 +315,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(slackUserId === undefined ? {} : { slackUserId }),
     });
     if (request.browserReturnTo !== undefined) {
+      // A fixed 30 days from sign-in, with no renewal: the session record ends then, whatever the cookie says.
+      const endsAt = Math.floor(deps.now() / 1000) + SESSION_MAX_AGE_SECONDS;
       const { session } = await store.createSession({ developerId, amr: method,
         ...(slackUserId === undefined ? {} : { slackUserId }),
-        reviewExpiresAt: Math.floor(deps.now() / 1000) + REVIEW_SESSION_MAX_AGE_SECONDS,
+        reviewExpiresAt: endsAt, endsAt,
       });
       deps.log({ event: "signin.browser_succeeded", method, developerId });
       return browserReturn(request.browserReturnTo, true, session.sessionId);

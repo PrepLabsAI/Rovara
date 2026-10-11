@@ -20,6 +20,7 @@ import {
   SlackRequestMessageSchema,
   SlackTeamIdSchema,
   SlackUserIdSchema,
+  TASK_NOTE_SAVED_TEXT,
   VIEW_ONLY_NOTICE,
   isStopCommand,
   parseConfirmationReply,
@@ -28,9 +29,11 @@ import {
   sharedTaskKey,
   slackRequestText,
   slackThreadSubject,
+  taskQuestionAttributes,
   type SlackChannelBinding,
   type SlackRequestMessage,
   type SlackThread,
+  type TaskQuestionRoute,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
 import { createSlackMemberCheck, type SlackMemberCheck } from "./slack-members.js";
@@ -104,7 +107,7 @@ export interface SlackIngressDependencies {
    * route after Slack has its answer: a question goes to the chat agent, a change gets a card suggesting Quick or Full.
    * Absent: such a request asks Quick or Full here (`requestWorkflowChoice`), as before.
    */
-  routeRequest?: (message: SlackRequestMessage, messageGroupId: string) => Promise<void>;
+  routeRequest?: (message: SlackRequestMessage, messageGroupId: string, taskQuestion?: TaskQuestionRoute) => Promise<void>;
   /** Task 21: the requester's typed `answer` to a waiting choice: its request goes to the chat agent instead. Absent: `answer` is not read. */
   answerWorkflowChoice?: (input: { thread: SlackThread; userId: string }) => Promise<WorkflowChoiceOutcome>;
   /**
@@ -177,7 +180,6 @@ const TURN_COUNTER_TTL_SECONDS = 2 * TURN_WINDOW_SECONDS;
 
 const UNVERIFIED_MEMBER_NOTICE = "I couldn't confirm that this message came from a person, so I didn't act on it. Try again, or type the request in Slack.";
 /** Gap 2: the private acknowledgements in a Slack-started task's thread. */
-const THREAD_NOTE_SAVED = "Saved. I'll include this at the next step.";
 const THREAD_NOTE_NOT_SAVED = "I couldn't save this reply for the task. It may be closed, or it already has as many replies as I keep.";
 const NOTHING_RUNNING_NOTICE = "Nothing is running for this task right now.";
 const NOT_OWNER_STOP_NOTICE = "Only the person who started this task can stop it.";
@@ -601,9 +603,51 @@ async function workflowThreadReply(
   // Only a mention asked AgentX something, so only a mention is answered, and only its sender sees it. A
   // duplicate here is the plain-message copy of this same mention, saved first.
   if (mention.kind === "mention") {
-    await ephemeral(dependencies, log, thread, mention.userId, outcome === "refused" ? THREAD_NOTE_NOT_SAVED : THREAD_NOTE_SAVED);
+    // The note is saved. A mention that could be a question is sent to the Slack service to decide; it answers or
+    // leaves the note as an instruction, so no acknowledgement is posted here unless it could not be sent.
+    if (outcome !== "refused" && await routeTaskQuestion(dependencies, log, mention, taskId, replyText)) return respond(200, { ok: true });
+    await ephemeral(dependencies, log, thread, mention.userId, outcome === "refused" ? THREAD_NOTE_NOT_SAVED : TASK_NOTE_SAVED_TEXT);
   }
   return respond(200, { ok: true });
+}
+
+/**
+ * Sends a saved task-thread mention to the Slack service with the `task-question` route. True when it was sent; false
+ * when this deployment cannot route or the send failed, so the caller says "saved". A failure is never an error answer:
+ * the note is saved, and the claim stays, so Slack's retry (if any) is a duplicate.
+ */
+async function routeTaskQuestion(
+  dependencies: SlackIngressDependencies,
+  log: SlackIngressLog,
+  mention: Mention,
+  taskId: string,
+  replyText: string,
+): Promise<boolean> {
+  if (dependencies.routeRequest === undefined) return false;
+  const { thread, eventId } = mention;
+  const subject = slackThreadSubject(thread);
+  let counted = false;
+  try {
+    const message = SlackRequestMessageSchema.parse({
+      version: 1, eventId, thread, userId: mention.userId, text: replyText, receivedAt: new Date((dependencies.now ?? Date.now)()).toISOString(),
+    });
+    await dependencies.changePending(subject, 1);
+    counted = true;
+    await dependencies.routeRequest(message, createHash("sha256").update(subject).digest("hex"),
+      { taskId, noteTs: mention.messageTs, chat: parseWorkflowStartRequest(replyText).kind === "chat" });
+  } catch (error) {
+    if (counted) {
+      try {
+        await dependencies.changePending(subject, -1);
+      } catch (undoError) {
+        log("task_question.pending_undo_failed", { eventId, errorName: errorName(undoError) });
+      }
+    }
+    log("task_question.route_failed", { eventId, taskId, errorName: errorName(error) });
+    return false;
+  }
+  log("task_question.routed", { eventId, taskId });
+  return true;
 }
 
 /** A Slack task cannot start, or its path be chosen, where task threads cannot be read: say so, and start nothing. */
@@ -1028,9 +1072,9 @@ function createAwsSlackIngressHandler() {
         return choices.pending(thread);
       },
       // Task 21: the Slack service routes a plain top-level request; the queue mark (not the body) says so.
-      async routeRequest(message: SlackRequestMessage, messageGroupId: string) {
+      async routeRequest(message: SlackRequestMessage, messageGroupId: string, taskQuestion?: TaskQuestionRoute) {
         await sqs.send(new SendMessageCommand({ QueueUrl: queueUrl, MessageBody: JSON.stringify(message), MessageGroupId: messageGroupId,
-          MessageDeduplicationId: message.eventId, MessageAttributes: routeAttributes() }));
+          MessageDeduplicationId: message.eventId, MessageAttributes: taskQuestion === undefined ? routeAttributes() : taskQuestionAttributes(taskQuestion) }));
       },
       async answerWorkflowChoice(input: { thread: SlackThread; userId: string }) {
         return answerChosenRequest({ store: choices, enqueueAnswer: (answer) => enqueueAnswer(answer),

@@ -8,13 +8,13 @@ import { plainMessage } from "../output.js";
 import { alertChecks, capacityChecks, modelChecks, signInChecks } from "./account.js";
 import { check, doctorReport, guarded, type DoctorCheck, type DoctorContext, type DoctorGroup, type DoctorReport, type DoctorServices } from "./checks.js";
 import { connectorChecks } from "./connectors.js";
-import { githubChecks } from "./github.js";
+import { githubChecks, githubWebhookChecks } from "./github.js";
 import { secretChecks } from "./secrets.js";
 import { slackChecks } from "./slack.js";
 import { stackChecks } from "./stacks.js";
 
 const GROUPS: ReadonlyArray<[DoctorGroup, (context: DoctorContext) => Promise<DoctorCheck[]>]> = [
-  ["stacks", stackChecks], ["secrets", secretChecks], ["slack", slackChecks], ["github", githubChecks], ["connectors", connectorChecks],
+  ["stacks", stackChecks], ["secrets", secretChecks], ["slack", slackChecks], ["github", githubChecks], ["github", githubWebhookChecks], ["connectors", connectorChecks],
   ["models", modelChecks], ["alerts", alertChecks], ["capacity", capacityChecks], ["sign-in", signInChecks],
 ];
 

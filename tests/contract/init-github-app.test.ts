@@ -2,7 +2,7 @@ import { createVerify } from "node:crypto";
 import { createServer, request as httpRequest } from "node:http";
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, environmentStackName } from "@agentx/contracts";
 import {
   githubAppJwt, githubAppManifest, githubAppSecretName, githubAppStep, githubNewAppUrl, githubRestApi, manifestFormPage, parseManifestCallback, startManifestListener,
 } from "../../packages/cli/src/init/github-app.js";
@@ -12,15 +12,18 @@ import { problemText } from "../../packages/cli/src/init/retry.js";
 import { githubCard } from "../../packages/cli/src/init/ui/cards.js";
 import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
+import type { PreMadeGitHubApp } from "../../packages/cli/src/init/context.js";
 import type { ProgressHandle } from "../../packages/cli/src/init/steps.js";
 import {
-  browserThatCreatesGitHubApp, fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_PRIVATE_KEY, TEST_PUBLIC_KEY,
+  allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedDeployer, scriptedPrompter, T0, TEST_PRIVATE_KEY, TEST_PUBLIC_KEY,
   type ScriptedAnswer, type TestInitContext,
 } from "../support/init-fakes.js";
 
 const homes: string[] = [];
 afterEach(async () => { await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true }))); });
 const SECRET = githubAppSecretName("staging");
+const WEBHOOK_URL = "https://abc123.execute-api.us-east-1.amazonaws.com/v1/github/webhooks";
+const GITHUB_WEBHOOK_SECRET = "github-made-webhook-secret-".padEnd(40, "g");
 
 /** Spec 048 FR-032: an InitContext and ProgressHandle for the GitHub step, built like every other
  * test's `initContext()` and `progressHandle()`, extended with a seeded `githubPending`, a scripted
@@ -45,14 +48,15 @@ async function githubContext(input: {
 }
 
 describe("GitHub App manifest", () => {
-  it("asks for exactly the permissions AgentX uses, no webhook and no events", () => {
-    expect(githubAppManifest({ appName: "AgentX acme (staging)", redirectUrl: "http://127.0.0.1:50123/github/created" })).toEqual({
+  it("the manifest subscribes to the four PR events and points the webhook at the control plane", () => {
+    expect(githubAppManifest({ appName: "AgentX acme (staging)", redirectUrl: "http://127.0.0.1:50123/github/created", webhookUrl: WEBHOOK_URL })).toEqual({
       name: "AgentX acme (staging)",
       url: "https://github.com/PrepLabsAI/Rovara",
       redirect_url: "http://127.0.0.1:50123/github/created",
       public: false,
+      hook_attributes: { url: WEBHOOK_URL, active: true },
       default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
-      default_events: [],
+      default_events: ["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment"],
     });
   });
 
@@ -62,7 +66,7 @@ describe("GitHub App manifest", () => {
   });
 
   it("posts the manifest from an auto-submitting form, escaping everything", () => {
-    const page = manifestFormPage({ actionUrl: "https://github.com/settings/apps/new?state=s1", manifest: githubAppManifest({ appName: "A\"<b>'&", redirectUrl: "http://127.0.0.1:1/github/created" }) });
+    const page = manifestFormPage({ actionUrl: "https://github.com/settings/apps/new?state=s1", manifest: githubAppManifest({ appName: "A\"<b>'&", redirectUrl: "http://127.0.0.1:1/github/created", webhookUrl: "https://cp.example.test/v1/github/webhooks" }) });
     expect(page).toContain('<form id="manifest-form" method="post" action="https://github.com/settings/apps/new?state=s1">');
     expect(page).toContain('name="manifest" value="{&quot;name&quot;:&quot;A\\&quot;&lt;b&gt;&#39;&amp;&quot;');
     expect(page).not.toContain("<b>");
@@ -114,11 +118,107 @@ describe("GitHub App step", () => {
     const outcome = await githubAppStep(api).run(context, progress);
     expect(outcome.status).toBe("done");
     expect(api.conversions).toEqual(["0123456789abcdef0123"]);
-    expect(JSON.parse(context.secrets.values.get(SECRET)!)).toEqual({ appId: "424242", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY });
+    expect(JSON.parse(context.secrets.values.get(SECRET)!)).toMatchObject({ appId: "424242", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY });
     expect(progress.value().github).toEqual({ account: "acme", appId: "424242", slug: "agentx-acme-staging", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", installationId: "777" });
     expect(opened).toContain("https://github.com/apps/agentx-acme-staging/installations/new");
     expect(context.lines.join("\n")).not.toContain("PRIVATE KEY");
     expect(JSON.stringify(progress.value())).not.toContain("PRIVATE KEY");
+  });
+
+  it("puts the control plane's webhook URL in the manifest form it posts to GitHub", async () => {
+    const pages: string[] = [];
+    const context = initContext({
+      openBrowser: async () => true,
+      manifestHost: async (host) => {
+        pages.push(host.page("http://127.0.0.1:50123/github/created"));
+        return { startUrl: "http://127.0.0.1:50123/github/start", redirectUrl: "http://127.0.0.1:50123/github/created", port: 50123, code: Promise.resolve("0123456789abcdef0123"), close: () => undefined };
+      },
+    });
+    homes.push(context.home);
+    await githubAppStep(fakeGitHubApi()).run(context, progressHandle());
+    expect(pages[0]).toContain(WEBHOOK_URL);
+    expect(pages[0]).toContain("pull_request_review_comment");
+  });
+
+  it("falls back to the control plane's API endpoint for the webhook URL", async () => {
+    const outputs = { ...allStackOutputs() };
+    const controlPlane = environmentStackName("staging", "control-plane");
+    outputs[controlPlane] = Object.fromEntries(Object.entries(outputs[controlPlane]!).filter(([key]) => key !== "GithubWebhookUrl"));
+    const pages: string[] = [];
+    const context = initContext({
+      openBrowser: async () => true,
+      manifestHost: async (host) => {
+        pages.push(host.page("http://127.0.0.1:50123/github/created"));
+        return { startUrl: "http://127.0.0.1:50123/github/start", redirectUrl: "http://127.0.0.1:50123/github/created", port: 50123, code: Promise.resolve("0123456789abcdef0123"), close: () => undefined };
+      },
+    });
+    context.deployment = async () => ({ deployer: scriptedDeployer(outputs, Object.keys(outputs)), store: context.store, secrets: context.secrets, holder: context.holder, partition: "aws", cleanup: async () => undefined });
+    homes.push(context.home);
+    await githubAppStep(fakeGitHubApi()).run(context, progressHandle());
+    expect(pages[0]).toContain(WEBHOOK_URL);
+  });
+
+  it("stores GitHub's webhook secret with the App credentials without printing it", async () => {
+    // GitHub made the hook from the manifest, so its URL is already right.
+    const api = fakeGitHubApi({ webhookSecret: GITHUB_WEBHOOK_SECRET, hookUrl: WEBHOOK_URL });
+    const context = initContext({ openBrowser: browserThatCreatesGitHubApp([]) });
+    homes.push(context.home);
+    const progress = progressHandle();
+    await githubAppStep(api).run(context, progress);
+    expect(JSON.parse(context.secrets.values.get(SECRET)!)).toEqual({ appId: "424242", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY, webhookSecret: GITHUB_WEBHOOK_SECRET });
+    // Kept as GitHub made it, and sent back to GitHub as it is.
+    expect(api.hookWrites).toEqual([{ url: WEBHOOK_URL, secret: GITHUB_WEBHOOK_SECRET }]);
+    expect(context.lines.join("\n")).not.toContain(GITHUB_WEBHOOK_SECRET);
+    expect(JSON.stringify(progress.value())).not.toContain(GITHUB_WEBHOOK_SECRET);
+  });
+
+  it("an App given by ID gets a generated webhook secret and its hook configured", async () => {
+    const api = fakeGitHubApi({ installationId: 555, events: ["pull_request"] });
+    const context = initContext({
+      preMadeGitHubApp: { appId: "424242", installationId: "555" },
+      secretFlags: { githubPrivateKey: { envName: "GH_KEY" } },
+      processEnv: { GH_KEY: TEST_PRIVATE_KEY },
+    });
+    homes.push(context.home);
+    await githubAppStep(api).run(context, progressHandle());
+    const stored = JSON.parse(context.secrets.values.get(SECRET)!) as { webhookSecret: string; privateKey: string };
+    expect(stored.webhookSecret).toMatch(/^[0-9a-f]{64}$/);
+    expect(stored.privateKey).toBe(TEST_PRIVATE_KEY);
+    expect(api.hookWrites).toEqual([{ url: WEBHOOK_URL, secret: stored.webhookSecret }]);
+    expect(context.lines).toContain("GitHub webhook: configured");
+    // An App made beforehand may have no webhook, and GitHub's API cannot switch it on.
+    expect(context.lines).toContain("GitHub webhook: turn on Active at https://github.com/organizations/acme/settings/apps/agentx-acme-staging if it is off");
+    // The App made beforehand may not listen for the events: say which and where, never the secret.
+    expect(context.lines).toContain("GitHub webhook: tick these events on https://github.com/organizations/acme/settings/apps/agentx-acme-staging/permissions: pull_request_review, pull_request_review_comment, issue_comment");
+    expect(context.lines.join("\n")).not.toContain(stored.webhookSecret);
+  });
+
+  it("does not print the secret when storing it fails", async () => {
+    const api = fakeGitHubApi({ installationId: 555 });
+    const context = initContext({
+      preMadeGitHubApp: { appId: "424242", installationId: "555" },
+      secretFlags: { githubPrivateKey: { envName: "GH_KEY" } },
+      processEnv: { GH_KEY: TEST_PRIVATE_KEY },
+    });
+    homes.push(context.home);
+    let written = "";
+    context.secrets.put = async (_name, value) => { written = value; throw Object.assign(new Error(`access denied for ${value}`), { name: "AccessDeniedException" }); };
+    const failure = await githubAppStep(api).run(context, progressHandle()).catch((error: unknown) => error);
+    const generated = (JSON.parse(written) as { webhookSecret: string }).webhookSecret;
+    expect(problemText(failure)).toContain("could not store the webhook secret");
+    expect(`${String(failure)} ${problemText(failure)} ${context.lines.join("\n")}`).not.toContain(generated);
+    expect(`${String(failure)} ${problemText(failure)}`).not.toContain("PRIVATE KEY");
+  });
+
+  it("keeps the webhook secret an earlier run stored when the step runs again", async () => {
+    const api = fakeGitHubApi({ installationId: 555, hookUrl: WEBHOOK_URL });
+    const secrets = memoryInitSecrets({ [SECRET]: JSON.stringify({ appId: "424242", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY, webhookSecret: GITHUB_WEBHOOK_SECRET }) });
+    const context = initContext({ secrets });
+    homes.push(context.home);
+    const progress = progressHandle({ ...emptyProgress("staging", T0), github: { account: "acme", appId: "424242", slug: "agentx-acme-staging", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf" } });
+    await githubAppStep(api).run(context, progress);
+    expect((JSON.parse(secrets.values.get(SECRET)!) as { webhookSecret: string }).webhookSecret).toBe(GITHUB_WEBHOOK_SECRET);
+    expect(api.hookWrites).toEqual([{ url: WEBHOOK_URL, secret: GITHUB_WEBHOOK_SECRET }]);
   });
 
   it("writes 'If no browser opens' only on the terminal path; on the page the address is the card's button", async () => {
@@ -256,7 +356,7 @@ describe("GitHub App step", () => {
 
     it("a failure before any GitHub card shows none", async () => {
       const cards: WizardCard[] = [];
-      const context = initContext({ surface: { card: (card) => { cards.push(card); } }, preMadeGitHubApp: { appId: "999" } });
+      const context = initContext({ surface: { card: (card) => { cards.push(card); } }, preMadeGitHubApp: { appId: "999" } as PreMadeGitHubApp });
       homes.push(context.home);
       const { progress } = recorded();
       await expect(githubAppStep(fakeGitHubApi()).run(context, progress)).rejects.toThrow("this install already uses GitHub App 424242, not 999 from --github-app-id");
@@ -554,6 +654,15 @@ describe("spec 048 FR-032: a GitHub app made but not stored", () => {
     await expect(githubAppStep(api).run(context, progress)).resolves.toMatchObject({ status: "done" });
     expect(api.conversions).toEqual([]);
     expect(progress.current().github).toMatchObject({ appId: "424242", slug: "agentx-acme-staging" });
+  });
+
+  it("on resume, Finish also gives the app a generated webhook secret and its hook", async () => {
+    const api = fakeGitHubApi();
+    const { context, progress } = await githubContext({ pending: { account: "acme", appId: "424242", slug: "agentx-acme-staging" }, script: ["finish", TEST_PRIVATE_KEY] });
+    await githubAppStep(api).run(context, progress);
+    const stored = JSON.parse(context.secrets.values.get(SECRET)!) as { webhookSecret: string };
+    expect(stored.webhookSecret).toMatch(/^[0-9a-f]{64}$/);
+    expect(api.hookWrites).toEqual([{ url: WEBHOOK_URL, secret: stored.webhookSecret }]);
   });
 
   it("on resume, Replace sends the user to delete the old app, then makes a new one", async () => {

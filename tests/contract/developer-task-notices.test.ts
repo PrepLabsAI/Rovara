@@ -111,6 +111,30 @@ describe("notices from the stream (C7, C8)", () => {
     expect(noticesOf(running, { ...running, workflow: { revision: 6, state: "RUNNING", stage: "REVIEW" } }, "t", "")).toEqual([]);
   });
 
+  it("announces a failed PR feedback review once, by its report, so the owner can retry it", () => {
+    const taskId = randomUUID();
+    const at = "2026-10-10T12:00:00.000Z";
+    const digest = "9".repeat(64);
+    const running = { entityType: "DEVELOPER_TASK", taskId, workflow: { revision: 4, stage: "WAIT_FOR_MERGE", state: "RUNNING", feedbackReview: { status: "COLLECTING", bundleRefs: [] } } };
+    const failed = { ...running, workflow: { revision: 5, stage: "WAIT_FOR_MERGE", state: "WAITING",
+      feedbackReview: { status: "PENDING", bundleRefs: [], reviewRef: { status: "FAILED", sha256: digest, blockReason: "reviewer output: not valid JSON" } } } };
+    expect(noticesOf(running, failed, at, "e1")).toEqual([{ id: `${taskId}:feedback_review:${digest}:5`, kind: "github_feedback", taskId, at, feedbackReviewDigest: digest }]);
+    // A later change that keeps the same failed report is an ordinary step change, not the failure said again.
+    expect(noticesOf(failed, { ...failed, workflow: { ...failed.workflow, revision: 6 } }, at, "e2").map((notice) => notice.kind)).toEqual(["workflow"]);
+  });
+
+  it("announces a PR feedback review that timed out or was interrupted like a failed one", () => {
+    const taskId = randomUUID();
+    const at = "2026-10-10T12:00:00.000Z";
+    for (const [status, blockReason] of [["BLOCKED", "review timed out"], ["INTERRUPTED", "review was cancelled"]]) {
+      const digest = (status === "BLOCKED" ? "7" : "8").repeat(64);
+      const running = { entityType: "DEVELOPER_TASK", taskId, workflow: { revision: 4, stage: "WAIT_FOR_MERGE", state: "RUNNING", feedbackReview: { status: "COLLECTING", bundleRefs: [] } } };
+      const stopped = { ...running, workflow: { revision: 5, stage: "WAIT_FOR_MERGE", state: "WAITING",
+        feedbackReview: { status: "PENDING", bundleRefs: [], reviewRef: { status, sha256: digest, blockReason } } } };
+      expect(noticesOf(running, stopped, at, "e1"), status).toEqual([{ id: `${taskId}:feedback_review:${digest}:5`, kind: "github_feedback", taskId, at, feedbackReviewDigest: digest }]);
+    }
+  });
+
   it("creates closeout work only when a task reaches a terminal workflow or explicit close", () => {
     const taskId = randomUUID();
     const waiting = { entityType: "DEVELOPER_TASK", taskId, workflow: { revision: 2, stage: "WAIT_FOR_MERGE", state: "WAITING" } };

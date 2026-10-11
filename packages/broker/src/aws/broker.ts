@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { posix as posixPath } from "node:path";
 import { cancelCallbackForbidden, verifyCancelCallbackCapability } from "./cancel-callback-capability.js";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -16,10 +17,7 @@ import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { SQSClient } from "@aws-sdk/client-sqs";
-import {
-  GetSecretValueCommand,
-  SecretsManagerClient,
-} from "@aws-sdk/client-secrets-manager";
+import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import {
   AgentXError,
   CHANNEL_TURN_REQUEST_MAX,
@@ -33,6 +31,15 @@ import {
   nextStandingFailures,
   type StandingFailure,
   submitWorkflowArtifact,
+  parsePlanDocument,
+  retiredClaimIds,
+  canonicalPlanJson,
+  type PlanDocument,
+  type PlanEvidenceBundle,
+  WORKFLOW_REGRESSED_CHECK_MAX,
+  WORKFLOW_REGRESSED_CHECKS_MAX,
+  workflowIsReviewOnly,
+  workflowSelectedChecks,
   blockWorkflow,
   completeWorkflowFeedbackReview,
   createCandidateManifest,
@@ -46,6 +53,13 @@ import {
   recordWorkflowVerification,
   submitWorkflowReview,
   registerWorkflowPullRequest,
+  blockWorkflowPullRequestUpdate,
+  nextWorkflowPullRequestUpdate,
+  recordWorkflowPullRequestUpdate,
+  observeWorkflowPullRequestMergedWithFix,
+  workflowPullRequestUpdateDue,
+  WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED,
+  type WorkflowPullRequestUpdateCause,
   taskResultChecks,
   type CheckEntry,
   type LatestChecks,
@@ -78,6 +92,8 @@ import {
   SlackChannelIdSchema,
   SlackMessageTimestampSchema,
   SlackRequesterSchema,
+  SlackTaskAnswerRequestSchema,
+  SlackThreadNoteAnsweredRequestSchema,
   SlackThreadSchema,
   SlackTeamIdSchema,
   WorkspaceClosePreflightResultSchema,
@@ -99,6 +115,8 @@ import {
   type ProjectCommand,
   type WorkflowFeedbackApprovalBinding,
   type WorkflowReviewBase,
+  type WorkflowReviewChecks,
+  type WorkflowReviewPlan,
   type RegistrationPreflight,
   type PullRequestLifecycleResult,
   type SlackChannelBinding,
@@ -119,6 +137,7 @@ import {
   WorkflowFeedbackApprovalBindingSchema,
   workflowFeedbackApprovalMatchesReview,
   WorkflowFeedbackReviewReportSchema,
+  WORKFLOW_FEEDBACK_REVIEW_ANSWER_ARTIFACT,
   WorkflowFeedbackReviewRefSchema,
   cleanDisplayName,
   redactAndCap,
@@ -136,6 +155,7 @@ import {
   type AdminChangePressEvent,
   INDEX_EXPIRY_ATTRIBUTE,
   indexExpiresAt,
+  WORKFLOW_RESOLVE_FINDINGS_MAX,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
@@ -148,8 +168,10 @@ import { recordPrepareFailureEvent } from "./operation-events.js";
 import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
-import { appIdFromSecret, GitHubAppCredentialProvider, privateKeyFromSecret, webhookSecretFromSecret } from "../github-app.js";
-import { GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
+import type { GitHubAppCredentialProvider } from "../github-app.js";
+import { isWebhookSecretMissing } from "../github-app.js";
+import { createGitHubAppCredentials } from "./github-credentials.js";
+import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
@@ -159,16 +181,20 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
+import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown } from "../developer/plan-artifacts.js";
+import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, planEvidenceEvent, planEvidenceJobItem, planEvidenceSources, type PlanEvidenceEvent, type PlanEvidenceJob } from "../developer/plan-evidence-jobs.js";
+import { resolvePlanEvidence } from "../developer/plan-evidence.js";
+import { projectKey, requireProject } from "./project-records.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
   type CallbackClaims, type OperationRecord,
 } from "./cancellation.js";
 import { aiToolTurn, completedTurn, developerFooter, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
-import { AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, workerPrompt } from "./broker-shared.js";
+import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, getWorkflowFeedbackReview, recordWorkflowThreadNote, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -286,9 +312,9 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getCommitTree" | "getCommitParents" | "getBranchHead">>;
-  /** Reads the GitHub webhook HMAC key from the configured GitHub App secret. */
-  githubWebhookSecret?: () => Promise<string>;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
+  /** Reads the GitHub webhook HMAC key from the configured GitHub App secret; `refresh` asks for a fresh read of the secret. */
+  githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /** Refuses, with CONFIG_INVALID, a repository its credential cannot reach; checked at registration. */
   checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
   codeBuild: CodeBuildGateway;
@@ -310,6 +336,8 @@ interface AwsBrokerDependencies {
   adminReads?: Partial<Pick<AdminReadDependencies, "me" | "health" | "now" | "log">>;
   /** Spec 025 phase 25e: the admin changes' method switch, clock and metric; the defaults serve production. */
   adminChanges?: { confirm?: { elicitation: boolean; slack: boolean }; now?: () => number; metric?: (outcome: AdminChangeOutcome) => void };
+  /** Spec 061: asks the PlanEvidence job to work a plan's evidence row (an async Lambda invoke); absent when the deployment has none. */
+  startPlanEvidenceJob?: (event: PlanEvidenceEvent) => Promise<void>;
   /** Spec 043: SWE-bench runs; absent in a harness that does not exercise them. */
   swebench?: Pick<EvalBatchDependencies, "deployment" | "startExecution" | "stopBatchForThread" | "onRunEnded" | "now" | "estimateRunCostUsd">;
 }
@@ -509,6 +537,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
       .map((item) => ({ repository: String(item.repository), number: Number(item.number), url: String(item.url), state: item.state as "open" | "closed" | "merged" })),
     acceptTask: (identity, workspaceId, request, extra, options) => acceptTask(dependencies, identity, workspaceId, request, extra, options),
     acceptPullRequest: (identity, workspaceId, request, extra, options) => acceptPullRequest(dependencies, identity, workspaceId, request, extra, options),
+    acceptPullRequestUpdate: (identity, workspaceId, request, extra, workflowCandidate) => acceptPullRequestLifecycle(dependencies, identity, workspaceId, request, extra, { workflowCandidate }),
     failedPublications: async (workspaceId, candidate) => (await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
       .filter((item) => {
         const publication = item.publication as OperationRecord["publication"];
@@ -598,7 +627,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.workflow-dispatch-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.workflow-dispatch-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -618,7 +647,15 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
     }
     // Gap 6: the scheduled sweep that re-runs any workflow dispatch left behind after its result committed.
     if (isWorkflowDispatchRecoveryEvent(event)) {
-      try { return json(await retryDueWorkflowDispatches(dependencies), "workflow-dispatch-recovery"); }
+      try {
+        const dispatches = await retryDueWorkflowDispatches(dependencies);
+        // The plan evidence rows ride the same schedule; their failure never hides the dispatches' result.
+        const planEvidence = await startDuePlanEvidenceJobs(dependencies).catch((error: unknown) => {
+          console.log(JSON.stringify({ component: "broker", event: "plan_evidence.sweep_failed", error: error instanceof Error ? error.name : "unknown" }));
+          return { attempted: 0, started: 0 };
+        });
+        return json({ ...dispatches, planEvidence }, "workflow-dispatch-recovery");
+      }
       catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
         return json({ error: "recovery_failed" }, "workflow-dispatch-recovery", 500);
@@ -651,9 +688,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
     if (isSlackWorkflowReviewRetryEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "review_retry", () => retrySlackWorkflowReviews(dependencies, tasks, event), button);
     if (isSlackWorkflowPublishRetryEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "publish_retry", () => retrySlackWorkflowPublication(dependencies, tasks, event), button);
     if (isSlackWorkflowSendBackEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "send_back", () => sendSlackWorkflowBack(dependencies, tasks, event), button);
+    if (isSlackWorkflowResolveFindingsEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "resolve_findings", () => resolveSlackWorkflowFindings(dependencies, tasks, event), button);
     if (isSlackWorkflowCloseEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "close", () => closeSlackWorkflowTask(dependencies, tasks, event), button);
     if (isSlackWorkflowFeedbackFindingsDecisionEvent(event)) {
       return answerSlackWorkflowEvent(dependencies, event, "feedback_findings_decision", () => decideSlackWorkflowFeedbackFindings(dependencies, tasks, event), approval);
+    }
+    if (isSlackWorkflowFeedbackReviewRetryEvent(event)) {
+      return answerSlackWorkflowEvent(dependencies, event, "feedback_review_retry", () => retrySlackWorkflowFeedbackReview(dependencies, tasks, event), button);
     }
     if (isSlackThreadNoteEvent(event)) {
       try {
@@ -697,13 +738,24 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (request.body === undefined || dependencies.githubWebhookSecret === undefined) {
           return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
         }
+        const notConfigured = () => json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
+        const readWebhookSecret = async (refresh: boolean): Promise<string | undefined> => {
+          try {
+            return await dependencies.githubWebhookSecret?.(refresh ? { refresh: true } : undefined);
+          } catch (error) {
+            if (isWebhookSecretMissing(error)) return undefined;
+            throw error;
+          }
+        };
         try {
-          const result = await handleGithubWebhook({
+          const secret = await readWebhookSecret(false);
+          if (secret === undefined) return notConfigured();
+          const deliver = (webhookSecret: string) => handleGithubWebhook({
             documentClient: dependencies.documentClient,
             tableName: dependencies.tableName,
-            rawBody: request.body,
+            rawBody: request.body ?? "",
             headers: request.headers,
-            secret: await dependencies.githubWebhookSecret(),
+            secret: webhookSecret,
             authorizeRepository: (scope) => authorizeLinkedGithubWebhook({
               documentClient: dependencies.documentClient,
               tableName: dependencies.tableName,
@@ -718,6 +770,18 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
             process: (workflowEvent, deliveryId) => processGithubWorkflowEvent(dependencies, workflowEvent, deliveryId),
             now: () => new Date().toISOString(),
           });
+          let result;
+          try {
+            result = await deliver(secret);
+          } catch (error) {
+            if (!(error instanceof GithubWebhookRefusal) || error.message !== GITHUB_WEBHOOK_SIGNATURE_INVALID) throw error;
+            // The secret may have been changed since this container read it. The signature is checked before a delivery is
+            // reserved, so verifying once more with a fresh copy has no side effect.
+            const renewed = await readWebhookSecret(true);
+            if (renewed === undefined) return notConfigured();
+            if (renewed === secret) throw error;
+            result = await deliver(renewed);
+          }
           if (result.status === "IN_PROGRESS") return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId, 503);
           return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId);
         } catch (error) {
@@ -768,6 +832,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         const identity = await slackServiceIdentity(dependencies, request);
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace") {
           return json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
+        }
+        if (request.method === "POST" && serviceUrl.pathname === "/v1/tasks/thread-notes/answered") {
+          return json(await markThreadNoteAnswered(dependencies, identity, parseBody(request.body)), request.requestId);
         }
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/prepare") {
           return json(await prepareThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
@@ -930,8 +997,9 @@ const SLACK_BUTTON_OUT_OF_DATE = "That button is out of date. Use the latest mes
  */
 const SLACK_PLAIN_REFUSALS: ReadonlyMap<string, string> = new Map([
   ["select at least one check before retrying verification", "Select at least one check, then try again."],
-  ["select at least one check before approving the coding plan", "Select at least one check before approving the coding plan."],
   ["choose checks that are approved for this project", "Choose from this project's checks, then try again."],
+  [FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_BUSY],
+  [FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_CHANGED_SINCE_CARD],
 ]);
 /**
  * Task 19: the broker refusals a Slack press can meet in the normal course of things, by what the presser hears. A
@@ -994,6 +1062,9 @@ async function answerSlackWorkflowEvent(
   try {
     const result = await run();
     console.log(JSON.stringify({ component: "broker", event: `slack.workflow_${name}_saved`, taskId: event.taskId, requestId: event.requestId }));
+    // A press whose effect is not otherwise said (a retried review whose start post was already said once) is told privately.
+    const note = result !== null && typeof result === "object" ? (result as { note?: unknown }).note : undefined;
+    if (typeof note === "string") await recordSlackWorkflowRefusal(dependencies, event, note, attemptId);
     return json(result, "slack-ingress");
   } catch (error) {
     const refusal = error instanceof AgentXError ? slackRefusalMessage(error.code, options.outOfDate, stripCode(error.message, error.code)) : undefined;
@@ -1504,7 +1575,9 @@ async function slackServiceIdentity(
   // C11: open only while continue, not closed, and the channel still serves the task's project.
   // A Slack-started task's own thread is driven by its owner's buttons, never by the channel's chat agent: closed to it.
   if (!sharedThreadOpen(shared, binding)) {
-    return { ...own, sharedTask: { ...sharedTask, state: shared.closedAt !== undefined || shared.workflowThread === true ? "closed" : "view" } };
+    // The ordinary chat workspace stays closed; only a request for task mode (a read-only view with no tools) may use an open one.
+    const taskAnswer = shared.workflowThread === true && shared.closedAt === undefined && binding.projectName === shared.project;
+    return { ...own, sharedTask: { ...sharedTask, state: shared.closedAt !== undefined || shared.workflowThread === true ? "closed" : "view", ...(taskAnswer ? { taskAnswer: true as const } : {}) } };
   }
   return {
     issuer: DEVELOPER_TASK_OWNER_ISSUER,
@@ -2004,6 +2077,14 @@ async function ensureThreadWorkspace(
     actionPolicy: includeActionPolicy,
   };
   if (identity.sharedTask !== undefined) {
+    // Task mode (a separate opt-in, so a service that never sends it keeps the closed workflow thread): only for exactly
+    // the open Slack-started task whose own thread this is.
+    const taskAnswer = input.taskAnswer === undefined ? undefined : SlackTaskAnswerRequestSchema.safeParse(input.taskAnswer);
+    if (taskAnswer !== undefined && !taskAnswer.success) throw agentXError("CONFIG_INVALID", "taskAnswer needs the task's ID");
+    if (taskAnswer?.data.taskId === identity.sharedTask.taskId && identity.sharedTask.taskAnswer === true) {
+      const answer = await taskAnswerWorkspace(dependencies, slack.thread, identity.sharedTask);
+      if (answer !== undefined) return answer;
+    }
     return sharedThreadWorkspace(dependencies, identity, identity.sharedTask, input.includeSharedTask === true, include, includeSettingsRevision);
   }
   const threadWorkspace = await getThreadWorkspace(dependencies, identity.ownerKey);
@@ -2368,6 +2449,53 @@ function threadChargeItems(
       },
     } },
   ];
+}
+
+/**
+ * Task mode for the chat agent in a Slack-started task's own thread: a read-only view. No repositories, connectors or
+ * actions, no operation and no compute (nothing is created, prepared or charged); `taskContext` is the broker's
+ * untrusted-data text about the task. Undefined (the thread stays closed) when the task is closed or its context
+ * cannot be built.
+ */
+async function taskAnswerWorkspace(
+  dependencies: AwsBrokerDependencies,
+  thread: SlackThread,
+  shared: NonNullable<AuthenticatedIdentity["sharedTask"]>,
+): Promise<SlackThreadWorkspaceResult | undefined> {
+  const workspace = await requireWorkspace(dependencies, shared.workspaceId);
+  if (workspace.status === "CLOSED") return undefined;
+  const taskContext = await workflowTaskAnswerContext(
+    { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: developerTaskActions(dependencies) },
+    { taskId: shared.taskId, workspaceId: shared.workspaceId, thread },
+  );
+  if (taskContext === undefined) return undefined;
+  const settings = await requireLatestProject(dependencies, workspace.projectName);
+  return {
+    outcome: "WORKSPACE", mode: "task-answer", workspaceId: workspace.id, status: workspace.status, operationId: null, created: false,
+    orchestratorInstructions: settings.definition.orchestratorInstructions, taskContext,
+  };
+}
+
+/**
+ * POST /v1/service/tasks/thread-notes/answered: the chat agent answered a reply in a Slack-started task's thread as a
+ * question, so the next step skips it. The call must be from that task's own open thread and name it; the broker then
+ * marks the saved reply (and nothing else). A repeat answers the same.
+ */
+async function markThreadNoteAnswered(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, value: unknown): Promise<{ outcome: "ANSWERED" }> {
+  if (dependencies.developer === undefined || identity.slack === undefined) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
+  const input = SlackThreadNoteAnsweredRequestSchema.safeParse(value);
+  if (!input.success) throw agentXError("CONFIG_INVALID", "taskId, messageTs and thread are required");
+  const { thread } = identity.slack;
+  const body = input.data;
+  const own = identity.sharedTask;
+  if (own?.taskAnswer !== true || own.taskId !== body.taskId || body.thread.teamId !== thread.teamId || body.thread.channelId !== thread.channelId || body.thread.threadTs !== thread.threadTs
+    || dependencies.developer.slackTeamId !== thread.teamId) {
+    throw agentXError("FORBIDDEN", "this thread is not that task's own thread");
+  }
+  const outcome = await markWorkflowThreadNoteAnswered({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now }, { taskId: body.taskId, thread, messageTs: body.messageTs });
+  if (outcome === "refused") throw agentXError("FORBIDDEN", "this thread is not that task's own thread");
+  if (outcome === "missing") throw agentXError("NOT_FOUND", "that reply was not saved for this task");
+  return { outcome: "ANSWERED" };
 }
 
 const SHARED_VIEW_ONLY = "this thread follows a task started from an AI tool and is view only";
@@ -2853,7 +2981,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; retiredClaimIds?: readonly string[] },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -2878,17 +3006,17 @@ async function taskOperationParts(
   });
   operation.settingsRevision = settings.definition.revision;
   // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
-  const phaseInstructions = input.workflowPhase === "REQUIREMENTS"
-    ? "Prepare a concise requirements brief with Goal, Scope, Non-goals, Acceptance criteria, and Assumptions. Do not design implementation or edit files."
-    : input.workflowPhase === "DESIGN"
-      ? "Prepare a concise design proposal with Proposed approach, Affected areas, Risks, and Alternatives. Do not edit files."
-      : input.workflowPhase === "IMPLEMENTATION_PLAN"
-        ? "Prepare an ordered coding plan with Goal, Files or areas, Steps, Checks, and Risks. Do not edit files."
-        : "Return a concise plan with Goal, What will change, Checks, and Risks or questions. Name relevant files and exact checks where known.";
+  // Spec 061: every planning step answers with a structured plan document; a Quick plan (no phase) is a whole coding plan.
+  const planKind = input.workflowPhase === "REQUIREMENTS" ? "requirements" as const : input.workflowPhase === "DESIGN" ? "design" as const : "plan" as const;
+  const documentInstructions = planDocumentInstructions({ kind: planKind, path: input.workflowPhase === undefined ? "QUICK" : "FULL", anchors: true, ...(input.retiredClaimIds === undefined ? {} : { retired: input.retiredClaimIds }) });
+  // Only a coding plan (a Quick plan, or a Full implementation plan) proposes checks; requirements and design do not.
+  const codingPlan = input.workflowPhase === undefined || input.workflowPhase === "IMPLEMENTATION_PLAN";
+  const planChecks = codingPlan && input.workflowMode === "PLAN" ? await codingPlanChecksInstructions(dependencies, workspace.id) : "";
+  const checksInstructions = planChecks === "" ? "" : `\n\n${planChecks}`;
   // A task started without the workflow still runs its first turn in IMPLEMENT mode; its prompt is unchanged.
   const gated = input.workflowMode !== undefined && input.legacyTask !== true;
   const selectedPrompt = input.workflowMode === "PLAN"
-    ? `${WORKFLOW_PREAMBLE}\n\nPlanning phase only. Do not edit, write, or create files. Inspect the request and repository. ${phaseInstructions} ${PLAN_PHASE_LIMITS} Avoid filler and include only material risks or genuine unanswered questions. This linked detail is shown to the owner for approval before the next phase or code changes.\n\nRequest:\n${input.prompt}`
+    ? `${WORKFLOW_PREAMBLE}\n\nPlanning phase only. Do not edit, write, or create files. Inspect the request and repository. ${PLAN_PHASE_LIMITS} Avoid filler and include only material risks or genuine unanswered questions. This linked detail is shown to the owner for approval before the next phase or code changes.\n\n${documentInstructions}${checksInstructions}\n\nRequest:\n${input.prompt}`
     : input.workflowMode === "REVIEW"
       ? `${WORKFLOW_PREAMBLE}\n\nReview the current code read-only for the current task. Do not edit files or run commands that modify the workspace. Return concise critic and security review findings. The broker will bind your reports to this operation and candidate.\n\n${input.prompt}`
       : gated ? `${WORKFLOW_PREAMBLE}\n\n${input.prompt}` : input.prompt;
@@ -2913,9 +3041,15 @@ async function taskOperationParts(
       prompt,
       conversationStarted: input.conversationStarted,
       ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
+      // The worker reads a planning answer as this kind of document (a Quick plan has no phase and is a coding plan).
+      ...(input.workflowMode === "PLAN" && input.workflowPhase !== undefined ? { workflowPhase: input.workflowPhase } : {}),
+      // Every planning step asks for a structured plan, so the worker checks the answer and asks once more when it is unreadable.
+      ...(input.workflowMode === "PLAN" ? { planFormat: "structured" as const } : {}),
       ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
       ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
       ...(input.workflowBase === undefined ? {} : { workflowBase: input.workflowBase }),
+      ...(input.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: input.workflowReviewChecks }),
+      ...(input.workflowReviewPlan === undefined ? {} : { workflowReviewPlan: input.workflowReviewPlan }),
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
       // Spec 051 (P-1): the checks the worker reruns when the agent finishes. The latest revision's readiness, as
@@ -2924,6 +3058,20 @@ async function taskOperationParts(
     },
   };
   return { operation, outbox: outboxRecord(workspace, invocation), fence };
+}
+
+/**
+ * The coding plan's checks instructions for the workspace's task: the repository paths of the task's starting project
+ * revision (the one the plan's proposal is checked against) and the project checks its policy always runs. None for a
+ * task stored without a check policy: it runs the project's checks, and a proposal would be ignored.
+ */
+async function codingPlanChecksInstructions(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<string> {
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
+  const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  if (task === undefined) throw agentXError("CONFIG_INVALID", "the task for this planning step is missing");
+  if (task.workflow?.checkPolicy === undefined) return "";
+  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  return planChecksInstructions(project.definition.repositories.map((repository) => repository.path), task.workflow?.checkPolicy?.required ?? []);
 }
 
 /** Whether the workspace belongs to a developer task with the gated workflow. */
@@ -2938,7 +3086,7 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase } = {},
+  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; retiredClaimIds?: readonly string[] } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
@@ -2984,6 +3132,9 @@ async function acceptTask(
     ...(options.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: options.workflowFeedbackReview }),
     ...(options.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: options.workflowFeedbackApproval }),
     ...(options.workflowBase === undefined ? {} : { workflowBase: options.workflowBase }),
+    ...(options.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: options.workflowReviewChecks }),
+    ...(options.workflowReviewPlan === undefined ? {} : { workflowReviewPlan: options.workflowReviewPlan }),
+    ...(options.retiredClaimIds === undefined ? {} : { retiredClaimIds: options.retiredClaimIds }),
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
   }, now);
   try {
@@ -3194,16 +3345,28 @@ async function acceptPullRequestLifecycle(
   value: unknown,
   // C13: a continue thread's marker naming the teammate, as tasks and pull requests write (final review M2).
   extra: ExtraItems = () => [],
+  /**
+   * A workflow task's own push of a fix whose checks and reviews passed to its existing pull request: only an append, of
+   * exactly the reviewed tree on the task's pinned base, onto the head the workflow recorded. Only the broker's own
+   * dispatch passes it; nothing a person asks for changes a workflow task's pull request.
+   */
+  options: { workflowCandidate?: { candidateDigest: string; treeSha: string; baseCommitSha: string; expectedHeadCommit: string } } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   const request = PullRequestLifecycleRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
+  const candidate = options.workflowCandidate;
+  if (candidate !== undefined && (request.action !== "append" || !/^[a-f0-9]{64}$/.test(candidate.candidateDigest)
+    || !/^[a-f0-9]{40}$/.test(candidate.treeSha) || !/^[a-f0-9]{40}$/.test(candidate.baseCommitSha) || !/^[a-f0-9]{40}$/.test(candidate.expectedHeadCommit))) {
+    throw agentXError("CONFIG_INVALID", "workflow pull request update does not match its reviewed fix");
+  }
   const requestHash = hashJson({
     repository: request.repository,
     pullRequestNumber: request.pullRequestNumber,
     action: request.action,
     ...(request.title === undefined ? {} : { title: request.title }),
     ...(request.body === undefined ? {} : { body: request.body }),
+    ...(candidate === undefined ? {} : { candidateDigest: candidate.candidateDigest, candidateTreeSha: candidate.treeSha }),
   });
   const idempotencyKey = {
     pk: `IDEMPOTENCY#${identity.ownerKey}#${workspaceId}`,
@@ -3217,7 +3380,8 @@ async function acceptPullRequestLifecycle(
     return { operation: publicOperation(await requireOperation(dependencies, workspaceId, previous.operationId)), duplicate: true };
   }
   // Ruling A: nothing replaces, reverts, edits, closes or reopens a gated task's pull request through AgentX on request.
-  if (await gatedTaskWorkspace(dependencies, workspaceId)) throw agentXError("CONFIG_INVALID", GATED_TASK_PULL_REQUEST_ACTION_REFUSAL);
+  // The workflow's own push of its reviewed fix is the one change it makes, and only its dispatch asks for it.
+  if (candidate === undefined && await gatedTaskWorkspace(dependencies, workspaceId)) throw agentXError("CONFIG_INVALID", GATED_TASK_PULL_REQUEST_ACTION_REFUSAL);
   const { project, settingsRevision } = await publicationProject(dependencies, workspace);
   const repository = project.definition.repositories.find((candidate) => candidate.name === request.repository);
   if (!repository) throw agentXError("CONFIG_INVALID", "repository is not registered for this project");
@@ -3225,6 +3389,10 @@ async function acceptPullRequestLifecycle(
     dependencies,
     pullRequestKey(workspaceId, request.repository, request.pullRequestNumber),
   );
+  // The workflow's pull request was recorded when AgentX opened it, on the head the workflow recorded too.
+  if (candidate !== undefined && existingRecord?.expectedHeadCommit !== candidate.expectedHeadCommit) {
+    throw agentXError("STALE_FENCE", "the pull request's recorded head is not the one the task recorded");
+  }
   const remote = await dependencies.githubPullRequests.getPullRequest(repository.url, request.pullRequestNumber);
   const record = existingRecord ?? await adoptLegacyPullRequest(
     dependencies,
@@ -3387,7 +3555,8 @@ async function acceptPullRequestLifecycle(
   if (request.action !== "append" && request.action !== "sync") {
     throw agentXError("CONFIG_INVALID", "pull request action is not supported");
   }
-  if (remote.state !== "open") throw agentXError("CONFIG_INVALID", "only an open pull request can be maintained");
+  // A workflow task's pull request merged or closed on GitHub since AgentX opened it: it changed there, like a moved head.
+  if (remote.state !== "open") throw agentXError(candidate === undefined ? "CONFIG_INVALID" : "STALE_FENCE", "only an open pull request can be maintained");
   if (!['READY', 'STOPPED'].includes(workspace.status) || workspace.activeOperationId) {
     throw agentXError(workspace.status === "BUSY" ? "WORKSPACE_BUSY" : "WORKSPACE_NOT_READY", `workspace is ${workspace.status}`);
   }
@@ -3407,6 +3576,7 @@ async function acceptPullRequestLifecycle(
     baseBranch: record.baseBranch,
     expectedHeadCommit: record.expectedHeadCommit,
     codeBuildGates: repository.codeBuildGates ?? [],
+    ...(candidate === undefined ? {} : { workflowCandidate: { candidateDigest: candidate.candidateDigest, treeSha: candidate.treeSha, baseCommitSha: candidate.baseCommitSha } }),
   };
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
@@ -3427,30 +3597,41 @@ async function acceptPullRequestLifecycle(
       repositoryGrant: issueRepositoryGrant(
         dependencies, project, identity.ownerKey, workspaceId, operationId, "push", record.repository,
       ),
+      // The reviewed fix: the worker pushes exactly this tree, built on the pinned base's history, or refuses before pushing.
+      ...(candidate === undefined ? {} : { workflowCandidateTreeSha: candidate.treeSha, workflowBaseCommit: candidate.baseCommitSha }),
     },
   };
   const outbox = outboxRecord(workspace, invocation);
-  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-    { Update: {
-      TableName: dependencies.tableName,
-      Key: workspaceKey(workspaceId),
-      UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
-      ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: {
-        ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED",
-        ":operation": operationId, ":fence": fence, ":now": now,
-      },
-    } },
-    { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
-    { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
-    { Put: {
-      TableName: dependencies.tableName,
-      Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
-      ConditionExpression: "attribute_not_exists(pk)",
-    } },
-    ...extra(publicOperation(operation)),
-  ] }));
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: workspaceKey(workspaceId),
+        UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
+        ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: {
+          ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED",
+          ":operation": operationId, ":fence": fence, ":now": now,
+        },
+      } },
+      { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: {
+        TableName: dependencies.tableName,
+        Item: { ...idempotencyKey, entityType: "IDEMPOTENCY", operationId, payloadHash: requestHash },
+        ConditionExpression: "attribute_not_exists(pk)",
+      } },
+      ...extra(publicOperation(operation)),
+    ] }));
+  } catch (error) {
+    // The workflow's push, as its publication: a concurrent start of the same request is a duplicate, anything else busy.
+    if (candidate === undefined || !isConditional(error)) throw error;
+    const concurrent = await getItem<{ operationId: string; payloadHash: string }>(dependencies, idempotencyKey);
+    if (concurrent === undefined) throw agentXError("WORKSPACE_BUSY", "workspace already has an active writer");
+    if (concurrent.payloadHash !== requestHash) throw agentXError("IDEMPOTENCY_CONFLICT", "request ID was reused with another payload");
+    return { operation: publicOperation(await requireOperation(dependencies, workspaceId, concurrent.operationId)), duplicate: true };
+  }
   return { operation: publicOperation(operation), duplicate: false };
 }
 
@@ -3562,6 +3743,8 @@ export interface SlackWorkflowRetryEvent {
   requestId: string;
   expectedRevision: number;
   selectedOptionalCheckIds: string[];
+  /** The approved plan's proposed checks the owner kept; all of them when absent. */
+  selectedProposedCheckIds?: string[];
   /** Task 16: which blocked step the owner retries; the checks when absent. */
   step?: "plan" | "coding";
 }
@@ -3575,6 +3758,19 @@ export interface SlackWorkflowSendBackEvent {
   thread: SlackThread;
   requestId: string;
   expectedRevision: number;
+}
+
+/** The owner's answer for each blocking review finding (the Resolve findings form), from the task's own thread. */
+export interface SlackWorkflowResolveFindingsEvent {
+  source: "agentx.slack-ingress";
+  action: "workflow-resolve-findings";
+  taskId: string;
+  userId: string;
+  thread: SlackThread;
+  requestId: string;
+  expectedRevision: number;
+  candidateDigest: string;
+  resolutions: Array<{ findingId: string; action: "ACCEPT" | "FIX"; note: string }>;
 }
 
 /** Task 16: the owner's confirmed Close task, from the task's own thread. */
@@ -3602,8 +3798,12 @@ export interface SlackWorkflowFeedbackFindingsDecisionEvent {
   source: "agentx.slack-ingress";
   action: "workflow-feedback-findings-decision";
   taskId: string; userId: string; thread: SlackThread; requestId: string; expectedRevision: number;
-  reviewDigest: string; proposalDigest: string; bundleSetDigest: string; selection: "RECOMMENDED";
-  decision: "APPROVE" | "REQUEST_CHANGES"; ownerNote?: string;
+  reviewDigest: string; proposalDigest: string; bundleSetDigest: string;
+  /** ANSWER: the owner's words answer the reviewer's questions shown on the card; they approve those findings only. */
+  selection: "RECOMMENDED" | "ANSWER";
+  /** ANSWER only: the findings whose questions the card showed (one to three). */
+  questionFindingIds?: string[];
+  decision: "APPROVE" | "REQUEST_CHANGES" | "DISMISS"; ownerNote?: string;
 }
 
 export interface SlackWorkflowFeedbackNoteEvent {
@@ -3663,6 +3863,7 @@ export function isSlackWorkflowRetryEvent(event: unknown): event is SlackWorkflo
     && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
     && Number.isInteger(value.expectedRevision) && Array.isArray(value.selectedOptionalCheckIds)
     && value.selectedOptionalCheckIds.every((id) => typeof id === "string") && typeof value.thread === "object" && value.thread !== null
+    && (value.selectedProposedCheckIds === undefined || (Array.isArray(value.selectedProposedCheckIds) && value.selectedProposedCheckIds.every((id) => typeof id === "string")))
     && (value.step === undefined || value.step === "plan" || value.step === "coding");
 }
 
@@ -3672,6 +3873,31 @@ export function isSlackWorkflowSendBackEvent(event: unknown): event is SlackWork
   return value.source === "agentx.slack-ingress" && value.action === "workflow-send-back" && value.requestContext === undefined
     && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
     && Number.isInteger(value.expectedRevision) && typeof value.thread === "object" && value.thread !== null;
+}
+
+export function isSlackWorkflowResolveFindingsEvent(event: unknown): event is SlackWorkflowResolveFindingsEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "workflow-resolve-findings" && value.requestContext === undefined
+    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
+    && Number.isInteger(value.expectedRevision) && typeof value.candidateDigest === "string" && /^[a-f0-9]{64}$/.test(value.candidateDigest)
+    && typeof value.thread === "object" && value.thread !== null
+    && Array.isArray(value.resolutions) && value.resolutions.length >= 1 && value.resolutions.length <= WORKFLOW_RESOLVE_FINDINGS_MAX
+    && value.resolutions.every((entry: unknown) => {
+      const resolution = entry as Record<string, unknown> | null;
+      return typeof resolution === "object" && resolution !== null && typeof resolution.findingId === "string" && /^[a-f0-9]{64}$/.test(resolution.findingId)
+        && (resolution.action === "ACCEPT" || resolution.action === "FIX") && typeof resolution.note === "string";
+    });
+}
+
+/** The owner's answers to the blocking review findings, through the same route an AI tool uses; the route holds every rule. */
+async function resolveSlackWorkflowFindings(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowResolveFindingsEvent) {
+  const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "resolve these review findings");
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
+  const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision, candidateDigest: event.candidateDigest,
+    resolutions: event.resolutions.map((resolution) => ({ findingId: resolution.findingId, action: resolution.action, note: resolution.note })) });
+  const path = `/v1/dev/tasks/${taskId}/workflow/review-findings`;
+  return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
 }
 
 export function isSlackWorkflowCloseEvent(event: unknown): event is SlackWorkflowCloseEvent {
@@ -3735,7 +3961,8 @@ async function retrySlackWorkflowChecks(dependencies: AwsBrokerDependencies, tas
   const instructions = event.step === "plan" ? "The previous planning run stopped before it saved a plan. Plan the request again."
     : event.step === "coding" ? "Retry the coding step." : "Retry the owner-selected project checks without changing code.";
   const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision, instructions,
-    ...(event.step === undefined ? { selectedOptionalCheckIds: event.selectedOptionalCheckIds } : {}) });
+    ...(event.step === undefined ? { selectedOptionalCheckIds: event.selectedOptionalCheckIds,
+      ...(event.selectedProposedCheckIds === undefined ? {} : { selectedProposedCheckIds: event.selectedProposedCheckIds }) } : {}) });
   const path = `/v1/dev/tasks/${taskId}/workflow/retry`;
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
 }
@@ -3797,7 +4024,11 @@ export function isSlackWorkflowFeedbackFindingsDecisionEvent(event: unknown): ev
     && Number.isInteger(value.expectedRevision) && typeof value.reviewDigest === "string" && /^[a-f0-9]{64}$/.test(value.reviewDigest)
     && typeof value.proposalDigest === "string" && /^[a-f0-9]{64}$/.test(value.proposalDigest)
     && typeof value.bundleSetDigest === "string" && /^[a-f0-9]{64}$/.test(value.bundleSetDigest)
-    && value.selection === "RECOMMENDED" && (value.decision === "APPROVE" || value.decision === "REQUEST_CHANGES")
+    && ((value.selection === "RECOMMENDED" && (value.decision === "APPROVE" || value.decision === "REQUEST_CHANGES" || value.decision === "DISMISS"))
+      || (value.selection === "ANSWER" && value.decision === "APPROVE" && Array.isArray(value.questionFindingIds)
+        && value.questionFindingIds.length >= 1 && value.questionFindingIds.length <= 3
+        && value.questionFindingIds.every(id => typeof id === "string" && id.length > 0 && id.length <= 128)))
+    && (value.selection === "ANSWER" || value.questionFindingIds === undefined)
     && (value.ownerNote === undefined || typeof value.ownerNote === "string");
 }
 
@@ -3828,19 +4059,53 @@ async function decideSlackWorkflowFeedbackFindings(dependencies: AwsBrokerDepend
   if (workflow?.revision !== event.expectedRevision || workflow.stage !== "WAIT_FOR_MERGE" || workflow.state !== "WAITING"
     || review?.status !== "PENDING" || review.reviewRef.sha256 !== event.reviewDigest || review.reviewRef.proposalDigest !== event.proposalDigest
     || bundleSetDigest !== event.bundleSetDigest) throw agentXError("CONFIG_INVALID", "this review changed; reopen the AgentX review details");
-  if (event.decision === "REQUEST_CHANGES" && (typeof event.ownerNote !== "string" || event.ownerNote.trim().length === 0 || event.ownerNote.trim().length > 500)) {
-    throw agentXError("CONFIG_INVALID", "add a short note before requesting changes");
+  if ((event.decision !== "APPROVE" || event.selection === "ANSWER")
+    && (typeof event.ownerNote !== "string" || event.ownerNote.trim().length === 0 || event.ownerNote.trim().length > 500)) {
+    throw agentXError("CONFIG_INVALID", event.selection === "ANSWER" ? "add your answer before sending it" : "add a short note before requesting changes");
   }
   const caller: DeveloperCaller = { developerId: task.developerId, sessionId: "slack-workflow", amr: "slack", name: task.developerName, slackUserId: userId };
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
     developer: dependencies.developer, now: Date.now, tasks, refreshTaskFeedback: id => refreshTaskFeedbackForOwnerDecision(dependencies, id) }, caller);
   const view = await getWorkflowFeedbackReview(routeDeps, caller, taskId);
   const findings = Array.isArray(view.findings) ? view.findings as Array<Record<string, unknown>> : [];
-  const selectedFindingIds = event.decision === "APPROVE" ? findings.filter(finding => finding.recommended === true).map(finding => String(finding.id)) : [];
+  // An answer approves only the questions its card showed; the owner's words say how. Recommended fixes are approved apart.
+  const ownerDecision = (finding: Record<string, unknown>) => finding.proposedDisposition === "OWNER_DECISION";
+  const questionIds = [...new Set(event.questionFindingIds ?? [])];
+  if (event.selection === "ANSWER") {
+    if (!findings.some(ownerDecision)) throw agentXError("CONFIG_INVALID", "this review has no question to answer; reopen the AgentX review details");
+    if (!questionIds.every(id => findings.some(finding => String(finding.id) === id && ownerDecision(finding)))) {
+      throw agentXError("CONFIG_INVALID", "that question is no longer in this review; reopen the AgentX review details");
+    }
+  }
+  const selectedFindingIds = event.decision !== "APPROVE" ? [] : event.selection === "ANSWER" ? questionIds
+    : findings.filter(finding => finding.recommended === true).map(finding => String(finding.id));
   return submitWorkflowFeedbackDecision(routeDeps, caller, taskId, {
     requestId, expectedRevision: event.expectedRevision, reviewDigest: event.reviewDigest, proposalDigest: event.proposalDigest,
     bundleDigests, decision: event.decision, selectedFindingIds, ...(event.ownerNote === undefined ? {} : { ownerNote: event.ownerNote.trim() }),
   });
+}
+
+/** The owner's Retry review on a failed PR feedback review's card, from the task's own thread. */
+export interface SlackWorkflowFeedbackReviewRetryEvent {
+  source: "agentx.slack-ingress"; action: "workflow-feedback-review-retry";
+  taskId: string; userId: string; thread: SlackThread; requestId: string; reviewDigest: string;
+}
+
+export function isSlackWorkflowFeedbackReviewRetryEvent(event: unknown): event is SlackWorkflowFeedbackReviewRetryEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "workflow-feedback-review-retry" && value.requestContext === undefined
+    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
+    && typeof value.reviewDigest === "string" && /^[a-f0-9]{64}$/.test(value.reviewDigest)
+    && typeof value.thread === "object" && value.thread !== null;
+}
+
+async function retrySlackWorkflowFeedbackReview(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowFeedbackReviewRetryEvent) {
+  // The same checks as every other Slack press: this Slack workspace, the task's owner, and the task's own thread.
+  const { task, taskId, developer } = await ownedSlackWorkflowTask(dependencies, event, "retry this review");
+  const caller: DeveloperCaller = { developerId: task.developerId, sessionId: "slack-workflow", amr: "slack", name: task.developerName, slackUserId: SlackRequesterSchema.shape.userId.parse(event.userId) };
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
+  return retryTaskWorkflowFeedbackReview(routeDeps, caller, taskId, { reviewDigest: event.reviewDigest });
 }
 
 async function captureSlackWorkflowFeedbackNote(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowFeedbackNoteEvent) {
@@ -4001,11 +4266,11 @@ async function handleCallback(
     return json({ authorized: true }, request.requestId);
   }
   if (action === "pull-request") {
-    const pullRequest = await reconcilePullRequest(dependencies, operation, body);
+    const pullRequest = await logCallbackRefusal(action, operation, () => reconcilePullRequest(dependencies, operation, body));
     return json(pullRequest, request.requestId);
   }
   if (action === "pull-request-update") {
-    const pullRequest = await reconcilePullRequestUpdate(dependencies, operation, body);
+    const pullRequest = await logCallbackRefusal(action, operation, () => reconcilePullRequestUpdate(dependencies, operation, body));
     return json(pullRequest, request.requestId);
   }
   if (action === "codebuild") {
@@ -4016,12 +4281,28 @@ async function handleCallback(
   return json({ operation: publicOperation(result) }, request.requestId);
 }
 
+/**
+ * A refused pull request callback says why in the broker log: the worker only sees its HTTP status. The reason is the
+ * broker's own refusal text (scope, head and state checks), never a request body; any other error is logged by name.
+ */
+async function logCallbackRefusal<T>(action: string, operation: OperationRecord, run: () => Promise<T>): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    const refusal = error instanceof AgentXError
+      ? { code: error.code, reason: error.message.replace(`${error.code}: `, "") }
+      : { error: error instanceof Error ? error.name : "unknown" };
+    console.log(JSON.stringify({ component: "broker", event: "callback.refused", action, workspaceId: operation.workspaceId, operationId: operation.id, ...refusal }));
+    throw error;
+  }
+}
+
 /** Worker-start linearization point: stale or invalidated feedback approvals cannot start code. */
 async function authorizeWorkflowFeedbackApproval(dependencies: AwsBrokerDependencies, operation: OperationRecord, value: unknown): Promise<void> {
   const input = WorkflowFeedbackApprovalBindingSchema.parse(value);
   const binding = operation.workflowFeedbackApproval;
   if (operation.kind !== "task" || operation.workflowMode !== "IMPLEMENT" || binding === undefined
-    || JSON.stringify(binding) !== JSON.stringify(input)) {
+    || !sameFeedbackApproval(binding, input)) {
     throw agentXError("CALLBACK_FORBIDDEN", "feedback approval callback is outside the implementation operation binding");
   }
   // Re-fetch every linked PR here as well. A webhook may be delayed while this durable outbox is
@@ -4039,7 +4320,7 @@ async function authorizeWorkflowFeedbackApproval(dependencies: AwsBrokerDependen
   if (task?.workspaceId !== operation.workspaceId || task.ownerKey !== input.ownerId || task.closedAt !== undefined
     || workflow === undefined || workflow.revision !== input.activeWorkflowRevision || workflow.stage !== "IMPLEMENT" || workflow.state !== "RUNNING"
     || workflow.candidate?.digest !== input.candidateDigest || workflow.feedbackDispatchApproval === undefined
-    || JSON.stringify(workflow.feedbackDispatchApproval) !== JSON.stringify(input)
+    || !sameFeedbackApproval(workflow.feedbackDispatchApproval, input)
     || review?.status !== "APPROVED" || review.reviewRef.sha256 !== input.reviewDigest
     || review.reviewRef.proposalDigest !== input.proposalDigest
     || JSON.stringify(review.bundleRefs.map(ref => ref.sha256)) !== JSON.stringify(input.bundleDigests)
@@ -4055,6 +4336,15 @@ async function authorizeWorkflowFeedbackApproval(dependencies: AwsBrokerDependen
     || JSON.stringify(decision.selectedCommentIds) !== JSON.stringify(input.selectedCommentIds)) {
     throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
   }
+}
+
+/**
+ * Whether a stored feedback approval is exactly the one the worker presents. The stored one is read back from DynamoDB,
+ * which keeps no map's attribute order, so both are put in the schema's order before their JSON is compared.
+ */
+function sameFeedbackApproval(stored: unknown, presented: WorkflowFeedbackApprovalBinding): boolean {
+  const parsed = WorkflowFeedbackApprovalBindingSchema.safeParse(stored);
+  return parsed.success && JSON.stringify(parsed.data) === JSON.stringify(presented);
 }
 
 async function verifyTaskFeedbackForWorkerStart(dependencies: AwsBrokerDependencies, taskId: string): Promise<boolean> {
@@ -4114,8 +4404,19 @@ async function readFeedbackBundlesForCritic(
   });
   if (requirements.length === 0) throw agentXError("CONFIG_INVALID", "feedback critic has no owner-approved task requirements");
   const approved: string[] = [];
-  for (const artifact of requirements) {
+  // Structured documents: the critic gets only the latest approved one (the coding plan carries the whole requirements,
+  // design and plan tree; a Quick task's plan is its only document), as its Markdown copy.
+  const latestStructured = requirements.filter((artifact) => artifact.format === "structured").at(-1);
+  for (const artifact of latestStructured === undefined ? requirements : [latestStructured]) {
     if (!artifact.objectKey.startsWith(`private/${task.ownerKey}/${task.workspaceId}/`)) throw agentXError("CALLBACK_FORBIDDEN", "approved requirement artifact is outside this task's private storage");
+    if (artifact.format === "structured") {
+      // The owner approved it with AgentX's recommended answers. A copy too long for the critic is cut, never refused.
+      const loaded = await loadWorkflowDocument((key, maxBytes) => readObjectText(dependencies, key, maxBytes), artifact, { answers: "recommended" });
+      if (loaded === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "approved task requirements failed size or digest validation");
+      const heading = artifact.type.toUpperCase() + " (sha256 " + artifact.sha256 + "):\n";
+      approved.push(heading + shortenMarkdown(loaded.markdown, FEEDBACK_REQUIREMENTS_MAX_BYTES - Buffer.byteLength(heading, "utf8"), "… (shortened; the full plan is on the task page)"));
+      continue;
+    }
     const response = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: artifact.objectKey }));
     if (response.ContentLength === undefined || response.ContentLength > FEEDBACK_REQUIREMENTS_MAX_BYTES) throw agentXError("CONFIG_INVALID", "approved task requirement exceeds the critic input limit");
     const bytes = response.Body ? Buffer.from(await response.Body.transformToByteArray()) : Buffer.alloc(0);
@@ -4356,9 +4657,21 @@ async function reconcilePullRequestUpdate(
     throw agentXError("STALE_FENCE", "pull request record changed before callback reconciliation");
   }
   const remote = await dependencies.githubPullRequests.getPullRequest(record.repositoryUrl, record.number);
+  // GitHub moves a pull request's head a moment after a push to its branch, and the worker calls back right after its
+  // push: a pull request still at the head before the push holds the update when its branch, which GitHub reads from
+  // Git itself, already points at the pushed commit.
+  const branchHoldsUpdate = async (): Promise<boolean> => {
+    const getBranchHead = dependencies.githubPullRequests.getBranchHead;
+    if (remote.headCommit !== expected.expectedHeadCommit || getBranchHead === undefined) return false;
+    try {
+      return await getBranchHead.call(dependencies.githubPullRequests, record.repositoryUrl, record.headBranch) === input.commit;
+    } catch {
+      return false;
+    }
+  };
   if (
     remote.state !== "open" || remote.headBranch !== record.headBranch ||
-    remote.baseBranch !== record.baseBranch || remote.headCommit !== input.commit
+    remote.baseBranch !== record.baseBranch || (remote.headCommit !== input.commit && !await branchHoldsUpdate())
   ) {
     throw agentXError("STALE_FENCE", "GitHub pull request state does not match the worker update");
   }
@@ -4402,6 +4715,16 @@ async function blockUncheckedPublication(dependencies: AwsBrokerDependencies, op
   } catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "workflow.unchecked_publication_block_failed", operationId: operation.id, error: error instanceof Error ? error.name : "unknown" }));
   }
+}
+
+/** Whether this publication is of a review-only task's verified candidate (its policy selects no check). */
+async function reviewOnlyWorkflowPublication(dependencies: AwsBrokerDependencies, operation: OperationRecord): Promise<boolean> {
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
+  const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  const workflow = task?.workflow;
+  return workflow !== undefined && workflow.candidate?.digest === operation.publication?.candidateDigest
+    && workflow.verification?.candidateDigest === workflow.candidate?.digest
+    && workflow.verification?.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy);
 }
 
 async function reconcilePullRequest(
@@ -4451,9 +4774,16 @@ async function reconcilePullRequest(
   const publishChecks = publicationChecks(input.checks);
   await assertCodeBuildGatesPassed(dependencies, operation, input.commit);
   // A revert undoes a merged pull request, so the workspace's own task work is not what it publishes.
-  const latestChecks = expected.mode === "revert" ? undefined : await latestWorkspaceChecks(dependencies, operation.workspaceId);
-  const standingFailures = expected.mode === "revert" ? [] : await workspaceStandingFailures(dependencies, operation.workspaceId);
-  const checked = checkedPullRequest(expected.body, expected.draft, publishChecks, latestChecks, standingFailures);
+  // A review-only workflow pull request keeps its description's review-only line, with no section for reruns of the
+  // agent's own tests under it; a check that fails as the pull request opens (one added to the project since) is still
+  // reported.
+  const reviewOnly = expected.expectedTreeSha !== undefined && await reviewOnlyWorkflowPublication(dependencies, operation);
+  const latestChecks = expected.mode === "revert" || reviewOnly ? undefined : await latestWorkspaceChecks(dependencies, operation.workspaceId);
+  const standingFailures = expected.mode === "revert" || reviewOnly ? [] : await workspaceStandingFailures(dependencies, operation.workspaceId);
+  const failingPublishChecks = publishChecks?.filter((check) => check.after === "failed" || check.after === "timed_out") ?? [];
+  const checked = reviewOnly
+    ? failingPublishChecks.length === 0 ? { body: expected.body, draft: expected.draft } : checkedPullRequest(expected.body, expected.draft, failingPublishChecks, undefined)
+    : checkedPullRequest(expected.body, expected.draft, publishChecks, latestChecks, standingFailures);
   const body = checked.body;
   // A workflow publication is always a draft: humans merge.
   const draft = expected.expectedTreeSha !== undefined ? true : checked.draft;
@@ -4732,7 +5062,10 @@ async function putArtifact(
   const feedbackReportMatch = operation.workflowMode === "FEEDBACK_REVIEW"
     ? /^workflow-feedback-review-([a-f0-9]{64})\.json$/.exec(input.name) : undefined;
   const feedbackReportDigest = feedbackReportMatch?.[1];
-  if (operation.workflowMode === "FEEDBACK_REVIEW" && (feedbackReportDigest === undefined
+  // Beside the report, a feedback review may keep the reviewer's rejected answer (redacted by the worker), privately
+  // under its operation; nothing reads it back into the task.
+  const feedbackAnswer = operation.workflowMode === "FEEDBACK_REVIEW" && input.name === WORKFLOW_FEEDBACK_REVIEW_ANSWER_ARTIFACT;
+  if (operation.workflowMode === "FEEDBACK_REVIEW" && !feedbackAnswer && (feedbackReportDigest === undefined
     || createHash("sha256").update(input.content, "utf8").digest("hex") !== feedbackReportDigest)) {
     throw agentXError("CONFIG_INVALID", "feedback critic report artifact name must match its content digest");
   }
@@ -4948,7 +5281,7 @@ function failedPrepareItems(dependencies: AwsBrokerDependencies, workspace: Work
 }
 
 /** The operation kinds whose result may concern a developer task: one pointer read serves them all (P39). */
-const TASK_POINTER_KINDS: ReadonlySet<string> = new Set(["prepare", "task", "publish", "close", "cancel"]);
+const TASK_POINTER_KINDS: ReadonlySet<string> = new Set(["prepare", "task", "publish", "maintain", "close", "cancel"]);
 
 /** What a successful cancel's result makes of its target, and what a failed one does. */
 const cancelledTargetStatus = (cancelStatus: OperationStatus): OperationStatus => (cancelStatus === "SUCCEEDED" ? "CANCELLED" : "INTERRUPTED");
@@ -4961,7 +5294,7 @@ async function operationEventsNewestFirst(dependencies: AwsBrokerDependencies, o
 
 /**
  * Spec 025 R12: the `completed` turn record of the developer task or publish operation this result
- * ends, for the result's own transaction, so the record and the result land together or not at
+ * ends (or the push of a workflow task's approved fix, whose accepted record the push wrote), for the result's own transaction, so the record and the result land together or not at
  * all. A task's own result ends it; a cancel's result ends its target (ruling F13: the target's
  * own later result finds it terminal and writes nothing). A Slack workspace has no pointer and
  * gets none.
@@ -4977,14 +5310,16 @@ async function completedTurnItems(
   const table = dependencies.turnRecordsTableName;
   if (pointer === undefined || table === undefined) return [];
   let ended: { operation: OperationRecord; status: OperationStatus } | undefined;
-  if (operation.kind === "task" || operation.kind === "publish") {
+  const recordsTurn = (record: OperationRecord) => record.kind === "task" || record.kind === "publish"
+    || (record.kind === "maintain" && record.maintenance?.workflowCandidate !== undefined);
+  if (recordsTurn(operation)) {
     ended = {
       operation: { ...operation, ...(outcome.result === undefined ? {} : { result: outcome.result }), ...(outcome.error === undefined ? {} : { error: outcome.error }) },
       status: terminalStatus,
     };
   } else if (operation.kind === "cancel" && operation.targetOperationId) {
     const target = await getItem<OperationRecord>(dependencies, operationKey(operation.workspaceId, operation.targetOperationId));
-    if (target !== undefined && (target.kind === "task" || target.kind === "publish") && !TERMINAL.has(target.status)) {
+    if (target !== undefined && recordsTurn(target) && !TERMINAL.has(target.status)) {
       ended = { operation: target, status: cancelledTargetStatus(terminalStatus) };
     }
   }
@@ -5067,6 +5402,38 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
       return project.definition.repositories.find(repository => repository.name === repositoryId)?.url;
     },
     getCurrentFeedback: (url, number) => getFeedback.call(dependencies.githubPullRequests, url, number),
+    recordedHead: async (workspaceId, repositoryId, number) => (await getItem<PullRequestRecord>(dependencies, pullRequestKey(workspaceId, repositoryId, number)))?.expectedHeadCommit,
+    ...(dependencies.githubPullRequests.getCommitParents === undefined ? {} : {
+      commitParents: (url: string, commit: string) => dependencies.githubPullRequests.getCommitParents!(url, commit),
+    }),
+    // A fix push taken for failed but landed: recorded as its result would have, together or not at all.
+    saveLandedPushes: async (taskId, expectedRevision, workflow, pushes) => {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { Update: {
+          TableName: dependencies.tableName, Key: taskKey(taskId),
+          UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+          ConditionExpression: "workflow.revision = :revision AND attribute_not_exists(closedAt)",
+          ExpressionAttributeValues: { ":workflow": workflow, ":now": workflow.updatedAt, ":revision": expectedRevision },
+        } },
+        ...pushes.flatMap((push) => [
+          { Update: {
+            TableName: dependencies.tableName, Key: githubWorkflowPullRequestKey(push.repositoryFullName, push.number),
+            UpdateExpression: "SET candidateDigest = :candidate, updatedAt = :now",
+            ConditionExpression: "taskId = :taskId AND #url = :url AND candidateDigest = :previous",
+            ExpressionAttributeNames: { "#url": "url" },
+            ExpressionAttributeValues: { ":candidate": push.candidateDigest, ":now": workflow.updatedAt, ":taskId": taskId, ":url": push.url, ":previous": push.previousCandidateDigest },
+          } },
+          { Update: {
+            TableName: dependencies.tableName, Key: pullRequestKey(push.workspaceId, push.repositoryId, push.number),
+            UpdateExpression: "SET expectedHeadCommit = :head, #state = :state, updatedAt = :now",
+            ConditionExpression: "expectedHeadCommit = :previous OR expectedHeadCommit = :head",
+            ExpressionAttributeNames: { "#state": "state" },
+            ExpressionAttributeValues: { ":head": push.headSha, ":previous": push.previousHeadSha, ":state": push.state, ":now": workflow.updatedAt },
+          } },
+        ]),
+      ] }));
+      console.log(JSON.stringify({ component: "broker", event: "workflow.landed_fix_push_recorded", taskId, pullRequests: pushes.map((push) => push.number) }));
+    },
     persistBundle: async (bundle, bytes, sha256) => {
       const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(bundle.taskId));
       if (!task) throw new GithubWebhookRefusal("linked feedback task no longer exists");
@@ -5178,52 +5545,18 @@ function isGithubWebhookRecoveryEvent(event: unknown): event is { source: "agent
   return event !== null && typeof event === "object" && (event as { source?: unknown }).source === "agentx.github-webhook-recovery";
 }
 
-/**
- * Gap 6: the intent to start the next workflow step with no one asking, written in the same transaction as the
- * result that made it due. The broker runs it right after that commit; the recovery sweep runs any row left behind.
- */
-interface WorkflowDispatchRecord {
-  pk: "WORKFLOW_DISPATCH";
-  sk: string; // `${taskId}#${revision}`
-  entityType: "WORKFLOW_DISPATCH";
-  taskId: string;
-  workflowRevision: number;
-  kind: "REVIEW" | "PUBLISH";
-  candidateDigest: string;
-  createdAt: string;
-  /** Failed runs so far; the row is retried with backoff and gives up (blocking the task) at the cap. */
-  attempts: number;
-  /** When the sweep may run the row next. */
-  nextAttemptAt: string;
-  /** The due-time index keys (WORKFLOW_DISPATCH_DUE_INDEX): a constant, and `${nextAttemptAt}#${sk}`. */
-  dispatchDuePk: "WORKFLOW_DISPATCH";
-  dispatchDueSk: string;
-  /** TTL backstop (epoch seconds), in case a row is somehow never resolved. */
-  indexExpiresAt: number;
-}
 
-const WORKFLOW_DISPATCH_PK = "WORKFLOW_DISPATCH";
 const WORKFLOW_DISPATCH_SWEEP_LIMIT = 25;
+const PLAN_EVIDENCE_SWEEP_LIMIT = 25;
 /** After this many failed runs the task is blocked with a plain reason and the owner's Retry reviews (or Retry opening the pull request) takes over. */
 const WORKFLOW_DISPATCH_MAX_ATTEMPTS = 10;
 const WORKFLOW_DISPATCH_MAX_BACKOFF_MINUTES = 15;
-const WORKFLOW_DISPATCH_RETENTION_SECONDS = 7 * 86_400;
 
 /** The minutes to wait after the given number of failed runs: 1, 2, 4, 8, then 15. */
 function workflowDispatchBackoffMinutes(attempts: number): number {
   return Math.min(2 ** Math.max(attempts - 1, 0), WORKFLOW_DISPATCH_MAX_BACKOFF_MINUTES);
 }
 
-function workflowDispatchItem(dependencies: AwsBrokerDependencies, taskId: string, workflowRevision: number, kind: WorkflowDispatchRecord["kind"], candidateDigest: string, now: string): TransactItems[number] {
-  const sk = `${taskId}#${workflowRevision}`;
-  const item: WorkflowDispatchRecord = {
-    pk: WORKFLOW_DISPATCH_PK, sk, entityType: "WORKFLOW_DISPATCH",
-    taskId, workflowRevision, kind, candidateDigest, createdAt: now,
-    attempts: 0, nextAttemptAt: now, dispatchDuePk: WORKFLOW_DISPATCH_PK, dispatchDueSk: `${now}#${sk}`,
-    [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + WORKFLOW_DISPATCH_RETENTION_SECONDS,
-  };
-  return { Put: { TableName: dependencies.tableName, Item: item, ConditionExpression: "attribute_not_exists(pk)" } };
-}
 
 /**
  * A failed run: count it and push the row's due time back, or at the cap delete the row and block the task with a
@@ -5252,10 +5585,13 @@ async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies
     const workflow = task?.workflow;
     const deleteRow = { Delete: { TableName: dependencies.tableName, Key: key, ...sameRow } };
     // The stage and state the row was due in, and the plain reason the owner sees when AgentX gives up on it.
-    const [stage, state, reason] = item.kind === "PUBLISH"
-      ? ["PULL_REQUEST", "READY", WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE] as const
-      : ["REVIEW", "WAITING", WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE] as const;
-    if (workflow === undefined || workflow.revision !== item.workflowRevision || workflow.stage !== stage || workflow.state !== state || task?.closedAt !== undefined) {
+    const [stage, state, reason] = item.kind === "REVIEW"
+      ? ["REVIEW", "WAITING", WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE] as const
+      : ["PULL_REQUEST", "READY", WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE] as const;
+    // A fix AgentX gave up pushing: the task waits for the merge, blocked, naming the pull request.
+    const updating = item.kind === "UPDATE" && workflow !== undefined ? nextWorkflowPullRequestUpdate(workflow) : undefined;
+    if (workflow === undefined || workflow.revision !== item.workflowRevision || workflow.stage !== stage || workflow.state !== state || task?.closedAt !== undefined
+      || (item.kind === "UPDATE" && updating === undefined)) {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [deleteRow] }));
       return;
     }
@@ -5264,7 +5600,7 @@ async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies
       UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
       ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND attribute_not_exists(closedAt)",
       ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
-      ExpressionAttributeValues: { ":workflow": blockWorkflow(workflow, reason, now), ":now": now,
+      ExpressionAttributeValues: { ":workflow": updating === undefined ? blockWorkflow(workflow, reason, now) : blockWorkflowPullRequestUpdate(workflow, { numbers: [updating.number], now }), ":now": now,
         ":revision": item.workflowRevision, ":stage": stage, ":state": state },
     } }] }));
     console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_gave_up", taskId: item.taskId, kind: item.kind, attempts }));
@@ -5293,7 +5629,7 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Wo
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
     const workflow = task?.workflow;
     const due = item.kind === "REVIEW" ? workflow?.stage === "REVIEW" && workflow.state === "WAITING"
-      : item.kind === "PUBLISH" ? workflow?.stage === "PULL_REQUEST" && workflow.state === "READY" : false;
+      : item.kind === "PUBLISH" || item.kind === "UPDATE" ? workflow?.stage === "PULL_REQUEST" && workflow.state === "READY" : false;
     if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== item.workflowRevision
       || !due || dependencies.developer === undefined) {
       await remove();
@@ -5302,10 +5638,11 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Wo
     const caller = { developerId: task.developerId, sessionId: "workflow-dispatch", amr: task.provider, name: task.developerName };
     const routeDependencies = developerTaskRouteDependencies({
       documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
-      now: Date.now, tasks: developerTaskActions(dependencies),
+      now: Date.now, tasks: developerTaskActions(dependencies), refreshTaskFeedback: (taskId) => refreshTaskFeedbackForOwnerDecision(dependencies, taskId),
     }, caller);
     const expected = { workflowRevision: item.workflowRevision, candidateDigest: item.candidateDigest };
-    const outcome = item.kind === "PUBLISH"
+    // A fix for the pull requests already open is pushed to them by the same start, which sees they exist.
+    const outcome = item.kind === "PUBLISH" || item.kind === "UPDATE"
       ? await startTaskWorkflowPublicationFromSystem(routeDependencies, item.taskId, expected, { taskPageUrl: taskPageUrl(dependencies.developer.issuer, item.taskId) })
       : await startTaskWorkflowReviewFromSystem(routeDependencies, item.taskId, expected);
     await remove();
@@ -5349,8 +5686,182 @@ async function retryDueWorkflowDispatches(dependencies: AwsBrokerDependencies): 
   return { attempted: rows.length, dispatched };
 }
 
+/** The cited code a plan's own callback read, waiting for the plan to commit before it is attached. */
+interface InlineEvidence { taskId: string; artifactId: string; artifactSha256: string; bundle: PlanEvidenceBundle; prefix: string }
+
+/** Attaches evidence read inside the plan callback; a failure is logged and leaves the plan's page saying it could not load the code. */
+async function attachInlineEvidence(dependencies: AwsBrokerDependencies, entries: readonly InlineEvidence[]): Promise<void> {
+  for (const entry of entries) {
+    try {
+      await attachEvidence({ documentClient: dependencies.documentClient, s3: dependencies.s3, tableName: dependencies.tableName, bucketName: dependencies.artifactBucketName, now: Date.now }, entry);
+    } catch (error) {
+      console.log(JSON.stringify({ component: "broker", event: "plan_evidence.attach_failed", taskId: entry.taskId, artifactId: entry.artifactId, error: error instanceof Error ? error.name : "unknown" }));
+    }
+  }
+}
+
+/** Starts the evidence job for each event; a failed start is logged and left to the sweep, and never fails the caller. */
+async function startPlanEvidenceJobs(dependencies: AwsBrokerDependencies, events: readonly PlanEvidenceEvent[]): Promise<number> {
+  const start = dependencies.startPlanEvidenceJob;
+  if (start === undefined) return 0;
+  let started = 0;
+  for (const event of events) {
+    try {
+      await start(event);
+      started += 1;
+    } catch (error) {
+      console.log(JSON.stringify({ component: "broker", event: "plan_evidence.start_failed", taskId: event.taskId, artifactId: event.artifactId, error: error instanceof Error ? error.name : "unknown" }));
+    }
+  }
+  return started;
+}
+
+/**
+ * The evidence jobs the sweep starts: up to 25 PLAN_EVIDENCE rows that are due, oldest first, from the same due-time index as
+ * the dispatch rows under their own partition value. A row being worked holds a lease past now, and a row waiting out a backoff
+ * sorts after the bound, so neither is started again early; the job's own claim keeps two starts of one row from both running.
+ */
+async function startDuePlanEvidenceJobs(dependencies: AwsBrokerDependencies): Promise<{ attempted: number; started: number }> {
+  if (dependencies.startPlanEvidenceJob === undefined) return { attempted: 0, started: 0 };
+  const page = await dependencies.documentClient.send(new QueryCommand({
+    TableName: dependencies.tableName,
+    IndexName: WORKFLOW_DISPATCH_DUE_INDEX.name,
+    KeyConditionExpression: `${WORKFLOW_DISPATCH_DUE_INDEX.partitionKey} = :pk AND ${WORKFLOW_DISPATCH_DUE_INDEX.sortKey} BETWEEN :from AND :due`,
+    // ":" sorts after the "#" that follows each due time, so `${due(now)}:` includes every row due at or before now.
+    ExpressionAttributeValues: { ":pk": PLAN_EVIDENCE_PK, ":from": "0", ":due": `${planEvidenceDueKey(Date.now())}:` },
+    Limit: PLAN_EVIDENCE_SWEEP_LIMIT,
+  }));
+  const rows = (page.Items ?? []) as PlanEvidenceJob[];
+  return { attempted: rows.length, started: await startPlanEvidenceJobs(dependencies, rows.map((row) => planEvidenceEvent(row.taskId, row.artifactId))) };
+}
+
 function isWorkflowDispatchRecoveryEvent(event: unknown): event is { source: "agentx.workflow-dispatch-recovery" } {
   return event !== null && typeof event === "object" && (event as { source?: unknown }).source === "agentx.workflow-dispatch-recovery";
+}
+
+/**
+ * Item 7: the result of pushing an approved fix to the workflow's pull request. Only the push the task is waiting on
+ * counts: its candidate must still be the task's, at PULL_REQUEST/RUNNING; anything else (the pull request merged
+ * meanwhile, the task closed or moved on) is dropped. A success is recorded only once GitHub says the pull request's head
+ * is the pushed commit and that commit's tree is the reviewed tree; the pull request's link to the task then names the
+ * fix's candidate. A failure, or a head GitHub does not confirm, blocks the task waiting for the merge, with a plain cause;
+ * the pull request keeps the head and reviewed code it had, which merge tracking matches.
+ */
+async function completedPullRequestUpdateItems(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  task: DeveloperTaskRecord & { workflow: WorkflowSnapshot },
+  terminalStatus: OperationStatus,
+  now: string,
+  result: unknown,
+  terminalError: string | undefined,
+): Promise<TransactItems> {
+  const binding = operation.maintenance?.workflowCandidate;
+  const workflow = task.workflow;
+  const maintenance = operation.maintenance;
+  if (binding === undefined || maintenance === undefined || task.closedAt !== undefined || workflow.stage !== "PULL_REQUEST" || workflow.state !== "RUNNING"
+    || workflow.candidate?.digest !== binding.candidateDigest) return [];
+  const pullRequest = workflow.pullRequests?.find((entry) => entry.repositoryId === maintenance.repository && entry.number === maintenance.pullRequestNumber);
+  if (pullRequest === undefined) return [];
+  const candidateRepository = workflow.candidate.repositories.find((entry) => entry.repositoryId === maintenance.repository);
+  const taskUpdate = (next: WorkflowSnapshot): TransactItems[number] => ({ Update: {
+    TableName: dependencies.tableName,
+    Key: taskKey(task.taskId),
+    UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+    ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running AND attribute_not_exists(closedAt)",
+    ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+    ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": workflow.revision, ":stage": "PULL_REQUEST", ":running": "RUNNING" },
+  } });
+  const failed = (cause?: WorkflowPullRequestUpdateCause) => [taskUpdate(blockWorkflowPullRequestUpdate(workflow, { numbers: [pullRequest.number], cause, now }))];
+  // Why the push failed, by the worker's own error: it could not take a reviewed fix; the pull request's head moved or the
+  // push was not a fast-forward; or anything else on the way to GitHub (a CodeBuild gate included) stopped it.
+  const cause: WorkflowPullRequestUpdateCause = terminalStatus === "SUCCEEDED" ? "PUSH_REFUSED"
+    : terminalError?.includes(WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED) === true ? "WORKER_OUTDATED"
+      : terminalError?.startsWith("STALE_FENCE") === true ? "HEAD_MOVED" : "PUSH_REFUSED";
+  // A worker that could not take the fix never reached GitHub.
+  if (cause === "WORKER_OUTDATED") return failed(cause);
+  let pushedCommit: string | undefined;
+  if (terminalStatus === "SUCCEEDED") {
+    const pushed = PullRequestLifecycleResultSchema.safeParse(result);
+    if (!pushed.success || pushed.data.action !== "append" || pushed.data.repository !== maintenance.repository || pushed.data.number !== maintenance.pullRequestNumber
+      || pushed.data.treeSha !== binding.treeSha || candidateRepository?.treeSha !== binding.treeSha || !/^[a-f0-9]{40}$/.test(pushed.data.commit)) {
+      return failed("PUSH_REFUSED");
+    }
+    pushedCommit = pushed.data.commit;
+  }
+  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  const repository = project.definition.repositories.find((entry) => entry.name === maintenance.repository);
+  const gateway = dependencies.githubPullRequests;
+  const getFeedback = gateway.getPullRequestFeedback;
+  if (repository === undefined || getFeedback === undefined) {
+    if (pushedCommit === undefined) return failed(cause);
+    throw agentXError("RUNTIME_UNAVAILABLE", "cannot verify the updated pull request against the reviewed fix");
+  }
+  const record = await getItem<PullRequestRecord>(dependencies, pullRequestKey(task.workspaceId, maintenance.repository, maintenance.pullRequestNumber));
+  // GitHub, not the worker, says what the pull request now holds. A failed push may still have landed (a CodeBuild gate
+  // after the push, a lost result): then GitHub's head is AgentX's fast-forward of the recorded head, on the reviewed tree.
+  let current: Awaited<ReturnType<typeof getFeedback>>;
+  try {
+    current = await getFeedback.call(gateway, repository.url, maintenance.pullRequestNumber);
+  } catch (error) {
+    if (pushedCommit === undefined) return failed(cause);
+    throw error;
+  }
+  let head = current.pullRequest.headCommit;
+  let headTree = current.pullRequest.headTreeSha;
+  // GitHub moves a pull request's head a moment after a push to its branch, and the push's result comes right after the
+  // push: while the open pull request still shows the head before the push, its branch (read from Git itself) says
+  // what it holds.
+  if (head === maintenance.expectedHeadCommit && current.pullRequest.state === "open"
+    && gateway.getBranchHead !== undefined && gateway.getCommitTree !== undefined) {
+    try {
+      const branchHead = await gateway.getBranchHead(repository.url, maintenance.headBranch);
+      if (branchHead !== head && /^[a-f0-9]{40}$/.test(branchHead)) {
+        headTree = await gateway.getCommitTree(repository.url, branchHead);
+        head = branchHead;
+      }
+    } catch {
+      // GitHub could not say: the pull request's own head stands.
+    }
+  }
+  const onReviewedTree = current.pullRequest.number === pullRequest.number && current.pullRequest.url === pullRequest.url
+    && headTree === binding.treeSha && head !== maintenance.expectedHeadCommit && /^[a-f0-9]{40}$/.test(head);
+  const ownFastForward = async (): Promise<boolean> => {
+    if (record?.expectedHeadCommit === head) return true;
+    try {
+      return gateway.getCommitParents !== undefined && JSON.stringify(await gateway.getCommitParents(repository.url, head)) === JSON.stringify([maintenance.expectedHeadCommit]);
+    } catch {
+      return false;
+    }
+  };
+  const landed = onReviewedTree && (pushedCommit !== undefined ? head === pushedCommit && record?.expectedHeadCommit === head : await ownFastForward());
+  if (!landed || current.pullRequest.state === "closed") return failed(pushedCommit === undefined ? cause : "HEAD_MOVED");
+  // Merged at the pushed fix before its result was recorded: the fix is recorded with the merge, which completes the task.
+  const next = current.pullRequest.state === "merged"
+    ? observeWorkflowPullRequestMergedWithFix(workflow, { repositoryId: pullRequest.repositoryId, number: pullRequest.number, headSha: head, headTreeSha: binding.treeSha, observedAt: now }, now)
+    : recordWorkflowPullRequestUpdate(workflow, { updates: [{ repositoryId: pullRequest.repositoryId, number: pullRequest.number, headSha: head, headTreeSha: binding.treeSha }], now });
+  const repositoryFullName = githubRepositoryFullName(repository.url);
+  return [taskUpdate(next), { Update: {
+    TableName: dependencies.tableName,
+    Key: githubWorkflowPullRequestKey(repositoryFullName, pullRequest.number),
+    // The pull request's link to the task now names the fix it holds.
+    UpdateExpression: "SET candidateDigest = :candidate, updatedAt = :now",
+    ConditionExpression: "taskId = :taskId AND #url = :url AND candidateDigest = :previous",
+    ExpressionAttributeNames: { "#url": "url" },
+    ExpressionAttributeValues: { ":candidate": binding.candidateDigest, ":now": now, ":taskId": task.taskId, ":url": pullRequest.url, ":previous": pullRequest.candidateDigest },
+  } },
+  // A push that landed without its update callback: the pull request's record learns its head, for the next push.
+  ...(record !== undefined && record.expectedHeadCommit !== head ? [{ Update: {
+    TableName: dependencies.tableName,
+    Key: pullRequestKey(task.workspaceId, maintenance.repository, maintenance.pullRequestNumber),
+    UpdateExpression: "SET expectedHeadCommit = :head, #state = :state, updatedAt = :now",
+    ConditionExpression: "expectedHeadCommit = :previous",
+    ExpressionAttributeNames: { "#state": "state" },
+    ExpressionAttributeValues: { ":head": head, ":state": current.pullRequest.state, ":now": now, ":previous": maintenance.expectedHeadCommit },
+  } }] : []),
+  // More pull requests to go: the next push is due, as the first one was after the reviews.
+  ...(next.stage === "PULL_REQUEST" && next.state === "READY" && next.candidate !== undefined
+    ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "UPDATE", next.candidate.digest, now)] : [])];
 }
 
 async function completedWorkflowItems(
@@ -5361,6 +5872,8 @@ async function completedWorkflowItems(
   now: string,
   result: unknown,
   terminalError?: string,
+  /** Collects the evidence a stored plan's own callback read (no evidence job configured), to attach once the plan has committed. */
+  inlineEvidence?: InlineEvidence[],
 ): Promise<TransactItems> {
   if (pointer === undefined) return [];
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
@@ -5431,6 +5944,7 @@ async function completedWorkflowItems(
       number: published.data.number,
       url: published.data.url,
       headSha: publishedRecord.expectedHeadCommit,
+      headTreeSha: publishedFeedback.pullRequest.headTreeSha,
       candidateDigest: task.workflow.candidate.digest,
       required: true,
     }, now);
@@ -5448,10 +5962,15 @@ async function completedWorkflowItems(
     } }] : []),
     // More repositories to go: the next draft pull request is due, as the first one was after the reviews.
     ...(next.stage === "PULL_REQUEST" && next.state === "READY" && next.candidate !== undefined
-      ? [workflowDispatchItem(dependencies, task.taskId, next.revision, "PUBLISH", next.candidate.digest, now)] : [])];
+      ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "PUBLISH", next.candidate.digest, now)] : [])];
   }
+  if (operation.kind === "maintain") return completedPullRequestUpdateItems(dependencies, operation, task as DeveloperTaskRecord & { workflow: WorkflowSnapshot }, terminalStatus, now, result, terminalError);
   if (operation.kind !== "task" || operation.workflowMode === undefined || task.workflow.state !== "RUNNING") return [];
   let next: WorkflowSnapshot;
+  // The planning answer's own outcome for the task record: why it could not be read, or `null` to forget an old reason.
+  let planUnreadable: DeveloperTaskRecord["planUnreadable"] | null | undefined;
+  // A stored plan that cites code: the job that reads that code later, committed with the plan.
+  let evidenceJob: { artifactId: string; artifactSha256: string } | undefined;
   if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") {
     if (terminalStatus !== "SUCCEEDED") {
       next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_HISTORY_REWRITTEN_MESSAGE) === true ? WORKFLOW_HISTORY_REWRITTEN_MESSAGE
@@ -5465,6 +5984,8 @@ async function completedWorkflowItems(
       let verificationFailure: string = WORKFLOW_BLOCK_REASONS.checksUnconfirmed;
       // Why, for the log only: the owner reads the plain reason.
       let verificationDetail: string | undefined;
+      // Review only: the tests the rerun found regressed, for the owner's message and a send-back.
+      let regressedChecks: string[] | undefined;
       try {
         if (operation.workflowMode === "CHECKS" && task.workflow.stage !== "VERIFY") {
           verificationFailure = WORKFLOW_BLOCK_REASONS.checkRetryStale;
@@ -5474,7 +5995,19 @@ async function completedWorkflowItems(
           verificationFailure = WORKFLOW_BLOCK_REASONS.checkReportUnreadable;
           throw new Error("invalid check report");
         }
-        if (checks.data.status === "not_verified") {
+        // Review only: the approved plan and the project select no check, so "no checks ran" is the expected report. The
+        // candidate is still validated below exactly as for a checked task. A task with no stored policy is never this.
+        const reviewOnly = workflowIsReviewOnly(task.workflow.checkPolicy);
+        // Review only still stops on evidence AgentX saw itself: a rerun test that passed before fails now.
+        if (reviewOnly && checks.data.status === "regression") {
+          verificationFailure = WORKFLOW_BLOCK_REASONS.regressionFound;
+          verificationDetail = checks.data.status;
+          regressedChecks = regressedCheckLabels(checks.data.checks);
+          throw new Error("a rerun test regressed");
+        }
+        // Review only: no checks to run, or a rerun of the agent's own tests that stopped or errored, is no evidence either
+        // way (a regression that stands through a stop is reported as one); reviews decide.
+        if (checks.data.status === "not_verified" && !reviewOnly) {
           verificationFailure = checks.data.notVerifiedReason === "no_checks" ? WORKFLOW_BLOCK_REASONS.noChecksConfigured : WORKFLOW_BLOCK_REASONS.checkRunnerFailed;
           verificationDetail = checks.data.notVerifiedReason ?? checks.data.status;
           throw new Error("checks were not verified");
@@ -5523,19 +6056,21 @@ async function completedWorkflowItems(
             throw error;
           }
         }
-        const selectedChecks = task.workflow.checkPolicy === undefined ? [] : [
-          ...task.workflow.checkPolicy.required,
-          ...task.workflow.checkPolicy.optional.filter((check) => task.workflow?.checkPolicy?.selectedOptionalIds.includes(check.id)),
-        ];
-        // The worker reports the readiness commands it was sent (required, then selected optional,
+        const selectedChecks = workflowSelectedChecks(task.workflow.checkPolicy);
+        // The worker reports the readiness commands it was sent (required, then proposed, then selected optional,
         // in selectedChecks order) as `readiness:<index>`; agent-claimed entries never stand in for them, not even when
-        // no check was selected: then there are no results, and the step stops (fails closed).
+        // no check was selected: then there are no results, a review-only task records none, and any other task stops
+        // (fails closed).
         const byId = new Map(checks.data.checks.filter((entry) => entry.source === "project").map((entry) => [entry.id, entry]));
         const results = selectedChecks.map((check, index) => {
           const entry = byId.get(`readiness:${index}`);
-          return { checkId: check.id, status: entry === undefined || entry.after === "not_run" || entry.after === "unknown" ? "UNKNOWN" as const : entry.after === "passed" ? "PASS" as const : "FAILED" as const };
+          const status = entry === undefined || entry.after === "not_run" || entry.after === "unknown" ? "UNKNOWN" as const : entry.after === "passed" ? "PASS" as const : "FAILED" as const;
+          // The worker's report of a program it could not start, which is all the check's output then holds.
+          const programNotFound = status === "FAILED" && entry?.output.trim() === `spawn ${check.command.executable} ENOENT`;
+          const broken = status === "FAILED" && entry !== undefined && (programNotFound || checkCommandCouldNotRun(check.command, entry.exitCode, entry.output));
+          return { checkId: check.id, status, ...(programNotFound ? { programNotFound: true as const } : {}), ...(broken ? { broken: true as const } : {}) };
         });
-        if (results.length === 0) {
+        if (results.length === 0 && !reviewOnly) {
           verificationFailure = WORKFLOW_BLOCK_REASONS.noCheckResults;
           throw new Error("there are no selected check results");
         }
@@ -5547,12 +6082,13 @@ async function completedWorkflowItems(
             environmentId: task.workspaceId,
             recordedAt: now,
             results,
+            ...(reviewOnly ? { reviewOnly: true } : {}),
           },
           now,
         });
       } catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "workflow.verification_blocked", taskId: task.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown", reason: verificationFailure, ...(verificationDetail === undefined ? {} : { detail: verificationDetail }) }));
-        next = blockWorkflow(verifying, verificationFailure, now);
+        next = blockWorkflow(verifying, verificationFailure, now, regressedChecks === undefined ? {} : { regressedChecks });
       }
     }
   } else if (operation.workflowMode === "REVIEW") {
@@ -5589,7 +6125,7 @@ async function completedWorkflowItems(
       || current.revision !== binding.workflowRevision || current.taskId !== binding.taskId
       || current.candidate?.digest !== binding.candidateDigest || current.feedbackReview?.status !== "COLLECTING") return [];
     if (terminalStatus !== "SUCCEEDED") {
-      next = blockWorkflow(current, "PR feedback review operation ended " + terminalStatus.toLowerCase(), now);
+      next = blockWorkflow(current, WORKFLOW_BLOCK_REASONS.feedbackReviewFailed, now);
     } else {
       try {
         const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
@@ -5627,7 +6163,7 @@ async function completedWorkflowItems(
           operationId: operation.id, bundleRefs: refs, reviewRef,
         }, now);
       } catch {
-        next = blockWorkflow(current, "PR feedback review report was invalid, incomplete, or stale", now);
+        next = blockWorkflow(current, WORKFLOW_BLOCK_REASONS.feedbackReviewFailed, now);
       }
     }
   } else if (task.workflow.stage !== "PLAN") {
@@ -5640,19 +6176,11 @@ async function completedWorkflowItems(
     if (artifact === undefined) {
       next = blockWorkflow(task.workflow, WORKFLOW_BLOCK_REASONS.planNotSaved, now);
     } else {
-      const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: String(artifact.objectKey) }));
-      const content = object.Body ? await object.Body.transformToString("utf8") : "";
-      const sha256 = createHash("sha256").update(content, "utf8").digest("hex");
-      const artifactType = task.workflow.path === "FULL" && task.workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
-        : task.workflow.path === "FULL" && task.workflow.reviewPhase === "DESIGN" ? "design" : "plan";
-      next = submitWorkflowArtifact(task.workflow, {
-        expectedRevision: task.workflow.revision,
-        now,
-        artifact: {
-          id: String(artifact.id), type: artifactType, version: task.workflow.artifacts.filter((entry) => entry.type === artifactType).length + 1,
-          sha256, producer: "agentx-worker-untrusted", objectKey: String(artifact.objectKey), createdAt: String(artifact.createdAt),
-        },
-      });
+      const stored = await storePlanAnswer(dependencies, task as DeveloperTaskRecord & { workflow: WorkflowSnapshot }, artifact, now);
+      next = stored.next;
+      planUnreadable = stored.planUnreadable;
+      evidenceJob = stored.evidenceJob;
+      if (stored.inlineEvidence !== undefined) inlineEvidence?.push({ ...stored.inlineEvidence, taskId: task.taskId });
     }
   } else {
     next = blockWorkflow(task.workflow, `planning operation ended ${terminalStatus.toLowerCase()}`, now);
@@ -5663,18 +6191,172 @@ async function completedWorkflowItems(
   // Task 12: both reviews passed, so the draft pull request is due the same way; AgentX opens it with no one asking.
   const dispatch = (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS")
     && next.stage === "REVIEW" && next.state === "WAITING" && next.candidate !== undefined
-    ? [workflowDispatchItem(dependencies, task.taskId, next.revision, "REVIEW", next.candidate.digest, now)]
+    ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "REVIEW", next.candidate.digest, now)]
+    // Item 7: a fix of pull requests already open is pushed to them, not opened as new ones.
     : operation.workflowMode === "REVIEW" && next.stage === "PULL_REQUEST" && next.state === "READY" && next.candidate !== undefined
-      ? [workflowDispatchItem(dependencies, task.taskId, next.revision, "PUBLISH", next.candidate.digest, now)]
+      ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, workflowPullRequestUpdateDue(next) ? "UPDATE" : "PUBLISH", next.candidate.digest, now)]
       : [];
+  // A saved plan forgets the reasons an earlier answer was unreadable; an unreadable answer keeps its own for Retry planning.
+  const forget = planUnreadable === null && task.planUnreadable !== undefined;
   return [{ Update: {
     TableName: dependencies.tableName,
     Key: taskKey(task.taskId),
-    UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+    // A stored plan quoted the replies fed so far; the next plan's window starts after them.
+    UpdateExpression: `SET workflow = :workflow, updatedAt = :now${planUnreadable === undefined || planUnreadable === null ? "" : ", planUnreadable = :unreadable"}${planUnreadable === null && task.threadNotesFedThrough !== undefined ? ", threadNotesFedFrom = :fedFrom" : ""}${forget ? " REMOVE planUnreadable" : ""}`,
     ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running",
     ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
-    ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": task.workflow.stage, ":running": "RUNNING" },
-  } }, ...dispatch];
+    ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": task.workflow.stage, ":running": "RUNNING",
+      ...(planUnreadable === undefined || planUnreadable === null ? {} : { ":unreadable": planUnreadable }),
+      ...(planUnreadable === null && task.threadNotesFedThrough !== undefined ? { ":fedFrom": task.threadNotesFedThrough } : {}) },
+  } }, ...dispatch,
+  ...(evidenceJob === undefined ? [] : [{ Put: { TableName: dependencies.tableName, Item: planEvidenceJobItem({ taskId: task.taskId, ...evidenceJob, now: Date.parse(now) }), ConditionExpression: "attribute_not_exists(pk)" } }])];
+}
+
+/** What the broker keeps of a planning answer it could not read: the problems found, at most this many. */
+const PLAN_UNREADABLE_ERRORS_MAX = 5;
+/** The most bytes of an earlier structured document read back to find the claim numbers that are retired. */
+const EARLIER_PLAN_MAX_BYTES = 32_768;
+
+const readObjectText = (dependencies: AwsBrokerDependencies, key: string, maxBytes: number) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes);
+
+/**
+ * Spec 061: reads the planner's saved answer (`plan.md`) as a structured plan document. A readable plan is stored as
+ * canonical JSON and submitted for review at once (the code it cites is attached later, by the evidence job); an unreadable one blocks planning, keeping the
+ * problems so Retry planning can tell the planner what to fix.
+ */
+async function storePlanAnswer(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord & { workflow: WorkflowSnapshot },
+  artifact: Record<string, unknown>,
+  now: string,
+): Promise<{ next: WorkflowSnapshot; planUnreadable: NonNullable<DeveloperTaskRecord["planUnreadable"]> | null; evidenceJob?: { artifactId: string; artifactSha256: string }; inlineEvidence?: Omit<InlineEvidence, "taskId"> }> {
+  const workflow = task.workflow;
+  const unreadable = (errors: string[]) => {
+    const next = blockWorkflow(workflow, WORKFLOW_BLOCK_REASONS.planUnreadable, now);
+    return { next, planUnreadable: { workflowRevision: next.revision, errors: errors.slice(0, PLAN_UNREADABLE_ERRORS_MAX) } };
+  };
+  // One byte more than the limit is read, so an answer over the limit is told from one at it.
+  const answer = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: String(artifact.objectKey), Range: `bytes=0-${WORKFLOW_PLAN_MAX_BYTES}` }));
+  const content = answer.Body ? await answer.Body.transformToString("utf8") : "";
+  if (Buffer.byteLength(content, "utf8") > WORKFLOW_PLAN_MAX_BYTES) return unreadable(["the answer is too long"]);
+
+  const artifactType = workflow.path === "FULL" && workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
+    : workflow.path === "FULL" && workflow.reviewPhase === "DESIGN" ? "design" : "plan";
+  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  // Claim numbers an earlier structured document of this task had and its latest dropped may not come back. A document
+  // that cannot be read back or fails its digest is skipped.
+  const earlier: PlanDocument[] = [];
+  for (const entry of workflow.artifacts) {
+    if (entry.format !== "structured") continue;
+    const loaded = await loadWorkflowDocument((key) => readObjectText(dependencies, key, EARLIER_PLAN_MAX_BYTES), entry, {}).catch(() => undefined);
+    if (loaded?.format === "structured") earlier.push(loaded.plan);
+  }
+  // A coding plan's `checks` member proposes its checks; they run only once the owner approves this plan.
+  const parsed = parsePlanDocument(content, {
+    kind: artifactType,
+    retiredClaimIds: retiredClaimIds(earlier),
+    ...(artifactType === "plan" && workflow.checkPolicy !== undefined ? { checks: {
+      repositoryPaths: project.definition.repositories.map((repository) => repository.path),
+      required: workflow.checkPolicy.required,
+      optionalCount: workflow.checkPolicy.optional.length,
+    } } : {}),
+  });
+  if (!parsed.ok) return unreadable(parsed.errors);
+  // The owner's real request (and the replies this step was given) is what the plan says it is for, not the planner's words.
+  const plan: PlanDocument = { ...parsed.plan, why: await planWhyEntries(dependencies, task, parsed.plan.why) };
+  const canonical = canonicalPlanJson(plan);
+  if (Buffer.byteLength(canonical, "utf8") > WORKFLOW_PLAN_MAX_BYTES) return unreadable(["the plan is too long once saved"]);
+
+  // The plan is stored now. The code it cites is read afterwards by the evidence job, so a slow or failing GitHub never
+  // holds up (or blocks) the plan; the job row is written in the same transaction as the plan.
+  const artifactId = String(artifact.id);
+  const prefix = `private/${task.ownerKey}/${task.workspaceId}/plan-documents/${artifactId}`;
+  const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
+  await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: `${prefix}.json`, Body: canonical, ContentType: "application/json" }));
+  const next = submitWorkflowArtifact(workflow, {
+    expectedRevision: workflow.revision,
+    now,
+    ...(parsed.proposal === undefined ? {} : { proposal: parsed.proposal }),
+    artifact: {
+      id: artifactId, type: artifactType, version: workflow.artifacts.filter((entry) => entry.type === artifactType).length + 1,
+      sha256: sha(canonical), producer: "agentx-worker-untrusted", objectKey: `${prefix}.json`, createdAt: String(artifact.createdAt),
+      format: "structured",
+    },
+  });
+  if (!planCitesCode(plan)) return { next, planUnreadable: null };
+  const artifactSha256 = sha(canonical);
+  // With the evidence job configured, the code is read afterwards. Without it (no PlanEvidence function in this deployment),
+  // it is read here as before, inside the old 12 second budget, and attached after the plan commits, the same way the job does.
+  if (dependencies.startPlanEvidenceJob !== undefined) return { next, planUnreadable: null, evidenceJob: { artifactId, artifactSha256 } };
+  const github = dependencies.githubPullRequests;
+  let bundle: PlanEvidenceBundle;
+  try {
+    bundle = await resolvePlanEvidence(plan, {
+      ...planEvidenceSources(project, { workflow, preparedBase: task.preparedBase }),
+      readFile: async (url, path, commit, options) => {
+        if (github.getFileAtCommit === undefined) throw new Error("reading files from GitHub is not configured");
+        return github.getFileAtCommit(url, path, commit, options);
+      },
+    });
+  } catch {
+    bundle = { schemaVersion: 1, excerpts: [] };
+  }
+  return { next, planUnreadable: null, inlineEvidence: { artifactId, artifactSha256, bundle, prefix } };
+}
+
+/**
+ * Whether a failed check's command could not run, so the code is not what failed: the shell could not find it or run it
+ * (exit 126 or 127), or the Python code the check itself is made of (its `-c` text, or its script) does not parse. A
+ * syntax error in any other file, such as a module the check imports, is the change's own failure. A worker that sends
+ * no exit code is judged by its output alone. A program the worker could not start is told apart by the caller.
+ */
+function checkCommandCouldNotRun(command: { executable: string; args: readonly string[]; cwd: string }, exitCode: number | null | undefined, output: string): boolean {
+  if (exitCode === 126 || exitCode === 127) return true;
+  const program = command.executable.split("/").at(-1) ?? command.executable;
+  if (!/^python(3(\..*)?)?$/u.test(program)) return false;
+  const error = /^(SyntaxError|IndentationError):/mu.exec(output);
+  if (error === null) return false;
+  // The file the traceback names last before the error is the one that does not parse.
+  const files = [...output.slice(0, error.index).matchAll(/^\s*File "([^"\n]*)", line \d+/gmu)];
+  const file = files.at(-1)?.[1];
+  const own = pythonCheckOwnCode(command.args);
+  return file !== undefined && own !== undefined && (own === "<string>" ? file === "<string>" : pythonFileIsScript(file, own, command.cwd));
+}
+
+/** What a python check runs: `<string>` for `-c`, the script's path, or nothing the check owns (`-m module`, no script). */
+function pythonCheckOwnCode(args: readonly string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] as string;
+    if (arg === "-c") return "<string>";
+    if (arg === "-m") return undefined;
+    if (arg === "-W" || arg === "-X") index += 1;
+    else if (!arg.startsWith("-")) return arg;
+  }
+  return undefined;
+}
+
+/**
+ * Whether a traceback's file is the check's own script: the same file once both are resolved against the check's
+ * directory. A relative path is taken from the check's directory (or, in full, from the worker's root); an absolute one
+ * must end with the script's path under the check's directory. A file elsewhere that only shares the script's name is
+ * not the script: it is the change's own code.
+ */
+function pythonFileIsScript(file: string, script: string, cwd: string): boolean {
+  const own = script.startsWith("/") ? posixPath.normalize(script) : posixPath.join(cwd, script);
+  if (file.startsWith("/")) return script.startsWith("/") ? posixPath.normalize(file) === own : posixPath.normalize(file).endsWith(`/${own}`);
+  return posixPath.join(cwd, file) === own || posixPath.normalize(file) === own;
+}
+
+/**
+ * The tests a rerun found passed before this change and fail now: each label (a command, untrusted worker output) on one
+ * line, redacted and cut short, without repeats, at most WORKFLOW_REGRESSED_CHECKS_MAX.
+ */
+function regressedCheckLabels(entries: readonly CheckEntry[]): string[] {
+  const labels = entries.filter((entry) => entry.class === "regression").map((entry) => {
+    const line = redactText(entry.label).replace(/\s+/gu, " ").trim();
+    return line.length > WORKFLOW_REGRESSED_CHECK_MAX ? `${line.slice(0, WORKFLOW_REGRESSED_CHECK_MAX - 3).trimEnd()}...` : line;
+  }).filter((label) => label !== "");
+  return [...new Set(labels)].slice(0, WORKFLOW_REGRESSED_CHECKS_MAX);
 }
 
 const TERMINAL_ERROR_MAX = 16_384;
@@ -5797,6 +6479,9 @@ async function recordTerminalResult(
   if (operation.kind !== "cancel" || terminalStatus === "SUCCEEDED") transactItems.push(workspaceUpdate);
   const send = (items: TransactItems) => dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
   let taskPointer: DeveloperTaskPointerRecord | undefined;
+  // Spec 061: the evidence jobs this result queued (a stored plan that cites code), started after it commits.
+  let evidenceJobs: PlanEvidenceEvent[] = [];
+  const inlineEvidence: InlineEvidence[] = [];
   try {
     // A queuing transaction that met another one in flight (TransactionConflict, not a failed
     // condition) is decided again once from fresh reads before it counts as a stale callback.
@@ -5807,8 +6492,13 @@ async function recordTerminalResult(
         : undefined;
       taskPointer = pointer;
       const completed = await completedTurnItems(dependencies, operation, pointer, terminalStatus, { result, error }, now);
-      const workflow = await completedWorkflowItems(dependencies, operation, pointer, terminalStatus, now, result, error);
+      inlineEvidence.length = 0;
+      const workflow = await completedWorkflowItems(dependencies, operation, pointer, terminalStatus, now, result, error, inlineEvidence);
       recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed, ...workflow], workspaceUpdate, send);
+      evidenceJobs = workflow.flatMap((item) => {
+        const row = item.Put?.Item as Partial<PlanEvidenceJob> | undefined;
+        return row?.pk === PLAN_EVIDENCE_PK && row.taskId !== undefined && row.artifactId !== undefined ? [planEvidenceEvent(row.taskId, row.artifactId)] : [];
+      });
     };
     try {
       await decideAndSend();
@@ -5851,6 +6541,11 @@ async function recordTerminalResult(
   if (closeCanFinish && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id, operation.createdAt, operation.discardUnpublished === true && closePreflight?.safeToClose !== true);
   // Gap 6: start any step this result made due (its dispatch row committed above); a lost start is the sweep's.
   if (taskPointer !== undefined) await dispatchWorkflowContinuation(dependencies, taskPointer.taskId);
+  // Spec 061: read the code a new plan cites, in the background; a lost start is the sweep's.
+  if (recordedStatus === terminalStatus) {
+    await startPlanEvidenceJobs(dependencies, evidenceJobs);
+    await attachInlineEvidence(dependencies, inlineEvidence);
+  }
   // #213: a prepare that did not succeed leaves the workspace PREPARATION_FAILED, which stops
   // counting toward the workspace limits now; the release logs, and never fails the callback.
   if (operation.kind === "prepare" && recordedStatus !== "SUCCEEDED") {
@@ -6090,16 +6785,6 @@ async function getThreadWorkspace(
 ): Promise<WorkspaceInstance | undefined> {
   const thread = await getItem<{ workspaceId?: string }>(dependencies, slackThreadKey(ownerKey));
   return typeof thread?.workspaceId === "string" ? requireWorkspace(dependencies, thread.workspaceId) : undefined;
-}
-
-async function requireProject(
-  dependencies: AwsBrokerDependencies,
-  projectName: string,
-  revision: number,
-): Promise<RegisteredProjectRecord> {
-  const project = await getItem<RegisteredProjectRecord>(dependencies, projectKey(projectName, revision));
-  if (!project) throw agentXError("NOT_FOUND", "registered project revision not found");
-  return project;
 }
 
 /**
@@ -6461,10 +7146,6 @@ function membershipRecord(ownerKey: string, projectName: string, role: Membershi
   return { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey, projectName, role };
 }
 
-function projectKey(nameValue: string, revision: number) {
-  return { pk: `PROJECT#${nameValue}`, sk: `REV#${String(revision).padStart(12, "0")}` };
-}
-
 function githubRepositoryFullName(repositoryUrl: string): string {
   let url: URL;
   try { url = new URL(repositoryUrl); } catch { throw agentXError("CONFIG_INVALID", "registered repository URL is invalid for GitHub PR tracking"); }
@@ -6703,48 +7384,8 @@ const ec2Sessions = new SessionManager({
     },
   },
 });
-const githubPrivateKeySecretArn = requiredEnvironment("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
-const githubAppIdSetting = process.env.GITHUB_APP_ID ?? "";
-let githubAppSecret: Promise<string> | undefined;
-const loadGitHubAppSecret = (): Promise<string> => {
-  githubAppSecret ??= secretsManager.send(new GetSecretValueCommand({
-    SecretId: githubPrivateKeySecretArn,
-  })).then((response) => {
-    const secret = response.SecretString ?? (
-      response.SecretBinary === undefined
-        ? undefined
-        : Buffer.from(response.SecretBinary).toString("utf8")
-    );
-    if (!secret) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App private-key secret is empty");
-    return secret;
-  }).catch((error: unknown) => {
-    githubAppSecret = undefined;
-    // The secret has no version until `agentx init` creates the GitHub App.
-    if (error instanceof Error && error.name === "ResourceNotFoundException") {
-      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App private-key secret is empty; finish agentx init to create the GitHub App");
-    }
-    throw error;
-  });
-  return githubAppSecret;
-};
-let githubApp: Promise<{ appId: string; privateKey: string }> | undefined;
-const loadGitHubApp = (): Promise<{ appId: string; privateKey: string }> => {
-  githubApp ??= loadGitHubAppSecret().then((secret) => ({
-    appId: githubAppIdSetting !== "" ? githubAppIdSetting : appIdFromSecret(secret),
-    privateKey: privateKeyFromSecret(secret),
-  })).catch((error: unknown) => {
-    githubApp = undefined;
-    throw error;
-  });
-  return githubApp;
-};
-const loadGitHubPrivateKey = (): Promise<string> => loadGitHubAppSecret().then(privateKeyFromSecret);
-const loadGitHubWebhookSecret = (): Promise<string> => loadGitHubAppSecret().then(webhookSecretFromSecret);
-const githubCredentials = new GitHubAppCredentialProvider({
-  credentialRef: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"),
-  appId: githubAppIdSetting !== "" ? githubAppIdSetting : async () => (await loadGitHubApp()).appId,
-  getPrivateKey: loadGitHubPrivateKey,
-});
+const github = createGitHubAppCredentials(secretsManager);
+const githubCredentials = github.provider;
 const repositoryGrantSigningKey = createHmac("sha256", requiredEnvironment("CALLBACK_SIGNING_KEY"))
   .update("agentx:repository-grants:v3")
   .digest();
@@ -6798,15 +7439,22 @@ export const handler = createAwsBrokerHandler({
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrants,
   githubPullRequests: githubCredentials,
-  githubWebhookSecret: loadGitHubWebhookSecret,
+  githubWebhookSecret: github.webhookSecret,
   checkRepositoryAccess: (repository) => githubCredentials.checkRepository(repository),
   githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },
   connectorCredentials: {
     secrets: secretsManagerSource(secretsManager, process.env.CONNECTOR_SECRET_PREFIX),
-    githubApp: { ref: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"), secretName: githubPrivateKeySecretArn },
+    githubApp: { ref: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"), secretName: github.privateKeySecretArn },
     ...(process.env.CONNECTOR_SECRET_PREFIX ? { connectorSecretPrefix: process.env.CONNECTOR_SECRET_PREFIX } : {}),
   },
   codeBuild,
+  // Spec 061: set only where the PlanEvidence function exists (infra/lib/control-plane.ts).
+  ...(process.env.PLAN_EVIDENCE_FUNCTION_NAME
+    ? { startPlanEvidenceJob: async (event: PlanEvidenceEvent) => {
+        const response = await lambdaClient.send(new InvokeCommand({ FunctionName: process.env.PLAN_EVIDENCE_FUNCTION_NAME, InvocationType: "Event", Payload: Buffer.from(JSON.stringify(event)) }));
+        if (response.StatusCode !== 202) throw new Error(`plan evidence start answered ${String(response.StatusCode)}`);
+      } }
+    : {}),
   ...(developer ? { developer } : {}),
   // Spec 025 A12: set only here, so a test harness without its own `me` never reaches the network.
   adminReads: {

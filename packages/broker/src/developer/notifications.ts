@@ -58,8 +58,11 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       const afterReviewRef = record(afterReview?.reviewRef);
       const oldNotes = Array.isArray(beforeWorkflow?.feedbackNotes) ? beforeWorkflow.feedbackNotes.length : 0;
       const newNotes = Array.isArray(afterWorkflow?.feedbackNotes) ? afterWorkflow.feedbackNotes.length : 0;
-      if (afterReview?.status === "PENDING" && afterReviewRef?.status === "COMPLETE" && typeof afterReviewRef.sha256 === "string"
-        && (afterReviewRef.sha256 !== beforeReviewRef?.sha256 || newNotes !== oldNotes)) {
+      // A complete report is said again after a new note; any other (failed, timed out, interrupted: said with Retry
+      // review) once, by its report.
+      if (afterReview?.status === "PENDING" && typeof afterReviewRef?.sha256 === "string"
+        && ((afterReviewRef.status === "COMPLETE" && (afterReviewRef.sha256 !== beforeReviewRef?.sha256 || newNotes !== oldNotes))
+          || (afterReviewRef.status !== "COMPLETE" && afterReviewRef.sha256 !== beforeReviewRef?.sha256))) {
         notices.push({ id: feedbackReviewNoticeId(taskId, afterReviewRef.sha256, Number(afterWorkflow?.revision)), kind: "github_feedback", taskId, at,
           feedbackReviewDigest: afterReviewRef.sha256 });
       } else if (afterWorkflow !== undefined && beforeWorkflow !== undefined && afterWorkflow.revision !== beforeWorkflow.revision && eventId !== "") {

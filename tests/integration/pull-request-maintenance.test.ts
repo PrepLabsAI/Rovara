@@ -198,6 +198,210 @@ describe("pull request maintenance", () => {
       .resolves.toBe("");
   });
 
+  describe("pushing a reviewed fix (workflow task)", () => {
+    // The project's readiness check fails here: a reviewed fix's checks ran already, on this tree, so none may run again.
+    const failingReadiness = (invocation: Extract<WorkerInvocation, { kind: "maintain" }>, workflowCandidateTreeSha: string, extra: Record<string, unknown> = {}) => ({
+      ...invocation,
+      payload: {
+        ...invocation.payload,
+        workflowCandidateTreeSha,
+        ...extra,
+        project: {
+          ...invocation.payload.project,
+          readiness: [{ cwd: "repo/demo", executable: process.execPath, args: ["-e", "process.exit(1)"], timeoutSeconds: 10 }],
+        },
+      },
+    }) as Extract<WorkerInvocation, { kind: "maintain" }>;
+    const sink = () => vi.fn(async () => ({ url: "https://github.com/example/demo/pull/7", state: "open" as const, reconciled: false }));
+    // Nothing is left running from the workspace, so the real process and container sweeps are not needed.
+    const pushFix = (options: Parameters<typeof maintainPullRequest>[0]) => maintainPullRequest({
+      stopWorkspaceProcesses: async () => ({ stopped: 0 }),
+      sweepWorkspaceContainers: async () => ({ removed: 0 }),
+      ...options,
+    });
+
+    it("stops leftover processes and containers before the push credential is fetched", async () => {
+      const fixture = await createFixture("append");
+      await writeFile(join(fixture.checkout, "FIX.md"), "address feedback\n", "utf8");
+      const reviewedTree = await workspaceTree(fixture.checkout);
+      const order: string[] = [];
+      await maintainPullRequest({
+        rootPath: fixture.root,
+        invocation: failingReadiness(fixture.invocation, reviewedTree, { workflowBaseCommit: fixture.baseCommit }),
+        credentialProvider: async () => { order.push("credential"); return {}; },
+        sweepWorkspaceContainers: async () => { order.push("containers"); return { removed: 0 }; },
+        stopWorkspaceProcesses: async () => { order.push("processes"); return { stopped: 0 }; },
+        pullRequestUpdateSink: sink(),
+      });
+      expect(order).toEqual(["containers", "processes", "containers", "credential"]);
+    });
+
+    it("fetches no credential and pushes nothing when leftover programs cannot be stopped", async () => {
+      const fixture = await createFixture("append");
+      await writeFile(join(fixture.checkout, "FIX.md"), "address feedback\n", "utf8");
+      const reviewedTree = await workspaceTree(fixture.checkout);
+      const credential = vi.fn(async () => ({}));
+      await expect(maintainPullRequest({
+        rootPath: fixture.root,
+        invocation: failingReadiness(fixture.invocation, reviewedTree, { workflowBaseCommit: fixture.baseCommit }),
+        credentialProvider: credential,
+        sweepWorkspaceContainers: async () => ({ removed: 0 }),
+        stopWorkspaceProcesses: async () => { throw new Error("AgentX could not stop every process left in the workspace, so it did not push"); },
+        pullRequestUpdateSink: sink(),
+      })).rejects.toThrow("did not push");
+      expect(credential).not.toHaveBeenCalled();
+      expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+    });
+
+    it("pushes the reviewed fix tree to the existing PR branch as a fast-forward", async () => {
+      const fixture = await createFixture("append");
+      await writeFile(join(fixture.checkout, "FIX.md"), "address feedback\n", "utf8");
+      const reviewedTree = await workspaceTree(fixture.checkout);
+      const update = sink();
+      const result = await pushFix({
+        rootPath: fixture.root,
+        invocation: failingReadiness(fixture.invocation, reviewedTree, { workflowBaseCommit: fixture.baseCommit }),
+        credentialProvider: async () => ({}),
+        pullRequestUpdateSink: update,
+      });
+      expect(result).toMatchObject({ action: "append", previousCommit: fixture.pullRequestHead, treeSha: reviewedTree, checks: [] });
+      expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${result.commit}\n`);
+      expect(await git(fixture.bare, ["rev-parse", `${result.commit}^{tree}`])).toBe(`${reviewedTree}\n`);
+      expect(await git(fixture.bare, ["rev-list", "--parents", "-n", "1", result.commit])).toBe(`${result.commit} ${fixture.pullRequestHead}\n`);
+      expect(await git(fixture.bare, ["log", "-1", "--format=%s", result.commit])).toBe("AgentX: address PR feedback\n");
+      expect(await git(fixture.bare, ["rev-list", "--count", `${fixture.pullRequestHead}..${result.commit}`])).toBe("1\n");
+      expect(update).toHaveBeenCalledWith(expect.objectContaining({ previousCommit: fixture.pullRequestHead, commit: result.commit }));
+    });
+
+    it("refuses to push a fix whose tree differs from the reviewed tree", async () => {
+      const fixture = await createFixture("append");
+      await writeFile(join(fixture.checkout, "FIX.md"), "address feedback\n", "utf8");
+      const reviewedTree = await workspaceTree(fixture.checkout);
+      await writeFile(join(fixture.checkout, "FIX.md"), "address feedback, then edited again\n", "utf8");
+      const update = sink();
+      await expect(pushFix({
+        rootPath: fixture.root,
+        invocation: failingReadiness(fixture.invocation, reviewedTree, { workflowBaseCommit: fixture.baseCommit }),
+        credentialProvider: async () => ({}),
+        pullRequestUpdateSink: update,
+      })).rejects.toThrow("the code changed after its checks and reviews; AgentX did not publish it");
+      expect(update).not.toHaveBeenCalled();
+      expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+    });
+
+    it("refuses to push a fix when the PR branch moved on GitHub", async () => {
+      const fixture = await createFixture("append");
+      await writeFile(join(fixture.checkout, "FIX.md"), "address feedback\n", "utf8");
+      const reviewedTree = await workspaceTree(fixture.checkout);
+      // Someone else pushes to the PR branch from another clone.
+      await git(fixture.seed, ["fetch", "origin", fixture.headBranch]);
+      await git(fixture.seed, ["checkout", "-b", "someone-else", "FETCH_HEAD"]);
+      await writeFile(join(fixture.seed, "THEIRS.md"), "their commit\n", "utf8");
+      await git(fixture.seed, ["add", "THEIRS.md"]);
+      await commit(fixture.seed, "their commit");
+      await git(fixture.seed, ["push", "origin", `someone-else:${fixture.headBranch}`]);
+      const moved = (await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).trim();
+      expect(moved).not.toBe(fixture.pullRequestHead);
+      const update = sink();
+      await expect(pushFix({
+        rootPath: fixture.root,
+        invocation: failingReadiness(fixture.invocation, reviewedTree, { workflowBaseCommit: fixture.baseCommit }),
+        credentialProvider: async () => ({}),
+        pullRequestUpdateSink: update,
+      })).rejects.toThrow(/STALE_FENCE: pull request head changed/);
+      expect(update).not.toHaveBeenCalled();
+      expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${moved}\n`);
+    });
+
+    it("looks at the PR branch again right before the push, and refuses when it moved or is gone", async () => {
+      // The validation gate runs after the commit is built and before the push: GitHub changes the branch meanwhile.
+      for (const change of ["moved", "deleted"] as const) {
+        const fixture = await createFixture("append");
+        await writeFile(join(fixture.checkout, "FIX.md"), "address feedback\n", "utf8");
+        const reviewedTree = await workspaceTree(fixture.checkout);
+        const invocation = failingReadiness(fixture.invocation, reviewedTree, { workflowBaseCommit: fixture.baseCommit });
+        const gated = { ...invocation, payload: { ...invocation.payload, project: { ...invocation.payload.project,
+          repositories: invocation.payload.project.repositories.map((repository) => ({ ...repository, codeBuildGates: [{ name: "quality", projectName: "agentx-demo-quality", timeoutMinutes: 5 }] })) } } } as typeof invocation;
+        let after: string | undefined;
+        const update = sink();
+        await expect(pushFix({
+          rootPath: fixture.root,
+          invocation: gated,
+          credentialProvider: async () => ({}),
+          codeBuildSink: async (request) => {
+            if (change === "deleted") {
+              // The pull request was merged and its branch deleted.
+              await git(fixture.bare, ["update-ref", "-d", `refs/heads/${fixture.headBranch}`]);
+            } else {
+              await git(fixture.seed, ["fetch", "origin", fixture.headBranch]);
+              await git(fixture.seed, ["checkout", "-B", "someone-else", "FETCH_HEAD"]);
+              await writeFile(join(fixture.seed, "THEIRS.md"), "their commit\n", "utf8");
+              await git(fixture.seed, ["add", "THEIRS.md"]);
+              await commit(fixture.seed, "their commit");
+              await git(fixture.seed, ["push", "origin", `someone-else:${fixture.headBranch}`]);
+              after = (await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).trim();
+            }
+            return { gate: request.gate, projectName: request.projectName, buildId: `${request.projectName}:${crypto.randomUUID()}`, status: "SUCCEEDED",
+              requestedSourceVersion: request.commit, resolvedSourceVersion: request.commit };
+          },
+          pullRequestUpdateSink: update,
+        }), change).rejects.toThrow(/STALE_FENCE: pull request head changed/);
+        expect(update).not.toHaveBeenCalled();
+        if (change === "deleted") {
+          // Never pushed back into existence.
+          await expect(git(fixture.bare, ["rev-parse", "--verify", `refs/heads/${fixture.headBranch}`])).rejects.toThrow();
+        } else {
+          expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${after}\n`);
+        }
+      }
+    });
+
+    it("refuses a fix when the task's base commit is not in the workspace", async () => {
+      const fixture = await createFixture("append");
+      await writeFile(join(fixture.checkout, "FIX.md"), "address feedback\n", "utf8");
+      const reviewedTree = await workspaceTree(fixture.checkout);
+      await expect(pushFix({
+        rootPath: fixture.root,
+        invocation: failingReadiness(fixture.invocation, reviewedTree, { workflowBaseCommit: "e".repeat(40) }),
+        credentialProvider: async () => ({}),
+        pullRequestUpdateSink: sink(),
+      })).rejects.toThrow("the task's base commit is missing from the workspace");
+      expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+    });
+
+    it("refuses a fix when the task's base commit is not an ancestor of the workspace", async () => {
+      const fixture = await createFixture("append");
+      // A commit that exists in the workspace but is not in its history.
+      await git(fixture.checkout, ["checkout", "--orphan", "unrelated"]);
+      await commit(fixture.checkout, "unrelated");
+      const unrelated = (await git(fixture.checkout, ["rev-parse", "HEAD"])).trim();
+      await git(fixture.checkout, ["checkout", "--force", fixture.headBranch]);
+      await writeFile(join(fixture.checkout, "FIX.md"), "address feedback\n", "utf8");
+      const reviewedTree = await workspaceTree(fixture.checkout);
+      await expect(pushFix({
+        rootPath: fixture.root,
+        invocation: failingReadiness(fixture.invocation, reviewedTree, { workflowBaseCommit: unrelated }),
+        credentialProvider: async () => ({}),
+        pullRequestUpdateSink: sink(),
+      })).rejects.toThrow("the code changed after its checks and reviews; AgentX did not publish it");
+      expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+    });
+
+    it("pushes a reviewed fix whose pinned base is an ancestor of the workspace", async () => {
+      const fixture = await createFixture("append");
+      const base = (await git(fixture.checkout, ["rev-parse", "main"])).trim();
+      await writeFile(join(fixture.checkout, "FIX.md"), "address feedback\n", "utf8");
+      const reviewedTree = await workspaceTree(fixture.checkout);
+      const result = await pushFix({
+        rootPath: fixture.root,
+        invocation: failingReadiness(fixture.invocation, reviewedTree, { workflowBaseCommit: base }),
+        credentialProvider: async () => ({}),
+        pullRequestUpdateSink: sink(),
+      });
+      expect(result.treeSha).toBe(reviewedTree);
+    });
+  });
+
   it("syncs the latest base with a merge commit and never rewrites the PR head", async () => {
     const fixture = await createFixture("sync");
     await writeFile(join(fixture.seed, "UPSTREAM.md"), "latest base\n", "utf8");
@@ -435,7 +639,15 @@ async function createFixture(action: "append" | "sync", remoteName = "remote.git
       expectedHeadCommit: pullRequestHead, repositoryGrant: "push-grant",
     },
   } satisfies Extract<WorkerInvocation, { kind: "maintain" }>;
-  return { root, bare, seed, checkout, invocation, headBranch, pullRequestHead };
+  return { root, bare, seed, checkout, invocation, headBranch, pullRequestHead, baseCommit: preparedCommit };
+}
+
+/** The workspace's tree as the reviewers would have computed it: HEAD plus every change; the index is put back. */
+async function workspaceTree(directory: string): Promise<string> {
+  await git(directory, ["add", "--all"]);
+  const tree = (await git(directory, ["write-tree"])).trim();
+  await git(directory, ["reset", "--quiet"]);
+  return tree;
 }
 
 async function commit(directory: string, message: string): Promise<void> {

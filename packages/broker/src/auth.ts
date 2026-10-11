@@ -37,7 +37,11 @@ export interface AuthenticatedIdentity {
    * task's owner key with the teammate's Slack context; otherwise the thread's own key, which answers
    * VIEW_ONLY and never creates a workspace.
    */
-  sharedTask?: { taskId: string; workspaceId: string; developerName: string; state: "continue" | "view" | "closed" };
+  sharedTask?: {
+    taskId: string; workspaceId: string; developerName: string; state: "continue" | "view" | "closed";
+    /** Only a Slack-started task's own open thread: the chat agent may be given its read-only task view there, when it asks for task mode. */
+    taskAnswer?: true;
+  };
 }
 
 export interface JwtAuthenticatorConfig {

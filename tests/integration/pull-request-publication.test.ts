@@ -1,11 +1,11 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { AgentXError, agentXError, type WorkerInvocation } from "@agentx/contracts";
+import { AgentXError, agentXError, createCandidateManifest, type WorkerInvocation, type WorkflowFeedbackBundleRef } from "@agentx/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { allowGitFileTransportForTests } from "../../packages/worker/src/git.js";
 import { publishWorkspace, runReadinessChecks } from "../../packages/worker/src/publish.js";
@@ -16,6 +16,9 @@ import type { PreparationManifest } from "../../packages/worker/src/prepare.js";
 import { createWorkerCallbackSinks, type PullRequestSink } from "../../packages/worker/src/callback-client.js";
 import { projectCheckKey, recordProjectOutcomes } from "../../packages/worker/src/verification/check-history.js";
 import { readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
+import type { PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
+import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
+import { FAUX_MODEL } from "../support/faux-model.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
@@ -608,6 +611,103 @@ describe("pull request publication", () => {
 });
 
 // #170: a check's output is stored redacted, its last lines kept, and its outcome says what happened.
+describe("PR feedback review after publication moved HEAD", () => {
+  /** A repository with one edit, read as the candidate and then published, so HEAD is the published commit. */
+  const published = async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "README.md"), "initial\nreviewed change\n", "utf8");
+    const base = (await git(fixture.checkout, ["rev-parse", "HEAD"])).trim();
+    const [candidate] = await readCandidateRepositories([{ repositoryId: "demo", directory: fixture.checkout, baseCommitSha: base }]);
+    const preDigest = createCandidateManifest([candidate!]).digest;
+    const invocation = { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha } } as typeof fixture.invocation;
+    const result = await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}),
+      pullRequestSink: async () => ({ number: 21, url: "https://github.com/example/demo/pull/21", reconciled: false }) });
+    expect((await git(fixture.checkout, ["rev-parse", "HEAD"])).trim()).toBe(result.commit);
+    expect(result.commit).not.toBe(candidate!.commitSha);
+    return { fixture, base, candidate: candidate!, preDigest, commit: result.commit };
+  };
+
+  /** A bundle with no comments, as the broker would store it for the published pull request. */
+  const bundleFor = (taskId: string, headSha: string, headTreeSha: string | undefined, candidateDigest: string) => {
+    const comments: never[] = [];
+    const bundle = { schemaVersion: 1, taskId, repositoryId: "demo", number: 21, headSha, ...(headTreeSha === undefined ? {} : { headTreeSha }),
+      candidateDigest, commentSetDigest: createHash("sha256").update(JSON.stringify(comments), "utf8").digest("hex"),
+      producer: "agentx-github-reconciler", version: "1", recordedAt: new Date().toISOString(), comments, sourceDeliveryIds: ["delivery-1"] };
+    const bytes = JSON.stringify(bundle);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const { sourceDeliveryIds: deliveryIds, ...metadata } = bundle;
+    void deliveryIds;
+    const ref = { ...metadata, sha256, objectKey: `feedback/${sha256}.json` } as WorkflowFeedbackBundleRef;
+    return { ref, bytes };
+  };
+
+  const reviewer = (): PiSessionAdapter => ({
+    async create(input) {
+      let notify: ((event: unknown) => void) | undefined;
+      const sessionFile = join(input.sessionDirectory, "feedback-review.json");
+      return {
+        conversationId: randomUUID(), sessionFile,
+        async prompt() { notify?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify({ findings: [] }) }] } }); },
+        async abort() {},
+        getModel: () => ({ provider: "test-provider", modelId: "read-only-critic-v1" }),
+        getSessionStats: () => ({ sessionFile, sessionId: "feedback-review", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0,
+          totalMessages: 2, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }),
+        subscribe(listener) { notify = listener; return () => { notify = undefined; }; },
+        dispose() {},
+      };
+    },
+  });
+
+  const review = async (
+    state: Awaited<ReturnType<typeof published>>,
+    bundle: { headTreeSha?: string | undefined; candidateDigest?: string } = {},
+  ) => {
+    const taskId = randomUUID();
+    const { ref, bytes } = bundleFor(taskId, state.commit, "headTreeSha" in bundle ? bundle.headTreeSha : state.candidate.treeSha, bundle.candidateDigest ?? state.preDigest);
+    return runTaskInvocation({
+      protocolVersion: 1, kind: "task", operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1,
+      callbackCapability: "c".repeat(64),
+      payload: {
+        conversationId: randomUUID(), prompt: "review the pull request feedback", workflowMode: "FEEDBACK_REVIEW",
+        workflowFeedbackReview: { taskId, workflowRevision: 3, candidateDigest: state.preDigest },
+        workflowBase: [{ repositoryId: "demo", baseCommitSha: state.base }],
+      },
+    }, {
+      rootPath: state.fixture.root, model: FAUX_MODEL, piAdapter: reviewer(),
+      eventSink: async () => undefined, artifactSink: async () => undefined,
+      feedbackBundleReader: async () => ({ taskRequirements: "Update the README.", bundles: [{ ref, bytes }] }),
+    });
+  };
+
+  it("reviews PR feedback after publication moved HEAD to the published commit", async () => {
+    const state = await published();
+    const result = await review(state);
+    expect(result).toMatchObject({ workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult: { candidateDigest: state.preDigest, status: "COMPLETE" } });
+  });
+
+  it("refuses PR feedback review when a file changed after publication", async () => {
+    const state = await published();
+    await writeFile(join(state.fixture.checkout, "README.md"), "initial\nreviewed change\nlater line\n", "utf8");
+    await expect(review(state)).rejects.toThrow("the candidate changed before PR feedback review");
+  });
+
+  it("refuses PR feedback review when the bundle's tree is not the workspace tree", async () => {
+    const state = await published();
+    await expect(review(state, { headTreeSha: (await git(state.fixture.checkout, ["rev-parse", `${state.base}^{tree}`])).trim() }))
+      .rejects.toThrow("the candidate changed before PR feedback review");
+  });
+
+  it("refuses PR feedback review when the bundle has no tree", async () => {
+    const state = await published();
+    await expect(review(state, { headTreeSha: undefined })).rejects.toThrow("the candidate changed before PR feedback review");
+  });
+
+  it("refuses PR feedback review when the bundle belongs to another candidate", async () => {
+    const state = await published();
+    await expect(review(state, { candidateDigest: "f".repeat(64) })).rejects.toThrow("the candidate changed before PR feedback review");
+  });
+});
+
 describe("publication check results (#170)", () => {
   const TOKEN = `ghp_${"Z9y8X7w6V5".repeat(4)}`;
 

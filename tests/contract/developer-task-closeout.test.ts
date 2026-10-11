@@ -86,6 +86,18 @@ describe("verified Slack Canvas closeout", () => {
     expect(unresolved.calls.filter((call) => call.startsWith("delete:"))).toEqual([]);
   });
 
+  it("completes past a Canvas Slack refused to create, since there is nothing to delete", async () => {
+    // A free Slack workspace refuses standalone Canvases: the plan is recorded CREATE_FAILED with no Canvas ID.
+    const failed = { ...task.workflow!.canvasLineage![0]!, state: "CREATE_FAILED" as const, errorCategory: "free_teams_cannot_create_standalone_canvases" };
+    delete failed.canvasId;
+    const h = storeFor({ ...task, workflow: { ...task.workflow!, canvasLineage: [failed, task.workflow!.canvasLineage![1]!] } });
+    await expect(runTaskCanvasCloseout(h.store, { taskId })).resolves.toMatchObject({ status: "COMPLETE" });
+    expect(h.calls.filter((call) => call.startsWith("delete:"))).toEqual(["delete:F22345678"]);
+    const only = storeFor({ ...task, workflow: { ...task.workflow!, canvasLineage: [failed] } });
+    await expect(runTaskCanvasCloseout(only.store, { taskId })).resolves.toMatchObject({ status: "COMPLETE" });
+    expect(only.calls.filter((call) => call.startsWith("delete:"))).toEqual([]);
+  });
+
   it("rejects lineage whose source reference or digest does not match the canonical workflow artifact", async () => {
     const invalid = storeFor({ ...task, workflow: { ...task.workflow!, canvasLineage: task.workflow!.canvasLineage!.map((entry, index) =>
       index === 0 ? { ...entry, artifactDigest: "f".repeat(64) } : entry) } });

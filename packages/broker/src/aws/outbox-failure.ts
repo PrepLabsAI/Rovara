@@ -1,6 +1,8 @@
-import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, TransactWriteCommand, UpdateCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED, WorkflowSnapshotSchema, blockWorkflowPullRequestUpdate } from "@agentx/contracts";
 import { releaseFailedPreparation } from "./failed-preparation.js";
 import type { DurableOutboxRecord } from "./lambda.js";
+import { taskKey, taskPointerKey } from "../developer/task-records.js";
 
 /**
  * Fails an outbox record's operation for good: the operation becomes FAILED, the workspace is
@@ -70,6 +72,40 @@ export async function failOutboxOperation(
     ],
   }));
   if (record.invocation.kind === "prepare") await releaseFailedPreparation(documentClient, tableName, record.workspaceId);
+  if (record.invocation.kind === "maintain") await blockFailedPullRequestUpdate(documentClient, tableName, record.workspaceId, record.operationId, error);
+}
+
+/**
+ * A workflow task's push of its reviewed fix that ended without reaching the worker's result (the worker refused it, or
+ * could not be reached, or its compute was lost): the task waits for the merge, blocked, naming the pull request, as a
+ * failed result would leave it. Only the push the task still waits on is blocked; a failed write is logged, since the
+ * operation itself is already failed.
+ */
+async function blockFailedPullRequestUpdate(documentClient: Pick<DynamoDBDocumentClient, "send">, tableName: string, workspaceId: string, operationId: string, error: string): Promise<void> {
+  try {
+    const read = async (key: { pk: string; sk: string }) => (await documentClient.send(new GetCommand({ TableName: tableName, Key: key }))).Item;
+    const operation = await read({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` }) as { maintenance?: { repository?: string; pullRequestNumber?: number; workflowCandidate?: { candidateDigest?: string } } } | undefined;
+    const binding = operation?.maintenance?.workflowCandidate;
+    if (binding === undefined) return;
+    const pointer = await read(taskPointerKey(workspaceId)) as { taskId?: string } | undefined;
+    if (typeof pointer?.taskId !== "string") return;
+    const task = await read(taskKey(pointer.taskId)) as { closedAt?: string; workflow?: unknown } | undefined;
+    const workflow = WorkflowSnapshotSchema.safeParse(task?.workflow);
+    if (task === undefined || task.closedAt !== undefined || !workflow.success || workflow.data.stage !== "PULL_REQUEST" || workflow.data.state !== "RUNNING"
+      || workflow.data.candidate?.digest !== binding.candidateDigest || typeof operation?.maintenance?.pullRequestNumber !== "number") return;
+    const now = new Date().toISOString();
+    const next = blockWorkflowPullRequestUpdate(workflow.data, { numbers: [operation.maintenance.pullRequestNumber],
+      ...(error.includes(WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED) ? { cause: "WORKER_OUTDATED" as const } : {}), now });
+    await documentClient.send(new UpdateCommand({
+      TableName: tableName, Key: taskKey(pointer.taskId),
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+      ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": workflow.data.revision, ":stage": "PULL_REQUEST", ":running": "RUNNING" },
+    }));
+  } catch (failure) {
+    console.log(JSON.stringify({ component: "broker", event: "workflow.pull_request_update_block_failed", operationId, error: failure instanceof Error ? failure.name : "unknown" }));
+  }
 }
 
 /**
@@ -120,6 +156,7 @@ export async function failActiveOperation(
       } },
     ] }));
     if (released === "PREPARATION_FAILED") await releaseFailedPreparation(documentClient, tableName, workspaceId);
+    if (operation.kind === "maintain") await blockFailedPullRequestUpdate(documentClient, tableName, workspaceId, operationId, error);
     return operationId;
   } catch (failure) {
     if (failure instanceof Error && failure.name === "TransactionCanceledException") return undefined;

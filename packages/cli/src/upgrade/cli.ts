@@ -1,5 +1,6 @@
 // The `agentx upgrade` command (FR-042 to FR-044, FR-026's upgrade --export), kept out of main.ts.
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
+import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { STSClient } from "@aws-sdk/client-sts";
 import type { Command } from "commander";
 import { cdkDiff } from "../deploy/cdk-engine.js";
@@ -9,6 +10,8 @@ import { realDoctorServices } from "../doctor/aws.js";
 import { runDoctor } from "../doctor/run.js";
 import { cloudFormationStackReader, stsCallerIdentity } from "../environments/adopt.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
+import { secretsManagerInitSecrets } from "../init/context.js";
+import { githubRestApi } from "../init/github-app.js";
 import type { TextWriter } from "../init/prompts.js";
 import { fetchRelease, sourceRelease } from "../init/release-fetch.js";
 import { formatSuccess } from "../output.js";
@@ -64,6 +67,7 @@ export function registerUpgradeCommand(program: Command, context: UpgradeCommand
         cdkDiff: overrides.cdkDiff ?? ((request, settings, source) => cdkDiff({ runner, source, env: settings.env, region: settings.region, identityMode: settings.identity.mode, request })),
         ask: overrides.ask ?? readlineAsk(),
         isInteractive: overrides.isInteractive ?? (() => process.stdin.isTTY === true),
+        githubWebhook: overrides.githubWebhook ?? ((settings) => ({ secrets: secretsManagerInitSecrets(new SecretsManagerClient({ region: settings.region })), github: githubRestApi(context.fetch) })),
         doctor: overrides.doctor ?? ((env) => runDoctor({ env, store, services: (settings) => realDoctorServices({ settings, store, fetch: context.fetch, home: context.home, configDir: globals.configDir, stderr: context.stderr }) })),
         write,
         now: overrides.now ?? Date.now,

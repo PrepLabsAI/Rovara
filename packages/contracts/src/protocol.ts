@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { WorkflowFeedbackApprovalBindingSchema, WorkflowReviewBaseSchema } from "./task-workflow.js";
+import { WORKFLOW_PLAN_MAX_BYTES, WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckProposalSchema, WorkflowFeedbackApprovalBindingSchema, WorkflowReviewBaseSchema } from "./task-workflow.js";
 import { ProjectCommandSchema, StoredProjectDefinitionSchema } from "./project.js";
 import { ModelSelectionSchema, type ModelSelection } from "./models.js";
 
@@ -12,7 +12,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number];
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -22,6 +22,31 @@ export function modelSelectionFor(model: ModelSelection, features: readonly stri
   if (model.thinkingLevel === undefined || features.includes("model.thinkingLevel")) return model;
   return { provider: model.provider, modelId: model.modelId };
 }
+
+/**
+ * What the code and security reviewers are told about the checks: the checks AgentX ran on the change (labels and
+ * commands as text, shown to reviewers as untrusted data), or that the change is review only, with the plan's reason.
+ * At most the project's required (64) and optional (20) checks plus the plan's proposed ones.
+ */
+export const WorkflowReviewChecksSchema = z.object({
+  reviewOnly: z.boolean(),
+  checks: z.array(z.object({ label: z.string().min(1).max(80), command: z.string().min(1).max(1_024) }).strict()).max(64 + 20 + WORKFLOW_PROPOSED_CHECKS_MAX),
+  noneReason: WorkflowCheckProposalSchema.shape.noneReason,
+}).strict().superRefine((value, context) => {
+  if (value.reviewOnly && value.checks.length > 0) context.addIssue({ code: "custom", path: ["checks"], message: "a review-only change ran no checks" });
+  if (!value.reviewOnly && value.noneReason !== undefined) context.addIssue({ code: "custom", path: ["noneReason"], message: "a reason for no checks is only for a review-only change" });
+});
+export type WorkflowReviewChecks = z.infer<typeof WorkflowReviewChecksSchema>;
+
+/**
+ * The coding plan the owner approved, as the reviewers read it: its Markdown copy (with AgentX's recommended answers),
+ * cut to fit, and the digest of the approved artifact. Shown to reviewers as untrusted data.
+ */
+export const WorkflowReviewPlanSchema = z.object({
+  markdown: z.string().min(1).refine((value) => new TextEncoder().encode(value).byteLength <= WORKFLOW_PLAN_MAX_BYTES, `plan exceeds ${WORKFLOW_PLAN_MAX_BYTES} UTF-8 bytes`),
+  sha256: z.string().regex(/^[a-f0-9]{64}$/),
+}).strict();
+export type WorkflowReviewPlan = z.infer<typeof WorkflowReviewPlanSchema>;
 
 const InvocationBaseSchema = z.object({
   protocolVersion: z.literal(AGENTX_PROTOCOL_VERSION),
@@ -47,6 +72,17 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         conversationStarted: z.boolean().optional(),
         /** The broker-selected tool boundary for the current native workflow stage (spec 056). */
         workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW", "CHECKS", "FEEDBACK_REVIEW"]).optional(),
+        /**
+         * The document a planning run writes in the Full path (a Quick plan has none). The worker uses it to read the
+         * planner's answer as that kind of plan. Sent only to a worker whose /ping lists "task.structuredPlans"; an older
+         * worker is sent the run without it.
+         */
+        workflowPhase: z.enum(["REQUIREMENTS", "DESIGN", "IMPLEMENTATION_PLAN"]).optional(),
+        /**
+         * The broker asked this planning run for a structured plan (spec 061). Only then does the worker check the answer
+         * and ask once more when it cannot be read. Sent only to a worker whose /ping lists "task.structuredPlans".
+         */
+        planFormat: z.literal("structured").optional(),
         workflowFeedbackReview: z.object({ taskId: z.string().uuid(), workflowRevision: z.number().int().positive(), candidateDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
         workflowFeedbackApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
         /**
@@ -54,6 +90,17 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * candidate and reviewers see the diff from it. Sent only to a worker whose /ping lists "task.workflowBase".
          */
         workflowBase: WorkflowReviewBaseSchema.optional(),
+        /**
+         * The checks that ran on the candidate under review, or that it is review only, for the reviewers' prompt.
+         * Review operations only. Sent only to a worker whose /ping lists "task.workflowReviewChecks"; an older worker
+         * is sent the review without it and reviews as before, without that section.
+         */
+        workflowReviewChecks: WorkflowReviewChecksSchema.optional(),
+        /**
+         * The coding plan the owner approved, for the reviewers' prompt. Review operations only. Sent only to a worker
+         * whose /ping lists "task.workflowReviewPlan"; an older worker is sent the review without it.
+         */
+        workflowReviewPlan: WorkflowReviewPlanSchema.optional(),
         model: ModelSelectionSchema.optional(),
         modelSelectionDiagnostic: z.string().min(1).max(512).optional(),
         /**
@@ -66,6 +113,18 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
       .strict().superRefine((payload, context) => {
         if ((payload.workflowMode === "FEEDBACK_REVIEW") !== (payload.workflowFeedbackReview !== undefined)) {
           context.addIssue({ code: "custom", path: ["workflowFeedbackReview"], message: "feedback review mode requires its exact task workflow binding" });
+        }
+        if (payload.workflowPhase !== undefined && payload.workflowMode !== "PLAN") {
+          context.addIssue({ code: "custom", path: ["workflowPhase"], message: "the document a run writes requires planning mode" });
+        }
+        if (payload.planFormat !== undefined && payload.workflowMode !== "PLAN") {
+          context.addIssue({ code: "custom", path: ["planFormat"], message: "the plan format requires planning mode" });
+        }
+        if (payload.workflowReviewChecks !== undefined && payload.workflowMode !== "REVIEW") {
+          context.addIssue({ code: "custom", path: ["workflowReviewChecks"], message: "the checks reviewers are told about require review mode" });
+        }
+        if (payload.workflowReviewPlan !== undefined && payload.workflowMode !== "REVIEW") {
+          context.addIssue({ code: "custom", path: ["workflowReviewPlan"], message: "the approved plan reviewers are shown requires review mode" });
         }
         if (payload.workflowFeedbackApproval !== undefined && payload.workflowMode !== "IMPLEMENT") {
           context.addIssue({ code: "custom", path: ["workflowFeedbackApproval"], message: "feedback approval binding requires implementation mode" });
@@ -146,8 +205,25 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         baseBranch: z.string().min(1).max(255),
         expectedHeadCommit: z.string().regex(/^[a-f0-9]{40,64}$/),
         repositoryGrant: z.string().min(1),
+        /**
+         * A workflow task's fix to its pull request: the tree the fix's checks and reviews passed on. The worker pushes
+         * exactly this tree, runs no readiness checks again, and refuses before pushing when the workspace no longer
+         * matches it. Sent only to a worker whose /ping lists "task.workflowPullRequestUpdate".
+         */
+        workflowCandidateTreeSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+        /** The base commit the broker pinned for the task in this repository; it must be in the workspace's history. Always and only with workflowCandidateTreeSha. */
+        workflowBaseCommit: z.string().regex(/^[a-f0-9]{40}$/).optional(),
       })
-      .strict(),
+      .strict()
+      .superRefine((value, context) => {
+        if (value.workflowCandidateTreeSha !== undefined && value.action !== "append") {
+          context.addIssue({ code: "custom", message: "workflowCandidateTreeSha is allowed only with append" });
+        }
+        // A reviewed fix is pushed only with the task's base, so its base ancestry is always checked.
+        if ((value.workflowBaseCommit === undefined) !== (value.workflowCandidateTreeSha === undefined)) {
+          context.addIssue({ code: "custom", message: "workflowBaseCommit and workflowCandidateTreeSha go together" });
+        }
+      }),
   }).strict(),
   InvocationBaseSchema.extend({
     kind: z.literal("cancel"),

@@ -66,6 +66,8 @@ export const CheckEntrySchema = z.object({
   /** Trimmed, redacted tail of the after run. */
   output: z.string().max(65_536),
   durationMs: z.number().int().nonnegative(),
+  /** The command's exit code when it ran to an end (null: a signal stopped it). Older workers send none. */
+  exitCode: z.number().int().nullable().optional(),
 }).strict();
 export type CheckEntry = z.infer<typeof CheckEntrySchema>;
 

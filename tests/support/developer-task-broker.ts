@@ -71,6 +71,8 @@ export async function createDeveloperTaskBroker(options: {
   developerExtra?: Partial<DeveloperApiConfiguration>;
   /** Passed to createBroker as its `extra` broker input. */
   brokerExtra?: Record<string, unknown>;
+  /** How the table hands a map's attributes back: "dynamodb" (the default here, another order than written) or "insertion". */
+  mapOrder?: "insertion" | "dynamodb";
 } = {}) {
   const module = await loadSlackBroker() as unknown as { createDeveloperTaskActions: (input: never) => DeveloperTaskActions };
   const channelMembers = vi.fn(options.channelMembers ?? (async (request: ChannelMembersRequest): Promise<ChannelMembersResponse> => ({ ok: true, memberOf: request.slackUserId === MAYA.slackUserId ? request.channelIds.filter((id) => id === SLACK_CHANNEL) : [] })));
@@ -88,6 +90,8 @@ export async function createDeveloperTaskBroker(options: {
     ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.organizationLimit === undefined ? {} : { organizationLimit: options.organizationLimit }),
     developer, turnRecordsTableName: "turns", slackThreadsTableName: "threads",
+    // A developer task's records come back as DynamoDB hands them: a map's attributes in its own order.
+    mapOrder: options.mapOrder ?? "dynamodb",
     ...(options.brokerExtra === undefined ? {} : { extra: options.brokerExtra }),
   });
   const actions = module.createDeveloperTaskActions(brokerInput as never);

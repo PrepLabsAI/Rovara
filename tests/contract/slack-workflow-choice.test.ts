@@ -18,6 +18,8 @@ import {
   workflowStartFailureNotice,
   workflowStartedNotice,
 } from "../../packages/broker/src/aws/slack-workflow-choice.js";
+import { PutCommand } from "@aws-sdk/lib-dynamodb";
+import { suggestionCardMessage, workflowChoicePut } from "../../packages/contracts/src/index.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
 
@@ -299,6 +301,128 @@ describe("the pending Quick or Full choice", () => {
     expect(await answerChosenRequest(deps, { thread, userId: requester, choiceId })).toBe("started");
     expect(queued).toEqual([{ thread, userId: requester, text: "What does retry.ts do?", eventId: answerRequestEventId(choiceId) }]);
     expect(await choices.pending(thread)).toBeUndefined();
+  });
+
+  describe("the card at once, and back when the start fails", () => {
+    const responseUrl = "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc";
+    const hasButtons = (blocks: unknown[]) => blocks.some((block) => (block as { type: string }).type === "actions");
+    const buttonLabels = (blocks: unknown[]) => (blocks as Array<{ type: string; elements?: Array<{ text: { text: string } }> }>)
+      .filter((block) => block.type === "actions").flatMap((block) => block.elements!.map((element) => element.text.text));
+
+    it("changes the card to Starting this on <path>... with no buttons before the start is handed over", async () => {
+      for (const [workflowPath, word] of [["FULL", "Full"], ["QUICK", "Quick"]] as const) {
+        const db = new FakeDynamoDb();
+        const choices = store(db);
+        const slack = new StrictSlackWeb({ briefLimit: 1_200 });
+        const { choiceId } = await choices.save({ thread, userId: requester, instructions: "Add password reset" });
+        const order: string[] = [];
+        const handed: HandedOffWorkflowStart[] = [];
+        const outcome = await handOffChosenWorkflow({ store: choices,
+          replaceCard: async (message) => { order.push("card"); await slack.replaceOriginal(responseUrl, message); },
+          handOff: async (event) => { order.push("hand-off"); handed.push(event); } }, { thread, userId: requester, workflowPath, choiceId, responseUrl });
+        expect(outcome).toBe("started");
+        expect(order).toEqual(["card", "hand-off"]);
+        expect(slack.replacements).toHaveLength(1);
+        expect(slack.replacements[0]).toMatchObject({ url: responseUrl, text: `Starting this on ${word}…` });
+        expect(hasButtons(slack.replacements[0]!.blocks)).toBe(false);
+        expect(JSON.stringify(slack.replacements[0]!.blocks)).toContain(`Starting this on ${word}…`);
+      }
+    });
+
+    it("leaves the card alone when the press is refused", async () => {
+      const db = new FakeDynamoDb();
+      const choices = store(db);
+      const { choiceId } = await choices.save({ thread, userId: requester, instructions: "x" });
+      const replaced: unknown[] = [];
+      const deps = { store: choices, replaceCard: async (message: unknown) => { replaced.push(message); }, handOff: async () => undefined };
+      expect(await handOffChosenWorkflow(deps, { thread, userId: other, workflowPath: "QUICK", choiceId, responseUrl })).toBe("not_requester");
+      expect(await handOffChosenWorkflow(deps, { thread, userId: requester, workflowPath: "QUICK", choiceId: "99999999-9999-4999-8999-999999999999", responseUrl })).toBe("none");
+      expect(replaced).toEqual([]);
+    });
+
+    it("still hands the start over when the card edit is refused", async () => {
+      const db = new FakeDynamoDb();
+      const choices = store(db);
+      const { choiceId } = await choices.save({ thread, userId: requester, instructions: "x" });
+      const handed: HandedOffWorkflowStart[] = [];
+      expect(await handOffChosenWorkflow({ store: choices, replaceCard: async () => { throw new Error("expired_url"); }, handOff: async (event) => { handed.push(event); } },
+        { thread, userId: requester, workflowPath: "QUICK", choiceId, responseUrl })).toBe("started");
+      expect(handed).toHaveLength(1);
+    });
+
+    it("puts the card back with its buttons when the start cannot be handed over, and when it fails later", async () => {
+      const db = new FakeDynamoDb();
+      const choices = store(db);
+      const slack = new StrictSlackWeb({ briefLimit: 1_200 });
+      const { choiceId } = await choices.save({ thread, userId: requester, instructions: "Add password reset" });
+      const replaceCard = async (message: { text: string; blocks: Array<Record<string, unknown>> }) => { await slack.replaceOriginal(responseUrl, message); };
+      await expect(handOffChosenWorkflow({ store: choices, replaceCard, handOff: async () => { throw new Error("TooManyRequestsException"); } },
+        { thread, userId: requester, workflowPath: "FULL", choiceId, responseUrl })).rejects.toThrow("TooManyRequestsException");
+      expect(slack.replacements.map((entry) => entry.text)).toEqual(["Starting this on Full…", workflowChoiceMessage({ choiceId, requesterId: requester }).text]);
+      expect(buttonLabels(slack.replacements[1]!.blocks)).toEqual(["Quick", "Full"]);
+      expect(JSON.stringify(slack.replacements[1]!.blocks)).toContain(choiceId);
+      // A start that fails after the hand-off: the edit goes through the press's response URL again, with the buttons back.
+      const handed: HandedOffWorkflowStart[] = [];
+      expect(await handOffChosenWorkflow({ store: choices, replaceCard, handOff: async (event) => { handed.push(event); } }, { thread, userId: requester, workflowPath: "FULL", choiceId, responseUrl })).toBe("started");
+      const told: string[] = [];
+      const deps = { store: choices, respondEphemeral: async (_url: string, text: string) => { told.push(text); },
+        replaceCard: async (url: string, message: { text: string; blocks: Array<Record<string, unknown>> }) => { await slack.replaceOriginal(url, message); },
+        startWorkflow: async () => { throw new SlackWorkflowStartError("UNKNOWN"); } };
+      expect(await runHandedOffWorkflowStart(deps, handed[0]!)).toBe("failed");
+      const restored = slack.replacements.at(-1)!;
+      expect(slack.replacements.map((entry) => entry.text).slice(-2)).toEqual(["Starting this on Full…", workflowChoiceMessage({ choiceId, requesterId: requester }).text]);
+      expect(buttonLabels(restored.blocks)).toEqual(["Quick", "Full"]);
+      expect(told).toEqual([workflowStartFailureNotice("UNKNOWN", choiceId)]);
+      // The restored buttons work: pressing again starts it, and the card is then marked answered by the usual edit.
+      expect(await handOffChosenWorkflow({ store: choices, handOff: async (event) => { handed.push(event); } }, { thread, userId: requester, workflowPath: "FULL", choiceId, responseUrl })).toBe("started");
+    });
+
+    it("restores a routed card as it was (Just answer too), and does not restore a started task's card", async () => {
+      const db = new FakeDynamoDb();
+      const choices = store(db);
+      const slack = new StrictSlackWeb({ briefLimit: 1_200 });
+      const choiceId = "22222222-2222-4222-8222-222222222222";
+      await db.send(new PutCommand({ TableName: "threads", ...workflowChoicePut({ thread, userId: requester, instructions: "Rename the helper", choiceId, nowMs: 1_758_657_600_000, suggestion: "small_change" }) }));
+      const handed: HandedOffWorkflowStart[] = [];
+      await handOffChosenWorkflow({ store: choices, handOff: async (event) => { handed.push(event); } }, { thread, userId: requester, workflowPath: "FULL", choiceId, responseUrl });
+      expect(handed[0]).toMatchObject({ suggestion: "small_change" });
+      expect(isHandedOffWorkflowStart(handed[0])).toBe(true);
+      expect(isHandedOffWorkflowStart({ ...handed[0], suggestion: "something else" })).toBe(false);
+      const replaceCard = async (url: string, message: { text: string; blocks: Array<Record<string, unknown>> }) => { await slack.replaceOriginal(url, message); };
+      const base = { store: choices, replaceCard, respondEphemeral: async () => undefined };
+      expect(await runHandedOffWorkflowStart({ ...base, startWorkflow: async () => { throw new SlackWorkflowStartError("WORKSPACE_LIMIT"); } }, handed[0]!)).toBe("failed");
+      expect(slack.replacements).toHaveLength(1);
+      expect(slack.replacements[0]!.text).toBe(suggestionCardMessage({ choiceId, requesterId: requester, suggestion: "small_change" }).text);
+      expect(buttonLabels(slack.replacements[0]!.blocks)).toEqual(["Start", "Use Full instead", "Just answer"]);
+      // A success edits nothing through the response URL: the usual answered card replaces the question.
+      await handOffChosenWorkflow({ store: choices, handOff: async (event) => { handed.push(event); } }, { thread, userId: requester, workflowPath: "FULL", choiceId, responseUrl });
+      expect(await runHandedOffWorkflowStart({ ...base, startWorkflow: async () => undefined }, handed[1]!)).toBe("started");
+      expect(slack.replacements).toHaveLength(1);
+    });
+
+    it("ends the card without buttons when the start was refused for good, and restores it when the choice could not be read", async () => {
+      const db = new FakeDynamoDb();
+      const choices = store(db);
+      const slack = new StrictSlackWeb({ briefLimit: 1_200 });
+      const { choiceId } = await choices.save({ thread, userId: requester, instructions: "x" });
+      const handed: HandedOffWorkflowStart[] = [];
+      await handOffChosenWorkflow({ store: choices, handOff: async (event) => { handed.push(event); } }, { thread, userId: requester, workflowPath: "QUICK", choiceId, responseUrl });
+      const replaceCard = async (url: string, message: { text: string; blocks: Array<Record<string, unknown>> }) => { await slack.replaceOriginal(url, message); };
+      const told: string[] = [];
+      const base = { store: choices, replaceCard, respondEphemeral: async (_url: string, text: string) => { told.push(text); } };
+      expect(await runHandedOffWorkflowStart({ ...base, startWorkflow: async () => { throw new SlackWorkflowStartError("PROJECT_TASKS_DISABLED"); } }, handed[0]!)).toBe("failed");
+      // The choice is gone, so its buttons would only say it is no longer waiting.
+      expect(hasButtons(slack.replacements[0]!.blocks)).toBe(false);
+      expect(slack.replacements[0]!.text).toContain("Start a new request in the channel");
+      expect(told).toHaveLength(1);
+      // The held choice could not be read: the buttons come back.
+      const failingStore = { ...choices, held: async () => { throw new Error("DynamoDB unavailable"); } };
+      expect(await runHandedOffWorkflowStart({ ...base, store: failingStore, startWorkflow: async () => undefined }, handed[0]!)).toBe("failed");
+      expect(buttonLabels(slack.replacements[1]!.blocks)).toEqual(["Quick", "Full"]);
+      // A refused card edit never hides the failure from the member.
+      expect(await runHandedOffWorkflowStart({ ...base, replaceCard: async () => { throw new Error("expired_url"); }, store: failingStore, startWorkflow: async () => undefined }, handed[0]!)).toBe("failed");
+      expect(told).toHaveLength(3);
+    });
   });
 
   it("gives the hold back when the start cannot be handed over (Task 19)", async () => {

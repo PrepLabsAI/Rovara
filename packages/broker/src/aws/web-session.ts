@@ -3,7 +3,10 @@
 
 export const SESSION_COOKIE = "__Host-agentx_review_session";
 export const CSRF_COOKIE = "__Host-agentx_review_csrf";
-export const SESSION_MAX_AGE_SECONDS = 15 * 60;
+/** A browser review sign-in lasts a fixed 30 days from sign-in; the server-side session record is the authority and stays revocable. */
+export const SESSION_MAX_AGE_SECONDS = 30 * 24 * 60 * 60;
+/** The CSRF cookie stays short-lived, whatever the sign-in lasts. */
+export const CSRF_MAX_AGE_SECONDS = 15 * 60;
 
 export const PRIVATE_HEADERS: Record<string, string> = {
   "cache-control": "private, no-store, max-age=0",

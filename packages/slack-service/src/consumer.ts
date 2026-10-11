@@ -1,4 +1,4 @@
-import { SlackRequestMessageSchema, type SlackRequestMessage } from "@agentx/contracts";
+import { SlackRequestMessageSchema, type SlackRequestMessage, type TaskQuestionRoute } from "@agentx/contracts";
 import { HANDOFF_MILLISECONDS, TurnHandedOffError } from "./interrupted-turn.js";
 import type { ServiceLog } from "./processor.js";
 
@@ -11,6 +11,8 @@ export interface QueueMessage {
   queuedBehind?: number;
   /** Task 21: the ingress asks for this plain request to be routed (a question or a change) before anything runs. */
   route?: "suggest";
+  /** A task-thread mention, already saved as a thread note, sent to be answered if it is a question. */
+  taskQuestion?: TaskQuestionRoute;
 }
 
 export interface QueueClient {
@@ -36,6 +38,8 @@ export type RequestHandler = (message: SlackRequestMessage, context: {
   queuedBehind?: number;
   /** Task 21: route this plain request first (see QueueMessage.route). */
   route?: "suggest";
+  /** A saved task-thread mention to answer if it is a question (see QueueMessage.taskQuestion). */
+  taskQuestion?: TaskQuestionRoute;
   redelivered?: boolean;
   /** Issue 157: aborted at the hand-off deadline after the stop. */
   handoff?: AbortSignal;
@@ -130,6 +134,7 @@ export async function processGroup(
           finalAttempt: entry.receiveCount >= options.maxReceiveCount,
           ...(entry.queuedBehind === undefined ? {} : { queuedBehind: entry.queuedBehind }),
           ...(entry.route === undefined ? {} : { route: entry.route }),
+          ...(entry.taskQuestion === undefined ? {} : { taskQuestion: entry.taskQuestion }),
           // SQS redelivers after the visibility timeout expires on an earlier, non-final attempt; the
           // member was told "Working on it now" for that attempt, so a fresh one says so again rather
           // than restarting silently.

@@ -14,7 +14,10 @@ import type { CallerIdentity, StackDescription, StackReader } from "../environme
 import { withEnvironmentLock, type LockRecord } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
+import { activeHintLine, ensureGithubWebhook, missingEventsLine } from "../github/webhook-setup.js";
 import { isOperatorRole } from "../init/commands.js";
+import type { InitSecrets } from "../init/context.js";
+import { githubAppJwt, githubAppSecretName, githubWebhookUrl, parseAppSecret, type GitHubApi } from "../init/github-app.js";
 import { plainMessage } from "../output.js";
 import { readStoredDeveloperSignIn } from "../signin/settings.js";
 import { upgradeAnswers } from "./answers.js";
@@ -40,6 +43,8 @@ export interface UpgradeDependencies {
   cdkDiff(request: DeployRequest, settings: EnvironmentSettings, source: string): Promise<string>;
   ask: Ask;
   isInteractive(): boolean;
+  /** The clients that point the GitHub App's webhook at the control plane: Secrets Manager (read and write) and GitHub. */
+  githubWebhook(settings: EnvironmentSettings): { secrets: Pick<InitSecrets, "get" | "put">; github: GitHubApi };
   doctor(env: string): Promise<DoctorReport>;
   write: (line: string) => void;
   now: () => number;
@@ -139,6 +144,33 @@ function upgradableSettings(settings: EnvironmentSettings | undefined, env: stri
   if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} is not installed in this account and region; check --env and --region`);
   if (settings.naming !== "environment") throw agentXError("CONFIG_INVALID", `agentx upgrade works on environments installed with agentx init; ${env} uses the legacy stack names`);
   return settings;
+}
+
+/** Points the GitHub App's webhook at the control plane once the stacks are upgraded. The stacks are already upgraded, so
+ * a failure here is told and doctor still runs; it never prints the webhook secret. */
+async function setUpGithubWebhook(env: string, deps: UpgradeDependencies): Promise<void> {
+  try {
+    const settings = await readEnvironmentSettings(deps.store, env);
+    if (settings === undefined) return;
+    const { secrets, github } = deps.githubWebhook(settings);
+    const secretName = githubAppSecretName(env);
+    const raw = await secrets.get(secretName);
+    if (raw === undefined) {
+      deps.write(`GitHub webhook: skipped, ${secretName} holds no GitHub App yet`);
+      return;
+    }
+    const app = parseAppSecret(raw, secretName);
+    const controlPlane = await deps.stacks.describe(settings.stacks["control-plane"]);
+    const outcome = await ensureGithubWebhook({
+      appJwt: githubAppJwt({ appId: app.appId, privateKey: app.privateKey, nowSeconds: Math.floor(deps.now() / 1000) }),
+      api: github, secrets, secretId: secretName,
+      webhookUrl: controlPlane?.outputs.GithubWebhookUrl ?? githubWebhookUrl(settings.controlPlaneUrl),
+    });
+    deps.write(`GitHub webhook: ${outcome.status}`);
+    for (const line of [activeHintLine(outcome), missingEventsLine(outcome)]) if (line !== undefined) deps.write(line);
+  } catch (error) {
+    deps.write(`GitHub webhook: could not be set up (${plainMessage(error)}); run agentx upgrade again`);
+  }
 }
 
 export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependencies): Promise<UpgradeResult> {
@@ -254,6 +286,9 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
     }
     return { settings, parts };
   });
+
+  // Outside the lock on purpose: it changes only GitHub's hook and the App secret, never the environment's settings or stacks.
+  await setUpGithubWebhook(env, deps);
 
   deps.write("Checking the environment with agentx doctor");
   let report: DoctorReport;

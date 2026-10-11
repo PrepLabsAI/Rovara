@@ -1,10 +1,11 @@
 // Spec 025 Testing section: the MCP SDK's client drives `agentx mcp`'s server against the broker in
 // process, through User Stories 1 and 2. The client lists the tools first, as real AI tools do, so
 // every error result is also checked against SDK 1.30.1's output-schema validation (ruling F3).
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { DeveloperTaskResponseSchema, WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, type WorkflowSnapshot } from "@agentx/contracts";
+import { DeveloperTaskResponseSchema, WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, canonicalPlanJson, planDocumentMarkdown, readCanonicalPlan, type WorkflowSnapshot } from "@agentx/contracts";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
 import { URL_BASE, signedInClient } from "../support/mcp-broker-client.js";
 
 type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
@@ -83,8 +84,7 @@ describe("a saved plan that fails its digest check", () => {
     const workspaceId = workspaceOf(harness, taskId);
     await harness.finish(workspaceId, activeOf(harness, workspaceId), "SUCCEEDED", { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } });
     const planning = activeOf(harness, workspaceId);
-    await harness.artifact(workspaceId, planning, "plan.md", "# Plan\n\n1. Fix retry handling.\n");
-    await harness.finish(workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await finishPlanningWithMarkdown(harness, workspaceId, planning, "# Plan\n\n1. Fix retry handling.\n");
     const stored = (harness.db.get(`DEVTASK#${taskId}`, "META") as { workflow: WorkflowSnapshot }).workflow;
     expect(stored).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
     // The saved bytes change after their digest was recorded.
@@ -99,6 +99,48 @@ describe("a saved plan that fails its digest check", () => {
     // Only the view is blocked: the stored task still waits, and a blocked approval can't be stored.
     expect((harness.db.get(`DEVTASK#${taskId}`, "META") as { workflow: WorkflowSnapshot }).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
     expect(WorkflowSnapshotSchema.safeParse({ ...stored, state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.documentUnverified }).success).toBe(false);
+  });
+});
+
+describe("the document an AI tool is asked to approve", () => {
+  type Approval = { workflow: { approval_document: { type: string; sha256: string; version: number; content?: string }; plan: { content?: string } } };
+  const waitingTask = async (finish: (harness: Harness, workspaceId: string, planning: string) => Promise<unknown>) => {
+    const harness = await createDeveloperTaskBroker();
+    const { tool } = await signedInClient(harness, MAYA);
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK" });
+    const taskId = (started.body.task as { taskId: string }).taskId;
+    const workspaceId = workspaceOf(harness, taskId);
+    await harness.finish(workspaceId, activeOf(harness, workspaceId), "SUCCEEDED", { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } });
+    await finish(harness, workspaceId, activeOf(harness, workspaceId));
+    return { harness, tool, taskId };
+  };
+
+  it("is a legacy Markdown plan exactly as it was saved", async () => {
+    const markdown = "# Plan\n\n1. Fix retry handling.\n";
+    const { tool, taskId } = await waitingTask((harness, workspaceId, planning) => finishPlanningWithMarkdown(harness, workspaceId, planning, markdown));
+    const read = (await tool("agentx_get_task", { task_id: taskId })).value as unknown as Approval;
+    expect(read.workflow.approval_document).toMatchObject({ type: "plan", version: 1, sha256: createHash("sha256").update(markdown).digest("hex"), content: markdown });
+    expect(read.workflow.plan.content).toBe(markdown);
+  });
+
+  it("is the Markdown copy of a structured plan, derived from it, never the stored JSON", async () => {
+    const plan = planDocument();
+    const { harness, tool, taskId } = await waitingTask(async (harness, workspaceId, planning) => {
+      await harness.artifact(workspaceId, planning, "plan.md", planAnswer(plan));
+      await harness.finish(workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    });
+    const read = (await tool("agentx_get_task", { task_id: taskId })).value as unknown as Approval;
+    const { sha256, version } = read.workflow.approval_document;
+    expect(read.workflow.approval_document).toMatchObject({ type: "plan", version: 1, sha256 });
+    // The saved document is the plan as JSON; the owner has not answered its decisions yet, so the copy does not say they were taken.
+    const saved = (harness.db.get(`DEVTASK#${taskId}`, "META") as { workflow: WorkflowSnapshot }).workflow.artifacts.at(-1)!;
+    const stored = String(harness.s3.objects.get(saved.objectKey));
+    expect(createHash("sha256").update(stored).digest("hex")).toBe(sha256);
+    expect(read.workflow.approval_document.content).toBe(planDocumentMarkdown(readCanonicalPlan(stored)!, { kind: "plan", version, sha256 }));
+    expect(stored).toBe(canonicalPlanJson(readCanonicalPlan(stored)!));
+    expect(read.workflow.approval_document.content).toContain("Payments that fail with a timeout are retried.");
+    expect(read.workflow.approval_document.content).not.toContain("schemaVersion");
+    expect(read.workflow.plan.content).toBe(read.workflow.approval_document.content);
   });
 });
 

@@ -2102,7 +2102,10 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             {
               "Action": "sts:AssumeRole",
               "Condition": {
-                "ArnLike": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
                   "aws:SourceArn": {
                     "Fn::Join": [
                       "",
@@ -2119,14 +2122,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                         {
                           "Ref": "AWS::AccountId",
                         },
-                        ":schedule/*",
+                        ":schedule-group/default",
                       ],
                     ],
-                  },
-                },
-                "StringEquals": {
-                  "aws:SourceAccount": {
-                    "Ref": "AWS::AccountId",
                   },
                 },
               },
@@ -6224,7 +6222,10 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             {
               "Action": "sts:AssumeRole",
               "Condition": {
-                "ArnLike": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
                   "aws:SourceArn": {
                     "Fn::Join": [
                       "",
@@ -6241,14 +6242,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                         {
                           "Ref": "AWS::AccountId",
                         },
-                        ":schedule/*",
+                        ":schedule-group/default",
                       ],
                     ],
-                  },
-                },
-                "StringEquals": {
-                  "aws:SourceAccount": {
-                    "Ref": "AWS::AccountId",
                   },
                 },
               },

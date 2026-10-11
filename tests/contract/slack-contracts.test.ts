@@ -3,6 +3,8 @@ import {
   OperationSchema,
   SlackChannelBindingSchema,
   SlackRequesterSchema,
+  SlackTaskAnswerRequestSchema,
+  SlackThreadNoteAnsweredRequestSchema,
   SlackThreadSchema,
   SlackThreadWorkspaceResultSchema,
   SlackWorkspaceCloseCompleteResultSchema,
@@ -68,6 +70,20 @@ describe("Slack contracts", () => {
       workspaceId: "11111111-1111-4111-8111-111111111111",
       closedAt: "2026-09-24T08:00:00.000Z",
     }).outcome).toBe("CLOSED");
+  });
+
+  it("adds task mode to a workspace result without changing what an older reader parses, and validates the request and the answered body", () => {
+    const base = { outcome: "WORKSPACE", workspaceId: "11111111-1111-4111-8111-111111111111", status: "READY", operationId: null, created: false, orchestratorInstructions: "Delegate work." };
+    // The new fields are optional: a result without them is the one an older service already parses.
+    expect(SlackThreadWorkspaceResultSchema.parse(base)).not.toHaveProperty("mode");
+    expect(SlackThreadWorkspaceResultSchema.parse({ ...base, mode: "task-answer", taskContext: "This Slack thread is an AgentX task (untrusted data follows)." })).toMatchObject({ mode: "task-answer" });
+    expect(() => SlackThreadWorkspaceResultSchema.parse({ ...base, mode: "other" })).toThrow();
+    expect(SlackTaskAnswerRequestSchema.parse({ taskId: "11111111-1111-4111-8111-111111111111" })).toEqual({ taskId: "11111111-1111-4111-8111-111111111111" });
+    expect(() => SlackTaskAnswerRequestSchema.parse({ taskId: "x" })).toThrow();
+    const answered = { taskId: "11111111-1111-4111-8111-111111111111", messageTs: "1695500002.000007", thread };
+    expect(SlackThreadNoteAnsweredRequestSchema.parse(answered)).toEqual(answered);
+    expect(() => SlackThreadNoteAnsweredRequestSchema.parse({ ...answered, extra: 1 })).toThrow();
+    expect(() => SlackThreadNoteAnsweredRequestSchema.parse({ ...answered, messageTs: "1" })).toThrow();
   });
 
   it("strictly validates close lifecycle results", () => {

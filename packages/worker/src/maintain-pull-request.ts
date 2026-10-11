@@ -5,6 +5,7 @@ import { promisify } from "node:util";
 import {
   AgentXError,
   PullRequestLifecycleResultSchema,
+  WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE,
   agentXError,
   type WorkerInvocation,
   type PullRequestLifecycleResult,
@@ -14,7 +15,9 @@ import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js"
 import type { PullRequestUpdateSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
-import { runReadinessChecks } from "./publish.js";
+import { containWorkspace, runReadinessChecks, temporaryIndexTree } from "./publish.js";
+import { stopWorkspaceProcesses } from "./workspace-processes.js";
+import { sweepWorkspaceContainers } from "./workspace-containers.js";
 import { storedCommandOutput } from "./command-failure.js";
 import type { PreparationManifest } from "./prepare.js";
 import type { DevcontainerCli } from "./devcontainer.js";
@@ -31,6 +34,10 @@ export async function maintainPullRequest(options: {
   codeBuildSink?: CodeBuildSink;
   /** The `devcontainer` CLI, as a seam for tests. */
   devcontainerCli?: DevcontainerCli;
+  /** A workflow task's fix stops every process left from the workspace before the push credential is fetched. A seam for tests, as in publication. */
+  stopWorkspaceProcesses?: (rootPath: string) => Promise<{ stopped: number } | void>;
+  /** A workflow task's fix removes every container but the worker's own before the push credential is fetched. A seam for tests, as in publication. */
+  sweepWorkspaceContainers?: (rootPath: string) => Promise<{ removed: number }>;
 }): Promise<PullRequestLifecycleResult> {
   const { invocation } = options;
   // In the devcontainer preparation recorded, as at publication (#183).
@@ -54,6 +61,14 @@ export async function maintainPullRequest(options: {
   assertCredentialFreeRemote(remoteUrl);
   if (remoteUrl !== repository.url) throw agentXError("CONFIG_INVALID", "repository remote does not match the registered project");
 
+  // A workflow task's fix runs no readiness checks, so nothing but leftover programs from the fix's own run could
+  // reach the push token. As in publication, none is left before the credential is fetched.
+  if (invocation.payload.workflowCandidateTreeSha !== undefined) {
+    await containWorkspace(rootPath, {
+      sweep: options.sweepWorkspaceContainers ?? ((root: string) => sweepWorkspaceContainers({ rootPath: root })),
+      stop: options.stopWorkspaceProcesses ?? ((root: string) => stopWorkspaceProcesses({ rootPath: root })),
+    });
+  }
   const credential = await options.credentialProvider(repository);
   await credentialedGit(repositoryPath, [
     // From the registered URL, never the remote's name, so a repository remote setting cannot redirect it.
@@ -79,7 +94,19 @@ export async function maintainPullRequest(options: {
     if (currentHead === remoteHead && !status.trim()) {
       throw agentXError("CONFIG_INVALID", "repository has no new changes to append");
     }
-    const checks = await runReadinessChecks(rootPath, invocation, manifest, readinessOptions);
+    // A workflow task's fix runs no project command here: its checks already ran, on this same tree, before its
+    // reviews, and the tree is checked again below. Any other append runs the project's readiness checks.
+    const reviewedTree = invocation.payload.workflowCandidateTreeSha;
+    const baseCommit = invocation.payload.workflowBaseCommit;
+    if (reviewedTree !== undefined && baseCommit !== undefined) {
+      await git(repositoryPath, ["cat-file", "-e", `${baseCommit}^{commit}`]).catch(() => {
+        throw agentXError("WORKSPACE_NOT_READY", "the task's base commit is missing from the workspace");
+      });
+      if (!(await isAncestor(repositoryPath, baseCommit, currentHead))) {
+        throw agentXError("CONFIG_INVALID", WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE);
+      }
+    }
+    const checks = reviewedTree === undefined ? await runReadinessChecks(rootPath, invocation, manifest, readinessOptions) : [];
     if (checks.some((check) => check.outcome !== "passed")) {
       throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
     }
@@ -91,8 +118,15 @@ export async function maintainPullRequest(options: {
       if (error instanceof AgentXError) throw error;
       throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
     }
-    await git(repositoryPath, ["add", "--all"]);
-    const workspaceTree = (await git(repositoryPath, ["write-tree"])).trim();
+    let workspaceTree: string;
+    if (reviewedTree === undefined) {
+      await git(repositoryPath, ["add", "--all"]);
+      workspaceTree = (await git(repositoryPath, ["write-tree"])).trim();
+    } else {
+      // In a temporary index, as the reviewed tree was computed, so the real index is untouched.
+      workspaceTree = await temporaryIndexTree({ directory: repositoryPath, env: await gitHardenedEnvironment(repositoryPath) });
+      if (workspaceTree !== reviewedTree) throw agentXError("CONFIG_INVALID", WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE);
+    }
     const publishedTree = (await git(repositoryPath, ["rev-parse", `${remoteHead}^{tree}`])).trim();
     if (workspaceTree === publishedTree) {
       throw agentXError("CONFIG_INVALID", "repository has no effective changes to append");
@@ -100,7 +134,7 @@ export async function maintainPullRequest(options: {
     commit = (await git(repositoryPath, [
       "-c", `user.name=${AGENTX_GIT_NAME}`, "-c", `user.email=${AGENTX_GIT_EMAIL}`,
       "commit-tree", workspaceTree, "-p", remoteHead,
-      "-m", `AgentX: update PR #${invocation.payload.pullRequestNumber}`,
+      "-m", reviewedTree === undefined ? `AgentX: update PR #${invocation.payload.pullRequestNumber}` : "AgentX: address PR feedback",
     ])).trim();
     await git(repositoryPath, ["checkout", "--force", "-B", invocation.payload.headBranch, commit]);
     const codeBuildChecks = await validateCandidate(
@@ -113,6 +147,12 @@ export async function maintainPullRequest(options: {
       credential,
       options.codeBuildSink,
     );
+    // A workflow task's fix is pushed onto the head AgentX recorded and nothing else: GitHub is asked again right before
+    // the push, so a branch that moved or was deleted (the pull request merged) meanwhile is never pushed to.
+    if (reviewedTree !== undefined
+      && await remoteBranchHead(repositoryPath, repository.url, invocation.payload.headBranch, credential) !== remoteHead) {
+      throw agentXError("STALE_FENCE", "pull request head changed since AgentX last observed it");
+    }
     await push(repositoryPath, repository.url, invocation.payload.headBranch, credential);
     const callback = await options.pullRequestUpdateSink({
       repository: repository.name,
@@ -127,6 +167,7 @@ export async function maintainPullRequest(options: {
       action: "append", repository: repository.name, number: invocation.payload.pullRequestNumber,
       url: callback.url, state: callback.state, headBranch: invocation.payload.headBranch,
       baseBranch: invocation.payload.baseBranch, previousCommit: remoteHead, commit,
+      ...(reviewedTree === undefined ? {} : { treeSha: workspaceTree }),
       checks, codeBuildChecks, reconciled: callback.reconciled,
     });
   }
@@ -222,14 +263,21 @@ async function push(directory: string, url: string, branch: string, credential: 
   await git(directory, ["update-ref", `refs/remotes/origin/${branch}`, "HEAD"]);
 }
 
+/** The commit a branch of the registered URL points at, or undefined when the branch does not exist. */
+async function remoteBranchHead(directory: string, url: string, branch: string, credential: Awaited<ReturnType<RepositoryCredentialProvider>>): Promise<string | undefined> {
+  assertCredentialFreeRemote(url);
+  const listed = await credentialedGit(directory, ["-C", directory, "ls-remote", url, `refs/heads/${branch}`], credential, "Git ls-remote failed");
+  return listed.split("\n").map((line) => line.split("\t")).find(([, ref]) => ref === `refs/heads/${branch}`)?.[0];
+}
+
 async function credentialedGit(
   directory: string,
   args: string[],
   credential: Awaited<ReturnType<RepositoryCredentialProvider>>,
   fallback: string,
-): Promise<void> {
+): Promise<string> {
   try {
-    await runGitWithCredential({ directory, args, credential, timeout: 300_000, maxBuffer: MAX_GIT_OUTPUT });
+    return (await runGitWithCredential({ directory, args, credential, timeout: 300_000, maxBuffer: MAX_GIT_OUTPUT })).stdout;
   } catch (error) {
     // A refusal of the repository's own config is the project's to fix, not a runtime failure.
     if (error instanceof AgentXError) throw error;

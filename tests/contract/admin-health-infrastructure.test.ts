@@ -104,7 +104,11 @@ describe("the health route's grants (A13)", () => {
     const allowed = new Set([
       "packages/contracts/src/admin.ts", "packages/broker/src/aws/activity-index.ts", "packages/broker/src/aws/admin-reads.ts", "infra/lib/control-plane.ts",
       "packages/broker/src/aws/developer-task-notifier.ts", "packages/broker/src/aws/broker.ts",
+      // The workflow dispatch row's one definition, shared by the broker and the developer task routes.
+      "packages/broker/src/aws/broker-shared.ts",
       "packages/contracts/src/admin-changes.ts", "packages/broker/src/aws/admin-changes.ts",
+      // The plan evidence job row (spec 061) expires on it too.
+      "packages/broker/src/developer/plan-evidence-jobs.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
@@ -116,7 +120,6 @@ describe("the health route's grants (A13)", () => {
     expect(brokerUses).toEqual([
       "        slackUserId: user.data, channelId: thread.data.channelId, threadTs: thread.data.threadTs, message, at, [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(at) },",
       "      [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(operation.createdAt),",
-      "    [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + WORKFLOW_DISPATCH_RETENTION_SECONDS,",
     ]);
     // Task 19: a refused Slack press's private note, delivered within the hour and then dead weight.
     const refusal = broker.slice(broker.indexOf("async function recordSlackWorkflowRefusal("), broker.indexOf("async function answerSlackWorkflowEvent("));
@@ -126,9 +129,14 @@ describe("the health route's grants (A13)", () => {
     expect(channelOperation).toContain('entityType: "CHANNEL_OPERATION"');
     expect(channelOperation).toContain(brokerUses[0]);
     // Gap 6: a backstop for a workflow dispatch row that is somehow never resolved (the sweep gives up long before).
-    const dispatchItem = broker.slice(broker.indexOf("function workflowDispatchItem("), broker.indexOf("async function recordWorkflowDispatchFailure("));
+    const shared = readFileSync("packages/broker/src/aws/broker-shared.ts", "utf8");
+    const dispatchItem = shared.slice(shared.indexOf("export function workflowDispatchItem("));
     expect(dispatchItem).toContain('entityType: "WORKFLOW_DISPATCH"');
-    expect(dispatchItem).toContain(brokerUses[1]);
+    expect(shared.split("\n").filter((line) => /indexExpiresAt|INDEX_EXPIRY_ATTRIBUTE/.test(line)).map((line) => line.trim())).toEqual([
+      'import { INDEX_EXPIRY_ATTRIBUTE, OPERATION_PROMPT_MAX_BYTES, PLAN_DOCUMENT_INFO_STRING, type PlanDocumentKind } from "@agentx/contracts";',
+      "indexExpiresAt: number;",
+      "[INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + WORKFLOW_DISPATCH_RETENTION_SECONDS,",
+    ]);
     const notifier = readFileSync("packages/broker/src/aws/developer-task-notifier.ts", "utf8");
     const writes = notifier.split("\n").filter((line) => line.includes("noticeExpiry(deps)"));
     expect(writes.length).toBeGreaterThanOrEqual(4);

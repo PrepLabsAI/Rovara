@@ -206,8 +206,9 @@ export class DeveloperSignInStore {
     return { developerId: record.developerId, amr: record.amr, ...(record.slackUserId === undefined ? {} : { slackUserId: record.slackUserId }) };
   }
 
-  async createSession(input: { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; reviewExpiresAt?: number }): Promise<{ session: SessionRecord; refreshToken: string }> {
-    const session: SessionRecord = { ...input, sessionId: randomUUID(), startedAt: this.iso(), endsAt: this.seconds() + DEVELOPER_SESSION_SECONDS };
+  /** `endsAt` (epoch seconds) is for a browser review sign-in, which has its own fixed length; every other session lasts DEVELOPER_SESSION_SECONDS. The stored record's clean-up time follows `endsAt`. */
+  async createSession(input: { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; reviewExpiresAt?: number; endsAt?: number }): Promise<{ session: SessionRecord; refreshToken: string }> {
+    const session: SessionRecord = { endsAt: this.seconds() + DEVELOPER_SESSION_SECONDS, ...input, sessionId: randomUUID(), startedAt: this.iso() };
     const refreshToken = randomToken("agxr_");
     await this.input.documentClient.send(new TransactWriteCommand({
       TransactItems: [

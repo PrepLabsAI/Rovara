@@ -75,7 +75,8 @@ describe("authenticated PR feedback review web journey", () => {
     expect(response.statusCode).toBe(200);
     expect(response.headers["cache-control"]).toContain("no-store");
     expect(response.headers["x-robots-tag"]).toContain("noindex");
-    expect(response.headers["set-cookie"]).toMatch(/__Host-agentx_review_csrf=[A-Za-z0-9_-]+; Secure; SameSite=Lax; Path=\//);
+    // The sign-in lasts 30 days, but the CSRF cookie stays short-lived.
+    expect(response.headers["set-cookie"]).toMatch(/__Host-agentx_review_csrf=[A-Za-z0-9_-]+; Secure; SameSite=Lax; Path=\/; Max-Age=900$/);
     expect(response.body).toContain("AI-generated advisory");
     expect(response.body).toContain("Approving starts the selected code changes and checks");
     expect(response.body).toContain("Handle retries");
@@ -118,20 +119,87 @@ describe("authenticated PR feedback review web journey", () => {
     expect(response.body).not.toContain("Approve selected findings");
   });
 
-  it("does not let a copied browser review cookie outlive its server-side 15 minute expiry", async () => {
-    const now = 1_791_212_400_000;
-    const expiresAt = Math.floor(now / 1000) + 15 * 60;
-    const deps = {
-      developer: { issuer: origin, env: "test", methods: { slack: true, oidc: false }, signInTableName: "signin", channelMembers: vi.fn() },
-      documentClient: { send: vi.fn(async (command: { input?: { Key?: { pk?: string } } }) => ({ Item: command.input?.Key?.pk?.startsWith("DEVELOPER#")
-        ? { displayName: "Maya", slackUserId: "UOWNER", revoked: false }
-        : { sessionId: "session-owner", developerId: "d".repeat(64), amr: "slack", startedAt: new Date(now).toISOString(), endsAt: expiresAt + 7 * 24 * 60 * 60, reviewExpiresAt: expiresAt } })) },
-      now: () => now,
-    };
+  it("says why a proposal names no tests instead of an empty Tests list", async () => {
+    const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
+      taskId, title: "Handle retries", revision: 12, status: "PENDING", qualification: "AI_GENERATED_ADVISORY",
+      proposalDigest: "b".repeat(64), bundleDigests: ["a".repeat(64)], candidates: [],
+      findings: [{ ...finding, fixProposal: { ...finding.fixProposal, tests: [] }, comments: [] }], recommendedFindingIds: [finding.id], checks: [],
+    })) });
+    const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${taskId}`, origin));
+    expect(response.body).not.toContain("<h5>Tests</h5><ul></ul>");
+    expect(response.body).toContain("No new tests: the change is documentation only, or the repository has no tests.");
+  });
+
+  it("shows a finding left to the owner as a question for them, without empty Files and Tests lists", async () => {
+    const question = { ...finding, assessment: "NEEDS_OWNER_DECISION", recommended: false, proposedDisposition: "OWNER_DECISION",
+      fixProposal: { summary: "Which wording should replace the sentence? <b>Options</b>: shorter; or none.", fileChanges: [], tests: [] }, comments: [] };
+    const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
+      taskId, title: "Handle retries", revision: 12, status: "PENDING", qualification: "AI_GENERATED_ADVISORY",
+      proposalDigest: "b".repeat(64), bundleDigests: ["a".repeat(64)], candidates: [],
+      findings: [question], recommendedFindingIds: [], checks: [],
+    })) });
+    const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${taskId}`, origin));
+    expect(response.body).toContain(`<section aria-label="Question for you"><h4>Question for you</h4><p>Which wording should replace the sentence? &lt;b&gt;Options&lt;/b&gt;: shorter; or none.</p></section>`);
+    expect(response.body).toContain("<summary>See the question, comments and evidence</summary>");
+    expect(response.body).not.toContain("Proposed fix");
+    expect(response.body).not.toContain("<h5>Files</h5>");
+    expect(response.body).not.toContain("<h5>Tests</h5>");
+  });
+
+  it("points to the Slack thread for a review that could not be completed, with no decision controls", async () => {
+    const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
+      taskId, title: "Handle retries", revision: 12, status: "PENDING", reportStatus: "FAILED", workflowStatus: "WAITING", workflowStage: "WAIT_FOR_MERGE",
+      nextAction: "Retry the review from the Slack thread of this task.", bundleDigests: ["a".repeat(64)], candidates: [], findings: [], recommendedFindingIds: [], checks: [],
+    })) });
+    const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${taskId}`, origin));
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("Retry the review from the Slack thread of this task.");
+    expect(response.body).not.toContain("Approve selected findings");
+    expect(response.body).not.toContain("Request changes");
+  });
+
+  describe("a browser review sign-in lasts a fixed 30 days", () => {
+    const signedInAt = 1_791_212_400_000;
+    const DAY = 24 * 60 * 60;
     const copiedCookieSession = "11111111-1111-4111-8111-111111111111";
-    await expect(authenticateDeveloperSessionId(deps as never, copiedCookieSession)).resolves.toMatchObject({ sessionId: copiedCookieSession });
-    deps.now = () => now + 15 * 60 * 1000;
-    await expect(authenticateDeveloperSessionId(deps as never, copiedCookieSession)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    const setup = (session: Record<string, unknown> = {}) => {
+      const sent: unknown[] = [];
+      const endsAt = Math.floor(signedInAt / 1000) + 30 * DAY;
+      const deps = {
+        developer: { issuer: origin, env: "test", methods: { slack: true, oidc: false }, signInTableName: "signin", channelMembers: vi.fn() },
+        documentClient: { send: vi.fn(async (command: { input?: { Key?: { pk?: string } } }) => {
+          sent.push(command);
+          return { Item: command.input?.Key?.pk?.startsWith("DEVELOPER#")
+            ? { displayName: "Maya", slackUserId: "UOWNER", revoked: false }
+            : { sessionId: "session-owner", developerId: "d".repeat(64), amr: "slack", startedAt: new Date(signedInAt).toISOString(), endsAt, reviewExpiresAt: endsAt, ...session } };
+        }) },
+        now: () => signedInAt,
+      };
+      return { deps, sent };
+    };
+
+    it("works 29 days after sign-in and is refused after 30", async () => {
+      const { deps } = setup();
+      await expect(authenticateDeveloperSessionId(deps as never, copiedCookieSession)).resolves.toMatchObject({ sessionId: copiedCookieSession });
+      deps.now = () => signedInAt + 29 * DAY * 1000;
+      await expect(authenticateDeveloperSessionId(deps as never, copiedCookieSession)).resolves.toMatchObject({ sessionId: copiedCookieSession });
+      deps.now = () => signedInAt + 30 * DAY * 1000;
+      await expect(authenticateDeveloperSessionId(deps as never, copiedCookieSession)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    });
+
+    it("is refused at once when the session is revoked", async () => {
+      const { deps } = setup({ revokedAt: new Date(signedInAt + DAY * 1000).toISOString() });
+      deps.now = () => signedInAt + 2 * DAY * 1000;
+      await expect(authenticateDeveloperSessionId(deps as never, copiedCookieSession)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+    });
+
+    it("only reads the sign-in table on an authenticated page request", async () => {
+      const { deps, sent } = setup();
+      deps.now = () => signedInAt + 2 * DAY * 1000;
+      await authenticateDeveloperSessionId(deps as never, copiedCookieSession);
+      expect(sent.length).toBeGreaterThan(0);
+      expect(sent.map((command) => (command as object).constructor.name)).toEqual(sent.map(() => "GetCommand"));
+    });
   });
 
   it.each([
@@ -211,7 +279,8 @@ describe("authenticated PR feedback review web journey", () => {
 });
 
 describe("broker-backed feedback review data", () => {
-  async function preparedReview(prCount = 1) {
+  /** `firstFinding` changes the first finding (and its reference): for example, to leave it to the owner as a question. */
+  async function preparedReview(prCount = 1, firstFinding: Record<string, unknown> = {}) {
     const now = "2026-10-05T12:00:00.000Z";
     const repositories = prCount === 1 ? [{ repositoryId: "demo", number: 42 }] : [
       { repositoryId: "demo", number: 42 }, { repositoryId: "ui", number: 43 },
@@ -264,6 +333,9 @@ describe("broker-backed feedback review data", () => {
         confidence: { level: "HIGH" as const, reason: "The linked source supports this finding." }, proposedDisposition: "IMPLEMENT" as const },
       };
     }));
+    const refFields = ["assessment", "recommended", "priority"];
+    bundles[0]!.finding = { ...bundles[0]!.finding, ...firstFinding };
+    bundles[0]!.findingRef = { ...bundles[0]!.findingRef, ...Object.fromEntries(Object.entries(firstFinding).filter(([key]) => refFields.includes(key))) };
     const report = WorkflowFeedbackReviewReportSchema.parse({ schemaVersion: 1, taskId, workflowRevision: 2, operationMode: "FEEDBACK_REVIEW", qualification: "AI_GENERATED_ADVISORY",
       proposalDigest: "b".repeat(64), taskRequirementsDigest: "d".repeat(64), candidateBindings: bundles.map(({ ref, commentSetDigest, digest }) => ({ repositoryId: ref.repositoryId, number: ref.number,
         headSha: ref.headSha, candidateDigest: candidate.digest, commentSetDigest, bundleDigest: digest })),
@@ -301,6 +373,18 @@ describe("broker-backed feedback review data", () => {
     const data = await getWorkflowFeedbackReview(fixture.deps, { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack", name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" }, fixture.taskId);
     expect(data).toMatchObject({ status: "PENDING", qualification: "AI_GENERATED_ADVISORY", reviewDigest: fixture.reviewDigest, bundleDigests: [fixture.bundleDigest], findings: [{ id: "finding-1", comments: [{ body: "Handle empty input" }] }] });
     await expect(getWorkflowFeedbackReview(fixture.deps as never, { developerId: OMAR.developerId, sessionId: OMAR.sessionId, amr: "oidc", name: OMAR.name }, fixture.taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+  });
+
+  it("returns a review that could not be completed without reading its report, pointing to the Slack thread", async () => {
+    const fixture = await preparedReview();
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
+    const review = task.workflow.feedbackReview;
+    if (review?.status !== "PENDING") throw new Error("the fixture's review is pending");
+    fixture.harness.db.set({ ...task, workflow: { ...task.workflow, feedbackReview: { ...review,
+      reviewRef: { ...review.reviewRef, status: "BLOCKED", blockReason: "review timed out", findingRefs: [] } } } });
+    const data = await getWorkflowFeedbackReview(fixture.deps, owner, fixture.taskId);
+    expect(data).toMatchObject({ status: "PENDING", reportStatus: "BLOCKED", findings: [], nextAction: "Retry the review from the Slack thread of this task." });
   });
 
   it.each([
@@ -376,6 +460,63 @@ describe("broker-backed feedback review data", () => {
       .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect(refresh).toHaveBeenCalledTimes(2);
     expect(operations.filter(item => item.workflowMode === "IMPLEMENT")).toHaveLength(1);
+  });
+
+  it("refuses in plain words a decision whose GitHub refresh collected new feedback, before or right before dispatch", async () => {
+    for (const refreshThatCollects of [1, 2]) {
+      const fixture = await preparedReview();
+      const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+      let refreshes = 0;
+      // GitHub has a comment the card did not show: the refresh collects it, which starts a new review.
+      fixture.deps.refreshTaskFeedback = vi.fn(async (): Promise<undefined> => {
+        if (++refreshes !== refreshThatCollects) return;
+        const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workflow: WorkflowSnapshot };
+        const review = task.workflow.feedbackReview!;
+        fixture.harness.db.set({ ...task, workflow: { ...task.workflow, revision: task.workflow.revision + 1,
+          feedbackReview: { status: "COLLECTING", bundleRefs: review.bundleRefs, threadObservations: [] } } });
+      });
+      const refusal = await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, { requestId: randomUUID(), expectedRevision: fixture.workflow.revision,
+        reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64), bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"] })
+        .then(() => undefined, (error: unknown) => error);
+      expect(refusal).toMatchObject({ code: "CONFIG_INVALID" });
+      expect(refusal instanceof Error ? refusal.message : "").toContain("The feedback changed since this card; a new review is starting.");
+      const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workspaceId: string; workflow: WorkflowSnapshot };
+      expect(task.workflow.feedbackDecisions).toBeUndefined();
+      expect(fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT")).toEqual([]);
+    }
+  });
+
+  /** The first finding as the 0.2.8 live test's reviewer left it: a question for the owner, with no file changes. */
+  const QUESTION = { assessment: "NEEDS_OWNER_DECISION", recommended: false, proposedDisposition: "OWNER_DECISION",
+    fixProposal: { summary: "Which wording should replace the sentence? Options: shorter; or none.", fileChanges: [], tests: [] } };
+
+  it("refuses approving a question without the owner's answer, from the web page as from Slack", async () => {
+    const fixture = await preparedReview(1, QUESTION);
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    const payload = { requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE" as const, selectedFindingIds: ["finding-1"] };
+    await expect(submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, payload)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, payload)).rejects.toThrow(/add your answer to the reviewer's question/);
+    expect(fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META")?.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", feedbackReview: { status: "PENDING" } });
+    expect(fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META")?.workflow).not.toHaveProperty("feedbackDecisions");
+  });
+
+  it("caps the owner's words that reach the coder at 500 characters, as in Slack, and scopes them to the question", async () => {
+    const fixture = await preparedReview(1, QUESTION);
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    const payload = { requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE" as const, selectedFindingIds: ["finding-1"] };
+    await expect(submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, { ...payload, ownerNote: "x".repeat(501) }))
+      .rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, { ...payload, requestId: randomUUID(), ownerNote: "x".repeat(501) }))
+      .rejects.toThrow(/to 500 characters/);
+    await expect(submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, { ...payload, requestId: randomUUID(), ownerNote: "Use the shorter wording." }))
+      .resolves.toMatchObject({ status: "APPROVED" });
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workspaceId: string };
+    const dispatch = fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION").find(item => item.workflowMode === "IMPLEMENT");
+    const invocation = fixture.harness.db.find(item => item.entityType === "OUTBOX" && item.operationId === dispatch?.id)[0]?.invocation as { payload?: { prompt?: string } };
+    expect(invocation.payload?.prompt).toContain("The task owner's answer to the question of finding finding-1 (carry it out for that finding only): \"Use the shorter wording.\"");
+    expect(invocation.payload?.prompt).toContain("\"question\":\"Which wording should replace the sentence? Options: shorter; or none.\"");
   });
 
   it("lets the owner approve findings bound to both linked PRs in one decision and dispatches once", async () => {

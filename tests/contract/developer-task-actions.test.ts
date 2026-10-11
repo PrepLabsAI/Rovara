@@ -105,6 +105,36 @@ describe("acceptPullRequest with a developer identity (FR-023, R14)", () => {
   });
 });
 
+describe("the pull request footer says where a task started and who asked (FR-023)", () => {
+  const footerOf = async (named: Partial<typeof task>) => {
+    const { db, actions, workspaceId } = await readyWorkspace();
+    const identity = developerTaskIdentity({ ...task, ...named });
+    const accepted = await actions.acceptPullRequest(identity, workspaceId, { requestId: randomUUID(), repository: "demo", title: "Fix", body: "Fixes #12." }, () => []);
+    const record = db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${accepted.operation.id}`) as { publication: { body: string } };
+    return record.publication.body;
+  };
+
+  it("names a Slack-started task's requester as the task owner, started from Slack", async () => {
+    expect(await footerOf({ developerName: "Slack user U0BSPTAFNG2", client: "Slack" })).toBe("Fixes #12.\n\n---\nRequested by the task owner via AgentX, started from Slack");
+    // A task stored before the Slack client was kept reads the same.
+    expect(await footerOf({ developerName: "Slack user U0BSPTAFNG2", client: "an AI tool" })).toBe("Fixes #12.\n\n---\nRequested by the task owner via AgentX, started from Slack");
+  });
+
+  it("keeps an AI tool start's wording with the developer's name", async () => {
+    expect(await footerOf({ client: "an AI tool" })).toBe("Fixes #12.\n\n---\nRequested by `Maya Chen` via AgentX, started from an AI tool");
+    expect(await footerOf({ client: "Codex" })).toBe("Fixes #12.\n\n---\nRequested by `Maya Chen` via AgentX, started from Codex");
+  });
+
+  it("never shows a raw Slack user ID in the footer", async () => {
+    for (const client of ["Slack", "an AI tool", "Claude Code"]) {
+      const body = await footerOf({ developerName: "Slack user U0BSPTAFNG2", client });
+      expect(body).not.toContain("Slack user U");
+      expect(body).toContain("Requested by the task owner via AgentX");
+      expect(body).not.toContain("`");
+    }
+  });
+});
+
 describe("acceptPullRequest attribution and draft (FR-023, R14)", () => {
   it("keeps a display name with a backtick and a mention inert in the footer", async () => {
     const { db, actions, workspaceId } = await readyWorkspace();

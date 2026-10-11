@@ -42,13 +42,13 @@ export type WorkflowReviewerResponse = {
 };
 
 /** Strips one fenced block wrapping the whole answer, e.g. ```json\n{...}\n```. */
-function unfence(value: string): string {
+export function unfence(value: string): string {
   return /^\s*```[\w-]*[ \t]*\r?\n([\s\S]*?)\r?\n?```\s*$/.exec(value)?.[1] ?? value;
 }
 
-/** INTRODUCED before PRE_EXISTING, then HIGH > MEDIUM > LOW > no severity. */
+/** Findings that block before PRE_EXISTING and advisory ones, then HIGH > MEDIUM > LOW > no severity. */
 function rank(finding: WorkflowReviewFinding): number {
-  return (finding.origin === "INTRODUCED" ? 0 : 10) + (finding.severity === undefined ? 3 : SEVERITY_RANK[finding.severity]);
+  return (finding.origin === "INTRODUCED" && finding.advisory !== true ? 0 : 10) + (finding.severity === undefined ? 3 : SEVERITY_RANK[finding.severity]);
 }
 
 /**
@@ -83,11 +83,12 @@ function readEntry(entry: unknown): WorkflowReviewFinding | "SKIP" | undefined {
 
 /**
  * Reads a reviewer's JSON answer. `classify` sees every kept finding before ranking and the 20-finding cut,
- * so a finding it moves to INTRODUCED is ranked, and decides the status, as one.
+ * so a finding it moves to INTRODUCED is ranked, and decides the status, as one. The "advisory" flag is dropped from
+ * a SECURITY reviewer's findings: a security finding is never advisory, so it blocks (the owner's accept is the waiver).
  */
 export function parseWorkflowReviewerResponse(
   value: string,
-  options: { classify?: (finding: WorkflowReviewFinding) => WorkflowReviewFinding } = {},
+  options: { classify?: (finding: WorkflowReviewFinding) => WorkflowReviewFinding; role?: "CRITIC" | "SECURITY" } = {},
 ): WorkflowReviewerResponse {
   if (Buffer.byteLength(value, "utf8") > REVIEW_RESPONSE_MAX_BYTES) return { status: "UNKNOWN", findings: [], failureReason: "RESPONSE_TOO_LARGE" };
   let parsed: unknown;
@@ -101,9 +102,15 @@ export function parseWorkflowReviewerResponse(
   for (const entry of record.findings as unknown[]) {
     const finding = readEntry(entry);
     if (finding === undefined) return { status: "UNKNOWN", findings: [], failureReason: "INVALID_SHAPE" };
-    if (finding !== "SKIP") findings.push(options.classify === undefined ? finding : options.classify(finding));
+    if (finding === "SKIP") continue;
+    const classified = options.classify === undefined ? finding : options.classify(finding);
+    if (options.role === "SECURITY" && classified.advisory !== undefined) {
+      const { advisory: _advisory, ...blocking } = classified;
+      void _advisory;
+      findings.push(blocking);
+    } else findings.push(classified);
   }
   // Array.prototype.sort is stable, so equal-rank findings keep the reviewer's order.
   const kept = findings.sort((a, b) => rank(a) - rank(b)).slice(0, REVIEW_REPORT_MAX_FINDINGS);
-  return { status: kept.some((finding) => finding.origin === "INTRODUCED") ? "FINDINGS" : "PASS", findings: kept };
+  return { status: kept.some((finding) => finding.origin === "INTRODUCED" && finding.advisory !== true) ? "FINDINGS" : "PASS", findings: kept };
 }

@@ -190,6 +190,7 @@ export function allStackOutputs(env = "staging"): Record<string, StackOutputs> {
     [name("identity")]: { Issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_abc", Audience: "client123", ClientId: "client123", UserPoolId: "us-east-1_abc" },
     [name("control-plane")]: {
       ApiEndpoint: "https://abc123.execute-api.us-east-1.amazonaws.com",
+      GithubWebhookUrl: "https://abc123.execute-api.us-east-1.amazonaws.com/v1/github/webhooks",
       SlackEventsUrl: "https://abc123.execute-api.us-east-1.amazonaws.com/v1/slack/events",
       SlackInteractivityUrl: "https://abc123.execute-api.us-east-1.amazonaws.com/v1/slack/interactions",
       SlackSecretArn: `arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/${env}/slack-AbCdEf`,
@@ -249,7 +250,8 @@ export function initContext(overrides: Partial<Omit<InitContext, "secrets">> & {
   const opened: string[] = [];
   const store = storeWithInitLock();
   const secrets = memoryInitSecrets();
-  const deployer = scriptedDeployer(allStackOutputs());
+  // The control plane is deployed before the GitHub step, which reads its webhook URL.
+  const deployer = scriptedDeployer(allStackOutputs(), [environmentStackName("staging", "control-plane")]);
   const context: InitContext = {
     env: "staging",
     answers: sampleAnswers(),
@@ -302,18 +304,23 @@ export const TEST_PRIVATE_KEY = TEST_KEYS.privateKey.trim();
 export const TEST_PUBLIC_KEY = TEST_KEYS.publicKey;
 
 /** A GitHub that converts any code into an app owned by `owner`, installs it after `installAfterPolls` polls, and reports repository counts in turn. Installation tokens expire at `tokenExpiresAt` (default T0 plus one hour). */
-export function fakeGitHubApi(input: { owner?: string; ownerType?: string; installAfterPolls?: number; repositoryCounts?: number[]; installationId?: number; tokenExpiresAt?: number } = {}): GitHubApi & { conversions: string[]; polls: () => number; tokens: () => number } {
+export function fakeGitHubApi(input: { owner?: string; ownerType?: string; installAfterPolls?: number; repositoryCounts?: number[]; installationId?: number; tokenExpiresAt?: number; hookUrl?: string; events?: string[]; webhookSecret?: string } = {}): GitHubApi & { conversions: string[]; polls: () => number; tokens: () => number; hookWrites: Array<{ url: string; secret: string }> } {
   const conversions: string[] = [];
+  const hookWrites: Array<{ url: string; secret: string }> = [];
+  let hook: { url?: string; contentType?: string; insecureSsl?: string } = input.hookUrl === undefined ? {} : { url: input.hookUrl, contentType: "json", insecureSsl: "0" };
   let polls = 0;
   let tokens = 0;
   const counts = [...(input.repositoryCounts ?? [1])];
   const owner = { login: input.owner ?? "acme", type: input.ownerType ?? "Organization" };
   return {
     conversions,
+    hookWrites,
     polls: () => polls,
     tokens: () => tokens,
-    async convertManifest(code) { conversions.push(code); return { id: 424242, slug: "agentx-acme-staging", pem: TEST_PRIVATE_KEY, owner }; },
-    async getApp() { return { slug: "agentx-acme-staging", owner }; },
+    async convertManifest(code) { conversions.push(code); return { id: 424242, slug: "agentx-acme-staging", pem: TEST_PRIVATE_KEY, owner, ...(input.webhookSecret === undefined ? {} : { webhook_secret: input.webhookSecret }) }; },
+    async getApp() { return { slug: "agentx-acme-staging", owner, events: input.events ?? ["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment"] }; },
+    async getHookConfig() { return hook; },
+    async setHookConfig(_jwt, config) { hookWrites.push(config); hook = { url: config.url, contentType: "json", insecureSsl: "0" }; },
     async listInstallations() { polls += 1; return polls > (input.installAfterPolls ?? 0) ? [{ id: input.installationId ?? 777, account: { login: owner.login } }] : []; },
     async installationToken() { tokens += 1; return { token: "ghs_installation-token-value", expiresAt: input.tokenExpiresAt ?? T0 + 60 * 60 * 1000 }; },
     async repositoryCount() { return counts.length > 1 ? (counts.shift() as number) : (counts[0] as number); },
