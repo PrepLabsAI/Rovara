@@ -84,6 +84,8 @@ export const TaskCommentSchema = z.object({
   /** Set when a decision included the comment: it can no longer be edited or deleted. */
   lockedBy: z.object({ requestId: UuidSchema, decision: z.enum(["APPROVE", "REQUEST_CHANGES"]), at: DateTimeSchema }).strict().optional(),
   ask: z.object({ state: z.enum(["answering", "answered", "failed", "unavailable"]), at: DateTimeSchema }).strict().optional(),
+  /** Top-level comments: how many people's replies the thread holds (at most 20). */
+  replyCount: z.number().int().min(0).max(COMMENT_THREAD_REPLIES_MAX).optional(),
 }).strict().superRefine((comment, context) => {
   if (comment.deletedAt === undefined && comment.text.length === 0) context.addIssue({ code: "custom", path: ["text"], message: "a comment needs text" });
   if (comment.deletedAt !== undefined && comment.text.length > 0) context.addIssue({ code: "custom", path: ["text"], message: "a deleted comment keeps no text" });

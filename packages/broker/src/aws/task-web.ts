@@ -3,7 +3,8 @@
 // requests and its history. GET only, no forms, and one small script (by nonce) that opens and scrolls to a deep
 // link and, while the page is open, asks this origin's `/task/status` whether the task moved on. Every value is escaped; model and reviewer text is plain text in the page, so a link in it is never a link.
 import { randomBytes } from "node:crypto";
-import { redactText, type PlanDocument, type PlanEvidenceBundle } from "@agentx/contracts";
+import { redactText, type PlanDocument, type PlanEvidenceBundle, type TaskComment, type TaskSuggestion } from "@agentx/contracts";
+import type { TaskRole } from "../developer/task-access.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { checksAnchor, renderPlanDocument, type PlanAnchor } from "./plan-page/render-plan.js";
@@ -50,6 +51,12 @@ export interface TaskDocumentView {
   pullRequests: Array<{ url: string; number: number; state: string }>;
   /** What happened to the task's documents, newest first. `link` is a link inside this page. */
   history: Array<{ at: string; text: string; link?: string }>;
+  /** What the reader may do on the page now (spec 061 slice 2). */
+  access?: { role: TaskRole; canComment: boolean; canSuggest: boolean; canDecide: boolean; canAsk: boolean };
+  /** The task's comments, replies and AgentX replies, oldest first, as stored (redacted when written; the page escapes them). */
+  comments?: TaskComment[];
+  /** The suggestions that still apply to each document's current version. */
+  suggestions?: TaskSuggestion[];
 }
 
 export interface TaskWebDependencies {
@@ -306,7 +313,7 @@ const NO_ACCESS_HEADING = "No access";
 const NO_ACCESS = "You don't have access to this task.";
 
 /** A person's name as it reads inside a sentence: one line, redacted, cut short. messagePage escapes it. */
-function plainName(name: unknown): string | undefined {
+export function plainName(name: unknown): string | undefined {
   if (typeof name !== "string") return undefined;
   const characters = Array.from(redactText(name).replace(/[\p{Cc}\s]+/gu, " ").trim());
   if (characters.length === 0) return undefined;

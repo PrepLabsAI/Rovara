@@ -55,6 +55,8 @@ import {
   type StartDeveloperTaskRequest,
   type WorkspaceInstance,
   type WorkflowSnapshot,
+  type TaskComment,
+  type TaskSuggestion,
   workflowIsReviewOnly,
   workflowSelectedChecks,
   type ProjectCommand,
@@ -145,6 +147,8 @@ import { feedbackReviewNoticeId } from "../developer/notifications.js";
 import { feedbackNoticeToDecisionMeasure, feedbackRecommendationMeasure } from "../developer/feedback-review-measures.js";
 import { documentSummaryLines, isFeedbackReviewFailure, workflowDocumentName } from "../developer/workflow-messages.js";
 import type { TaskDocumentKind, TaskDocumentView, TaskFreshness } from "./task-web.js";
+import { pageAccess, resolveTaskAccess } from "../developer/task-access.js";
+import { listSuggestions, listTaskComments, suggestionsFor } from "../developer/page-comments.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -2051,45 +2055,9 @@ const cutReason = (reason: string): string => {
   return characters.length <= HISTORY_REASON_MAX_CHARS ? characters.join("") : `${characters.slice(0, HISTORY_REASON_MAX_CHARS - 1).join("")}…`;
 };
 
-/**
- * The task a task-page reader may see, and whether they own it. Not theirs, and no such task, both read as TASK_NOT_FOUND;
- * only an eligible teammate who is not in the task's channel gets TASK_ACCESS_DENIED with the owner's name.
- */
-async function visibleTaskForPage(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<{ task: DeveloperTaskRecord; owner: boolean }> {
-  const task = TASK_ID.test(taskId) ? await get<DeveloperTaskRecord>(deps, taskKey(taskId)) : undefined;
-  const notFound = () => agentXError("TASK_NOT_FOUND", "no task here that you can see");
-  if (task === undefined) throw notFound();
-  const owner = task.developerId === caller.developerId;
-  if (!owner) {
-    // Whatever fails below reads as "not found" too: an answer that differed would confirm the task exists.
-    let usesProject = false;
-    try {
-      await deps.checkAccess(task.project);
-      usesProject = true;
-    } catch (error) {
-      log(deps, { event: "developer.task_page_project_access_refused", taskId, errorName: error instanceof Error ? error.name : "unknown" });
-    }
-    const share = task.share;
-    if (!usesProject || share === undefined || caller.slackUserId === undefined || deps.channelMember === undefined) throw notFound();
-    let member: boolean;
-    try {
-      member = await deps.channelMember(caller.slackUserId, share.channelId);
-    } catch (error) {
-      log(deps, { event: "developer.task_page_membership_unavailable", taskId, errorName: error instanceof Error ? error.name : "unknown" });
-      throw notFound();
-    }
-    if (!member) {
-      // Only someone on the task's own Slack workspace who may use the project is told whom to ask.
-      if (deps.slackTeamId === undefined || share.teamId !== deps.slackTeamId) throw notFound();
-      throw Object.assign(agentXError("TASK_ACCESS_DENIED", "you can't open this task yet"), { owners: [task.developerName] });
-    }
-  }
-  return { task, owner };
-}
-
 /** Where the task stands now, for the open task page's "moved on" check: the same access rule as the page, two values only. */
 export async function getTaskFreshness(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskFreshness> {
-  const { task } = await visibleTaskForPage(deps, caller, taskId);
+  const { task } = await resolveTaskAccess(deps, caller, taskId);
   return { revision: task.workflow?.revision ?? 0, stage: taskPageStep(task.workflow, task.closedAt !== undefined) };
 }
 
@@ -2101,7 +2069,9 @@ export async function getTaskFreshness(deps: DeveloperTaskRouteDependencies, cal
  * through its recorded key and shown only when its digest matches; review findings are the current code's.
  */
 export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskDocumentView> {
-  const { task, owner } = await visibleTaskForPage(deps, caller, taskId);
+  const access = await resolveTaskAccess(deps, caller, taskId);
+  const { task } = access;
+  const owner = access.role === "owner";
   const workflow = task.workflow;
   const documents: TaskDocumentView["documents"] = [];
   const unverified: TaskDocumentKind[] = [];
@@ -2230,13 +2200,29 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     history.push({ at: decision.at, text, ...(found === undefined ? {} : { link: found.link }) });
   }
   history.sort((left, right) => right.at.localeCompare(left.at));
+  // Comments and suggestions never hide the page: when they cannot be read, the documents still show.
+  let comments: TaskComment[] = [];
+  let suggestions: TaskSuggestion[] = [];
+  try {
+    [comments, suggestions] = await Promise.all([listTaskComments(deps, taskId), listSuggestions(deps, taskId)]);
+  } catch (error) {
+    log(deps, { event: "developer.task_page_comments_unavailable", taskId, errorName: error instanceof Error ? error.name : "unknown" });
+  }
+  // A suggestion shows on the version it was made on, or on a later one where its decision did not change.
+  const shownSuggestions = TASK_PAGE_DOCUMENTS.flatMap(({ type, kind }) => {
+    const versions = documents.filter((document) => document.kind === kind && document.format === "structured");
+    const latest = versions.find((document) => document.current);
+    if (latest?.format !== "structured") return [];
+    const plans = new Map(versions.flatMap((document) => document.format === "structured" ? [[document.version, document.plan] as const] : []));
+    return suggestionsFor(suggestions, { document: type, version: latest.version, plan: latest.plan, plans });
+  });
   return {
     taskId, now: deps.now(), title: task.title, ...taskPageStage(workflow, task.closedAt !== undefined, owner, await publicationAttempts(deps, task)),
     path: workflow?.path ?? "QUICK", revision: workflow?.revision ?? 0, stage: taskPageStep(workflow, task.closedAt !== undefined), role: owner ? "owner" : "reader",
     documents, ...(unverified.length === 0 ? {} : { unverified }), checks, checksRan: results.length > 0, ...(checksNote === undefined ? {} : { checksNote }), findings,
     ...(acceptedFindings.length === 0 ? {} : { acceptedFindings }),
     pullRequests: (workflow?.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state })),
-    history,
+    history, access: pageAccess(access), comments, suggestions: shownSuggestions,
   };
 }
 
