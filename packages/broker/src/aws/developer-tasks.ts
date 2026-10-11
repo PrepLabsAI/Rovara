@@ -144,7 +144,7 @@ import { setupWatchKey } from "./stuck-setup.js";
 import { feedbackReviewNoticeId } from "../developer/notifications.js";
 import { feedbackNoticeToDecisionMeasure, feedbackRecommendationMeasure } from "../developer/feedback-review-measures.js";
 import { documentSummaryLines, isFeedbackReviewFailure, workflowDocumentName } from "../developer/workflow-messages.js";
-import type { TaskDocumentKind, TaskDocumentView } from "./task-web.js";
+import type { TaskDocumentKind, TaskDocumentView, TaskFreshness } from "./task-web.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -2051,7 +2051,11 @@ const cutReason = (reason: string): string => {
  * everyone else, including a reader whose checks failed, gets the answer a missing task gets. Each document is read
  * through its recorded key and shown only when its digest matches; review findings are the current code's.
  */
-export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskDocumentView> {
+/**
+ * The task a task-page reader may see, and whether they own it. Not theirs, and no such task, both read as TASK_NOT_FOUND;
+ * only an eligible teammate who is not in the task's channel gets TASK_ACCESS_DENIED with the owner's name.
+ */
+async function visibleTaskForPage(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<{ task: DeveloperTaskRecord; owner: boolean }> {
   const task = TASK_ID.test(taskId) ? await get<DeveloperTaskRecord>(deps, taskKey(taskId)) : undefined;
   const notFound = () => agentXError("TASK_NOT_FOUND", "no task here that you can see");
   if (task === undefined) throw notFound();
@@ -2080,6 +2084,17 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
       throw Object.assign(agentXError("TASK_ACCESS_DENIED", "you can't open this task yet"), { owners: [task.developerName] });
     }
   }
+  return { task, owner };
+}
+
+/** Where the task stands now, for the open task page's "moved on" check: the same access rule as the page, two values only. */
+export async function getTaskFreshness(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskFreshness> {
+  const { task } = await visibleTaskForPage(deps, caller, taskId);
+  return { revision: task.workflow?.revision ?? 0, stage: taskPageStep(task.workflow, task.closedAt !== undefined) };
+}
+
+export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskDocumentView> {
+  const { task, owner } = await visibleTaskForPage(deps, caller, taskId);
   const workflow = task.workflow;
   const documents: TaskDocumentView["documents"] = [];
   const unverified: TaskDocumentKind[] = [];
@@ -2210,7 +2225,7 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
   history.sort((left, right) => right.at.localeCompare(left.at));
   return {
     taskId, now: deps.now(), title: task.title, ...taskPageStage(workflow, task.closedAt !== undefined, owner, await publicationAttempts(deps, task)),
-    path: workflow?.path ?? "QUICK", stage: taskPageStep(workflow, task.closedAt !== undefined), role: owner ? "owner" : "reader",
+    path: workflow?.path ?? "QUICK", revision: workflow?.revision ?? 0, stage: taskPageStep(workflow, task.closedAt !== undefined), role: owner ? "owner" : "reader",
     documents, ...(unverified.length === 0 ? {} : { unverified }), checks, checksRan: results.length > 0, ...(checksNote === undefined ? {} : { checksNote }), findings,
     ...(acceptedFindings.length === 0 ? {} : { acceptedFindings }),
     pullRequests: (workflow?.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state })),

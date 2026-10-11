@@ -1,10 +1,12 @@
 // The task page's one script and its stylesheet. Both are static text: no model or reader value is ever put in them.
 
 /**
- * The page's one script. It only finds a deep link's target (the hash, else `?doc=`), opens every `<details>` around
+ * The page's one script. It finds a deep link's target (the hash, else `?doc=`), opens every `<details>` around
  * it and scrolls there. `#<document>/<claim>` (for example `#coding-plan/2.1`) means that claim of the document's
- * current version, built the way `claimAnchor` builds claim element IDs (`coding-plan-v2-2-1`). The page reads fully
- * without it.
+ * current version, built the way `claimAnchor` builds claim element IDs (`coding-plan-v2-2-1`). Then, every 20 s while
+ * the page is visible and for 30 minutes at most, it asks `/task/status` (same origin) where the task stands and, when that
+ * differs from the page, shows the hidden "moved on" banner; it never reloads by itself, so nothing half-typed is lost.
+ * The page reads fully without it.
  */
 export const TASK_PAGE_SCRIPT = String.raw`(function(){
 var CLAIM=/^([a-z]+(?:-[a-z]+)*)\/([1-9][0-9]{0,2}(?:\.[1-9][0-9]{0,2}){0,2})$/;
@@ -35,6 +37,29 @@ function go(){
 }
 go();
 window.addEventListener("hashchange",go);
+})();
+(function(){
+var box=document.getElementById("moved-on");
+if(!box||typeof fetch!=="function"||typeof setInterval!=="function")return;
+var url=box.getAttribute("data-check"),version=box.getAttribute("data-version"),stage=box.getAttribute("data-stage");
+if(!url||!/^\/review\/[0-9a-fA-F-]{36}\/task\/status$/.test(url))return;
+var EVERY=20000,LIMIT=30*60*1000,started=Date.now(),timer=null,asking=false;
+function stop(){if(timer!==null){clearInterval(timer);timer=null;}}
+function check(){
+  if(timer===null||asking||document.hidden)return;
+  if(Date.now()-started>=LIMIT){stop();return;}
+  asking=true;
+  fetch(url,{credentials:"same-origin",cache:"no-store",headers:{accept:"application/json"}}).then(function(reply){
+    if(reply.status===401||reply.status===403||reply.status===404){stop();return null;}
+    return reply.ok?reply.json():null;
+  }).then(function(now){
+    if(timer!==null&&now&&(String(now.revision)!==version||String(now.stage)!==stage)){stop();box.hidden=false;}
+  }).catch(function(){}).then(function(){asking=false;});
+}
+var refresh=document.getElementById("moved-on-refresh");
+if(refresh)refresh.addEventListener("click",function(){location.reload();});
+timer=setInterval(check,EVERY);
+document.addEventListener("visibilitychange",function(){if(!document.hidden)check();});
 })();`;
 
 /** Colours are custom properties with a dark set; nothing scrolls the page sideways at 360 px (code blocks and tables scroll inside themselves). */
@@ -112,6 +137,11 @@ main>section,.kind{border-top:1px solid var(--line);padding:.5rem 0}
 .history{padding-left:1.2rem}
 .history time{color:var(--muted);font-size:.85rem}
 .accepted-by{color:var(--muted)}
+[hidden]{display:none!important}
+.moved-on{position:sticky;top:0;z-index:1;display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem;margin:0 0 .75rem;padding:.5rem .8rem;background:var(--panel);border:1px solid var(--focus);border-radius:.4rem}
+.moved-on p{margin:0}
+.moved-on button{font:inherit;padding:.2rem .8rem;border:1px solid var(--focus);border-radius:999px;background:var(--bg);color:var(--fg);cursor:pointer}
+.moved-on button:focus{outline:3px solid var(--focus);outline-offset:2px}
 @media (max-width:35rem){body{padding:1rem}
 .checks table,.checks tbody,.checks tr{display:block;overflow-x:visible}
 .checks thead{position:absolute;height:1px;overflow:hidden;clip-path:inset(50%)}
