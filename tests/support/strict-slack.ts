@@ -268,6 +268,13 @@ export class StrictSlackWeb {
     this.replacements.push({ url, text: message.text, blocks: message.blocks });
   }
 
+  /** The post `ts`, which must carry action `actionId` (a press on an older card). */
+  postWithAction(actionId: string, ts: string): Post {
+    const found = this.posts.find((post) => post.ts === ts);
+    if (found === undefined || !hasAction(found.blocks, actionId)) throw new Error(`Post ${ts} does not carry action ${actionId}`);
+    return found;
+  }
+
   lastPostWithAction(actionId: string): Post {
     const found = [...this.posts].reverse().find((post) => hasAction(post.blocks, actionId));
     if (found === undefined) throw new Error(`No post carries action ${actionId}`);

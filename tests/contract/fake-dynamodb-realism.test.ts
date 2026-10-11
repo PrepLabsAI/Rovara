@@ -129,4 +129,18 @@ describe("FakeDynamoDb realism defaults", () => {
     const old = records[1]!.dynamodb!.OldImage!;
     expect(Object.keys(old.nested!.M!)).toEqual(Object.keys((db.reorder(item) as { nested: object }).nested));
   });
+
+  it("queries a sparse index by a sort key range with <, <=, >, >= or BETWEEN", async () => {
+    const db = new FakeDynamoDb();
+    for (const due of ["2026-01-01", "2026-01-02", "2026-01-03"]) {
+      await db.send(new PutCommand({ TableName: TABLE, Item: { pk: `ROW#${due}`, sk: "META", duePk: "DUE", dueSk: due } }));
+    }
+    const due = async (condition: string, values: Record<string, string>) => ((await db.send(new QueryCommand({ TableName: TABLE, IndexName: "due",
+      KeyConditionExpression: `duePk = :pk AND dueSk ${condition}`, ExpressionAttributeValues: { ":pk": "DUE", ...values } })) as { Items: Array<{ dueSk: string }> }).Items.map((item) => item.dueSk));
+    expect(await due("<= :to", { ":to": "2026-01-02" })).toEqual(["2026-01-01", "2026-01-02"]);
+    expect(await due("< :to", { ":to": "2026-01-02" })).toEqual(["2026-01-01"]);
+    expect(await due("> :from", { ":from": "2026-01-02" })).toEqual(["2026-01-03"]);
+    expect(await due(">= :from", { ":from": "2026-01-02" })).toEqual(["2026-01-02", "2026-01-03"]);
+    expect(await due("BETWEEN :from AND :to", { ":from": "2026-01-02", ":to": "2026-01-03" })).toEqual(["2026-01-02", "2026-01-03"]);
+  });
 });

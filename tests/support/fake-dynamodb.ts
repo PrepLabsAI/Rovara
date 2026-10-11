@@ -220,16 +220,21 @@ export class FakeDynamoDb {
     const values = input.ExpressionAttributeValues as Values;
     if (input.IndexName !== undefined) {
       const names = (input.ExpressionAttributeNames ?? {}) as Names;
-      // An index with a sort key range, as the turn and workspace reads send it (spec 025 phase 25d):
-      // `<attribute> = :v AND <sort> >= :a` or `<attribute> = :v AND <sort> BETWEEN :a AND :b`.
+      // An index with a sort key range, as the turn and workspace reads send it (spec 025 phase 25d), and the webhook
+      // recovery sweep's due rows: `<attribute> = :v AND <sort> (>=|>|<=|<) :a` or `<attribute> = :v AND <sort> BETWEEN :a AND :b`.
       const name = (token: string) => (token.startsWith("#") ? names[token]! : token);
       const ranged = INDEX_RANGE.exec(String(input.KeyConditionExpression));
       if (ranged) {
         const [partition, sort] = [name(ranged[1]!), name(ranged[3]!)];
-        const low = values[ranged[5]!] as string;
+        const operator = ranged[4]!;
+        const bound = values[ranged[5]!] as string;
         const high = ranged[6] === undefined ? undefined : values[ranged[6]] as string;
-        const found = this.find((item) => item[partition] === values[ranged[2]!] && typeof item[sort] === "string"
-          && compareKeys(item[sort], low) >= 0 && (high === undefined || compareKeys(item[sort], high) <= 0))
+        const inRange = (value: string): boolean => {
+          const order = compareKeys(value, bound);
+          if (operator === "BETWEEN") return order >= 0 && compareKeys(value, high!) <= 0;
+          return operator === ">=" ? order >= 0 : operator === ">" ? order > 0 : operator === "<=" ? order <= 0 : order < 0;
+        };
+        const found = this.find((item) => item[partition] === values[ranged[2]!] && typeof item[sort] === "string" && inRange(item[sort]))
           // Items that share a sort value keep one order, by table key, so a page boundary between them skips nothing.
           .sort((left, right) => compareTuples(indexOrder(left, sort), indexOrder(right, sort)));
         if (input.ScanIndexForward === false) found.reverse();
@@ -347,7 +352,7 @@ export class FakeDynamoDb {
 }
 
 const INDEX_EQUALS = /^(#?[A-Za-z0-9_]+) = (:[A-Za-z0-9_]+)$/;
-const INDEX_RANGE = /^(#?[A-Za-z0-9_]+) = (:[A-Za-z0-9_]+) AND (#?[A-Za-z0-9_]+) (>=|BETWEEN) (:[A-Za-z0-9_]+)(?: AND (:[A-Za-z0-9_]+))?$/;
+const INDEX_RANGE = /^(#?[A-Za-z0-9_]+) = (:[A-Za-z0-9_]+) AND (#?[A-Za-z0-9_]+) (>=|<=|>|<|BETWEEN) (:[A-Za-z0-9_]+)(?: AND (:[A-Za-z0-9_]+))?$/;
 
 /** An index item's position: its sort value, then its table keys. */
 function indexOrder(item: Record<string, unknown>, sort: string): string[] {

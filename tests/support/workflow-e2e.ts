@@ -8,6 +8,7 @@ import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
+import { onTestFinished, vi } from "vitest";
 import {
   SharedTaskRecordSchema,
   SlackChannelBindingSchema,
@@ -43,6 +44,11 @@ import type { Notice, StreamRecord } from "../../packages/broker/src/developer/n
 import type { GitHubFeedbackComment, GitHubPullRequestFeedback } from "../../packages/broker/src/github-app.js";
 import { GitHubAppCredentialProvider, webhookSecretFromSecret } from "../../packages/broker/src/github-app.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
+import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
+import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
+import { createEc2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js";
+import { failActiveOperation, failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
+import type { DurableOutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import { runPlanEvidenceJob, type PlanEvidenceRunOutcome } from "../../packages/broker/src/aws/plan-evidence-handler.js";
 import type { PlanEvidenceEvent } from "../../packages/broker/src/developer/plan-evidence-jobs.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
@@ -52,7 +58,8 @@ import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import type { CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
-import { MAYA, createDeveloperTaskBroker, recordStream, type Developer } from "./developer-task-broker.js";
+import { DEV_ISSUER, MAYA, createDeveloperTaskBroker, recordStream, type Developer } from "./developer-task-broker.js";
+import { signedInClient, type ToolAnswer } from "./mcp-broker-client.js";
 import { FAUX_MODEL, fauxModelRuntime } from "./faux-model.js";
 import { workflowModel, type WorkflowTurn } from "./faux-scripts.js";
 import { planAnswer, planDocument, turnPlanIntoMarkdown } from "./plan-documents.js";
@@ -154,11 +161,31 @@ function wireFeedbackReader(github: FakeGitHub): (repositoryUrl: string, number:
 export type E2EWebhookEvent =
   | { kind: "issue_comment" | "pull_request_review_comment"; action?: "created" | "edited" | "deleted"; number: number; comment: GitHubFeedbackComment }
   | { kind: "pull_request_review"; action?: "submitted" | "edited" | "dismissed"; number: number; review: GitHubFeedbackComment; body?: string | null; state?: string }
-  | { kind: "pull_request"; action: "synchronize" | "closed" | "opened" | "reopened" | "edited"; number: number; merged?: boolean };
+  | { kind: "pull_request"; action: "synchronize" | "closed" | "opened" | "reopened" | "edited" | "ready_for_review" | "converted_to_draft"; number: number; merged?: boolean };
 
 /** GitHub's numeric ID for a feedback item (`discussion:12` -> 12). */
 function githubDatabaseId(id: string): number {
   return Number(id.slice(id.indexOf(":") + 1));
+}
+
+/**
+ * What the session reconciler records on a workspace's active operation when the worker's compute is lost mid-run
+ * (packages/broker/src/aws/session-reconciler.ts, its call to failActiveOperation).
+ */
+export const LOST_COMPUTE_ERROR = "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request";
+
+/**
+ * Maya as AgentX knows her after "Sign in with Slack": her developer ID is her Slack user's (the ID a task she starts in
+ * Slack is owned by), so the review pages and MCP see her Slack-started tasks as hers. (The shared MAYA fixture's ID is a
+ * placeholder that no Slack sign-in would produce.)
+ */
+export const SLACK_MAYA: Developer = { ...MAYA, developerId: developerIdForSlackUser(MAYA.slackUserId!), sessionId: "s-maya-slack" };
+
+/** A worker invocation to match: its kind, or a task's kind and workflow mode (`task:REVIEW`). */
+export type E2EInvocationKind = WorkerInvocation["kind"] | `task:${NonNullable<Extract<WorkerInvocation, { kind: "task" }>["payload"]["workflowMode"]>}`;
+
+function invocationMatches(invocation: WorkerInvocation, kind: E2EInvocationKind): boolean {
+  return kind === invocation.kind || (invocation.kind === "task" && kind === `task:${String(invocation.payload.workflowMode)}`);
 }
 
 /** The brief limit on a task thread's messages (1,200 visible characters), on by default. */
@@ -204,6 +231,8 @@ export async function createWorkflowE2E(options: {
   github?: FakeGitHubOptions & { wire?: boolean };
   /** The App secret's webhook secret: absent for the default; null when the secret holds none (the broker answers 503). */
   webhookSecret?: string | null;
+  /** The worker's review timeouts (the run-task seam); absent, the reviews' own 5 minutes. */
+  workerTimeouts?: { reviewMs?: number; feedbackReviewMs?: number };
 } = {}) {
   const github = new FakeGitHub(options.github?.realism === undefined ? {} : { realism: options.github.realism });
   // The webhook secret GitHub signs with, and the copy the broker's container has cached (it re-reads on { refresh: true }).
@@ -229,6 +258,11 @@ export async function createWorkflowE2E(options: {
     },
   });
   const { db, s3 } = harness;
+  // Maya's Slack sign-in: her session and developer records, keyed by her Slack user's developer ID.
+  db.set({ pk: `SESSION#${SLACK_MAYA.sessionId}`, sk: "META", sessionId: SLACK_MAYA.sessionId, developerId: SLACK_MAYA.developerId, amr: "slack",
+    startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
+  db.set({ pk: `DEVELOPER#${SLACK_MAYA.developerId}`, sk: "META", developerId: SLACK_MAYA.developerId, provider: "slack", displayName: SLACK_MAYA.name,
+    slackUserId: SLACK_MAYA.slackUserId, firstSignInAt: "x", lastSignInAt: "x", revoked: false });
   const readiness = options.readiness ?? [E2E_CHECK];
   await registerSlackProject(harness.handler, { readiness,
     ...(options.optionalChecks === undefined ? {} : { developerTasks: { optionalWorkflowChecks: options.optionalChecks } }) });
@@ -419,12 +453,49 @@ export async function createWorkflowE2E(options: {
     return { ...record, dynamodb: { ...rest, ...(newImage === undefined ? {} : { NewImage: newImage }), ...(oldImage === undefined ? {} : { OldImage: oldImage }) } };
   };
 
-  /** Every invocation the worker was given, as the broker queued it. */
+  /** Faults and version skew the test asked the worker for (`e2e.worker`). */
+  const crashes: Array<{ kind: E2EInvocationKind; afterPush: boolean }> = [];
+  const failures: Array<{ kind: E2EInvocationKind; message: string }> = [];
+  const strippedFields: string[] = [];
+  let workerFeatureList: readonly string[] | undefined;
+  /** Runs that crashed (no terminal callback), by workspace, until a recovery sweep fails them. */
+  const crashed: Array<{ workspaceId: string; operationId: string; kind: WorkerInvocation["kind"] }> = [];
+  /** Invocations the dispatcher could not deliver (the worker's /ping lacked a feature), with the error it recorded. */
+  const deliveryFailures: Array<{ operationId: string; kind: WorkerInvocation["kind"]; error: string }> = [];
+  const takeFault = <T extends { kind: E2EInvocationKind }>(queue: T[], invocation: WorkerInvocation): T | undefined => {
+    const index = queue.findIndex((entry) => invocationMatches(invocation, entry.kind));
+    return index === -1 ? undefined : queue.splice(index, 1)[0];
+  };
+
+  /** Every invocation the worker was given, as the broker queued it (after any delivery downgrade). */
   const invocations: WorkerInvocation[] = [];
-  const runInvocation = async (invocation: WorkerInvocation): Promise<void> => {
+  const runInvocation = async (queued: WorkerInvocation): Promise<void> => {
+    // An old broker: the fields it did not know are not in the payload at all.
+    const invocation = strippedFields.length === 0 ? queued
+      : { ...queued, payload: Object.fromEntries(Object.entries(queued.payload).filter(([key]) => !strippedFields.includes(key))) } as WorkerInvocation;
     invocations.push(invocation);
     const callbacks = createWorkerCallbackSinks({ controlPlaneUrl: CONTROL_PLANE_URL, invocation, fetchImplementation: workerFetch(handler) });
     const { operationId } = invocation;
+    const failure = takeFault(failures, invocation);
+    if (failure !== undefined) {
+      await callbacks.terminalSink({ operationId, status: "FAILED", error: failure.message });
+      return;
+    }
+    const crash = takeFault(crashes, invocation);
+    if (crash !== undefined) {
+      crashed.push({ workspaceId: invocation.workspaceId, operationId, kind: invocation.kind });
+      // With afterPush the worker gets as far as its push, then its compute is gone: no callback of any kind.
+      if (crash.afterPush && (invocation.kind === "publish" || invocation.kind === "maintain")) {
+        const silent = { ...callbacks, pullRequestSink: async () => { throw new Error("the worker crashed after its push"); },
+          pullRequestUpdateSink: async () => { throw new Error("the worker crashed after its push"); } } as unknown as typeof callbacks;
+        github.during = invocation.kind;
+        try {
+          if (invocation.kind === "publish") await publish(invocation, silent);
+          else await maintain(invocation, silent);
+        } catch { /* the crash */ } finally { github.during = undefined; }
+      }
+      return;
+    }
     await probeCredentials(invocation);
     if (invocation.kind === "prepare") {
       await callbacks.terminalSink({ operationId, status: "SUCCEEDED", result: { manifestPath: MANIFEST_PATH, projectName: "payments", projectRevision: invocation.projectRevision,
@@ -438,6 +509,7 @@ export async function createWorkflowE2E(options: {
       result = invocation.kind === "publish" ? await publish(invocation, callbacks) : invocation.kind === "maintain" ? await maintain(invocation, callbacks) : await runTaskInvocation(invocation, {
         rootPath: root, model: FAUX_MODEL, piAdapter, eventSink: callbacks.eventSink, artifactSink: callbacks.artifactSink,
         feedbackBundleReader: callbacks.feedbackBundleReader, authorizeFeedbackApproval: callbacks.authorizeFeedbackApproval, checkRunners,
+        ...(options.workerTimeouts === undefined ? {} : { timeouts: options.workerTimeouts }),
       });
     } catch (error) {
       await callbacks.terminalSink({ operationId, status: "FAILED", error: error instanceof Error ? error.message : String(error) });
@@ -461,6 +533,39 @@ export async function createWorkflowE2E(options: {
       return parsed.data;
     }
     return undefined;
+  };
+
+  /**
+   * Deploy skew: the invocation goes through the production dispatcher (one attempt) and EC2 delivery, whose feature gate
+   * asks the worker's /ping (answered with `e2e.worker.features(...)`) and drops or refuses what that worker cannot parse.
+   * Answers what the worker would receive, or undefined when the dispatcher failed the operation instead.
+   */
+  const deliverThroughDispatcher = async (invocation: WorkerInvocation): Promise<WorkerInvocation | undefined> => {
+    const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === invocation.operationId)[0];
+    if (outbox === undefined) throw new Error(`no outbox record for operation ${invocation.operationId}`);
+    let sent: WorkerInvocation | undefined;
+    const features = workerFeatureList ?? [];
+    const dispatch = createDispatcherHandler({
+      maxAttempts: 1,
+      markDispatching: async () => true,
+      markDelivered: async () => undefined,
+      markFailed: async (record, error) => {
+        deliveryFailures.push({ operationId: record.operationId, kind: record.invocation.kind, error });
+        await failOutboxOperation(db as never, "state", record, error);
+      },
+      log: () => undefined,
+      deliverEc2: createEc2Delivery({
+        sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "10.0.0.9" }) },
+        binding: async () => ({ deploymentMode: "ec2-ebs" }) as never,
+        sign: async () => new Uint8Array(64),
+        post: async (_url, init) => { sent = WorkerInvocationSchema.parse(JSON.parse(init.body)); return { status: 202, body: "" }; },
+        progress: async () => undefined,
+        workerFeatures: async () => features,
+      }),
+    });
+    const record: Partial<DurableOutboxRecord> = { ...outbox, invocation };
+    await dispatch({ Records: [{ messageId: `dispatch-${invocation.operationId}`, body: JSON.stringify(record), attributes: { ApproximateReceiveCount: "1" } }] });
+    return sent;
   };
 
   // The notifier, fed from the table's writes as the stream would feed it.
@@ -622,6 +727,35 @@ export async function createWorkflowE2E(options: {
   /** What each chat-agent answer turn was given: the text the model saw, and the tools it could use. */
   const taskAnswerTurns: Array<{ question: string; modelInput: string; tools: string[] }> = [];
 
+  // The clock: fake Date only, so git subprocesses and timers keep working. Installed on first use, restored when the test ends.
+  let clockInstalled = false;
+  const installClock = () => {
+    if (clockInstalled) return;
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    clockInstalled = true;
+    onTestFinished(() => { vi.useRealTimers(); clockInstalled = false; });
+  };
+  const clock = {
+    now: (): number => Date.now(),
+    /** Moves the clock forward by `ms`. */
+    advance: (ms: number): void => { installClock(); vi.setSystemTime(Date.now() + ms); },
+    /** Sets the clock to `iso`. */
+    set: (iso: string): void => { installClock(); vi.setSystemTime(new Date(iso)); },
+  };
+
+  /** A browser review sign-in as `reader` (its own session record, with a review expiry), as the review pages need. */
+  const browserSession = (reader: Developer): string => {
+    const sessionId = reader.developerId === MAYA.developerId ? "b0b0b0b0-0000-4000-8000-000000000001" : `b0b0b0b0-0000-4000-8000-${reader.developerId.slice(0, 12)}`;
+    db.set({ pk: `SESSION#${sessionId}`, sk: "META", sessionId, developerId: reader.developerId, amr: reader.provider,
+      startedAt: new Date().toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800, reviewExpiresAt: Math.floor(Date.now() / 1000) + 604_800 });
+    return sessionId;
+  };
+  /** The review pages' origin, as a browser on them sends it. */
+  const reviewOrigin = new URL(DEV_ISSUER).origin;
+  let feedbackCsrf: string | undefined;
+
+  const mcpClients = new Map<string, Awaited<ReturnType<typeof signedInClient>>>();
+
   let sequence = 0;
   return {
     /** Runs, as the PlanEvidence Lambda would, every job the broker started since the last call; answers what each did. */
@@ -674,22 +808,30 @@ export async function createWorkflowE2E(options: {
     },
     db, s3, handler, slack, github, repoDirectory, baseCommit, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs,
 
-    /** A signed Events API callback for a message in the test thread; answers the HTTP status. */
-    async mention(text: string, mentionOptions: { user?: string; threadTs?: string; type?: "app_mention" | "message"; ts?: string } = {}): Promise<number> {
+    /**
+     * A signed Events API callback for a message in the test thread; answers the HTTP status. `subtype` and `botId` make it
+     * a message Slack marks as such (an edit, a bot's post), `eventId` reuses an event ID, and `retryNum` sends it as Slack's
+     * retry of an earlier delivery (X-Slack-Retry-Num).
+     */
+    async mention(text: string, mentionOptions: { user?: string; threadTs?: string; type?: "app_mention" | "message"; ts?: string; subtype?: string; botId?: string; eventId?: string; retryNum?: number } = {}): Promise<number> {
       sequence += 1;
       const threadTs = mentionOptions.threadTs ?? THREAD_TS;
       const ts = mentionOptions.ts ?? `1695500000.${String(sequence).padStart(6, "0")}`;
       const type = mentionOptions.type ?? "app_mention";
       const payload = {
-        type: "event_callback", team_id: SLACK_TEAM, event_id: `Ev${String(sequence).padStart(10, "0")}`,
+        type: "event_callback", team_id: SLACK_TEAM, event_id: mentionOptions.eventId ?? `Ev${String(sequence).padStart(10, "0")}`,
         authorizations: [{ team_id: SLACK_TEAM, user_id: BOT_USER, is_bot: true }],
         event: {
           type, user: mentionOptions.user ?? MAYA.slackUserId, team: SLACK_TEAM, channel: SLACK_CHANNEL, ts,
           ...(ts === threadTs ? {} : { thread_ts: threadTs }),
+          ...(mentionOptions.subtype === undefined ? {} : { subtype: mentionOptions.subtype }),
+          ...(mentionOptions.botId === undefined ? {} : { bot_id: mentionOptions.botId }),
           text: type === "app_mention" ? `<@${BOT_USER}> ${text}` : text,
         },
       };
-      const status = (await ingress(signedRequest("/v1/slack/events", JSON.stringify(payload)))).statusCode;
+      const request = signedRequest("/v1/slack/events", JSON.stringify(payload));
+      if (mentionOptions.retryNum !== undefined) request.headers = { ...request.headers, "X-Slack-Retry-Num": String(mentionOptions.retryNum), "X-Slack-Retry-Reason": "http_timeout" };
+      const status = (await ingress(request)).statusCode;
       // The Slack service takes a routed request off the queue after Slack has its answer.
       await runRoutedRequests();
       return status;
@@ -767,15 +909,25 @@ export async function createWorkflowE2E(options: {
       cachedSecret = next;
     },
 
-    /** Presses the button `actionId` on the latest message that carries it. */
-    async click(actionId: string, clickOptions: { user?: string } = {}): Promise<void> {
-      const post = slack.lastPostWithAction(actionId);
+    /**
+     * Presses the button `actionId` on the latest message that carries it (or on the message `messageTs`, an older card),
+     * as `user`; `deliver: "twice"` sends the same press twice, as a double click or Slack's retry does.
+     */
+    async click(actionId: string, clickOptions: { user?: string; messageTs?: string; deliver?: "once" | "twice" } = {}): Promise<void> {
+      const post = clickOptions.messageTs === undefined ? slack.lastPostWithAction(actionId) : slack.postWithAction(actionId, clickOptions.messageTs);
       const value = actionElement(post.blocks, actionId)?.value ?? "";
-      await interact({
+      const payload = {
         type: "block_actions", user: { id: clickOptions.user ?? MAYA.slackUserId, team_id: SLACK_TEAM }, team: { id: SLACK_TEAM },
         container: { channel_id: post.channel, message_ts: post.ts, thread_ts: post.threadTs }, message: { ts: post.ts, thread_ts: post.threadTs, text: post.text },
         response_url: RESPONSE_URL, trigger_id: "1.2.3", actions: [{ action_id: actionId, value, action_ts: "1695500100.000001" }],
-      });
+      };
+      await interact(payload);
+      if (clickOptions.deliver === "twice") await interact(payload);
+    },
+
+    /** Runs the steps at once (each a press, a mention or a delivery) and waits for all of them. */
+    async concurrently(...steps: Array<() => Promise<unknown>>): Promise<unknown[]> {
+      return Promise.all(steps.map((step) => step()));
     },
 
     /** Submits the latest opened modal with these input values; throws when Slack would show form errors. */
@@ -797,7 +949,8 @@ export async function createWorkflowE2E(options: {
         if (invocation === undefined) break;
         if (step >= maxSteps) throw new Error(`the workflow did not settle within ${maxSteps} steps`);
         processed.add(invocation.operationId);
-        await runInvocation(invocation);
+        const delivered = workerFeatureList === undefined ? invocation : await deliverThroughDispatcher(invocation);
+        if (delivered !== undefined) await runInvocation(delivered);
       }
       await pumpNotices();
     },
@@ -817,16 +970,96 @@ export async function createWorkflowE2E(options: {
      * default), exactly as a browser sends it. Not counted in `brokerCalls`: it is a person's page view, not part of the Slack journey.
      */
     async taskPage(search = "", reader: Developer = MAYA): Promise<{ status: number; body: string }> {
-      // A browser review sign-in is its own session record (a UUID, with a review expiry), not the CLI session.
-      const browserSession = "b0b0b0b0-0000-4000-8000-000000000001";
-      db.set({ pk: `SESSION#${browserSession}`, sk: "META", sessionId: browserSession, developerId: reader.developerId, amr: reader.provider,
-        startedAt: new Date().toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800, reviewExpiresAt: Math.floor(Date.now() / 1000) + 604_800 });
       const response = await harness.handler({
         version: "2.0", routeKey: "ANY /review/{proxy+}", rawPath: `/review/${this.taskId()}/task`, rawQueryString: search.replace(/^\?/, ""),
-        headers: { cookie: `__Host-agentx_review_session=${browserSession}` },
+        headers: { cookie: `__Host-agentx_review_session=${browserSession(reader)}` },
         requestContext: { requestId: randomUUID(), http: { method: "GET" } },
       });
       return { status: response.statusCode, body: response.body };
+    },
+
+    /**
+     * The PR feedback review page (`/review/<task>`), as `reader`'s browser fetches it (Maya's Slack sign-in by default); remembers the CSRF cookie the page
+     * sets, for `feedbackDecision`. `api: true` fetches its JSON (`/review/<task>/api`) instead.
+     */
+    async feedbackPage(reader: Developer = SLACK_MAYA, pageOptions: { api?: boolean } = {}): Promise<{ status: number; body: string; csrf?: string }> {
+      const response = await harness.handler({
+        version: "2.0", routeKey: "ANY /review/{proxy+}", rawPath: `/review/${this.taskId()}${pageOptions.api === true ? "/api" : ""}`, rawQueryString: "",
+        headers: { cookie: [`__Host-agentx_review_session=${browserSession(reader)}`, ...(feedbackCsrf === undefined ? [] : [`__Host-agentx_review_csrf=${feedbackCsrf}`])].join("; ") },
+        requestContext: { requestId: randomUUID(), http: { method: "GET" } },
+      });
+      const setCookie = (response as { headers?: Record<string, string> }).headers?.["set-cookie"];
+      const csrf = typeof setCookie === "string" ? /__Host-agentx_review_csrf=([^;]+)/.exec(setCookie)?.[1] : undefined;
+      if (csrf !== undefined) feedbackCsrf = csrf;
+      return { status: response.statusCode, body: response.body, ...(feedbackCsrf === undefined ? {} : { csrf: feedbackCsrf }) };
+    },
+
+    /**
+     * A decision posted from the PR feedback page, as its script sends it: the CSRF cookie and header (the page's, or
+     * `csrf`; null sends none) and the page's origin (or `origin`). Answers the status and parsed reply.
+     */
+    async feedbackDecision(body: Record<string, unknown>, decisionOptions: { csrf?: string | null; origin?: string; reader?: Developer } = {}): Promise<{ status: number; body: Record<string, unknown> }> {
+      const csrf = decisionOptions.csrf === null ? undefined : decisionOptions.csrf ?? feedbackCsrf;
+      const response = await harness.handler({
+        version: "2.0", routeKey: "ANY /review/{proxy+}", rawPath: `/review/${this.taskId()}/api/decision`, rawQueryString: "", body: JSON.stringify(body),
+        headers: { cookie: [`__Host-agentx_review_session=${browserSession(decisionOptions.reader ?? SLACK_MAYA)}`, ...(csrf === undefined ? [] : [`__Host-agentx_review_csrf=${csrf}`])].join("; "),
+          origin: decisionOptions.origin ?? reviewOrigin, "content-type": "application/json", ...(csrf === undefined ? {} : { "x-agentx-csrf": csrf }) },
+        requestContext: { requestId: randomUUID(), http: { method: "POST" } },
+      });
+      return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
+    },
+
+    /** The clock (fake Date only): `now()`, `advance(ms)`, `set(iso)`. Restored when the test ends. */
+    clock,
+
+    /** Worker faults and version skew, each for the next matching invocation (`kind`, or `task:<mode>`). */
+    worker: {
+      /** The next matching run's compute is lost: no terminal callback. With `afterPush` (publish, maintain) it pushes first. */
+      crashNext: (kind: E2EInvocationKind, crashOptions: { afterPush?: boolean } = {}): void => { crashes.push({ kind, afterPush: crashOptions.afterPush === true }); },
+      /** The next matching run fails at once with `message`, without running. */
+      failNext: (kind: E2EInvocationKind, message: string): void => { failures.push({ kind, message }); },
+      /** An old broker: these payload fields are left out of every later invocation. */
+      stripInvocationFields: (fields: string[]): void => { strippedFields.push(...fields); },
+      /**
+       * An old (or new) worker: from now on every invocation goes through the production dispatcher and EC2 delivery, whose
+       * /ping answers `list`; undefined goes back to running each outbox invocation as queued.
+       */
+      features: (list: readonly string[] | undefined): void => { workerFeatureList = list; },
+      /** Runs that crashed and that no sweep has failed yet. */
+      crashed,
+      /** Invocations the dispatcher failed instead of delivering, with the error it recorded. */
+      deliveryFailures,
+    },
+
+    /**
+     * The broker's recovery sweeps: the scheduled workflow dispatch recovery (`agentx.workflow-dispatch-recovery`, which
+     * re-runs a dispatch left behind after its result committed, and starts due plan evidence jobs), then the session
+     * reconciler's lost-compute step for each crashed run (production failActiveOperation with LOST_COMPUTE_ERROR, as
+     * the reconciler records it when a worker's compute is gone). It is the reconciler's step that ends a lost run (the
+     * dispatch sweep only re-runs dispatches whose result committed); failing the operation also blocks the workflow step it
+     * was running, with its retry (outbox-failure.ts, blockFailedWorkflowRun).
+     */
+    async runRecovery(): Promise<{ dispatch: { statusCode: number; body: Record<string, unknown> }; lostOperations: string[] }> {
+      const response = await harness.handler({ source: "agentx.workflow-dispatch-recovery" });
+      const lostOperations: string[] = [];
+      for (const lost of crashed.splice(0)) {
+        const failed = await failActiveOperation(db as never, "state", lost.workspaceId, LOST_COMPUTE_ERROR);
+        if (failed !== undefined) lostOperations.push(failed);
+      }
+      return { dispatch: { statusCode: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> }, lostOperations };
+    },
+
+    /**
+     * An MCP tool call through `agentx mcp`'s real server and packages/mcp tools, signed in as `who` (Maya's Slack sign-in
+     * by default), against this broker.
+     */
+    async mcp(tool: string, args: Record<string, unknown> = {}, who: Developer = SLACK_MAYA): Promise<ToolAnswer> {
+      let client = mcpClients.get(who.developerId);
+      if (client === undefined) {
+        client = await signedInClient({ handler: harness.handler } as never, who);
+        mcpClients.set(who.developerId, client);
+      }
+      return client.tool(tool, args);
     },
 
     repoFile: (path: string): Promise<string> => readFile(join(repoDirectory, path), "utf8"),

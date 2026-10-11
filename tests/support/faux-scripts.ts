@@ -4,6 +4,9 @@ import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep, type Transcr
 
 export const DONE = "AgentX result: done";
 
+/** Named, documented model answers for the workflow E2E suites. */
+export * from "./model-fixtures.js";
+
 type Message = TranscriptContext["messages"][number];
 export type WorkflowTurn = { role: "PLAN" | "CODE" | "SECURITY" | "CODER" | "FEEDBACK"; userText: string };
 type ReviewRole = "CODE" | "SECURITY";
