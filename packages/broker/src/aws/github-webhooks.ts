@@ -146,7 +146,7 @@ export interface ReconcileTaskPullRequestFeedbackInput {
   repositoryFullName: string; number: number; deliveryId: string;
   /** The head a push event says the pull request now has (a hint): until GitHub's own read shows it, nothing is decided. */
   expectedHeadSha?: string;
-  loadTask(taskId: string): Promise<{ project: string; startingRevision: number; workflow?: WorkflowSnapshot } | undefined>;
+  loadTask(taskId: string): Promise<{ project: string; startingRevision: number; closedAt?: string; workflow?: WorkflowSnapshot } | undefined>;
   repositoryUrl(project: string, revision: number, repositoryId: string): Promise<string | undefined>;
   getCurrentFeedback(repositoryUrl: string, number: number): Promise<GitHubPullRequestFeedback>;
   /** Writes exact payload bytes to immutable content-addressed storage; never overwrites an artifact. */
@@ -173,6 +173,10 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const task = await input.loadTask(linked.taskId);
     const current = task?.workflow;
+    // A task whose pull requests all merged is complete, and a closed task no longer follows its pull requests: a later
+    // event (a redelivered merge, a comment, a merge after the owner closed the task) changes nothing, so it is neither
+    // recorded nor said, and is not retried.
+    if (task?.closedAt !== undefined || (current?.stage === "MERGED" && current.state === "COMPLETE")) return false;
     if (!task || !current || !tracksLinkedPullRequests(current)
       || !current.pullRequests?.some(pr => pr.repositoryId === linked.repositoryId && pr.number === linked.number
         && pr.url === linked.url && pr.candidateDigest === linked.candidateDigest)) {
