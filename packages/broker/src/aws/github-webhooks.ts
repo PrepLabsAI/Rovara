@@ -312,8 +312,12 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
         && p.candidateDigest === b.candidateDigest && p.commentSetDigest === b.commentSetDigest));
       // Unchanged content (comment set, heads, trees and threads) is never collected again: a new bundle would be recorded
       // under another digest only for its delivery ID and time, and an owner's decision bound to the old one would be stale.
+      // No feedback yet and none now (an approval with no summary, a pull request marked ready): nothing to review or say.
+      const nothingToReview = prior === undefined && observations.length === 0 && bundles.every(b => b.comments.length === 0);
       if (same && sameThreadObservations(prior.threadObservations ?? [], observations) && next === current) {
         if (headTrees.length === 0) return false;
+      } else if (nothingToReview) {
+        if (next === current && headTrees.length === 0) return false;
       } else {
         const refs: WorkflowFeedbackBundleRef[] = [];
         for (const bundle of bundles) {
