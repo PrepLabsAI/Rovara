@@ -668,7 +668,7 @@ export async function writeCommentAnswer(
   if (state === "skipped") return "failed";
   if (state !== "answering") throw pageRefusal("changed");
   // Deleted, or edited after it was asked: the answer would be to words no longer there, so it is not shown.
-  if (comment.deletedAt !== undefined || (comment.editedAt !== undefined && comment.editedAt > comment.ask.at)) {
+  if (comment.deletedAt !== undefined || (comment.editedAt !== undefined && comment.editedAt >= comment.ask.at)) {
     await setAsk(deps, comment, "skipped", "answering");
     return "failed";
   }
