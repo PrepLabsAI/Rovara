@@ -198,7 +198,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -1003,6 +1003,7 @@ const SLACK_PLAIN_REFUSALS: ReadonlyMap<string, string> = new Map([
   ["select at least one check before retrying verification", "Select at least one check, then try again."],
   ["choose checks that are approved for this project", "Choose from this project's checks, then try again."],
   [FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_BUSY],
+  [FEEDBACK_REVIEW_RETRY_CHANGED, FEEDBACK_REVIEW_RETRY_CHANGED],
   [FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_CHANGED_SINCE_CARD],
 ]);
 /**

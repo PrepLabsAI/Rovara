@@ -274,6 +274,29 @@ describe("native developer task workflow", () => {
     expect(feedbackReviews()).toHaveLength(1);
     harness.db.set({ ...harness.db.get(`WORKSPACE#${workspaceId}`, "META")!, status: workspaceMeta.status });
 
+    // A press that loses the race to another (which started the review and holds the workspace) is not told "busy":
+    // the review it pressed for changed, and the review now running posts a new card.
+    {
+      const send = harness.db.send;
+      let raced = false;
+      harness.db.send = async (command) => {
+        if (!raced && command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes('"workflowMode":"FEEDBACK_REVIEW"')) {
+          raced = true;
+          const record = harness.db.get(`DEVTASK#${taskId}`, "META")! as Record<string, unknown> & { workflow: WorkflowSnapshot };
+          harness.db.set({ ...record, workflow: { ...record.workflow, revision: record.workflow.revision + 1, state: "RUNNING" } });
+          harness.db.set({ ...harness.db.get(`WORKSPACE#${workspaceId}`, "META")!, status: "BUSY", activeOperationId: "other-operation" });
+        }
+        return send(command);
+      };
+      const lost = JSON.parse(String((await retry()).body)) as Record<string, unknown>;
+      harness.db.send = send;
+      expect(raced).toBe(true);
+      expect(lost).toMatchObject({ refused: true, message: "This review changed; a new card is coming." });
+      harness.db.set({ ...harness.db.get(`DEVTASK#${taskId}`, "META")!, workflow: before });
+      harness.db.set({ ...harness.db.get(`WORKSPACE#${workspaceId}`, "META")!, status: workspaceMeta.status, activeOperationId: workspaceMeta.activeOperationId });
+      expect(feedbackReviews()).toHaveLength(1);
+    }
+
     const pressed = await retry();
     expect(pressed.statusCode).toBe(200);
     expect(JSON.parse(String(pressed.body))).toMatchObject({ started: true });

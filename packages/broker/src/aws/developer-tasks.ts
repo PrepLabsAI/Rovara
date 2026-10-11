@@ -2594,6 +2594,8 @@ function feedbackReviewWorkspaceReady(task: DeveloperTaskRecord, workspace: Work
 const FEEDBACK_REVIEW_RETRY_STALE = "this review changed; use the latest AgentX message";
 /** Said to the owner when Retry review meets a workspace that cannot start the review now; nothing changed. */
 export const FEEDBACK_REVIEW_RETRY_BUSY = "AgentX is busy on this task; try Retry review again in a minute.";
+/** Said to the owner when Retry review lost to another change of the task (another press started the review): a new card follows. */
+export const FEEDBACK_REVIEW_RETRY_CHANGED = "This review changed; a new card is coming.";
 /** Said privately to the owner once the retried review has started. */
 const FEEDBACK_REVIEW_RETRY_STARTED = "Reviewing the feedback again.";
 
@@ -2619,9 +2621,8 @@ export async function retryTaskWorkflowFeedbackReview(
     && current.feedbackReviewHistory?.some(ref => ref.sha256 === input.reviewDigest && ref.status !== "COMPLETE")) {
     // Already retried: a review still collecting (never started) is started now; one running or done is left alone.
     if (review?.status !== "COLLECTING" || current.state !== "WAITING") return { started: false };
-    if (!feedbackReviewWorkspaceReady(task, workspace) || !await acceptFeedbackReview(deps, task, current, current)) {
-      throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_BUSY);
-    }
+    if (!feedbackReviewWorkspaceReady(task, workspace)) throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_BUSY);
+    if (!await acceptFeedbackReview(deps, task, current, current)) throw await feedbackRetryRefusal(deps, task, current);
     return { started: true, note: FEEDBACK_REVIEW_RETRY_STARTED };
   }
   let collecting: WorkflowSnapshot;
@@ -2631,10 +2632,19 @@ export async function retryTaskWorkflowFeedbackReview(
     if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_STALE);
     throw error;
   }
-  if (!feedbackReviewWorkspaceReady(task, workspace) || !await acceptFeedbackReview(deps, task, current, collecting)) {
-    throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_BUSY);
-  }
+  if (!feedbackReviewWorkspaceReady(task, workspace)) throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_BUSY);
+  if (!await acceptFeedbackReview(deps, task, current, collecting)) throw await feedbackRetryRefusal(deps, task, current);
   return { started: true, note: FEEDBACK_REVIEW_RETRY_STARTED };
+}
+
+/**
+ * Why a retry that found the workspace idle still could not start: the task changed under it (another press won and
+ * started the review, so its new card is coming), or else the workspace really became busy.
+ */
+async function feedbackRetryRefusal(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, read: WorkflowSnapshot): Promise<AgentXError> {
+  const latest = await get<DeveloperTaskRecord>(deps, taskKey(task.taskId));
+  const changed = latest === undefined || latest.closedAt !== undefined || latest.workflow?.revision !== read.revision;
+  return agentXError("CONFIG_INVALID", changed ? FEEDBACK_REVIEW_RETRY_CHANGED : FEEDBACK_REVIEW_RETRY_BUSY);
 }
 
 function slackEventRequestId(eventId: string): string {
