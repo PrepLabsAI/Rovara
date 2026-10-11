@@ -482,7 +482,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_get_task",
     title: "Check an AgentX task",
     description:
-      "Shows one of your tasks, its latest progress, and any native workflow stage. For an agentx_start_workflow task, it includes the current approval document and digest while a review gate is open. After work ends it shows the worker's summary, changed files, artifacts and any pull requests. For a shared task it shows the channel, sharing mode, thread link and channel turns.",
+      "Shows one of your tasks, its latest progress, and any native workflow stage. For an agentx_start_workflow task, it includes the current approval document and digest while a review gate is open. After work ends it shows the worker's summary, changed files, artifacts and any pull requests. For a shared task it shows the channel, sharing mode, thread link and channel turns. Status CLOSED also covers a workflow task that finished (its pull requests merged, or its plan was rejected) and gave back its workspace: workflow.stage says which (MERGED or CLOSED).",
     inputSchema: { task_id: taskIdInput, events: eventsInput },
     outputSchema: TaskShape,
     async handler(context, input) {
@@ -505,7 +505,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_list_tasks",
     title: "List my AgentX tasks",
     description:
-      "Lists the tasks you started from AI tools, newest first, with each task's ID, title, project, status and times. Use it to find a task ID, or to find open tasks you no longer need and can close with agentx_close_task. Filter by project or status; limit is 1 to 50, 20 by default.",
+      "Lists the tasks you started from AI tools, newest first, with each task's ID, title, project, status and times. Use it to find a task ID, or to find open tasks you no longer need and can close with agentx_close_task. Filter by project or status; limit is 1 to 50, 20 by default. Status CLOSED includes workflow tasks that finished (merged, or plan rejected); agentx_get_task's workflow.stage tells them apart.",
     inputSchema: {
       project: z.string().max(200).optional().describe("only this project's tasks"),
       status: DeveloperTaskStatusSchema.optional().describe("only tasks with this status"),
