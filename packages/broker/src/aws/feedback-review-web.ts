@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { z } from "zod";
-import { describeWorkflowCheckChanges } from "@agentx/contracts";
+import { describeWorkflowCheckChanges, workflowCheckCommandText } from "@agentx/contracts";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import {
@@ -76,10 +76,17 @@ function page(review: Record<string, unknown>, csrf: string, nonce: string): str
     const tests = Array.isArray(proposal?.tests) ? proposal.tests as Array<Record<string, unknown>> : [];
     // A finding the reviewer left to the owner holds a question (and its options), not a fix: no Files or Tests to list.
     const isQuestion = finding.proposedDisposition === "OWNER_DECISION";
+    // Every check the fix adds is shown by its exact command and folder (cut only past its program), escaped, as code.
     const changes = finding.checkChanges !== null && typeof finding.checkChanges === "object" ? finding.checkChanges as Record<string, unknown> : undefined;
     const labels = (value: unknown) => (Array.isArray(value) ? value : []).filter((label): label is string => typeof label === "string").map(label => escape(label));
-    const checksLine = changes === undefined ? undefined : describeWorkflowCheckChanges({ obsolete: labels(changes.obsolete), added: labels(changes.added) });
-    const checksContent = checksLine === undefined ? "" : `<h5>Checks</h5><p>${checksLine}</p>`;
+    const addedChecks = (Array.isArray(changes?.added) ? changes.added as Array<Record<string, unknown>> : []).flatMap(check => {
+      const command = check.command !== null && typeof check.command === "object" ? check.command as Record<string, unknown> : undefined;
+      if (typeof check.label !== "string" || command === undefined || typeof command.executable !== "string" || typeof command.cwd !== "string" || !Array.isArray(command.args)) return [];
+      const args = command.args.filter((arg): arg is string => typeof arg === "string");
+      return [{ label: escape(check.label), command: `<code>${escape(workflowCheckCommandText({ executable: command.executable, args }))}</code>`, cwd: `<code>${escape(command.cwd)}</code>` }];
+    });
+    const checkLines = changes === undefined ? [] : describeWorkflowCheckChanges([{ obsolete: labels(changes.obsolete), added: addedChecks }]);
+    const checksContent = checkLines.length === 0 ? "" : `<h5>Checks</h5>${checkLines.map(line => `<p>${line}</p>`).join("")}`;
     const proposalContent = proposal === undefined ? "" : isQuestion
       ? `<section aria-label="Question for you"><h4>Question for you</h4><p>${escape(proposal.summary)}</p></section>`
       : `<section aria-label="Proposed fix"><h4>Proposed fix</h4><p>${escape(proposal.summary)}</p><h5>Files</h5><ul>${fileChanges.map(change => `<li>${escape(change.operation)} <code>${escape(change.repositoryId)}/${escape(change.path)}</code>: ${escape(change.change)}</li>`).join("")}</ul><h5>Tests</h5>${tests.length === 0 ? "<p>No new tests: the change is documentation only, or the repository has no tests.</p>" : `<ul>${tests.map(test => `<li>${escape(test.operation)} <code>${escape(test.repositoryId)}/${escape(test.path)}</code>: ${escape(test.behavior)}</li>`).join("")}</ul>`}${checksContent}</section>`;

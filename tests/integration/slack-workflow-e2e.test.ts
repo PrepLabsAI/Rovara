@@ -1127,7 +1127,13 @@ describe("Slack-only workflow, end to end in one process", () => {
     };
     const e2e = await createWorkflowE2E({
       model: { plan, feedback, reviews: { CODE: [codeReviewer] },
-        edits: (latest) => { if (latest.includes("Implement only the owner-approved PR feedback")) { fixMade = true; return readme(NEW); } return readme(OLD); } },
+        // The coder writes the shorter sentence only when it is given the approved fix's wording (the comment names none).
+        edits: (latest) => {
+          if (!latest.includes("Implement only the owner-approved PR feedback")) return readme(OLD);
+          if (!latest.includes(`Replace the sentence with \\"${NEW}\\"`)) return [];
+          fixMade = true;
+          return readme(NEW);
+        } },
       // The old check finds the old sentence until the fix replaces it.
       checkResult: (command) => command.args.includes(OLD) && fixMade ? { exitCode: 1, stdout: "", stderr: "" } : undefined,
     });
@@ -1146,6 +1152,9 @@ describe("Slack-only workflow, end to end in one process", () => {
     // The proposal says which check the fix changes; Approve covers it.
     const proposal = e2e.slack.lastPostWithAction("agentx_feedback_review_recommended");
     expect(visibleSlackText(proposal.text)).toContain(`Updates checks: ${OLD_CHECK.label} → ${NEW_CHECK.label}`);
+    // ...and the exact command it adds, which the owner approves with it.
+    expect(visibleSlackText(proposal.text)).toContain(`Adds check ${NEW_CHECK.label}: \`grep -q "${NEW}" README.md\` in \`repo/demo\``);
+    expect(visibleSlackText(proposal.text)).toContain("These commands run on the next step.");
     expect(visibleSlackText(proposal.text)).not.toMatch(JARGON);
     const runsBefore = e2e.checkRuns.length;
     const reviewersBefore = reviewerPrompts.length;

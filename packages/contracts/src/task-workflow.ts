@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ProjectCommandSchema } from "./project.js";
-import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema } from "./workflow-check-input.js";
+import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema, proposedCheckProblem } from "./workflow-check-input.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const ActorIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -656,60 +656,104 @@ export const WorkflowFeedbackTaskChecksSchema = z.object({
 }).strict();
 export type WorkflowFeedbackTaskChecks = z.infer<typeof WorkflowFeedbackTaskChecksSchema>;
 
-/** The checks an approved PR feedback fix changes: the task's proposed checks it makes wrong, and the corrected ones it adds. */
+/**
+ * The checks an approved PR feedback fix changes: the task's proposed checks it makes wrong, the corrected ones it adds,
+ * and, in plain words, what in the proposal AgentX will not apply (an approval with any problem is refused whole).
+ */
 export interface WorkflowFeedbackCheckChanges {
   obsolete: WorkflowCheck[];
   added: Array<{ label: string; command: WorkflowCheck["command"] }>;
+  problems: string[];
 }
 
 function sameCheckCommand(a: WorkflowCheck["command"], b: WorkflowCheck["command"]): boolean {
   return a.cwd === b.cwd && a.executable === b.executable && a.args.length === b.args.length && a.args.every((arg, index) => arg === b.args[index]);
 }
 
+type FeedbackFindingCheckInput = {
+  proposedDisposition?: string | undefined;
+  fixProposal?: { obsoleteChecks?: readonly string[] | undefined; replacementChecks?: readonly unknown[] | undefined } | undefined;
+};
+
 /**
- * The check changes of the given feedback findings' proposals, against the task's check policy: each obsolete name
- * resolves to a proposed check the task runs now (by ID, or by label ignoring case); required and optional project
- * checks are never dropped. A corrected check that follows the proposed-check rules is added once, unless it is the same
- * command as a required check or a proposed check that stays.
+ * The check changes of the given feedback findings' proposals, against the task's check policy. Only a fix to make
+ * (IMPLEMENT) changes checks. An obsolete name is a check ID, or a label naming exactly one check; it must be a proposed
+ * check: naming a project check (which always runs), a check the task does not have, or a label several checks share is
+ * a problem. A proposed check the owner already unticked is not run, so naming it changes nothing. A corrected check must
+ * follow the proposed-check rules (and, given `repositoryPaths`, run in one of those folders); it is added once, unless it
+ * is the same command as a required check or a proposed check that stays.
  */
 export function workflowFeedbackCheckChanges(
   policy: WorkflowCheckPolicy | undefined,
-  findings: ReadonlyArray<{ fixProposal?: { obsoleteChecks?: readonly string[] | undefined; replacementChecks?: readonly unknown[] | undefined } | undefined }>,
+  findings: ReadonlyArray<FeedbackFindingCheckInput>,
+  repositoryPaths?: readonly string[],
 ): WorkflowFeedbackCheckChanges {
-  if (policy === undefined) return { obsolete: [], added: [] };
+  if (policy === undefined) return { obsolete: [], added: [], problems: [] };
+  const fixes = findings.filter((finding) => finding.proposedDisposition === "IMPLEMENT");
   const kept = policy.selectedProposedIds;
-  const running = (policy.proposed ?? []).filter((check) => kept === undefined || kept.includes(check.id));
+  const proposedAll = policy.proposed ?? [];
+  const running = proposedAll.filter((check) => kept === undefined || kept.includes(check.id));
+  const projectChecks = [...policy.required, ...policy.optional];
   const obsolete: WorkflowCheck[] = [];
-  for (const name of findings.flatMap((finding) => finding.fixProposal?.obsoleteChecks ?? [])) {
-    const wanted = name.trim().toLowerCase();
-    const check = running.find((entry) => entry.id === name.trim() || entry.label.trim().toLowerCase() === wanted);
-    if (check !== undefined && !obsolete.includes(check)) obsolete.push(check);
+  const problems: string[] = [];
+  const named = (name: string, checks: readonly WorkflowCheck[]) => {
+    const byId = checks.filter((check) => check.id === name.trim());
+    return byId.length > 0 ? byId : checks.filter((check) => check.label.trim().toLowerCase() === name.trim().toLowerCase());
+  };
+  for (const name of fixes.flatMap((finding) => finding.fixProposal?.obsoleteChecks ?? [])) {
+    if (named(name, projectChecks).length > 0) { problems.push("it names a project check, which always runs"); continue; }
+    const matches = named(name, proposedAll);
+    if (matches.length === 0) { problems.push("it names a check the task does not have"); continue; }
+    if (matches.length > 1) { problems.push("it names more than one check by the same label"); continue; }
+    const check = matches[0]!;
+    if (running.includes(check) && !obsolete.includes(check)) obsolete.push(check);
   }
   const staying = [...policy.required, ...running.filter((check) => !obsolete.includes(check))];
   const added: WorkflowFeedbackCheckChanges["added"] = [];
-  for (const raw of findings.flatMap((finding) => finding.fixProposal?.replacementChecks ?? [])) {
+  for (const raw of fixes.flatMap((finding) => finding.fixProposal?.replacementChecks ?? [])) {
+    const problem = proposedCheckProblem(raw, repositoryPaths);
     const parsed = WorkflowProposedCheckInputSchema.safeParse(raw);
-    if (!parsed.success) continue;
+    if (problem !== undefined || !parsed.success) {
+      problems.push(problem ?? "it must have only label, cwd, executable, args and timeoutSeconds");
+      continue;
+    }
     const command = { cwd: parsed.data.cwd, executable: parsed.data.executable, args: parsed.data.args,
       timeoutSeconds: parsed.data.timeoutSeconds ?? WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS };
     if (staying.some((check) => sameCheckCommand(check.command, command)) || added.some((check) => sameCheckCommand(check.command, command))) continue;
     added.push({ label: parsed.data.label, command });
   }
-  return { obsolete, added };
+  return { obsolete, added, problems };
 }
 
 /**
- * How a proposal card and the review page say an approved fix's check changes, from the checks' labels (the caller makes
- * them safe to show first): "Updates checks: Old → New; Other → removed; adds Extra". Undefined when nothing changes.
+ * A check's command as the owner reads it before approving it: the program, then each argument (quoted when it holds
+ * anything but plain characters). Past `max` characters only the arguments are cut, ending in "…": the program always shows.
  */
-export function describeWorkflowCheckChanges(changes: { obsolete: readonly string[]; added: readonly string[] }): string | undefined {
-  const paired = Math.min(changes.obsolete.length, changes.added.length);
-  const parts = [
-    ...changes.obsolete.slice(0, paired).map((label, index) => `${label} → ${changes.added[index]!}`),
-    ...changes.obsolete.slice(paired).map((label) => `${label} → removed`),
-    ...changes.added.slice(paired).map((label) => `adds ${label}`),
-  ];
-  return parts.length === 0 ? undefined : `Updates checks: ${parts.join("; ")}`;
+export function workflowCheckCommandText(command: { executable: string; args: readonly string[] }, max = 160): string {
+  const args = command.args.map((arg) => /^[A-Za-z0-9._/=:@+,-]+$/.test(arg) ? arg : JSON.stringify(arg)).join(" ");
+  const full = args.length === 0 ? command.executable : `${command.executable} ${args}`;
+  if (full.length <= max) return full;
+  const room = Math.max(0, max - command.executable.length - 2);
+  return `${command.executable} ${args.slice(0, room).trimEnd()}…`;
+}
+
+/**
+ * How a proposal card and the review page say approved fixes' check changes, one finding at a time (each finding's
+ * obsolete checks pair with its own corrected ones), then every corrected check's exact command and folder, which the
+ * owner approves with the fix. Labels, commands and folders come made safe (and styled as code) by the caller.
+ */
+export function describeWorkflowCheckChanges(findings: ReadonlyArray<{ obsolete: readonly string[]; added: ReadonlyArray<{ label: string; command: string; cwd: string }> }>): string[] {
+  const parts = findings.flatMap(({ obsolete, added }) => {
+    const paired = Math.min(obsolete.length, added.length);
+    return [
+      ...obsolete.slice(0, paired).map((label, index) => `${label} → ${added[index]!.label}`),
+      ...obsolete.slice(paired).map((label) => `${label} → removed`),
+      ...added.slice(paired).map((check) => `adds ${check.label}`),
+    ];
+  });
+  if (parts.length === 0) return [];
+  const commands = findings.flatMap(({ added }) => added.map((check) => `Adds check ${check.label}: ${check.command} in ${check.cwd}`));
+  return [`Updates checks: ${parts.join("; ")}`, ...commands, ...(commands.length === 0 ? [] : ["These commands run on the next step."])];
 }
 
 /**

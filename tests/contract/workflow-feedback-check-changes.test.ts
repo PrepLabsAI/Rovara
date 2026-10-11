@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   WorkflowSnapshotSchema, WorkflowTransitionError, applyWorkflowFeedbackCheckChanges, createWorkflowSnapshot, workflowFeedbackCheckChanges,
-  workflowSelectedChecks, type WorkflowCheckPolicyInput,
+  describeWorkflowCheckChanges, workflowCheckCommandText, workflowSelectedChecks, type WorkflowCheckPolicyInput,
 } from "../../packages/contracts/src/index.js";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
@@ -15,7 +15,7 @@ const SENTENCE = { id: "proposed-1", label: "Code of Conduct sentence present in
 const LINKS = { id: "proposed-2", label: "Links still work", command: grep("CODE_OF_CONDUCT.md") };
 const policy = (extra: Partial<WorkflowCheckPolicyInput> = {}): WorkflowCheckPolicyInput => ({ required: [UNIT], optional: [], selectedOptionalIds: [], proposed: [SENTENCE, LINKS], ...extra });
 const replacement = { label: "Shorter sentence present in README.md", cwd: "repo/demo", executable: "grep", args: ["-q", "Be respectful and kind.", "README.md"] };
-const finding = (fixProposal: Record<string, unknown>) => ({ fixProposal: { summary: "Shorten it.", fileChanges: [], tests: [], ...fixProposal } });
+const finding = (fixProposal: Record<string, unknown>, proposedDisposition = "IMPLEMENT") => ({ proposedDisposition, fixProposal: { summary: "Shorten it.", fileChanges: [], tests: [], ...fixProposal } });
 const workflow = (checkPolicy: WorkflowCheckPolicyInput, feedbackDecisions = 0) => WorkflowSnapshotSchema.parse({
   ...createWorkflowSnapshot({ taskId, ownerId, now, checkPolicy }),
   ...(feedbackDecisions === 0 ? {} : { feedbackDecisions: Array.from({ length: feedbackDecisions }, (_, index) => ({
@@ -28,14 +28,66 @@ describe("check changes of an approved PR feedback fix", () => {
   it("resolves obsolete checks by ID or label among the proposed checks the task runs, and normalizes corrected checks", () => {
     const parsed = WorkflowSnapshotSchema.parse(workflow(policy())).checkPolicy;
     expect(workflowFeedbackCheckChanges(parsed, [finding({ obsoleteChecks: ["proposed-1"], replacementChecks: [replacement] })])).toEqual({
-      obsolete: [SENTENCE], added: [{ label: replacement.label, command: { cwd: replacement.cwd, executable: replacement.executable, args: replacement.args, timeoutSeconds: 600 } }],
+      obsolete: [SENTENCE], added: [{ label: replacement.label, command: { cwd: replacement.cwd, executable: replacement.executable, args: replacement.args, timeoutSeconds: 600 } }], problems: [],
     });
     expect(workflowFeedbackCheckChanges(parsed, [finding({ obsoleteChecks: ["code of conduct sentence present in readme.md"] })]).obsolete).toEqual([SENTENCE]);
   });
 
-  it("never drops a required project check, a check the task does not run, or an unticked proposed check", () => {
+  it("never drops a required project check or a check the task does not have, and names the problem; an unticked proposed check is already not run", () => {
     const unticked = WorkflowSnapshotSchema.parse(workflow(policy({ selectedProposedIds: ["proposed-2"] }))).checkPolicy;
-    expect(workflowFeedbackCheckChanges(unticked, [finding({ obsoleteChecks: ["required-1", "Unit tests", "proposed-9", "proposed-1"] })]).obsolete).toEqual([]);
+    expect(workflowFeedbackCheckChanges(unticked, [finding({ obsoleteChecks: ["proposed-1"] })])).toMatchObject({ obsolete: [], problems: [] });
+    for (const name of ["required-1", "Unit tests"]) {
+      expect(workflowFeedbackCheckChanges(unticked, [finding({ obsoleteChecks: [name] })])).toMatchObject({ obsolete: [], problems: ["it names a project check, which always runs"] });
+    }
+    expect(workflowFeedbackCheckChanges(unticked, [finding({ obsoleteChecks: ["proposed-9"] })]).problems).toEqual(["it names a check the task does not have"]);
+  });
+
+  it("refuses a label that names more than one check the task runs", () => {
+    const twins = WorkflowSnapshotSchema.parse(workflow(policy({ proposed: [SENTENCE, { ...LINKS, label: SENTENCE.label }] }))).checkPolicy;
+    expect(workflowFeedbackCheckChanges(twins, [finding({ obsoleteChecks: [SENTENCE.label] })])).toMatchObject({ obsolete: [], problems: ["it names more than one check by the same label"] });
+    expect(workflowFeedbackCheckChanges(twins, [finding({ obsoleteChecks: ["proposed-2"] })]).obsolete.map((check) => check.id)).toEqual(["proposed-2"]);
+  });
+
+  it("checks a corrected check against the task's repository folders and names what is wrong", () => {
+    const parsed = WorkflowSnapshotSchema.parse(workflow(policy())).checkPolicy;
+    expect(workflowFeedbackCheckChanges(parsed, [finding({ obsoleteChecks: ["proposed-1"], replacementChecks: [{ ...replacement, cwd: "elsewhere" }] })], ["repo/demo"]))
+      .toMatchObject({ added: [], problems: ["it must run in one of the task's repositories"] });
+    expect(workflowFeedbackCheckChanges(parsed, [finding({ replacementChecks: [{ ...replacement, executable: "/bin/sh" }] })], ["repo/demo"]).problems)
+      .toEqual(["its program must be a plain program name or a ./ path inside the repository"]);
+    expect(workflowFeedbackCheckChanges(parsed, [finding({ replacementChecks: [replacement] })], ["repo/demo"]).problems).toEqual([]);
+  });
+
+  it("takes check changes only from a fix to make, never from a question or a skip", () => {
+    const parsed = WorkflowSnapshotSchema.parse(workflow(policy())).checkPolicy;
+    for (const disposition of ["OWNER_DECISION", "SKIP"]) {
+      expect(workflowFeedbackCheckChanges(parsed, [finding({ obsoleteChecks: ["proposed-1"], replacementChecks: [replacement] }, disposition)]))
+        .toEqual({ obsolete: [], added: [], problems: [] });
+    }
+  });
+
+  it("shows a command for the owner to approve in full up to its limit, cutting only its arguments", () => {
+    expect(workflowCheckCommandText({ executable: "grep", args: ["-q", "Be respectful and kind.", "README.md"] })).toBe('grep -q "Be respectful and kind." README.md');
+    const long = workflowCheckCommandText({ executable: "sh", args: ["-c", `echo ${"x".repeat(400)}`] }, 160);
+    expect(long.startsWith('sh -c "echo xxx')).toBe(true);
+    expect(long.endsWith("…")).toBe(true);
+    expect(long.length).toBeLessThanOrEqual(160);
+    const longProgram = `./${"p".repeat(200)}`;
+    expect(workflowCheckCommandText({ executable: longProgram, args: ["a".repeat(50)] }, 160).startsWith(`${longProgram} `)).toBe(true);
+  });
+
+  it("says each finding's check changes, pairing its own obsolete and corrected checks, and every command added", () => {
+    expect(describeWorkflowCheckChanges([
+      { obsolete: ["Old A"], added: [{ label: "New A", command: "`grep a`", cwd: "`repo/demo`" }] },
+      { obsolete: ["Old B"], added: [] },
+      { obsolete: [], added: [{ label: "New C", command: "`sh -c x`", cwd: "`repo/demo`" }] },
+    ])).toEqual([
+      "Updates checks: Old A → New A; Old B → removed; adds New C",
+      "Adds check New A: `grep a` in `repo/demo`",
+      "Adds check New C: `sh -c x` in `repo/demo`",
+      "These commands run on the next step.",
+    ]);
+    expect(describeWorkflowCheckChanges([{ obsolete: ["Old"], added: [] }])).toEqual(["Updates checks: Old → removed"]);
+    expect(describeWorkflowCheckChanges([{ obsolete: [], added: [] }])).toEqual([]);
   });
 
   it("adds a corrected check once, and not when it is the same command as a check that stays", () => {

