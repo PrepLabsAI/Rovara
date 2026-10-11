@@ -8,6 +8,7 @@ import {
   EvalBatchWatchUpdateRequestSchema,
   EvalBatchWatchUpdateResultSchema,
   type SlackThread,
+  SlackCommentAnsweredRequestSchema,
   SlackThreadNoteAnsweredRequestSchema,
   SlackThreadNoteAnsweredResultSchema,
   SlackThreadPrepareResultSchema,
@@ -59,8 +60,13 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
     async ensureWorkspace(requestId) {
       return SlackThreadWorkspaceResultSchema.parse(await servicePost("/v1/threads/workspace", threadWorkspaceRequest(requestId), "thread workspace request failed"));
     },
-    async taskAnswerWorkspace(requestId, taskId) {
-      return SlackThreadWorkspaceResultSchema.parse(await servicePost("/v1/threads/workspace", { ...threadWorkspaceRequest(requestId), taskAnswer: { taskId } }, "task answer workspace request failed"));
+    async taskAnswerWorkspace(requestId, taskId, commentId) {
+      const taskAnswer = commentId === undefined ? { taskId } : { taskId, commentId };
+      return SlackThreadWorkspaceResultSchema.parse(await servicePost("/v1/threads/workspace", { ...threadWorkspaceRequest(requestId), taskAnswer }, "task answer workspace request failed"));
+    },
+    async markCommentAnswered(input) {
+      const body = SlackCommentAnsweredRequestSchema.parse(input);
+      await servicePost("/v1/tasks/comments/answered", body, "writing the comment answer failed");
     },
     async markThreadNoteAnswered(input) {
       const body = SlackThreadNoteAnsweredRequestSchema.parse(input);

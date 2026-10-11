@@ -232,4 +232,17 @@ describe("notices from the stream (C7, C8)", () => {
     const record = { eventName: "MODIFY", dynamodb: { ApproximateCreationDateTime: 1_790_000_000, OldImage: marshall({ ...task, share: { mode: "view" } }), NewImage: marshall({ ...task, share: { mode: "continue" } }) } };
     expect(readStream([record]).notices).toEqual([]);
   });
+
+  it("a new nudge window makes one notice; the same window makes none", () => {
+    const at = "2026-10-11T10:00:00.000Z";
+    const window = { pk: "DEVTASK#t1", sk: "NUDGE#lee", entityType: "TASK_COMMENT_NUDGE", taskId: "t1", developerId: "lee", name: "Lee", windowStart: at, nudgeId: "c1", dueAt: "2026-10-11T10:10:00.000Z" };
+    expect(noticesOf(undefined, window, at, "e1")).toEqual([{ id: "t1:nudge:c1", kind: "comment_nudge", taskId: "t1", at, notBefore: "2026-10-11T10:10:00.000Z" }]);
+    // The same window written again (a later comment inside it is not a write, but a repeat could be) says nothing.
+    expect(noticesOf(window, { ...window }, at, "e2")).toEqual([]);
+    const next = { ...window, windowStart: "2026-10-11T10:20:00.000Z", nudgeId: "c9", dueAt: "2026-10-11T10:30:00.000Z" };
+    // Stamped with the window's start.
+    expect(noticesOf(window, next, "2026-10-11T10:21:00.000Z", "e3").map((notice) => [notice.id, notice.at])).toEqual([["t1:nudge:c9", "2026-10-11T10:20:00.000Z"]]);
+    // A window with no task or due time is not a notice.
+    expect(noticesOf(undefined, { ...window, dueAt: undefined }, at, "e4")).toEqual([]);
+  });
 });

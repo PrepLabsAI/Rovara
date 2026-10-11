@@ -437,7 +437,7 @@ describe("workflow Slack messages", () => {
         "*Coding plan v1 is ready for your approval.* No code has changed yet.",
         "> Payments that time out are retried.", "> A payment is never charged twice.", "> Failed retries are logged.",
         "And 4 more claims.",
-        "2 decisions: approving here uses AgentX's recommended answers.",
+        "Approve here uses AgentX's answers for 2 decisions and includes the open comments (up to 25) from the task page.",
         "2 thread replies since the last step will be included.",
         `<${linkInText}|Open the full coding plan>`,
       ].join("\n"));
@@ -446,7 +446,21 @@ describe("workflow Slack messages", () => {
     it("leaves out the 'more claims' and decisions lines when there are none, and says one of each in the singular", () => {
       const none = cardOf({ claims: claims.slice(0, 2), claimCount: 2, decisionCount: 0, tiny: true }).text;
       expect(none).not.toMatch(/more claim|decision/);
-      expect(cardOf({ claimCount: 4, decisionCount: 1 }).text).toContain("And 1 more claim.\n1 decision: approving here uses AgentX's recommended answer.\n");
+      expect(cardOf({ claimCount: 4, decisionCount: 1 }).text).toContain("And 1 more claim.\nApprove here uses AgentX's answers for 1 decision and includes the open comments (up to 25) from the task page.\n");
+    });
+
+    it("the card says Approve uses AgentX's answers and includes open comments", () => {
+      expect(cardOf({ decisionCount: 3 }).text).toContain("\nApprove here uses AgentX's answers for 3 decisions and includes the open comments (up to 25) from the task page.\n");
+      // No decisions, and not a tiny plan: the comments are still said.
+      expect(cardOf({ decisionCount: 0 }).text).toContain("\nApprove here includes the open comments (up to 25) from the task page.\n");
+      expect(cardOf({ decisionCount: 0 }).text).not.toContain("recommended");
+    });
+
+    it("the answered-comments line", () => {
+      const text = cardOf({}, { commentAnswers: { answered: 2, total: 3, fromVersion: 1 } }).text;
+      expect(text).toContain("\nAgentX answered 2 of 3 comments from v1.\n");
+      expect(cardOf({}, { commentAnswers: { answered: 1, total: 1, fromVersion: 2 } }).text).toContain("AgentX answered 1 of 1 comments from v2.");
+      expect(cardOf({}).text).not.toContain("AgentX answered");
     });
 
     it("lists every claim of a tiny plan, children indented, and does not say 'full'", () => {

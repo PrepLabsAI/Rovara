@@ -49,6 +49,14 @@ so historical worker totals can still undercount. No backfill or token estimate 
 Both roles currently use `@earendil-works/pi-coding-agent` 1.0.0. GitHub Spec Kit supplies the
 specification workflow and demo repository; it is not the coding-agent runtime.
 
+A plan, design or requirements document waiting for its owner can also be decided on the AgentX task
+page. The owner's answers to the plan's decisions and the comments they choose to send go through the
+same single decision as a Slack or AI-tool approval, so exactly one decision is recorded however many
+places it is pressed. The coding and review steps read the plan with the owner's answers, and the
+planner answers each comment sent with Request changes on the next version. Comments are passed to the
+model as quoted, untrusted teammates' words. See
+[Deciding and commenting on the task page](slack.md#deciding-and-commenting-on-the-task-page).
+
 See the [production architecture](architecture-production.md) for the EBS-backed platform,
 its request path, and how environments are installed and torn down.
 

@@ -139,6 +139,17 @@ describe("hosted Slack control-plane infrastructure", () => {
     });
   });
 
+  it("the broker can send to the Slack request queue and knows its URL", () => {
+    const [, broker] = Object.entries(template.findResources("AWS::Lambda::Function")).find(([id]) => /^Broker[0-9A-F]{8}$/.test(id))!;
+    expect((broker as { Properties: { Environment: { Variables: Record<string, unknown> } } }).Properties.Environment.Variables.SLACK_REQUEST_QUEUE_URL)
+      .toEqual({ Ref: expect.stringMatching(/^SlackRequestQueue[0-9A-F]{8}$/) as unknown });
+    const statements = statementsForRole(template, "BrokerServiceRole");
+    const send = statements.find((statement) => actionsOf(statement).includes("sqs:SendMessage") && JSON.stringify(statement.Resource).includes("SlackRequestQueue"));
+    expect(send).toBeDefined();
+    // Send only: the broker never reads or deletes the service's requests.
+    expect(statements.filter((statement) => JSON.stringify(statement.Resource).includes("SlackRequestQueue")).flatMap(actionsOf)).not.toContain("sqs:ReceiveMessage");
+  });
+
   it("gives the orchestrator role service-route invoke only, and no access to the control-plane state table", () => {
     template.hasResourceProperties("AWS::IAM::Role", {
       AssumeRolePolicyDocument: Match.objectLike({

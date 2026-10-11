@@ -316,6 +316,90 @@ removes the hosted orchestrator conversation session and releases the organizati
 of the member who prepared the workspace. Later mentions in the closed thread do not create another
 workspace; start a new Slack thread for fresh work.
 
+## Deciding and commenting on the task page
+
+Every approval card links the task page (**Open review**). Besides reading the plan there, the task
+owner can decide on the page, and teammates in the task's channel can comment and suggest.
+
+**Who can do what.** The page's first line says which you are:
+
+- *You're the task owner.* You can answer the plan's decisions, comment, and press **Approve** or
+  **Request changes**.
+- *You can read and comment on this task.* You are in the task's channel and can use its project. You
+  can comment, reply, and press **Suggest this** on a decision option. Only the owner decides; the bar
+  at the bottom says "Only owners decide."
+- Anyone else gets "You don't have access to this task." That is also what a link to a task that does
+  not exist says.
+
+**Answering decisions.** Each decision shows its options with AgentX's recommendation already picked.
+Pick another option to change the answer. The bar at the bottom counts the decisions you have not
+looked at yet ("2 to answer", then "All answered"); press it to jump to the next one. You don't have to
+answer every decision: any you leave keep AgentX's answer. Teammates' suggestions show under each
+decision, for example "Priya and Sam suggest: Above".
+
+**Comments.** Press **Comment** under a claim, a decision, a check, or the whole document, and **Reply**
+under a comment. Comments are plain text (links are not clickable) and can be edited or deleted until
+they are sent with a decision. New comments can go on the newest version of the document waiting for a
+decision; replies work on any comment while the task is open. When a new version comes, each comment
+stays on the same claim, decision or check if it is still there, marked "from v1"; otherwise it moves
+under "Removed claims". The page checks for new comments and new versions every 20 seconds while it is
+open, and says "Coding plan v2 is ready." or "This task moved on." with a **Show it** button.
+
+**Approve and Request changes.** Both open a short summary before anything is sent: your answers that
+differ from AgentX's, the decisions left to AgentX, and the open comments to send (all ticked; untick
+any to keep them for later). You can add a note. **Approve and start coding** (or **Approve and
+continue** for requirements and design) moves the task on. **Request changes** needs at least one
+comment or a note. AgentX writes the next version, and answers each comment you sent under it, starting
+"Done:" or "Not changed because:". A comment it did not answer says "Not answered". Your answers and
+the comments you send go to the next step as part of the plan; comments are passed on as teammates'
+words, never as instructions that override your answers.
+
+Nothing is coded until the owner presses Approve, on the page or in Slack. Comments, suggestions and
+Ask AgentX never move the task.
+
+**Slack and the page stay in step.** A decision made on the page edits the Slack card the same way a
+button press does, and says what went with it, for example "Approved by @Maya · 1 answer changed · 2
+comments included". **Approve** in Slack uses AgentX's answers and includes the open comments from the
+page (up to 25, oldest first); the card says so. **Request changes** in Slack sends no comments. If you
+decide in one place while the page is open in another, the second one says "Already approved by Maya
+Chen a moment ago." and keeps what you typed. A teammate who comments gets one Slack message in the
+task's thread at most every 10 minutes ("Sam Lee left 2 comments on Coding plan v1."), with no comment
+text in it. The next version's card says how many sent comments AgentX answered.
+
+**Ask AgentX to answer.** Tick **Ask AgentX to answer** when you post a comment, and AgentX replies under
+it on the page, from what it knows about the task. Its reply is marked "AgentX (AI) · answering Sam Lee",
+naming who asked. It cannot change code, choose answers or decide, and says so if asked. If the comment
+is edited or deleted before the answer comes, the answer is not shown ("Edited after it was asked, so
+AgentX didn't answer.").
+This works only on tasks started in Slack ("AgentX can answer comments only on tasks started in
+Slack."). While it works the comment says "AgentX is answering…"; if no answer comes within 10 minutes
+it says "AgentX couldn't answer this one." Asks made while the Slack service is updating may read
+"AgentX couldn't answer this one." — post again.
+
+**Limits.**
+
+- A comment is at most 2,000 characters ("Keep comments under 2,000 characters.").
+- Each person can post 30 comments and change 60 suggestions per task in 10 minutes ("You've posted a
+  lot in the last 10 minutes. Try again in a few minutes.").
+- A task holds 300 comments, replies and AgentX answers in all, and a comment holds 20 replies.
+- One decision sends at most 25 comments; the rest stay open for the next version.
+- AgentX answers 6 questions per person and 20 per task in an hour, 30 per person over all their tasks
+  in an hour, and 5 per comment thread (counting questions still being answered). Past that
+  the comment is still posted: "AgentX has answered a lot of questions on this task in the last hour.
+  Your comment is posted; ask again later."
+- The note with a decision is at most 500 characters.
+
+**Phones.** The page is built for Slack's in-app browser: nothing scrolls sideways, buttons are large
+enough to tap, the summary opens full screen, and the bottom bar stays clear of the home indicator.
+With JavaScript off the page still shows the plan, every comment and AgentX's answers, and the buttons
+that need JavaScript stay hidden. Unsent answers and comment text are kept in the browser tab while it
+is open, so a refresh does not lose them; they are gone when the tab closes or the sign-in ends.
+
+**After a release.** `npx tsx scripts/plan-review-live-check.ts --page <task page link>` checks a
+deployed page (set `AGENTX_REVIEW_SESSION` to your review sign-in cookie; it is never printed) and
+prints the hands-on list to try on real phones: an iPhone in Slack's browser, Android in dark mode,
+keyboard only, VoiceOver, a second person suggesting, and a Full task with one Request changes.
+
 ## Tasks shared from an AI tool
 
 A developer can share a task they started from their AI tool into one of the project's bound

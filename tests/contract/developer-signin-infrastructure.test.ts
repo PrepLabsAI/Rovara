@@ -329,8 +329,9 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
       { dynamodb: { NewImage: { entityType: { S: ["OPERATION"] }, requestedBy: { M: { kind: { S: ["developer"] } } }, status: { S: ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"] } } } },
       // Spec 025 E13: a fourth filter on this same mapping, never a third reader.
       { dynamodb: { NewImage: { entityType: { S: ["ADMIN_CHANGE"] } } } },
-      // Task 19: a fifth, for refused Slack presses, on this same mapping.
-      { dynamodb: { NewImage: { entityType: { S: ["WORKFLOW_ACTION_REFUSAL"] } } } },
+      // Task 19: a fifth, for refused Slack presses, on this same mapping. Spec 061: comment nudges share it, since a
+      // mapping takes five filters by default.
+      { dynamodb: { NewImage: { entityType: { S: ["WORKFLOW_ACTION_REFUSAL", "TASK_COMMENT_NUDGE"] } } } },
     ]);
     expect(notifierMapping.Properties).toMatchObject({ StartingPosition: "LATEST", MaximumRecordAgeInSeconds: 3600, MaximumRetryAttempts: 10, BisectBatchOnFunctionError: true });
     // A batch that still fails (the notice queue refusing sends, say) leaves a record of its shard and

@@ -287,7 +287,7 @@ describe("Slack-only workflow, end to end in one process", () => {
       expect(page.body).toContain(expected);
     }
     // The proposed check's row names the claim it proves.
-    expect(page.body).toMatch(new RegExp(`<td class="check-label">${PROPOSED.label}</td><td class="check-from">Proposed</td><td class="check-proves"><a [^>]*>1</a></td>`));
+    expect(page.body).toMatch(new RegExp(`<td class="check-label">${PROPOSED.label}(?: <button type="button" class="comment-open" data-target="check:[a-z0-9_-]+" data-label="[^"]*" hidden>Comment</button>)?</td><td class="check-from">Proposed</td><td class="check-proves"><a [^>]*>1</a></td>`));
     expect(page.body).not.toContain("You opened this from");
 
     // Slack approval takes the recommended answer to every decision.
@@ -504,7 +504,7 @@ describe("Slack-only workflow, end to end in one process", () => {
     // The coding plan adds level 3 claims and a check that proves one of them.
     const codingPage = (await e2e.taskPage("?doc=coding-plan&from=1")).body;
     expect(codingPage).toContain("Edit greet in greeting.ts.");
-    expect(codingPage).toMatch(new RegExp(`<td class="check-label">${PROPOSED.label}</td><td class="check-from">Proposed</td><td class="check-proves"><a [^>]*>1\\.1</a></td>`));
+    expect(codingPage).toMatch(new RegExp(`<td class="check-label">${PROPOSED.label}(?: <button type="button" class="comment-open" data-target="check:[a-z0-9_-]+" data-label="[^"]*" hidden>Comment</button>)?</td><td class="check-from">Proposed</td><td class="check-proves"><a [^>]*>1\\.1</a></td>`));
     // No project checks to choose from, so approving the coding plan is one click with no form.
     const formsBefore = e2e.slack.views.length;
     await e2e.click("agentx_workflow_approve");

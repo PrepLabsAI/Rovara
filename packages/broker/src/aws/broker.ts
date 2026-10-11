@@ -16,7 +16,7 @@ import {
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
-import { SQSClient } from "@aws-sdk/client-sqs";
+import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import {
   AgentXError,
@@ -32,6 +32,9 @@ import {
   type StandingFailure,
   submitWorkflowArtifact,
   parsePlanDocument,
+  parseCommentAnswers,
+  type CommentAnswer,
+  type WorkflowDecisionDetail,
   retiredClaimIds,
   canonicalPlanJson,
   type PlanDocument,
@@ -94,6 +97,7 @@ import {
   SlackRequesterSchema,
   SlackTaskAnswerRequestSchema,
   SlackThreadNoteAnsweredRequestSchema,
+  SlackCommentAnsweredRequestSchema,
   SlackThreadSchema,
   SlackTeamIdSchema,
   WorkspaceClosePreflightResultSchema,
@@ -185,6 +189,8 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
+import { ownerAnswersFor, readDecisionDetail } from "../developer/owner-answers.js";
+import { isPageRefusal, writeCommentAnswer, writePlannerReplies, type SlackRequestQueue } from "../developer/page-comments.js";
 import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown } from "../developer/plan-artifacts.js";
 import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, planEvidenceEvent, planEvidenceJobItem, planEvidenceSources, type PlanEvidenceEvent, type PlanEvidenceJob } from "../developer/plan-evidence-jobs.js";
 import { resolvePlanEvidence } from "../developer/plan-evidence.js";
@@ -840,6 +846,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (request.method === "POST" && serviceUrl.pathname === "/v1/tasks/thread-notes/answered") {
           return json(await markThreadNoteAnswered(dependencies, identity, parseBody(request.body)), request.requestId);
         }
+        if (request.method === "POST" && serviceUrl.pathname === "/v1/tasks/comments/answered") {
+          return json(await markCommentAnswered(dependencies, identity, parseBody(request.body)), request.requestId);
+        }
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace/prepare") {
           return json(await prepareThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
         }
@@ -1011,11 +1020,25 @@ const SLACK_PLAIN_REFUSALS: ReadonlyMap<string, string> = new Map([
  * task is not found for a Slack caller when it was started from an AI tool (its owner is that tool's sign-in) or is
  * gone, so the words fit both.
  */
-function slackRefusalMessage(code: string, outOfDate: string, reason = ""): string | undefined {
+/** The decision's lost-race sentences (FR-035), which Slack says as they are. */
+const LOST_RACE = /^(Already approved by|Changes were already requested by) [^\n]{1,200}\.$/u;
+/** The lost-race sentence for Slack: Slack's markup characters escaped, and the winner named with a mention when their Slack ID is known. */
+function slackLostRace(reason: string, decidedBy: unknown): string {
+  const escape = (text: string) => text.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;");
+  const escaped = escape(reason);
+  const { name, slackUserId } = (decidedBy ?? {}) as { name?: unknown; slackUserId?: unknown };
+  if (typeof name !== "string" || typeof slackUserId !== "string" || !/^[UW][A-Z0-9]{2,}$/u.test(slackUserId)) return escaped;
+  const plain = ` by ${escape(name)} `;
+  const at = escaped.indexOf(plain);
+  return at < 0 ? escaped : `${escaped.slice(0, at)} by <@${slackUserId}> ${escaped.slice(at + plain.length)}`;
+}
+
+function slackRefusalMessage(code: string, outOfDate: string, reason = "", decidedBy?: unknown): string | undefined {
   switch (code) {
     // A refusal the presser can act on is said as it is; any other means the press no longer fits the task.
     case "CONFIG_INVALID": return SLACK_PLAIN_REFUSALS.get(reason) ?? outOfDate;
-    case "IDEMPOTENCY_CONFLICT": return outOfDate;
+    // A lost race says who decided and when (the owner's name is redacted; Slack's markup characters are escaped).
+    case "IDEMPOTENCY_CONFLICT": return LOST_RACE.test(reason) ? slackLostRace(reason, decidedBy) : outOfDate;
     case "WORKSPACE_BUSY":
     case "TASK_BUSY": return "AgentX is still working on the previous step. Try again when it posts.";
     case "FORBIDDEN": return "Only the task owner can do that.";
@@ -1072,9 +1095,11 @@ async function answerSlackWorkflowEvent(
     if (typeof note === "string") await recordSlackWorkflowRefusal(dependencies, event, note, attemptId);
     return json(result, "slack-ingress");
   } catch (error) {
-    const refusal = error instanceof AgentXError ? slackRefusalMessage(error.code, options.outOfDate, stripCode(error.message, error.code)) : undefined;
+    const refusal = error instanceof AgentXError ? slackRefusalMessage(error.code, options.outOfDate, stripCode(error.message, error.code), (error as { decidedBy?: unknown }).decidedBy) : undefined;
     if (error instanceof AgentXError && refusal !== undefined) {
-      console.log(JSON.stringify({ component: "broker", event: `slack.workflow_${name}_refused`, taskId: event.taskId, requestId: event.requestId, errorCode: error.code, reason: stripCode(error.message, error.code) }));
+      // A lost race's sentence names a person: the log keeps a fixed label instead.
+      const reason = error.code === "IDEMPOTENCY_CONFLICT" ? "already_decided" : stripCode(error.message, error.code);
+      console.log(JSON.stringify({ component: "broker", event: `slack.workflow_${name}_refused`, taskId: event.taskId, requestId: event.requestId, errorCode: error.code, reason }));
       await recordSlackWorkflowRefusal(dependencies, event, refusal, attemptId);
       return json({ refused: true, message: refusal }, "slack-ingress");
     }
@@ -2085,7 +2110,7 @@ async function ensureThreadWorkspace(
     const taskAnswer = input.taskAnswer === undefined ? undefined : SlackTaskAnswerRequestSchema.safeParse(input.taskAnswer);
     if (taskAnswer !== undefined && !taskAnswer.success) throw agentXError("CONFIG_INVALID", "taskAnswer needs the task's ID");
     if (taskAnswer?.data.taskId === identity.sharedTask.taskId && identity.sharedTask.taskAnswer === true) {
-      const answer = await taskAnswerWorkspace(dependencies, slack.thread, identity.sharedTask);
+      const answer = await taskAnswerWorkspace(dependencies, slack.thread, identity.sharedTask, taskAnswer.data.commentId);
       if (answer !== undefined) return answer;
     }
     return sharedThreadWorkspace(dependencies, identity, identity.sharedTask, input.includeSharedTask === true, include, includeSettingsRevision);
@@ -2464,12 +2489,13 @@ async function taskAnswerWorkspace(
   dependencies: AwsBrokerDependencies,
   thread: SlackThread,
   shared: NonNullable<AuthenticatedIdentity["sharedTask"]>,
+  commentId?: string,
 ): Promise<SlackThreadWorkspaceResult | undefined> {
   const workspace = await requireWorkspace(dependencies, shared.workspaceId);
   if (workspace.status === "CLOSED") return undefined;
   const taskContext = await workflowTaskAnswerContext(
     { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: developerTaskActions(dependencies) },
-    { taskId: shared.taskId, workspaceId: shared.workspaceId, thread },
+    { taskId: shared.taskId, workspaceId: shared.workspaceId, thread, ...(commentId === undefined ? {} : { commentId }) },
   );
   if (taskContext === undefined) return undefined;
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -2499,6 +2525,36 @@ async function markThreadNoteAnswered(dependencies: AwsBrokerDependencies, ident
   if (outcome === "refused") throw agentXError("FORBIDDEN", "this thread is not that task's own thread");
   if (outcome === "missing") throw agentXError("NOT_FOUND", "that reply was not saved for this task");
   return { outcome: "ANSWERED" };
+}
+
+/**
+ * POST /v1/service/tasks/comments/answered (spec 061 slice 2): AgentX's answer to a task page comment, from the Slack
+ * service. The call must come from that task's own open thread and name it; only a comment still waiting for an answer
+ * takes one, and a repeat answers the same. The answer becomes AgentX's reply on the page; nothing is posted in Slack.
+ */
+async function markCommentAnswered(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, value: unknown): Promise<{ outcome: "ANSWERED" | "FAILED" }> {
+  if (dependencies.developer === undefined || identity.slack === undefined) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
+  const input = SlackCommentAnsweredRequestSchema.safeParse(value);
+  if (!input.success) throw agentXError("CONFIG_INVALID", "taskId, commentId, thread and outcome are required");
+  const { thread } = identity.slack;
+  const body = input.data;
+  const own = identity.sharedTask;
+  if (own?.taskAnswer !== true || own.taskId !== body.taskId || body.thread.teamId !== thread.teamId || body.thread.channelId !== thread.channelId || body.thread.threadTs !== thread.threadTs
+    || dependencies.developer.slackTeamId !== thread.teamId) {
+    throw agentXError("FORBIDDEN", "this thread is not that task's own thread");
+  }
+  let state: "answered" | "failed";
+  try {
+    state = await writeCommentAnswer(
+      { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: developerTaskActions(dependencies), now: Date.now },
+      { taskId: body.taskId, commentId: body.commentId, outcome: body.outcome, ...(body.outcome === "ANSWERED" ? { text: body.text } : {}) },
+    );
+  } catch (error) {
+    if (isPageRefusal(error)) throw agentXError("IDEMPOTENCY_CONFLICT", "that comment is not waiting for an answer");
+    throw error;
+  }
+  console.log(JSON.stringify({ component: "broker", event: "developer.comment_answer_written", taskId: body.taskId, outcome: state }));
+  return { outcome: state === "answered" ? "ANSWERED" : "FAILED" };
 }
 
 const SHARED_VIEW_ONLY = "this thread follows a task started from an AI tool and is view only";
@@ -3173,7 +3229,9 @@ async function acceptTask(
           duplicate: true,
         };
       }
-      throw agentXError("WORKSPACE_BUSY", "workspace already has an active writer");
+      // Which of the caller's own items failed (after this function's four), so it can tell its own conditions apart.
+      const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons ?? [];
+      throw Object.assign(agentXError("WORKSPACE_BUSY", "workspace already has an active writer"), { extraCancellation: reasons.slice(4).map((reason) => reason.Code ?? "None") });
     }
     throw error;
   }
@@ -4415,8 +4473,9 @@ async function readFeedbackBundlesForCritic(
   for (const artifact of latestStructured === undefined ? requirements : [latestStructured]) {
     if (!artifact.objectKey.startsWith(`private/${task.ownerKey}/${task.workspaceId}/`)) throw agentXError("CALLBACK_FORBIDDEN", "approved requirement artifact is outside this task's private storage");
     if (artifact.format === "structured") {
-      // The owner approved it with AgentX's recommended answers. A copy too long for the critic is cut, never refused.
-      const loaded = await loadWorkflowDocument((key, maxBytes) => readObjectText(dependencies, key, maxBytes), artifact, { answers: "recommended" });
+      // With the owner's answers and the comments they sent. A copy too long for the critic is cut, never refused.
+      const answers = await ownerAnswersFor({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, workflow, artifact);
+      const loaded = await loadWorkflowDocument((key, maxBytes) => readObjectText(dependencies, key, maxBytes), artifact, { answers });
       if (loaded === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "approved task requirements failed size or digest validation");
       const heading = artifact.type.toUpperCase() + " (sha256 " + artifact.sha256 + "):\n";
       approved.push(heading + shortenMarkdown(loaded.markdown, FEEDBACK_REQUIREMENTS_MAX_BYTES - Buffer.byteLength(heading, "utf8"), "… (shortened; the full plan is on the task page)"));
@@ -5900,6 +5959,8 @@ async function completedWorkflowItems(
   terminalError?: string,
   /** Collects the evidence a stored plan's own callback read (no evidence job configured), to attach once the plan has committed. */
   inlineEvidence?: InlineEvidence[],
+  /** Collects the planner's answers to the comments its Request changes sent, to write as replies once the plan has committed. */
+  plannerReplies?: PlannerReplies[],
 ): Promise<TransactItems> {
   if (pointer === undefined) return [];
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
@@ -6207,6 +6268,7 @@ async function completedWorkflowItems(
       planUnreadable = stored.planUnreadable;
       evidenceJob = stored.evidenceJob;
       if (stored.inlineEvidence !== undefined) inlineEvidence?.push({ ...stored.inlineEvidence, taskId: task.taskId });
+      if (stored.plannerReplies !== undefined) plannerReplies?.push(stored.plannerReplies);
     }
   } else {
     next = blockWorkflow(task.workflow, `planning operation ended ${terminalStatus.toLowerCase()}`, now);
@@ -6255,7 +6317,7 @@ async function storePlanAnswer(
   task: DeveloperTaskRecord & { workflow: WorkflowSnapshot },
   artifact: Record<string, unknown>,
   now: string,
-): Promise<{ next: WorkflowSnapshot; planUnreadable: NonNullable<DeveloperTaskRecord["planUnreadable"]> | null; evidenceJob?: { artifactId: string; artifactSha256: string }; inlineEvidence?: Omit<InlineEvidence, "taskId"> }> {
+): Promise<{ next: WorkflowSnapshot; planUnreadable: NonNullable<DeveloperTaskRecord["planUnreadable"]> | null; evidenceJob?: { artifactId: string; artifactSha256: string }; inlineEvidence?: Omit<InlineEvidence, "taskId">; plannerReplies?: PlannerReplies }> {
   const workflow = task.workflow;
   const unreadable = (errors: string[]) => {
     const next = blockWorkflow(workflow, WORKFLOW_BLOCK_REASONS.planUnreadable, now);
@@ -6309,11 +6371,13 @@ async function storePlanAnswer(
       format: "structured",
     },
   });
-  if (!planCitesCode(plan)) return { next, planUnreadable: null };
+  const replies = await plannerRepliesFor(dependencies, task, artifactType, content, { artifactId, version: next.artifacts.at(-1)?.version ?? 1 });
+  const withReplies = replies === undefined ? {} : { plannerReplies: replies };
+  if (!planCitesCode(plan)) return { next, planUnreadable: null, ...withReplies };
   const artifactSha256 = sha(canonical);
   // With the evidence job configured, the code is read afterwards. Without it (no PlanEvidence function in this deployment),
   // it is read here as before, inside the old 12 second budget, and attached after the plan commits, the same way the job does.
-  if (dependencies.startPlanEvidenceJob !== undefined) return { next, planUnreadable: null, evidenceJob: { artifactId, artifactSha256 } };
+  if (dependencies.startPlanEvidenceJob !== undefined) return { next, planUnreadable: null, evidenceJob: { artifactId, artifactSha256 }, ...withReplies };
   const github = dependencies.githubPullRequests;
   let bundle: PlanEvidenceBundle;
   try {
@@ -6327,7 +6391,46 @@ async function storePlanAnswer(
   } catch {
     bundle = { schemaVersion: 1, excerpts: [] };
   }
-  return { next, planUnreadable: null, inlineEvidence: { artifactId, artifactSha256, bundle, prefix } };
+  return { next, planUnreadable: null, inlineEvidence: { artifactId, artifactSha256, bundle, prefix }, ...withReplies };
+}
+
+/** The planner's answers to the comments the owner sent back with Request changes, for the version just stored. */
+interface PlannerReplies { taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: CommentAnswer[] }
+
+/**
+ * Spec 061 slice 2: when this planning step follows a Request changes that sent comments, the planner's
+ * `agentx-comment-answers` block read against that decision's comments (refs c1, c2 and so on). Undefined when the step
+ * did not follow such a decision, or its record cannot be read; a missing or unreadable block is no answers.
+ */
+async function plannerRepliesFor(
+  dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord & { workflow: WorkflowSnapshot }, artifactType: string, content: string,
+  stored: { artifactId: string; version: number },
+): Promise<PlannerReplies | undefined> {
+  const workflow = task.workflow;
+  const last = [...workflow.decisions].reverse().find((decision) => (decision.source ?? "GATE") === "GATE");
+  if (last?.decision !== "REQUEST_CHANGES" || (last.commentsIncluded ?? 0) === 0) return undefined;
+  if (!workflow.artifacts.some((artifact) => artifact.sha256 === last.artifactDigest && artifact.type === artifactType)) return undefined;
+  try {
+    const detail = await readDecisionDetail(dependencies, task.taskId, last.requestId);
+    if (detail === undefined || detail.includedCommentIds.length === 0) return undefined;
+    const refs = new Set(detail.includedCommentIds.map((_, index) => `c${index + 1}`));
+    return { taskId: task.taskId, ...stored, detail, answers: parseCommentAnswers(content, refs) };
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "developer.planner_replies_unread", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }));
+    return undefined;
+  }
+}
+
+/** Writes the planner's answers as replies from AgentX, after the plan committed. Best effort: a failure is logged with counts only. */
+async function writeAllPlannerReplies(dependencies: AwsBrokerDependencies, entries: readonly PlannerReplies[]): Promise<void> {
+  for (const entry of entries) {
+    if (entry.answers.length === 0) continue;
+    try {
+      await writePlannerReplies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, log: (line) => console.log(JSON.stringify({ component: "broker", ...line })) }, entry);
+    } catch (error) {
+      console.log(JSON.stringify({ component: "broker", event: "developer.planner_replies_failed", taskId: entry.taskId, answers: entry.answers.length, errorName: error instanceof Error ? error.name : "unknown" }));
+    }
+  }
 }
 
 /**
@@ -6508,6 +6611,7 @@ async function recordTerminalResult(
   // Spec 061: the evidence jobs this result queued (a stored plan that cites code), started after it commits.
   let evidenceJobs: PlanEvidenceEvent[] = [];
   const inlineEvidence: InlineEvidence[] = [];
+  const plannerReplies: PlannerReplies[] = [];
   try {
     // A queuing transaction that met another one in flight (TransactionConflict, not a failed
     // condition) is decided again once from fresh reads before it counts as a stale callback.
@@ -6519,7 +6623,8 @@ async function recordTerminalResult(
       taskPointer = pointer;
       const completed = await completedTurnItems(dependencies, operation, pointer, terminalStatus, { result, error }, now);
       inlineEvidence.length = 0;
-      const workflow = await completedWorkflowItems(dependencies, operation, pointer, terminalStatus, now, result, error, inlineEvidence);
+      plannerReplies.length = 0;
+      const workflow = await completedWorkflowItems(dependencies, operation, pointer, terminalStatus, now, result, error, inlineEvidence, plannerReplies);
       recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed, ...workflow], workspaceUpdate, send);
       evidenceJobs = workflow.flatMap((item) => {
         const row = item.Put?.Item as Partial<PlanEvidenceJob> | undefined;
@@ -6571,6 +6676,7 @@ async function recordTerminalResult(
   if (recordedStatus === terminalStatus) {
     await startPlanEvidenceJobs(dependencies, evidenceJobs);
     await attachInlineEvidence(dependencies, inlineEvidence);
+    await writeAllPlannerReplies(dependencies, plannerReplies);
   }
   // #213: a prepare that did not succeed leaves the workspace PREPARATION_FAILED, which stops
   // counting toward the workspace limits now; the release logs, and never fails the callback.
@@ -7428,6 +7534,8 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
   const functionName = requiredEnvironment("DEVELOPER_IDENTITY_FUNCTION_ARN");
   const teamId = process.env.SLACK_TEAM_ID ?? "";
   return {
+    // Spec 061 slice 2: "Ask AgentX to answer" queues on the Slack service's request queue; set only where that service runs.
+    ...(process.env.SLACK_REQUEST_QUEUE_URL ? { slackRequestQueue: slackRequestQueue(process.env.SLACK_REQUEST_QUEUE_URL) } : {}),
     issuer,
     env: requiredEnvironment("AGENTX_ENV"),
     methods: { slack: process.env.DEVELOPER_SIGNIN_SLACK === "enabled", oidc: (process.env.DEVELOPER_OIDC_ISSUER ?? "") !== "" },
@@ -7446,6 +7554,17 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
       keys: developerKeysThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       now: Date.now,
     }),
+  };
+}
+/** The Slack request queue (FIFO) as "Ask AgentX to answer" sends to it. */
+function slackRequestQueue(queueUrl: string): SlackRequestQueue {
+  const client = new SQSClient(awsClientConfiguration);
+  return {
+    async send(message) {
+      await client.send(new SendMessageCommand({
+        QueueUrl: queueUrl, MessageBody: message.body, MessageGroupId: message.groupId, MessageDeduplicationId: message.deduplicationId, MessageAttributes: message.attributes,
+      }));
+    },
   };
 }
 const developer = developerConfiguration();

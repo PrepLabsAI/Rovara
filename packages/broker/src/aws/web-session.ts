@@ -70,3 +70,14 @@ export function reviewSessionCookie(sessionId: string): string {
 }
 
 export function reviewSessionCookieName(): string { return SESSION_COOKIE; }
+
+/** A CSRF token as AgentX issues it: 32 to 64 URL-safe characters. */
+export function isCsrfToken(value: string | undefined): value is string {
+  return value !== undefined && /^[A-Za-z0-9_-]{32,64}$/.test(value);
+}
+
+/** The CSRF cookie for `value`: the page reads the token from its own data, so scripts never need the cookie itself. */
+export function csrfCookie(value: string): string {
+  if (!isCsrfToken(value)) throw new Error("invalid CSRF token");
+  return `${CSRF_COOKIE}=${value}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${CSRF_MAX_AGE_SECONDS}`;
+}
