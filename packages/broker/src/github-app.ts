@@ -1,6 +1,7 @@
 import { createSign } from "node:crypto";
 import { agentXError, type AgentXError } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "./repository-access.js";
+import type { GithubMergeReadBudget } from "./aws/workflow-merge-recovery.js";
 
 const GITHUB_APP_ID = /^[1-9][0-9]*$/;
 const FILE_AT_COMMIT_MAX_BYTES = 20_971_520;
@@ -43,6 +44,16 @@ export interface GitHubPullRequestDetails {
   mergeCommit?: string;
   title: string;
   body: string;
+}
+
+export class GithubMergeRateLimitError extends Error {
+  constructor(readonly retryAt: number) {
+    if (!Number.isSafeInteger(retryAt) || retryAt < 1 || !Number.isFinite(new Date(retryAt).getTime())) {
+      throw new Error("GitHub merge rate-limit retry time is invalid");
+    }
+    super("GitHub merge observation is rate limited");
+    this.name = "GithubMergeRateLimitError";
+  }
 }
 
 export interface GitHubPullRequestUpdate {
@@ -190,6 +201,48 @@ export class GitHubAppCredentialProvider {
       pull_requests: "read",
     });
     return this.getPullRequestWithToken(repository, number, token);
+  }
+
+  /** A bounded, stable merge-state read that cannot reuse or populate the singleton provider's caches. */
+  async getPullRequestMergeObservation(
+    repositoryUrl: string,
+    number: number,
+    budget: GithubMergeReadBudget,
+  ): Promise<GitHubPullRequestDetails & { headTreeSha: string }> {
+    const boundedFetch = (async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      if (budget.signal.aborted) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub merge observation was cancelled");
+      budget.beforeRequest();
+      if (budget.signal.aborted) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub merge observation was cancelled");
+      const signals = [budget.signal, init?.signal, AbortSignal.timeout(5_000)]
+        .filter((signal): signal is AbortSignal => signal instanceof AbortSignal);
+      const response = await this.fetchImplementation(input, { ...init, signal: AbortSignal.any(signals) });
+      const retryAt = mergeRateLimitRetryAt(response, this.now());
+      if (retryAt !== undefined) throw new GithubMergeRateLimitError(retryAt);
+      return response;
+    }) as typeof fetch;
+    const scoped = new GitHubAppCredentialProvider({ ...this.options, fetchImplementation: boundedFetch, now: this.now });
+    const repository = parseGitHubRepository(repositoryUrl);
+    let installed: InstalledRepository;
+    try {
+      installed = await scoped.installed(repository);
+    } catch (error) {
+      if (error instanceof GithubMergeRateLimitError) throw error;
+      if (isAgentXError(error) && error.code === "CONFIG_INVALID") {
+        throw agentXError("RUNTIME_UNAVAILABLE", "GitHub merge observation installation is unavailable");
+      }
+      throw error;
+    }
+    const token = await scoped.createInstallationToken(installed, { contents: "read", pull_requests: "read" });
+    const before = await scoped.getPullRequestWithToken(installed, number, token);
+    assertMergePullRequestIdentity(before, number);
+    const headTreeSha = await scoped.getCommitTreeWithToken(installed, before.headCommit, token);
+    const after = await scoped.getPullRequestWithToken(installed, number, token);
+    assertMergePullRequestIdentity(after, number);
+    if (before.number !== after.number || before.url !== after.url || before.headCommit !== after.headCommit
+      || before.state !== after.state || before.mergeCommit !== after.mergeCommit) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub merge observation changed during the read");
+    }
+    return { ...after, headTreeSha };
   }
 
   /** Reads a bounded PR diff summary for a code-aware, owner-approved feedback proposal. */
@@ -546,6 +599,26 @@ export class GitHubAppCredentialProvider {
     return parsePullRequestDetails(await response.json(), repository);
   }
 
+  private async getCommitTreeWithToken(
+    repository: InstalledRepository,
+    commit: string,
+    token: string,
+  ): Promise<string> {
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/git/commits/${commit}`,
+      { headers: githubHeaders(token) },
+    );
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub commit tree lookup failed with HTTP ${response.status}`);
+    const value: unknown = await response.json();
+    const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+    const tree = record?.tree;
+    const treeSha = tree && typeof tree === "object" && !Array.isArray(tree) ? (tree as Record<string, unknown>).sha : undefined;
+    if (record?.sha !== commit || typeof treeSha !== "string" || !/^[a-f0-9]{40}$/.test(treeSha)) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid commit tree response");
+    }
+    return treeSha;
+  }
+
   /** The repository's installation, cached by owner; a failed lookup is not cached. */
   private async installed(repository: { owner: string; name: string }): Promise<InstalledRepository> {
     const key = repository.owner.toLowerCase();
@@ -755,6 +828,39 @@ function githubHeaders(token: string): Record<string, string> {
     "user-agent": "agentx-control-plane",
     "x-github-api-version": "2022-11-28",
   };
+}
+
+function safeFutureMilliseconds(value: number, now: number): number | undefined {
+  return Number.isSafeInteger(value) && value > now && Number.isFinite(new Date(value).getTime()) ? value : undefined;
+}
+
+function mergeRateLimitRetryAt(response: Response, now: number): number | undefined {
+  if (response.status !== 429 && response.status !== 403) return undefined;
+  const candidates: number[] = [];
+  const retryAfter = response.headers.get("retry-after");
+  if (retryAfter !== null) {
+    const seconds = /^[0-9]+$/.test(retryAfter.trim()) ? Number(retryAfter.trim()) : Number.NaN;
+    const relative = safeFutureMilliseconds(now + seconds * 1_000, now);
+    const absolute = safeFutureMilliseconds(Date.parse(retryAfter), now);
+    if (relative !== undefined) candidates.push(relative);
+    else if (absolute !== undefined) candidates.push(absolute);
+  }
+  const exhausted = response.headers.get("x-ratelimit-remaining")?.trim() === "0";
+  if (exhausted) {
+    const resetSeconds = response.headers.get("x-ratelimit-reset");
+    const reset = resetSeconds !== null && /^[0-9]+$/.test(resetSeconds.trim())
+      ? safeFutureMilliseconds(Number(resetSeconds.trim()) * 1_000, now) : undefined;
+    if (reset !== undefined) candidates.push(reset);
+  }
+  if (response.status === 403 && candidates.length === 0 && !exhausted) return undefined;
+  return candidates.length > 0 ? Math.max(...candidates) : safeFutureMilliseconds(now + 5 * 60_000, now);
+}
+
+function assertMergePullRequestIdentity(details: GitHubPullRequestDetails, expectedNumber: number): void {
+  if (details.number !== expectedNumber || !/^[a-f0-9]{40}$/.test(details.headCommit)
+    || (details.mergeCommit !== undefined && !/^[a-f0-9]{40}$/.test(details.mergeCommit))) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid merge observation identity");
+  }
 }
 
 function parsePullRequest(
