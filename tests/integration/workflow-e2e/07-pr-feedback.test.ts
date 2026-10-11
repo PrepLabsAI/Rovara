@@ -228,6 +228,26 @@ describe("Suite 7: PR feedback loop", () => {
     expect(counts.prompts[1]).toContain(NOTE);
   }, 120_000);
 
+  it("7.10 the owner's note goes to the next round of PR feedback only, never to the rounds after it", async () => {
+    // Found in review: every note the owner ever left was sent to every later round.
+    const NOTE = "Keep greet's signature; only trim inside it.";
+    const { e2e, counts, pullRequest } = await feedbackJourney();
+    await commented(e2e, pullRequest.number, "Please trim the name.");
+    await e2e.click("agentx_feedback_review_changes");
+    await e2e.submitView({ feedback_note: { reason: { value: NOTE } } });
+    await e2e.settle();
+    await commented(e2e, pullRequest.number, "Also add a test for an empty name.");
+    expect(counts.feedback).toBe(2);
+    expect(counts.prompts[1]).toContain(NOTE);
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    await commented(e2e, pullRequest.number, "And greet in lowercase.");
+    expect(counts.feedback).toBe(3);
+    expect(counts.prompts[2]).not.toContain(NOTE);
+    expect(counts.prompts[2]).not.toContain("Notes the task owner left for this round of PR feedback");
+  }, 120_000);
+
   it("7.11 [LIVE-BUG B6] a feedback review that times out is said with Retry review, and the retry proposes the fix", async () => {
     let calls = 0;
     const { e2e, pullRequest } = await feedbackJourney({ workerTimeouts: { feedbackReviewMs: 200 } }, (prompt) => (++calls === 1 ? reviewerHangs

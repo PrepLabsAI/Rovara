@@ -947,7 +947,7 @@ const WorkflowSnapshotShapeSchema = z.object({
   canvasCloseout: WorkflowCanvasCloseoutSchema.optional(),
   canvasCloseoutAttempt: WorkflowCanvasCloseoutAttemptSchema.optional(),
 }).superRefine((workflow, context) => {
-  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, verificationRetries: workflow.verificationRetries, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout, canvasCloseoutAttempt: workflow.canvasCloseoutAttempt };
+  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, feedbackThreadObservations: workflow.feedbackThreadObservations, verificationRetries: workflow.verificationRetries, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout, canvasCloseoutAttempt: workflow.canvasCloseoutAttempt };
   if (Buffer.byteLength(JSON.stringify(taskMetadata), "utf8") > 262_144) {
     context.addIssue({ code: "custom", message: "workflow metadata exceeds the task snapshot storage budget" });
   }

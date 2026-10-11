@@ -429,6 +429,21 @@ describe("native task workflow contracts", () => {
   });
 });
 
+describe("the task snapshot's storage budget", () => {
+  it("counts the review threads remembered between rounds (feedbackThreadObservations)", () => {
+    const taskId = "11111111-2222-4333-8444-555555555555";
+    const ownerId = "a".repeat(64);
+    const workflow = createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z" });
+    const observation = (index: number) => ({ repositoryId: "demo", number: 1, threadId: `thread-${index}`, resolved: true,
+      comments: Array.from({ length: 128 }, (_, comment) => ({ id: `review_comment:${index}-${comment}`, updatedAt: "2026-10-05T12:00:00.000Z", bodyDigest: "b".repeat(64) })),
+      eligibleCommentIds: [] });
+    expect(WorkflowSnapshotSchema.safeParse({ ...workflow, feedbackThreadObservations: [observation(1)] }).success).toBe(true);
+    const tooMany = WorkflowSnapshotSchema.safeParse({ ...workflow, feedbackThreadObservations: Array.from({ length: 30 }, (_, index) => observation(index)) });
+    expect(tooMany.success).toBe(false);
+    expect(JSON.stringify(tooMany.error?.issues)).toContain("workflow metadata exceeds the task snapshot storage budget");
+  });
+});
+
 describe("Slack-attributed PR feedback notes", () => {
   it("records the verified Slack owner, workspace, thread and source message", () => {
     const note = WorkflowFeedbackNoteSchema.parse({
