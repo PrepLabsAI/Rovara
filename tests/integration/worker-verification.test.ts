@@ -734,6 +734,25 @@ describe("checks a PR feedback fix makes wrong (0.2.12 live test)", () => {
     expect(unknown.report.blockReason).toBe("reviewer output: fixProposal.obsoleteChecks of finding 1 names a check the task does not have");
   });
 
+  it("refuses an obsolete label that names more than one of the task's checks, and matches an ID first", async () => {
+    const fixture = await readmeFixture();
+    const twins = { ...taskChecks, proposed: [...taskChecks.proposed, { ...taskChecks.proposed[0]!, id: "proposed-2", command: { ...taskChecks.proposed[0]!.command, args: ["-q", "Other.", "README.md"] } }] };
+    const ambiguous = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: [taskChecks.proposed[0]!.label] })], [], twins);
+    expect(ambiguous.report.blockReason).toBe("reviewer output: fixProposal.obsoleteChecks of finding 1 names more than one check by the same label");
+    const byId = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: ["proposed-2"], replacementChecks: [replacement] })], [], twins);
+    expect(byId.report.status).toBe("COMPLETE");
+  });
+
+  it("keeps no check changes on a finding that is not a fix to make", async () => {
+    const fixture = await readmeFixture();
+    const answer = JSON.parse(shorten(fixture.bundleRef.sha256, { obsoleteChecks: ["readiness-1"], replacementChecks: [{ ...replacement, executable: "/bin/sh" }] })) as { findings: Array<Record<string, unknown>> };
+    const question = { ...answer.findings[0]!, assessment: "NEEDS_OWNER_DECISION", recommended: false, proposedDisposition: "OWNER_DECISION", confidence: { level: "MEDIUM", reason: "Two readings." } };
+    const result = await review(fixture, [JSON.stringify({ findings: [question] })], []);
+    expect(result.report.status).toBe("COMPLETE");
+    expect(result.report.findings[0]?.fixProposal).not.toHaveProperty("obsoleteChecks");
+    expect(result.report.findings[0]?.fixProposal).not.toHaveProperty("replacementChecks");
+  });
+
   it("asks nothing about checks when the broker sent none (an older broker), and keeps no check changes in the report", async () => {
     const fixture = await readmeFixture();
     const prompts: string[] = [];

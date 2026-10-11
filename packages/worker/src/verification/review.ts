@@ -407,15 +407,22 @@ function checkedCheckChanges(value: unknown, index: number, taskChecks: Workflow
   const proposal = (value as { fixProposal?: unknown }).fixProposal;
   if (proposal === null || typeof proposal !== "object" || Array.isArray(proposal)) return value;
   const { obsoleteChecks, replacementChecks, ...rest } = proposal as Record<string, unknown>;
-  if (taskChecks === undefined) return { ...value, fixProposal: rest };
+  // Only a fix to make changes checks: a question or a skip keeps none (an older broker gets none either).
+  if (taskChecks === undefined || (value as { proposedDisposition?: unknown }).proposedDisposition !== "IMPLEMENT") return { ...value, fixProposal: rest };
   const finding = `finding ${String(index + 1)}`;
   if (Array.isArray(obsoleteChecks)) {
-    const named = (name: unknown, check: { id: string; label: string }) => typeof name === "string"
-      && (check.id === name.trim() || check.label.trim().toLowerCase() === name.trim().toLowerCase());
+    // An ID names its check; a label must name exactly one.
+    const named = (name: unknown, checks: ReadonlyArray<{ id: string; label: string }>) => {
+      if (typeof name !== "string") return [];
+      const byId = checks.filter((check) => check.id === name.trim());
+      return byId.length > 0 ? byId : checks.filter((check) => check.label.trim().toLowerCase() === name.trim().toLowerCase());
+    };
     const rule = "List in obsoleteChecks only the ids of the task's proposed checks your fix makes wrong. Required project checks always run.";
     for (const name of obsoleteChecks) {
-      if (taskChecks.required.some((check) => named(name, check))) throw outputError(`fixProposal.obsoleteChecks of ${finding} names a required project check`, rule);
-      if (!taskChecks.proposed.some((check) => named(name, check))) throw outputError(`fixProposal.obsoleteChecks of ${finding} names a check the task does not have`, rule);
+      if (named(name, taskChecks.required).length > 0) throw outputError(`fixProposal.obsoleteChecks of ${finding} names a required project check`, rule);
+      const matches = named(name, taskChecks.proposed);
+      if (matches.length === 0) throw outputError(`fixProposal.obsoleteChecks of ${finding} names a check the task does not have`, rule);
+      if (matches.length > 1) throw outputError(`fixProposal.obsoleteChecks of ${finding} names more than one check by the same label`, rule);
     }
   }
   if (Array.isArray(replacementChecks)) {
