@@ -178,6 +178,18 @@ describe("assertJourneyInvariants", () => {
     expect(violations(journey).filter((violation) => violation.startsWith("INV-CODE"))).toEqual([expect.stringMatching(/^INV-CODE: task .* has 2 pull requests in demo/)]);
   });
 
+  it("INV-CODE: two pull requests on GitHub for one task, from two of its branches; one the product closed is allowed", () => {
+    const journey = goodJourney();
+    const second = "8".repeat(40);
+    journey.github = { ...journey.github,
+      pushLog: [...journey.github.pushLog, { branch: "agentx/y", commit: second, tree: TREE, parents: [BASE], token: "ghs_push_1", during: "publish" }],
+      pullRequests: [...journey.github.pullRequests, { number: 2, headBranch: "agentx/y", state: "open" }] };
+    journey.pushedWorkflows = [...journey.pushedWorkflows, { commit: second, workflow: pushedWorkflow(FIRST) }];
+    expect(violations(journey).filter((violation) => violation.startsWith("INV-CODE"))).toEqual([expect.stringMatching(/^INV-CODE: task .* has 2 pull requests on GitHub \(#1, #2\)/)]);
+    journey.github = { ...journey.github, pullRequests: [journey.github.pullRequests[0]!, { number: 2, headBranch: "agentx/y", state: "closed" }] };
+    expect(violations(journey).filter((violation) => violation.startsWith("INV-CODE"))).toEqual([]);
+  });
+
   it("INV-CODE: reviewed code that was not checked, a fix that is not a fast-forward, and two pull requests from one branch", () => {
     const journey = goodJourney();
     journey.checkRuns = [{ tree: TREE }];
@@ -188,6 +200,7 @@ describe("assertJourneyInvariants", () => {
       expect.stringMatching(/^INV-CODE: a review run was given tree e{40}, on which no check ran/),
       expect.stringMatching(/^INV-CODE: the fix push d{40} to agentx\/x is not a fast-forward/),
       expect.stringMatching(/^INV-CODE: branch agentx\/x has more than one pull request/),
+      expect.stringMatching(/^INV-CODE: task .* has 2 pull requests on GitHub \(#1, #2\)/),
     ]);
   });
 
@@ -263,6 +276,17 @@ describe("assertJourneyInvariants", () => {
       expect.stringMatching(/^INV-ONCE: 2 fix pushes for 1 approved fixes/),
       expect.stringMatching(/^INV-ONCE: the same message was posted twice in a row/),
     ]);
+  });
+
+  it("INV-ONCE: fix pushes are counted per task: another task's approved fix and push are not this task's", () => {
+    const journey = goodJourney();
+    const other = "7e1c2a3b-4d5e-4f60-8a7b-9c0d1e2f3a4b";
+    const otherFix = "6".repeat(40);
+    const otherWorkflow = WorkflowSnapshotSchema.parse({ ...waitingWorkflow(), taskId: other });
+    journey.db.set({ pk: `DEVTASK#${other}`, sk: "META", entityType: "DEVELOPER_TASK", taskId: other, workflow: otherWorkflow });
+    journey.github = { ...journey.github, pushLog: [...journey.github.pushLog, { branch: "agentx/x", commit: otherFix, tree: FIX_TREE, parents: [FIX], token: "ghs_push_2", during: "maintain" }] };
+    journey.pushedWorkflows = [...journey.pushedWorkflows, { commit: otherFix, workflow: WorkflowSnapshotSchema.parse({ ...pushedWorkflow(), taskId: other }) }];
+    expect(violations(journey).filter((violation) => violation.startsWith("INV-ONCE"))).toEqual([]);
   });
 
   it("INV-DDB: a request DynamoDB refused, or a broker log line naming one", () => {

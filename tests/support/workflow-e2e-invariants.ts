@@ -60,7 +60,8 @@ export interface JourneyView {
     tokens: ReadonlyMap<string, "clone" | "push">;
     minted: ReadonlyArray<{ token: string; access: "clone" | "push"; during: string | undefined }>;
     pushLog: ReadonlyArray<{ branch: string; commit: string; tree: string; parents: readonly string[]; token: string; during: string | undefined }>;
-    pullRequests: ReadonlyArray<{ number: number; headBranch: string }>;
+    /** GitHub's pull requests (one repository), with their state on GitHub. */
+    pullRequests: ReadonlyArray<{ number: number; headBranch: string; state?: string }>;
   };
   slack: {
     posts: readonly SlackMessage[];
@@ -198,6 +199,18 @@ function checkCode(journey: JourneyView): string[] {
   const branches = journey.github.pullRequests.map((pullRequest) => pullRequest.headBranch);
   for (const branch of new Set(branches)) {
     if (branches.filter((entry) => entry === branch).length > 1) violations.push(`INV-CODE: branch ${branch} has more than one pull request`);
+  }
+  // GitHub's own pull requests, each with the task whose push opened its branch: one open or merged per task (a pull
+  // request the product closed again, such as one that turned out not to hold the checked code, is allowed).
+  const branchTasks = new Map<string, Set<string>>();
+  for (const push of agentx) {
+    const taskId = journey.pushedWorkflows.find((entry) => entry.commit === push.commit)?.workflow?.taskId;
+    if (taskId !== undefined) branchTasks.set(push.branch, new Set([...(branchTasks.get(push.branch) ?? []), taskId]));
+  }
+  const live = journey.github.pullRequests.filter((pullRequest) => pullRequest.state !== "closed");
+  for (const taskId of new Set([...branchTasks.values()].flatMap((ids) => [...ids]))) {
+    const numbers = live.filter((pullRequest) => branchTasks.get(pullRequest.headBranch)?.has(taskId) === true).map((pullRequest) => pullRequest.number);
+    if (numbers.length > 1) violations.push(`INV-CODE: task ${taskId} has ${numbers.length} pull requests on GitHub (${numbers.map((number) => `#${number}`).join(", ")})`);
   }
   for (const task of tasks(journey)) {
     const recorded = ((task.workflow as Partial<WorkflowSnapshot> | undefined)?.pullRequests ?? []);
@@ -348,7 +361,9 @@ function checkOnce(journey: JourneyView): string[] {
       for (const id of new Set(ids)) if (ids.filter((entry) => entry === id).length > 1) violations.push(`INV-ONCE: one request recorded more than one ${name} (${id})`);
     }
     const approvals = (workflow?.feedbackDecisions ?? []).filter((decision) => decision.decision === "APPROVE").length;
-    const fixPushes = journey.github.pushLog.filter((push) => push.during === "maintain" && journey.github.tokens.has(push.token)).length;
+    // This task's fix pushes: AgentX's pushes made while the task's own fix was pushed.
+    const fixPushes = journey.github.pushLog.filter((push) => push.during === "maintain" && journey.github.tokens.has(push.token)
+      && journey.pushedWorkflows.find((entry) => entry.commit === push.commit)?.workflow?.taskId === task.taskId).length;
     if (fixPushes > approvals) violations.push(`INV-ONCE: ${fixPushes} fix pushes for ${approvals} approved fixes`);
   }
   const byThread = new Map<string, SlackMessage[]>();
