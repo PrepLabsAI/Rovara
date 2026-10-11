@@ -32,7 +32,10 @@ async function connect(client: Partial<ControlPlaneClient>, overrides: Partial<T
   await mcp.listTools();
   return mcp;
 }
-const text = (result: Awaited<ReturnType<Client["callTool"]>>) => CallToolResultSchema.parse(result).content.find((block) => block.type === "text")?.text ?? "";
+const text = (result: Awaited<ReturnType<Client["callTool"]>>) => {
+  const first = CallToolResultSchema.parse(result).content[0];
+  return first?.type === "text" ? first.text : "";
+};
 
 describe("share fields in task results (FR-030, C21)", () => {
   it("says a start was shared because the project requires it, view only because continue is not allowed", async () => {
