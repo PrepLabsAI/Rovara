@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  AGENTX_ANSWER_MAX_CHARS, AGENTX_ASK_RATE, COMMENT_RATE, COMMENT_THREAD_REPLIES_MAX, NUDGE_WINDOW_MS, SlackPageCommentMessageSchema, TASK_COMMENT_ITEMS_MAX, TaskCommentSchema,
+  AGENTX_ANSWER_MAX_CHARS, AGENTX_ASK_RATE, ANSWER_STALE_MS, COMMENT_RATE, COMMENT_THREAD_REPLIES_MAX, NUDGE_WINDOW_MS, SlackPageCommentMessageSchema, TASK_COMMENT_ITEMS_MAX, TaskCommentSchema,
   TaskSuggestionSchema, agentXError, agentxAnswerCommentId, cleanCommentText, diffPlanDocuments, pageCommentAttributes, pageCommentEventId, pageCommentId,
   planClaimIds, plannerReplyCommentId, redactText, sharedTaskKey,
   type AgentXError, type AgentXErrorCode, type CommentAnswer, type CommentDocument, type CommentTarget, type PlanDocument, type TaskComment,
@@ -606,7 +606,10 @@ export async function queueCommentAnswer(
     // refused ask). Then every hourly limit is checked before any of them is spent.
     const threadId = comment.parentId ?? comment.commentId;
     const inThread = (await listTaskComments(deps, task.taskId)).filter((item) => item.commentId !== comment.commentId && (item.parentId === threadId || item.commentId === threadId));
-    const answers = inThread.filter((item) => (item.author.kind === "agentx" && item.author.source === "answer") || item.ask?.state === "answering");
+    // A question still "answering" past ANSWER_STALE_MS already shows as "couldn't answer", so it holds no place.
+    const now = deps.now();
+    const answers = inThread.filter((item) => (item.author.kind === "agentx" && item.author.source === "answer")
+      || (item.ask?.state === "answering" && now - Date.parse(item.ask.at) <= ANSWER_STALE_MS));
     if (answers.length >= AGENTX_ASK_RATE.perThread) return { outcome: "limited", comment };
     const limits = [
       { key: rateKey(task.taskId, "ask", caller.developerId), limit: AGENTX_ASK_RATE.perPersonPerHour },
@@ -667,8 +670,10 @@ export async function writeCommentAnswer(
   if (state === "answered" || state === "failed") return state;
   if (state === "skipped") return "failed";
   if (state !== "answering") throw pageRefusal("changed");
-  // Deleted, or edited after it was asked: the answer would be to words no longer there, so it is not shown.
-  if (comment.deletedAt !== undefined || (comment.editedAt !== undefined && comment.editedAt >= comment.ask.at)) {
+  // Deleted, or edited after it was asked: the answer would be to words no longer there, so it is not shown. An ask is only
+  // ever set on a comment at rev 1, so any edit at all came after it; comparing editedAt with the ask's time would trust
+  // two clocks to agree.
+  if (comment.deletedAt !== undefined || comment.editedAt !== undefined) {
     await setAsk(deps, comment, "skipped", "answering");
     return "failed";
   }

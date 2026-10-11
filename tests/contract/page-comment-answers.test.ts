@@ -4,7 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  SlackPageCommentMessageSchema, SlackRequestMessageSchema, agentxAnswerCommentId, pageCommentAttributes, pageCommentEventId,
+  ANSWER_STALE_MS, SlackPageCommentMessageSchema, SlackRequestMessageSchema, agentxAnswerCommentId, pageCommentAttributes, pageCommentEventId,
   type PlanDocument, type TaskComment, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { createPageComment, listPageComments, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
@@ -261,6 +261,18 @@ describe("asking AgentX to answer a page comment", () => {
     expect(busy.harness.db.get(`DEVTASK#${busy.taskId}`, `RATE#ask#${busy.owner.developerId}`)).toBeUndefined();
   });
 
+  it("five stale questions do not hold a thread's limit: they already read as couldn't answer", async () => {
+    const t = await waitingTask();
+    const top = await t.comment({ ask: false, text: "Where does it go?" });
+    for (let index = 0; index < 5; index += 1) await t.comment({ parentId: top.comment.id, text: `Asking ${index}?` });
+    expect((await t.comment({ parentId: top.comment.id, text: "Too soon?" })).askRefused).toBe("limited");
+    const start = Date.now();
+    (t.deps as { now: () => number }).now = () => start + ANSWER_STALE_MS + 1_000;
+    const next = await t.comment({ parentId: top.comment.id, text: "Now?" });
+    expect(next.askRefused).toBeUndefined();
+    expect(t.sent).toHaveLength(6);
+  });
+
   it("one person asks AgentX at most 30 times an hour across all their tasks", async () => {
     const t = await waitingTask();
     for (let index = 0; index < 30; index += 1) await takeAskRateAcrossTasks(t.deps, t.owner.developerId);
@@ -285,5 +297,18 @@ describe("asking AgentX to answer a page comment", () => {
     const views = await listPageComments(t.deps, t.owner, t.taskId);
     expect(views.comments.find((view) => view.id === edited.comment.id)?.agentx).toBe("skipped");
     expect(views.comments.find((view) => view.id === edited.comment.id)?.text).toBe("Why above, really?");
+  });
+
+  it("an edit counts as after the ask whatever the clocks say", async () => {
+    const t = await waitingTask();
+    const edited = await t.comment({ text: "Why above?" });
+    const actor = { task: t.harness.db.get(`DEVTASK#${t.taskId}`, "META") as never, caller: t.owner, role: "owner" as const };
+    // The edit is stamped by a clock a minute behind the one that stamped the ask.
+    (t.deps as { now: () => number }).now = () => Date.now() - 60_000;
+    await editTaskComment(t.deps, actor, { commentId: edited.comment.id, rev: 1, text: "Why above, really?" });
+    const answer = await t.answered({ taskId: t.taskId, commentId: edited.comment.id, thread: t.thread, outcome: "ANSWERED", text: "Because." });
+    expect(answer.status).toBe(200);
+    expect(t.stored(agentxAnswerCommentId(edited.comment.id))).toBeUndefined();
+    expect((await listPageComments(t.deps, t.owner, t.taskId)).comments.find((view) => view.id === edited.comment.id)?.agentx).toBe("skipped");
   });
 });
