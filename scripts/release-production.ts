@@ -360,6 +360,7 @@ async function releaseSlackOrchestrator(
     `agentxRegion=${options.region}`,
     ...profileArgs(options.profile),
     ...parameter("OrchestratorImageUri", image),
+    ...parameter("OrchestratorImageRepositoryName", "agentx-slack-orchestrator"),
     ...parameter("TaskRoleArn", stackOutput(controlPlane, "SlackOrchestratorTaskRoleArn")),
     ...parameter("ControlPlaneUrl", stackOutput(controlPlane, "ApiEndpoint")),
     ...parameter("SlackRequestQueueUrl", stackOutput(controlPlane, "SlackRequestQueueUrl")),
