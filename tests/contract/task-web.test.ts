@@ -1212,6 +1212,8 @@ describe("deciding and commenting on the task page (slice 2)", () => {
     expect(body).not.toContain('id="decide-dialog"');
     expect(body).not.toContain('type="radio"');
     expect(body).toContain("You can read and comment on this task.");
+    expect(body).toContain("Only the task owner decides; you can comment and suggest.");
+    expect(body).not.toContain("Decisions are made in Slack.");
   });
 
   it("the page data island escapes script-closing text", async () => {
@@ -1225,10 +1227,12 @@ describe("deciding and commenting on the task page (slice 2)", () => {
     expect(answer.headers["set-cookie"]).toContain(`__Host-agentx_review_csrf=${data.csrf};`);
     // Only the nonce'd script runs: the data island is not a script the page executes.
     const nonce = /<script nonce="([^"]+)">/.exec(answer.body)![1]!;
-    expect(answer.body.match(/<script nonce=/g)).toHaveLength(1);
+    // Two scripts by the page's nonce (reading, then deciding and commenting); the data island is not one of them.
+    expect(answer.body.match(/<script nonce=/g)).toHaveLength(2);
+    expect(answer.body.match(new RegExp(`<script nonce="${nonce}">`, "g"))).toHaveLength(2);
     expect(answer.headers["content-security-policy"]).toContain(`script-src 'nonce-${nonce}'`);
     // A reader who can do nothing gets no island.
-    expect((await render({ documents: plans() })).body).not.toContain("agentx-page-data");
+    expect((await render({ documents: plans() })).body).not.toContain('id="agentx-page-data"');
   });
 
   it("every new string avoids the banned words", async () => {

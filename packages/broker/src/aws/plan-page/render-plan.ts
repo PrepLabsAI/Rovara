@@ -148,7 +148,7 @@ function decisionHtml(context: Context, decision: PlanDecision, withLink: boolea
     const options = decision.options.map((option) => {
       const recommended = option.id === decision.recommended;
       const inputId = escapeHtml(`answer-${decisionAnchor(context, decision.id)}-${option.id}`);
-      return `<li class="option${recommended ? " recommended" : ""}"><input type="radio" name="answer-${t(decision.id)}" value="${t(option.id)}" id="${inputId}"${recommended ? " checked" : ""}>`
+      return `<li class="option${recommended ? " recommended" : ""}" data-option="${t(option.id)}"><input type="radio" name="answer-${t(decision.id)}" value="${t(option.id)}" id="${inputId}"${recommended ? " checked" : ""}>`
         + `<label for="${inputId}"><span class="option-label">${t(option.label)}</span>${recommended ? ' <span class="badge badge-recommended">AgentX recommends</span>' : ""} <span class="consequence">${t(option.consequence)}</span></label></li>`;
     }).join("");
     return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><fieldset class="answer"><legend><span class="decision-id">${t(decision.id)}</span> ${t(decision.question)}</legend>${where}<ul class="options">${options}</ul></fieldset>${after}</div>`;
@@ -158,7 +158,7 @@ function decisionHtml(context: Context, decision: PlanDecision, withLink: boolea
   const options = decision.options.map((option) => {
     const recommended = option.id === decision.recommended;
     const suggest = !suggesting ? "" : ` <button type="button" class="suggest" data-decision="${t(decision.id)}" data-option="${t(option.id)}"${mine === option.id ? ' data-mine="true"' : ""} hidden>${mine === option.id ? "You suggest this · Undo" : "Suggest this"}</button>`;
-    return `<li class="option${recommended ? " recommended" : ""}"><span class="option-label">${t(option.label)}</span>${recommended ? ' <span class="badge badge-recommended">AgentX recommends</span>' : ""} <span class="consequence">${t(option.consequence)}</span>${suggest}</li>`;
+    return `<li class="option${recommended ? " recommended" : ""}" data-option="${t(option.id)}"><span class="option-label">${t(option.label)}</span>${recommended ? ' <span class="badge badge-recommended">AgentX recommends</span>' : ""} <span class="consequence">${t(option.consequence)}</span>${suggest}</li>`;
   }).join("");
   return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><p class="decision-question"><span class="decision-id">${t(decision.id)}</span> ${t(decision.question)}</p>${where}<ul class="options">${options}</ul>${after}</div>`;
 }
@@ -264,7 +264,7 @@ function checksHtml(context: Context): string {
   if (checks === undefined || checks.length === 0) return "";
   // Class names let the stylesheet keep the short columns whole and, on a phone, stack each check as one block.
   const commentControl = (check: NonNullable<RenderPlanInput["checks"]>[number]) => check.id === undefined || !context.commenting || context.input.comments === undefined || !context.input.current ? ""
-    : ` <button type="button" class="comment-open" data-target="check:${t(check.id)}" hidden>Comment</button>`;
+    : ` <button type="button" class="comment-open" data-target="check:${t(check.id)}" data-label="${t(check.label)}" hidden>Comment</button>`;
   const threads = checks.map((check) => check.id === undefined ? "" : threadsHtml(context, `check:${check.id}`, { label: check.label, open: false })).join("");
   const rows = checks.map((check) => `<tr><td class="check-label">${t(check.label)}${commentControl(check)}</td><td class="check-from">${check.proposed ? "Proposed" : "Project"}</td><td class="check-proves">${check.proves.length === 0 ? "None" : check.proves.map((id) => provesLink(context, id)).join(", ")}</td><td class="check-status">${t(check.status)}</td></tr>`).join("");
   return `<section id="${escapeHtml(checksAnchor(context.input.version))}" class="checks"><h3>Checks</h3><table><thead><tr><th class="check-label">Check</th><th class="check-from">From</th><th class="check-proves">Proves</th><th class="check-status">Status</th></tr></thead><tbody>${rows}</tbody></table>${threads}</section>`;

@@ -9,7 +9,7 @@ import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { checksAnchor, renderPlanDocument, type PlanAnchor } from "./plan-page/render-plan.js";
 import type { PageCommentView, PageSuggestionView } from "./plan-page/comments.js";
-import { TASK_PAGE_SCRIPT, TASK_PAGE_STYLE } from "./task-page-assets.js";
+import { TASK_PAGE_DECIDING_SCRIPT, TASK_PAGE_SCRIPT, TASK_PAGE_STYLE } from "./task-page-assets.js";
 import { TASK_PAGE_API_PREFIX } from "./task-web-api.js";
 import {
   CSRF_COOKIE, SESSION_COOKIE, canonicalGithubUrl, csrfCookie, escapeHtml, isCsrfToken, parseCookie, safeResponse, signInLocation, type WebResponse,
@@ -376,7 +376,9 @@ async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequ
     }).join("")}</ol>`;
   const owns = view.access === undefined ? view.role === "owner" : view.access.role === "owner";
   const role = owns ? "You're the task owner." : view.access?.canComment === true ? "You can read and comment on this task." : "You can read this task.";
-  const slackOnly = view.access?.canDecide === true ? "" : '<p class="muted">Decisions are made in Slack.</p>';
+  const slackOnly = view.access?.canDecide === true ? ""
+    : view.access?.canComment === true ? `<p class="muted">${view.access.canSuggest ? "Only the task owner decides; you can comment and suggest." : "Only the task owner decides; you can comment."}</p>`
+    : '<p class="muted">Decisions are made in Slack.</p>';
   const island = csrf === undefined || view.access === undefined ? "" : `<script type="application/json" id="agentx-page-data">${scriptJson(pageData(view, csrf))}</script>`;
   // Hidden until the script sees the task moved on; without scripts it never shows and the page reads as before.
   const movedOn = `<div id="moved-on" class="moved-on" role="status" hidden data-version="${escapeHtml(view.revision ?? 0)}" data-stage="${escapeHtml(view.stage)}"`
@@ -391,7 +393,9 @@ async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequ
     + `<section id="findings" aria-label="Review findings"><h2>Review findings</h2>${findings}</section>`
     + `<section id="pull-requests" aria-label="Pull requests"><h2>Pull requests</h2>${pullRequests}</section>`
     + `<section id="history" aria-label="History"><h2>History</h2>${historyHtml}</section>`
-    + `${decideBar(view)}</main>${decideDialog(view)}${island}<script nonce="${nonce}">${TASK_PAGE_SCRIPT}</script></body></html>`;
+    + `${decideBar(view)}</main>${decideDialog(view)}${island}<script nonce="${nonce}">${TASK_PAGE_SCRIPT}</script>`
+    // The deciding and commenting script comes with the data island: only for someone who can comment or decide.
+    + `${island === "" ? "" : `<script nonce="${nonce}">${TASK_PAGE_DECIDING_SCRIPT}</script>`}</body></html>`;
 }
 
 

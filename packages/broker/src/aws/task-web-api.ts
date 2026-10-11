@@ -72,7 +72,8 @@ export interface TaskWebApiDependencies {
   authenticateSession(sessionId: string): Promise<DeveloperCaller | undefined>;
   /** Must run the full access check on every call. */
   taskState(caller: DeveloperCaller, taskId: string): Promise<TaskPageState>;
-  listComments(caller: DeveloperCaller, taskId: string): Promise<PageCommentView[]>;
+  /** The comments, and the suggestions that still apply (names and "you" only), as the open page refreshes them. */
+  listComments(caller: DeveloperCaller, taskId: string): Promise<{ comments: PageCommentView[]; suggestions?: unknown[] }>;
   createComment(caller: DeveloperCaller, taskId: string, input: PageCommentInput): Promise<{ comment: PageCommentView; duplicate?: boolean; askRefused?: string }>;
   editComment(caller: DeveloperCaller, taskId: string, input: { commentId: string; rev: number; text: string }): Promise<{ comment: PageCommentView }>;
   deleteComment(caller: DeveloperCaller, taskId: string, input: { commentId: string; rev: number }): Promise<{ comment: PageCommentView }>;
@@ -139,7 +140,10 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
     }
     try {
       if (method === "GET") {
-        if (endpoint === "comments") return json(200, { comments: await deps.listComments(caller, taskId) });
+        if (endpoint === "comments") {
+          const listed = await deps.listComments(caller, taskId);
+          return json(200, { comments: listed.comments, suggestions: listed.suggestions ?? [] });
+        }
         const state = await deps.taskState(caller, taskId);
         const current = parseCookie(request.headers, CSRF_COOKIE);
         const csrf = isCsrfToken(current) ? current : randomBytes(32).toString("base64url");

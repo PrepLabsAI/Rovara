@@ -247,7 +247,7 @@ describe("the plan page renderer", () => {
     expect(claim).toContain("Five times");
     expect(claim).toContain("Approve in Slack uses AgentX's answer.");
     expect(count(html, /AgentX recommends/g)).toBe(1);
-    expect(html).toMatch(/<li class="option recommended"><span class="option-label">Three times<\/span> <span class="badge badge-recommended">AgentX recommends/);
+    expect(html).toMatch(/<li class="option recommended" data-option="three"><span class="option-label">Three times<\/span> <span class="badge badge-recommended">AgentX recommends/);
   });
 
   it("shows five decisions in their claims and lists the rest with links to their claims", async () => {

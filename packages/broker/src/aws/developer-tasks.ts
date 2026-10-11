@@ -2221,10 +2221,53 @@ async function pageActor(deps: DeveloperTaskRouteDependencies, caller: Developer
 const commentViewContext = (deps: DeveloperTaskRouteDependencies, actor: PageActor) =>
   ({ readerId: actor.caller.developerId, now: deps.now(), artifacts: actor.task.workflow?.artifacts ?? [] });
 
-/** The task's comments as the page's script reads them. */
-export async function listPageComments(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<PageCommentView[]> {
+/**
+ * The task's comments as the page's script reads them, and the suggestions that still apply to each document's current
+ * version (names and "you" only), so an open page can refresh both. Suggestions that cannot be worked out are left out
+ * (logged); comments still answer.
+ */
+export async function listPageComments(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<{ comments: PageCommentView[]; suggestions: PageSuggestionListing[] }> {
   const actor = await pageActor(deps, caller, taskId);
-  return pageCommentViews(await listTaskComments(deps, taskId), commentViewContext(deps, actor));
+  const comments = pageCommentViews(await listTaskComments(deps, taskId), commentViewContext(deps, actor));
+  let suggestions: PageSuggestionListing[] = [];
+  try {
+    suggestions = (await currentSuggestions(deps, actor.task)).map((suggestion) => ({
+      document: suggestion.document, decisionId: suggestion.decisionId, optionId: suggestion.optionId, name: suggestion.name, you: suggestion.developerId === caller.developerId,
+    }));
+  } catch (error) {
+    log(deps, { event: "developer.task_page_suggestions_unavailable", taskId, errorName: error instanceof Error ? error.name : "unknown" });
+  }
+  return { comments, suggestions };
+}
+
+export interface PageSuggestionListing { document: "requirements" | "design" | "plan"; decisionId: string; optionId: string; name: string; you: boolean }
+
+/**
+ * The stored suggestions that still apply to each document's latest version. Only the versions they name are read (the
+ * latest, and any earlier one a suggestion was made on), and only from the task's own storage.
+ */
+async function currentSuggestions(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<TaskSuggestion[]> {
+  const stored = await listSuggestions(deps, task.taskId);
+  if (stored.length === 0) return [];
+  const privatePrefix = `private/${task.ownerKey}/${task.workspaceId}/`;
+  const read = (objectKey: string, maxBytes: number) => deps.actions.readArtifact(objectKey, maxBytes);
+  const out: TaskSuggestion[] = [];
+  for (const { type } of TASK_PAGE_DOCUMENTS) {
+    const mine = stored.filter((suggestion) => suggestion.document === type);
+    if (mine.length === 0) continue;
+    const artifacts = (task.workflow?.artifacts ?? []).filter((artifact) => artifact.type === type && artifact.objectKey.startsWith(privatePrefix));
+    const latest = artifacts.reduce<(typeof artifacts)[number] | undefined>((most, artifact) => most === undefined || artifact.version > most.version ? artifact : most, undefined);
+    if (latest === undefined) continue;
+    const plans = new Map<number, PlanDocument>();
+    for (const version of new Set([latest.version, ...mine.map((suggestion) => suggestion.version)])) {
+      const artifact = artifacts.find((item) => item.version === version);
+      const loaded = artifact === undefined ? undefined : await loadWorkflowDocument(read, artifact, {});
+      if (loaded?.format === "structured") plans.set(version, loaded.plan);
+    }
+    const plan = plans.get(latest.version);
+    if (plan !== undefined) out.push(...suggestionsFor(mine, { document: type, version: latest.version, plan, plans }));
+  }
+  return out;
 }
 
 /** Posts a comment or a reply from the page. Asking AgentX is accepted and has no effect yet. */

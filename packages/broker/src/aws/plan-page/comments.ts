@@ -133,11 +133,11 @@ function commentHtml(comment: PageCommentView, context: { shownVersion: number; 
   const sent = yours && comment.sent ? '<p class="comment-sent">Sent with a decision, so it can\'t be changed.</p>' : "";
   const controls: string[] = [];
   if (yours && !comment.sent && context.canComment) {
-    controls.push(`<button type="button" class="comment-edit" data-comment="${escapeHtml(comment.id)}" hidden>Edit</button>`);
-    controls.push(`<button type="button" class="comment-delete" data-comment="${escapeHtml(comment.id)}" hidden>Delete</button>`);
+    controls.push(`<button type="button" class="comment-edit" data-comment="${escapeHtml(comment.id)}" aria-describedby="comment-${escapeHtml(comment.id)}" hidden>Edit</button>`);
+    controls.push(`<button type="button" class="comment-delete" data-comment="${escapeHtml(comment.id)}" aria-describedby="comment-${escapeHtml(comment.id)}" hidden>Delete</button>`);
   }
   if (!reply && context.canComment && comment.author.kind === "person" && !comment.deleted) {
-    controls.push(`<button type="button" class="reply-open" data-comment="${escapeHtml(comment.id)}" hidden>Reply</button>`);
+    controls.push(`<button type="button" class="reply-open" data-comment="${escapeHtml(comment.id)}" aria-describedby="comment-${escapeHtml(comment.id)}" hidden>Reply</button>`);
   }
   const actions = controls.length === 0 ? "" : `<p class="comment-actions">${controls.join(" ")}</p>`;
   return `<article class="comment${comment.author.kind === "agentx" ? " comment-agentx" : ""}" id="comment-${escapeHtml(comment.id)}" data-comment="${escapeHtml(comment.id)}" data-rev="${comment.rev}">${header}${body}${state}${sent}${actions}</article>`;

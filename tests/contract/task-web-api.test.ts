@@ -26,7 +26,7 @@ function fakeDeps(overrides: Partial<TaskWebApiDependencies> = {}): TaskWebApiDe
     origin: DEV_ISSUER,
     authenticateSession: async (sessionId) => (sessionId === SESSION_ID ? caller : undefined),
     taskState: async (who) => { calls.push({ name: "state", caller: who }); return { revision: 4, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 1 }], commentSeq: 2 }; },
-    listComments: async (who) => { calls.push({ name: "comments", caller: who }); return []; },
+    listComments: async (who) => { calls.push({ name: "comments", caller: who }); return { comments: [] }; },
     createComment: record("createComment"),
     editComment: record("editComment"),
     deleteComment: record("deleteComment"),
@@ -217,6 +217,18 @@ describe("task page API through the broker", () => {
     expect(listed.statusCode).toBe(200);
     expect(listed.body).not.toContain(LEE.developerId);
     expect((listed.json.comments as Array<{ author: unknown; text: string }>)[0]).toMatchObject({ author: { kind: "person", name: "Lee Park", owner: false, you: false }, text: "Above reads better." });
+  });
+
+  it("the comment listing carries the suggestions that still apply, by name, so the page can refresh them", async () => {
+    const t = await sharedTask();
+    const set = await t.send(LEE, "POST", `/review/${t.id}/task/api/suggestions`, { document: "plan", decisionId: "d1", optionId: "above" });
+    expect(set.statusCode, set.body).toBe(200);
+    const listed = await t.send(MAYA, "GET", `/review/${t.id}/task/api/comments`);
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json.suggestions).toEqual([{ document: "plan", decisionId: "d1", optionId: "above", name: "Lee Park", you: false }]);
+    expect(listed.body).not.toContain(LEE.developerId);
+    const mine = await t.send(LEE, "GET", `/review/${t.id}/task/api/comments`);
+    expect((mine.json.suggestions as Array<{ you: boolean }>)[0]!.you).toBe(true);
   });
 
   it("a commenter cannot decide", async () => {
