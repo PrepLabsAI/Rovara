@@ -67,9 +67,17 @@ export async function resolveTaskAccess(deps: AccessDependencies, caller: Develo
   if (!member) {
     // Only someone on the task's own Slack workspace who may use the project is told whom to ask.
     if (deps.slackTeamId === undefined || share.teamId !== deps.slackTeamId) throw notFound();
-    throw Object.assign(agentXError("TASK_ACCESS_DENIED", "you can't open this task yet"), { owners: [task.developerName] });
+    throw Object.assign(agentXError("TASK_ACCESS_DENIED", "you can't open this task yet"), { owners: [ownerNameForReaders(task.developerName)] });
   }
   return { task, role: "commenter" };
+}
+
+/**
+ * The owner's name as a reader outside the channel is told it. A task started in Slack knows its owner only by Slack
+ * user ID ("Slack user U0…"), which is no name a person recognises, so the reader is told to ask the task owner.
+ */
+export function ownerNameForReaders(developerName: string): string {
+  return /^Slack user [UW][A-Z0-9]{2,31}$/.test(developerName) ? "the task owner" : developerName;
 }
 
 /** Whether the task still takes comments, suggestions and decisions: not closed and not finished. */
