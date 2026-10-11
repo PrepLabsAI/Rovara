@@ -16,6 +16,8 @@ import {
   WorkflowSnapshotSchema,
   sharedTaskKey,
   slackThreadSubject,
+  type ChannelMembersRequest,
+  type ChannelMembersResponse,
   type ProjectCommand,
   type SlackRequestMessage,
   type SlackThread,
@@ -57,6 +59,7 @@ import { workflowModel, type WorkflowTurn } from "./faux-scripts.js";
 import { planAnswer, planDocument, turnPlanIntoMarkdown } from "./plan-documents.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, orchestratorPrincipal, registerSlackProject, type Handler } from "./slack-broker.js";
 import { SlackPostError } from "../../packages/broker/src/aws/slack-web.js";
+import type { SlackRequestQueue } from "../../packages/broker/src/developer/page-comments.js";
 import { StrictSlackWeb } from "./strict-slack.js";
 
 const execFile = promisify(execFileCallback);
@@ -295,12 +298,18 @@ export async function createWorkflowE2E(options: {
    * format and no evidence, as the table, the storage and the notifier's stream all see it.
    */
   legacyPlanMarkdown?: string;
+  /** Spec 061 slice 2: who the Slack channel lookup says is in which channel. Absent: only Maya is in the project's channel. */
+  channelMembers?: (request: ChannelMembersRequest) => Promise<ChannelMembersResponse>;
+  /** Spec 061 slice 2: the Slack service's request queue as the broker sends to it ("Ask AgentX to answer"). Absent: not set up. */
+  slackRequestQueue?: SlackRequestQueue;
 } = {}) {
   const github = new FakeGitHub();
   // The plan evidence jobs the broker started: the background Lambda is run by the test, with `runPlanEvidenceJobs`.
   const planEvidenceJobs: PlanEvidenceEvent[] = [];
   const harness = await createDeveloperTaskBroker({
     register: false,
+    ...(options.channelMembers === undefined ? {} : { channelMembers: options.channelMembers }),
+    ...(options.slackRequestQueue === undefined ? {} : { developerExtra: { slackRequestQueue: options.slackRequestQueue } }),
     brokerExtra: {
       githubPullRequests: github.gateway,
       startPlanEvidenceJob: async (event: PlanEvidenceEvent) => { planEvidenceJobs.push(event); },

@@ -8,7 +8,7 @@ import * as workflowContracts from "../../packages/contracts/src/task-workflow.j
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
-import { getTaskDocumentView, inertTaskTitle, promptTagId, startTaskWorkflowFeedbackReviewFromWebhook, threadNotesPromptSection, workflowPullRequestBody } from "../../packages/broker/src/aws/developer-tasks.js";
+import { decideTaskWorkflow, getTaskDocumentView, inertTaskTitle, promptTagId, startTaskWorkflowFeedbackReviewFromWebhook, threadNotesPromptSection, workflowPullRequestBody } from "../../packages/broker/src/aws/developer-tasks.js";
 import { GATED_TASK_TURN_REFUSAL, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
 import { failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
 import { recordThreadNoteThroughBroker } from "../../packages/broker/src/aws/slack-ingress.js";
@@ -3789,6 +3789,33 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
     expect((await t.harness.dev(MAYA, "POST", t.route, request)).status).toBe(200);
     const coding = operations(t.harness, t.workspaceId).find((item) => item.requestId === request.requestId)!;
     expect(outboxPrompt(t.harness, String(coding.id))).toContain("the owner's own instructions for this step; the numbers follow the order the problems are listed in): none beyond fixing the problems.");
+  });
+
+  it("history says how many answers changed and comments were included", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK" });
+    const taskId = String((started.body.task as { taskId: string }).taskId);
+    const workspaceId = String(harness.db.get(`DEVTASK#${taskId}`, "META")?.workspaceId);
+    await harness.finish(workspaceId, String(operations(harness, workspaceId).find((item) => item.kind === "prepare")?.id), "SUCCEEDED", PREPARED);
+    const planning = operations(harness, workspaceId).find((item) => item.workflowMode === "PLAN")!;
+    await harness.artifact(workspaceId, String(planning.id), "plan.md", planAnswer(planDocument()));
+    await harness.finish(workspaceId, String(planning.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    const comment = (minute: number) => {
+      const commentId = randomUUID();
+      harness.db.set({ pk: `DEVTASK#${taskId}`, sk: `COMMENT#${commentId}`, entityType: "TASK_COMMENT", schemaVersion: 1, taskId, commentId, document: "plan", version: 1,
+        target: { kind: "document" }, author: { kind: "person", developerId: "5".repeat(64), name: "Sam Lee", owner: false }, text: `Comment ${minute}`,
+        createdAt: `2026-10-11T09:0${minute}:00.000Z`, rev: 1 });
+      return commentId;
+    };
+    const ids = [comment(1), comment(2)];
+    const deps = { documentClient: harness.db, tableName: "state", actions: harness.actions, checkAccess: async () => ({ revision: 1, policy: {} as never, access: "channel" as const, channelIds: [SLACK_CHANNEL] }),
+      projectChannelIds: async () => [SLACK_CHANNEL], now: () => Date.now(), log: () => undefined };
+    const caller = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId! };
+    const workflow = taskWorkflow(harness, taskId);
+    await decideTaskWorkflow(deps, caller, taskId, { requestId: randomUUID(), expectedRevision: workflow.revision, decision: "APPROVE", reason: "Approved on the task page.",
+      artifactDigest: workflow.artifacts.at(-1)!.sha256, answers: [{ decisionId: "d1", optionId: "five", opened: true }], includedCommentIds: ids }, { via: "PAGE" });
+    const view = await getTaskDocumentView(deps, caller, taskId);
+    expect(view.history.map((entry) => entry.text)).toContain("Maya Chen approved Coding plan v1 · 1 answer changed · 2 comments included");
   });
 
   it("names a Slack-started task's owner as \"the task owner\" on the page, in its history and beside an accepted finding", async () => {

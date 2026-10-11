@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ActionPolicySchema } from "./action-policy.js";
 import { ThreadConnectorSchema } from "./connectors.js";
@@ -42,8 +43,11 @@ export const SlackWorkspaceLimitSchema = z.enum(["MEMBER", "ORGANIZATION"]);
 /** The longest task context the broker sends a chat agent in task mode (characters; the broker keeps it far smaller). */
 export const SLACK_TASK_CONTEXT_MAX_CHARS = 40_000;
 
-/** What a Slack service adds to POST /v1/threads/workspace to ask for task mode in a task's own thread. */
-export const SlackTaskAnswerRequestSchema = z.object({ taskId: z.string().uuid() }).strict();
+/**
+ * What a Slack service adds to POST /v1/threads/workspace to ask for task mode in a task's own thread. `commentId` names
+ * a task page comment being answered, so the broker adds that comment's place and thread to the task context.
+ */
+export const SlackTaskAnswerRequestSchema = z.object({ taskId: z.string().uuid(), commentId: z.string().uuid().optional() }).strict();
 export type SlackTaskAnswerRequest = z.infer<typeof SlackTaskAnswerRequestSchema>;
 
 /** The body of POST /v1/service/tasks/thread-notes/answered: which saved thread note a question answer covers. */
@@ -196,6 +200,39 @@ export const SlackRequestMessageSchema = z
     receivedAt: z.string().datetime(),
   })
   .strict();
+
+/**
+ * A task page comment someone asked AgentX to answer, queued by the broker on the Slack request queue. The body has a
+ * field (`pageComment`) that `SlackRequestMessageSchema` does not know, so a Slack service built before page comments
+ * refuses and discards it rather than running it as a chat request. Nothing is ever posted in Slack for it.
+ */
+export const SlackPageCommentMessageSchema = z
+  .object({
+    version: z.literal(1),
+    eventId: z.string().regex(/^Ev[A-Za-z0-9]{4,64}$/),
+    thread: SlackThreadSchema,
+    userId: SlackUserIdSchema,
+    text: z.string().min(1).max(4_000),
+    receivedAt: z.string().datetime(),
+    pageComment: z.object({ taskId: z.string().uuid(), commentId: z.string().uuid() }).strict(),
+  })
+  .strict();
+export type SlackPageCommentMessage = z.infer<typeof SlackPageCommentMessageSchema>;
+
+/** The queue event ID of a page comment's answer request: stable per comment, in Slack's event ID form (for deduplication). */
+export function pageCommentEventId(commentId: string): string {
+  return `Ev${createHash("sha256").update(commentId, "utf8").digest("hex").slice(0, 32)}`;
+}
+
+/** The body of POST /v1/service/tasks/comments/answered: AgentX's answer to a page comment, or that it could not answer. */
+export const SlackCommentAnsweredRequestSchema = z.discriminatedUnion("outcome", [
+  z.object({
+    taskId: z.string().uuid(), commentId: z.string().uuid(), thread: SlackThreadSchema,
+    outcome: z.literal("ANSWERED"), text: z.string().trim().min(1).max(3_000),
+  }).strict(),
+  z.object({ taskId: z.string().uuid(), commentId: z.string().uuid(), thread: SlackThreadSchema, outcome: z.literal("FAILED") }).strict(),
+]);
+export type SlackCommentAnsweredRequest = z.infer<typeof SlackCommentAnsweredRequestSchema>;
 
 /**
  * Spec 014 FR-026: the queue message attribute through which the ingress tells the Slack service how

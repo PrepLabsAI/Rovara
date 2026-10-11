@@ -20,6 +20,8 @@ import {
   WorkflowReviewReportSchema,
   submitWorkflowArtifact,
   StartDeveloperTaskRequestSchema,
+  WorkflowDecisionRequestSchema,
+  WorkflowDecisionSchema,
 } from "@agentx/contracts";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
@@ -357,6 +359,20 @@ describe("native task workflow contracts", () => {
     expect(approved.state).toBe("READY");
     expect(approved.decisions[0]).toMatchObject({ decision: "APPROVE", actorId: ownerId, artifactDigest: plan.sha256 });
     expect(decideWorkflow(approved, approvalRequest, actor, options)).toEqual(approved);
+  });
+
+  it("the decision request and record carry the owner's answers and included comments within their limits", () => {
+    const base = { requestId: "d532a6e0-3de1-44e3-a6d2-e8c635d77f2b", expectedRevision: 2, decision: "APPROVE", artifactDigest: plan.sha256, reason: "Approved." };
+    const commentId = "6c1f5d7e-4ab0-4d43-9c55-2f0a3c9e2b11";
+    expect(WorkflowDecisionRequestSchema.safeParse({ ...base, answers: [{ decisionId: "d1", optionId: "above", opened: true }], includedCommentIds: [commentId] }).success).toBe(true);
+    expect(WorkflowDecisionRequestSchema.safeParse({ ...base, answers: [{ decisionId: "d1", optionId: "above", opened: true }, { decisionId: "d1", optionId: "below", opened: true }] }).success).toBe(false);
+    expect(WorkflowDecisionRequestSchema.safeParse({ ...base, answers: [{ decisionId: "d1", optionId: "above" }] }).success).toBe(false);
+    expect(WorkflowDecisionRequestSchema.safeParse({ ...base, includedCommentIds: [commentId, commentId] }).success).toBe(false);
+    expect(WorkflowDecisionRequestSchema.safeParse({ ...base, includedCommentIds: ["c1"] }).success).toBe(false);
+    const recorded = { requestId: base.requestId, workflowRevision: 2, decision: "APPROVE", actorId: ownerId, actorRole: "TASK_OWNER", reason: "Approved.", at: "2026-10-05T12:02:00.000Z" };
+    expect(WorkflowDecisionSchema.safeParse({ ...recorded, answerOverrides: [{ decisionId: "d1", optionId: "above" }], commentsIncluded: 2, via: "PAGE" }).success).toBe(true);
+    expect(WorkflowDecisionSchema.safeParse({ ...recorded, commentsIncluded: 26 }).success).toBe(false);
+    expect(WorkflowDecisionSchema.safeParse({ ...recorded, via: "SLACK" }).success).toBe(false);
   });
 
   it("requires requirements, design, and implementation-plan approvals on the Full path", () => {

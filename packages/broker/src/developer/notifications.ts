@@ -8,7 +8,7 @@ export interface StreamRecord {
   eventName?: string;
   dynamodb?: { ApproximateCreationDateTime?: number; NewImage?: Record<string, AttributeValue>; OldImage?: Record<string, AttributeValue> };
 }
-export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "workflow" | "github_feedback" | "canvas_closeout" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry" | "workflow_refusal";
+export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "workflow" | "github_feedback" | "canvas_closeout" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry" | "workflow_refusal" | "comment_nudge";
 export interface Notice {
   /** Fixed per change, so a repeated delivery posts once (C9). */
   id: string;
@@ -120,6 +120,16 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       const sk = text(next.sk);
       if (previous !== undefined || taskId === "" || !sk.startsWith("REFUSAL#")) return [];
       return [{ id: `${taskId}:refusal:${sk}`, kind: "workflow_refusal", taskId, at }];
+    }
+    // Spec 061 FR-044: a commenter's nudge window opened; the notifier posts one batched nudge when it is due.
+    case "TASK_COMMENT_NUDGE": {
+      const taskId = text(next.taskId);
+      const nudgeId = text(next.nudgeId);
+      const dueAt = text(next.dueAt);
+      if (taskId === "" || nudgeId === "" || dueAt === "" || Number.isNaN(Date.parse(dueAt)) || previous?.nudgeId === nudgeId) return [];
+      // Stamped with the window's own start, to the millisecond, so it compares exactly with the share's time.
+      const windowStart = text(next.windowStart);
+      return [{ id: `${taskId}:nudge:${nudgeId}`, kind: "comment_nudge", taskId, at: Number.isNaN(Date.parse(windowStart)) ? at : windowStart, notBefore: dueAt }];
     }
     case "ADMIN_CHANGE": {
       // Spec 025 E13: the Slack step started, or a change with a message ended. Only stored

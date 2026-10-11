@@ -1,7 +1,7 @@
 // Spec 061: a workflow document read back from storage, whichever way it was stored.
 import { createHash } from "node:crypto";
 import { GetObjectCommand } from "@aws-sdk/client-s3";
-import { PlanEvidenceBundleSchema, WORKFLOW_PLAN_MAX_BYTES, planDocumentMarkdown, readCanonicalPlan, type PlanDocument, type PlanEvidenceBundle, type WorkflowArtifact } from "@agentx/contracts";
+import { PlanEvidenceBundleSchema, WORKFLOW_PLAN_MAX_BYTES, planDocumentMarkdown, readCanonicalPlan, type PlanDocument, type PlanEvidenceBundle, type PlanOwnerAnswers, type WorkflowArtifact } from "@agentx/contracts";
 
 /** The most bytes read for a legacy Markdown document. */
 const MARKDOWN_MAX_BYTES = 1_000_000;
@@ -32,7 +32,8 @@ export type LoadedDocument =
 export async function loadWorkflowDocument(
   read: (objectKey: string, maxBytes: number) => Promise<string | undefined>,
   artifact: WorkflowArtifact,
-  input: { answers?: "recommended" },
+  /** The owner's answers for the Markdown copy: "recommended" (AgentX's), or the answers and comments a decision recorded. */
+  input: { answers?: "recommended" | PlanOwnerAnswers },
 ): Promise<LoadedDocument | undefined> {
   const structured = artifact.format === "structured";
   const text = await read(artifact.objectKey, structured ? WORKFLOW_PLAN_MAX_BYTES : MARKDOWN_MAX_BYTES);

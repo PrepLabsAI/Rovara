@@ -14,7 +14,7 @@ import {
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import {
   SLACK_CHAT_ATTRIBUTE, SLACK_NOTE_TS_ATTRIBUTE, SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE, SLACK_TASK_ID_ATTRIBUTE, confirmationBlocks,
-  queuedBehindOf, routeOf, sharedNoticeClaim, taskQuestionOf, type SlackRequestMessage,
+  isPageCommentRoute, queuedBehindOf, routeOf, sharedNoticeClaim, taskQuestionOf, type SlackRequestMessage,
 } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
@@ -30,6 +30,7 @@ import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./in
 import { classifierTimeoutMs, createHostedClassifier, createHostedRequestRouter, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
 import { createChoiceOffer, routeSlackRequest } from "./request-routing.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
+import { handlePageComment } from "./page-comment.js";
 import { handleTaskQuestion, runTaskAnswer } from "./task-question.js";
 
 const MAX_RECEIVE_COUNT = 5;
@@ -336,6 +337,7 @@ const queue: QueueClient = {
       const queuedBehind = queuedBehindOf(message.MessageAttributes);
       const route = routeOf(message.MessageAttributes);
       const taskQuestion = taskQuestionOf(message.MessageAttributes);
+      const pageComment = isPageCommentRoute(message.MessageAttributes);
       return {
         body: message.Body ?? "",
         receiptHandle: message.ReceiptHandle ?? "",
@@ -344,6 +346,7 @@ const queue: QueueClient = {
         ...(queuedBehind === undefined ? {} : { queuedBehind }),
         ...(route === undefined ? {} : { route }),
         ...(taskQuestion === undefined ? {} : { taskQuestion }),
+        ...(pageComment ? { pageComment: true as const } : {}),
       };
     });
   },
@@ -412,6 +415,19 @@ await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQ
   heartbeatMilliseconds: 5 * 60 * 1_000,
   signal: controller.signal,
   handoffMilliseconds: HANDOFF_MILLISECONDS,
+  // Spec 061 slice 2: a task page comment, answered in task mode and written back; nothing is posted in Slack.
+  pageComment: (comment, { handoff }) => {
+    const { pageComment: target, ...request } = comment;
+    const api = threadApi(request);
+    return handlePageComment(comment, {
+      answer: (question) => runTaskAnswer(request, target, question, { api, runTurn, ...(handoff === undefined ? {} : { handoff }) }),
+      markAnswered: async (input) => {
+        if (api.markCommentAnswered === undefined) throw new Error("comment answers are unavailable in this deployment");
+        await api.markCommentAnswered(input);
+      },
+      log,
+    });
+  },
   log,
 });
 

@@ -69,6 +69,21 @@ export function taskQuestionOf(attributes: Readonly<Record<string, { StringValue
   return { taskId, noteTs, chat: attributes[SLACK_CHAT_ATTRIBUTE]?.StringValue === "1" };
 }
 
+/**
+ * A task page comment someone asked AgentX to answer (`SlackPageCommentMessageSchema` body). A service that does not
+ * know this route value ignores the attribute and then refuses the body, so it never becomes a chat request.
+ */
+export const SLACK_ROUTE_PAGE_COMMENT = "page-comment";
+
+export function pageCommentAttributes(): Record<string, { DataType: "String"; StringValue: string }> {
+  return { [SLACK_ROUTE_ATTRIBUTE]: { DataType: "String", StringValue: SLACK_ROUTE_PAGE_COMMENT } };
+}
+
+/** Whether a received message carries the page comment route. */
+export function isPageCommentRoute(attributes: Readonly<Record<string, { StringValue?: string | undefined }>> | undefined): boolean {
+  return attributes?.[SLACK_ROUTE_ATTRIBUTE]?.StringValue === SLACK_ROUTE_PAGE_COMMENT;
+}
+
 /** "suggest" when a received message carries the routing mark, else undefined. Any other value (task-question too) is undefined. */
 export function routeOf(attributes: Readonly<Record<string, { StringValue?: string | undefined }>> | undefined): typeof SLACK_ROUTE_SUGGEST | undefined {
   return attributes?.[SLACK_ROUTE_ATTRIBUTE]?.StringValue === SLACK_ROUTE_SUGGEST ? SLACK_ROUTE_SUGGEST : undefined;
