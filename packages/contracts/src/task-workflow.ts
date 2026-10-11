@@ -565,6 +565,14 @@ export const WorkflowArtifactSchema = z.object({
 }).refine((artifact) => artifact.evidence === undefined || artifact.format === "structured", { message: "evidence belongs only to a structured document", path: ["evidence"] });
 export type WorkflowArtifact = z.infer<typeof WorkflowArtifactSchema>;
 
+/** At most this many decisions in a plan (PLAN_DECISIONS_MAX), and so answers in one decision. */
+const WORKFLOW_DECISION_ANSWERS_MAX = 20;
+/** At most this many page comments in one decision (DECISION_COMMENTS_MAX). */
+const WORKFLOW_DECISION_COMMENTS_MAX = 25;
+const PlanDecisionIdSchema = z.string().regex(/^d[1-9][0-9]?$/);
+const PlanOptionIdSchema = z.string().regex(/^[a-z][a-z0-9-]{0,30}$/);
+const WorkflowAnswerSchema = z.object({ decisionId: PlanDecisionIdSchema, optionId: PlanOptionIdSchema }).strict();
+
 export const WorkflowDecisionSchema = z.object({
   requestId: z.string().uuid(),
   workflowRevision: z.number().int().positive(),
@@ -576,6 +584,12 @@ export const WorkflowDecisionSchema = z.object({
   selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20).optional(),
   /** Where the decision was made: an approval gate (the default), the owner sending blocked work back to coding, or the owner resolving review findings. */
   source: z.enum(["GATE", "SEND_BACK", "FINDINGS"]).optional(),
+  /** Plan decisions: the owner's answers that differ from AgentX's recommended ones, in the plan's decision order. */
+  answerOverrides: z.array(WorkflowAnswerSchema).min(1).max(WORKFLOW_DECISION_ANSWERS_MAX).optional(),
+  /** How many page comments the decision sent along (their IDs are in the decision's detail item). */
+  commentsIncluded: z.number().int().min(0).max(WORKFLOW_DECISION_COMMENTS_MAX).optional(),
+  /** Made on the task page; absent for Slack, MCP and older decisions. */
+  via: z.literal("PAGE").optional(),
   at: z.string().datetime(),
 }).strict();
 export type WorkflowDecision = z.infer<typeof WorkflowDecisionSchema>;
@@ -1003,10 +1017,20 @@ export const WorkflowDecisionRequestSchema = z.object({
   reason: z.string().trim().min(1).max(500),
   artifactDigest: DigestSchema.optional(),
   selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20).optional(),
+  /** The task page: the owner's answer to every decision of the plan, and whether they opened it. */
+  answers: z.array(WorkflowAnswerSchema.extend({ opened: z.boolean() }).strict()).max(WORKFLOW_DECISION_ANSWERS_MAX).optional(),
+  /** The task page: the open comments the owner chose to send, in the order the next step sees them. */
+  includedCommentIds: z.array(z.string().uuid()).max(WORKFLOW_DECISION_COMMENTS_MAX).optional(),
 }).strict().refine((request) => request.artifactDigest !== undefined, { message: "a workflow decision must name the current artifact digest", path: ["artifactDigest"] })
   .superRefine((request, context) => {
     if (request.selectedOptionalCheckIds !== undefined && new Set(request.selectedOptionalCheckIds).size !== request.selectedOptionalCheckIds.length) {
       context.addIssue({ code: "custom", path: ["selectedOptionalCheckIds"], message: "selected optional checks must be unique" });
+    }
+    if (request.answers !== undefined && new Set(request.answers.map((answer) => answer.decisionId)).size !== request.answers.length) {
+      context.addIssue({ code: "custom", path: ["answers"], message: "each decision can be answered only once" });
+    }
+    if (request.includedCommentIds !== undefined && new Set(request.includedCommentIds).size !== request.includedCommentIds.length) {
+      context.addIssue({ code: "custom", path: ["includedCommentIds"], message: "each comment can be included only once" });
     }
   });
 export type WorkflowDecisionRequest = z.infer<typeof WorkflowDecisionRequestSchema>;
@@ -1815,26 +1839,82 @@ export function resolveWorkflowReviewFindings(
   });
 }
 
+/**
+ * The owner's answers that differ from AgentX's recommendation, in the plan's decision order. Without answers there are
+ * none (Slack and MCP use the recommended answers). With answers, every decision of the plan is answered exactly once
+ * with one of its options; a document whose decisions are not known (Markdown) takes no answers.
+ */
+function ownerAnswerOverrides(
+  answers: ReadonlyArray<{ decisionId: string; optionId: string }> | undefined,
+  decisions: ReadonlyArray<{ id: string; optionIds: readonly string[]; recommended: string }> | undefined,
+): Array<{ decisionId: string; optionId: string }> {
+  if (answers === undefined) return [];
+  if (decisions === undefined) {
+    if (answers.length > 0) throw new WorkflowTransitionError("this document has no decisions to answer");
+    return [];
+  }
+  const chosen = new Map(answers.map((answer) => [answer.decisionId, answer.optionId]));
+  if (chosen.size !== answers.length) throw new WorkflowTransitionError("each decision can be answered only once");
+  if (answers.some((answer) => !decisions.some((decision) => decision.id === answer.decisionId))) {
+    throw new WorkflowTransitionError("an answer names a decision this plan does not have");
+  }
+  return decisions.flatMap((decision) => {
+    const optionId = chosen.get(decision.id);
+    if (optionId === undefined) throw new WorkflowTransitionError("answer every decision");
+    if (!decision.optionIds.includes(optionId)) throw new WorkflowTransitionError("an answer names an option this decision does not have");
+    return optionId === decision.recommended ? [] : [{ decisionId: decision.id, optionId }];
+  });
+}
+
+/**
+ * Whether two answer lists choose the same option for the same decisions, whatever their order. Stored decisions come
+ * back from DynamoDB with their maps in any order, so answers are never compared as JSON text.
+ */
+export function sameAnswers(
+  a: ReadonlyArray<{ decisionId: string; optionId: string }>,
+  b: ReadonlyArray<{ decisionId: string; optionId: string }>,
+): boolean {
+  const left = new Map(a.map((answer) => [answer.decisionId, answer.optionId]));
+  const right = new Map(b.map((answer) => [answer.decisionId, answer.optionId]));
+  if (left.size !== a.length || right.size !== b.length || left.size !== right.size) return false;
+  for (const [decisionId, optionId] of left) {
+    if (right.get(decisionId) !== optionId) return false;
+  }
+  return true;
+}
+
 export function decideWorkflow(
   currentInput: unknown,
   requestInput: unknown,
   actor: { actorId: string; role: "TASK_OWNER" | "PROJECT_ADMIN" },
-  options: { now: string; allowedSkipStages: readonly WorkflowStage[] },
+  options: {
+    now: string;
+    allowedSkipStages: readonly WorkflowStage[];
+    /** The decided plan's decisions; required when the request carries answers. Absent for a Markdown document. */
+    decisions?: ReadonlyArray<{ id: string; optionIds: readonly string[]; recommended: string }>;
+    via?: "PAGE";
+  },
 ): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   const request = WorkflowDecisionRequestSchema.safeParse(requestInput);
   const actorId = ActorIdSchema.safeParse(actor.actorId);
   if (!request.success || !actorId.success) throw new WorkflowTransitionError("workflow decision is invalid");
+  const answerOverrides = ownerAnswerOverrides(request.data.answers, options.decisions);
+  const commentsIncluded = request.data.includedCommentIds?.length ?? 0;
 
   const prior = current.decisions.find((decision) => decision.requestId === request.data.requestId);
   if (prior !== undefined) {
     const selectedOptionalCheckIds = request.data.selectedOptionalCheckIds ?? current.checkPolicy?.selectedOptionalIds ?? [];
+    // Stored decisions come back from DynamoDB with their maps in any order: answers are compared by content.
     const duplicate = prior.workflowRevision === request.data.expectedRevision
       && prior.decision === request.data.decision
       && prior.actorId === actor.actorId
       && prior.reason === request.data.reason
       && prior.artifactDigest === request.data.artifactDigest
-      && JSON.stringify(prior.selectedOptionalCheckIds ?? []) === JSON.stringify(selectedOptionalCheckIds);
+      && JSON.stringify(prior.selectedOptionalCheckIds ?? []) === JSON.stringify(selectedOptionalCheckIds)
+      && sameAnswers(prior.answerOverrides ?? [], answerOverrides)
+      && (prior.commentsIncluded ?? 0) === commentsIncluded
+      && prior.via === options.via;
     if (duplicate) return current;
     throw new WorkflowTransitionError("request ID was already used for a different workflow decision");
   }
@@ -1866,6 +1946,9 @@ export function decideWorkflow(
     reason: request.data.reason,
     ...(request.data.artifactDigest === undefined ? {} : { artifactDigest: request.data.artifactDigest }),
     ...(current.checkPolicy === undefined ? {} : { selectedOptionalCheckIds }),
+    ...(answerOverrides.length === 0 ? {} : { answerOverrides }),
+    ...(commentsIncluded === 0 ? {} : { commentsIncluded }),
+    ...(options.via === undefined ? {} : { via: options.via }),
     at: options.now,
   });
   if (current.decisions.length >= 100) throw new WorkflowTransitionError("workflow decision history is full");
