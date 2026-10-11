@@ -2,7 +2,7 @@
 // broker's start-workflow event, the notifier posts to a strict Slack double, buttons and modals go through the
 // real interactivity handler, and a worker stub runs the real run-task on the scripted faux model against a real
 // git repository. GitHub is a fake that only accepts a push made with a push-scoped token.
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac, generateKeyPairSync, randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -40,7 +40,8 @@ import { runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrato
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
 import type { RequestRoute } from "../../packages/orchestrator/src/request-router.js";
 import type { Notice, StreamRecord } from "../../packages/broker/src/developer/notifications.js";
-import type { GitHubFeedbackComment, GitHubFeedbackThread, GitHubPullRequestDetails, GitHubPullRequestFeedback, GitHubPullRequestInput, GitHubPullRequestResult, GitHubPullRequestUpdate } from "../../packages/broker/src/github-app.js";
+import type { GitHubFeedbackComment, GitHubPullRequestFeedback } from "../../packages/broker/src/github-app.js";
+import { GitHubAppCredentialProvider, webhookSecretFromSecret } from "../../packages/broker/src/github-app.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
 import { runPlanEvidenceJob, type PlanEvidenceRunOutcome } from "../../packages/broker/src/aws/plan-evidence-handler.js";
 import type { PlanEvidenceEvent } from "../../packages/broker/src/developer/plan-evidence-jobs.js";
@@ -58,6 +59,7 @@ import { planAnswer, planDocument, turnPlanIntoMarkdown } from "./plan-documents
 import { SLACK_CHANNEL, SLACK_TEAM, call, orchestratorPrincipal, registerSlackProject, type Handler } from "./slack-broker.js";
 import { SlackPostError } from "../../packages/broker/src/aws/slack-web.js";
 import { StrictSlackWeb } from "./strict-slack.js";
+import { FakeGitHub, type FakeGitHubOptions } from "./workflow-e2e-github.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -75,130 +77,7 @@ const MAX_SETTLE_STEPS = 40;
 /** The GitHub App's webhook secret, as the broker reads it; the test signs its deliveries with it. */
 const WEBHOOK_SECRET = "e2e-github-webhook-secret-0123456789abcdef";
 
-type FakePullRequest = { number: number; url: string; headBranch: string; baseBranch: string; title: string; body?: string; draft?: boolean; commit: string; tree: string; state: "open" | "closed" | "merged"; comments: GitHubFeedbackComment[]; threads?: GitHubFeedbackThread[] };
-
-/**
- * GitHub as the broker and worker see it: tokens it issued (and for which access), pushes made with them,
- * commit trees, and pull requests opened from a pushed branch.
- */
-export class FakeGitHub {
-  readonly tokens = new Map<string, "clone" | "push">();
-  readonly pushes = new Map<string, { commit: string; tree: string; token: string }>();
-  readonly commits = new Map<string, string>();
-  /** Each pushed commit's parents. */
-  readonly parents = new Map<string, string[]>();
-  readonly pullRequests: FakePullRequest[] = [];
-  /** The repository's files by path (as GitHub names them, inside the repository), for the plan's cited code. */
-  readonly files = new Map<string, string>();
-  /** Every token minted, with the kind of worker invocation running when it was (set by the harness). */
-  readonly minted: Array<{ token: string; access: "clone" | "push"; during: string | undefined }> = [];
-  /** The kind of worker invocation now running, or undefined between invocations. */
-  during: string | undefined;
-
-  async resolveCredential(_reference: string, _url: string, access: "clone" | "push"): Promise<{ token: string }> {
-    const token = `ghs_e2e_${access}_${this.tokens.size + 1}`;
-    this.tokens.set(token, access);
-    this.minted.push({ token, access, during: this.during });
-    return { token };
-  }
-
-  push(token: string | undefined, headBranch: string, commit: string, tree: string, parents: readonly string[] = []): void {
-    if (token === undefined || this.tokens.get(token) !== "push") throw new Error(`GitHub refused the push to ${headBranch}: the token cannot push`);
-    this.pushes.set(headBranch, { commit, tree, token });
-    this.commits.set(commit, tree);
-    this.parents.set(commit, [...parents]);
-    // An open pull request from the branch now has the pushed commit as its head.
-    for (const pullRequest of this.pullRequests) {
-      if (pullRequest.headBranch === headBranch && pullRequest.state === "open") Object.assign(pullRequest, { commit, tree });
-    }
-  }
-
-  /** Someone comments on the pull request's conversation on GitHub. */
-  comment(number: number, author: string, body: string): GitHubFeedbackComment {
-    const pullRequest = this.find(number);
-    const id = String(1000 + this.pullRequests.reduce((count, entry) => count + entry.comments.length, 0));
-    const comment: GitHubFeedbackComment = { id, kind: "DISCUSSION", url: `${pullRequest.url}#issuecomment-${id}`, author, updatedAt: new Date().toISOString(), body };
-    pullRequest.comments.push(comment);
-    return comment;
-  }
-
-  /** Someone comments on a line of the pull request's diff on GitHub, which opens a review thread of its own. */
-  reviewComment(number: number, author: string, body: string, path: string, line: number): GitHubFeedbackComment {
-    const pullRequest = this.find(number);
-    const databaseId = String(4000 + this.pullRequests.reduce((count, entry) => count + entry.comments.length, 0));
-    const threadId = `PRRT_e2e${databaseId}`;
-    const comment: GitHubFeedbackComment = { id: `review_comment:${databaseId}`, threadId, kind: "REVIEW_COMMENT", url: `${pullRequest.url}#discussion_r${databaseId}`,
-      author, updatedAt: new Date().toISOString(), body, path, line };
-    pullRequest.comments.push(comment);
-    (pullRequest.threads ??= []).push({ id: threadId, resolved: false, commentIds: [comment.id] });
-    return comment;
-  }
-
-  /** Someone merges the pull request on GitHub, at its current head. */
-  merge(number: number): void {
-    this.find(number).state = "merged";
-  }
-
-  private find(number: number): FakePullRequest {
-    const found = this.pullRequests.find((pullRequest) => pullRequest.number === number);
-    if (found === undefined) throw new Error(`GitHub has no pull request #${number}`);
-    return found;
-  }
-
-  private details(pullRequest: FakePullRequest): GitHubPullRequestDetails {
-    return {
-      number: pullRequest.number, url: pullRequest.url, state: pullRequest.state, headBranch: pullRequest.headBranch,
-      baseBranch: pullRequest.baseBranch, headCommit: pullRequest.commit, title: pullRequest.title, body: pullRequest.body ?? "",
-    };
-  }
-
-  readonly gateway = {
-    reconcilePullRequest: async (input: GitHubPullRequestInput): Promise<GitHubPullRequestResult> => {
-      const pushed = this.pushes.get(input.headBranch);
-      if (pushed === undefined) throw new Error(`GitHub has no branch ${input.headBranch}`);
-      const existing = this.pullRequests.find((pullRequest) => pullRequest.headBranch === input.headBranch && pullRequest.state === "open");
-      if (existing !== undefined) return { number: existing.number, url: existing.url, reconciled: true };
-      const number = this.pullRequests.length + 1;
-      const url = `https://github.com/example/demo/pull/${number}`;
-      this.pullRequests.push({
-        number, url, headBranch: input.headBranch, baseBranch: input.baseBranch, title: input.title,
-        ...(input.body === undefined ? {} : { body: input.body }), ...(input.draft === undefined ? {} : { draft: input.draft }),
-        commit: pushed.commit, tree: pushed.tree, state: "open", comments: [],
-      });
-      return { number, url, reconciled: false };
-    },
-    getPullRequest: async (_repositoryUrl: string, number: number): Promise<GitHubPullRequestDetails> => this.details(this.find(number)),
-    updatePullRequest: async (_repositoryUrl: string, number: number, update: GitHubPullRequestUpdate): Promise<GitHubPullRequestDetails> => {
-      const pullRequest = this.find(number);
-      if (update.title !== undefined) pullRequest.title = update.title;
-      if (update.body !== undefined) pullRequest.body = update.body;
-      if (update.state !== undefined) pullRequest.state = update.state;
-      return this.details(pullRequest);
-    },
-    verifyWebhookRepository: async (): Promise<boolean> => true,
-    getBranchHead: async (_repositoryUrl: string, branch: string): Promise<string> => {
-      const pushed = this.pushes.get(branch);
-      if (pushed === undefined) throw new Error(`GitHub has no branch ${branch}`);
-      return pushed.commit;
-    },
-    getCommitTree: async (_repositoryUrl: string, commit: string): Promise<string> => {
-      const tree = this.commits.get(commit);
-      if (tree === undefined) throw new Error(`GitHub has no commit ${commit}`);
-      return tree;
-    },
-    getFileAtCommit: async (_repositoryUrl: string, path: string): Promise<string | undefined> => this.files.get(path),
-    getCommitParents: async (_repositoryUrl: string, commit: string): Promise<string[]> => {
-      const parents = this.parents.get(commit);
-      if (parents === undefined) throw new Error(`GitHub has no commit ${commit}`);
-      return parents;
-    },
-    getPullRequestFeedback: async (_repositoryUrl: string, number: number): Promise<GitHubPullRequestFeedback> => {
-      const pullRequest = this.find(number);
-      return { pullRequest: { ...this.details(pullRequest), headTreeSha: pullRequest.tree }, comments: [...pullRequest.comments],
-        threads: (pullRequest.threads ?? []).map((thread) => ({ ...thread, commentIds: [...thread.commentIds] })) };
-    },
-  };
-}
+export { FakeGitHub, type FakePullRequest, type FakeGitHubMethod, type GitHubReviewState } from "./workflow-e2e-github.js";
 
 function signedRequest(rawPath: string, body: string): HttpApiV2Event {
   const timestamp = String(Math.floor(Date.now() / 1_000));
@@ -259,6 +138,29 @@ function actionElement(blocks: unknown[] | undefined, actionId: string): { value
   return undefined;
 }
 
+let wireAppKey: string | undefined;
+/** The real provider's PR feedback read, over the fake's wire endpoints, with the App's own (test) private key. */
+function wireFeedbackReader(github: FakeGitHub): (repositoryUrl: string, number: number) => Promise<GitHubPullRequestFeedback> {
+  wireAppKey ??= generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+  const key = wireAppKey;
+  const provider = new GitHubAppCredentialProvider({ credentialRef: "github-app", appId: "123", getPrivateKey: async () => key, fetchImplementation: github.fetch });
+  return async (repositoryUrl, number) => {
+    github.fault("getPullRequestFeedback");
+    return provider.getPullRequestFeedback(repositoryUrl, number);
+  };
+}
+
+/** A GitHub webhook event for a task's pull request, as `webhook()` builds and signs it. */
+export type E2EWebhookEvent =
+  | { kind: "issue_comment" | "pull_request_review_comment"; action?: "created" | "edited" | "deleted"; number: number; comment: GitHubFeedbackComment }
+  | { kind: "pull_request_review"; action?: "submitted" | "edited" | "dismissed"; number: number; review: GitHubFeedbackComment; body?: string | null; state?: string }
+  | { kind: "pull_request"; action: "synchronize" | "closed" | "opened" | "reopened" | "edited"; number: number; merged?: boolean };
+
+/** GitHub's numeric ID for a feedback item (`discussion:12` -> 12). */
+function githubDatabaseId(id: string): number {
+  return Number(id.slice(id.indexOf(":") + 1));
+}
+
 /** The brief limit on a task thread's messages (1,200 visible characters), on by default. */
 export const E2E_BRIEF_LIMIT = 1_200;
 
@@ -295,16 +197,34 @@ export async function createWorkflowE2E(options: {
    * format and no evidence, as the table, the storage and the notifier's stream all see it.
    */
   legacyPlanMarkdown?: string;
+  /**
+   * GitHub's realism (head lag is on by default; `realism: { lag: false }` needs a comment saying why). `wire: true`: the
+   * broker reads PR feedback through the real GitHubAppCredentialProvider over the fake's REST and GraphQL endpoints.
+   */
+  github?: FakeGitHubOptions & { wire?: boolean };
+  /** The App secret's webhook secret: absent for the default; null when the secret holds none (the broker answers 503). */
+  webhookSecret?: string | null;
 } = {}) {
-  const github = new FakeGitHub();
+  const github = new FakeGitHub(options.github?.realism === undefined ? {} : { realism: options.github.realism });
+  // The webhook secret GitHub signs with, and the copy the broker's container has cached (it re-reads on { refresh: true }).
+  let configuredSecret: string | null = options.webhookSecret === undefined ? WEBHOOK_SECRET : options.webhookSecret;
+  let cachedSecret = configuredSecret;
+  const githubWebhookSecret = async (read?: { refresh?: boolean }): Promise<string> => {
+    if (read?.refresh === true) cachedSecret = configuredSecret;
+    // The production reader's own refusal for an App secret with no usable webhook secret.
+    return cachedSecret === null ? webhookSecretFromSecret("{}") : cachedSecret;
+  };
+  const githubPullRequests = options.github?.wire === true
+    ? { ...github.gateway, getPullRequestFeedback: wireFeedbackReader(github) }
+    : github.gateway;
   // The plan evidence jobs the broker started: the background Lambda is run by the test, with `runPlanEvidenceJobs`.
   const planEvidenceJobs: PlanEvidenceEvent[] = [];
   const harness = await createDeveloperTaskBroker({
     register: false,
     brokerExtra: {
-      githubPullRequests: github.gateway,
+      githubPullRequests,
       startPlanEvidenceJob: async (event: PlanEvidenceEvent) => { planEvidenceJobs.push(event); },
-      githubWebhookSecret: async () => WEBHOOK_SECRET,
+      githubWebhookSecret,
       repositoryGrants: new RepositoryGrantService(Buffer.alloc(32, 4), (reference, url, access) => github.resolveCredential(reference, url, access)),
     },
   });
@@ -780,25 +700,71 @@ export async function createWorkflowE2E(options: {
      * real route: a new comment on its conversation, or (merged) the pull request closing merged. Answers the HTTP status.
      */
     async githubWebhook(number: number, event: { comment: GitHubFeedbackComment } | { merged: true }): Promise<number> {
-      const pullRequest = github.pullRequests.find((entry) => entry.number === number)!;
+      const built: E2EWebhookEvent = "comment" in event
+        ? { kind: event.comment.kind === "REVIEW_COMMENT" ? "pull_request_review_comment" : "issue_comment", action: "created", number, comment: event.comment }
+        : { kind: "pull_request", action: "closed", number, merged: true };
+      return (await this.webhook(built)).status;
+    },
+
+    /**
+     * Any GitHub webhook delivery for pull request `event.number`, as GitHub builds it, signed with the webhook secret GitHub
+     * holds (or `secret`), with a fresh delivery ID (or `deliveryId`, to redeliver) and its event name (or `eventName`).
+     */
+    async webhook(event: E2EWebhookEvent, deliveryOptions: { deliveryId?: string; secret?: string; eventName?: string } = {}): Promise<{ status: number; body: Record<string, unknown> }> {
+      const pullRequest = github.pullRequests.find((entry) => entry.number === event.number);
+      if (pullRequest === undefined) throw new Error(`GitHub has no pull request #${event.number}`);
       const repository = { id: 4242, full_name: "example/demo" };
-      const inline = "comment" in event && event.comment.kind === "REVIEW_COMMENT";
-      const payload = "comment" in event
-        ? inline
-          ? { action: "created", installation: { id: 77 }, repository, pull_request: { number, state: "open", html_url: pullRequest.url },
-            comment: { id: Number(event.comment.id.replace("review_comment:", "")), body: event.comment.body, html_url: event.comment.url, updated_at: event.comment.updatedAt,
-              path: event.comment.path, line: event.comment.line, user: { login: event.comment.author } } }
-          : { action: "created", installation: { id: 77 }, repository, issue: { number, state: "open", pull_request: { url: `https://api.github.com/repos/example/demo/pulls/${number}` } },
-            comment: { id: Number(event.comment.id), body: event.comment.body, html_url: event.comment.url, updated_at: event.comment.updatedAt, user: { login: event.comment.author } } }
-        : { action: "closed", installation: { id: 77 }, repository, pull_request: { number, state: "closed", merged: true, html_url: pullRequest.url } };
+      const pull = { number: event.number, state: pullRequest.state === "open" ? "open" : "closed", merged: pullRequest.state === "merged", html_url: pullRequest.url,
+        head: { ref: pullRequest.headBranch, sha: pullRequest.commit }, base: { ref: pullRequest.baseBranch } };
+      const user = (login: string) => ({ login });
+      let payload: Record<string, unknown>;
+      switch (event.kind) {
+        case "issue_comment":
+          payload = { action: event.action ?? "created", installation: { id: 77 }, repository,
+            issue: { number: event.number, state: pull.state, pull_request: { url: `https://api.github.com/repos/example/demo/pulls/${event.number}` } },
+            comment: { id: githubDatabaseId(event.comment.id), body: event.comment.body, html_url: event.comment.url, updated_at: event.comment.updatedAt, user: user(event.comment.author) } };
+          break;
+        case "pull_request_review_comment":
+          payload = { action: event.action ?? "created", installation: { id: 77 }, repository, pull_request: pull,
+            comment: { id: githubDatabaseId(event.comment.id), body: event.comment.body, html_url: event.comment.url, updated_at: event.comment.updatedAt,
+              ...(event.comment.path === undefined ? {} : { path: event.comment.path }), ...(event.comment.line === undefined ? {} : { line: event.comment.line }), user: user(event.comment.author) } };
+          break;
+        case "pull_request_review":
+          payload = { action: event.action ?? "submitted", installation: { id: 77 }, repository, pull_request: pull,
+            review: { id: githubDatabaseId(event.review.id), body: event.body === undefined ? event.review.body : event.body, state: (event.state ?? "commented").toLowerCase(),
+              html_url: event.review.url, submitted_at: event.review.updatedAt, user: user(event.review.author) } };
+          break;
+        case "pull_request":
+          payload = { action: event.action, installation: { id: 77 }, repository,
+            pull_request: { ...pull, ...(event.action === "closed" ? { state: "closed", merged: event.merged === true } : {}) } };
+          break;
+      }
       const body = JSON.stringify(payload);
+      const secret = deliveryOptions.secret ?? configuredSecret ?? WEBHOOK_SECRET;
       const response = await harness.handler({
         version: "2.0", rawPath: "/v1/github/webhooks", rawQueryString: "", body, isBase64Encoded: false,
-        headers: { "x-hub-signature-256": `sha256=${createHmac("sha256", WEBHOOK_SECRET).update(body, "utf8").digest("hex")}`,
-          "x-github-delivery": randomUUID(), "x-github-event": inline ? "pull_request_review_comment" : "comment" in event ? "issue_comment" : "pull_request" },
+        headers: { "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(body, "utf8").digest("hex")}`,
+          "x-github-delivery": deliveryOptions.deliveryId ?? randomUUID(), "x-github-event": deliveryOptions.eventName ?? event.kind },
         requestContext: { requestId: randomUUID(), http: { method: "POST" } },
       });
-      return response.statusCode;
+      return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
+    },
+
+    /** Runs the broker's scheduled GitHub webhook recovery sweep, as its EventBridge schedule does; answers its status and reply. */
+    async runWebhookRecovery(): Promise<{ statusCode: number; body: Record<string, unknown> }> {
+      const response = await harness.handler({ source: "agentx.github-webhook-recovery" });
+      return { statusCode: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
+    },
+
+    /** The App secret's webhook secret changes (GitHub signs with it at once); the broker's cached copy stays until it re-reads. */
+    rotateWebhookSecret(next: string): void {
+      configuredSecret = next;
+    },
+
+    /** Sets the webhook secret on both sides at once (null: the App secret holds none). */
+    setWebhookSecret(next: string | null): void {
+      configuredSecret = next;
+      cachedSecret = next;
     },
 
     /** Presses the button `actionId` on the latest message that carries it. */
