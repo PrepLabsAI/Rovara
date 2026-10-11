@@ -88,6 +88,8 @@ import {
   workflowFeedbackCheckChanges,
   retryWorkflowFeedbackReview,
   WorkflowPublishRetryRequestSchema,
+  WorkflowFeedbackDecisionRequestSchema,
+  WorkflowFeedbackReviewRetryRequestSchema,
   WORKFLOW_PLAN_MAX_BYTES,
   WORKFLOW_BLOCK_REASONS,
   canonicalPlanJson,
@@ -3980,11 +3982,31 @@ export async function adminShareMode(deps: ShareModeDependencies, admin: ShareAd
   throw agentXError("WORKSPACE_BUSY", "the task changed while switching its mode; try again");
 }
 
+/**
+ * An AI tool's decision on the pending PR feedback proposal: the same owner-only transition, GitHub refresh and fences as
+ * the Slack buttons and the feedback page, then the task as it now stands.
+ */
+async function decideTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: unknown): Promise<{ task: DeveloperTaskView }> {
+  const parsed = WorkflowFeedbackDecisionRequestSchema.safeParse(input);
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", parsed.error.issues[0]?.message ?? "the PR feedback decision is invalid");
+  await submitWorkflowFeedbackDecision(deps, caller, taskId, parsed.data);
+  return readTask(deps, caller, taskId, new URL(`/v1/dev/tasks/${encodeURIComponent(taskId)}`, "https://agentx.invalid"));
+}
+
+/** An AI tool's Retry review of a PR feedback review that could not finish: the same transition as the Slack button. */
+async function retryTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: unknown): Promise<{ task: DeveloperTaskView; started: boolean }> {
+  const parsed = WorkflowFeedbackReviewRetryRequestSchema.safeParse(input);
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", "name the review to retry by its review digest");
+  const retried = await retryTaskWorkflowFeedbackReview(deps, caller, taskId, parsed.data);
+  const read = await readTask(deps, caller, taskId, new URL(`/v1/dev/tasks/${encodeURIComponent(taskId)}`, "https://agentx.invalid"));
+  return { ...read, started: retried.started };
+}
+
 /** Every developer task route answers 200 with its body; errors are AgentXErrors. */
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/send-back|workflow\/review-findings|canvas-closeout\/retry))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
@@ -3996,6 +4018,9 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/publish-retry") return retryTaskWorkflowPublication(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/send-back") return sendTaskWorkflowBackToCoding(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/review-findings") return resolveTaskWorkflowFindings(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "workflow/feedback") return { review: await getWorkflowFeedbackReview(deps, caller, taskId) };
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/feedback-decision") return decideTaskWorkflowFeedback(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/feedback-retry") return retryTaskWorkflowFeedback(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "cancel") return cancelTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "close") return closeTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "pull-requests") return openPullRequest(deps, caller, taskId, body(request));
