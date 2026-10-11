@@ -320,7 +320,8 @@ export function workflowFindingsModal(findings: readonly WorkflowOpenFinding[], 
       { type: "section", text: { type: "mrkdwn", text: `*${index + 1}. ${finding.role === "SECURITY" ? "Security review" : "Code review"}*${where}\n${cleanLine(finding.text, FINDING_FORM_TEXT_MAX)}` } },
       { type: "input", block_id: ids.action, label: { type: "plain_text", text: `What should happen to finding ${index + 1}?` },
         element: { type: "radio_buttons", action_id: "action", options: [fix, accept], initial_option: fix } },
-      { type: "input", block_id: ids.note, optional: true, label: { type: "plain_text", text: "Instructions if you choose Fix, or your reason if you choose Accept (required to accept)" },
+      { type: "input", block_id: ids.note, optional: true, label: { type: "plain_text", text: "Fix instructions, or your reason to accept" },
+        hint: { type: "plain_text", text: "A reason is needed to accept this finding." },
         element: { type: "plain_text_input", action_id: "note", multiline: true, max_length: FINDING_INSTRUCTION_MAX } },
     );
   });
