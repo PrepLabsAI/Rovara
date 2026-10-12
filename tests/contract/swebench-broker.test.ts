@@ -62,7 +62,7 @@ async function evalBroker(options: { installed?: boolean; models?: unknown; star
   return { ...broker, launches, startExecution };
 }
 
-const enable = (handler: Parameters<typeof call>[0], body: unknown = {}, user = administrator) =>
+const enable = (handler: Parameters<typeof call>[0], body: unknown = {}, user: NonNullable<Parameters<typeof call>[1]["user"]> = administrator) =>
   call(handler, { method: "PUT", path: channelPath, user, body });
 
 const start = (handler: Parameters<typeof call>[0], body: Record<string, unknown> = {}, threadValue = thread) =>
@@ -89,7 +89,7 @@ describe("enabling SWE-bench runs in a channel (spec 043 FR-002)", () => {
 
   it("refuses a non-administrator and an unbound channel", async () => {
     const { handler } = await evalBroker();
-    expect((await enable(handler, {}, { subject: "someone", admin: false })).status).toBe(403);
+    expect((await enable(handler, {}, { subject: "someone" })).status).toBe(403);
     const unbound = await call(handler, { method: "PUT", path: `/v1/admin/evals/channels/${SLACK_TEAM}/C0999999999`, user: administrator, body: {} });
     expect(unbound).toMatchObject({ status: 404, body: { error: { message: expect.stringContaining("bind the channel") as unknown } } });
   });

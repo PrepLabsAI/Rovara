@@ -1,6 +1,7 @@
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { describe, expect, it, vi } from "vitest";
 import { createPiSessionRuntime, runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
+import { runOrchestratorTurn as runHostedOrchestratorTurn } from "@agentx/orchestrator";
 import { TurnRecorder as HostedTurnRecorder } from "@agentx/orchestrator/turn-recorder";
 import { TurnRecorder } from "../../packages/orchestrator/src/turn-recorder.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
@@ -32,7 +33,7 @@ describe("Pi extension error reporting", () => {
     });
     try {
       faux.setResponses([fauxAssistantMessage("Hello.")]);
-      expect(await runOrchestratorTurn(runtime, "hello")).toBe("Hello.");
+      expect(await runHostedOrchestratorTurn(runtime, "hello", recorder)).toBe("Hello.");
       expect(failures).toHaveBeenCalledExactlyOnceWith({ extension: "agentx-turn-recorder", event: "agent_end", errorName: "unknown" });
       expect(recorder.observation().recordingErrors).toEqual(["handler_failed:agentx-turn-recorder:agent_end"]);
     } finally { await runtime.dispose(); }
