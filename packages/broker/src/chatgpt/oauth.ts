@@ -54,6 +54,7 @@ export function parseChatGptCallback(pasted: string): ChatGptCallback {
     throw agentXError("CONFIG_INVALID", "that is not the address the browser ended on; copy the whole address that starts with http://127.0.0.1:1455/auth/callback");
   }
   const error = url.searchParams.get("error");
+  if (error === "access_denied") throw agentXError("CONFIG_INVALID", "ChatGPT was not connected: the sign-in was declined on OpenAI's page");
   if (error !== null) throw agentXError("CONFIG_INVALID", /^[a-z_]{1,40}$/.test(error) ? `ChatGPT did not connect (${error})` : "ChatGPT did not connect");
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
