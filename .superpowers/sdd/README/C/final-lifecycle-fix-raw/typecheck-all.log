@@ -1,5 +1,0 @@
-
-> agentx@0.1.0 typecheck:all
-> tsc -b --pretty false && node scripts/typecheck-baseline.ts check
-
-Stricter type check (tsconfig.lint.json): 0 errors in 0 files (baseline: 0 errors in 0 files).
