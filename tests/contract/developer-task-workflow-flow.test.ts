@@ -302,13 +302,27 @@ describe("native developer task workflow", () => {
     const plan = "# Plan\n\n1. Exercise the terminal response.\n";
     await finishPlanningWithMarkdown(harness, workspaceId, String(operations(harness, workspaceId).find((operation) => operation.workflowMode === "PLAN")!.id), plan);
     const current = taskWorkflow(harness, taskId);
-    const response = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, {
-      requestId: randomUUID(), expectedRevision: current.revision, decision: "REJECT", reason: "Do not proceed", artifactDigest: createHash("sha256").update(plan).digest("hex"),
-    });
+    const request = { requestId: randomUUID(), expectedRevision: current.revision, decision: "REJECT" as const,
+      reason: "Do not proceed", artifactDigest: createHash("sha256").update(plan).digest("hex") };
+    const response = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, request);
 
     expect(response.status).toBe(200);
     expect(response.body.task).toMatchObject({ taskId });
     expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "CLOSED", state: "COMPLETE", outcome: "REJECTED" });
+    const operationsAfterReject = operations(harness, workspaceId).length;
+    const replay = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, request);
+    expect(replay.status).toBe(200);
+    expect(replay.body.task).toMatchObject({ taskId });
+    expect(taskWorkflow(harness, taskId).decisions).toHaveLength(1);
+    expect(operations(harness, workspaceId)).toHaveLength(operationsAfterReject);
+    const changedPayload = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, { ...request, reason: "Different reason" });
+    expect(changedPayload.status).not.toBe(200);
+    const developer = harness.db.get(`DEVELOPER#${MAYA.developerId}`, "META")!;
+    harness.db.set({ ...developer, revoked: true });
+    const revokedReplay = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, request);
+    expect(revokedReplay.status).not.toBe(200);
+    expect(taskWorkflow(harness, taskId).decisions).toHaveLength(1);
+    expect(operations(harness, workspaceId)).toHaveLength(operationsAfterReject);
   });
 
   it("refuses webhook feedback critic acceptance after all effective owners are lost", async () => {

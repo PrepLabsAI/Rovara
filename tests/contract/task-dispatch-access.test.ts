@@ -96,6 +96,15 @@ describe("task dispatch access", () => {
     expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe("WAITING_FOR_TASK_ACCESS");
   });
 
+  it("refuses normal delivery while a terminal workflow awaits its closedAt write", async () => {
+    const h = harness();
+    h.db.set({ ...h.current, workflow: { revision: 8, stage: "CLOSED", state: "COMPLETE", outcome: "REJECTED" } });
+
+    await expect(guardTaskDispatch({ documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson }, h.outbox))
+      .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe("QUEUED");
+  });
+
   it("durably parks PEOPLE work when proof is unconfigured and preserves operation identity", async () => {
     const h = harness();
     await expect(guardTaskDispatch({ documentClient: h.db, tableName: "state" }, h.outbox)).resolves.toBe("PARKED");

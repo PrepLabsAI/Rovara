@@ -1,6 +1,7 @@
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { agentXError } from "@agentx/contracts";
 import type { DurableOutboxRecord } from "./lambda.js";
+import { taskOpen } from "../developer/task-access.js";
 import { resolveTaskDispatchPeople, type CheckTaskPerson } from "../developer/task-people.js";
 import { taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord } from "../developer/task-records.js";
 
@@ -98,9 +99,10 @@ async function allowedStillCurrent(
   const taskCondition = workflow === undefined
     ? { ConditionExpression: "workspaceId = :workspaceId AND attribute_not_exists(closedAt) AND attribute_not_exists(workflow)",
       ExpressionAttributeValues: { ":workspaceId": record.workspaceId } }
-    : { ConditionExpression: "workspaceId = :workspaceId AND attribute_not_exists(closedAt) AND workflow.#revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state",
+    : { ConditionExpression: "workspaceId = :workspaceId AND attribute_not_exists(closedAt) AND workflow.#revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.#stage <> :closed AND workflow.#stage <> :merged AND workflow.#state <> :complete",
       ExpressionAttributeNames: { "#revision": "revision", "#stage": "stage", "#state": "state" },
-      ExpressionAttributeValues: { ":workspaceId": record.workspaceId, ":revision": workflow.revision, ":stage": workflow.stage, ":state": workflow.state } };
+      ExpressionAttributeValues: { ":workspaceId": record.workspaceId, ":revision": workflow.revision, ":stage": workflow.stage, ":state": workflow.state,
+        ":closed": "CLOSED", ":merged": "MERGED", ":complete": "COMPLETE" } };
   const peopleCondition = peopleRevision === undefined
     ? { ConditionExpression: "attribute_not_exists(pk)" }
     : { ConditionExpression: "#revision = :revision", ExpressionAttributeNames: { "#revision": "revision" }, ExpressionAttributeValues: { ":revision": peopleRevision } };
@@ -141,6 +143,9 @@ export async function guardTaskDispatch(deps: TaskDispatchAccessDependencies, re
     // exists. Broken task state is retried instead of silently dropping the invocation.
     if (task === undefined || task.workspaceId !== record.workspaceId) {
       throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch state could not be verified");
+    }
+    if (!taskOpen(task) || task.workflow?.state === "COMPLETE") {
+      throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch is no longer open");
     }
     const access = await resolveTaskDispatchPeople(deps, task);
     if (access === undefined || access.status === "ALLOWED") {

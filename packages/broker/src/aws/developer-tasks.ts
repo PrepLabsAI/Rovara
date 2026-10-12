@@ -1480,13 +1480,26 @@ async function continueTask(deps: DeveloperTaskRouteDependencies, caller: Develo
  * The task a caller may decide, through the one access rule (resolveTaskAccess and the role table). Anyone whose role may
  * not decide, and anyone who may not see the task at all, gets the answer a missing task gets, as before.
  */
-async function decidableTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<AuthorizedTask> {
+async function decidableTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, historicalRequestId?: string): Promise<AuthorizedTask> {
   const notYours = () => agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
   let access: Awaited<ReturnType<typeof resolveTaskAccess>>;
   try {
     access = await authorizeTaskAction(deps, caller, taskId, "decide");
   } catch (error) {
-    if (error instanceof AgentXError && (error.code === "TASK_NOT_FOUND" || error.code === "TASK_ACCESS_DENIED")) throw notYours();
+    if (error instanceof AgentXError && (error.code === "TASK_NOT_FOUND" || error.code === "TASK_ACCESS_DENIED")) {
+      // A terminal task no longer accepts a new decision, but its exact recorded answer remains
+      // readable to an actor who still has current decide authority. Payload and actor equality are
+      // checked by the normal historical transition below; this path performs no write or reopening.
+      if (historicalRequestId !== undefined) {
+        try {
+          const historical = await authorizeTaskActor(deps, caller, taskId, "decide");
+          if (historical.task.workflow?.decisions.some((decision) => decision.requestId === historicalRequestId) === true) return historical;
+        } catch {
+          // Revoked or no-longer-authorized actors receive the same missing-task answer as before.
+        }
+      }
+      throw notYours();
+    }
     throw error;
   }
   if (!can(access.role, "decide")) throw notYours();
@@ -1506,7 +1519,7 @@ export async function decideTaskWorkflow(
   options: { via?: "PAGE"; note?: string } = {},
 ): Promise<{ task: DeveloperTaskView }> {
   const request = parse(WorkflowDecisionRequestSchema, value, deps, "workflow-decision");
-  const access = await decidableTask(deps, caller, taskId);
+  const access = await decidableTask(deps, caller, taskId, request.requestId);
   const { task } = access;
   if (task.workflow === undefined) throw agentXError("NOT_FOUND", "this task does not have a workflow record");
   const workflow = task.workflow;
