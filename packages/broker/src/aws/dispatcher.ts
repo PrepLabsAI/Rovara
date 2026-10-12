@@ -11,7 +11,7 @@ import { failOutboxOperation } from "./outbox-failure.js";
 import { createEc2Delivery } from "./ec2-delivery.js";
 import { appendOperationEvent } from "./operation-events.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
-import { guardTaskDispatch } from "./task-dispatch-access.js";
+import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
 import { createTaskPersonRuntime, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
 import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
@@ -88,7 +88,7 @@ export function createDispatcherHandler(dependencies: {
         }
         throw agentXError("RUNTIME_UNAVAILABLE", "retired deployment mode cannot execute work; register an ec2-ebs project");
       } catch (error) {
-        const terminal = record !== undefined && attempt >= maxAttempts;
+        const terminal = record !== undefined && attempt >= maxAttempts && !isTaskDispatchGuardRetryError(error);
         logDispatchFailure(dependencies.log, {
           ...errorLogFields(error),
           level: "warn",

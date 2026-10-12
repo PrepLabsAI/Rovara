@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
+import { agentXError } from "../../packages/contracts/src/index.js";
 import type { Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
-import { guardTaskDispatch, resumeTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
+import { guardTaskDispatch, isTaskDispatchGuardRetryError, resumeTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
@@ -56,6 +57,16 @@ function harness(withPeople = true) {
 }
 
 describe("task dispatch access", () => {
+  it("classifies only rejected core guard decisions as retryable and preserves the original failure", async () => {
+    const original = agentXError("RUNTIME_UNAVAILABLE", "task access pause reserve is unavailable");
+    const guard = guardTaskDispatch({ documentClient: { async send() { throw original; } }, tableName: "state" }, record());
+    let caught: unknown;
+    try { await guard; } catch (error) { caught = error; }
+    expect(isTaskDispatchGuardRetryError(caught)).toBe(true);
+    expect(caught).toMatchObject({ name: "TaskDispatchGuardRetryError", message: original.message, code: original.code, cause: original });
+    expect(isTaskDispatchGuardRetryError(agentXError("RUNTIME_UNAVAILABLE", original.message))).toBe(false);
+  });
+
   it.each(["deleted", "downgraded"] as const)("requalifies after the sole developer grant is %s before the final State fence", async (change) => {
     const h = harness();
     const revision = {

@@ -3,13 +3,21 @@
 // MCP-started Quick task to its draft PR, a Slack-started task decided through MCP, each recovery tool against its Slack
 // button, PR feedback decided through MCP [R4, decision D4], and agentx_get_task's next step at every stage.
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { describe, expect, it } from "vitest";
-import { SLACK_OIDC_ISSUER, openReviewFindings, type TaskPeopleDisplayReadRequest, type TaskPersonProofRequest, type TaskPersonInviteClaimRequest } from "@agentx/contracts";
+import { DeveloperSignInMethodSchema, SlackUserIdSchema, SLACK_OIDC_ISSUER, openReviewFindings, TaskPersonInviteClaimRequestSchema, type TaskPeopleDisplayReadRequest,
+  type TaskPersonProofRequest, type TaskPersonInviteClaimRequest, type TaskPersonInviteExecutionReceipt } from "@agentx/contracts";
 import { developerIdForSlackUser } from "../../../packages/broker/src/aws/admin-actions.js";
 import type { CheckTaskPerson } from "../../../packages/broker/src/developer/task-people.js";
 import { taskOwnerKey } from "../../../packages/broker/src/developer/task-records.js";
 import { ownerKeyForSubject } from "../../../packages/broker/src/aws/lambda.js";
 import { taskPersonInviteClaimDigest } from "../../../packages/broker/src/developer/task-people-effects.js";
+import { createTaskPersonInviteHandler } from "../../../packages/broker/src/aws/task-person-invite-handler.js";
+import { taskPersonInviteThroughLambda } from "../../../packages/broker/src/aws/task-person-invite-transport.js";
+import { createTaskPersonRuntime, TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "../../../packages/broker/src/aws/task-person-runtime.js";
+import { type TaskAuthorityAdmission } from "../../../packages/broker/src/aws/task-authority-admission.js";
+import { type ProjectAuthorityReader } from "../../../packages/broker/src/developer/task-project-access.js";
+import { taskPersonInviteStateConditions, type TaskPersonInviteStateCondition } from "../../../packages/broker/src/aws/task-person-invite-authority-fence.js";
 import { reviewerFindings, reviewerHangs } from "../../support/model-fixtures.js";
 import { feedbackCriticReply } from "../../support/faux-scripts.js";
 import { OMAR, grantProject } from "../../support/developer-task-broker.js";
@@ -57,11 +65,11 @@ function taskPeopleDirectory(baileyInTaskChannel = true) {
   return { members, names, proof, display, check };
 }
 
-function assertClaimMatchesPersistedProposal(e2e: WorkflowE2E, input: TaskPersonInviteClaimRequest): Record<string, unknown> {
+function assertClaimMatchesPersistedProposal(e2e: WorkflowE2E, input: TaskPersonInviteClaimRequest, targetSlackUserId = BAILEY.slackUserId): Record<string, unknown> {
   const proposal = e2e.db.get(`DEVTASK#${input.taskId}`, `PEOPLE_PROPOSAL#${input.requestId}`);
   if (proposal === undefined || proposal.invitationStatus !== "CLAIMED" || proposal.kind !== "role" || proposal.role !== "owner"
     || proposal.taskId !== input.taskId || proposal.requestId !== input.requestId || proposal.invitationTeamId !== "T0BSHLLUGBD"
-    || proposal.invitationChannelId !== "C0123456789" || proposal.invitationSlackUserId !== BAILEY.slackUserId
+    || proposal.invitationChannelId !== "C0123456789" || proposal.invitationSlackUserId !== targetSlackUserId
     || typeof proposal.callerDeveloperId !== "string" || typeof proposal.targetDeveloperId !== "string" || typeof proposal.personId !== "string"
     || typeof proposal.expectedPeopleRevision !== "number" || typeof proposal.payloadDigest !== "string" || typeof proposal.expiresAt !== "string"
     || typeof proposal.invitationUpdatedAt !== "string") throw new Error("invitation claim is missing or unbound in the retained proposal");
@@ -72,6 +80,138 @@ function assertClaimMatchesPersistedProposal(e2e: WorkflowE2E, input: TaskPerson
     invitationSlackUserId: proposal.invitationSlackUserId, invitationUpdatedAt: proposal.invitationUpdatedAt });
   if (digest !== input.claimDigest) throw new Error("invitation claim digest does not match the retained proposal");
   return proposal;
+}
+
+function actualInviteComposition(e2e: WorkflowE2E, directory: ReturnType<typeof taskPeopleDirectory>, options: {
+  missingResponseOnCall?: number; membershipLag?: boolean; faultOnCall?: { call: number; kind: "function-error" | "throw-after-effect" | "deadline-after-effect" | "malformed" };
+} = {}) {
+  const receipts = new Map<string, TaskPersonInviteExecutionReceipt>();
+  const requests: TaskPersonInviteClaimRequest[] = [];
+  const posts: Array<{ teamId: string; channelId: string; slackUserId: string }> = [];
+  const readRows = (prefix: string) => e2e.db.find((row) => typeof row.pk === "string" && row.pk.startsWith(prefix));
+  const projectAuthorityReader: ProjectAuthorityReader = {
+    async latestRevision(project) {
+      const latest = readRows(`PROJECT#${project}`).filter((row) => String(row.sk).startsWith("REV#"))
+        .sort((left, right) => String(right.sk).localeCompare(String(left.sk)))[0];
+      if (latest === undefined) return { complete: true };
+      const definition = latest.definition as Record<string, unknown> | undefined;
+      if (definition === undefined) return { complete: false };
+      return { complete: true, revision: { pk: String(latest.pk), sk: String(latest.sk),
+        revision: Number(definition.revision), definition: Object.hasOwn(definition, "developerTasks")
+          ? { developerTasks: definition.developerTasks } : {} } };
+    },
+    async memberships(developerId) {
+      return { complete: true, items: readRows(`MEMBER#${developerId}`).map((row) => ({ pk: String(row.pk), sk: String(row.sk),
+        projectName: String(row.projectName), ...(typeof row.role === "string" ? { role: row.role } : {}) })) };
+    },
+    async bindings(teamId) {
+      return { complete: true, items: readRows(`SLACK_BINDING#${teamId}`).map((row) => ({ pk: String(row.pk), sk: String(row.sk),
+        teamId: String(row.teamId), channelId: String(row.channelId), projectName: String(row.projectName), updatedAt: String(row.updatedAt) })) };
+    },
+  };
+  const runtimePorts: TaskPersonRuntimePorts = {
+    async readTaskRecord({ taskId, sortKey }) {
+      return e2e.db.get(`DEVTASK#${taskId}`, sortKey);
+    },
+    async readDeveloperRecord({ developerId, consistentRead, projection }) {
+      if (consistentRead !== true || !isDeepStrictEqual(projection, TASK_PERSON_DEVELOPER_RECORD_ATTRIBUTES)) {
+        throw new Error("developer identity read did not use the exact strong projected boundary");
+      }
+      const row = e2e.db.get(`DEVELOPER#${developerId}`, "META");
+      if (row === undefined) return undefined;
+      const provider = DeveloperSignInMethodSchema.safeParse(row.provider);
+      if (row.pk !== `DEVELOPER#${developerId}` || row.sk !== "META" || row.developerId !== developerId
+        || !provider.success || typeof row.issuer !== "string" || typeof row.subject !== "string"
+        || typeof row.displayName !== "string" || typeof row.revoked !== "boolean"
+        || (row.slackUserId !== undefined && !SlackUserIdSchema.safeParse(row.slackUserId).success)) {
+        throw new Error("developer identity projection did not match the current State row");
+      }
+      const projected: TaskPersonDeveloperRecordProjection = {
+        pk: row.pk, sk: row.sk, developerId: row.developerId, provider: provider.data,
+        issuer: row.issuer, subject: row.subject, displayName: row.displayName, revoked: row.revoked,
+        ...(typeof row.slackUserId === "string" ? { slackUserId: row.slackUserId } : {}),
+      };
+      return projected;
+    },
+    projectAuthorityReader,
+    async taskPersonProof(request) { return { result: await directory.proof(request), slackCallsUsed: 1 }; },
+  };
+  const conditionCurrent = (condition: TaskPersonInviteStateCondition): boolean => {
+    const row = e2e.db.get(condition.pk, condition.sk);
+    if (row === undefined || row.pk !== condition.pk || row.sk !== condition.sk) return false;
+    if (condition.kind === "project-revision") {
+      const definition = row.definition as Record<string, unknown> | undefined;
+      return definition?.revision === condition.revision
+        && Object.hasOwn(definition ?? {}, "developerTasks") === condition.developerTasksPresent
+        && (!condition.developerTasksPresent || isDeepStrictEqual(definition?.developerTasks, condition.developerTasks));
+    }
+    if (condition.kind === "developer-grant") return row.projectName === condition.projectName && row.role === "developer";
+    return row.teamId === condition.teamId && row.channelId === condition.channelId
+      && row.projectName === condition.projectName && row.updatedAt === condition.updatedAt;
+  };
+  let transportNowOverride: number | undefined;
+  const handler = createTaskPersonInviteHandler({
+    now: () => Date.now(), remainingTimeMs: () => 30_000, expectedTeamId: "T0BSHLLUGBD", stateTableName: "state",
+    async readState({ taskId, sortKey }) { return e2e.db.get(`DEVTASK#${taskId}`, sortKey); },
+    createPersonChecker(admission: TaskAuthorityAdmission) {
+      return createTaskPersonRuntime({ admission, ports: runtimePorts, stateTableName: "state", slackTeamId: "T0BSHLLUGBD",
+        now: () => Date.now(), uuid: randomUUID });
+    },
+    async readChannelInfo({ teamId, channelId, slackCallsLimit }) {
+      if (slackCallsLimit < 1 || teamId !== "T0BSHLLUGBD" || channelId !== "C0123456789") throw new Error("invite channel lookup exceeded its measured allowance");
+      return { isPrivate: false, botIsMember: true, slackCallsUsed: 1 };
+    },
+    async beginReceipt({ receipt, stateFence }) {
+      const task = e2e.db.get(`DEVTASK#${receipt.taskId}`, "META");
+      const people = e2e.db.get(`DEVTASK#${receipt.taskId}`, "PEOPLE");
+      const proposal = e2e.db.get(`DEVTASK#${receipt.taskId}`, `PEOPLE_PROPOSAL#${receipt.requestId}`);
+      const conditions = taskPersonInviteStateConditions({ taskId: receipt.taskId, project: stateFence.task.project,
+        teamId: receipt.teamId, actor: stateFence.actorAuthority, target: stateFence.targetAuthority });
+      if (task === undefined || people === undefined || proposal === undefined
+        || !isDeepStrictEqual(stateFence.task, task) || !isDeepStrictEqual(stateFence.people, people)
+        || !isDeepStrictEqual(stateFence.proposal, proposal) || conditions === undefined
+        || !isDeepStrictEqual(stateFence.authorityConditions, conditions) || !conditions.every(conditionCurrent)) return { kind: "conflict" };
+      const key = `${receipt.pk}/${receipt.sk}`;
+      const existing = receipts.get(key);
+      if (existing !== undefined) return { kind: "existing", receipt: existing, stateFenceVerified: true };
+      receipts.set(key, receipt);
+      return { kind: "created", stateFenceVerified: true };
+    },
+    async finishReceipt({ executionReceiptId, claimDigest, status, reason }) {
+      const existing = [...receipts.values()].find((receipt) => receipt.executionReceiptId === executionReceiptId);
+      if (existing === undefined || existing.claimDigest !== claimDigest || existing.status !== "STARTED") return false;
+      receipts.set(`${existing.pk}/${existing.sk}`, { ...existing, status, updatedAt: new Date().toISOString(), ...(reason === undefined ? {} : { reason }) });
+      return true;
+    },
+    async invite(input) {
+      posts.push({ teamId: input.teamId, channelId: input.channelId, slackUserId: input.slackUserId });
+      if (options.membershipLag !== true) directory.members.get(input.slackUserId)?.add(input.channelId);
+      return { kind: "accepted" };
+    },
+    async targetIsMember({ channelId, slackUserId, slackCallsLimit }) {
+      if (slackCallsLimit < 1) throw new Error("invite membership lookup exceeded its measured allowance");
+      return { isMember: directory.members.get(slackUserId)?.has(channelId) === true, slackCallsUsed: 1 };
+    },
+    configuration: { peopleChangesEnabled: true, publicInvitationsEnabled: true, privateInvitationsEnabled: true,
+      publicInviteCapability: true, privateInviteCapability: true },
+  });
+  const transport = taskPersonInviteThroughLambda({ now: () => transportNowOverride ?? Date.now(), async invoke({ invocationType, maxAttempts, payload, abortSignal }) {
+    if (invocationType !== "RequestResponse" || maxAttempts !== 1 || abortSignal.aborted) throw new Error("invite transport was not bounded");
+    const request = TaskPersonInviteClaimRequestSchema.parse(JSON.parse(Buffer.from(payload).toString("utf8")) as unknown);
+    requests.push(request);
+    const outcome = await handler(request);
+    const fault = options.faultOnCall?.call === requests.length ? options.faultOnCall.kind : undefined;
+    if (fault === "function-error") return { FunctionError: "Unhandled", Payload: Buffer.from(JSON.stringify(outcome), "utf8") };
+    if (fault === "throw-after-effect") throw new Error("simulated endpoint connection loss after invitation effect");
+    if (fault === "deadline-after-effect") {
+      transportNowOverride = request.admission.deadlineAt;
+      return { Payload: Buffer.from(JSON.stringify(outcome), "utf8") };
+    }
+    if (fault === "malformed") return { Payload: Buffer.from("not-json", "utf8") };
+    if (requests.length === options.missingResponseOnCall) return {};
+    return { Payload: Buffer.from(JSON.stringify(outcome), "utf8") };
+  } });
+  return { transport, requests, receipts, posts };
 }
 
 /** The MCP answer's text, which an AI tool reads; fails the test on a tool error. */
@@ -513,22 +653,20 @@ describe("Suite 11: MCP parity", () => {
 
     const unknownDirectory = taskPeopleDirectory(false);
     const unknownInvitations: Array<{ taskId: string; requestId: string; claimDigest: string; admissionId: string }> = [];
-    const unknownReceipts = new Map<string, { executionReceiptId: string; claimDigest: string; status: "UNKNOWN" }>();
+    const unknownComposition: { value?: ReturnType<typeof actualInviteComposition> } = {};
     const unknownHolder: { value?: WorkflowE2E } = {};
     const unknown = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
       changesEnabled: true, checkTaskPerson: unknownDirectory.check, taskPersonProof: unknownDirectory.proof,
       taskPeopleDisplayRead: unknownDirectory.display, boundChannels: [SECOND_CHANNEL],
+      developers: [SLACK_BAILEY],
       inviteTaskPerson: async (input: TaskPersonInviteClaimRequest) => {
         const current = unknownHolder.value;
         if (current === undefined) throw new Error("workflow harness was not initialized before invite");
         assertClaimMatchesPersistedProposal(current, input);
         if (input.kind !== "task-person-invite-claimed" || input.admission.remainingMs > 12_000) throw new Error("invalid invitation claim envelope");
         unknownInvitations.push({ taskId: input.taskId, requestId: input.requestId, claimDigest: input.claimDigest, admissionId: input.admission.id });
-        const key = `${input.taskId}/${input.requestId}`;
-        const receipt = unknownReceipts.get(key) ?? { executionReceiptId: randomUUID(), claimDigest: input.claimDigest, status: "UNKNOWN" as const };
-        unknownReceipts.set(key, receipt);
-        return { taskId: input.taskId, requestId: input.requestId, claimDigest: input.claimDigest, admissionId: input.admission.id,
-          status: "unknown", executionReceiptId: receipt.executionReceiptId, reason: "transport_unknown" };
+        unknownComposition.value ??= actualInviteComposition(current, unknownDirectory, { missingResponseOnCall: 1 });
+        return unknownComposition.value.transport(input);
       },
     } });
     unknownHolder.value = unknown;
@@ -540,6 +678,9 @@ describe("Suite 11: MCP parity", () => {
     expect(unknownInvitations[0]?.taskId).toBe(unknown.taskId());
     expect(unknownInvitations[0]?.claimDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(unknownInvitations[0]?.admissionId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(unknownComposition.value?.requests).toHaveLength(1);
+    expect(unknownComposition.value?.posts).toEqual([{ teamId: "T0BSHLLUGBD", channelId: "C0123456789", slackUserId: BAILEY.slackUserId }]);
+    expect([...unknownComposition.value!.receipts.values()]).toMatchObject([expect.objectContaining({ status: "ACCEPTED" })]);
     expect(unknown.db.get(`DEVTASK#${unknown.taskId()}`, "PEOPLE")).toEqual(beforeUnknown);
     expect(unknown.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toEqual([]);
     expect(unknown.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toEqual([]);
@@ -551,32 +692,28 @@ describe("Suite 11: MCP parity", () => {
 
     const directory = taskPeopleDirectory(false);
     const invitations: Array<{ taskId: string; requestId: string; claimDigest: string; admissionId: string }> = [];
-    const inviteReceipts = new Map<string, { executionReceiptId: string; claimDigest: string; status: "STARTED" | "ACCEPTED" }>();
+    const effectComposition: { value?: ReturnType<typeof actualInviteComposition> } = {};
     const e2eHolder: { value?: WorkflowE2E } = {};
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
       changesEnabled: true, checkTaskPerson: directory.check, taskPersonProof: directory.proof, taskPeopleDisplayRead: directory.display, boundChannels: [SECOND_CHANNEL],
+      developers: [SLACK_BAILEY],
       inviteTaskPerson: async (input: TaskPersonInviteClaimRequest) => {
         const current = e2eHolder.value;
         if (current === undefined) throw new Error("workflow harness was not initialized before invite");
         assertClaimMatchesPersistedProposal(current, input);
         if (input.kind !== "task-person-invite-claimed" || input.taskId !== current.taskId()) throw new Error("invitation claim does not match the active task");
         invitations.push({ taskId: input.taskId, requestId: input.requestId, claimDigest: input.claimDigest, admissionId: input.admission.id });
-        const key = `${input.taskId}/${input.requestId}`;
-        const existing = inviteReceipts.get(key);
-        if (existing !== undefined) {
-          if (existing.claimDigest !== input.claimDigest || existing.status !== "ACCEPTED") {
-            return { taskId: input.taskId, requestId: input.requestId, claimDigest: input.claimDigest, admissionId: input.admission.id,
-              status: "unknown", executionReceiptId: existing.executionReceiptId, reason: "effect_unknown" };
+        effectComposition.value ??= actualInviteComposition(current, directory);
+        const outcome = await effectComposition.value.transport(input);
+        if (outcome.status === "accepted") {
+          const duplicate = await effectComposition.value.transport({ ...input, admission: {
+            ...input.admission, id: randomUUID(), deadlineAt: Date.now() + input.admission.remainingMs,
+          } });
+          if (duplicate.status !== "accepted" || duplicate.executionReceiptId !== outcome.executionReceiptId) {
+            throw new Error("duplicate invitation delivery did not return the retained accepted receipt");
           }
-          return { taskId: input.taskId, requestId: input.requestId, claimDigest: input.claimDigest, admissionId: input.admission.id,
-            status: "accepted", executionReceiptId: existing.executionReceiptId };
         }
-        const receipt = { executionReceiptId: randomUUID(), claimDigest: input.claimDigest, status: "STARTED" as const };
-        inviteReceipts.set(key, receipt);
-        directory.members.get(BAILEY.slackUserId)?.add("C0123456789");
-        inviteReceipts.set(key, { ...receipt, status: "ACCEPTED" });
-        return { taskId: input.taskId, requestId: input.requestId, claimDigest: input.claimDigest, admissionId: input.admission.id,
-          status: "accepted", executionReceiptId: receipt.executionReceiptId };
+        return outcome;
       },
     } });
     e2eHolder.value = e2e;
@@ -594,12 +731,213 @@ describe("Suite 11: MCP parity", () => {
     expect(invitations[0]?.taskId).toBe(e2e.taskId());
     expect(invitations[0]?.claimDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(invitations[0]?.admissionId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(effectComposition.value?.requests).toHaveLength(2);
+    expect(effectComposition.value?.requests[1]?.admission.id).not.toBe(effectComposition.value?.requests[0]?.admission.id);
+    expect(effectComposition.value?.posts).toEqual([{ teamId: "T0BSHLLUGBD", channelId: "C0123456789", slackUserId: BAILEY.slackUserId }]);
+    const storedInviteReceipt = [...(effectComposition.value?.receipts.values() ?? [])][0];
+    expect(storedInviteReceipt).toMatchObject({ status: "ACCEPTED", attempt: 1, taskId: e2e.taskId(),
+      requestId: invitations[0]?.requestId, admissionId: invitations[0]?.admissionId });
     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toMatchObject({ revision: 3, orphaned: false,
       people: [expect.objectContaining({ role: "owner" }), expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "owner" })] });
     expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(2);
     expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toEqual([
       expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "viewer", status: "SENT", attempts: 1 }),
     ]);
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    e2e.github.merge(e2e.github.pullRequests[0]!.number);
+    expect(await e2e.githubWebhook(e2e.github.pullRequests[0]!.number, { merged: true })).toBe(200);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+  }, 120_000);
+
+  it("11.8b an accepted invite with lagging membership records its receipt but does not commit the owner role", async () => {
+    const directory = taskPeopleDirectory(false);
+    const composition: { value?: ReturnType<typeof actualInviteComposition> } = {};
+    const holder: { value?: WorkflowE2E } = {};
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
+      changesEnabled: true, checkTaskPerson: directory.check, taskPersonProof: directory.proof,
+      taskPeopleDisplayRead: directory.display, boundChannels: [SECOND_CHANNEL], developers: [SLACK_BAILEY],
+      inviteTaskPerson: async (input) => {
+        const current = holder.value;
+        if (current === undefined) throw new Error("workflow harness was not initialized before invite");
+        assertClaimMatchesPersistedProposal(current, input);
+        composition.value ??= actualInviteComposition(current, directory, { membershipLag: true });
+        return composition.value.transport(input);
+      },
+    } });
+    holder.value = e2e;
+    await atPlanReview(e2e);
+    await e2e.click("agentx_task_people");
+    await e2e.submitView({ task_person: { person: { selected_user: BAILEY.slackUserId } },
+      task_role: { role: { selected_option: { value: "viewer" } } } });
+    await e2e.deliverNotices();
+    const beforeOwnerProposal = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
+    const eventsBeforeOwnerProposal = structuredClone(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT"));
+    const notificationsBeforeOwnerProposal = structuredClone(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION"));
+
+    await e2e.click("agentx_task_people");
+    await expect(e2e.submitView({ task_person: { person: { selected_user: BAILEY.slackUserId } },
+      task_role: { role: { selected_option: { value: "owner" } } } })).rejects.toThrow("the modal refused the submission");
+    expect(composition.value?.posts).toEqual([{ teamId: "T0BSHLLUGBD", channelId: "C0123456789", slackUserId: BAILEY.slackUserId }]);
+    expect([...composition.value!.receipts.values()]).toMatchObject([expect.objectContaining({ status: "ACCEPTED" })]);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforeOwnerProposal);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toEqual(eventsBeforeOwnerProposal);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toEqual(notificationsBeforeOwnerProposal);
+    expect(directory.members.get(BAILEY.slackUserId)?.has("C0123456789")).toBe(false);
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    e2e.github.merge(e2e.github.pullRequests[0]!.number);
+    expect(await e2e.githubWebhook(e2e.github.pullRequests[0]!.number, { merged: true })).toBe(200);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+  }, 120_000);
+
+  it.each([
+    ["FunctionError", "function-error"],
+    ["endpoint send loss after POST", "throw-after-effect"],
+    ["late response after the admission deadline", "deadline-after-effect"],
+    ["malformed endpoint response", "malformed"],
+  ] as const)("11.8c an ambiguous %s after the invite effect preserves its receipt and does not commit task ownership", async (_label, fault) => {
+    const directory = taskPeopleDirectory(false);
+    const composition: { value?: ReturnType<typeof actualInviteComposition> } = {};
+    const holder: { value?: WorkflowE2E } = {};
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
+      changesEnabled: true, checkTaskPerson: directory.check, taskPersonProof: directory.proof,
+      taskPeopleDisplayRead: directory.display, boundChannels: [SECOND_CHANNEL], developers: [SLACK_BAILEY],
+      inviteTaskPerson: async (input) => {
+        const current = holder.value;
+        if (current === undefined) throw new Error("workflow harness was not initialized before invite");
+        assertClaimMatchesPersistedProposal(current, input);
+        composition.value ??= actualInviteComposition(current, directory, { faultOnCall: { call: 1, kind: fault } });
+        return composition.value.transport(input);
+      },
+    } });
+    holder.value = e2e;
+    await atPlanReview(e2e);
+    await e2e.click("agentx_task_people");
+    const beforePeople = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
+    await expect(e2e.submitView({ task_person: { person: { selected_user: BAILEY.slackUserId } },
+      task_role: { role: { selected_option: { value: "owner" } } } })).rejects.toThrow("the modal refused the submission");
+    expect(composition.value?.requests).toHaveLength(1);
+    expect(composition.value?.posts).toEqual([{ teamId: "T0BSHLLUGBD", channelId: "C0123456789", slackUserId: BAILEY.slackUserId }]);
+    expect([...composition.value!.receipts.values()]).toMatchObject([expect.objectContaining({ status: "ACCEPTED", attempt: 1 })]);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforePeople);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toEqual([]);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toEqual([]);
+    const proposal = e2e.db.find((item) => item.entityType === "TASK_PEOPLE_PROPOSAL"
+      && item.taskId === e2e.taskId()).at(-1);
+    expect(proposal?.invitationStatus).toBe("UNKNOWN");
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    e2e.github.merge(e2e.github.pullRequests[0]!.number);
+    expect(await e2e.githubWebhook(e2e.github.pullRequests[0]!.number, { merged: true })).toBe(200);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+  }, 120_000);
+
+  it("11.8d post-call actor owner loss preserves the truthful accepted invite while another current owner completes the workflow", async () => {
+    const directory = taskPeopleDirectory(true);
+    const charlie = { developerId: developerIdForSlackUser("U0CHARLIE01"), name: "Charlie Reed", provider: "slack" as const,
+      sessionId: "s-charlie-slack", slackUserId: "U0CHARLIE01" };
+    directory.members.set(charlie.slackUserId, new Set([SECOND_CHANNEL]));
+    directory.names.set(charlie.slackUserId, charlie.name);
+    const composition: { value?: ReturnType<typeof actualInviteComposition> } = {};
+    const holder: { value?: WorkflowE2E } = {};
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
+      changesEnabled: true, checkTaskPerson: directory.check, taskPersonProof: directory.proof,
+      taskPeopleDisplayRead: directory.display, boundChannels: [SECOND_CHANNEL], developers: [SLACK_BAILEY, charlie],
+      inviteTaskPerson: async (input) => {
+        const current = holder.value;
+        if (current === undefined) throw new Error("workflow harness was not initialized before invite");
+        assertClaimMatchesPersistedProposal(current, input, charlie.slackUserId);
+        composition.value ??= actualInviteComposition(current, directory);
+        const outcome = await composition.value.transport(input);
+        if (outcome.status === "accepted") {
+          const key = `DEVTASK#${current.taskId()}`;
+          const people = current.db.get(key, "PEOPLE");
+          if (people === undefined || !Array.isArray(people.people)) throw new Error("task People row disappeared after accepted invitation");
+          const entries = people.people.filter((entry): entry is Record<string, unknown> => typeof entry === "object" && entry !== null && !Array.isArray(entry));
+          if (entries.length !== people.people.length) throw new Error("task People row contained an invalid entry after accepted invitation");
+          current.db.set({ ...people, revision: Number(people.revision) + 1,
+            people: entries.map((entry) => entry.developerId === SLACK_BAILEY.developerId ? { ...entry, role: "commenter" } : entry) });
+        }
+        return outcome;
+      },
+    } });
+    holder.value = e2e;
+    grantProject(e2e.db, SLACK_BAILEY);
+    grantProject(e2e.db, charlie);
+    await atPlanReview(e2e);
+
+    // Maya adds Bailey as a co-owner while Bailey is already a member of the task channel.
+    await e2e.click("agentx_task_people");
+    await e2e.submitView({ task_person: { person: { selected_user: BAILEY.slackUserId } },
+      task_role: { role: { selected_option: { value: "owner" } } } });
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")?.people)
+      .toContainEqual(expect.objectContaining({ developerId: SLACK_BAILEY.developerId, role: "owner" }));
+
+    // Bailey, now a real task owner, submits the invitation. The post-effect State change removes Bailey's owner role,
+    // while Maya remains the workflow owner and can complete the journey without restoring the revoked actor.
+    await e2e.click("agentx_task_people", { user: SLACK_BAILEY.slackUserId });
+    const eventsBeforeInvite = structuredClone(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT"));
+    await expect(e2e.submitView({ task_person: { person: { selected_user: charlie.slackUserId } },
+      task_role: { role: { selected_option: { value: "owner" } } } }, { user: SLACK_BAILEY.slackUserId }))
+      .rejects.toThrow("the modal refused the submission");
+    expect(composition.value?.posts).toEqual([{ teamId: "T0BSHLLUGBD", channelId: "C0123456789", slackUserId: charlie.slackUserId }]);
+    expect([...composition.value!.receipts.values()]).toMatchObject([expect.objectContaining({ status: "ACCEPTED", attempt: 1 })]);
+    const afterPeople = e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE");
+    expect(afterPeople?.people).toContainEqual(expect.objectContaining({ developerId: SLACK_BAILEY.developerId, role: "commenter" }));
+    expect(afterPeople?.people).not.toContainEqual(expect.objectContaining({ developerId: charlie.developerId, role: "owner" }));
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toEqual(eventsBeforeInvite);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toEqual([]);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_PROPOSAL"
+      && item.taskId === e2e.taskId()).at(-1)?.invitationStatus).toBe("ACCEPTED");
+
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    e2e.github.merge(e2e.github.pullRequests[0]!.number);
+    expect(await e2e.githubWebhook(e2e.github.pullRequests[0]!.number, { merged: true })).toBe(200);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+  }, 120_000);
+
+  it("11.8e disabling People after an accepted invite prevents the role commit and preserves the receipt", async () => {
+    const directory = taskPeopleDirectory(false);
+    const composition: { value?: ReturnType<typeof actualInviteComposition> } = {};
+    const holder: { value?: WorkflowE2E } = {};
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
+      changesEnabled: true, checkTaskPerson: directory.check, taskPersonProof: directory.proof,
+      taskPeopleDisplayRead: directory.display, boundChannels: [SECOND_CHANNEL], developers: [SLACK_BAILEY],
+      inviteTaskPerson: async (input) => {
+        const current = holder.value;
+        if (current === undefined) throw new Error("workflow harness was not initialized before invite");
+        assertClaimMatchesPersistedProposal(current, input);
+        composition.value ??= actualInviteComposition(current, directory);
+        const outcome = await composition.value.transport(input);
+        if (outcome.status === "accepted") current.people.changesEnabled(false);
+        return outcome;
+      },
+    } });
+    holder.value = e2e;
+    await atPlanReview(e2e);
+    await e2e.click("agentx_task_people");
+    const beforePeople = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
+    await expect(e2e.submitView({ task_person: { person: { selected_user: BAILEY.slackUserId } },
+      task_role: { role: { selected_option: { value: "owner" } } } })).rejects.toThrow("the modal refused the submission");
+    expect(composition.value?.posts).toHaveLength(1);
+    expect([...composition.value!.receipts.values()]).toMatchObject([expect.objectContaining({ status: "ACCEPTED", attempt: 1 })]);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforePeople);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toEqual([]);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toEqual([]);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_PROPOSAL"
+      && item.taskId === e2e.taskId()).at(-1)?.invitationStatus).toBe("ACCEPTED");
+
+    // Complete through the existing task owner while new Task People mutations remain disabled.
     await e2e.click("agentx_workflow_approve");
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });

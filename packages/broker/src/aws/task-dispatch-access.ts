@@ -23,6 +23,22 @@ export interface TaskDispatchAccessDependencies {
 
 export type TaskDispatchGuard = (record: DurableOutboxRecord) => Promise<"ALLOWED" | "PARKED">;
 
+class TaskDispatchGuardRetryError extends Error {
+  readonly code?: string;
+
+  constructor(cause: unknown) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    super(message, { cause });
+    this.name = "TaskDispatchGuardRetryError";
+    const code = cause !== null && typeof cause === "object" ? (cause as Record<string, unknown>).code : undefined;
+    if (typeof code === "string") this.code = code;
+  }
+}
+
+export function isTaskDispatchGuardRetryError(error: unknown): boolean {
+  return error instanceof TaskDispatchGuardRetryError;
+}
+
 type PauseReason = "OWNERLESS" | "PROOF_UNAVAILABLE";
 
 const outboxKey = (outboxId: string) => ({ pk: `OUTBOX#${outboxId}`, sk: "OUTBOX" });
@@ -179,7 +195,7 @@ async function allowedStillCurrent(
  * PEOPLE work is allowed only with a freshly qualified effective owner; every other result is
  * durably parked while preserving the original operation, invocation and charge.
  */
-export async function guardTaskDispatch(deps: TaskDispatchAccessDependencies, record: DurableOutboxRecord): Promise<"ALLOWED" | "PARKED"> {
+async function guardTaskDispatchCore(deps: TaskDispatchAccessDependencies, record: DurableOutboxRecord): Promise<"ALLOWED" | "PARKED"> {
   // Terminal cleanup is independent of owner availability. It must be able to release compute,
   // workspace slots and charge after the last owner departs.
   if (record.invocation.kind === "close" || record.invocation.kind === "cancel") return "ALLOWED";
@@ -251,6 +267,16 @@ export async function guardTaskDispatch(deps: TaskDispatchAccessDependencies, re
     return "PARKED";
   }
   throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch access changed while it was being verified");
+}
+
+/** Marks only an incomplete core authority decision so the dispatcher retries the same durable operation. */
+export async function guardTaskDispatch(deps: TaskDispatchAccessDependencies, record: DurableOutboxRecord): Promise<"ALLOWED" | "PARKED"> {
+  try {
+    return await guardTaskDispatchCore(deps, record);
+  } catch (error) {
+    if (record.invocation.kind === "close" || record.invocation.kind === "cancel" || isTaskDispatchGuardRetryError(error)) throw error;
+    throw new TaskDispatchGuardRetryError(error);
+  }
 }
 
 const TASK_PAUSE_RESERVE_MS = 2_000;

@@ -1,7 +1,8 @@
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkerInvocationSchema, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
+import { WorkerInvocationSchema, agentXError, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { createDispatcherHandler, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
+import { guardTaskDispatch as coreGuardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
 import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
 import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
@@ -692,6 +693,33 @@ describe("the dispatcher with ec2-ebs records", () => {
     expect(await failing.handler({ Records: [{ messageId: "m2", body: JSON.stringify(record), attributes: { ApproximateReceiveCount: "1" } }] }))
       .toEqual({ batchItemFailures: [{ itemIdentifier: "m2" }] });
     expect(failing.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("keeps an incomplete authority guard retryable at max attempts but preserves identical ordinary worker errors", async () => {
+    const record = recordFor();
+    const original = agentXError("RUNTIME_UNAVAILABLE", "task access pause reserve is unavailable");
+    const guardTaskDispatch = async (candidate: DurableOutboxRecord) => coreGuardTaskDispatch({
+      documentClient: { async send() { throw original; } }, tableName: "state",
+    }, candidate);
+    const markFailed = vi.fn(async () => undefined);
+    const logs: Array<{ terminal: boolean; errorCode?: string }> = [];
+    const guarded = createDispatcherHandler({
+      guardTaskDispatch, markDispatching: async () => true, markDelivered: async () => undefined, markFailed,
+      maxAttempts: 5, deliverEc2: async () => "DELIVERED", log: (entry) => { logs.push(entry); },
+    });
+    await expect(guarded({ Records: [{ messageId: "guard-terminal", body: JSON.stringify(record), attributes: { ApproximateReceiveCount: "5" } }] }))
+      .resolves.toEqual({ batchItemFailures: [{ itemIdentifier: "guard-terminal" }] });
+    expect(markFailed).not.toHaveBeenCalled();
+    expect(logs.at(-1)).toMatchObject({ terminal: false, errorCode: original.code });
+
+    const ordinaryMarkFailed = vi.fn(async () => undefined);
+    const ordinary = createDispatcherHandler({ markDispatching: async () => true, markDelivered: async () => undefined,
+      markFailed: ordinaryMarkFailed, maxAttempts: 5,
+      deliverEc2: async () => { throw agentXError("RUNTIME_UNAVAILABLE", original.message.slice("RUNTIME_UNAVAILABLE: ".length)); },
+      log: () => undefined });
+    await expect(ordinary({ Records: [{ messageId: "worker-terminal", body: JSON.stringify(record), attributes: { ApproximateReceiveCount: "5" } }] }))
+      .resolves.toEqual({ batchItemFailures: [] });
+    expect(ordinaryMarkFailed).toHaveBeenCalledTimes(1);
   });
 
   it("fails the current and remaining batch items before starting another guard inside the pause reserve", async () => {

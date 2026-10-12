@@ -3,19 +3,25 @@
 // brief limit, webhooks replayed after completion, a page read while the task moves [LIVE-BUG B12], deploy skew both
 // ways, the item size limit, and DynamoDB's map order on every read [LIVE-BUG B3]. 9.13 (old stored records) is covered by
 // slack-workflow-e2e.test.ts.
-import { describe, expect, it } from "vitest";
-import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, WORKFLOW_PLAN_MAX_BYTES, WorkerInvocationSchema, WorkflowSnapshotSchema,
+import { describe, expect, it, vi } from "vitest";
+import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { KMSClient } from "@aws-sdk/client-kms";
+import type { InvokeCommand } from "@aws-sdk/client-lambda";
+import { PLAN_CLAIMS_MAX, TaskDispatchProofRequestSchema, TaskDispatchProofResponseSchema, WORKER_INVOKE_AUTHORIZATION_SCHEME,
+  WORKER_INVOCATION_FEATURES, WORKER_PING_FEATURES_FIELD, WORKFLOW_PLAN_MAX_BYTES, WorkerInvocationSchema, WorkflowSnapshotSchema,
   type TaskPersonProofRequest,
   type Ec2RuntimeBinding, type WorkerInvocation } from "@agentx/contracts";
 import { createEc2Delivery } from "../../../packages/broker/src/aws/ec2-delivery.js";
-import type { Ec2OutboxRecord } from "../../../packages/broker/src/aws/lambda.js";
+import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../../packages/broker/src/aws/lambda.js";
 import { LOST_COMPUTE_ERROR, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
+import { SLACK_CHANNEL } from "../../support/slack-broker.js";
 import type { CheckTaskPerson } from "../../../packages/broker/src/developer/task-people.js";
 import { DYNAMODB_ITEM_MAX_BYTES } from "../../support/fake-dynamodb.js";
 import { planAnswer, planDocument } from "../../support/plan-documents.js";
 import { visibleSlackText } from "../../support/strict-slack.js";
 import { EDITS, MERGED, OPENED_PR, PLAN, PUSHED_FIX, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
 import { loadRollback0212Parser } from "../../support/rollback-0212-parser.js";
+import { handler as productionDispatcher, taskPersonProofLambdaClient } from "../../../packages/broker/src/aws/dispatcher.js";
 
 /** Feature list exported by the source commit pinned in rollback-0.2.12/provenance.json. */
 const ROLLBACK_0212_WORKER_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks",
@@ -57,6 +63,104 @@ function retainOwner(e2e: WorkflowE2E): void {
     pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
     people: [{ developerId: task.developerId, slackUserId: task.slackUserId, name: task.developerName, role: "owner" }],
   });
+}
+
+function installProductionDispatcher(e2e: WorkflowE2E, options: {
+  removeBindingAtFence?: number;
+  functionErrorOnProofCalls?: readonly number[];
+  ineligibleOnProofCalls?: readonly number[];
+  failPauseTransactionOnCalls?: readonly number[];
+} = {}) {
+  vi.stubEnv("STATE_TABLE_NAME", "state");
+  vi.stubEnv("DEVELOPER_SIGNIN_TABLE_NAME", "signin");
+  vi.stubEnv("TASK_PERSON_PROOF_FUNCTION_ARN", "arn:aws:lambda:us-east-1:123456789012:function:proof");
+  vi.stubEnv("SLACK_TEAM_ID", "T0BSHLLUGBD");
+  vi.stubEnv("INVOKE_SIGNING_KEY_ARN", "arn:aws:kms:us-east-1:123456789012:key/e2e");
+  let bindingFenceCount = 0;
+  let pauseTransactionCount = 0;
+  const state = vi.spyOn(DynamoDBDocumentClient.prototype, "send").mockImplementation((command) => {
+    const input = (command as { input?: { TransactItems?: Array<{
+      ConditionCheck?: { Key?: { pk?: unknown; sk?: unknown } };
+      Put?: { Item?: { entityType?: unknown } };
+    }> } }).input;
+    const isPauseTransaction = input?.TransactItems?.some((item) => item.Put?.Item?.entityType === "TASK_ACCESS_PAUSE") === true;
+    if (isPauseTransaction) {
+      pauseTransactionCount += 1;
+      if (options.failPauseTransactionOnCalls?.includes(pauseTransactionCount) === true) {
+        throw Object.assign(new Error("injected task-access pause transaction failure"), { name: "TransactionCanceledException" });
+      }
+    }
+    const hasBindingFence = input?.TransactItems?.some((item) => {
+      const key = item.ConditionCheck?.Key;
+      return typeof key?.pk === "string" && key.pk.startsWith("SLACK_BINDING#")
+        && typeof key.sk === "string" && key.sk.startsWith("CHANNEL#");
+    }) === true;
+    if (hasBindingFence) {
+      bindingFenceCount += 1;
+      if (bindingFenceCount === options.removeBindingAtFence) {
+        const task = e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META") as { share?: { teamId?: string; channelId?: string } } | undefined;
+        if (task?.share?.teamId === undefined || task.share.channelId === undefined) throw new Error("the dispatch task has no channel binding to revoke");
+        e2e.db.delete(`SLACK_BINDING#${task.share.teamId}`, `CHANNEL#${task.share.channelId}`);
+      }
+    }
+    return e2e.db.send(command as never) as never;
+  });
+  const sign = vi.spyOn(KMSClient.prototype, "send").mockImplementation(() => Promise.resolve({ Signature: new Uint8Array(64) }) as never);
+  const proofRequests: Array<ReturnType<typeof TaskDispatchProofRequestSchema.parse>> = [];
+  let remainingTimeMs = 60_000;
+  const proof = vi.spyOn(taskPersonProofLambdaClient, "send").mockImplementation((command) => {
+    const payload = (command as InvokeCommand).input.Payload;
+    if (!(payload instanceof Uint8Array)) throw new Error("production dispatcher omitted the byte-encoded dedicated proof envelope");
+    const request = TaskDispatchProofRequestSchema.parse(JSON.parse(Buffer.from(payload).toString("utf8")) as unknown);
+    proofRequests.push(request);
+    if (options.functionErrorOnProofCalls?.includes(proofRequests.length) === true) {
+      remainingTimeMs = 1_500;
+      return Promise.resolve({ FunctionError: "Unhandled" }) as never;
+    }
+    if (options.ineligibleOnProofCalls?.includes(proofRequests.length) === true) {
+      const response = TaskDispatchProofResponseSchema.parse({ kind: "task-dispatch-person-proof-result", admissionId: request.admission.id,
+        usage: { slackCallsUsed: 1, completedAt: Date.now() }, result: { ok: false, error: "ineligible" } });
+      return Promise.resolve({ Payload: Buffer.from(JSON.stringify(response), "utf8") }) as never;
+    }
+    const response = TaskDispatchProofResponseSchema.parse({ kind: "task-dispatch-person-proof-result", admissionId: request.admission.id,
+      usage: { slackCallsUsed: 1, completedAt: Date.now() }, result: { ok: true, user: { id: request.request.slackUserId,
+        teamId: "T0BSHLLUGBD", name: "Maya Chen" }, memberOf: request.request.channelIds.includes(SLACK_CHANNEL) ? [SLACK_CHANNEL] : [] } });
+    return Promise.resolve({ Payload: Buffer.from(JSON.stringify(response), "utf8") }) as never;
+  });
+  const pingUrls: string[] = [];
+  const posts: Array<{ authorization?: string; invocation: WorkerInvocation }> = [];
+  vi.stubGlobal("fetch", (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (url.pathname === "/ping" && init?.method === undefined) {
+      pingUrls.push(url.href);
+      return Promise.resolve(new Response(JSON.stringify({ [WORKER_PING_FEATURES_FIELD]: WORKER_INVOCATION_FEATURES }), { status: 200, headers: { "content-type": "application/json" } }));
+    }
+    if (url.pathname === "/invocations" && init?.method === "POST") {
+      const authorization = new Headers(init.headers).get("authorization") ?? undefined;
+      if (typeof init.body !== "string") throw new Error("production dispatcher did not send a serialized worker invocation");
+      posts.push({ ...(authorization === undefined ? {} : { authorization }), invocation: WorkerInvocationSchema.parse(JSON.parse(init.body) as unknown) });
+      return Promise.resolve(new Response("", { status: 202 }));
+    }
+    throw new Error(`unexpected production dispatcher fetch ${init?.method ?? "GET"} ${url.href}`);
+  });
+  const batchFailures: Array<Array<{ itemIdentifier: string }>> = [];
+  return {
+    proofRequests, pingUrls, posts, batchFailures, sign,
+    get bindingFenceCount() { return bindingFenceCount; }, get pauseTransactionCount() { return pauseTransactionCount; },
+    async deliver(record: DurableOutboxRecord, receiveCount: number): Promise<WorkerInvocation | undefined> {
+      remainingTimeMs = 60_000;
+      const now = new Date().toISOString();
+      e2e.db.set({ pk: `WORKSPACE#${record.workspaceId}`, sk: "SESSION", entityType: "SESSION", sessionState: "READY", workspaceId: record.workspaceId,
+        state: "READY", generation: 1, volumeId: "vol-12345678", availabilityZone: "us-east-1a", subnetId: "subnet-12345678",
+        instanceId: "i-12345678", privateIp: "10.0.0.9", launchedAt: now, readyAt: now, lastActivityAt: now });
+      const previousPostCount = posts.length;
+      const result = await productionDispatcher({ Records: [{ messageId: `production-${record.id}`, body: JSON.stringify(record),
+        attributes: { ApproximateReceiveCount: String(receiveCount) } }] }, { getRemainingTimeInMillis: () => remainingTimeMs });
+      batchFailures.push(result.batchItemFailures);
+      return posts.slice(previousPostCount).find((post) => post.invocation.operationId === record.operationId)?.invocation;
+    },
+    restore(): void { state.mockRestore(); sign.mockRestore(); proof.mockRestore(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); },
+  };
 }
 
 const freshOwner = (eligible = true): CheckTaskPerson => async (task, developerId) => {
@@ -640,6 +744,176 @@ describe("Suite 9: resilience", () => {
     ]);
     void logged;
   }, 120_000);
+
+  it("9.25 an accepted outbox can be driven through the exported production dispatcher boundary", async () => {
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: { changesEnabled: false, boundChannels: [SLACK_CHANNEL] } });
+    await atPlanReview(e2e);
+    const production = installProductionDispatcher(e2e);
+    e2e.worker.useProductionHandler((record, receiveCount) => production.deliver(record, receiveCount));
+    await e2e.click("agentx_workflow_approve");
+    retainOwner(e2e);
+    try {
+      await e2e.settle();
+    } finally {
+      production.restore();
+    }
+    expect(production.batchFailures).toEqual([[]]);
+    expect(production.proofRequests).toHaveLength(3);
+    expect(new Set(production.proofRequests.map((request) => request.admission.id)).size).toBe(3);
+    expect(production.proofRequests.every((request) => request.kind === "task-dispatch-person-proof" && request.admission.slackCallsLimit === 100)).toBe(true);
+    expect(production.pingUrls).toEqual(["http://10.0.0.9:8080/ping"]);
+    expect(production.posts).toHaveLength(1);
+    expect(production.posts[0]?.authorization).toMatch(new RegExp(`^${WORKER_INVOKE_AUTHORIZATION_SCHEME} `));
+    expect(production.posts[0]?.invocation.kind).toBe("task");
+    expect(e2e.workflow()).toMatchObject({ stage: "REVIEW", state: "WAITING" });
+  }, 120_000);
+
+  for (const fence of [1, 2, 3] as const) {
+    it(`9.26 production guard requalifies a deleted project binding at State fence ${fence} before any worker POST`, async () => {
+      const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS },
+        taskPeople: { changesEnabled: false, boundChannels: [SLACK_CHANNEL] } });
+      await atPlanReview(e2e);
+      const production = installProductionDispatcher(e2e, { removeBindingAtFence: fence });
+      e2e.worker.useProductionHandler((record, receiveCount) => production.deliver(record, receiveCount));
+      await e2e.click("agentx_workflow_approve");
+      retainOwner(e2e);
+      const beforePeople = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
+      const beforeCharge = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge);
+      const queued = e2e.db.find((item) => item.entityType === "OUTBOX"
+        && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0];
+      try {
+        await e2e.settle();
+      } finally {
+        production.restore();
+      }
+      expect(production.bindingFenceCount).toBeGreaterThanOrEqual(fence);
+      expect(production.batchFailures).toEqual([[]]);
+      expect(production.posts).toHaveLength(0);
+      expect(production.pingUrls).toHaveLength(fence === 3 ? 1 : 0);
+      expect(e2e.db.find((item) => item.entityType === "TASK_ACCESS_PAUSE")).toHaveLength(2);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforePeople);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge).toEqual(beforeCharge);
+      expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+      expect(queued).toBeDefined();
+      expect(e2e.db.get(String(queued?.pk), String(queued?.sk))).toMatchObject({
+        status: "WAITING_FOR_TASK_ACCESS", operationId: queued?.operationId, invocation: queued?.invocation,
+      });
+    }, 120_000);
+  }
+
+  it("9.27 an unavailable proof with no pause reserve is returned for retry, then the same outbox completes", async () => {
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS },
+      taskPeople: { changesEnabled: false, boundChannels: [SLACK_CHANNEL] } });
+    await atPlanReview(e2e);
+    const production = installProductionDispatcher(e2e, { functionErrorOnProofCalls: [1] });
+    e2e.worker.useProductionHandler((record, receiveCount) => production.deliver(record, receiveCount));
+    await e2e.click("agentx_workflow_approve");
+    retainOwner(e2e);
+    const queued = e2e.db.find((item) => item.entityType === "OUTBOX"
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
+    const charge = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge);
+    const people = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
+    try {
+      await e2e.settle();
+      expect(production.batchFailures[0]).toEqual([{ itemIdentifier: `production-${String(queued.id)}` }]);
+      expect(production.posts).toHaveLength(0);
+      expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({ operationId: queued.operationId, invocation: queued.invocation });
+      expect(e2e.db.find((item) => item.entityType === "TASK_ACCESS_PAUSE")).toHaveLength(0);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge).toEqual(charge);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+      expect(await e2e.worker.dispatchAgain(String(queued.operationId), 2)).toBe(true);
+      expect(production.batchFailures).toEqual([[{ itemIdentifier: `production-${String(queued.id)}` }], []]);
+      expect(production.proofRequests).toHaveLength(4);
+      expect(new Set(production.proofRequests.map((request) => request.admission.id)).size).toBe(4);
+      expect(production.posts).toHaveLength(1);
+      expect(production.posts[0]?.invocation.operationId).toBe(queued.operationId);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge).toEqual(charge);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+    } finally {
+      production.restore();
+    }
+  }, 120_000);
+
+  it("9.28 exhausted pause reserve remains a retryable SQS failure at terminal receive count", async () => {
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS },
+      taskPeople: { changesEnabled: false, boundChannels: [SLACK_CHANNEL] } });
+    await atPlanReview(e2e);
+    const production = installProductionDispatcher(e2e, { functionErrorOnProofCalls: [1, 2] });
+    e2e.worker.useProductionHandler((record, receiveCount) => production.deliver(record, receiveCount));
+    await e2e.click("agentx_workflow_approve");
+    retainOwner(e2e);
+    const queued = e2e.db.find((item) => item.entityType === "OUTBOX"
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
+    const charge = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge);
+    const people = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
+    try {
+      await e2e.settle();
+      expect(production.batchFailures[0]).toEqual([{ itemIdentifier: `production-${String(queued.id)}` }]);
+      expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({ status: queued.status, operationId: queued.operationId, invocation: queued.invocation });
+      expect(await e2e.worker.dispatchAgain(String(queued.operationId), 5)).toBe(false);
+      expect(production.batchFailures).toEqual([
+        [{ itemIdentifier: `production-${String(queued.id)}` }],
+        [{ itemIdentifier: `production-${String(queued.id)}` }],
+      ]);
+      expect(production.posts).toHaveLength(0);
+      expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({
+        status: queued.status, operationId: queued.operationId, invocation: queued.invocation,
+      });
+      expect(e2e.db.find((item) => item.entityType === "TASK_ACCESS_PAUSE")).toHaveLength(0);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge).toEqual(charge);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+    } finally {
+      production.restore();
+    }
+  }, 120_000);
+
+  for (const phase of ["initial", "post-ready", "post-ping"] as const) {
+    it(`9.29 a failed durable pause at terminal count remains retryable at the ${phase} guard`, async () => {
+      const proofCall = phase === "initial" ? 1 : phase === "post-ready" ? 2 : 3;
+      const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS },
+        taskPeople: { changesEnabled: false, boundChannels: [SLACK_CHANNEL] } });
+      await atPlanReview(e2e);
+      const production = installProductionDispatcher(e2e, {
+        ineligibleOnProofCalls: [proofCall], failPauseTransactionOnCalls: [1],
+      });
+      await e2e.click("agentx_workflow_approve");
+      retainOwner(e2e);
+      const queued = e2e.db.find((item) => item.entityType === "OUTBOX"
+        && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
+      const beforePeople = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
+      const beforeCharge = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge);
+      const dispatchLogs: Array<{ event: string; terminal?: boolean; operationId?: string }> = [];
+      const captureLog = vi.spyOn(process.stderr, "write").mockImplementation((...args) => {
+        try { dispatchLogs.push(JSON.parse(String(args[0])) as { event: string; terminal?: boolean; operationId?: string }); } catch { /* other structured logs are irrelevant here */ }
+        return true;
+      });
+      try {
+        await expect(production.deliver(queued as unknown as DurableOutboxRecord, 5)).resolves.toBeUndefined();
+      } finally {
+        production.restore();
+        captureLog.mockRestore();
+      }
+      expect(production.pauseTransactionCount).toBe(1);
+      expect(production.batchFailures).toEqual([[{ itemIdentifier: `production-${String(queued.id)}` }]]);
+      expect(production.proofRequests).toHaveLength(proofCall);
+      expect(new Set(production.proofRequests.map((request) => request.admission.id)).size).toBe(proofCall);
+      expect(production.bindingFenceCount).toBe(proofCall - 1);
+      expect(production.pingUrls).toHaveLength(phase === "post-ping" ? 1 : 0);
+      expect(production.sign).not.toHaveBeenCalled();
+      expect(production.posts).toHaveLength(0);
+      expect(dispatchLogs.filter((entry) => entry.event === "dispatch.attempt_failed")).toContainEqual(expect.objectContaining({
+        operationId: queued.operationId, terminal: false,
+      }));
+      expect(e2e.db.find((item) => item.entityType === "TASK_ACCESS_PAUSE")).toHaveLength(0);
+      expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({
+        status: queued.status, operationId: queued.operationId, invocation: queued.invocation,
+      });
+      expect(e2e.db.get(`WORKSPACE#${String((queued.invocation as WorkerInvocation).workspaceId)}`, "META")?.activeOperationId).toBe(queued.operationId);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforePeople);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge).toEqual(beforeCharge);
+      expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+    }, 120_000);
+  }
 
   it("9.22 owner loss during the asynchronous feature probe is caught by the final guard before POST", async () => {
     let eligible = true;
