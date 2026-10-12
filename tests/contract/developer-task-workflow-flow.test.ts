@@ -4234,7 +4234,7 @@ describe("the owner resolves each blocking review finding (Task 5)", () => {
     const deps = { documentClient: t.harness.db, tableName: "state", actions: t.harness.actions, log: () => undefined,
       checkAccess: async () => ({ revision: 1, policy: {} as never, access: "granted" as const, channelIds: [] }), projectChannelIds: async () => [], now: () => Date.now() };
     const view = await getTaskDocumentView(deps, { developerId: row.developerId } as never, t.taskId);
-    expect(view.acceptedFindings).toEqual([expect.objectContaining({ owner: "the task owner" })]);
+    expect(view.acceptedFindings).toEqual([expect.objectContaining({ owner: "The task owner" })]);
     expect(view.history.map((entry) => entry.text)).toEqual(expect.arrayContaining(["The task owner approved Coding plan v1", "The task owner resolved the review findings: 1 accepted, 0 to fix"]));
     expect(JSON.stringify(view)).not.toContain("Slack user U");
   });

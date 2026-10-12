@@ -453,6 +453,20 @@ async function authorizeTaskActor(
   return access;
 }
 
+/** Current read+role admission for legacy actions that must retain their truthful terminal refusal. */
+async function authorizeLegacyTaskAction(
+  deps: DeveloperTaskRouteDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+  action: TaskAction,
+): Promise<AuthorizedTask> {
+  const access = await authorizeTaskActor(deps, caller, taskId, action);
+  if (access.task.closedAt !== undefined || access.task.workflow?.stage === "CLOSED" || access.task.workflow?.stage === "MERGED") {
+    throw agentXError("CONFIG_INVALID", CLOSED_TASK);
+  }
+  return access;
+}
+
 async function systemTaskAccess(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<TaskAccess | undefined> {
   const access = await resolveTaskDispatchPeople(deps, task);
   if (access === undefined) return undefined;
@@ -1490,7 +1504,7 @@ function busy(error: unknown, taskId: string): never {
 
 async function continueTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "continue");
-  const access = await authorizeTaskAction(deps, caller, taskId, "control");
+  const access = await authorizeLegacyTaskAction(deps, caller, taskId, "control");
   const { task } = access;
   if (task.workflow !== undefined) throw agentXError("WORKSPACE_BUSY", GATED_TASK_TURN_REFUSAL);
   const turns = turnTable(deps);
@@ -3973,7 +3987,7 @@ const CANCEL_PAYLOAD_HASH = hashJson({ action: "cancel" });
 
 async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(DeveloperTaskActionRequestSchema, value, deps, "cancel");
-  const access = await authorizeTaskAction(deps, caller, taskId, "control");
+  const access = await authorizeLegacyTaskAction(deps, caller, taskId, "control");
   const { task } = access;
   // Final review M2: a closed task is refused as continue refuses it, before anything is written,
   // so a repeat after the close answers "this task is closed" like any new call.
@@ -4064,7 +4078,7 @@ async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: Develope
  */
 async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<DeveloperPullRequestResponse> {
   const request = parse(DeveloperPullRequestRequestSchema, value, deps, "pull-request");
-  const access = await authorizeTaskAction(deps, caller, taskId, "publish");
+  const access = await authorizeLegacyTaskAction(deps, caller, taskId, "publish");
   const { task } = access;
   // Task 12: the workflow opens its own draft of the checked code; MCP and Slack follow it, nobody opens another.
   if (task.workflow !== undefined) throw agentXError("CONFIG_INVALID", GATED_TASK_PULL_REQUEST_REFUSAL);
@@ -4727,7 +4741,7 @@ const REUSED_REQUEST = "this request_id was already used for another action on t
  */
 async function shareTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ShareDeveloperTaskRequestSchema, value, deps, "share");
-  let access = await authorizeTaskAction(deps, caller, taskId, "control");
+  let access = await authorizeLegacyTaskAction(deps, caller, taskId, "control");
   let task = access.task;
   const turns = turnTable(deps);
   const idempotencyKey = shareIdempotencyKey(task, request.requestId);

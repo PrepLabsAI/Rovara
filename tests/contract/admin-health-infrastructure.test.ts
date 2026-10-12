@@ -109,6 +109,8 @@ describe("the health route's grants (A13)", () => {
       "packages/contracts/src/admin-changes.ts", "packages/broker/src/aws/admin-changes.ts",
       // The plan evidence job row (spec 061) expires on it too.
       "packages/broker/src/developer/plan-evidence-jobs.ts",
+      // Retired and quarantined recovery rows only; active retries remove the due/lease fields without TTL.
+      "packages/broker/src/aws/workflow-merge-recovery.ts",
     ]);
     const found = execFileSync("grep", ["-rl", "indexExpiresAt\\|INDEX_EXPIRY_ATTRIBUTE", "packages", "infra/lib", "--include=*.ts", "--exclude-dir=dist", "--exclude-dir=node_modules"], { encoding: "utf8" }).trim().split("\n").filter((file) => file !== "");
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
@@ -153,6 +155,23 @@ describe("the health route's grants (A13)", () => {
       'ExpressionAttributeNames: { "#expires": INDEX_EXPIRY_ATTRIBUTE },',
       '":expires": noticeExpiry(deps)[INDEX_EXPIRY_ATTRIBUTE] },',
     ]);
+  });
+
+  it("expires only retired or quarantined recovery rows, while active retries stay due without TTL", () => {
+    const recovery = readFileSync("packages/broker/src/aws/workflow-merge-recovery.ts", "utf8");
+    expect(recovery).toContain("const RETIRED_TTL_SECONDS = 7 * 24 * 60 * 60;");
+    const quarantineStart = recovery.indexOf("async function quarantine(");
+    const quarantineEnd = recovery.indexOf("async function claimRow(", quarantineStart);
+    expect(quarantineStart).toBeGreaterThanOrEqual(0);
+    expect(quarantineEnd).toBeGreaterThan(quarantineStart);
+    const quarantine = recovery.slice(quarantineStart, quarantineEnd);
+    expect(quarantine).toContain("recoveryStatus = :status");
+    expect(quarantine).toContain("indexExpiresAt = :ttl REMOVE nextAttemptAt, dispatchDuePk, dispatchDueSk");
+    const retire = recovery.slice(recovery.indexOf("async function retire("), recovery.indexOf("async function setGlobalCooldown("));
+    expect(retire).toContain("recoveryStatus = :status, retiredAt = :now, updatedAt = :now, indexExpiresAt = :ttl");
+    const retry = recovery.slice(recovery.indexOf("async function settleActive("), recovery.indexOf("async function retire("));
+    expect(retry).toContain("SET attempts = :attempts, nextAttemptAt = :next, dispatchDuePk = :pk, dispatchDueSk = :due, updatedAt = :now REMOVE leaseToken, leaseExpiresAt");
+    expect(retry).not.toContain("indexExpiresAt");
   });
 
   it("adds nothing to the legacy template", () => {

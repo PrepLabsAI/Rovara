@@ -22,7 +22,7 @@ describe("Suite 1: routing and start", () => {
     await e2e.click("agentx_workflow_approve", { user: "U0OTHER01" });
     await e2e.settle();
     // The refusal names the owner, privately, to the presser only (the button's own answer).
-    expect(e2e.slack.responses.map((response) => response.text)).toEqual([`Only <@${OWNER}> can approve this step.`]);
+    expect(e2e.slack.responses.map((response) => response.text)).toEqual(["Only the task owner can approve this step."]);
     expect(e2e.slack.views).toEqual([]);
     // Nothing moved: same revision, no decision, no coding run, and the card was not edited.
     expect(e2e.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", revision: before, decisions: [] });
@@ -205,7 +205,7 @@ describe("Suite 1: routing and start", () => {
     await e2e.click("agentx_workflow_close", { user: TEAMMATE });
     await e2e.settle();
     expect(e2e.slack.views).toEqual([]);
-    expect(e2e.slack.responses.map((response) => response.text).every((text) => text.startsWith(`Only <@${OWNER}> can `))).toBe(true);
+    expect(e2e.slack.responses.map((response) => response.text).every((text) => text.startsWith("Only the task owner can "))).toBe(true);
     expect(e2e.slack.responses).toHaveLength(2);
     expect(e2e.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", revision: before });
   }, 120_000);

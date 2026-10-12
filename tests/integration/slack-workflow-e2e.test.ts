@@ -706,7 +706,7 @@ describe("Slack-only workflow, end to end in one process", () => {
     expect(JSON.stringify(findings.blocks)).not.toContain("agentx_workflow_send_back");
     // Only the owner opens the form.
     await e2e.click("agentx_workflow_resolve_findings", { user: "U0TEAMMATE1" });
-    expect(e2e.slack.responses.at(-1)?.text).toMatch(/^Only <@\w+> can resolve these findings\.$/);
+    expect(e2e.slack.responses.at(-1)?.text).toBe("Only the task owner can resolve these findings.");
     expect(e2e.slack.views).toEqual([]);
     await e2e.click("agentx_workflow_resolve_findings");
     const form = e2e.slack.views.at(-1)!.view as { blocks: Array<{ type: string; block_id?: string; text?: { text: string } }> };

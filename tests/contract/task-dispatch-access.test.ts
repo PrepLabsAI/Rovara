@@ -76,7 +76,7 @@ describe("task dispatch access", () => {
   it("allows a freshly qualified effective owner without storing an allow receipt", async () => {
     const h = harness();
     await expect(guardTaskDispatch({ documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson }, h.outbox)).resolves.toBe("ALLOWED");
-    expect(h.checkTaskPerson).toHaveBeenCalledWith(h.current, OWNER);
+    expect(h.checkTaskPerson).toHaveBeenCalledWith(h.current, OWNER, undefined);
     expect(h.db.find((item) => String(item.sk).includes("TASK_ACCESS"))).toEqual([]);
   });
 

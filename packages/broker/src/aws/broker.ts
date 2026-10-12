@@ -258,7 +258,7 @@ import { dropWatchedBatch, listWatchedBatches, recordWatchedBatchThread, startSl
 import { batchResults, parseStartBody, requireBatchProject, showBatch, startBatch, stopBatchById } from "./eval-batch-admin.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 import { slackWorkflowCaller } from "./slack-workflow-caller.js";
-import { resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
+import { can, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
 
 const MAX_ARTIFACT_BYTES = 5_000_000;
@@ -4239,7 +4239,10 @@ async function authorizeSlackTaskAction(dependencies: AwsBrokerDependencies, tas
   const caller = slackWorkflowCaller(SlackRequesterSchema.shape.userId.parse(event.userId));
   const taskId = randomUUIDSchema.parse(event.taskId);
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
-  const access = await resolveTaskAccess(routeDeps, caller, taskId, event.taskAction);
+  // This signed UI port reports the current lifecycle state (for example, a retired button) after
+  // a fresh read+role check. The separately invoked mutation route still requires an open task.
+  const access = await resolveTaskAccess(routeDeps, caller, taskId, "read");
+  if (!can(access.role, event.taskAction)) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
   if (access.task.share?.teamId !== thread.teamId || access.task.share.channelId !== thread.channelId || access.task.share.threadTs !== thread.threadTs) {
     throw agentXError("FORBIDDEN", "this task belongs to another Slack thread");
   }

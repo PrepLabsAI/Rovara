@@ -275,7 +275,7 @@ describe("Suite 7: PR feedback loop", () => {
     expect(visibleSlackText(card.text)).toBe(failedReview(pullRequest.number, "the code changed during the review"));
     const revision = e2e.workflow().revision;
     await e2e.click("agentx_feedback_review_retry", { user: TEAMMATE });
-    expect(e2e.slack.responses.at(-1)?.text).toBe(`Only <@${OWNER}> can retry this review.`);
+    expect(e2e.slack.responses.at(-1)?.text).toBe("Only the task owner can retry this review.");
     expect(e2e.workflow().revision).toBe(revision);
     // The workspace is put back; the owner's retry reviews the feedback on the pull request's code.
     writeFileSync(join(e2e.repoDirectory, "farewell.ts"), original);
@@ -690,7 +690,7 @@ describe("Suite 7: PR feedback loop", () => {
     expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.fixChangedNothing });
     const revision = e2e.workflow().revision;
     await e2e.click("agentx_workflow_keep_pull_requests", { user: TEAMMATE });
-    expect(e2e.slack.responses.at(-1)?.text).toBe(`Only <@${OWNER}> can keep the pull request as it is.`);
+    expect(e2e.slack.responses.at(-1)?.text).toBe("Only the task owner can keep the pull request as it is.");
     expect(e2e.workflow().revision).toBe(revision);
     await e2e.click("agentx_workflow_keep_pull_requests");
     await e2e.settle();
@@ -827,7 +827,7 @@ describe("Suite 7: PR feedback loop", () => {
     const before = e2e.workflow();
     await e2e.click("agentx_feedback_review_recommended", { user: TEAMMATE });
     await e2e.settle();
-    expect(e2e.slack.responses.at(-1)?.text).toBe(`Only <@${OWNER}> can decide this PR feedback.`);
+    expect(e2e.slack.responses.at(-1)?.text).toBe("Only the task owner can decide this PR feedback.");
     expect(e2e.workflow().revision).toBe(before.revision);
     expect(e2e.workflow().feedbackDecisions).toBeUndefined();
     expect(runs(e2e).filter((run) => run === "IMPLEMENT")).toHaveLength(1);
