@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { KMSClient } from "@aws-sdk/client-kms";
 import type { InvokeCommand } from "@aws-sdk/client-lambda";
-import { PLAN_CLAIMS_MAX, TaskDispatchProofRequestSchema, TaskDispatchProofResponseSchema, WORKER_INVOKE_AUTHORIZATION_SCHEME,
+import { PLAN_CLAIMS_MAX, TaskDispatchProofRequestSchema, TaskDispatchProofResponseSchema, TaskPersonProofResponseSchema, WORKER_INVOKE_AUTHORIZATION_SCHEME,
   WORKER_INVOCATION_FEATURES, WORKER_PING_FEATURES_FIELD, WORKFLOW_PLAN_MAX_BYTES, WorkerInvocationSchema, WorkflowSnapshotSchema,
   type TaskPersonProofRequest,
   type Ec2RuntimeBinding, type WorkerInvocation } from "@agentx/contracts";
@@ -16,6 +16,7 @@ import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../../packages/bro
 import { LOST_COMPUTE_ERROR, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { SLACK_CHANNEL } from "../../support/slack-broker.js";
 import type { CheckTaskPerson } from "../../../packages/broker/src/developer/task-people.js";
+import { taskOwnerKey } from "../../../packages/broker/src/developer/task-records.js";
 import { DYNAMODB_ITEM_MAX_BYTES } from "../../support/fake-dynamodb.js";
 import { planAnswer, planDocument } from "../../support/plan-documents.js";
 import { visibleSlackText } from "../../support/strict-slack.js";
@@ -68,6 +69,7 @@ function retainOwner(e2e: WorkflowE2E): void {
 function installProductionDispatcher(e2e: WorkflowE2E, options: {
   removeBindingAtFence?: number;
   functionErrorOnProofCalls?: readonly number[];
+  functionErrorRemainingTimeMs?: number;
   ineligibleOnProofCalls?: readonly number[];
   failPauseTransactionOnCalls?: readonly number[];
 } = {}) {
@@ -114,7 +116,7 @@ function installProductionDispatcher(e2e: WorkflowE2E, options: {
     const request = TaskDispatchProofRequestSchema.parse(JSON.parse(Buffer.from(payload).toString("utf8")) as unknown);
     proofRequests.push(request);
     if (options.functionErrorOnProofCalls?.includes(proofRequests.length) === true) {
-      remainingTimeMs = 1_500;
+      remainingTimeMs = options.functionErrorRemainingTimeMs ?? 1_500;
       return Promise.resolve({ FunctionError: "Unhandled" }) as never;
     }
     if (options.ineligibleOnProofCalls?.includes(proofRequests.length) === true) {
@@ -834,6 +836,97 @@ describe("Suite 9: resilience", () => {
     }
   }, 120_000);
 
+  it("9.27a a durable proof pause waits for an authenticated Owner retry and resumes the original outbox", async () => {
+    const directoryProofCalls: TaskPersonProofRequest[] = [];
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS },
+      taskPeople: { changesEnabled: false, boundChannels: [SLACK_CHANNEL], checkTaskPerson: freshOwner(),
+        taskPersonProof: async (request) => {
+          directoryProofCalls.push(request);
+          return TaskPersonProofResponseSchema.parse({ ok: true,
+            user: { id: request.slackUserId, teamId: "T0BSHLLUGBD", name: "Maya Chen" },
+            memberOf: request.channelIds.includes(SLACK_CHANNEL) ? [SLACK_CHANNEL] : [] });
+        } } });
+    const projectRevision = e2e.db.get("PROJECT#payments", "REV#000000000001") as { definition: Record<string, unknown> };
+    e2e.db.set({ ...projectRevision, definition: { ...projectRevision.definition, developerTasks: { enabled: true, channelMembersMayUse: true } } });
+    e2e.db.set({ pk: `MEMBER#${SLACK_MAYA.developerId}`, sk: "PROJECT#payments", entityType: "MEMBERSHIP",
+      ownerKey: SLACK_MAYA.developerId, projectName: "payments", role: "developer" });
+    await atPlanReview(e2e);
+    const production = installProductionDispatcher(e2e, { functionErrorOnProofCalls: [1], functionErrorRemainingTimeMs: 60_000 });
+    e2e.worker.useProductionHandler((record, receiveCount) => production.deliver(record, receiveCount));
+    await e2e.click("agentx_workflow_approve");
+    retainOwner(e2e);
+    const queuedItem = e2e.db.find((item) => item.entityType === "OUTBOX"
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
+    const outboxId = String(queuedItem.id);
+    const outboxPk = String(queuedItem.pk);
+    const outboxSk = String(queuedItem.sk);
+    const operationId = String(queuedItem.operationId);
+    const workspaceId = String(queuedItem.workspaceId);
+    const charge = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge);
+    const people = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
+    const operation = structuredClone(e2e.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)!);
+    const invocation = WorkerInvocationSchema.parse(queuedItem.invocation);
+    const fence = invocation.fence;
+    try {
+      await e2e.settle();
+      expect(production.batchFailures[0]).toEqual([]);
+      expect(production.posts).toHaveLength(0);
+      expect(production.proofRequests).toHaveLength(1);
+      expect(e2e.db.get(outboxPk, outboxSk)).toMatchObject({
+        status: "WAITING_FOR_TASK_ACCESS", operationId, invocation,
+      });
+      expect(e2e.db.find((item) => item.entityType === "TASK_ACCESS_PAUSE" && item.outboxId === outboxId)).toHaveLength(2);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge).toEqual(charge);
+      expect(e2e.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)).toMatchObject(operation);
+
+      // Durable pause is not an automatic retry: recovering proof availability alone does not deliver the original record.
+      await e2e.settle();
+      expect(production.proofRequests).toHaveLength(1);
+      expect(production.posts).toHaveLength(0);
+      expect(e2e.db.get(outboxPk, outboxSk)).toMatchObject({ status: "WAITING_FOR_TASK_ACCESS", operationId });
+
+      const retry = await e2e.mcp("agentx_retry_workflow", { task_id: e2e.taskId(), request_id: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+        instructions: "Resume the same approved implementation after proof service recovery." });
+      expect(retry.isError, JSON.stringify(retry)).not.toBe(true);
+      expect(directoryProofCalls.length).toBeGreaterThan(0);
+      expect(directoryProofCalls.every((request) => request.slackUserId === SLACK_MAYA.slackUserId)).toBe(true);
+      await e2e.settle();
+      expect(production.batchFailures).toEqual([[]]);
+      expect(production.proofRequests).toHaveLength(1);
+      expect(production.posts).toHaveLength(0);
+      const retryAudit = e2e.db.get(`DEVTASK#${e2e.taskId()}`, "TASK_ACCESS_RETRY#aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+      expect(retryAudit).toMatchObject({ entityType: "TASK_ACCESS_RETRY", actorId: taskOwnerKey(SLACK_MAYA.developerId, e2e.taskId()),
+        requestId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", outboxId, operationId });
+      expect(e2e.db.get(outboxPk, outboxSk)).toMatchObject({
+        status: "PENDING", operationId, invocation,
+      });
+      expect(e2e.db.find((item) => item.entityType === "TASK_ACCESS_PAUSE" && item.outboxId === outboxId)).toHaveLength(0);
+      expect(e2e.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)).toEqual(operation);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge).toEqual(charge);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+
+      // The authenticated retry resumes the same durable outbox. This local queue delivery is separate from that Owner action.
+      const redelivered = await e2e.worker.dispatchAgain(operationId, 2);
+      expect(redelivered).toBe(true);
+      expect(production.batchFailures).toEqual([[], []]);
+      expect(production.proofRequests).toHaveLength(4);
+      expect(new Set(production.proofRequests.map((request) => request.admission.id)).size).toBe(4);
+      expect(production.posts).toHaveLength(1);
+      expect(production.posts[0]?.invocation).toMatchObject({ operationId, fence, workspaceId });
+      expect(e2e.db.get(outboxPk, outboxSk)).toMatchObject({
+        status: "DELIVERED", operationId, invocation,
+      });
+      const dispatchedOperation = e2e.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`);
+      expect(dispatchedOperation).toMatchObject({ ...Object.fromEntries(Object.entries(operation).filter(([key]) => key !== "status" && key !== "updatedAt")),
+        status: "DISPATCHING" });
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge).toEqual(charge);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+    } finally {
+      production.restore();
+    }
+  }, 120_000);
+
   it("9.28 exhausted pause reserve remains a retryable SQS failure at terminal receive count", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS },
       taskPeople: { changesEnabled: false, boundChannels: [SLACK_CHANNEL] } });
@@ -866,6 +959,46 @@ describe("Suite 9: resilience", () => {
       production.restore();
     }
   }, 120_000);
+
+  for (const proofCall of [2, 3] as const) {
+    it(`9.28a proof failure at terminal receive count after guard ${proofCall === 2 ? "ready" : "ping"} does not sign, post, pause, or terminally fail`, async () => {
+      const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS },
+        taskPeople: { changesEnabled: false, boundChannels: [SLACK_CHANNEL] } });
+      await atPlanReview(e2e);
+      const production = installProductionDispatcher(e2e, { functionErrorOnProofCalls: [proofCall] });
+      await e2e.click("agentx_workflow_approve");
+      retainOwner(e2e);
+      const queued = e2e.db.find((item) => item.entityType === "OUTBOX"
+        && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
+      const beforeOutbox = structuredClone(e2e.db.get(String(queued.pk), String(queued.sk)));
+      const beforePeople = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
+      const beforeCharge = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge);
+      const logs: Array<{ event?: string; terminal?: boolean; operationId?: string }> = [];
+      const captureLog = vi.spyOn(process.stderr, "write").mockImplementation((...args) => {
+        try { logs.push(JSON.parse(String(args[0])) as { event?: string; terminal?: boolean; operationId?: string }); } catch { /* unrelated structured logs */ }
+        return true;
+      });
+      try {
+        await expect(production.deliver(queued as unknown as DurableOutboxRecord, 5)).resolves.toBeUndefined();
+      } finally {
+        production.restore();
+        captureLog.mockRestore();
+      }
+      expect(production.batchFailures).toEqual([[{ itemIdentifier: `production-${String(queued.id)}` }]]);
+      expect(production.proofRequests).toHaveLength(proofCall);
+      expect(new Set(production.proofRequests.map((request) => request.admission.id)).size).toBe(proofCall);
+      expect(production.bindingFenceCount).toBe(proofCall - 1);
+      expect(production.pingUrls).toHaveLength(proofCall === 3 ? 1 : 0);
+      expect(production.sign).not.toHaveBeenCalled();
+      expect(production.posts).toHaveLength(0);
+      expect(production.pauseTransactionCount).toBe(0);
+      expect(e2e.db.find((item) => item.entityType === "TASK_ACCESS_PAUSE")).toHaveLength(0);
+      expect(e2e.db.get(String(queued.pk), String(queued.sk))).toEqual(beforeOutbox);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforePeople);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.charge).toEqual(beforeCharge);
+      expect(logs.some((entry) => entry.operationId === queued.operationId && entry.terminal === true)).toBe(false);
+    }, 120_000);
+  }
 
   for (const phase of ["initial", "post-ready", "post-ping"] as const) {
     it(`9.29 a failed durable pause at terminal count remains retryable at the ${phase} guard`, async () => {
