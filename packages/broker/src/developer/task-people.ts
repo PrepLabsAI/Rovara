@@ -272,11 +272,33 @@ async function reconcile(deps: TaskPeopleDependencies, task: DeveloperTaskRecord
   return stale();
 }
 
-async function currentPeople(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, initializeMissing: boolean): Promise<TaskPeople> {
+async function currentPeople(deps: TaskPeopleDependencies, task: DeveloperTaskRecord): Promise<TaskPeople> {
   const stored = await loadPeople(deps, task.taskId);
-  const people = stored ?? (initializeMissing ? await initialize(deps, task) : undefined);
-  if (people === undefined) return denied();
-  return reconcile(deps, task, people);
+  if (stored === undefined) return denied();
+  return reconcile(deps, task, stored);
+}
+
+async function authorizeColdInitialization(
+  deps: TaskPeopleDependencies,
+  task: DeveloperTaskRecord,
+  caller: DeveloperCaller,
+  ownerOnly: boolean,
+): Promise<void> {
+  if (ownerOnly && caller.developerId !== task.developerId) return denied();
+  const proof = await checked(deps, task, caller.developerId);
+  if (!proof.eligible || !proof.channelMember) return denied();
+}
+
+async function currentPeopleForCaller(
+  deps: TaskPeopleDependencies,
+  task: DeveloperTaskRecord,
+  caller: DeveloperCaller,
+  ownerOnly: boolean,
+): Promise<TaskPeople> {
+  const stored = await loadPeople(deps, task.taskId);
+  if (stored !== undefined) return reconcile(deps, task, stored);
+  await authorizeColdInitialization(deps, task, caller, ownerOnly);
+  return reconcile(deps, task, await initialize(deps, task));
 }
 
 async function effectiveRole(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, developerId: string): Promise<TaskRole | null> {
@@ -362,6 +384,22 @@ async function priorOutcome(
   return parseView(request.outcome) ?? denied();
 }
 
+async function readablePriorOutcome(
+  deps: TaskPeopleDependencies,
+  taskId: string,
+  caller: DeveloperCaller,
+  requestId: string,
+  kind: "change" | "takeOwnership",
+  payload: Record<string, unknown>,
+): Promise<TaskPeopleView | undefined> {
+  const outcome = await priorOutcome(deps, taskId, requestId, caller.developerId, kind, payload);
+  if (outcome === undefined) return undefined;
+  const currentTask = await loadTask(deps, taskId);
+  const current = await currentPeople(deps, currentTask);
+  await authorizedRead(deps, currentTask, current, caller);
+  return outcome;
+}
+
 function mutationInput(input: ChangeTaskPeopleInput): void {
   if (!REQUEST_ID.test(input.requestId) || !Number.isSafeInteger(input.expectedPeopleRevision) || input.expectedPeopleRevision < 1
     || !HEX64.test(input.targetDeveloperId) || (input.role !== "owner" && input.role !== "commenter" && input.role !== "viewer" && input.role !== "denied")) {
@@ -386,6 +424,7 @@ async function commitMutation(
   const createdAt = new Date(deps.now()).toISOString();
   const request = { ...requestKey(task.taskId, requestId), entityType: "TASK_PEOPLE_REQUEST", schemaVersion: 1, requestId, actorDeveloperId: caller.developerId, kind, payload, outcome, createdAt };
   const event = { ...eventKey(task.taskId, requestId), entityType: "TASK_PEOPLE_EVENT", schemaVersion: 1, requestId, actorDeveloperId: caller.developerId, targetDeveloperId, beforeRole, afterRole, createdAt };
+  if (!Number.isSafeInteger(task.workflow?.revision) || typeof task.workflow?.stage !== "string") return denied();
   const items: TransactItem[] = [
     { Update: {
       TableName: deps.tableName, Key: peopleKey(task.taskId),
@@ -393,6 +432,12 @@ async function commitMutation(
       ConditionExpression: "#revision = :expectedRevision",
       ExpressionAttributeNames: { "#revision": "revision", "#orphaned": "orphaned", "#people": "people" },
       ExpressionAttributeValues: { ":nextRevision": next.revision, ":orphaned": next.orphaned, ":people": next.people, ":expectedRevision": current.revision },
+    } },
+    { ConditionCheck: {
+      TableName: deps.tableName, Key: taskKey(task.taskId),
+      ConditionExpression: "#developerId = :developerId AND workflow.#revision = :taskRevision AND workflow.#stage = :taskStage AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#developerId": "developerId", "#revision": "revision", "#stage": "stage" },
+      ExpressionAttributeValues: { ":developerId": task.developerId, ":taskRevision": task.workflow.revision, ":taskStage": task.workflow.stage },
     } },
     { Put: { TableName: deps.tableName, Item: event, ConditionExpression: "attribute_not_exists(pk)" } },
     { Put: { TableName: deps.tableName, Item: request, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -402,7 +447,7 @@ async function commitMutation(
     return outcome;
   } catch (error) {
     if (!conditional(error)) throw error;
-    const replay = await priorOutcome(deps, task.taskId, requestId, caller.developerId, kind, payload);
+    const replay = await readablePriorOutcome(deps, task.taskId, caller, requestId, kind, payload);
     return replay ?? stale();
   }
 }
@@ -434,7 +479,7 @@ export async function resolveTaskPeopleAccess(
 
 export async function getTaskPeople(deps: TaskPeopleDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView> {
   const task = await loadTask(deps, taskId);
-  const people = await currentPeople(deps, task, true);
+  const people = await currentPeopleForCaller(deps, task, caller, false);
   await authorizedRead(deps, task, people, caller);
   return viewOf(deps, task, people, caller);
 }
@@ -447,10 +492,10 @@ export async function changeTaskPeople(
 ): Promise<TaskPeopleView> {
   mutationInput(input);
   const task = await loadTask(deps, taskId);
-  let people = await currentPeople(deps, task, true);
+  let people = await currentPeopleForCaller(deps, task, caller, true);
   const callerRole = await authorizedRead(deps, task, people, caller);
   const payload = { expectedPeopleRevision: input.expectedPeopleRevision, targetDeveloperId: input.targetDeveloperId, role: input.role };
-  const replay = await priorOutcome(deps, taskId, input.requestId, caller.developerId, "change", payload);
+  const replay = await readablePriorOutcome(deps, taskId, caller, input.requestId, "change", payload);
   if (replay !== undefined) return replay;
   if (!enabled(deps) || !open(task) || callerRole !== "owner") return denied();
   if (people.revision !== input.expectedPeopleRevision) return stale();
@@ -484,10 +529,10 @@ export async function takeTaskOwnership(
     throw agentXError("CONFIG_INVALID", "ownership request is invalid");
   }
   const task = await loadTask(deps, taskId);
-  const people = await currentPeople(deps, task, false);
+  const people = await currentPeople(deps, task);
   await authorizedRead(deps, task, people, caller);
   const payload = { expectedPeopleRevision: input.expectedPeopleRevision };
-  const replay = await priorOutcome(deps, taskId, input.requestId, caller.developerId, "takeOwnership", payload);
+  const replay = await readablePriorOutcome(deps, taskId, caller, input.requestId, "takeOwnership", payload);
   if (replay !== undefined) return replay;
   if (!enabled(deps) || !open(task) || !people.orphaned || people.revision !== input.expectedPeopleRevision) return denied();
   const mapping = await personByDeveloper(deps, taskId, caller.developerId);

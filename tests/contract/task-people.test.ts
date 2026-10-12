@@ -84,6 +84,12 @@ const errorOf = async (promise: Promise<unknown>) => {
   throw new Error("expected refusal");
 };
 
+const isPeopleMutation = (command: unknown) => {
+  const candidate = command as { constructor?: { name?: string }; input?: { TransactItems?: Array<{ Update?: { Key?: { sk?: unknown } } }> } };
+  return candidate.constructor?.name === "TransactWriteCommand"
+    && candidate.input?.TransactItems?.some((item) => item.Update?.Key?.sk === "PEOPLE") === true;
+};
+
 describe("task people", () => {
   it("initializes the exact creator and immutable opaque registry without changing runtime identity", async () => {
     const h = harness({ enabled: true });
@@ -204,6 +210,21 @@ describe("task people", () => {
     expect(unshared.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")).toBeUndefined();
   });
 
+  it("refuses an unauthorized cold read without initializing People or registry rows", async () => {
+    const read = harness({ enabled: true });
+    read.checks.set(C, { ...read.checks.get(C)!, eligible: false, channelMember: false });
+    expect((await errorOf(getTaskPeople(read.deps, OTHER, TASK_ID))).code).toBe("TASK_ACCESS_DENIED");
+    expect(read.db.find((item) => item.pk === `DEVTASK#${TASK_ID}` && item.sk !== "META")).toEqual([]);
+  });
+
+  it("refuses a non-owner cold change without initializing People or registry rows", async () => {
+    const change = harness({ enabled: true });
+    expect((await errorOf(changeTaskPeople(change.deps, MEMBER, TASK_ID, {
+      requestId: "40000000-0000-4000-8000-000000000021", expectedPeopleRevision: 1, targetDeveloperId: B, role: "viewer",
+    }))).code).toBe("TASK_ACCESS_DENIED");
+    expect(change.db.find((item) => item.pk === `DEVTASK#${TASK_ID}` && item.sk !== "META")).toEqual([]);
+  });
+
   it("people_revocation_race", async () => {
     const h = harness({ enabled: true });
     await getTaskPeople(h.deps, OWNER, TASK_ID);
@@ -251,6 +272,86 @@ describe("task people", () => {
     await changeTaskPeople(h.deps, MEMBER, TASK_ID, historical);
     await changeTaskPeople(h.deps, OWNER, TASK_ID, { requestId: "40000000-0000-4000-8000-000000000015", expectedPeopleRevision: 3, targetDeveloperId: B, role: "denied" });
     expect((await errorOf(changeTaskPeople(h.deps, MEMBER, TASK_ID, historical))).code).toBe("TASK_ACCESS_DENIED");
+  });
+
+  it("refuses an in-flight duplicate outcome after the actor loses current read access", async () => {
+    const h = harness({ enabled: true });
+    await getTaskPeople(h.deps, OWNER, TASK_ID);
+    h.seedPerson(B, "22222222-2222-4222-8222-222222222222");
+    h.seedPerson(C, "33333333-3333-4333-8333-333333333333");
+    await changeTaskPeople(h.deps, OWNER, TASK_ID, {
+      requestId: "40000000-0000-4000-8000-000000000022", expectedPeopleRevision: 1, targetDeveloperId: B, role: "owner",
+    });
+    const request = {
+      requestId: "40000000-0000-4000-8000-000000000023", expectedPeopleRevision: 2, targetDeveloperId: C, role: "viewer" as const,
+    };
+    let raced = false;
+    h.deps.documentClient = {
+      send: async (command: unknown) => {
+        if (!raced && isPeopleMutation(command)) {
+          raced = true;
+          await h.db.send(command as never);
+          const people = h.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE") as { revision: number; people: Array<{ developerId: string; role: string }> };
+          h.db.set({ ...people, pk: `DEVTASK#${TASK_ID}`, sk: "PEOPLE", revision: people.revision + 1,
+            people: people.people.map((person) => person.developerId === B ? { ...person, role: "denied" } : person) });
+        }
+        return h.db.send(command as never);
+      },
+    };
+
+    expect((await errorOf(changeTaskPeople(h.deps, MEMBER, TASK_ID, request))).code).toBe("TASK_ACCESS_DENIED");
+    expect(h.db.find((item) => item.sk === `PEOPLE_EVENT#${request.requestId}`)).toHaveLength(1);
+    expect(h.db.find((item) => item.sk === `PEOPLE_REQUEST#${request.requestId}`)).toHaveLength(1);
+  });
+
+  it("fences role changes and takeover against a terminal task transition", async () => {
+    const change = harness({ enabled: true });
+    await getTaskPeople(change.deps, OWNER, TASK_ID);
+    change.seedPerson(B, "22222222-2222-4222-8222-222222222222");
+    let closed = false;
+    change.deps.documentClient = {
+      send: async (command: unknown) => {
+        if (!closed && isPeopleMutation(command)) {
+          closed = true;
+          change.db.set({ ...change.db.get(`DEVTASK#${TASK_ID}`, "META")!, closedAt: new Date(START + 1_000).toISOString() });
+        }
+        return change.db.send(command as never);
+      },
+    };
+    const changeRequest = "40000000-0000-4000-8000-000000000024";
+    expect((await errorOf(changeTaskPeople(change.deps, OWNER, TASK_ID, {
+      requestId: changeRequest, expectedPeopleRevision: 1, targetDeveloperId: B, role: "viewer",
+    }))).code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(change.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")).toMatchObject({ revision: 1 });
+    expect(change.db.get(`DEVTASK#${TASK_ID}`, `PEOPLE_EVENT#${changeRequest}`)).toBeUndefined();
+    expect(change.db.get(`DEVTASK#${TASK_ID}`, `PEOPLE_REQUEST#${changeRequest}`)).toBeUndefined();
+
+    const takeover = harness({ enabled: true });
+    await getTaskPeople(takeover.deps, OWNER, TASK_ID);
+    takeover.seedPerson(B, "22222222-2222-4222-8222-222222222222");
+    await changeTaskPeople(takeover.deps, OWNER, TASK_ID, {
+      requestId: "40000000-0000-4000-8000-000000000025", expectedPeopleRevision: 1, targetDeveloperId: B, role: "commenter",
+    });
+    takeover.checks.set(A, { ...takeover.checks.get(A)!, eligible: false, channelMember: false });
+    const orphaned = await getTaskPeople(takeover.deps, MEMBER, TASK_ID);
+    let terminal = false;
+    takeover.deps.documentClient = {
+      send: async (command: unknown) => {
+        if (!terminal && isPeopleMutation(command)) {
+          terminal = true;
+          const meta = takeover.db.get(`DEVTASK#${TASK_ID}`, "META")!;
+          takeover.db.set({ ...meta, workflow: { ...(meta.workflow as Record<string, unknown>), stage: "CLOSED" } });
+        }
+        return takeover.db.send(command as never);
+      },
+    };
+    const takeoverRequest = "40000000-0000-4000-8000-000000000026";
+    expect((await errorOf(takeTaskOwnership(takeover.deps, MEMBER, TASK_ID, {
+      requestId: takeoverRequest, expectedPeopleRevision: orphaned.revision,
+    }))).code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(takeover.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")).toMatchObject({ revision: orphaned.revision, orphaned: true });
+    expect(takeover.db.get(`DEVTASK#${TASK_ID}`, `PEOPLE_EVENT#${takeoverRequest}`)).toBeUndefined();
+    expect(takeover.db.get(`DEVTASK#${TASK_ID}`, `PEOPLE_REQUEST#${takeoverRequest}`)).toBeUndefined();
   });
 
   it("external owner loss becomes orphaned and takeover only changes the role", async () => {
