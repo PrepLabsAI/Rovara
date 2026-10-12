@@ -6,6 +6,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { KMSClient } from "@aws-sdk/client-kms";
+import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { InvokeCommand } from "@aws-sdk/client-lambda";
 import { PLAN_CLAIMS_MAX, TaskDispatchProofRequestSchema, TaskDispatchProofResponseSchema, TaskPersonProofResponseSchema, WORKER_INVOKE_AUTHORIZATION_SCHEME,
   WORKER_INVOCATION_FEATURES, WORKER_PING_FEATURES_FIELD, WORKFLOW_PLAN_MAX_BYTES, WorkerInvocationSchema, WorkflowSnapshotSchema,
@@ -23,6 +24,7 @@ import { visibleSlackText } from "../../support/strict-slack.js";
 import { EDITS, MERGED, OPENED_PR, PLAN, PUSHED_FIX, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
 import { loadRollback0212Parser } from "../../support/rollback-0212-parser.js";
 import { handler as productionDispatcher, taskPersonProofLambdaClient } from "../../../packages/broker/src/aws/dispatcher.js";
+import { handler as taskPersonProofRuntime } from "../../../packages/broker/src/aws/task-person-proof-runtime.js";
 
 /** Feature list exported by the source commit pinned in rollback-0.2.12/provenance.json. */
 const ROLLBACK_0212_WORKER_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks",
@@ -67,6 +69,7 @@ function retainOwner(e2e: WorkflowE2E): void {
 }
 
 function installProductionDispatcher(e2e: WorkflowE2E, options: {
+  actualProofRuntime?: boolean;
   removeBindingAtFence?: number;
   functionErrorOnProofCalls?: readonly number[];
   functionErrorRemainingTimeMs?: number;
@@ -77,6 +80,8 @@ function installProductionDispatcher(e2e: WorkflowE2E, options: {
   vi.stubEnv("DEVELOPER_SIGNIN_TABLE_NAME", "signin");
   vi.stubEnv("TASK_PERSON_PROOF_FUNCTION_ARN", "arn:aws:lambda:us-east-1:123456789012:function:proof");
   vi.stubEnv("SLACK_TEAM_ID", "T0BSHLLUGBD");
+  vi.stubEnv("AGENTX_ENV", "agentxlivetest123");
+  vi.stubEnv("SLACK_SECRET_ARN", "arn:aws:secretsmanager:us-east-1:944937319445:secret:agentx/agentxlivetest123/slack-z7WaUV");
   vi.stubEnv("INVOKE_SIGNING_KEY_ARN", "arn:aws:kms:us-east-1:123456789012:key/e2e");
   let bindingFenceCount = 0;
   let pauseTransactionCount = 0;
@@ -108,6 +113,12 @@ function installProductionDispatcher(e2e: WorkflowE2E, options: {
     return e2e.db.send(command as never) as never;
   });
   const sign = vi.spyOn(KMSClient.prototype, "send").mockImplementation(() => Promise.resolve({ Signature: new Uint8Array(64) }) as never);
+  const secretReads: unknown[] = [];
+  const secret = vi.spyOn(SecretsManagerClient.prototype, "send").mockImplementation((async (command: unknown) => {
+    secretReads.push(command);
+    return { SecretString: JSON.stringify({ botToken: "xoxb-synthetic-test-token" }) };
+  }) as never);
+  const slackApiCalls: string[] = [];
   const proofRequests: Array<ReturnType<typeof TaskDispatchProofRequestSchema.parse>> = [];
   let remainingTimeMs = 60_000;
   const proof = vi.spyOn(taskPersonProofLambdaClient, "send").mockImplementation((command) => {
@@ -124,6 +135,10 @@ function installProductionDispatcher(e2e: WorkflowE2E, options: {
         usage: { slackCallsUsed: 1, completedAt: Date.now() }, result: { ok: false, error: "ineligible" } });
       return Promise.resolve({ Payload: Buffer.from(JSON.stringify(response), "utf8") }) as never;
     }
+    if (options.actualProofRuntime === true) {
+      return taskPersonProofRuntime(request, { getRemainingTimeInMillis: () => remainingTimeMs })
+        .then((response) => ({ Payload: Buffer.from(JSON.stringify(response), "utf8") }) as never) as never;
+    }
     const response = TaskDispatchProofResponseSchema.parse({ kind: "task-dispatch-person-proof-result", admissionId: request.admission.id,
       usage: { slackCallsUsed: 1, completedAt: Date.now() }, result: { ok: true, user: { id: request.request.slackUserId,
         teamId: "T0BSHLLUGBD", name: "Maya Chen" }, memberOf: request.request.channelIds.includes(SLACK_CHANNEL) ? [SLACK_CHANNEL] : [] } });
@@ -133,6 +148,20 @@ function installProductionDispatcher(e2e: WorkflowE2E, options: {
   const posts: Array<{ authorization?: string; invocation: WorkerInvocation }> = [];
   vi.stubGlobal("fetch", (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (url.hostname === "slack.com" && init?.method === undefined) {
+      slackApiCalls.push(url.pathname);
+      if (url.pathname === "/api/users.info") {
+        const userId = url.searchParams.get("user");
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, user: {
+          id: userId, team_id: "T0BSHLLUGBD", deleted: false, is_bot: false, is_stranger: false,
+          profile: { display_name: "Maya Chen" },
+        } }), { status: 200, headers: { "content-type": "application/json" } }));
+      }
+      if (url.pathname === "/api/conversations.members") {
+        return Promise.resolve(new Response(JSON.stringify({ ok: true, members: [SLACK_MAYA.slackUserId], response_metadata: { next_cursor: "" } }), { status: 200 }));
+      }
+      throw new Error(`unexpected production dispatcher Slack fetch ${init?.method ?? "GET"} ${url.href}`);
+    }
     if (url.pathname === "/ping" && init?.method === undefined) {
       pingUrls.push(url.href);
       return Promise.resolve(new Response(JSON.stringify({ [WORKER_PING_FEATURES_FIELD]: WORKER_INVOCATION_FEATURES }), { status: 200, headers: { "content-type": "application/json" } }));
@@ -147,7 +176,7 @@ function installProductionDispatcher(e2e: WorkflowE2E, options: {
   });
   const batchFailures: Array<Array<{ itemIdentifier: string }>> = [];
   return {
-    proofRequests, pingUrls, posts, batchFailures, sign,
+    proofRequests, pingUrls, posts, batchFailures, secretReads, slackApiCalls, sign,
     get bindingFenceCount() { return bindingFenceCount; }, get pauseTransactionCount() { return pauseTransactionCount; },
     async deliver(record: DurableOutboxRecord, receiveCount: number): Promise<WorkerInvocation | undefined> {
       remainingTimeMs = 60_000;
@@ -161,7 +190,7 @@ function installProductionDispatcher(e2e: WorkflowE2E, options: {
       batchFailures.push(result.batchItemFailures);
       return posts.slice(previousPostCount).find((post) => post.invocation.operationId === record.operationId)?.invocation;
     },
-    restore(): void { state.mockRestore(); sign.mockRestore(); proof.mockRestore(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); },
+    restore(): void { state.mockRestore(); sign.mockRestore(); secret.mockRestore(); proof.mockRestore(); vi.unstubAllGlobals(); vi.unstubAllEnvs(); },
   };
 }
 
@@ -767,6 +796,37 @@ describe("Suite 9: resilience", () => {
     expect(production.posts).toHaveLength(1);
     expect(production.posts[0]?.authorization).toMatch(new RegExp(`^${WORKER_INVOKE_AUTHORIZATION_SCHEME} `));
     expect(production.posts[0]?.invocation.kind).toBe("task");
+    expect(e2e.workflow()).toMatchObject({ stage: "REVIEW", state: "WAITING" });
+  }, 120_000);
+
+  it("9.31 the exported dispatcher composes through the dedicated fresh proof Lambda runtime", async () => {
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: { changesEnabled: false, boundChannels: [SLACK_CHANNEL] } });
+    await atPlanReview(e2e);
+    const production = installProductionDispatcher(e2e, { actualProofRuntime: true });
+    e2e.worker.useProductionHandler((record, receiveCount) => production.deliver(record, receiveCount));
+    await e2e.click("agentx_workflow_approve");
+    retainOwner(e2e);
+    const queued = e2e.db.find((item) => item.entityType === "OUTBOX"
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
+    try {
+      await e2e.settle();
+    } finally {
+      production.restore();
+    }
+
+    expect(production.batchFailures).toEqual([[]]);
+    expect(production.proofRequests).toHaveLength(3);
+    expect(new Set(production.proofRequests.map((request) => request.admission.id)).size).toBe(3);
+    expect(production.proofRequests.every((request) => request.request.slackUserId === SLACK_MAYA.slackUserId
+      && request.request.channelIds.includes(SLACK_CHANNEL))).toBe(true);
+    expect(production.secretReads).toHaveLength(3);
+    expect(production.secretReads.every((command) => command instanceof GetSecretValueCommand
+      && command.input.SecretId === "arn:aws:secretsmanager:us-east-1:944937319445:secret:agentx/agentxlivetest123/slack-z7WaUV")).toBe(true);
+    expect(production.slackApiCalls).toEqual(Array.from({ length: 3 }, () => ["/api/users.info", "/api/conversations.members"]).flat());
+    expect(production.posts).toHaveLength(1);
+    expect(production.posts[0]?.authorization).toMatch(new RegExp(`^${WORKER_INVOKE_AUTHORIZATION_SCHEME} `));
+    expect(production.posts[0]?.invocation.operationId).toBe(queued.operationId);
+    expect(JSON.stringify(production.posts)).not.toContain("xoxb-synthetic-test-token");
     expect(e2e.workflow()).toMatchObject({ stage: "REVIEW", state: "WAITING" });
   }, 120_000);
 

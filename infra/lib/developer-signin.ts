@@ -58,13 +58,16 @@ export interface DeveloperSignInProps {
 }
 
 export class DeveloperSignIn extends Construct {
+  /** Existing table, exposed without changing its construct path or permissions. */
+  readonly table: dynamodb.Table;
+
   constructor(scope: Construct, id: string, props: DeveloperSignInProps) {
     super(scope, id);
     const stack = Stack.of(this);
     const p = props.parameters;
     const issuer = `${props.api.attrApiEndpoint}/v1/auth`;
 
-    const table = new dynamodb.Table(this, "Table", {
+    const table = this.table = new dynamodb.Table(this, "Table", {
       partitionKey: { name: "pk", type: dynamodb.AttributeType.STRING },
       sortKey: { name: "sk", type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
