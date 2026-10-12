@@ -23,7 +23,7 @@ type ManagePullRequestApi = {
   followUp: Mock;
   createPullRequest: Mock;
   managePullRequest: Mock<() => Promise<{ operation: { id: string } }>>;
-  pullRequestResult: Mock<() => Promise<{ status: "SUCCEEDED"; url: string }>>;
+  pullRequestResult: Mock<() => Promise<{ status: string; url: string }>>;
 };
 
 export function managePullRequestApi(): ManagePullRequestApi {
