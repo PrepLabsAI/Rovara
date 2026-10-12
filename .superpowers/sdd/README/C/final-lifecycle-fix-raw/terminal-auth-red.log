@@ -1,0 +1,33 @@
+
+ RUN  v5.0.1 /Users/abhishekgarg/web/AgentX-page-access-20261011
+
+ ❯ tests/contract/task-terminal-owner-authority.test.ts (1 test | 1 failed) 895ms
+   ❯ terminal task Slack authorization (1)
+     × admits only current Owners to read authorization for a retired feedback card 895ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/contract/task-terminal-owner-authority.test.ts > terminal task Slack authorization > admits only current Owners to read authorization for a retired feedback card
+AssertionError: expected 404 to be 200 // Object.is equality
+
+- Expected
++ Received
+
+- 200
++ 404
+
+ ❯ tests/contract/task-terminal-owner-authority.test.ts:51:51
+     49|       taskAction: "feedback", taskId, userId, thread });
+     50|
+     51|     expect((await authorize(creator)).statusCode).toBe(200);
+       |                                                   ^
+     52|     expect((await authorize(coOwner)).statusCode).toBe(200);
+     53|     expect((await authorize(viewer)).statusCode).not.toBe(200);
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed (1)
+      Tests  1 failed (1)
+   Start at  03:15:35
+   Duration  1.39s (tests 68%, transform 17%, import 15%)

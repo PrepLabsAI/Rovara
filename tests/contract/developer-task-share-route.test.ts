@@ -113,6 +113,19 @@ describe("POST /v1/dev/tasks/{taskId}/share (C5)", () => {
     expect((await share({ shareMode: "continue" })).body.error).toMatchObject({ code: "CONFIG_INVALID" });
   });
 
+  it("refuses a terminal workflow before closedAt without changing the share or writing an audit", async () => {
+    const { db, share, taskId, record } = await privateTask();
+    const current = db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown>;
+    current.workflow = { revision: 2, stage: "MERGED", state: "COMPLETE", outcome: "MERGED" };
+    expect(current.closedAt).toBeUndefined();
+    const beforeTask = structuredClone(record());
+    const beforeEvents = db.find((item) => item.entityType === "AI_TOOL_TURN" && item.action === "share").length;
+
+    expect((await share({ shareMode: "continue" })).body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    expect(record()).toEqual(beforeTask);
+    expect(db.find((item) => item.entityType === "AI_TOOL_TURN" && item.action === "share")).toHaveLength(beforeEvents);
+  });
+
   it("marks the thread closed when the notifier records it after the close read the task (ruling F4)", async () => {
     const harness = await privateTask();
     const { db, share, taskId, dev, record } = harness;

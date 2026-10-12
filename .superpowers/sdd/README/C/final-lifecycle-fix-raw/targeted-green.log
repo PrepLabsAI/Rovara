@@ -1,0 +1,30 @@
+
+ RUN  v5.0.1 /Users/abhishekgarg/web/AgentX-page-access-20261011
+
+ ❯ tests/integration/workflow-e2e/08-merge-close.test.ts (30 tests | 1 failed) 42973ms
+   ❯ Suite 8: merge and close (30)
+     × 8.10 a teammate's Close is refused, and nothing moves 1165ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/integration/workflow-e2e/08-merge-close.test.ts > Suite 8: merge and close > 8.10 a teammate's Close is refused, and nothing moves
+AssertionError: expected 'Only the task owner can close this ta…' to be 'Only <@U0MAYA001> can close this task.' // Object.is equality
+
+Expected: "Only <@U0MAYA001> can close this task."
+Received: "Only the task owner can close this task."
+
+ ❯ tests/integration/workflow-e2e/08-merge-close.test.ts:315:46
+    313|     if (e2e.slack.views.length > 0) await e2e.submitView({}, { user: T…
+    314|     await e2e.settle();
+    315|     expect(e2e.slack.responses.at(-1)?.text).toBe(`Only <@${OWNER}> ca…
+       |                                              ^
+    316|     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", st…
+    317|     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.closedAt).to…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯
+
+
+ Test Files  1 failed | 3 passed (4)
+      Tests  1 failed | 78 passed (79)
+   Start at  03:16:44
+   Duration  44.63s (tests 94%, import 3%, transform 3%)
