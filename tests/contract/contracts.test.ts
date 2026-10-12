@@ -204,12 +204,13 @@ describe("strict contracts", () => {
     ).toThrow();
 
     const project = projectDefinition();
-    project.repositories.push({
-      ...project.repositories[0],
+    const repository = project.repositories[0]!;
+    const nestedRepository = {
+      ...repository,
       name: "nested",
       path: "services/api/nested",
-    });
-    expect(() => ProjectDefinitionSchema.parse(project)).toThrow(/overlap/);
+    };
+    expect(() => ProjectDefinitionSchema.parse({ ...project, repositories: [...project.repositories, nestedRepository] })).toThrow(/overlap/);
   });
 
   it("rejects unsupported states and unknown workspace keys", () => {
