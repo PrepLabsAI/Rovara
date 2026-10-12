@@ -932,14 +932,16 @@ describe("the task page through the broker", () => {
     const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
     const review = (role: "CRITIC" | "SECURITY", findings: unknown[]) => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "t", version: "1",
       status: "FINDINGS", findings, readOnly: true, recordedAt: "2026-10-08T00:00:00.000Z" });
-    const accept = (digest: string, role: "CRITIC" | "SECURITY", text: string, reason: string) => ({ candidateDigest: digest, role, fingerprint: workflowFindingFingerprint(role, { text }),
-      text, reason, actorId: MAYA.developerId, at: "2026-10-09T22:20:16.305Z" });
-    const { open } = await sharedPlanTask((saved) => ({ stage: "REVIEW", state: "BLOCKED", candidate, ownerKey: saved.ownerKey,
+    const { open } = await sharedPlanTask((saved) => {
+      const accept = (digest: string, role: "CRITIC" | "SECURITY", text: string, reason: string) => ({ candidateDigest: digest, role, fingerprint: workflowFindingFingerprint(role, { text }),
+        text, reason, actorId: saved.ownerKey, at: "2026-10-09T22:20:16.305Z" });
+      return { stage: "REVIEW", state: "BLOCKED", candidate, ownerKey: saved.ownerKey,
       reviews: [
         review("CRITIC", [{ text: "Accepted <b>bug</b>", origin: "INTRODUCED" }, { text: "Plan asked for it", origin: "INTRODUCED", advisory: true }, { text: "Old loop", origin: "PRE_EXISTING" }]),
         review("SECURITY", [{ text: "Secret in log", origin: "INTRODUCED", advisory: true }]),
       ],
-      acceptedFindings: [accept(candidate.digest, "CRITIC", "Accepted <b>bug</b>", "Only in <i>tests</i>"), accept("c".repeat(64), "CRITIC", "From older code", "Old reason")] }));
+      acceptedFindings: [accept(candidate.digest, "CRITIC", "Accepted <b>bug</b>", "Only in <i>tests</i>"), accept("c".repeat(64), "CRITIC", "From older code", "Old reason")] };
+    });
     const body = (await open(MAYA)).body;
     const section = body.slice(body.indexOf('id="findings"'), body.indexOf('aria-label="Pull requests"'));
     const caused = section.slice(section.indexOf("Caused by this change"), section.indexOf("Notes (advisory)"));
@@ -1070,7 +1072,7 @@ describe("the task page through the broker", () => {
       const { harness, open } = await sharedPlanTask((saved) => {
         plans.push(...structuredPlans(saved));
         return { artifacts: plans.map((plan) => plan.artifact), decisions: [
-          decision({ artifactDigest: plans[0]!.artifact.sha256, reason: long }),
+          decision({ artifactDigest: plans[0]!.artifact.sha256, reason: long, actorId: saved.ownerKey }),
           decision({ artifactDigest: plans[1]!.artifact.sha256, decision: "APPROVE", actorRole: "PROJECT_ADMIN", reason: "Looks right.", at: "2026-10-08T12:30:00.000Z" }),
         ] };
       });
@@ -1151,7 +1153,7 @@ describe("the task page and its API (slice 2)", () => {
     const commenter = await render({ access: { role: "commenter", canComment: true, canSuggest: true, canDecide: false, canAsk: true } });
     expect(commenter.headers["set-cookie"]).toContain("__Host-agentx_review_csrf=");
     const closed = await render({ access: { role: "owner", canComment: false, canSuggest: false, canDecide: false, canAsk: false } });
-    expect(closed.headers["set-cookie"]).toBeUndefined();
+    expect(closed.headers["set-cookie"]).toContain("__Host-agentx_review_csrf=");
     expect((await render({})).headers["set-cookie"]).toBeUndefined();
     // A valid cookie already there is kept, not replaced.
     const csrf = "k".repeat(43);
