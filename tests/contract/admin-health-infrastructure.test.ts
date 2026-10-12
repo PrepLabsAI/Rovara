@@ -160,7 +160,11 @@ describe("the health route's grants (A13)", () => {
   it("expires only retired or quarantined recovery rows, while active retries stay due without TTL", () => {
     const recovery = readFileSync("packages/broker/src/aws/workflow-merge-recovery.ts", "utf8");
     expect(recovery).toContain("const RETIRED_TTL_SECONDS = 7 * 24 * 60 * 60;");
-    const quarantine = recovery.slice(recovery.indexOf("async function quarantine("), recovery.indexOf("async function claimRecoveryRow("));
+    const quarantineStart = recovery.indexOf("async function quarantine(");
+    const quarantineEnd = recovery.indexOf("async function claimRow(", quarantineStart);
+    expect(quarantineStart).toBeGreaterThanOrEqual(0);
+    expect(quarantineEnd).toBeGreaterThan(quarantineStart);
+    const quarantine = recovery.slice(quarantineStart, quarantineEnd);
     expect(quarantine).toContain("recoveryStatus = :status");
     expect(quarantine).toContain("indexExpiresAt = :ttl REMOVE nextAttemptAt, dispatchDuePk, dispatchDueSk");
     const retire = recovery.slice(recovery.indexOf("async function retire("), recovery.indexOf("async function setGlobalCooldown("));
