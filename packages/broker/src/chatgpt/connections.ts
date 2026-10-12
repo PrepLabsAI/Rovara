@@ -16,9 +16,10 @@ import { DeleteCommand, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/l
 import { DecryptCommand, EncryptCommand, type KMSClient } from "@aws-sdk/client-kms";
 import {
   CHATGPT_CONNECT_STATE_SECONDS, CLI_COMMAND_NAME, ChatGptConnectFinishRequestSchema, agentXError, AgentXError,
-  type ChatGptConnectionStatus, type ChatGptConnectionView, type ChatGptConnectStart,
+  type ChatGptConnectionStatus, type ChatGptConnectionView, type ChatGptConnectStart, type ChatGptHealth,
 } from "@agentx/contracts";
 import { readChatGptSettings, type ChatGptSettings } from "./settings.js";
+import { CHATGPT_CONNECTIONS_INDEX_PK, chatGptHealth } from "./health.js";
 import { chatGptAuthorization, chatGptModels, exchangeChatGptCode, parseChatGptCallback, refreshChatGptTokens } from "./oauth.js";
 
 /** How long before an access token's expiry it is refreshed: a request never starts with one about to expire. */
@@ -77,6 +78,8 @@ export interface ChatGptConnections {
   accessToken(developerId: string): Promise<ChatGptAccessToken>;
   /** #343: the install's switch and preferred model. */
   settings(): Promise<ChatGptSettings>;
+  /** #343: what `rovara doctor` shows: the settings, how many people are connected, and whether OpenAI is reachable. */
+  health(): Promise<ChatGptHealth>;
   /** Records what a task found (#342): the plan's limit, or a model list that changed. */
   markStatus(developerId: string, status: ChatGptConnectionStatus, models?: string[]): Promise<void>;
   /** Reads the plan's allowed models again (#342: a task found its model no longer allowed) and keeps them. */
@@ -84,6 +87,8 @@ export interface ChatGptConnections {
 }
 
 const pkOf = (developerId: string) => `CHATGPT#${developerId}`;
+/** #343: the connection index (see health.ts), kept in step with each connection's status. */
+const indexKey = (developerId: string) => ({ pk: CHATGPT_CONNECTIONS_INDEX_PK, sk: developerId });
 const hashOf = (value: string) => createHash("sha256").update(value).digest("hex");
 const contextOf = (developerId: string, field: string) => ({ purpose: "chatgpt-connection", developerId, field });
 const sameHash = (a: string, b: string) => a.length === b.length && timingSafeEqual(Buffer.from(a), Buffer.from(b));
@@ -104,6 +109,17 @@ export function chatGptConnections(deps: ChatGptConnectionsDependencies): ChatGp
 
   const connection = (developerId: string) => get<ConnectionRecord>(developerId, "CONNECTION");
   const settings = () => readChatGptSettings(deps);
+  /** The index follows a connection's status; one without an index item (made before it) is left alone. */
+  const indexStatus = async (developerId: string, status: ChatGptConnectionStatus) => {
+    try {
+      await deps.documentClient.send(new UpdateCommand({
+        TableName: deps.tableName, Key: indexKey(developerId), UpdateExpression: "SET #status = :status",
+        ConditionExpression: "attribute_exists(pk)", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":status": status },
+      }));
+    } catch (error) {
+      if (!conditionFailed(error)) throw error;
+    }
+  };
   // #343: connecting needs the admin's switch on; with it off, existing connections are kept but unused.
   const requireEnabled = async () => {
     if (!(await settings()).enabled) throw agentXError("FORBIDDEN", `Sign in with ChatGPT is turned off in this Rovara; ask an admin to turn it on with: ${CLI_COMMAND_NAME} config set models.chatgpt.enabled true`);
@@ -111,6 +127,7 @@ export function chatGptConnections(deps: ChatGptConnectionsDependencies): ChatGp
 
   return {
     settings,
+    health: () => chatGptHealth(deps),
 
     async start(developerId) {
       await requireEnabled();
@@ -164,6 +181,7 @@ export function chatGptConnections(deps: ChatGptConnectionsDependencies): ChatGp
         connectedAt: new Date(deps.now()).toISOString(), models, status: "connected", version: 1,
       };
       await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: record }));
+      await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...indexKey(developerId), entityType: "CHATGPT_CONNECTION_INDEX", status: "connected" } }));
       return viewOf(record);
     },
 
@@ -172,6 +190,7 @@ export function chatGptConnections(deps: ChatGptConnectionsDependencies): ChatGp
     },
 
     async disconnect(developerId) {
+      await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName, Key: indexKey(developerId) }));
       await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName, Key: { pk: pkOf(developerId), sk: "CONNECTION" } }));
       await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName, Key: { pk: pkOf(developerId), sk: "PENDING" } }));
       return { connected: false };
@@ -212,7 +231,10 @@ export function chatGptConnections(deps: ChatGptConnectionsDependencies): ChatGp
             UpdateExpression: revoked ? "SET #status = :revoked REMOVE refreshingUntil" : "REMOVE refreshingUntil",
             ...(revoked ? { ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":revoked": "revoked" } } : {}),
           }));
-          if (revoked) throw agentXError("AUTH_REQUIRED", "the ChatGPT connection was revoked or expired; connect ChatGPT again");
+          if (revoked) {
+            await indexStatus(developerId, "revoked");
+            throw agentXError("AUTH_REQUIRED", "the ChatGPT connection was revoked or expired; connect ChatGPT again");
+          }
           throw error;
         }
         await deps.documentClient.send(new UpdateCommand({
@@ -242,7 +264,9 @@ export function chatGptConnections(deps: ChatGptConnectionsDependencies): ChatGp
       } catch (error) {
         // Disconnected meanwhile: nothing to mark.
         if (!conditionFailed(error)) throw error;
+        return;
       }
+      await indexStatus(developerId, status);
     },
 
     async refreshModels(developerId) {

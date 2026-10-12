@@ -972,6 +972,12 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           ? json(await dependencies.credentialRegistry.register(identity, body), request.requestId, 201)
           : json(await dependencies.credentialRegistry.list(identity), request.requestId);
       }
+      // #343: Sign in with ChatGPT, for rovara doctor.
+      if (request.method === "GET" && url.pathname === "/v1/admin/chatgpt") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (!dependencies.chatgpt) throw agentXError("NOT_FOUND", "Sign in with ChatGPT is not set up in this deployment");
+        return json(await dependencies.chatgpt.health(), request.requestId);
+      }
       if (request.method === "GET" && url.pathname === "/v1/admin/turns") {
         if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
         if (!dependencies.turnRecords) throw agentXError("RUNTIME_UNAVAILABLE", "turn records are not configured in this deployment");

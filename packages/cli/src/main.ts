@@ -449,6 +449,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     ...(dependencies.doctor?.store === undefined ? {} : { store: dependencies.doctor.store }),
     ...(dependencies.doctor?.services === undefined ? {} : { services: dependencies.doctor.services }),
     parameterStore, fetch: services.fetchImplementation, home, stdout: services.stdout, stderr: services.stderr,
+    adminSession: async (env: string) => {
+      const session = await adminSessionFor(env);
+      return session === undefined ? undefined : { controlPlaneUrl: session.baseUrl, accessToken: session.accessToken };
+    },
   });
   registerUpgradeCommand(program, {
     ...(dependencies.upgrade === undefined ? {} : { overrides: dependencies.upgrade }),
