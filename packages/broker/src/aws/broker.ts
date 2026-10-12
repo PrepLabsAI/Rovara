@@ -3133,7 +3133,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[] },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[]; slackThread?: SlackThread },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -3160,7 +3160,11 @@ async function taskOperationParts(
     ...input.requester,
   });
   operation.settingsRevision = settings.definition.revision;
-  if (chatgpt !== undefined) operation.chatgptDeveloperId = chatgpt.developerId;
+  if (chatgpt !== undefined) {
+    operation.chatgptDeveloperId = chatgpt.developerId;
+    // #342: where a fallback is told when the task ends.
+    if (input.slackThread !== undefined) operation.chatgptThread = { teamId: input.slackThread.teamId, channelId: input.slackThread.channelId, threadTs: input.slackThread.threadTs };
+  }
   // A PR feedback review this release starts is given only the owner's notes for its round; its answer is checked against that alone.
   if (input.workflowFeedbackReview !== undefined) operation.feedbackNotesScoped = true;
   // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
@@ -3338,6 +3342,7 @@ async function acceptTask(
     prompt: request.prompt,
     conversationStarted,
     requester: requesterOf(identity),
+    ...(identity.slack === undefined ? {} : { slackThread: identity.slack.thread }),
     // 25c note 1: a turn from an open shared thread, or the developer's own turn on a shared task.
     shared: identity.sharedTask?.state === "continue" || options.sharedTask === true,
     ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }),

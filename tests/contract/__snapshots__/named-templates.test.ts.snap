@@ -4175,6 +4175,24 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     "DEVTASK#*",
                     "WORKSPACE#*",
                     "OPERATION#*",
+                    "CHATGPT_NOTICE#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:PutItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "CHATGPT_NOTICE#*",
                   ],
                 },
               },
@@ -4465,7 +4483,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["DEVELOPER_TASK_POINTER"]}}}}",
             },
             {
-              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["OPERATION"]},"requestedBy":{"M":{"kind":{"S":["developer"]}}},"status":{"S":["SUCCEEDED","FAILED","CANCELLED","INTERRUPTED"]}}}}",
+              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["OPERATION"]},"status":{"S":["SUCCEEDED","FAILED","CANCELLED","INTERRUPTED"]}}}}",
             },
             {
               "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["ADMIN_CHANGE"]}}}}",
