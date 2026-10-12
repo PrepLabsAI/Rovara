@@ -151,4 +151,171 @@ describe("Task Person invite handler", () => {
     expect(result.status).toBe("failed");
     expect(f.send).not.toHaveBeenCalled();
   });
+
+  it("does not invite after the authorization allowance expires during receipt creation", async () => {
+    const f = fixture();
+    const beginReceipt = f.ports.beginReceipt.bind(f.ports);
+    f.ports.readChannelInfo = async () => {
+      f.setNow(now + 4_000);
+      return { isPrivate: false, botIsMember: true, slackCallsUsed: 1 };
+    };
+    f.ports.beginReceipt = async (input) => {
+      const result = await beginReceipt(input);
+      f.setNow(now + 6_500);
+      return result;
+    };
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result.status).not.toBe("accepted");
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["complete state", { state: "COMPLETE" }],
+    ["unknown state", { state: "NOT_A_STATE" }],
+    ["unknown stage", { stage: "RELEASED" }],
+    ["closed stage", { stage: "CLOSED" }],
+    ["merged stage", { stage: "MERGED" }],
+  ])("refuses terminal or unknown workflow %s before receipt creation", async (_label, workflowPatch) => {
+    const f = fixture();
+    const beginReceipt = vi.fn(f.ports.beginReceipt.bind(f.ports));
+    f.ports.beginReceipt = beginReceipt;
+    const task = f.rows.get("META")!;
+    f.rows.set("META", { ...task, workflow: { ...task.workflow as object, ...workflowPatch } });
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result.status).not.toBe("accepted");
+    expect(beginReceipt).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["canonical partition key", { pk: `TASK_INVITE#${taskId}#${randomUUID()}` }],
+    ["claim digest", { claimDigest: "c".repeat(64) }],
+    ["actor", { actorDeveloperId: "c".repeat(64) }],
+    ["target", { targetDeveloperId: "c".repeat(64) }],
+    ["team", { teamId: "T0OTHER001" }],
+    ["channel", { channelId: "C0OTHER001" }],
+    ["Slack user", { slackUserId: "U0OTHER001" }],
+  ])("does not trust an accepted receipt with a different %s", async (_label, changed) => {
+    const f = fixture({
+      async beginReceipt({ receipt }) { return { kind: "existing", receipt: { ...receipt, status: "ACCEPTED", ...changed } }; },
+    });
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result.status).not.toBe("accepted");
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps a matching receipt replay bound to its original admission without resending", async () => {
+    const f = fixture();
+    const handler = createTaskPersonInviteHandler(f.ports);
+    const first = await handler(f.request);
+    const secondAdmissionId = randomUUID();
+    const replay = await handler({ ...f.request, admission: { ...f.request.admission, id: secondAdmissionId } });
+    expect(first.status).toBe("accepted");
+    expect(replay).toMatchObject({ status: "accepted", executionReceiptId: first.executionReceiptId, admissionId: secondAdmissionId });
+    expect(f.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not issue fresh channel info after proof exhausts the shared Slack allowance", async () => {
+    const f = fixture();
+    const checker = f.ports.createPersonChecker.bind(f.ports);
+    const readChannelInfo = vi.fn(f.ports.readChannelInfo.bind(f.ports));
+    f.ports.createPersonChecker = (admission) => {
+      const check = checker(admission);
+      let charged = false;
+      return async (task, developerId) => {
+        const result = await check(task, developerId);
+        if (!charged) { admission.recordSlackUsage(100); charged = true; }
+        return result;
+      };
+    };
+    f.ports.readChannelInfo = readChannelInfo;
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result.status).not.toBe("accepted");
+    expect(readChannelInfo).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("passes the remaining Slack allowance to paginated target membership verification", async () => {
+    const f = fixture();
+    const checker = f.ports.createPersonChecker.bind(f.ports);
+    f.ports.createPersonChecker = (admission) => {
+      const check = checker(admission);
+      let charged = false;
+      return async (task, developerId) => {
+        if (!charged) { admission.recordSlackUsage(97); charged = true; }
+        return check(task, developerId);
+      };
+    };
+    f.ports.invite = async () => ({ kind: "already_in_channel" });
+    let memberInput: unknown;
+    const targetIsMember = vi.fn(async (...args: unknown[]) => {
+      memberInput = args[0];
+      return { isMember: true, slackCallsUsed: 1 };
+    });
+    f.ports.targetIsMember = targetIsMember;
+    await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(memberInput).toMatchObject({ slackCallsLimit: 1, deadlineAt: now + 5_000 });
+  });
+
+  it("passes the shared call limit and authorization deadline to fresh channel info", async () => {
+    const f = fixture();
+    let channelInput: unknown;
+    const readChannelInfo = vi.fn(async (...args: unknown[]) => {
+      channelInput = args[0];
+      return { isPrivate: false, botIsMember: true, slackCallsUsed: 1 };
+    });
+    f.ports.readChannelInfo = readChannelInfo;
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result.status).toBe("accepted");
+    expect(channelInput).toMatchObject({ slackCallsLimit: 100, deadlineAt: now + 6_000 });
+  });
+
+  it.each([
+    ["STARTED", undefined],
+    ["UNKNOWN", "effect_unknown"],
+  ] as const)("does not resend a matching existing %s receipt", async (status, reason) => {
+    const f = fixture({
+      async beginReceipt({ receipt }) {
+        return { kind: "existing", receipt: { ...receipt, status, ...(reason === undefined ? {} : { reason }), admissionId: randomUUID() } };
+      },
+    });
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result.status).toBe("unknown");
+    expect(f.send).not.toHaveBeenCalled();
+  });
+
+  it("uses the reserved total request window to persist an effect that completes before its effect deadline", async () => {
+    const f = fixture();
+    f.ports.readChannelInfo = async () => {
+      f.setNow(now + 4_000);
+      return { isPrivate: false, botIsMember: true, slackCallsUsed: 1 };
+    };
+    f.ports.invite = async () => {
+      f.setNow(now + 8_999);
+      return { kind: "accepted" };
+    };
+    let signal: AbortSignal | undefined;
+    f.ports.finishReceipt = async (input) => {
+      signal = input.abortSignal;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return !input.abortSignal.aborted;
+    };
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(signal?.aborted).toBe(false);
+    expect(result.status).toBe("accepted");
+  });
+
+  it("returns UNKNOWN when receipt persistence completes after the total request window without resending", async () => {
+    const f = fixture();
+    const handler = createTaskPersonInviteHandler(f.ports);
+    f.ports.finishReceipt = async () => {
+      f.setNow(f.request.admission.deadlineAt);
+      return true;
+    };
+    expect((await handler(f.request)).status).toBe("unknown");
+    f.setNow(now + 13_000);
+    const retryRequest = { ...f.request, admission: { ...f.request.admission, id: randomUUID(), deadlineAt: now + 25_000 } };
+    expect((await handler(retryRequest)).status).toBe("unknown");
+    expect(f.send).toHaveBeenCalledTimes(1);
+  });
 });

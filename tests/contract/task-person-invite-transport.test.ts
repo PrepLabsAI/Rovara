@@ -69,4 +69,22 @@ describe("Task Person invite transport", () => {
     const result = await taskPersonInviteThroughLambda({ invoke, now: () => clock })(value);
     expect(result.status).toBe("unknown");
   });
+
+  it.each([
+    [10_999, "accepted"],
+    [11_000, "unknown"],
+    [11_500, "unknown"],
+  ] as const)("enforces the effective relative deadline for response time %i", async (completedAt, expectedStatus) => {
+    const value = request();
+    value.admission.deadlineAt = 20_000;
+    value.admission.remainingMs = 1_000;
+    value.admission.authorityRemainingMs = 500;
+    let clock = 10_000;
+    const invoke = vi.fn(async () => {
+      clock = completedAt;
+      return { Payload: Buffer.from(JSON.stringify(accepted(value))) };
+    });
+    const result = await taskPersonInviteThroughLambda({ invoke, now: () => clock })(value);
+    expect(result.status).toBe(expectedStatus);
+  });
 });

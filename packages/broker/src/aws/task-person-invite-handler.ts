@@ -6,6 +6,8 @@ import {
   SlackTeamIdSchema,
   SlackChannelIdSchema,
   SlackUserIdSchema,
+  WorkflowStageSchema,
+  WorkflowStateSchema,
   agentXError,
   type TaskPersonInviteClaimRequest,
   type TaskPersonInviteExecutionReceipt,
@@ -31,7 +33,7 @@ export interface TaskPersonInviteHandlerPorts {
   /** Builds the normal fresh Task Person identity/project checker on this admission; no legacy fallback. */
   createPersonChecker(admission: TaskAuthorityAdmission): (task: DeveloperTaskRecord, developerId: string) => Promise<TaskPersonCheck>;
   /** Fresh Slack channel type/member read. Usage counts against the same admission as identity proof. */
-  readChannelInfo(input: { teamId: string; channelId: string; abortSignal: AbortSignal }): Promise<{ isPrivate: boolean; botIsMember: boolean; slackCallsUsed: number }>;
+  readChannelInfo(input: { teamId: string; channelId: string; slackCallsLimit: number; deadlineAt: number; abortSignal: AbortSignal }): Promise<{ isPrivate: boolean; botIsMember: boolean; slackCallsUsed: number }>;
   /** Storage-neutral conditional create in a separately retained attempts store. It must condition on the supplied State snapshot; it cannot write State. */
   beginReceipt(input: {
     receipt: TaskPersonInviteExecutionReceipt;
@@ -51,7 +53,7 @@ export interface TaskPersonInviteHandlerPorts {
     { kind: "accepted" } | { kind: "already_in_channel" } | { kind: "definite_rejection"; reason: "scope_unavailable" | "effect_rejected" }
   >;
   /** Fresh membership read for Slack's already_in_channel response. */
-  targetIsMember(input: { teamId: string; channelId: string; slackUserId: string; abortSignal: AbortSignal }): Promise<{ isMember: boolean; slackCallsUsed: number }>;
+  targetIsMember(input: { teamId: string; channelId: string; slackUserId: string; slackCallsLimit: number; deadlineAt: number; abortSignal: AbortSignal }): Promise<{ isMember: boolean; slackCallsUsed: number }>;
   configuration: {
     peopleChangesEnabled: boolean;
     publicInvitationsEnabled: boolean;
@@ -95,7 +97,8 @@ function validTask(row: Record<string, unknown> | undefined, taskId: string): ro
   return row !== undefined && row.pk === `DEVTASK#${taskId}` && row.sk === "META" && row.entityType === "DEVELOPER_TASK"
     && row.taskId === taskId && HEX64.test(String(row.developerId)) && typeof row.project === "string" && row.project.length > 0
     && row.closedAt === undefined && isRecord(row.workflow) && Number.isSafeInteger(row.workflow.revision)
-    && typeof row.workflow.stage === "string" && row.workflow.stage !== "CLOSED" && row.workflow.stage !== "MERGED"
+    && WorkflowStageSchema.safeParse(row.workflow.stage).success && row.workflow.stage !== "CLOSED" && row.workflow.stage !== "MERGED"
+    && WorkflowStateSchema.safeParse(row.workflow.state).success && row.workflow.state !== "COMPLETE"
     && isRecord(row.share) && SlackTeamIdSchema.safeParse(row.share.teamId).success
     && SlackChannelIdSchema.safeParse(row.share.channelId).success && typeof row.share.threadTs === "string";
 }
@@ -239,10 +242,16 @@ export function createTaskPersonInviteHandler(ports: TaskPersonInviteHandlerPort
       if (!targetCheck.eligible || !samePrincipal(targetCheck, targetRegistry, proposal.targetDeveloperId)) {
         return resultFor(request, "failed", { reason: "authorization_refused" });
       }
+      const channelCallsLimit = slackCalls;
+      if (channelCallsLimit <= 0) {
+        authority.close();
+        return resultFor(request, "failed", { reason: "capability_refused" });
+      }
       const channel = await ports.readChannelInfo({ teamId: proposal.invitationTeamId, channelId: proposal.invitationChannelId,
+        slackCallsLimit: channelCallsLimit, deadlineAt: authorityDeadline,
         abortSignal: AbortSignal.timeout(Math.max(1, authority.remainingMs())) });
       if (typeof channel.isPrivate !== "boolean" || typeof channel.botIsMember !== "boolean"
-        || !Number.isSafeInteger(channel.slackCallsUsed) || channel.slackCallsUsed < 1) throw unavailable();
+        || !Number.isSafeInteger(channel.slackCallsUsed) || channel.slackCallsUsed !== 1 || channel.slackCallsUsed > channelCallsLimit) throw unavailable();
       authority.recordSlackUsage(channel.slackCallsUsed);
       authority.assertOpen();
       channelIsPrivate = channel.isPrivate;
@@ -281,24 +290,34 @@ export function createTaskPersonInviteHandler(ports: TaskPersonInviteHandlerPort
     if (!isRecord(begin) || !(begin.kind === "created" || begin.kind === "existing" || begin.kind === "conflict")) {
       return resultFor(request, "unknown", { reason: "receipt_conflict" });
     }
+    const persistenceSignal = () => AbortSignal.timeout(Math.max(1, totalDeadline - ports.now()));
+    const finish = async (status: "ACCEPTED" | "FAILED" | "UNKNOWN", reason?: TaskPersonInviteOutcome["reason"]): Promise<boolean> => {
+      if (ports.now() >= totalDeadline) return false;
+      try {
+        const saved = await ports.finishReceipt({ executionReceiptId: receiptId, claimDigest: request.claimDigest, status,
+          ...(reason === undefined ? {} : { reason }), abortSignal: persistenceSignal() });
+        return saved && ports.now() < totalDeadline;
+      } catch { return false; }
+    };
     if (begin.kind === "conflict") return resultFor(request, "failed", { reason: "receipt_conflict" });
     if (begin.kind === "existing") {
       const existing = TaskPersonInviteExecutionReceiptSchema.safeParse(begin.receipt);
       if (!existing.success || existing.data.claimDigest !== request.claimDigest || existing.data.taskId !== request.taskId
-        || existing.data.requestId !== request.requestId || existing.data.targetDeveloperId !== proposal.targetDeveloperId) {
+        || existing.data.pk !== `TASK_INVITE#${request.taskId}#${request.requestId}` || existing.data.sk !== "META"
+        || existing.data.requestId !== request.requestId || existing.data.actorDeveloperId !== proposal.callerDeveloperId
+        || existing.data.targetDeveloperId !== proposal.targetDeveloperId || existing.data.teamId !== proposal.invitationTeamId
+        || existing.data.channelId !== proposal.invitationChannelId || existing.data.slackUserId !== proposal.invitationSlackUserId) {
         return resultFor(request, "failed", { reason: "receipt_conflict" });
       }
       if (existing.data.status === "ACCEPTED") return resultFor(request, "accepted", { receiptId: existing.data.executionReceiptId });
       if (existing.data.status === "FAILED") return resultFor(request, "failed", { receiptId: existing.data.executionReceiptId, reason: existing.data.reason ?? "effect_rejected" });
       return resultFor(request, "unknown", { receiptId: existing.data.executionReceiptId, reason: "effect_unknown" });
     }
-
-    const finish = async (status: "ACCEPTED" | "FAILED" | "UNKNOWN", reason?: TaskPersonInviteOutcome["reason"]): Promise<boolean> => {
-      try {
-        return await ports.finishReceipt({ executionReceiptId: receiptId, claimDigest: request.claimDigest, status,
-          ...(reason === undefined ? {} : { reason }), abortSignal: effectSignal() });
-      } catch { return false; }
-    };
+    if (ports.now() >= authorityDeadline) {
+      const saved = await finish("FAILED", "authorization_refused");
+      return saved ? resultFor(request, "failed", { receiptId, reason: "authorization_refused" })
+        : resultFor(request, "unknown", { receiptId, reason: "effect_unknown" });
+    }
     const inviteClassStillEnabled = channelIsPrivate
       ? ports.configuration.privateInvitationsEnabled === true && ports.configuration.privateInviteCapability === true
       : ports.configuration.publicInvitationsEnabled === true && ports.configuration.publicInviteCapability === true;
@@ -338,7 +357,7 @@ export function createTaskPersonInviteHandler(ports: TaskPersonInviteHandlerPort
       }
       try {
         const member = await ports.targetIsMember({ teamId: proposal.invitationTeamId, channelId: proposal.invitationChannelId,
-          slackUserId: proposal.invitationSlackUserId, abortSignal: effectSignal() });
+          slackUserId: proposal.invitationSlackUserId, slackCallsLimit: slackCalls, deadlineAt: effectDeadline, abortSignal: effectSignal() });
         if (ports.now() < effectDeadline && ports.now() < totalDeadline && typeof member.isMember === "boolean"
           && Number.isSafeInteger(member.slackCallsUsed) && member.slackCallsUsed > 0 && member.slackCallsUsed <= slackCalls && member.isMember) {
           slackCalls -= member.slackCallsUsed;

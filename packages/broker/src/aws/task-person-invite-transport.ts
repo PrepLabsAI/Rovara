@@ -30,17 +30,19 @@ export function taskPersonInviteThroughLambda(input: { invoke: TaskPersonInviteI
       };
     }
     const value = request.data;
-    const remaining = Math.min(value.admission.deadlineAt - input.now(), value.admission.remainingMs);
+    const startedAt = input.now();
+    const effectiveDeadline = Math.min(value.admission.deadlineAt, startedAt + value.admission.remainingMs);
+    const remaining = effectiveDeadline - startedAt;
     if (remaining <= 0) return unknown(value);
     try {
       const reply = await input.invoke({ invocationType: "RequestResponse", maxAttempts: 1, payload: Buffer.from(JSON.stringify(value), "utf8"),
         abortSignal: AbortSignal.timeout(remaining) });
-      if (input.now() >= value.admission.deadlineAt || reply.FunctionError !== undefined || reply.Payload === undefined) return unknown(value);
+      if (input.now() >= effectiveDeadline || reply.FunctionError !== undefined || reply.Payload === undefined) return unknown(value);
       const decoded: unknown = JSON.parse(Buffer.from(reply.Payload).toString("utf8"));
       const outcome = TaskPersonInviteOutcomeSchema.safeParse(decoded);
       if (!outcome.success || outcome.data.taskId !== value.taskId || outcome.data.requestId !== value.requestId
         || outcome.data.claimDigest !== value.claimDigest || outcome.data.admissionId !== value.admission.id
-        || input.now() >= value.admission.deadlineAt) return unknown(value);
+        || input.now() >= effectiveDeadline) return unknown(value);
       return outcome.data;
     } catch {
       return unknown(value);
