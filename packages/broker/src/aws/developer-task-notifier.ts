@@ -52,6 +52,7 @@ export interface NotifierDependencies {
   log(entry: Record<string, unknown>): void;
   /** One `SlackDeliveryFailed` count (spec 015 FR-045's alarm sums it). */
   deliveryFailed(): void;
+  peopleChangesEnabled?: boolean;
 }
 
 /** The start message is still being posted: a reply waits for its thread (C9). */
@@ -69,7 +70,65 @@ class CanvasCloseoutPending extends Error {
 /** 30, 60, 120, 240, 480, then 900 seconds, by the delivery attempt that failed. */
 export const retryDelaySeconds = (attempt: number): number => Math.min(900, 30 * 2 ** Math.max(0, Math.min(attempt - 1, 5)));
 
-const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "canvas_closeout", "admin_change_dm", "admin_change_outcome", "admin_change_expiry", "workflow_refusal", "comment_nudge", "chatgpt_fallback"]);
+const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "canvas_closeout", "admin_change_dm", "admin_change_outcome", "admin_change_expiry", "workflow_refusal", "comment_nudge", "people_dm", "chatgpt_fallback"]);
+
+class PeopleDeliveryRetry extends Error {
+  constructor(readonly attempt: number) { super("People notification delivery should retry"); this.name = "PeopleDeliveryRetry"; }
+}
+
+async function deliverPeopleNotification(deps: NotifierDependencies, notice: Notice): Promise<string> {
+  if (notice.taskId === undefined || notice.peopleRequestId === undefined) return "invalid";
+  const key = { pk: `DEVTASK#${notice.taskId}`, sk: `PEOPLE_NOTIFY#${notice.peopleRequestId}` };
+  const row = await getItem<Record<string, unknown>>(deps, key);
+  if (row === undefined || row.entityType !== "TASK_PEOPLE_NOTIFICATION" || row.taskId !== notice.taskId || row.requestId !== notice.peopleRequestId
+    || typeof row.slackUserId !== "string" || typeof row.targetDeveloperId !== "string" || typeof row.role !== "string"
+    || typeof row.attempts !== "number" || typeof row.status !== "string") return "invalid";
+  if (row.status === "SENT" || row.status === "UNKNOWN" || row.status === "CANCELLED") return row.status.toLowerCase();
+  if (deps.peopleChangesEnabled !== true) {
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET #status = :cancelled", ConditionExpression: "#status = :status", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":cancelled": "CANCELLED", ":status": row.status } })).catch(() => undefined);
+    return "suppressed";
+  }
+  const people = await getItem<{ revision?: number; people?: Array<{ developerId?: string; role?: string }> }>(deps, { pk: `DEVTASK#${notice.taskId}`, sk: "PEOPLE" });
+  if (!Array.isArray(people?.people) || !people.people.some((person) => person.developerId === row.targetDeveloperId && person.role === row.role && row.role !== "denied")) {
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET #status = :cancelled", ConditionExpression: "#status = :status", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":cancelled": "CANCELLED", ":status": row.status } })).catch(() => undefined);
+    return "cancelled";
+  }
+  if (row.status === "SENDING") {
+    if (typeof row.claimUntil === "number" && row.claimUntil >= deps.now()) return "claimed";
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET #status = :unknown", ConditionExpression: "#status = :sending", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":unknown": "UNKNOWN", ":sending": "SENDING" } })).catch(() => undefined);
+    return "unknown";
+  }
+  const attempt = row.attempts + 1;
+  if (attempt > 3) return "failed";
+  await deps.documentClient.send(new UpdateCommand({
+    TableName: deps.tableName, Key: key,
+    UpdateExpression: "SET #status = :sending, attempts = :attempt, claimUntil = :until",
+    ConditionExpression: "#status = :expected AND attempts = :previous",
+    ExpressionAttributeNames: { "#status": "status" },
+    ExpressionAttributeValues: { ":sending": "SENDING", ":expected": row.status, ":attempt": attempt, ":previous": row.attempts, ":until": deps.now() + 30_000 },
+  }));
+  const base = deps.reviewUrlBase;
+  const taskUrl = base === undefined ? undefined : new URL(`/review/${notice.taskId}/task`, base).href;
+  const text = `You now have the ${row.role} role on an AgentX task.${taskUrl === undefined ? "" : ` ${taskUrl}`}`;
+  try {
+    const posted = await deps.post({ channel: row.slackUserId, text });
+    try {
+      await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key,
+        UpdateExpression: "SET #status = :sent, postedTs = :ts, postedChannel = :channel REMOVE claimUntil",
+        ConditionExpression: "#status = :sending AND attempts = :attempt", ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":sent": "SENT", ":sending": "SENDING", ":attempt": attempt, ":ts": posted.ts, ":channel": posted.channel ?? row.slackUserId } }));
+      return "sent";
+    } catch {
+      await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET #status = :unknown REMOVE claimUntil", ConditionExpression: "#status = :sending", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":unknown": "UNKNOWN", ":sending": "SENDING" } })).catch(() => undefined);
+      return "unknown";
+    }
+  } catch (error) {
+    const uncertain = postMayHaveLanded(error);
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key, UpdateExpression: "SET #status = :next REMOVE claimUntil", ConditionExpression: "#status = :sending AND attempts = :attempt", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":next": uncertain ? "UNKNOWN" : "FAILED", ":sending": "SENDING", ":attempt": attempt } })).catch(() => undefined);
+    if (uncertain || attempt >= 3) return uncertain ? "unknown" : "failed";
+    throw new PeopleDeliveryRetry(attempt);
+  }
+}
 
 /**
  * #217: how long after a change's expiry its message is edited. The broker refuses a claim at or
@@ -739,7 +798,7 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
   const page = taskPageUrl(deps, task.taskId);
   // A reopened pull request is said once per reopening (its step's revision), even though its merge step was said before.
   const reopened = reopenedPullRequests !== undefined && workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING";
-  const context: WorkflowMessageContext = { taskId: task.taskId, ownerSlackUserId: task.slackUserId, workflow,
+  const context: WorkflowMessageContext = { taskId: task.taskId, ownerSlackUserId: task.slackUserId, workflow, peopleEnabled: deps.peopleChangesEnabled === true,
     ...(page === undefined ? {} : { findingsUrl: `${page}#findings`, taskPageUrl: page }), ...(reopened ? { pullRequestReopened: reopenedPullRequests } : {}) };
   let approval: WorkflowArtifact | undefined;
   if (workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
@@ -1419,10 +1478,17 @@ export function createNotifierHandler(deps: NotifierDependencies) {
         continue;
       }
       try {
-        const outcome = notice.kind === "admin_change_dm" || notice.kind === "admin_change_outcome" || notice.kind === "admin_change_expiry" ? await deliverAdminChange(deps, notice) : await deliver(deps, notice);
+        const outcome = notice.kind === "people_dm" ? await deliverPeopleNotification(deps, notice)
+          : notice.kind === "admin_change_dm" || notice.kind === "admin_change_outcome" || notice.kind === "admin_change_expiry" ? await deliverAdminChange(deps, notice) : await deliver(deps, notice);
         deps.log({ event: "developer_notifier.notice", kind: notice.kind, noticeId: notice.id, outcome });
       } catch (error) {
         const reason = error instanceof SlackPostError ? error.slackError : errorName(error);
+        if (error instanceof PeopleDeliveryRetry) {
+          try { await deps.retryLater(record.receiptHandle, error.attempt === 1 ? 30 : 60); } catch (delayError) { deps.log({ event: "developer_notifier.delay_failed", error: errorName(delayError) }); }
+          deps.log({ event: "developer_notifier.retry", kind: notice.kind, noticeId: notice.id, attempt: error.attempt, reason });
+          batchItemFailures.push({ itemIdentifier: record.messageId });
+          continue;
+        }
         if (notice.kind === "canvas_closeout" || deps.now() - Date.parse(notice.at) < SHARE_DELIVERY_WINDOW_MS) {
           const attempt = Number(record.attributes?.ApproximateReceiveCount ?? "1");
           try {
@@ -1673,6 +1739,7 @@ function createAwsNotifierHandler() {
       _aws: { Timestamp: Date.now(), CloudWatchMetrics: [{ Namespace: requiredEnvironment("AGENTX_METRICS_NAMESPACE"), Dimensions: [[]], Metrics: [{ Name: "SlackDeliveryFailed", Unit: "Count" }] }] },
       component: "developer-task-notifier", event: "metric", SlackDeliveryFailed: 1,
     })),
+    peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true",
   });
 }
 

@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { PlanDocument } from "@agentx/contracts";
 import { createTaskWeb, type TaskDocumentEntry, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
 import { TASK_PAGE_DECIDING_COPY, TASK_PAGE_DECIDING_SCRIPT } from "../../packages/broker/src/aws/task-page-assets.js";
+import { renderTaskPeopleConfirmation, renderTaskPeoplePanel } from "../../packages/broker/src/aws/task-people-page-view.js";
 import type { PageCommentView } from "../../packages/broker/src/aws/plan-page/comments.js";
 import { fakeStorage, makeEvent, parseHtml, type FakeDocument, type FakeElement } from "../support/fake-dom.js";
 import { planDocument } from "../support/plan-documents.js";
@@ -71,12 +72,13 @@ function boot(html: string, options: { storage?: ReturnType<typeof fakeStorage>;
   const timers: Array<{ fn: () => void; at: number; id: number }> = [];
   const clock = { now: 1_000_000 };
   const reloads: number[] = [];
+  const navigations: string[] = [];
   let uuids = 0;
   let timerId = 0;
   const respond = options.respond ?? (() => ({ status: 200, body: {} }));
   const sandbox: Record<string, unknown> = {
     document,
-    location: { hash: "", search: "", pathname: `/review/${taskId}/task`, reload: () => { reloads.push(clock.now); } },
+    location: { hash: "", search: "", pathname: `/review/${taskId}/task`, reload: () => { reloads.push(clock.now); }, assign: (value: string) => { navigations.push(value); } },
     setTimeout: (fn: unknown, ms: number) => {
       if (typeof fn !== "function") throw new Error("string timers are not allowed");
       timerId += 1;
@@ -120,7 +122,7 @@ function boot(html: string, options: { storage?: ReturnType<typeof fakeStorage>;
     clock.now = until;
   };
   const byId = (name: string) => document.getElementById(name)!;
-  return { document, storage, sent, pending, timers, clock, reloads, settle, advance, byId };
+  return { document, storage, sent, pending, timers, clock, reloads, navigations, settle, advance, byId };
 }
 type Page = ReturnType<typeof boot>;
 
@@ -129,6 +131,61 @@ const posts = (page: Page, path: string) => page.sent.filter((entry) => entry.me
 const commentBoxes = (page: Page) => page.byId("decide-comments-list").querySelectorAll("input[type=checkbox]");
 
 describe("the deciding and commenting script", () => {
+  it("submits a server-bound People role proposal and navigates only to its validated local confirmation", async () => {
+    const personId = id(80), requestId = id(81);
+    const panel = renderTaskPeoplePanel(taskId, { revision: 4, orphaned: false, canManage: true, canTakeOwnership: false,
+      people: [{ personId, name: "Lee", role: "commenter", you: false, effectiveRole: "commenter" }] });
+    const html = withCapabilities((await pageHtml()).replace("</main>", `${panel}</main>`), {
+      canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 4,
+    });
+    const page = boot(html, { respond: (entry) => entry.url.endsWith("/api/people/role")
+      ? { status: 202, body: { status: "PENDING", requestId, confirmationUrl: "https://untrusted.example/ignored", expiresAt: "2026-10-12T12:10:00.000Z" } }
+      : { status: 200, body: {} } });
+    const form = page.document.querySelector("[data-people-role-form]")!;
+    const select = form.querySelector("select")!;
+    select.value = "viewer";
+    form.querySelector("button")!.click();
+    await page.settle();
+    expect(posts(page, "/api/people/role")[0]!.body).toEqual({ requestId: id(1).replace(/^00000000-0000-4000-8000-/, "aaaaaaaa-aaaa-4aaa-8aaa-"), expectedPeopleRevision: 4, personId, role: "viewer" });
+    expect(page.navigations).toEqual([`/review/${taskId}/task/people/confirm/${requestId}`]);
+  });
+
+  it("suppresses a late People callback after current access is demoted", async () => {
+    const personId = id(82);
+    const panel = renderTaskPeoplePanel(taskId, { revision: 4, orphaned: false, canManage: true, canTakeOwnership: false,
+      people: [{ personId, name: "Lee", role: "commenter", you: false, effectiveRole: "commenter" }] });
+    const html = withCapabilities((await pageHtml()).replace("</main>", `${panel}</main>`), {
+      canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 4,
+    });
+    const page = boot(html, { respond: (entry) => {
+      if (entry.url.endsWith("/api/people/role")) return undefined;
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [], commentSeq: 3, csrf: "n".repeat(43),
+        canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 5 } };
+      return { status: 200, body: {} };
+    } });
+    const button = page.document.querySelector("[data-people-role-form] button")!;
+    button.click();
+    await page.advance(20_000);
+    expect(button.disabled).toBe(true);
+    page.pending[0]!({ status: 200, body: { status: "COMMITTED", view: {} } });
+    await page.settle();
+    expect(page.reloads).toEqual([]);
+    expect(page.navigations).toEqual([]);
+  });
+
+  it("confirms only the request named by the confirmation control", async () => {
+    const requestId = id(83);
+    const confirmation = renderTaskPeopleConfirmation({ taskId, requestId, expiresAt: "2026-10-12T12:10:00.000Z", kind: "takeOwnership" });
+    const html = withCapabilities((await pageHtml()).replace("</main>", `${confirmation}</main>`), {
+      canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: true, peopleRevision: 4,
+    });
+    const page = boot(html, { respond: (entry) => entry.url.endsWith(`/api/people/requests/${requestId}/confirm`)
+      ? { status: 200, body: { status: "COMMITTED", view: {} } } : { status: 200, body: {} } });
+    page.document.querySelector("[data-people-confirm]")!.click();
+    await page.settle();
+    expect(posts(page, `/api/people/requests/${requestId}/confirm`)[0]!.body).toEqual({ requestId });
+    expect(page.reloads).toHaveLength(1);
+  });
   it("applies a current owner-to-viewer projection while keeping this task's unsent drafts", async () => {
     const storage = fakeStorage();
     const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 4 });

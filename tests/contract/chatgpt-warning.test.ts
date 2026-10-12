@@ -43,10 +43,37 @@ function harness() {
   const end = async () => {
     await db.send(new UpdateCommand({ TableName: "state", Key: { pk: `WORKSPACE#${WS}`, sk: `OPERATION#${OP}` }, UpdateExpression: "SET #status = :done", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":done": "SUCCEEDED" } }));
   };
-  return { db, slack, logs, pump, operation, end };
+  return { db, slack, logs, pump, operation, end, handle };
 }
 
 describe("the warning a ChatGPT task's thread gets when it fell back (#342)", () => {
+  it("routes fallback and People notices independently when People delivery is off", async () => {
+    const h = harness();
+    const taskId = "33333333-3333-4333-8333-333333333333";
+    const requestId = "44444444-4444-4444-8444-444444444444";
+    h.operation({ status: "SUCCEEDED", requestedBy: { teamId: THREAD.teamId, userId: MAYA },
+      chatgptDeveloperId: developerIdForSlackUser(MAYA), chatgptThread: THREAD, chatgptFallback: "limit" });
+    h.db.set({ pk: `DEVTASK#${taskId}`, sk: `PEOPLE_NOTIFY#${requestId}`, entityType: "TASK_PEOPLE_NOTIFICATION", schemaVersion: 1,
+      taskId, requestId, targetDeveloperId: "d".repeat(64), slackUserId: TEAMMATE, role: "viewer", peopleRevision: 1,
+      status: "PENDING", attempts: 0, createdAt: new Date().toISOString() });
+    const at = new Date().toISOString();
+    const notices: Notice[] = [
+      { id: `${taskId}:people:${requestId}`, kind: "people_dm", taskId, peopleRequestId: requestId, at },
+      { id: `${OP}:chatgpt_fallback`, kind: "chatgpt_fallback", workspaceId: WS, operationId: OP, at },
+    ];
+
+    await h.handle({ Records: notices.map((notice, index) => ({ eventSource: "aws:sqs", messageId: `coexist-${index}`,
+      receiptHandle: `coexist-${index}`, body: JSON.stringify(notice), attributes: { ApproximateReceiveCount: "1" } })) });
+
+    expect(h.db.get(`DEVTASK#${taskId}`, `PEOPLE_NOTIFY#${requestId}`)).toMatchObject({ status: "CANCELLED" });
+    expect(h.slack.posts).toEqual([expect.objectContaining({ channel: THREAD.channelId, threadTs: THREAD.threadTs,
+      text: chatGptFallbackText("limit", MAYA) })]);
+    expect(h.logs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: "people_dm", outcome: "suppressed" }),
+      expect.objectContaining({ kind: "chatgpt_fallback", outcome: "posted" }),
+    ]));
+  });
+
   it("is posted once in the Slack thread the task was asked from, to the plan's owner, when the task ends", async () => {
     const h = harness();
     h.operation({ requestedBy: { teamId: THREAD.teamId, userId: MAYA }, chatgptDeveloperId: developerIdForSlackUser(MAYA), chatgptThread: THREAD });

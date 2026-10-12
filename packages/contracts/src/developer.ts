@@ -166,6 +166,47 @@ export const TaskPersonProofResponseSchema = z.discriminatedUnion("ok", [
 ]);
 export type TaskPersonProofResponse = z.infer<typeof TaskPersonProofResponseSchema>;
 
+/** Internal complete fresh channel directory for Task People. It is never an HTTP route. */
+export const TaskChannelPeopleRequestSchema = z.object({
+  kind: z.literal("task-channel-people"),
+  channelIds: z.array(SlackChannelIdSchema).min(1).max(CHANNEL_MEMBERS_MAX_CHANNELS),
+}).strict();
+export type TaskChannelPeopleRequest = z.infer<typeof TaskChannelPeopleRequestSchema>;
+export const TaskChannelPeopleResponseSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), users: z.array(z.object({ id: SlackUserIdSchema, teamId: SlackTeamIdSchema, name: z.string().min(1).max(80), memberOf: z.array(SlackChannelIdSchema).max(CHANNEL_MEMBERS_MAX_CHANNELS) }).strict()).max(100) }).strict(),
+  z.object({ ok: z.literal(false), error: z.enum(["invalid_request", "slack_unavailable", "capacity_exceeded"]) }).strict(),
+]);
+export type TaskChannelPeopleResponse = z.infer<typeof TaskChannelPeopleResponseSchema>;
+
+/** E display admission: a strict, read-only metered envelope over the unchanged proof/list contracts. */
+const TaskPeopleDisplayAdmissionSchema = z.object({
+  version: z.literal(1),
+  deadlineAt: z.number().int().nonnegative(),
+  slackCallsLimit: z.number().int().min(1).max(100),
+}).strict();
+export const TaskPeopleDisplayReadRequestSchema = z.discriminatedUnion("operation", [
+  z.object({
+    kind: z.literal("task-people-display-read"), operation: z.literal("proof"),
+    admission: TaskPeopleDisplayAdmissionSchema,
+    request: TaskPersonProofRequestSchema,
+  }).strict(),
+  z.object({
+    kind: z.literal("task-people-display-read"), operation: z.literal("directory"),
+    admission: TaskPeopleDisplayAdmissionSchema,
+    request: TaskChannelPeopleRequestSchema,
+    remainingNewIdentities: z.number().int().min(0).max(100),
+    knownNativeSlackUserIds: z.array(SlackUserIdSchema).max(100).refine((items) => new Set(items).size === items.length),
+  }).strict(),
+]);
+export type TaskPeopleDisplayReadRequest = z.infer<typeof TaskPeopleDisplayReadRequestSchema>;
+
+const TaskPeopleDisplayUsageSchema = z.object({ version: z.literal(1), slackCallsUsed: z.number().int().min(0).max(100) }).strict();
+export const TaskPeopleDisplayReadResponseSchema = z.discriminatedUnion("operation", [
+  z.object({ operation: z.literal("proof"), admission: TaskPeopleDisplayUsageSchema, result: TaskPersonProofResponseSchema }).strict(),
+  z.object({ operation: z.literal("directory"), admission: TaskPeopleDisplayUsageSchema, result: TaskChannelPeopleResponseSchema }).strict(),
+]);
+export type TaskPeopleDisplayReadResponse = z.infer<typeof TaskPeopleDisplayReadResponseSchema>;
+
 /** R10: the names and privacy of bound channels, read by DeveloperIdentity with the bot token. */
 export const ChannelInfoRequestSchema = z
   .object({

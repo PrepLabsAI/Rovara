@@ -3,14 +3,16 @@
 // requests and its history. GET only, no forms, and one small script (by nonce) that opens and scrolls to a deep
 // link and, while the page is open, asks this origin's `/task/status` whether the task moved on. Every value is escaped; model and reviewer text is plain text in the page, so a link in it is never a link.
 import { randomBytes } from "node:crypto";
-import { redactText, type PlanDocument, type PlanEvidenceBundle, type TaskComment, type TaskSuggestion } from "@agentx/contracts";
+import { redactText, type PlanDocument, type PlanEvidenceBundle, type TaskComment, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskSuggestion } from "@agentx/contracts";
 import type { TaskRole } from "../developer/task-access.js";
+import type { TaskPeopleView } from "../developer/task-people.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { checksAnchor, renderPlanDocument, type PlanAnchor } from "./plan-page/render-plan.js";
 import { renderThreads, type PageCommentView, type PageSuggestionView } from "./plan-page/comments.js";
 import { TASK_PAGE_DECIDING_SCRIPT, TASK_PAGE_SCRIPT, TASK_PAGE_STYLE } from "./task-page-assets.js";
 import { TASK_PAGE_API_PREFIX } from "./task-web-api.js";
+import { renderTaskPeopleConfirmation, renderTaskPeoplePanel, renderTaskPeopleUnavailable } from "./task-people-page-view.js";
 import {
   CSRF_COOKIE, SESSION_COOKIE, canonicalGithubUrl, csrfCookie, escapeHtml, isCsrfToken, parseCookie, safeResponse, signInLocation, type WebResponse,
 } from "./web-session.js";
@@ -74,6 +76,12 @@ export interface TaskDocumentView {
   optionalChecks?: Array<{ id: string; label: string; selected: boolean }>;
   /** Whether AgentX can answer comments on this task (started in Slack, and the Slack service is set up). */
   askAvailable?: boolean;
+  /** One coherent current People access projection for this reader. */
+  peopleRevision?: number;
+  canManagePeople?: boolean;
+  canTakeOwnership?: boolean;
+  /** The complete private People list, attached only after the view and list agree on their revision. */
+  people?: TaskPeopleView;
 }
 
 export interface TaskWebDependencies {
@@ -88,6 +96,11 @@ export interface TaskWebDependencies {
   getTaskFreshness?(caller: DeveloperCaller, taskId: string): Promise<TaskFreshness>;
   /** The page's JSON API (`/review/<task ID>/task/api/*`, see task-web-api.ts). Without it, those paths are not found. */
   api?(request: AdaptedHttpRequest, url: URL): Promise<WebResponse>;
+  getTaskPeople?(caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView>;
+  getTaskPeopleRequest?(caller: DeveloperCaller, taskId: string, requestId: string): Promise<TaskPeopleChangeResult>;
+  getTaskPeopleProposalMetadata?(caller: DeveloperCaller, taskId: string, requestId: string): Promise<TaskPeopleProposal>;
+  getTaskPersonName?(caller: DeveloperCaller, taskId: string, personId: string): Promise<string | undefined>;
+  getTaskPeopleCapabilities?(caller: DeveloperCaller, taskId: string): Promise<{ peopleRevision?: number; canManagePeople: boolean; canTakeOwnership: boolean }>;
 }
 
 /** What `/review/<task ID>/task/status` answers. */
@@ -97,6 +110,7 @@ export interface TaskFreshness { revision: number; stage: string }
 export const TASK_PAGE = /^\/review\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/task$/i;
 /** `/review/<task ID>/task/status`: where the task stands now, for the open page's "moved on" banner. */
 export const TASK_STATUS = /^\/review\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/task\/status$/i;
+export const TASK_PEOPLE_CONFIRMATION = new RegExp(`^/review/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/task/people/confirm/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$`, "i");
 const HIDDEN = new Set(["FORBIDDEN", "TASK_NOT_FOUND", "NOT_FOUND"]);
 
 /**
@@ -331,7 +345,9 @@ function pageData(view: TaskDocumentView, csrf: string): Record<string, unknown>
   };
   return {
     taskId: view.taskId, csrf, revision: view.revision ?? 0, role: access.role, canDecide: access.canDecide, canComment: access.canComment,
-    canSuggest: access.canSuggest, canAsk: access.canAsk, ...(view.askAvailable === undefined ? {} : { askAvailable: view.askAvailable }),
+    canSuggest: access.canSuggest, canAsk: access.canAsk, canRead: true, canManagePeople: view.canManagePeople === true,
+    canTakeOwnership: view.canTakeOwnership === true, ...(view.peopleRevision === undefined ? {} : { peopleRevision: view.peopleRevision }),
+    ...(view.askAvailable === undefined ? {} : { askAvailable: view.askAvailable }),
     ...(current === undefined ? {} : { current }), commentSeq: view.commentSeq ?? 0,
   };
 }
@@ -421,10 +437,21 @@ async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequ
     + (checks === undefined || checks === "" ? "" : `<section id="checks" aria-label="Checks"><h2>Checks</h2>${checks}</section>`)
     + `<section id="findings" aria-label="Review findings"><h2>Review findings</h2>${findings}</section>`
     + `<section id="pull-requests" aria-label="Pull requests"><h2>Pull requests</h2>${pullRequests}</section>`
+    + (view.people === undefined ? renderTaskPeopleUnavailable() : renderTaskPeoplePanel(view.taskId, view.people))
     + `<section id="history" aria-label="History"><h2>History</h2>${historyHtml}</section>`
     + `${decideBar(view)}</main>${decideDialog(view)}${island}<script nonce="${nonce}">${TASK_PAGE_SCRIPT}</script>`
     // The deciding and commenting script comes with the data island: only for someone who can comment or decide.
     + `${island === "" ? "" : `<script nonce="${nonce}">${TASK_PAGE_DECIDING_SCRIPT}</script>`}</body></html>`;
+}
+
+function confirmationPage(taskId: string, csrf: string, capabilities: { peopleRevision?: number; canManagePeople: boolean; canTakeOwnership: boolean }, content: string): WebResponse {
+  const nonce = randomBytes(18).toString("base64url");
+  const data = { taskId, csrf, revision: 0, role: capabilities.canManagePeople ? "owner" : "reader", canRead: true,
+    canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: capabilities.canManagePeople,
+    canTakeOwnership: capabilities.canTakeOwnership, ...(capabilities.peopleRevision === undefined ? {} : { peopleRevision: capabilities.peopleRevision }), commentSeq: 0 };
+  return htmlResponse(200, `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Review People change</title>`
+    + `<style nonce="${nonce}">${TASK_PAGE_STYLE}</style></head><body><main>${content}</main>`
+    + `<script type="application/json" id="agentx-page-data">${scriptJson(data)}</script><script nonce="${nonce}">${TASK_PAGE_DECIDING_SCRIPT}</script></body></html>`, nonce);
 }
 
 
@@ -483,7 +510,8 @@ export function createTaskWeb(deps: TaskWebDependencies): (request: AdaptedHttpR
     if (TASK_PAGE_API_PREFIX.test(url.pathname)) return deps.api === undefined ? safeResponse(404, { error: "not_found" }) : deps.api(request, url);
     const statusOf = TASK_STATUS.exec(url.pathname)?.[1];
     if (statusOf !== undefined) return taskStatus(deps, request, statusOf);
-    const taskId = TASK_PAGE.exec(url.pathname)?.[1];
+    const confirmation = TASK_PEOPLE_CONFIRMATION.exec(url.pathname);
+    const taskId = (confirmation?.[1] ?? TASK_PAGE.exec(url.pathname)?.[1])?.toLowerCase();
     if (taskId === undefined) return messagePage(404, "Not found", "This page doesn't exist.");
     if (request.method !== "GET") {
       const refused = messagePage(405, "Not allowed", "This page is read only.");
@@ -494,13 +522,46 @@ export function createTaskWeb(deps: TaskWebDependencies): (request: AdaptedHttpR
     const caller = sessionId === undefined ? undefined : await deps.authenticateSession(sessionId);
     if (caller === undefined) {
       const redirect = safeResponse(302, "");
-      return { ...redirect, headers: { ...redirect.headers, "content-security-policy": policy(""), location: signInLocation(`/review/${taskId}/task${signInQuery(url)}`) } };
+      const returnTo = confirmation === null ? `/review/${taskId}/task${signInQuery(url)}` : url.pathname;
+      return { ...redirect, headers: { ...redirect.headers, "content-security-policy": policy(""), location: signInLocation(returnTo) } };
     }
     try {
-      const view = await deps.getTaskDocumentView(caller, taskId);
+      if (confirmation !== null) {
+        if (deps.getTaskPeopleRequest === undefined || deps.getTaskPeopleProposalMetadata === undefined || deps.getTaskPersonName === undefined || deps.getTaskPeopleCapabilities === undefined) {
+          return messagePage(404, "Not found", "This page doesn't exist.");
+        }
+        const requestId = confirmation[2]!.toLowerCase();
+        const receipt = await deps.getTaskPeopleRequest(caller, taskId, requestId);
+        if (receipt.status === "COMMITTED") return messagePage(200, "People change complete", "This People change is already complete.");
+        let proposal: TaskPeopleProposal;
+        try {
+          proposal = await deps.getTaskPeopleProposalMetadata(caller, taskId, requestId);
+        } catch (error) {
+          const raced = await deps.getTaskPeopleRequest(caller, taskId, requestId);
+          if (raced.status === "COMMITTED") return messagePage(200, "People change complete", "This People change is already complete.");
+          throw error;
+        }
+        const capabilities = await deps.getTaskPeopleCapabilities(caller, taskId);
+        const personName = proposal.kind === "role" && proposal.personId !== undefined ? await deps.getTaskPersonName(caller, taskId, proposal.personId) : undefined;
+        if (proposal.kind === "role" && (proposal.role === undefined || personName === undefined)) throw Object.assign(new Error("unavailable"), { code: "RUNTIME_UNAVAILABLE" });
+        const current = parseCookie(request.headers, CSRF_COOKIE);
+        const csrf = isCsrfToken(current) ? current : randomBytes(32).toString("base64url");
+        const response = confirmationPage(taskId, csrf, capabilities, renderTaskPeopleConfirmation(proposal.kind === "takeOwnership"
+          ? { taskId, requestId, expiresAt: proposal.expiresAt, kind: "takeOwnership" }
+          : { taskId, requestId, expiresAt: proposal.expiresAt, kind: "role", personName: personName!, role: proposal.role! }));
+        response.headers["set-cookie"] = csrfCookie(csrf);
+        return response;
+      }
+      let view = await deps.getTaskDocumentView(caller, taskId);
+      if (deps.getTaskPeople !== undefined) {
+        try {
+          const people = await deps.getTaskPeople(caller, taskId);
+          if (view.peopleRevision === people.revision) view = { ...view, people };
+        } catch { /* A complete People read is optional presentation; authority stays in the page projection. */ }
+      }
       const nonce = randomBytes(18).toString("base64url");
       // Someone who can comment or decide gets the CSRF cookie the page's API checks; a valid one is kept as it is.
-      const acts = view.access?.canComment === true || view.access?.canDecide === true;
+      const acts = view.access !== undefined;
       const current = parseCookie(request.headers, CSRF_COOKIE);
       const csrf = !acts ? undefined : isCsrfToken(current) ? current : randomBytes(32).toString("base64url");
       const response = htmlResponse(200, await page(view, nonce, pageRequest(url), csrf), nonce);
