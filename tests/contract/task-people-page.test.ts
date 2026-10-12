@@ -105,11 +105,18 @@ describe("private task People page adapters", () => {
       reviewExpiresAt: Math.floor(Date.now() / 1000) + 600 });
     const coOwnerView = (await routed("GET", "/api/people", undefined, targetSessionId)).json as unknown as TaskPeopleView;
     const creatorPerson = coOwnerView.people.find((entry) => entry.you === false && entry.name === creator.name)!;
+    const pendingCreatorRequestId = randomUUID();
+    expect((await routed("POST", "/api/people/role", { requestId: pendingCreatorRequestId, expectedPeopleRevision: coOwnerView.revision,
+      personId: target.personId, role: "viewer" })).statusCode).toBe(202);
+    const beforeForeignConfirm = harness.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT").length;
+    expect((await routed("POST", `/api/people/requests/${pendingCreatorRequestId}/confirm`, { requestId: pendingCreatorRequestId }, targetSessionId)).statusCode).toBe(404);
+    expect(harness.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(beforeForeignConfirm);
     const coOwnerRequestId = randomUUID();
     expect((await routed("POST", "/api/people/role", { requestId: coOwnerRequestId, expectedPeopleRevision: coOwnerView.revision,
       personId: creatorPerson.personId, role: "viewer" }, targetSessionId)).statusCode).toBe(202);
     expect((await routed("POST", `/api/people/requests/${coOwnerRequestId}/confirm`, { requestId: coOwnerRequestId }, targetSessionId)).statusCode).toBe(200);
     expect((harness.db.get(`DEVTASK#${realTaskId}`, "META") as { developerId: string }).developerId).toBe(creator.developerId);
+    expect((await routed("POST", `/api/people/requests/${pendingCreatorRequestId}/confirm`, { requestId: pendingCreatorRequestId })).statusCode).toBe(404);
     const page = await routed("GET", "", undefined, targetSessionId);
     expect(page.statusCode, page.body).toBe(200);
     expect(page.body).toContain("Lee Park made The task owner viewer");
@@ -118,19 +125,46 @@ describe("private task People page adapters", () => {
     expect(replay.statusCode, replay.body).toBe(200);
     expect(replay.json).toEqual(confirmed.json);
     expect(harness.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(afterCoOwnerEvents);
+    const replayPost = await routed("POST", `/api/people/requests/${roleRequestId}/confirm`, { requestId: roleRequestId });
+    expect(replayPost.statusCode, replayPost.body).toBe(200);
+    expect(replayPost.json).toEqual(confirmed.json);
+    expect(harness.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(afterCoOwnerEvents);
+
+    let malformedSubject = "";
+    for (let index = 0; index < 100; index += 1) {
+      const slackUserId = `U0HIST${String(index).padStart(3, "0")}`;
+      const developerId = developerIdForSlackUser(slackUserId);
+      const retainedPersonId = randomUUID();
+      const createdAt = new Date().toISOString();
+      harness.db.set({ pk: `DEVTASK#${realTaskId}`, sk: `PERSON#${retainedPersonId}`, schemaVersion: 1, personId: retainedPersonId,
+        developerId, slackUserId, name: `Former person ${index}`, method: "slack", issuer: "https://slack.com", subject: slackUserId, createdAt });
+      harness.db.set({ pk: `DEVTASK#${realTaskId}`, sk: `PERSON_SUBJECT#${developerId}`, schemaVersion: 1, personId: retainedPersonId, developerId, createdAt });
+      if (index === 99) malformedSubject = developerId;
+    }
+    expect((await routed("GET", "/api/state", undefined, targetSessionId)).statusCode).toBe(200);
+    const retainedHistory = await routed("GET", "", undefined, targetSessionId);
+    expect(retainedHistory.statusCode, retainedHistory.body).toBe(200);
+    expect(retainedHistory.body).toContain("Lee Park made The task owner viewer");
+    harness.db.set({ ...(harness.db.get(`DEVTASK#${realTaskId}`, `PERSON_SUBJECT#${malformedSubject}`)!), personId: randomUUID() });
+    const genericHistory = await routed("GET", "", undefined, targetSessionId);
+    expect(genericHistory.statusCode, genericHistory.body).toBe(200);
+    expect(genericHistory.body).toContain("A task owner made The task owner viewer");
   });
 
   it("projects People through the session caller and accepts only strict route-bound confirmations", async () => {
     const calls: Array<{ name: string; who: string; value?: unknown }> = [];
     const committed: TaskPeopleChangeResult = { status: "COMMITTED", view: people };
     const pending: TaskPeopleChangeResult = { status: "PENDING", requestId, confirmationUrl: `${origin}/review/${taskId}/task/people/confirm/${requestId}`, expiresAt: "2026-10-12T12:10:00.000Z" };
-    const api = createTaskWebApi({
+    const baseDependencies = {
       origin, authenticateSession: async () => caller,
       taskState: async () => ({ revision: 4, waiting: true, stage: "Coding plan", documents: [], commentSeq: 0,
         peopleRevision: 7, canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false }),
       listComments: async () => ({ comments: [] }), createComment: async () => ({ comment: {} as never }),
       editComment: async () => ({ comment: {} as never }), deleteComment: async () => ({ comment: {} as never }),
       setSuggestion: async () => undefined, decide: async () => ({ revision: 5 }),
+    };
+    const api = createTaskWebApi({
+      ...baseDependencies,
       getPeople: async (who) => (calls.push({ name: "get", who: who.developerId }), people),
       proposePeopleRole: async (who, _task, value) => (calls.push({ name: "role", who: who.developerId, value }), pending),
       proposeOwnership: async () => committed,
@@ -145,8 +179,17 @@ describe("private task People page adapters", () => {
     expect(calls).toEqual([
       { name: "get", who: caller.developerId },
       { name: "role", who: caller.developerId, value: { requestId, expectedPeopleRevision: 7, personId, role: "viewer" } },
-      { name: "confirm", who: caller.developerId, value: requestId },
     ]);
+
+    const pendingCalls: string[] = [];
+    const pendingApi = createTaskWebApi({ ...baseDependencies,
+      getPeopleRequest: async () => (pendingCalls.push("receipt"), pending),
+      confirmPeopleRequest: async () => (pendingCalls.push("confirm"), committed),
+    });
+    const pendingResult = await pendingApi(request("POST", `/review/${taskId}/task/api/people/requests/${requestId}/confirm`, { requestId }),
+      new URL(`${origin}/review/${taskId}/task/api/people/requests/${requestId}/confirm`));
+    expect(pendingResult.statusCode).toBe(200);
+    expect(pendingCalls).toEqual(["receipt", "confirm"]);
   });
 
   it("renders the private People panel and a GET-only pending confirmation with escaped immutable identity", async () => {

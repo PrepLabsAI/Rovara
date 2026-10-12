@@ -174,7 +174,6 @@ async function allPeople(deps: TaskPeopleDependencies, taskId: string): Promise<
       const mapped = await personByDeveloper(deps, taskId, item.developerId);
       if (mapped === undefined || item.sk !== `PERSON#${mapped.personId}`) return denied();
       found.push(mapped);
-      if (found.length > 100) return denied();
     }
     start = response.LastEvaluatedKey;
   } while (start !== undefined);

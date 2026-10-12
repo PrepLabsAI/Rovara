@@ -209,9 +209,11 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
         return json(result.status === "PENDING" ? 202 : 200, result);
       }
       if (peopleRequestId !== undefined && peopleConfirm) {
-        if (deps.confirmPeopleRequest === undefined) return json(404, { error: "not_found" });
+        if (deps.getPeopleRequest === undefined || deps.confirmPeopleRequest === undefined) return json(404, { error: "not_found" });
         const parsed = z.object({ requestId: z.string().uuid() }).strict().safeParse(value);
         if (!parsed.success || parsed.data.requestId.toLowerCase() !== peopleRequestId) return invalid();
+        const receipt = await deps.getPeopleRequest(caller, taskId, peopleRequestId);
+        if (receipt.status === "COMMITTED") return json(200, receipt);
         const result = await deps.confirmPeopleRequest(caller, taskId, peopleRequestId);
         return json(result.status === "PENDING" ? 202 : 200, result);
       }

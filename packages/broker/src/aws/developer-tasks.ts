@@ -2799,7 +2799,9 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
         }];
       });
     });
-  const presentation = await getTaskPeoplePresentation(deps, taskId);
+  let presentation: Awaited<ReturnType<typeof getTaskPeoplePresentation>> = [];
+  try { presentation = await getTaskPeoplePresentation(deps, taskId); }
+  catch { /* Historical labels are presentation only; a malformed immutable pair falls back to generic actors. */ }
   const actorNames = new Map(presentation.map((person) => [taskOwnerKey(person.developerId, taskId), redactText(person.name)]));
   const ownerName = redactText(ownerLabel(task.developerName));
   const personName = (actorId: string | undefined): string => {
