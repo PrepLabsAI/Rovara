@@ -38,6 +38,7 @@ export * from "./admin-changes.js";
 export * from "./swebench.js";
 export * from "./eval-batch.js";
 export * from "./eval-stats.js";
+export * from "./e2e.js";
 export * from "./checks.js";
 export * from "./checks-section.js";
 export * from "./checks-reply.js";

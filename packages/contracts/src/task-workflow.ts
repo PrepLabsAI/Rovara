@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { E2EWorkflowProgressSchema, E2E_PROJECT_CHECK_ID } from "./e2e.js";
 import { z } from "zod";
 import { ProjectCommandSchema } from "./project.js";
 import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema, feedbackReplacementCheckProblem } from "./workflow-check-input.js";
@@ -620,7 +621,7 @@ export const WorkflowCheckSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
   label: z.string().trim().min(1).max(80),
   command: ProjectCommandSchema,
-}).strict();
+}).strict().refine((check) => check.id !== E2E_PROJECT_CHECK_ID, "project-e2e is reserved for trusted E2E aggregation");
 export type WorkflowCheck = z.infer<typeof WorkflowCheckSchema>;
 export const WORKFLOW_PROPOSED_CHECKS_MAX = 8;
 /** The checks a coding plan proposed (`parseProposedChecks`), with why it proposed none or why they could not be read. */
@@ -931,6 +932,8 @@ const WorkflowSnapshotShapeSchema = z.object({
   artifacts: z.array(WorkflowArtifactSchema).max(100),
   decisions: z.array(WorkflowDecisionSchema).max(100),
   checkPolicy: WorkflowCheckPolicySchema.optional(),
+  /** Frozen E2E references. Results remain separately qualified by the broker. */
+  e2e: E2EWorkflowProgressSchema.optional(),
   verificationRetries: z.array(WorkflowVerificationRetrySchema).max(100).optional(),
   candidate: CandidateManifestSchema.optional(),
   /** Each repository's base commit, pinned by the first verified candidate; later candidates must keep it. */
@@ -1031,6 +1034,11 @@ export const WorkflowSnapshotSchema = WorkflowSnapshotShapeSchema.superRefine((w
   // Nothing runs while a document waits for its owner, and a closed task is done: neither is ever stored blocked.
   if (workflow.state === "BLOCKED" && (workflow.stage === "PLAN_REVIEW" || workflow.stage === "CLOSED")) {
     context.addIssue({ code: "custom", path: ["state"], message: "an approval waiting for its owner or a closed task cannot be blocked" });
+  }
+  // Until the broker's trusted aggregate gate is wired, ordinary worker verification cannot
+  // advance a required E2E task into review or publication.
+  if (workflow.e2e?.required === true && (workflow.stage === "REVIEW" || workflow.stage === "PULL_REQUEST" || workflow.stage === "WAIT_FOR_MERGE" || workflow.stage === "MERGED")) {
+    context.addIssue({ code: "custom", path: ["stage"], message: "required E2E awaits trusted aggregate verification" });
   }
 });
 export type WorkflowSnapshot = z.infer<typeof WorkflowSnapshotSchema>;
