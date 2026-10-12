@@ -4,13 +4,14 @@
 // ways, the item size limit, and DynamoDB's map order on every read [LIVE-BUG B3]. 9.13 (old stored records) is covered by
 // slack-workflow-e2e.test.ts.
 import { describe, expect, it } from "vitest";
-import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, WORKFLOW_PLAN_MAX_BYTES } from "@agentx/contracts";
+import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, WORKFLOW_PLAN_MAX_BYTES, WorkflowSnapshotSchema } from "@agentx/contracts";
 import { LOST_COMPUTE_ERROR, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import type { CheckTaskPerson } from "../../../packages/broker/src/developer/task-people.js";
 import { DYNAMODB_ITEM_MAX_BYTES } from "../../support/fake-dynamodb.js";
 import { planAnswer, planDocument } from "../../support/plan-documents.js";
 import { visibleSlackText } from "../../support/strict-slack.js";
 import { EDITS, MERGED, OPENED_PR, PLAN, PUSHED_FIX, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
+import { loadRollback0212Parser } from "../../support/rollback-0212-parser.js";
 
 const READY_ONE = /^PR feedback is ready: 1 comment; 1 recommendation\./;
 const STILL_WATCHING = "I'm still watching the pull request and will finish this task when it's merged.";
@@ -170,7 +171,7 @@ describe("Suite 9: resilience", () => {
     const approvedFirst = decisions.find((decision) => decision.decision === "APPROVE");
     if (approvedFirst === undefined) {
       // The approval was refused as stale, and the new feedback reviewed.
-      expect(e2e.slack.ephemerals.map((message) => message.text)).toContain("The feedback changed since this card; a new review is starting.");
+      expect(e2e.slack.ephemerals.map((message) => message.text)).toContain("That approval is out of date. Use the latest message in this thread.");
       expect(counts.feedback).toBe(2);
     } else {
       // The fix went ahead bound to the first comment only; the second is reviewed after the push.
@@ -674,6 +675,28 @@ describe("Suite 9: resilience", () => {
     await e2e.runRecovery();
     expect(e2e.db.get(member.pk, member.sk)?.count).toBe(0);
     expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
+    void logged;
+  }, 120_000);
+
+  it("9.24 the pinned 0.2.12 parser accepts a current candidate-bearing final snapshot and broker-only People adds no worker fields", async () => {
+    const parser = await loadRollback0212Parser();
+    const { e2e } = await waiting({ taskPeople: { changesEnabled: false, checkTaskPerson: freshOwner() } });
+    retainOwner(e2e);
+    const snapshot = e2e.workflow();
+    const candidate = snapshot.candidate!;
+    expect(snapshot).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(candidate.digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(snapshot.verification?.candidateDigest).toBe(candidate.digest);
+    expect(candidate.repositories[0]!.treeSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(snapshot.reviews).toEqual(expect.arrayContaining([expect.objectContaining({ candidateDigest: snapshot.candidate!.digest })]));
+    expect(WorkflowSnapshotSchema.safeParse(snapshot).success).toBe(true);
+    expect(parser.WorkflowSnapshotSchema.safeParse(snapshot).success).toBe(true);
+    const taskInvocations = e2e.invocations.filter((invocation) => invocation.kind === "task");
+    expect(taskInvocations.length).toBeGreaterThan(0);
+    for (const invocation of taskInvocations) {
+      expect(Object.prototype.hasOwnProperty.call(invocation.payload, "people")).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(invocation.payload, "taskPeople")).toBe(false);
+    }
     void logged;
   }, 120_000);
 });

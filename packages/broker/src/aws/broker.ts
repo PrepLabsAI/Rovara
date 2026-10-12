@@ -259,7 +259,7 @@ import { batchResults, parseStartBody, requireBatchProject, showBatch, startBatc
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 import { slackWorkflowCaller } from "./slack-workflow-caller.js";
 import { resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
-import { taskAccessFence } from "../developer/task-people.js";
+import { resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
 
 const MAX_ARTIFACT_BYTES = 5_000_000;
 const EVENT_TRANSACTION_CHUNK = 80;
@@ -4774,11 +4774,77 @@ async function authorizeWorkflowFeedbackApproval(dependencies: AwsBrokerDependen
   const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
   if (pointer?.taskId !== input.taskId) throw agentXError("CALLBACK_FORBIDDEN", "feedback approval task does not own this workspace");
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(input.taskId));
+  const decision = currentWorkflowFeedbackApproval(task, operation, input);
+  if (task === undefined || decision === undefined) {
+    throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
+  }
+  const accessDependencies = dependencies.developer === undefined ? undefined : developerTaskRouteDependencies({
+    documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
+    now: Date.now, tasks: developerTaskActions(dependencies),
+  }, {
+    developerId: task.developerId, sessionId: "workflow-feedback-approval", amr: task.provider, name: task.developerName,
+    ...(task.slackUserId === undefined ? {} : { slackUserId: task.slackUserId }),
+  }, undefined, null);
+  const access = await resolveTaskDispatchPeople({
+    documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+    ...(accessDependencies?.checkTaskPerson === undefined ? {} : { checkTaskPerson: accessDependencies.checkTaskPerson }),
+  }, task);
+  const authorizedActor = access === undefined ? decision.actorId === task.ownerKey
+    : access.status === "ALLOWED" && access.ownerActorIds.includes(decision.actorId);
+  if (!authorizedActor) throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
+
+  const finalPointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
+  const finalTask = await getItem<DeveloperTaskRecord>(dependencies, taskKey(input.taskId));
+  const finalOperation = await getItem<OperationRecord>(dependencies, operationKey(operation.workspaceId, operation.id));
+  if (finalPointer?.taskId !== input.taskId || currentWorkflowFeedbackApproval(finalTask, finalOperation, input) === undefined) {
+    throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
+  }
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      taskAccessFence(dependencies.tableName, input.taskId, access?.peopleRevision),
+      { ConditionCheck: {
+        TableName: dependencies.tableName, Key: taskKey(input.taskId),
+        ConditionExpression: "workspaceId = :workspaceId AND #ownerKey = :ownerKey AND attribute_not_exists(closedAt) AND workflow.#revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.feedbackDispatchApproval.requestId = :requestId AND workflow.feedbackDispatchApproval.reviewDigest = :reviewDigest AND workflow.feedbackDispatchApproval.proposalDigest = :proposalDigest AND workflow.feedbackDispatchApproval.candidateDigest = :candidateDigest",
+        ExpressionAttributeNames: { "#ownerKey": "ownerKey", "#revision": "revision", "#stage": "stage", "#state": "state" },
+        ExpressionAttributeValues: { ":workspaceId": operation.workspaceId, ":ownerKey": input.ownerId, ":revision": input.activeWorkflowRevision,
+          ":stage": "IMPLEMENT", ":state": "RUNNING", ":requestId": input.requestId, ":reviewDigest": input.reviewDigest,
+          ":proposalDigest": input.proposalDigest, ":candidateDigest": input.candidateDigest },
+      } },
+      { ConditionCheck: {
+        TableName: dependencies.tableName, Key: taskPointerKey(operation.workspaceId),
+        ConditionExpression: "taskId = :taskId", ExpressionAttributeValues: { ":taskId": input.taskId },
+      } },
+      { ConditionCheck: {
+        TableName: dependencies.tableName, Key: operationKey(operation.workspaceId, operation.id),
+        ConditionExpression: "fence = :fence AND #kind = :kind AND workflowMode = :mode AND workflowFeedbackApproval.taskId = :taskId AND workflowFeedbackApproval.requestId = :requestId AND workflowFeedbackApproval.ownerId = :ownerKey AND workflowFeedbackApproval.decisionWorkflowRevision = :decisionRevision AND workflowFeedbackApproval.activeWorkflowRevision = :activeRevision AND workflowFeedbackApproval.reviewDigest = :reviewDigest AND workflowFeedbackApproval.proposalDigest = :proposalDigest AND workflowFeedbackApproval.candidateDigest = :candidateDigest AND (#status = :accepted OR #status = :dispatching OR #status = :running)",
+        ExpressionAttributeNames: { "#kind": "kind", "#status": "status" },
+        ExpressionAttributeValues: { ":fence": operation.fence, ":kind": "task", ":mode": "IMPLEMENT", ":taskId": input.taskId,
+          ":requestId": input.requestId, ":ownerKey": input.ownerId, ":decisionRevision": input.decisionWorkflowRevision,
+          ":activeRevision": input.activeWorkflowRevision, ":reviewDigest": input.reviewDigest, ":proposalDigest": input.proposalDigest,
+          ":candidateDigest": input.candidateDigest, ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":running": "RUNNING" },
+      } },
+      { ConditionCheck: {
+        TableName: dependencies.tableName, Key: workspaceKey(operation.workspaceId),
+        ConditionExpression: "#ownerKey = :ownerKey AND fence = :fence AND activeOperationId = :operationId",
+        ExpressionAttributeNames: { "#ownerKey": "ownerKey" },
+        ExpressionAttributeValues: { ":ownerKey": input.ownerId, ":fence": operation.fence, ":operationId": operation.id },
+      } },
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
+  }
+}
+
+function currentWorkflowFeedbackApproval(task: DeveloperTaskRecord | undefined, operation: OperationRecord | undefined,
+  input: WorkflowFeedbackApprovalBinding): NonNullable<NonNullable<DeveloperTaskRecord["workflow"]>["feedbackDecisions"]>[number] | undefined {
   const workflow = task?.workflow;
+  const binding = operation?.workflowFeedbackApproval;
   const review = workflow?.feedbackReview;
   const decision = workflow?.feedbackDecisions?.find(item => item.requestId === input.requestId);
   const activePullRequests = workflow?.pullRequests?.filter(pr => pr.state === "OPEN" || pr.state === "UNKNOWN") ?? [];
-  if (task?.workspaceId !== operation.workspaceId || task.ownerKey !== input.ownerId || task.closedAt !== undefined
+  if (operation?.kind !== "task" || operation.workflowMode !== "IMPLEMENT" || binding === undefined || !sameFeedbackApproval(binding, input)
+    || task?.workspaceId !== operation.workspaceId || task.ownerKey !== input.ownerId || task.closedAt !== undefined
     || workflow === undefined || workflow.revision !== input.activeWorkflowRevision || workflow.stage !== "IMPLEMENT" || workflow.state !== "RUNNING"
     || workflow.candidate?.digest !== input.candidateDigest || workflow.feedbackDispatchApproval === undefined
     || !sameFeedbackApproval(workflow.feedbackDispatchApproval, input)
@@ -4790,13 +4856,12 @@ async function authorizeWorkflowFeedbackApproval(dependencies: AwsBrokerDependen
     || review.bundleRefs.some(ref => !activePullRequests.some(pr => pr.repositoryId === ref.repositoryId && pr.number === ref.number
       && pr.headSha === ref.headSha && pr.candidateDigest === ref.candidateDigest
       && workflow.candidate?.repositories.some(repo => repo.repositoryId === ref.repositoryId && repo.treeSha === ref.headTreeSha)))
-    || decision?.decision !== "APPROVE" || decision.actorRole !== "TASK_OWNER" || decision.actorId !== task.ownerKey
+    || decision?.decision !== "APPROVE" || decision.actorRole !== "TASK_OWNER"
     || decision.workflowRevision !== input.decisionWorkflowRevision || decision.reviewDigest !== input.reviewDigest
     || decision.proposalDigest !== input.proposalDigest || JSON.stringify(decision.bundleDigests) !== JSON.stringify(input.bundleDigests)
     || JSON.stringify(decision.selectedFindingIds) !== JSON.stringify(input.selectedFindingIds)
-    || JSON.stringify(decision.selectedCommentIds) !== JSON.stringify(input.selectedCommentIds)) {
-    throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
-  }
+    || JSON.stringify(decision.selectedCommentIds) !== JSON.stringify(input.selectedCommentIds)) return undefined;
+  return decision;
 }
 
 /**

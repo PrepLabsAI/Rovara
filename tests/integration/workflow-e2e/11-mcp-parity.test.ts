@@ -2,17 +2,20 @@
 // Slack buttons. 11.3 (an MCP-started task's Slack press) is covered by developer-task-workflow-flow.test.ts. Here: an
 // MCP-started Quick task to its draft PR, a Slack-started task decided through MCP, each recovery tool against its Slack
 // button, PR feedback decided through MCP [R4, decision D4], and agentx_get_task's next step at every stage.
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { SLACK_OIDC_ISSUER, openReviewFindings, type TaskPeopleDisplayReadRequest, type TaskPersonProofRequest } from "@agentx/contracts";
 import { developerIdForSlackUser } from "../../../packages/broker/src/aws/admin-actions.js";
 import type { CheckTaskPerson } from "../../../packages/broker/src/developer/task-people.js";
 import { taskOwnerKey } from "../../../packages/broker/src/developer/task-records.js";
+import { ownerKeyForSubject } from "../../../packages/broker/src/aws/lambda.js";
 import { reviewerFindings, reviewerHangs } from "../../support/model-fixtures.js";
 import { feedbackCriticReply } from "../../support/faux-scripts.js";
-import { OMAR } from "../../support/developer-task-broker.js";
+import { OMAR, grantProject } from "../../support/developer-task-broker.js";
 import { visibleSlackText } from "../../support/strict-slack.js";
 import { SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { EDITS, MERGED, PLAN, PUSHED_FIX, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
+import { PAGE_ORIGIN } from "../../support/page-browser.js";
 
 const WAITING_FOR_MERGE = "Waiting for the pull request to be merged. Review and merge it on GitHub; the task finishes when it's merged.";
 const FEEDBACK_READY = (revision: number) => `PR feedback is ready for your decision. Read it with agentx_get_pr_feedback, then approve, request changes or dismiss it with agentx_decide_pr_feedback and expected_revision ${revision}. Nothing changes in the code until you approve.`;
@@ -50,7 +53,7 @@ function taskPeopleDirectory(baileyInTaskChannel = true) {
       channelMember: task.share === undefined || members.get(slackUserId)?.has(task.share.channelId) === true,
     };
   };
-  return { members, proof, display, check };
+  return { members, names, proof, display, check };
 }
 
 /** The MCP answer's text, which an AI tool reads; fails the test on a tool error. */
@@ -58,6 +61,17 @@ async function tool(e2e: WorkflowE2E, name: string, args: Record<string, unknown
   const answer = await e2e.mcp(name, args, who);
   if (answer.isError) throw new Error(`${name} failed: ${JSON.stringify(answer.error)}`);
   return answer;
+}
+
+async function peoplePageRequest(e2e: WorkflowE2E, sessionId: string, method: "GET" | "POST", suffix: string, body?: unknown) {
+  const csrf = "p".repeat(43);
+  const response = await e2e.handler({ version: "2.0", routeKey: "ANY /review/{proxy+}",
+    rawPath: `/review/${e2e.taskId()}/task/${suffix}`, rawQueryString: "",
+    headers: { cookie: `__Host-agentx_review_session=${sessionId}; __Host-agentx_review_csrf=${csrf}`,
+      ...(method === "POST" ? { origin: PAGE_ORIGIN, "x-agentx-csrf": csrf, "content-type": "application/json" } : {}) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }), isBase64Encoded: false,
+    requestContext: { requestId: randomUUID(), http: { method } } });
+  return { status: response.statusCode, body: response.body, json: (() => { try { return JSON.parse(response.body) as Record<string, unknown>; } catch { return {}; } })() };
 }
 
 const workflowOf = (answer: { value: Record<string, unknown> }) => answer.value.workflow as { stage: string; state: string; revision: number; candidate_digest?: string;
@@ -528,6 +542,113 @@ describe("Suite 11: MCP parity", () => {
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     e2e.github.merge(e2e.github.pullRequests[0]!.number);
     expect(await e2e.githubWebhook(e2e.github.pullRequests[0]!.number, { merged: true })).toBe(200);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+  }, 120_000);
+
+  it("11.9 an external co-owner proposal commits only through its authenticated page, while a never-signed native member remains a default commenter", async () => {
+    const directory = taskPeopleDirectory();
+    const external = { developerId: ownerKeyForSubject("https://login.example.test", "maya-external"), name: "Maya External", provider: "oidc" as const,
+      sessionId: "s-maya-external-confirm", slackUserId: SLACK_MAYA.slackUserId! };
+    const riley = { developerId: developerIdForSlackUser("U0RILEY001"), name: "Riley Chen", provider: "slack" as const,
+      sessionId: "never-written-riley-session", slackUserId: "U0RILEY001" };
+    directory.members.set(riley.slackUserId, new Set(["C0123456789"]));
+    directory.names.set(riley.slackUserId, riley.name);
+    const baseCheck = directory.check;
+    const check: CheckTaskPerson = async (task, developerId) => developerId === external.developerId
+      ? { subject: { developerId, slackUserId: external.slackUserId },
+        identity: { developerId, slackUserId: external.slackUserId, name: external.name, method: "oidc", issuer: "https://login.example.test", subject: "maya-external" },
+        eligible: true, channelMember: task.share === undefined || directory.members.get(external.slackUserId)?.has(task.share.channelId) === true }
+      : developerId === riley.developerId
+        ? { subject: { developerId, slackUserId: riley.slackUserId },
+          identity: { developerId, slackUserId: riley.slackUserId, name: riley.name, method: "slack", issuer: SLACK_OIDC_ISSUER, subject: riley.slackUserId },
+          eligible: true, channelMember: task.share === undefined || directory.members.get(riley.slackUserId)?.has(task.share.channelId) === true }
+        : baseCheck(task, developerId);
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
+      changesEnabled: true, checkTaskPerson: check, taskPersonProof: directory.proof, taskPeopleDisplayRead: directory.display,
+      developers: [external],
+    } });
+    grantProject(e2e.db, external);
+    e2e.db.set({ ...e2e.db.get(`DEVELOPER#${external.developerId}`, "META")!, issuer: "https://login.example.test", subject: "maya-external" });
+    const nativePageSession = randomUUID();
+    const externalPageSession = randomUUID();
+    for (const [sessionId, developerId, amr] of [[nativePageSession, SLACK_MAYA.developerId, "slack"], [externalPageSession, external.developerId, "oidc"]] as const) {
+      e2e.db.set({ pk: `SESSION#${sessionId}`, sk: "META", sessionId, developerId, amr,
+        startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 600,
+        reviewExpiresAt: Math.floor(Date.now() / 1000) + 600 });
+    }
+    await atPlanReview(e2e);
+    await e2e.click("agentx_task_people");
+    const externalPersonId = "11911111-2222-4333-8444-555555555550";
+    const registeredAt = new Date().toISOString();
+    e2e.db.set({ pk: `DEVTASK#${e2e.taskId()}`, sk: `PERSON#${externalPersonId}`, schemaVersion: 1, personId: externalPersonId,
+      developerId: external.developerId, slackUserId: external.slackUserId, name: external.name, method: "oidc",
+      issuer: "https://login.example.test", subject: "maya-external", createdAt: registeredAt });
+    e2e.db.set({ pk: `DEVTASK#${e2e.taskId()}`, sk: `PERSON_SUBJECT#${external.developerId}`, schemaVersion: 1,
+      personId: externalPersonId, developerId: external.developerId, createdAt: registeredAt });
+    const retained = e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")!;
+    e2e.db.set({ ...retained, people: [...retained.people as unknown[], {
+      developerId: external.developerId, slackUserId: external.slackUserId, name: external.name, role: "commenter",
+    }] });
+
+    const externalAnswer = await e2e.mcp("agentx_get_task_people", { task_id: e2e.taskId() }, external);
+    expect(externalAnswer.isError).toBe(false);
+    const externalView = externalAnswer.value as { can_manage: boolean; people: Array<{ role: string; effective_role: string; you: boolean }> };
+    expect(externalView.can_manage).toBe(false);
+    expect(externalView.people.some((person) => person.role === "commenter" && person.effective_role === "commenter" && person.you)).toBe(true);
+    const nativeView = await tool(e2e, "agentx_get_task_people", { task_id: e2e.taskId() });
+    const externalPerson = (nativeView.value.people as Array<{ person_id: string; name: string }>).find((person) => person.name.startsWith(external.name))!;
+    const baileyPerson = (nativeView.value.people as Array<{ person_id: string; name: string }>).find((person) => person.name === BAILEY.name)!;
+    const grantId = "11911111-2222-4333-8444-555555555551";
+    await tool(e2e, "agentx_set_task_person", { task_id: e2e.taskId(), request_id: grantId,
+      expected_people_revision: nativeView.value.revision, person_id: externalPerson.person_id, role: "owner" });
+    expect((await peoplePageRequest(e2e, nativePageSession, "POST", `api/people/requests/${grantId}/confirm`, { requestId: grantId })).status).toBe(200);
+
+    const ownerView = await tool(e2e, "agentx_get_task_people", { task_id: e2e.taskId() }, external);
+    expect(ownerView.value).toMatchObject({ can_manage: true });
+    const requestId = "11911111-2222-4333-8444-555555555552";
+    const proposed = await tool(e2e, "agentx_set_task_person", { task_id: e2e.taskId(), request_id: requestId,
+      expected_people_revision: ownerView.value.revision, person_id: baileyPerson.person_id, role: "viewer" }, external);
+    expect(proposed.value).toMatchObject({ status: "PENDING", request_id: requestId });
+    const eventsBefore = e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT").length;
+    expect((await peoplePageRequest(e2e, nativePageSession, "GET", `people/confirm/${requestId}`)).status).toBe(404);
+    const confirmation = await peoplePageRequest(e2e, externalPageSession, "GET", `people/confirm/${requestId}`);
+    expect(confirmation.status).toBe(200);
+    expect(confirmation.body).toContain(BAILEY.name);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(eventsBefore);
+    expect((await peoplePageRequest(e2e, nativePageSession, "POST", `api/people/requests/${requestId}/confirm`, { requestId })).status).toBe(404);
+    const committed = await peoplePageRequest(e2e, externalPageSession, "POST", `api/people/requests/${requestId}/confirm`, { requestId });
+    expect(committed).toMatchObject({ status: 200, json: { status: "COMMITTED" } });
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(eventsBefore + 1);
+    expect((await peoplePageRequest(e2e, externalPageSession, "POST", `api/people/requests/${requestId}/confirm`, { requestId })).json).toEqual(committed.json);
+
+    const afterGrant = await tool(e2e, "agentx_get_task_people", { task_id: e2e.taskId() });
+    const removalId = "11911111-2222-4333-8444-555555555553";
+    await tool(e2e, "agentx_set_task_person", { task_id: e2e.taskId(), request_id: removalId,
+      expected_people_revision: afterGrant.value.revision, person_id: externalPerson.person_id, role: "denied" });
+    expect((await peoplePageRequest(e2e, nativePageSession, "POST", `api/people/requests/${removalId}/confirm`, { requestId: removalId })).status).toBe(200);
+    const afterRemovalEvents = e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT").length;
+    expect((await peoplePageRequest(e2e, externalPageSession, "POST", `api/people/requests/${requestId}/confirm`, { requestId })).status).toBe(404);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(afterRemovalEvents);
+
+    expect(e2e.db.get(`DEVELOPER#${riley.developerId}`, "META")).toBeUndefined();
+    expect(e2e.db.get(`SESSION#${riley.sessionId}`, "META")).toBeUndefined();
+    const beforeRileyRead = e2e.people.replies.length;
+    await e2e.click("agentx_task_people", { user: riley.slackUserId });
+    const rileyReplies = e2e.people.replies.slice(beforeRileyRead) as unknown as Array<{
+      action: string; statusCode: number; body: { canManage: boolean; people: Array<{ name: string; role: string; effectiveRole: string; you: boolean }> };
+    }>;
+    expect(rileyReplies).toHaveLength(1);
+    expect(rileyReplies[0]).toMatchObject({ action: "read", statusCode: 200, body: { canManage: false } });
+    expect(rileyReplies[0]!.body.people.some((person) => person.name === riley.name && person.role === "commenter"
+      && person.effectiveRole === "commenter" && person.you)).toBe(true);
+    expect(e2e.db.get(`DEVELOPER#${riley.developerId}`, "META")).toBeUndefined();
+    expect(e2e.db.get(`SESSION#${riley.sessionId}`, "META")).toBeUndefined();
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    const pullRequest = e2e.github.pullRequests[0]!;
+    e2e.github.merge(pullRequest.number);
+    expect(await e2e.githubWebhook(pullRequest.number, { merged: true })).toBe(200);
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
   }, 120_000);

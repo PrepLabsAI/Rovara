@@ -574,7 +574,7 @@ const FEEDBACK_BUNDLE_TOTAL_MAX_BYTES = 8_000_000;
 
 /** Return a private review only after current task ownership and every stored digest are verified. */
 export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<Record<string, unknown>> {
-  const task = (await authorizeTaskAction(deps, caller, taskId, "feedback")).task;
+  const task = (await authorizeTaskActor(deps, caller, taskId, "feedback")).task;
   const workflow = task.workflow;
   const review = workflow?.feedbackReview;
   const decision = workflow?.feedbackDecisions?.find(item => item.reviewDigest === review?.reviewRef?.sha256);
