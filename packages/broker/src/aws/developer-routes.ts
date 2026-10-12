@@ -722,7 +722,7 @@ export function developerTaskRouteDependencies(
       const answer = await admission.directory({ kind: "task-channel-people", channelIds: channels });
       if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
       admission.assertOpen();
-      const identities = await registerTaskChannelPeople(identityDependencies(admission), task, answer.users);
+      const identities = await registerTaskChannelPeople(identityDependencies(admission), task, answer.users, () => admission.assertOpen());
       admission.assertOpen();
       const bySlack = new Map(answer.users.map((user) => [user.id, user]));
       return identities.map((identity) => {

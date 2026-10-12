@@ -4,6 +4,8 @@ import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAcce
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
+import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
+import { getTaskPeople } from "../../packages/broker/src/developer/task-people.js";
 import { adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { identityHarness, localSigner } from "../support/developer-fakes.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -623,6 +625,73 @@ describe("D2 task-person route dependencies", () => {
     const check = Reflect.get(route, "checkTaskPerson") as ((value: DeveloperTaskRecord, id: string) => Promise<Record<string, unknown>>) | undefined;
 
     await expect(check?.(task, nativeDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+  });
+
+  it("stops registering later directory identities when the first new write crosses the display deadline", async () => {
+    const firstNewSlackUserId = "U0NEW0001";
+    const secondNewSlackUserId = "U0NEW0002";
+    const caller = { ...maya, developerId: nativeDeveloperId };
+    let clock = T0;
+    db.set(task as unknown as Record<string, unknown>);
+    db.set({
+      pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
+      people: [{ developerId: nativeDeveloperId, slackUserId: "U0MAYA001", name: "Maya Chen", role: "owner" }],
+    });
+    db.set({
+      pk: `DEVTASK#${taskId}`, sk: "PERSON#22222222-2222-4222-8222-222222222222", schemaVersion: 1,
+      personId: "22222222-2222-4222-8222-222222222222", developerId: nativeDeveloperId,
+      slackUserId: "U0MAYA001", name: "Maya Chen", method: "slack", issuer: "https://slack.com", subject: "U0MAYA001",
+      createdAt: new Date(T0).toISOString(),
+    });
+    db.set({
+      pk: `DEVTASK#${taskId}`, sk: `PERSON_SUBJECT#${nativeDeveloperId}`, schemaVersion: 1,
+      personId: "22222222-2222-4222-8222-222222222222", developerId: nativeDeveloperId, createdAt: new Date(T0).toISOString(),
+    });
+    const originalSend = db.send.bind(db);
+    const newRegistryWrites: string[] = [];
+    vi.spyOn(db, "send").mockImplementation(async (command) => {
+      const transactItems = (command as { input?: { TransactItems?: Array<{ Put?: { Item?: Record<string, unknown> } }> } }).input?.TransactItems;
+      const slackUserId = transactItems?.find((item) => String(item.Put?.Item?.sk).startsWith("PERSON#"))?.Put?.Item?.slackUserId;
+      const answer = await originalSend(command);
+      if (slackUserId === firstNewSlackUserId || slackUserId === secondNewSlackUserId) {
+        newRegistryWrites.push(String(slackUserId));
+        if (slackUserId === firstNewSlackUserId) clock += 20_001;
+      }
+      return answer;
+    });
+    const users = new Map([
+      ["U0MAYA001", "Maya Chen"],
+      [firstNewSlackUserId, "First New Person"],
+      [secondNewSlackUserId, "Second New Person"],
+    ]);
+    const directory = slackDirectory({
+      teamId: "T0TEAM1", botToken: async () => "INERT", now: () => clock,
+      fetch: async (input) => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+        if (url.pathname.endsWith("conversations.members")) {
+          return new Response(JSON.stringify({ ok: true, members: [...users.keys()], response_metadata: { next_cursor: "" } }));
+        }
+        const slackUserId = url.searchParams.get("user") ?? "";
+        return new Response(JSON.stringify({ ok: true, user: {
+          id: slackUserId, team_id: "T0TEAM1", name: users.get(slackUserId), is_bot: false, deleted: false, is_stranger: false,
+        } }));
+      },
+    });
+    config.taskPeopleConfiguration = { peopleChangesEnabled: false };
+    config.taskPeopleDisplayRead = (request) => directory.taskPeopleDisplayRead(request);
+    const route = developerTaskRouteDependencies(
+      { documentClient: db, tableName: "state", developer: config, now: () => clock },
+      caller,
+    );
+
+    await expect(getTaskPeople(route, caller, taskId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+
+    expect(newRegistryWrites).toEqual([firstNewSlackUserId]);
+    const newlyStored = db.find((item) => item.pk === `DEVTASK#${taskId}`
+      && (item.slackUserId === firstNewSlackUserId || item.slackUserId === secondNewSlackUserId));
+    expect(newlyStored.filter((item) => String(item.sk).startsWith("PERSON#"))).toHaveLength(1);
+    expect(db.get(`DEVTASK#${taskId}`, `PERSON_SUBJECT#${developerIdForSlackUser(firstNewSlackUserId)}`)).toBeDefined();
+    expect(db.get(`DEVTASK#${taskId}`, `PERSON_SUBJECT#${developerIdForSlackUser(secondNewSlackUserId)}`)).toBeUndefined();
   });
 });
 
