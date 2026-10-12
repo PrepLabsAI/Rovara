@@ -372,7 +372,7 @@ describe("Suite 8: merge and close", () => {
     await e2e.click("agentx_workflow_close", { user: TEAMMATE });
     if (e2e.slack.views.length > 0) await e2e.submitView({}, { user: TEAMMATE }).catch(() => undefined);
     await e2e.settle();
-    expect(e2e.slack.responses.at(-1)?.text).toBe(`Only <@${OWNER}> can close this task.`);
+    expect(e2e.slack.responses.at(-1)?.text).toBe("Only the task owner can close this task.");
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", revision });
     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.closedAt).toBeUndefined();
   }, 120_000);
