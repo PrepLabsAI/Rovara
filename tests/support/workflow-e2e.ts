@@ -11,6 +11,7 @@ import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
 import { onTestFinished, vi } from "vitest";
 import {
   SharedTaskRecordSchema,
+  agentXError,
   SlackChannelBindingSchema,
   SlackRequestMessageSchema,
   WorkerInvocationSchema,
@@ -164,6 +165,47 @@ function wireFeedbackReader(github: FakeGitHub): (repositoryUrl: string, number:
   };
 }
 
+/** The recovery worker's bounded merge-only read, either through the real provider or the fake's stable API view. */
+function mergeObservationReader(
+  github: FakeGitHub,
+  wire: boolean,
+  requestLedger: string[],
+  controls: { httpFault?: (attempt: number) => Response | undefined; afterRead?: () => void | Promise<void> } = {},
+): GitHubAppCredentialProvider["getPullRequestMergeObservation"] {
+  if (wire) {
+    wireAppKey ??= generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+    let attempt = 0;
+    const provider = new GitHubAppCredentialProvider({ credentialRef: "github-app", appId: "123", getPrivateKey: async () => wireAppKey!, fetchImplementation: async (input, init) => {
+      const fault = controls.httpFault?.(++attempt);
+      return fault ?? github.fetch(input, init);
+    } });
+    return async (repositoryUrl, number, budget) => {
+      const observed = await provider.getPullRequestMergeObservation(repositoryUrl, number, {
+        ...budget,
+        beforeRequest: () => { requestLedger.push("github"); budget.beforeRequest(); },
+      });
+      await controls.afterRead?.();
+      return observed;
+    };
+  }
+  return async (repositoryUrl, number, budget) => github.atOneMoment(async () => {
+    requestLedger.push("pull-request");
+    budget.beforeRequest();
+    const before = await github.gateway.getPullRequest(repositoryUrl, number);
+    requestLedger.push("commit-tree");
+    budget.beforeRequest();
+    const headTreeSha = await github.gateway.getCommitTree(repositoryUrl, before.headCommit);
+    requestLedger.push("pull-request");
+    budget.beforeRequest();
+    const after = await github.gateway.getPullRequest(repositoryUrl, number);
+    if (before.number !== after.number || before.url !== after.url || before.headCommit !== after.headCommit || before.state !== after.state) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub merge observation changed during the read");
+    }
+    await controls.afterRead?.();
+    return { ...after, headTreeSha };
+  });
+}
+
 /** A GitHub webhook event for a task's pull request, as `webhook()` builds and signs it. */
 export type E2EWebhookEvent =
   | { kind: "issue_comment" | "pull_request_review_comment"; action?: "created" | "edited" | "deleted"; number: number; comment: GitHubFeedbackComment }
@@ -243,6 +285,8 @@ export async function createWorkflowE2E(options: {
   github?: FakeGitHubOptions & { wire?: boolean };
   /** The App secret's webhook secret: absent for the default; null when the secret holds none (the broker answers 503). */
   webhookSecret?: string | null;
+  /** Merge-recovery-only external seams: real-provider HTTP faults and a race immediately after its stable PR read. */
+  mergeObservation?: { httpFault?: (attempt: number) => Response | undefined; afterRead?: () => void | Promise<void> };
   /** The worker's review timeouts (the run-task seam); absent, the reviews' own 5 minutes. */
   workerTimeouts?: { reviewMs?: number; feedbackReviewMs?: number };
   /** How long the broker's PR description update (D2) may take; absent, the broker's own 5 seconds. */
@@ -253,6 +297,7 @@ export async function createWorkflowE2E(options: {
   memberLimit?: number;
 } = {}) {
   const github = new FakeGitHub(options.github?.realism === undefined ? {} : { realism: options.github.realism });
+  const mergeObservationRequests: string[] = [];
   // The webhook secret GitHub signs with, and the copy the broker's container has cached (it re-reads on { refresh: true }).
   let configuredSecret: string | null = options.webhookSecret === undefined ? WEBHOOK_SECRET : options.webhookSecret;
   let cachedSecret = configuredSecret;
@@ -263,8 +308,8 @@ export async function createWorkflowE2E(options: {
     return cachedSecret === null ? webhookSecretFromSecret("{}") : cachedSecret;
   };
   const githubPullRequests = options.github?.wire === true
-    ? { ...github.gateway, getPullRequestFeedback: wireFeedbackReader(github) }
-    : github.gateway;
+    ? { ...github.gateway, getPullRequestFeedback: wireFeedbackReader(github), getPullRequestMergeObservation: mergeObservationReader(github, true, mergeObservationRequests, options.mergeObservation) }
+    : { ...github.gateway, getPullRequestMergeObservation: mergeObservationReader(github, false, mergeObservationRequests, options.mergeObservation) };
   // The plan evidence jobs the broker started: the background Lambda is run by the test, with `runPlanEvidenceJobs`.
   const planEvidenceJobs: PlanEvidenceEvent[] = [];
   const harness = await createDeveloperTaskBroker({
@@ -912,7 +957,7 @@ export async function createWorkflowE2E(options: {
         });
       }
     },
-    db, s3, handler, slack, github, repoDirectory, baseCommit, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs,
+    db, s3, handler, slack, github, mergeObservationRequests, repoDirectory, baseCommit, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs,
     ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE, canvasesDeleted,
     /** The broker's EC2 session deleter: each call removes one workspace's compute. */
     deleteEc2Session,
@@ -1011,6 +1056,12 @@ export async function createWorkflowE2E(options: {
     /** Runs the broker's scheduled GitHub webhook recovery sweep, as its EventBridge schedule does; answers its status and reply. */
     async runWebhookRecovery(): Promise<{ statusCode: number; body: Record<string, unknown> }> {
       const response = await harness.handler({ source: "agentx.github-webhook-recovery" });
+      return { statusCode: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
+    },
+
+    /** Runs the merge-recovery schedule directly. It observes GitHub and only queues durable release work. */
+    async runMergeRecovery(): Promise<{ statusCode: number; body: Record<string, unknown> }> {
+      const response = await harness.handler({ source: "agentx.workflow-merge-recovery" });
       return { statusCode: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
     },
 
