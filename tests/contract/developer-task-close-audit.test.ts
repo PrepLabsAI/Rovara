@@ -125,7 +125,7 @@ describe("a close's completed record: the rest of its outcomes (E20)", () => {
     const { db, dev, finish, taskId, workspaceId, active, deleteEc2Session } = await readyTask();
     await finish(workspaceId, active(), "FAILED", { error: "npm ci exited 1" });
     // The compute's removal takes a minute, so the close finishes well after it was requested.
-    deleteEc2Session.mockImplementationOnce(async () => { vi.setSystemTime(new Date("2026-09-30T10:01:00.000Z")); });
+    deleteEc2Session!.mockImplementationOnce(async () => { vi.setSystemTime(new Date("2026-09-30T10:01:00.000Z")); });
     await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
     const accepted = closeRecords(db, taskId).find((record) => record.phase === "accepted");
     const completed = closeRecords(db, taskId).find((record) => record.phase === "completed");

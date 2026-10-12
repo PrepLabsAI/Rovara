@@ -46,7 +46,7 @@ describe("GitHub App repository credentials", () => {
   it("mints a repository-scoped installation token", async () => {
     const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const fetchImplementation = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
       requests.push({ url: requestUrl, init });
@@ -125,7 +125,7 @@ describe("GitHub App repository credentials", () => {
   it("uses a repository-scoped PR token that can resolve private refs", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
       appId: "5002502",
@@ -554,7 +554,7 @@ describe("GitHub App repository credentials", () => {
   it("looks up canonical pull request state with read-only permissions", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
       appId: "5002502",
@@ -613,7 +613,7 @@ describe("GitHub App repository credentials", () => {
   it("updates metadata and state with pull-request write permission", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
       appId: "5002502",

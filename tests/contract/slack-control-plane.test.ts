@@ -583,7 +583,7 @@ describe("hosted Slack GitHub MCP", () => {
     const path = `/v1/service/workspaces/${workspaceId}/connectors/github`;
     const catalog = ConnectorCatalogSchema.parse((await call(handler, { method: "GET", path: `${path}/tools`, service })).body.catalog);
     expect(catalog.tools.map((tool) => tool.name)).toEqual(["github__list_issues"]);
-    expect((catalog.tools[0]!.inputSchema.properties as Record<string, { enum: string[] }>).target.enum).toEqual(["demo", "docs"]);
+    expect((catalog.tools[0]!.inputSchema.properties as Record<string, { enum: string[] }>).target?.enum).toEqual(["demo", "docs"]);
     const docs = catalog.tools[0]!.scopes.find((scope) => scope.alias === "docs")!;
     const result = await call(handler, { method: "POST", path: `${path}/call`, service,
       body: { requestId: randomUUID(), scope: "docs", tool: "list_issues", schemaHash: docs.schemaHash, arguments: {} } });

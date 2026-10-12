@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { z } from "zod";
 import {
   DEFAULT_DEVELOPER_TASK_POLICY,
   DeveloperTaskPolicySchema,
@@ -9,7 +10,7 @@ import {
   developerTaskPolicy,
 } from "../../packages/contracts/src/index.js";
 
-const definition = {
+const definition: z.input<typeof ProjectDefinitionSchema> = {
   name: "payments",
   revision: 1,
   repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }],
