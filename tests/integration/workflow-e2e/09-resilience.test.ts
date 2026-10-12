@@ -567,7 +567,8 @@ describe("Suite 9: resilience", () => {
   }, 120_000);
 
   it("9.20 an accepted coding run with retained People but unavailable proof stays parked through redelivery and recovery", async () => {
-    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: { changesEnabled: false } });
+    const unavailableProof: CheckTaskPerson = async () => { throw new Error("fresh identity proof is unavailable"); };
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: { changesEnabled: false, checkTaskPerson: unavailableProof } });
     await atPlanReview(e2e);
     const runsBeforeApproval = e2e.invocations.length;
     const charge = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge);
@@ -575,11 +576,14 @@ describe("Suite 9: resilience", () => {
     await expect(e2e.settle(0)).rejects.toThrow("the workflow did not settle within 0 steps");
     const queued = e2e.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
     retainOwner(e2e);
+    const people = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")!);
     await e2e.settle();
     expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({
       status: "WAITING_FOR_TASK_ACCESS", operationId: queued.operationId, invocation: queued.invocation,
     });
     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge).toEqual(charge);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+    expect(people).toMatchObject({ revision: 1, orphaned: false, people: [expect.objectContaining({ role: "owner" })] });
     expect(e2e.invocations).toHaveLength(runsBeforeApproval);
     expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
     expect(e2e.dispatchReceipts.filter((receipt) => receipt.operationId === queued.operationId)).toEqual([
@@ -587,9 +591,24 @@ describe("Suite 9: resilience", () => {
     ]);
     expect(await e2e.worker.dispatchAgain(String(queued.operationId), 9)).toBe(false);
     expect((await e2e.runRecovery()).lostOperations).toEqual([]);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+    e2e.worker.taskPerson(freshOwner());
+    const receiptsBeforeProofRecovery = e2e.dispatchReceipts.length;
+    const turnsBeforeProofRecovery = e2e.turns.length;
     expect(await e2e.worker.dispatchAgain(String(queued.operationId))).toBe(false);
+    expect((await e2e.runRecovery()).lostOperations).toEqual([]);
+    expect(await e2e.worker.dispatchAgain(String(queued.operationId), 99)).toBe(false);
     expect(e2e.db.get(String(queued.pk), String(queued.sk))?.status).toBe("WAITING_FOR_TASK_ACCESS");
+    expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({ operationId: queued.operationId, invocation: queued.invocation });
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge).toEqual(charge);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+    expect(e2e.dispatchReceipts.slice(receiptsBeforeProofRecovery)).toEqual([
+      { operationId: queued.operationId, phase: "DISPATCH_GUARD", outcome: "PARKED" },
+      { operationId: queued.operationId, phase: "DISPATCH_GUARD", outcome: "PARKED" },
+    ]);
     expect(e2e.invocations).toHaveLength(runsBeforeApproval);
+    expect(e2e.turns).toHaveLength(turnsBeforeProofRecovery);
+    expect(e2e.worker.deliveryFailures).toEqual([]);
     void logged;
   }, 120_000);
 
