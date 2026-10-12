@@ -120,8 +120,8 @@ describe("discovery refresh after a changed tool definition", () => {
 describe("discovery refresh edge cases", () => {
   const thread = { teamId: "T0123456789", channelId: "C0123456789", threadTs: "1695500000.000001" };
   const base: SlackRequestMessage = { version: 1, eventId: "EvREFRESH10", receivedAt: "2026-09-24T10:00:00.000Z", userId: "U0123456789", thread, text: "list issues" };
-  const workspaceApi = () => ({
-    ensureWorkspace: async () => ({ outcome: "WORKSPACE" as const, workspaceId, status: "READY", operationId: null, created: false, orchestratorInstructions: "Delegate." }),
+  const workspaceApi: ProcessorDependencies["api"] = () => ({
+    ensureWorkspace: async () => ({ outcome: "WORKSPACE" as const, workspaceId, status: "READY" as const, operationId: null, created: false, orchestratorInstructions: "Delegate." }),
     startClose: vi.fn(), completeClose: vi.fn(), waitForOperation: vi.fn(), createConversation: vi.fn(),
   });
 

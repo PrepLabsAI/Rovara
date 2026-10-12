@@ -1,7 +1,8 @@
 // tests/contract/mcp-wait.test.ts
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { DeveloperTaskView } from "@agentx/contracts";
-import { ToolError, WAIT_POLL_DEADLINE_MS, waitForTask } from "../../packages/mcp/src/index.js";
+import type { ToolCall } from "../../packages/mcp/src/tools.js";
+import { ToolError, WAIT_POLL_DEADLINE_MS, waitForTask, type ControlPlaneClient } from "../../packages/mcp/src/index.js";
 
 const view = (status: DeveloperTaskView["status"]): DeveloperTaskView => ({
   taskId: "44444444-4444-4444-8444-444444444444", title: "Fix", project: "payments", status, startingRevision: 1, client: "Claude Code", shared: false,
@@ -36,8 +37,8 @@ afterEach(() => {
 
 describe("waits (US2, R21)", () => {
   it("returns the finished task when it ends before the wait does, with progress after each poll", async () => {
-    const getTask = vi.fn().mockResolvedValueOnce(view("RUNNING")).mockResolvedValueOnce(view("RUNNING")).mockResolvedValueOnce(view("SUCCEEDED"));
-    const progress = vi.fn(async () => undefined);
+    const getTask = vi.fn<ControlPlaneClient["getTask"]>().mockResolvedValueOnce(view("RUNNING")).mockResolvedValueOnce(view("RUNNING")).mockResolvedValueOnce(view("SUCCEEDED"));
+    const progress = vi.fn<NonNullable<ToolCall["progress"]>>(async () => undefined);
     const result = await waitForTask({ client: { getTask }, taskId: view("RUNNING").taskId, waitSeconds: 60, events: 10, signal: new AbortController().signal, progress, ...clock() });
     expect(result).toMatchObject({ timedOut: false, task: { status: "SUCCEEDED" } });
     expect(progress.mock.calls.length).toBeGreaterThanOrEqual(2);
@@ -46,7 +47,7 @@ describe("waits (US2, R21)", () => {
   });
 
   it("is not an error when the wait ends first: timed_out, and the task keeps running", async () => {
-    const getTask = vi.fn(async () => view("RUNNING"));
+    const getTask = vi.fn<ControlPlaneClient["getTask"]>(async () => view("RUNNING"));
     const result = await waitForTask({ client: { getTask }, taskId: view("RUNNING").taskId, waitSeconds: 60, events: 10, signal: new AbortController().signal, ...clock() });
     expect(result).toMatchObject({ timedOut: true, task: { status: "RUNNING" } });
     expect(result.failure).toBeUndefined();
@@ -55,7 +56,7 @@ describe("waits (US2, R21)", () => {
   it("never lets the gap between progress notifications reach 15 seconds", async () => {
     const times: number[] = [];
     const fake = clock();
-    const getTask = vi.fn(async () => view("RUNNING"));
+    const getTask = vi.fn<ControlPlaneClient["getTask"]>(async () => view("RUNNING"));
     await waitForTask({ client: { getTask }, taskId: view("RUNNING").taskId, waitSeconds: 120, events: 10, signal: new AbortController().signal, progress: async () => { times.push(fake.now()); }, ...fake });
     const gaps = times.slice(1).map((time, index) => time - times[index]!);
     expect(Math.max(...gaps)).toBeLessThan(15_000);
@@ -64,7 +65,7 @@ describe("waits (US2, R21)", () => {
   it("polls every 2 seconds, growing to 5, and reports progress that only grows, within the total", async () => {
     const fake = clock();
     const polls: number[] = [];
-    const getTask = vi.fn(async () => { polls.push(fake.now()); return view("RUNNING"); });
+    const getTask = vi.fn<ControlPlaneClient["getTask"]>(async () => { polls.push(fake.now()); return view("RUNNING"); });
     const values: number[] = [];
     await waitForTask({ client: { getTask }, taskId: view("RUNNING").taskId, waitSeconds: 30, events: 10, signal: new AbortController().signal, progress: async (elapsed) => { values.push(elapsed); }, ...fake });
     expect(polls.slice(0, 5)).toEqual([0, 2_000, 5_000, 9_000, 14_000]);
@@ -75,14 +76,14 @@ describe("waits (US2, R21)", () => {
   it("starts from the view a start or continue gave, without fetching it again at once", async () => {
     const fake = clock();
     const polls: number[] = [];
-    const getTask = vi.fn(async () => { polls.push(fake.now()); return view("SUCCEEDED"); });
+    const getTask = vi.fn<ControlPlaneClient["getTask"]>(async () => { polls.push(fake.now()); return view("SUCCEEDED"); });
     const result = await waitForTask({ client: { getTask }, taskId: view("RUNNING").taskId, first: view("STARTING"), waitSeconds: 30, events: 10, signal: new AbortController().signal, ...fake });
     expect(polls).toEqual([2_000]);
     expect(result).toMatchObject({ timedOut: false, task: { status: "SUCCEEDED" } });
   });
 
   it("returns at once when the first view has already ended", async () => {
-    const getTask = vi.fn();
+    const getTask = vi.fn<ControlPlaneClient["getTask"]>();
     const result = await waitForTask({ client: { getTask }, taskId: view("RUNNING").taskId, first: view("FAILED"), waitSeconds: 30, events: 10, signal: new AbortController().signal, ...clock() });
     expect(result).toMatchObject({ timedOut: false, task: { status: "FAILED" } });
     expect(getTask).not.toHaveBeenCalled();
@@ -90,19 +91,19 @@ describe("waits (US2, R21)", () => {
 
   it("answers with the last view and the failure, not a timeout, when a check fails", async () => {
     const failure = new ToolError("CONTROL_PLANE_UNAVAILABLE", "could not reach AgentX");
-    const getTask = vi.fn().mockResolvedValueOnce(view("RUNNING")).mockRejectedValueOnce(failure);
+    const getTask = vi.fn<ControlPlaneClient["getTask"]>().mockResolvedValueOnce(view("RUNNING")).mockRejectedValueOnce(failure);
     const result = await waitForTask({ client: { getTask }, taskId: view("RUNNING").taskId, waitSeconds: 30, events: 10, signal: new AbortController().signal, ...clock() });
     expect(result).toEqual({ task: view("RUNNING"), timedOut: false, failure });
   });
 
   it("still throws when the very first read fails, since there is no view to answer with", async () => {
-    const getTask = vi.fn(async () => { throw new ToolError("TASK_NOT_FOUND", "no such task"); });
+    const getTask = vi.fn<ControlPlaneClient["getTask"]>(async () => { throw new ToolError("TASK_NOT_FOUND", "no such task"); });
     await expect(waitForTask({ client: { getTask }, taskId: view("RUNNING").taskId, waitSeconds: 30, events: 10, signal: new AbortController().signal, ...clock() })).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
   });
 
   it("stops polling when the call is cancelled (Review Focus 2)", async () => {
     const controller = new AbortController();
-    const getTask = vi.fn(async () => view("RUNNING"));
+    const getTask = vi.fn<ControlPlaneClient["getTask"]>(async () => view("RUNNING"));
     const waiting = waitForTask({ client: { getTask }, taskId: view("RUNNING").taskId, waitSeconds: 600, events: 10, signal: controller.signal, ...clock() });
     await new Promise((resolve) => setTimeout(resolve, 10));
     controller.abort();

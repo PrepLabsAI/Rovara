@@ -11,6 +11,23 @@ export const TRACE = "trace-test-0001";
 /** The admin's bearer token in every call; it must never reach a log line, record or answer. */
 export const ADMIN_TOKEN = "Bearer admin-token-for-tests";
 
+type AdminResponse = Promise<{ status: number; body: Record<string, unknown> }>;
+type AdminChangeHarness = Awaited<ReturnType<typeof createAdminReadBroker>> & {
+  clock: { now: () => number; advance: (ms: number) => void };
+  metrics: string[];
+  channelLookup: { down: boolean };
+  endedSessions: EndDeveloperSessionsRequest[];
+  propose: (change: AdminChangeInput, methods?: string[], requestId?: string, subject?: string) => AdminResponse;
+  press: (changeId: string, click: "confirm" | "cancel", slackUserId?: string, teamId?: string | null) => Promise<{ outcome: string; changeId: string; traceId?: string }>;
+  get: (id: string, subject?: string) => AdminResponse;
+  list: (query?: string) => AdminResponse;
+  slack: (id: string, subject?: string) => AdminResponse;
+  apply: (id: string, method?: string, subject?: string) => AdminResponse;
+  decline: (id: string, reason?: string, subject?: string) => AdminResponse;
+  audit: (id: string) => Record<string, unknown> | undefined;
+  pending: (id: string) => Record<string, unknown> | undefined;
+};
+
 export async function createAdminChangeBroker(options: {
   elicitation?: boolean;
   slack?: boolean;
@@ -21,7 +38,7 @@ export async function createAdminChangeBroker(options: {
   connectorTypes?: Record<string, unknown>;
   /** The admin's Slack link lookup answers that Slack could not be reached. */
   slackLookupDown?: boolean;
-} = {}) {
+} = {}): Promise<AdminChangeHarness> {
   let now = Date.now();
   const clock = { now: () => now, advance: (ms: number) => { now += ms; } };
   const metrics: string[] = [];
@@ -65,7 +82,7 @@ export async function createAdminChangeBroker(options: {
     slack: (id: string, subject?: string) => call("POST", `/v1/admin/changes/${id}/slack`, {}, subject),
     apply: (id: string, method = "elicitation", subject?: string) => call("POST", `/v1/admin/changes/${id}/apply`, { method }, subject),
     decline: (id: string, reason = "declined", subject?: string) => call("POST", `/v1/admin/changes/${id}/decline`, { method: "elicitation", reason }, subject),
-    audit: (id: string) => harness.db.get(`CHANGE#${id}`, "AUDIT") as Record<string, unknown> | undefined,
-    pending: (id: string) => harness.db.get(`ADMIN_CHANGE#${id}`, "META") as Record<string, unknown> | undefined,
+    audit: (id: string) => harness.db.get(`CHANGE#${id}`, "AUDIT"),
+    pending: (id: string) => harness.db.get(`ADMIN_CHANGE#${id}`, "META"),
   };
 }

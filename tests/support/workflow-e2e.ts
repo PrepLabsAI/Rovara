@@ -4,13 +4,15 @@
 // git repository. GitHub is a fake that only accepts a push made with a push-scoped token.
 import { createHmac, generateKeyPairSync, randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
 import { onTestFinished, vi } from "vitest";
 import {
   SharedTaskRecordSchema,
+  WORKER_INVOCATION_FEATURES,
+  agentXError,
   SlackChannelBindingSchema,
   SlackRequestMessageSchema,
   WorkerInvocationSchema,
@@ -49,8 +51,10 @@ import { RepositoryGrantService } from "../../packages/broker/src/repository-acc
 import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { createEc2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js";
+import { guardTaskDispatch, type TaskDispatchGuard } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { failActiveOperation, failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
 import type { DurableOutboxRecord } from "../../packages/broker/src/aws/lambda.js";
+import type { CheckTaskPerson } from "../../packages/broker/src/developer/task-people.js";
 import { runPlanEvidenceJob, type PlanEvidenceRunOutcome } from "../../packages/broker/src/aws/plan-evidence-handler.js";
 import type { PlanEvidenceEvent } from "../../packages/broker/src/developer/plan-evidence-jobs.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
@@ -164,6 +168,47 @@ function wireFeedbackReader(github: FakeGitHub): (repositoryUrl: string, number:
   };
 }
 
+/** The recovery worker's bounded merge-only read, either through the real provider or the fake's stable API view. */
+function mergeObservationReader(
+  github: FakeGitHub,
+  wire: boolean,
+  requestLedger: string[],
+  controls: { httpFault?: (attempt: number) => Response | undefined; afterRead?: () => void | Promise<void> } = {},
+): GitHubAppCredentialProvider["getPullRequestMergeObservation"] {
+  if (wire) {
+    wireAppKey ??= generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
+    let attempt = 0;
+    const provider = new GitHubAppCredentialProvider({ credentialRef: "github-app", appId: "123", getPrivateKey: async () => wireAppKey!, fetchImplementation: async (input, init) => {
+      const fault = controls.httpFault?.(++attempt);
+      return fault ?? github.fetch(input, init);
+    } });
+    return async (repositoryUrl, number, budget) => {
+      const observed = await provider.getPullRequestMergeObservation(repositoryUrl, number, {
+        ...budget,
+        beforeRequest: () => { requestLedger.push("github"); budget.beforeRequest(); },
+      });
+      await controls.afterRead?.();
+      return observed;
+    };
+  }
+  return async (repositoryUrl, number, budget) => github.atOneMoment(async () => {
+    requestLedger.push("pull-request");
+    budget.beforeRequest();
+    const before = await github.gateway.getPullRequest(repositoryUrl, number);
+    requestLedger.push("commit-tree");
+    budget.beforeRequest();
+    const headTreeSha = await github.gateway.getCommitTree(repositoryUrl, before.headCommit);
+    requestLedger.push("pull-request");
+    budget.beforeRequest();
+    const after = await github.gateway.getPullRequest(repositoryUrl, number);
+    if (before.number !== after.number || before.url !== after.url || before.headCommit !== after.headCommit || before.state !== after.state) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub merge observation changed during the read");
+    }
+    await controls.afterRead?.();
+    return { ...after, headTreeSha };
+  });
+}
+
 /** A GitHub webhook event for a task's pull request, as `webhook()` builds and signs it. */
 export type E2EWebhookEvent =
   | { kind: "issue_comment" | "pull_request_review_comment"; action?: "created" | "edited" | "deleted"; number: number; comment: GitHubFeedbackComment }
@@ -203,6 +248,8 @@ export const WORKER_CALLBACK_ROUTE = /^\/v1\/internal\/workspaces\/[^/]+\/operat
 
 export async function createWorkflowE2E(options: {
   model?: Parameters<typeof workflowModel>[0];
+  /** Files placed under repo/demo before the fixture's base commit. */
+  initialRepositoryFiles?: readonly { path: string; content: string }[];
   /** The thread brief limit; null turns it off. */
   briefLimit?: number | null;
   /** "unavailable": this Slack workspace cannot create a Canvas, so approval cards link the task page. */
@@ -220,6 +267,10 @@ export async function createWorkflowE2E(options: {
    * it; throwing is the check runner itself failing.
    */
   checkResult?: (command: ProjectCommand) => { exitCode: number | null; stdout: string; stderr: string; timedOut?: boolean } | undefined;
+  /** Override a real agent-command replay at the external runner boundary. */
+  agentCheckResult?: (replay: string, tree: string) => { exitCode: number | null; timedOut: boolean; output: string } | undefined;
+  /** The worker check-round budget; absent, the production 30-minute default applies. */
+  checkBudgetMs?: () => number;
   /** Runs in the worker just before it publishes, with the repository's directory (to change the workspace, say). */
   beforePublish?: (repositoryDirectory: string) => Promise<void>;
   /**
@@ -243,6 +294,8 @@ export async function createWorkflowE2E(options: {
   github?: FakeGitHubOptions & { wire?: boolean };
   /** The App secret's webhook secret: absent for the default; null when the secret holds none (the broker answers 503). */
   webhookSecret?: string | null;
+  /** Merge-recovery-only external seams: real-provider HTTP faults and a race immediately after its stable PR read. */
+  mergeObservation?: { httpFault?: (attempt: number) => Response | undefined; afterRead?: () => void | Promise<void> };
   /** The worker's review timeouts (the run-task seam); absent, the reviews' own 5 minutes. */
   workerTimeouts?: { reviewMs?: number; feedbackReviewMs?: number };
   /** How long the broker's PR description update (D2) may take; absent, the broker's own 5 seconds. */
@@ -251,8 +304,11 @@ export async function createWorkflowE2E(options: {
   consistency?: "strong" | "eventual";
   /** The open tasks one person may have (the stack's per-person workspace limit); absent, the default 3. */
   memberLimit?: number;
+  /** Fresh People authority used by the real dispatch guard; absent proof fails closed for retained PEOPLE. */
+  taskPeople?: { changesEnabled?: boolean; checkTaskPerson?: CheckTaskPerson };
 } = {}) {
   const github = new FakeGitHub(options.github?.realism === undefined ? {} : { realism: options.github.realism });
+  const mergeObservationRequests: string[] = [];
   // The webhook secret GitHub signs with, and the copy the broker's container has cached (it re-reads on { refresh: true }).
   let configuredSecret: string | null = options.webhookSecret === undefined ? WEBHOOK_SECRET : options.webhookSecret;
   let cachedSecret = configuredSecret;
@@ -262,16 +318,25 @@ export async function createWorkflowE2E(options: {
     // The production reader's own refusal for an App secret with no usable webhook secret.
     return cachedSecret === null ? webhookSecretFromSecret("{}") : cachedSecret;
   };
+  // These two methods are mutable fault/barrier seams in existing journeys. Forward dynamically so replacing the
+  // gateway method after harness construction still reaches the broker; object spread alone captures the old function.
+  const mutableGithubReads = {
+    getPullRequest: (...args: Parameters<typeof github.gateway.getPullRequest>) => github.gateway.getPullRequest(...args),
+    getPullRequestFeedback: (...args: Parameters<typeof github.gateway.getPullRequestFeedback>) => github.gateway.getPullRequestFeedback(...args),
+  };
   const githubPullRequests = options.github?.wire === true
-    ? { ...github.gateway, getPullRequestFeedback: wireFeedbackReader(github) }
-    : github.gateway;
+    ? { ...github.gateway, ...mutableGithubReads, getPullRequestFeedback: wireFeedbackReader(github), getPullRequestMergeObservation: mergeObservationReader(github, true, mergeObservationRequests, options.mergeObservation) }
+    : { ...github.gateway, ...mutableGithubReads, getPullRequestMergeObservation: mergeObservationReader(github, false, mergeObservationRequests, options.mergeObservation) };
   // The plan evidence jobs the broker started: the background Lambda is run by the test, with `runPlanEvidenceJobs`.
   const planEvidenceJobs: PlanEvidenceEvent[] = [];
   const harness = await createDeveloperTaskBroker({
     register: false,
     ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.channelMembers === undefined ? {} : { channelMembers: options.channelMembers }),
-    ...(options.slackRequestQueue === undefined ? {} : { developerExtra: { slackRequestQueue: options.slackRequestQueue } }),
+    ...((options.slackRequestQueue === undefined && options.taskPeople?.changesEnabled === undefined) ? {} : { developerExtra: {
+      ...(options.slackRequestQueue === undefined ? {} : { slackRequestQueue: options.slackRequestQueue }),
+      ...(options.taskPeople?.changesEnabled === undefined ? {} : { taskPeopleConfiguration: { peopleChangesEnabled: options.taskPeople.changesEnabled } }),
+    } }),
     ...(options.consistency === undefined ? {} : { consistency: options.consistency }),
     brokerExtra: {
       githubPullRequests,
@@ -315,7 +380,27 @@ export async function createWorkflowE2E(options: {
   await writeFile(join(repoDirectory, "greeting.ts"), "export const placeholder = true;\nexport const greeting = 'Hello';\nexport const punctuation = '!';\n");
   // A file the change never touches: a finding in it can only be an older problem.
   await writeFile(join(repoDirectory, "farewell.ts"), "export const farewell = (name) => 'Bye ' + name;\n");
-  await git(["add", "greeting.ts", "farewell.ts"]);
+  const realRepositoryDirectory = await realpath(repoDirectory);
+  for (const file of options.initialRepositoryFiles ?? []) {
+    const parts = file.path.split("/");
+    if (file.path.length === 0 || isAbsolute(file.path) || file.path.includes("\\") || parts.some((part) => part.length === 0 || part === "." || part === "..")) {
+      throw new Error(`initial repository file path must stay inside repo/demo: ${file.path}`);
+    }
+    let parent = realRepositoryDirectory;
+    for (const segment of parts.slice(0, -1)) {
+      parent = join(parent, segment);
+      await mkdir(parent).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      });
+      const realParent = await realpath(parent);
+      const parentPath = relative(realRepositoryDirectory, realParent);
+      if (parentPath === ".." || parentPath.startsWith(`..${sep}`) || isAbsolute(parentPath)) {
+        throw new Error(`initial repository file path resolves outside repo/demo: ${file.path}`);
+      }
+    }
+    await writeFile(join(parent, parts.at(-1)!), file.content, { flag: "wx" });
+  }
+  await git(["add", "--all"]);
   await git(["commit", "--quiet", "-m", "base"]);
   const baseCommit = await git(["rev-parse", "HEAD"]);
   github.commits.set(baseCommit, await git(["rev-parse", "HEAD^{tree}"]));
@@ -351,8 +436,28 @@ export async function createWorkflowE2E(options: {
 
   /** Every project command a check round ran, with the workspace tree it ran on; each passes unless `checkResult` says otherwise. */
   const checkRuns: Array<{ command: ProjectCommand; tree: string }> = [];
+  const agentCheckRuns: Array<{ replay: string; tree: string; exitCode: number | null; timedOut: boolean; output: string }> = [];
   const checkRunners: CheckRunners = {
-    runAgentCommand: async () => ({ exitCode: 0, timedOut: false, output: "ok\n" }),
+    runAgentCommand: async (replay, timeoutMs, signal) => {
+      const tree = await workspaceTree("agent-check");
+      const scripted = options.agentCheckResult?.(replay, tree);
+      if (scripted !== undefined) {
+        agentCheckRuns.push({ replay, tree, ...scripted });
+        return scripted;
+      }
+      try {
+        const { stdout, stderr } = await execFile("bash", ["-lc", replay], { cwd: root, timeout: timeoutMs, signal });
+        const result = { exitCode: 0, timedOut: false, output: `${stdout}${stderr}` };
+        agentCheckRuns.push({ replay, tree, ...result });
+        return result;
+      } catch (error) {
+        const failure = error as Error & { code?: string | number; killed?: boolean; stdout?: string; stderr?: string };
+        const result = { exitCode: typeof failure.code === "number" ? failure.code : null, timedOut: failure.killed === true,
+          output: `${failure.stdout ?? ""}${failure.stderr ?? ""}` };
+        agentCheckRuns.push({ replay, tree, ...result });
+        return result;
+      }
+    },
     runProjectCommand: async (command) => {
       checkRuns.push({ command, tree: await workspaceTree("check") });
       const scripted = options.checkResult?.(command);
@@ -527,6 +632,10 @@ export async function createWorkflowE2E(options: {
 
   /** Every invocation the worker was given, as the broker queued it (after any delivery downgrade). */
   const invocations: WorkerInvocation[] = [];
+  let checkTaskPerson = options.taskPeople?.checkTaskPerson;
+  let beforeNextFeatureProbe: (() => void | Promise<void>) | undefined;
+  const dispatchReceipts: Array<{ operationId: string; phase: "DISPATCH_GUARD" | "EC2_GUARD" | "FEATURE_PROBE" | "POST"; outcome?: "ALLOWED" | "PARKED" }> = [];
+  const resultRewrites: Array<{ kind: E2EInvocationKind; rewrite: (result: unknown) => unknown }> = [];
   /** Per run, in order: its kind and mode, and how many owner decisions and feedback approvals the task held when it started. */
   const ledger: JourneyLedgerEntry[] = [];
   /** The workspace tree each review run was given. */
@@ -597,6 +706,7 @@ export async function createWorkflowE2E(options: {
           const read = await callbacks.feedbackBundleReader(binding);
           return { ...read, taskRequirements: rewrite(read.taskRequirements) };
         }, authorizeFeedbackApproval: callbacks.authorizeFeedbackApproval, checkRunners,
+        ...(options.checkBudgetMs === undefined ? {} : { checkBudgetMs: options.checkBudgetMs }),
         ...(options.workerTimeouts === undefined ? {} : { timeouts: options.workerTimeouts }),
       });
     } catch (error) {
@@ -605,6 +715,8 @@ export async function createWorkflowE2E(options: {
     } finally {
       github.during = undefined;
     }
+    const rewriteIndex = resultRewrites.findIndex((entry) => invocationMatches(invocation, entry.kind));
+    if (rewriteIndex !== -1) result = resultRewrites.splice(rewriteIndex, 1)[0]!.rewrite(result);
     await callbacks.terminalSink({ operationId, status: "SUCCEEDED", result });
     if (options.legacyPlanMarkdown !== undefined && legacyPlan === undefined && invocation.kind === "task" && invocation.payload.workflowMode === "PLAN") {
       legacyPlan = turnPlanIntoMarkdown({ db, s3 }, invocation.workspaceId, operationId, options.legacyPlanMarkdown);
@@ -628,13 +740,19 @@ export async function createWorkflowE2E(options: {
    * asks the worker's /ping (answered with `e2e.worker.features(...)`) and drops or refuses what that worker cannot parse.
    * Answers what the worker would receive, or undefined when the dispatcher failed the operation instead.
    */
-  const deliverThroughDispatcher = async (invocation: WorkerInvocation): Promise<WorkerInvocation | undefined> => {
+  const deliverThroughDispatcher = async (invocation: WorkerInvocation, receiveCount = 1): Promise<WorkerInvocation | undefined> => {
     const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === invocation.operationId)[0];
     if (outbox === undefined) throw new Error(`no outbox record for operation ${invocation.operationId}`);
     let sent: WorkerInvocation | undefined;
-    const features = workerFeatureList ?? [];
+    const features = workerFeatureList ?? WORKER_INVOCATION_FEATURES;
+    const guarded = (phase: "DISPATCH_GUARD" | "EC2_GUARD"): TaskDispatchGuard => async (record) => {
+      const outcome = await guardTaskDispatch({ documentClient: db, tableName: "state", ...(checkTaskPerson === undefined ? {} : { checkTaskPerson }) }, record);
+      dispatchReceipts.push({ operationId: record.operationId, phase, outcome });
+      return outcome;
+    };
     const dispatch = createDispatcherHandler({
       maxAttempts: 1,
+      guardTaskDispatch: guarded("DISPATCH_GUARD"),
       markDispatching: async () => true,
       markDelivered: async () => undefined,
       markFailed: async (record, error) => {
@@ -646,13 +764,20 @@ export async function createWorkflowE2E(options: {
         sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "10.0.0.9" }) },
         binding: async () => ({ deploymentMode: "ec2-ebs" }) as never,
         sign: async () => new Uint8Array(64),
-        post: async (_url, init) => { sent = WorkerInvocationSchema.parse(JSON.parse(init.body)); return { status: 202, body: "" }; },
+        post: async (_url, init) => { sent = WorkerInvocationSchema.parse(JSON.parse(init.body)); dispatchReceipts.push({ operationId: invocation.operationId, phase: "POST" }); return { status: 202, body: "" }; },
         progress: async () => undefined,
-        workerFeatures: async () => features,
+        workerFeatures: async () => {
+          dispatchReceipts.push({ operationId: invocation.operationId, phase: "FEATURE_PROBE" });
+          const barrier = beforeNextFeatureProbe;
+          beforeNextFeatureProbe = undefined;
+          await barrier?.();
+          return features;
+        },
+        guardTaskDispatch: guarded("EC2_GUARD"),
       }),
     });
     const record: Partial<DurableOutboxRecord> = { ...outbox, invocation };
-    await dispatch({ Records: [{ messageId: `dispatch-${invocation.operationId}`, body: JSON.stringify(record), attributes: { ApproximateReceiveCount: "1" } }] });
+    await dispatch({ Records: [{ messageId: `dispatch-${invocation.operationId}`, body: JSON.stringify(record), attributes: { ApproximateReceiveCount: String(receiveCount) } }] });
     return sent;
   };
 
@@ -912,7 +1037,7 @@ export async function createWorkflowE2E(options: {
         });
       }
     },
-    db, s3, handler, slack, github, repoDirectory, baseCommit, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs,
+    db, s3, handler, slack, github, mergeObservationRequests, repoDirectory, baseCommit, baseTree: github.commits.get(baseCommit)!, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, agentCheckRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs, dispatchReceipts,
     ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE, canvasesDeleted,
     /** The broker's EC2 session deleter: each call removes one workspace's compute. */
     deleteEc2Session,
@@ -1014,6 +1139,12 @@ export async function createWorkflowE2E(options: {
       return { statusCode: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
     },
 
+    /** Runs the merge-recovery schedule directly. It observes GitHub and only queues durable release work. */
+    async runMergeRecovery(): Promise<{ statusCode: number; body: Record<string, unknown> }> {
+      const response = await harness.handler({ source: "agentx.workflow-merge-recovery" });
+      return { statusCode: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
+    },
+
     /** The App secret's webhook secret changes (GitHub signs with it at once); the broker's cached copy stays until it re-reads. */
     rotateWebhookSecret(next: string): void {
       configuredSecret = next;
@@ -1066,7 +1197,9 @@ export async function createWorkflowE2E(options: {
         if (invocation === undefined) break;
         if (step >= maxSteps) throw new Error(`the workflow did not settle within ${maxSteps} steps`);
         processed.add(invocation.operationId);
-        const delivered = workerFeatureList === undefined ? invocation : await deliverThroughDispatcher(invocation);
+        const pointer = db.get(`WORKSPACE#${invocation.workspaceId}`, "DEVELOPER_TASK");
+        const retainedPeople = pointer === undefined ? undefined : db.get(`DEVTASK#${String(pointer.taskId)}`, "PEOPLE");
+        const delivered = workerFeatureList === undefined && retainedPeople === undefined ? invocation : await deliverThroughDispatcher(invocation);
         if (delivered !== undefined) await runInvocation(delivered);
       }
       await pumpNotices();
@@ -1140,11 +1273,23 @@ export async function createWorkflowE2E(options: {
       failNext: (kind: E2EInvocationKind, message: string): void => { failures.push({ kind, message }); },
       /** An old broker: these payload fields are left out of every later invocation. */
       stripInvocationFields: (fields: string[]): void => { strippedFields.push(...fields); },
+      /** One-shot mutation of a real successful worker result before its signed callback. */
+      rewriteNextResult: (kind: E2EInvocationKind, rewrite: (result: unknown) => unknown): void => { resultRewrites.push({ kind, rewrite }); },
       /**
        * An old (or new) worker: from now on every invocation goes through the production dispatcher and EC2 delivery, whose
        * /ping answers `list`; undefined goes back to running each outbox invocation as queued.
        */
       features: (list: readonly string[] | undefined): void => { workerFeatureList = list; },
+      /** Changes the fresh People proof used by every later dispatch guard. */
+      taskPerson: (proof: CheckTaskPerson | undefined): void => { checkTaskPerson = proof; },
+      /** Runs once during the next worker feature probe, between EC2 delivery's two fresh guard checks. */
+      beforeFeatureProbe: (barrier: () => void | Promise<void>): void => { beforeNextFeatureProbe = barrier; },
+      /** Redelivers an existing durable outbox message through the real dispatcher without running the worker. */
+      dispatchAgain: async (operationId: string, receiveCount = 1): Promise<boolean> => {
+        const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0];
+        if (outbox === undefined) throw new Error(`no outbox record for operation ${operationId}`);
+        return (await deliverThroughDispatcher(WorkerInvocationSchema.parse(outbox.invocation), receiveCount)) !== undefined;
+      },
       /**
        * Deploy skew: the next feedback review's input reads as an older broker built it (`rewrite` turns this broker's
        * owner-approved requirements text into that broker's), while its answer is checked by this broker. By default the run

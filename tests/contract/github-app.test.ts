@@ -2,6 +2,7 @@ import { generateKeyPairSync, verify } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   GitHubAppCredentialProvider,
+  GithubMergeRateLimitError,
   appIdFromSecret,
   createGitHubAppJwt,
   privateKeyFromSecret,
@@ -45,7 +46,7 @@ describe("GitHub App repository credentials", () => {
   it("mints a repository-scoped installation token", async () => {
     const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const fetchImplementation = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
       requests.push({ url: requestUrl, init });
@@ -124,7 +125,7 @@ describe("GitHub App repository credentials", () => {
   it("uses a repository-scoped PR token that can resolve private refs", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
       appId: "5002502",
@@ -553,7 +554,7 @@ describe("GitHub App repository credentials", () => {
   it("looks up canonical pull request state with read-only permissions", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
       appId: "5002502",
@@ -612,7 +613,7 @@ describe("GitHub App repository credentials", () => {
   it("updates metadata and state with pull-request write permission", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const provider = appProvider({
       credentialRef: "github-agentx-sdlc",
       appId: "5002502",
@@ -883,6 +884,174 @@ function pullRequestFixture(): Record<string, unknown> {
     body: "Current body",
   };
 }
+
+describe("bounded pull request merge observation", () => {
+  const NOW = Date.parse("2026-10-11T12:00:00.000Z");
+  type RequestKind = "installation" | "token" | "pull" | "tree";
+  function fixture(options: {
+    response?: (kind: RequestKind, ordinal: number) => Response | undefined;
+    mutatePull?: (value: Record<string, unknown>, pullRead: number) => Record<string, unknown>;
+    tree?: unknown;
+    beforeRequest?: () => void;
+  } = {}) {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const requests: string[] = [];
+    let pullReads = 0;
+    let attempts = 0;
+    const fetchImplementation = vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      requests.push(requestUrl);
+      const kind: RequestKind = requestUrl.endsWith("/installation") ? "installation"
+        : requestUrl.endsWith("/access_tokens") ? "token"
+          : requestUrl.includes("/git/commits/") ? "tree" : "pull";
+      const override = options.response?.(kind, requests.length);
+      if (override) return override;
+      if (kind === "installation") return Response.json({ id: 163046162, account: { login: "ps06756" } });
+      if (kind === "token") return Response.json({ token: "merge-read-token" });
+      if (kind === "tree") return Response.json(options.tree ?? { sha: "a".repeat(40), tree: { sha: "b".repeat(40) } });
+      pullReads += 1;
+      const value = options.mutatePull?.(pullRequestFixture(), pullReads) ?? pullRequestFixture();
+      return Response.json(value);
+    });
+    const provider = new GitHubAppCredentialProvider({
+      credentialRef: "github-agentx-sdlc", appId: "5002502",
+      getPrivateKey: async () => privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      fetchImplementation, now: () => NOW,
+    });
+    const controller = new AbortController();
+    const budget = {
+      signal: controller.signal,
+      beforeRequest: options.beforeRequest ?? (() => { attempts += 1; }),
+    };
+    return { provider, requests, fetchImplementation, controller, budget, attempts: () => attempts };
+  }
+
+  it("reads PR, exact head tree, and PR again using five bounded read-only HTTP attempts", async () => {
+    const f = fixture();
+    await expect(f.provider.getPullRequestMergeObservation(
+      "https://github.com/ps06756/personal-website-test.git", 42, f.budget,
+    )).resolves.toEqual({
+      number: 42,
+      url: "https://github.com/ps06756/personal-website-test/pull/42",
+      state: "open",
+      headBranch: "agentx/00000000-0000-4000-8000-000000000001",
+      baseBranch: "main",
+      headCommit: "a".repeat(40),
+      headTreeSha: "b".repeat(40),
+      title: "Current title",
+      body: "Current body",
+    });
+    expect(f.attempts()).toBe(5);
+    const tokenInit = (f.fetchImplementation.mock.calls[1] as unknown as [string, RequestInit])[1];
+    if (typeof tokenInit.body !== "string") throw new Error("expected token request body");
+    expect(JSON.parse(tokenInit.body)).toEqual({ repositories: ["personal-website-test"], permissions: { contents: "read", pull_requests: "read" } });
+    expect(f.requests).toEqual([
+      "https://api.github.com/repos/ps06756/personal-website-test/installation",
+      "https://api.github.com/app/installations/163046162/access_tokens",
+      "https://api.github.com/repos/ps06756/personal-website-test/pulls/42",
+      `https://api.github.com/repos/ps06756/personal-website-test/git/commits/${"a".repeat(40)}`,
+      "https://api.github.com/repos/ps06756/personal-website-test/pulls/42",
+    ]);
+    expect(f.requests.join("\n")).not.toMatch(/comments|reviews|graphql|compare|commits\/[^/]+\/parents/i);
+  });
+
+  it.each([
+    ["head", (value: Record<string, unknown>) => ({ ...value, head: { ...(value.head as Record<string, unknown>), sha: "c".repeat(40) } })],
+    ["state", (value: Record<string, unknown>) => ({ ...value, state: "closed" })],
+    ["merge commit", (value: Record<string, unknown>) => ({ ...value, state: "closed", merged: true, merge_commit_sha: "c".repeat(40) })],
+  ] as const)("refuses a %s change between the two PR reads", async (_label, second) => {
+    const f = fixture({ mutatePull: (value, read) => read === 2 ? second(value) : value });
+    await expect(f.provider.getPullRequestMergeObservation("https://github.com/ps06756/personal-website-test", 42, f.budget))
+      .rejects.toThrow(/changed/);
+  });
+
+  it.each([
+    ["64-character head", { mutatePull: (value: Record<string, unknown>) => ({ ...value, head: { ...(value.head as Record<string, unknown>), sha: "a".repeat(64) } }) }],
+    ["uppercase head", { mutatePull: (value: Record<string, unknown>) => ({ ...value, head: { ...(value.head as Record<string, unknown>), sha: "A".repeat(40) } }) }],
+    ["missing tree", { tree: { sha: "a".repeat(40), tree: {} } }],
+    ["uppercase tree", { tree: { sha: "a".repeat(40), tree: { sha: "B".repeat(40) } } }],
+  ] as const)("refuses a %s identity", async (_label, shape) => {
+    const f = fixture({
+      ...("tree" in shape ? { tree: shape.tree } : {}),
+      ...("mutatePull" in shape ? { mutatePull: (value) => shape.mutatePull(value) } : {}),
+    });
+    await expect(f.provider.getPullRequestMergeObservation("https://github.com/ps06756/personal-website-test", 42, f.budget))
+      .rejects.toThrow(/invalid/);
+  });
+
+  it.each([
+    ["number", (value: Record<string, unknown>) => ({ ...value, number: 43, html_url: "https://github.com/ps06756/personal-website-test/pull/43" })],
+    ["URL", (value: Record<string, unknown>) => ({ ...value, html_url: "https://github.com/ps06756/other/pull/42" })],
+    ["head repository", (value: Record<string, unknown>) => ({ ...value, head: { ...(value.head as Record<string, unknown>), repo: { full_name: "other/personal-website-test" } } })],
+  ] as const)("refuses the wrong PR %s", async (_label, mutatePull) => {
+    const f = fixture({ mutatePull: (value) => mutatePull(value) });
+    await expect(f.provider.getPullRequestMergeObservation("https://github.com/ps06756/personal-website-test", 42, f.budget))
+      .rejects.toThrow();
+  });
+
+  it("refuses the wrong installation owner", async () => {
+    const f = fixture({ response: (kind) => kind === "installation" ? Response.json({ id: 1, account: { login: "other" } }) : undefined });
+    await expect(f.provider.getPullRequestMergeObservation("https://github.com/ps06756/personal-website-test", 42, f.budget))
+      .rejects.toThrow(/installation/);
+  });
+
+  it("keeps an inaccessible installation retryable", async () => {
+    const f = fixture({ response: (kind) => kind === "installation" ? new Response("not found", { status: 404 }) : undefined });
+    await expect(f.provider.getPullRequestMergeObservation("https://github.com/ps06756/personal-website-test", 42, f.budget))
+      .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+  });
+
+  it.each([404, 500])("keeps HTTP %i unavailable rather than treating it as merge proof", async (status) => {
+    const f = fixture({ response: (kind) => kind === "pull" ? new Response("sensitive body", { status }) : undefined });
+    await expect(f.provider.getPullRequestMergeObservation("https://github.com/ps06756/personal-website-test", 42, f.budget))
+      .rejects.not.toThrow(/sensitive body/);
+  });
+
+  it.each([
+    ["retry-after", 429, { "retry-after": "120" }, NOW + 120_000],
+    ["reset", 429, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String((NOW + 180_000) / 1_000) }, NOW + 180_000],
+    ["fallback", 429, { "retry-after": "bad", "x-ratelimit-reset": "bad" }, NOW + 300_000],
+    ["403 retry-after", 403, { "retry-after": "60" }, NOW + 60_000],
+    ["403 exhausted", 403, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String((NOW + 240_000) / 1_000) }, NOW + 240_000],
+    ["later reset", 429, { "retry-after": "60", "x-ratelimit-remaining": "0", "x-ratelimit-reset": String((NOW + 240_000) / 1_000) }, NOW + 240_000],
+  ] as const)("classifies %s without reflecting response content", async (_label, status, headers, retryAt) => {
+    const f = fixture({ response: (kind) => kind === "pull" ? new Response("secret response", { status, headers }) : undefined });
+    const error = await f.provider.getPullRequestMergeObservation("https://github.com/ps06756/personal-website-test", 42, f.budget).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(GithubMergeRateLimitError);
+    expect(error).toMatchObject({ name: "GithubMergeRateLimitError", retryAt });
+    expect(String(error)).not.toContain("secret response");
+  });
+
+  it("keeps an ordinary 403 distinct from rate exhaustion", async () => {
+    const f = fixture({ response: (kind) => kind === "pull" ? new Response("secret response", { status: 403 }) : undefined });
+    const error = await f.provider.getPullRequestMergeObservation("https://github.com/ps06756/personal-website-test", 42, f.budget).catch((caught: unknown) => caught);
+    expect(error).not.toBeInstanceOf(GithubMergeRateLimitError);
+    expect(String(error)).not.toContain("secret response");
+  });
+
+  it("starts no request after cancellation or after beforeRequest refuses admission", async () => {
+    const aborted = fixture();
+    aborted.controller.abort(new Error("budget expired"));
+    await expect(aborted.provider.getPullRequestMergeObservation("https://github.com/ps06756/personal-website-test", 42, aborted.budget)).rejects.toThrow();
+    expect(aborted.fetchImplementation).not.toHaveBeenCalled();
+
+    let admitted = 0;
+    const exhausted = fixture({ beforeRequest: () => { admitted += 1; if (admitted > 2) throw new Error("request budget exhausted"); } });
+    await expect(exhausted.provider.getPullRequestMergeObservation("https://github.com/ps06756/personal-website-test", 42, exhausted.budget))
+      .rejects.toThrow(/budget exhausted/);
+    expect(exhausted.fetchImplementation).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not share the bounded reader's installation cache with ordinary provider calls", async () => {
+    const f = fixture();
+    const url = "https://github.com/ps06756/personal-website-test";
+    await f.provider.getPullRequest(url, 42);
+    await f.provider.getPullRequestMergeObservation(url, 42, f.budget);
+    await f.provider.getPullRequest(url, 42);
+    expect(f.requests.filter(request => request.endsWith("/installation"))).toHaveLength(2);
+    expect(f.requests.filter(request => request.endsWith("/access_tokens"))).toHaveLength(3);
+  });
+});
 
 
 describe("current PR feedback API reads", () => {

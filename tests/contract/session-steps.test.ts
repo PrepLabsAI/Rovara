@@ -91,13 +91,14 @@ describe("session steps", () => {
     expect(sessions.markDeleted).toHaveBeenCalledWith(workspaceId);
   });
 
-  it.each([
+  const pingCases: ReadonlyArray<[string, SessionStepsDependencies["ping"], { healthy: boolean; status: string }]> = [
     ["Healthy", async () => ({ status: "Healthy" }), { healthy: true, status: "Healthy" }],
     ["HealthyBusy", async () => ({ status: "HealthyBusy" }), { healthy: true, status: "HealthyBusy" }],
     ["unreachable", async () => { throw new Error("connect ECONNREFUSED"); }, { healthy: false, status: "Unreachable" }],
     ["no status", async () => undefined, { healthy: false, status: "Unreachable" }],
     ["an empty answer", async () => ({}), { healthy: false, status: "Unreachable" }],
-  ] as const)("probes the worker's /ping on its private address: %s", async (_name, ping, expected) => {
+  ];
+  it.each(pingCases)("probes the worker's /ping on its private address: %s", async (_name, ping, expected) => {
     const { handler, ping: spy } = setup(ping);
     expect(await handler({ action: "probePing", privateIp: "10.42.128.10" })).toEqual(expected);
     expect(spy).toHaveBeenCalledWith("http://10.42.128.10:8080/ping");

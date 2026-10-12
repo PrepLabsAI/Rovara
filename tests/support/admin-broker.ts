@@ -1,5 +1,6 @@
 // An administration-only broker harness: a fake DynamoDB, no Slack, and optional GitHub MCP,
 // connector credential and turn record export dependencies. It mirrors createBroker in slack-control-plane.test.ts.
+import type { ChatGptConnections } from "../../packages/broker/src/chatgpt/connections.js";
 import { randomUUID } from "node:crypto";
 import { vi } from "vitest";
 import type { GitHubMcpDependencies } from "../../packages/broker/src/github-mcp.js";
@@ -52,6 +53,8 @@ export async function createAdminBroker(options: {
   turnRecords?: TurnRecordExport;
   checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
   developer?: DeveloperApiConfiguration;
+  /** Sign in with ChatGPT (#338): built over the same fake table when given. */
+  chatgpt?: (db: FakeDynamoDb) => ChatGptConnections;
   /** The fake table's realism (all on by default); see FakeDynamoDbOptions. An opt-out needs a comment saying why. */
   realism?: FakeDynamoDbOptions["realism"];
   /** "eventual": a read without ConsistentRead may see an item's previous version once after a write. */
@@ -80,6 +83,7 @@ export async function createAdminBroker(options: {
     ...(registry ? { credentialRegistry: registry } : {}),
     ...(options.turnRecords ? { turnRecords: options.turnRecords } : {}),
     ...(options.developer ? { developer: options.developer } : {}),
+    ...(options.chatgpt ? { chatgpt: options.chatgpt(db) } : {}),
   } as never);
   return { db, handler, registry };
 }

@@ -11,9 +11,10 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { developerTokenKey, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";
-import { toolError } from "./../support/mcp-tool-error.js";
+import { toolError as parseToolError } from "./../support/mcp-tool-error.js";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const CLI = join(repoRoot, "packages", "cli", "dist", "main.js");
@@ -21,6 +22,10 @@ const ACCESS_TOKEN = `agxa_fake_${"b".repeat(40)}`;
 const REFRESH_TOKEN = `agxr_fake_${"c".repeat(40)}`;
 const TASK_ID = "7b0c1a52-5d6e-4f8a-9b1c-2d3e4f5a6b7c";
 const DEVELOPER = { id: "d".repeat(64), name: "Maya Chen", provider: "slack", slackUserId: "U0MAYA001" };
+
+function toolError(result: Awaited<ReturnType<Client["callTool"]>>) {
+  return parseToolError(CallToolResultSchema.parse(result));
+}
 
 beforeAll(() => {
   if (!existsSync(CLI)) throw new Error(`${CLI} is missing; run npm run build first`);

@@ -144,6 +144,8 @@ export interface LandedFixPush {
 export interface ReconcileTaskPullRequestFeedbackInput {
   documentClient: { send(command: unknown): Promise<unknown> }; tableName: string;
   repositoryFullName: string; number: number; deliveryId: string;
+  /** Broker-local bounded polling mode; omitted callers retain the full feedback behavior. */
+  observationMode?: "feedback" | "merge";
   /** The head a push event says the pull request now has (a hint): until GitHub's own read shows it, nothing is decided. */
   expectedHeadSha?: string;
   loadTask(taskId: string): Promise<{ project: string; startingRevision: number; closedAt?: string; workflow?: WorkflowSnapshot } | undefined>;
@@ -203,7 +205,32 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       const feedback = await input.getCurrentFeedback(url, pr.number);
       if (feedback.pullRequest.number !== pr.number || feedback.pullRequest.url !== pr.url
         || feedback.comments.some(comment => !comment.url.startsWith(`${pr.url}#`))) throw new GithubWebhookRefusal("current GitHub feedback scope mismatch");
+      if (input.observationMode === "merge" && (feedback.comments.length !== 0 || feedback.threads.length !== 0)) {
+        throw new GithubWebhookRefusal("merge observation contained feedback data");
+      }
       reads.push({ pr, feedback, url, fullName });
+    }
+    if (input.observationMode === "merge") {
+      const completePublishedSet = current.candidate !== undefined && current.candidate.repositories.every(repository =>
+        current.pullRequests?.some(pr => pr.required && pr.repositoryId === repository.repositoryId));
+      let next = current;
+      for (const { pr, feedback } of reads) {
+        const state = feedback.pullRequest.state === "merged" ? "MERGED" : feedback.pullRequest.state === "closed" ? "CLOSED" : "OPEN";
+        const exactHead = pr.headSha !== undefined && pr.headSha === feedback.pullRequest.headCommit;
+        const expectedTree = pr.headTreeSha ?? current.candidate?.repositories.find(repository => repository.repositoryId === pr.repositoryId)?.treeSha;
+        const exactIdentity = exactHead && expectedTree !== undefined && expectedTree === feedback.pullRequest.headTreeSha;
+        if ((state === "MERGED" && (!exactIdentity || !completePublishedSet)) || (state === "OPEN" && !exactIdentity)) continue;
+        if (pr.state !== state) next = observeWorkflowPullRequest(next, { repositoryId: pr.repositoryId, number: pr.number,
+          candidateDigest: pr.candidateDigest, state, source: "GITHUB_API", observedAt: input.now }, input.now);
+      }
+      if (next === current) return false;
+      try {
+        await input.saveWorkflow(linked.taskId, current.revision, next);
+        return true;
+      } catch (error) {
+        if (!isConditional(error)) throw error;
+        continue;
+      }
     }
     // GitHub moves a pull request's head a moment after a push. A push event whose head GitHub's read does not show yet,
     // while the read shows the head AgentX recorded or the pushed commit's parent, is read again later (the recovery

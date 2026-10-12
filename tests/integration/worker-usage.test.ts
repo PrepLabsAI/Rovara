@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkerInvocation } from "@agentx/contracts";
+import type { UsageStats } from "../../packages/contracts/src/usage.js";
 import { WorkerCancellationController, WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
 import type { WorkerArtifact } from "../../packages/worker/src/artifacts.js";
 import { redactCredentials, type WorkerEvent } from "../../packages/worker/src/events.js";
@@ -90,7 +91,10 @@ describe("worker usage telemetry", () => {
     expect(effectiveCacheRetention(undefined)).toBe("short");
     expect(effectiveCacheRetention("unsupported")).toBe("short");
     expect(effectiveCacheRetention("long")).toBe("long");
-    expect(createTaskUsageTelemetry({
+    const zeroUsage: UsageStats & {
+      sessionFile: undefined; sessionId: string; userMessages: number; assistantMessages: number;
+      toolCalls: number; toolResults: number; totalMessages: number;
+    } = {
       sessionFile: undefined,
       sessionId: "zero",
       userMessages: 0,
@@ -100,7 +104,8 @@ describe("worker usage telemetry", () => {
       totalMessages: 0,
       tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
       cost: 0,
-    }, { provider: "fixture", modelId: "fixture" }, "FAILED")).toMatchObject({
+    };
+    expect(createTaskUsageTelemetry(zeroUsage, { provider: "fixture", modelId: "fixture" }, "FAILED")).toMatchObject({
       cacheRetention: "short",
       cacheReadRatio: 0,
     });

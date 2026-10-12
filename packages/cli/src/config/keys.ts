@@ -1,7 +1,7 @@
 // FR-048: agentx config's fixed, documented keys. Each maps to exactly one place: a stack parameter,
 // an SSM value (the environment settings) or a control-plane setting. docs/day-two.md lists the
 // same table.
-import { agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
+import { CHATGPT_DEFAULT_PREFERRED_MODEL, ChatGptModelIdSchema, agentXError, environmentSettingsPrefix, environmentStackName } from "@agentx/contracts";
 import { AlertEmailSchema, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { DeployPart } from "../deploy/parameters.js";
 import type { ModelRole } from "../init/prerequisites.js";
@@ -11,7 +11,9 @@ export type { ModelRole } from "../init/prerequisites.js";
 export type ConfigTarget =
   | { kind: "stack-parameter"; part: DeployPart; parameter: string }
   | { kind: "settings"; field: "alertAddress" }
-  | { kind: "control-plane-setting"; field: "perPerson" | "perOrganization"; installDefault: { part: DeployPart; parameter: string } };
+  | { kind: "control-plane-setting"; field: "perPerson" | "perOrganization"; installDefault: { part: DeployPart; parameter: string } }
+  // #343: Sign in with ChatGPT's settings, held by the control plane alone (no stack parameter).
+  | { kind: "chatgpt-setting"; field: "enabled" | "preferredModel" };
 
 export interface ConfigKey {
   key: string;
@@ -51,6 +53,15 @@ export const CONFIG_KEYS: readonly ConfigKey[] = [
   { key: "models.classifier", description: "the model the gate classifier uses", target: parameter("slack", "GateClassifierModelId"), model: "classifier", parse: modelId("models.classifier") },
   { key: "models.worker", description: "the model the coding worker uses", target: parameter("runtime", "ModelId"), model: "worker", parse: modelId("models.worker") },
   {
+    key: "models.chatgpt.enabled", description: "true: people may connect their own ChatGPT plan and their tasks run on it; false: every task uses the worker model",
+    target: { kind: "chatgpt-setting", field: "enabled" }, defaultValue: "false", parse: oneOf("models.chatgpt.enabled", ["true", "false"]),
+  },
+  {
+    key: "models.chatgpt.preferredModel", description: "the model tasks on a ChatGPT plan prefer, where the person's plan allows it",
+    target: { kind: "chatgpt-setting", field: "preferredModel" }, defaultValue: CHATGPT_DEFAULT_PREFERRED_MODEL,
+    parse: (value) => (ChatGptModelIdSchema.safeParse(value.trim()).success ? value.trim() : refuse("models.chatgpt.preferredModel", "a model ID such as gpt-6.1-sol")),
+  },
+  {
     key: "limits.workspacesPerMember", description: "the most workspaces one person may have open",
     target: { kind: "control-plane-setting", field: "perPerson", installDefault: { part: "control-plane", parameter: "SlackMemberWorkspaceLimit" } },
     defaultValue: "3", parse: wholeNumber("limits.workspacesPerMember", 1, 50),
@@ -83,5 +94,7 @@ export function whereText(target: ConfigTarget, env: string): string {
       return `SSM ${environmentSettingsPrefix(env)}settings (${target.field})`;
     case "control-plane-setting":
       return `control-plane setting WORKSPACE_LIMITS.${target.field} (install-time default ${target.installDefault.parameter})`;
+    case "chatgpt-setting":
+      return `control-plane setting CHATGPT.${target.field}`;
   }
 }

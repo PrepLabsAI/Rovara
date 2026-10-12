@@ -14,8 +14,10 @@ const record = {
 type Handler = (event: unknown) => void;
 function handlersOf(recorder: TurnRecorder): Map<string, Handler> {
   const handlers = new Map<string, Handler>();
-  const factory = recorder.extension().factory as unknown as (pi: { on: (event: string, handler: Handler) => void }) => void;
-  factory({ on: (event, handler) => { handlers.set(event, handler); } });
+  const extension = recorder.extension();
+  const on = (event: string, handler: Handler) => { handlers.set(event, handler); };
+  if (typeof extension === "function") void extension({ on } as unknown as Parameters<typeof extension>[0]);
+  else if ("factory" in extension) void extension.factory({ on } as unknown as Parameters<typeof extension.factory>[0]);
   return handlers;
 }
 

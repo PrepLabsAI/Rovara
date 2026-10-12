@@ -1,7 +1,7 @@
 // A hosted Slack broker harness: a fake DynamoDB, the Slack orchestrator's service identity, and
 // optional GitHub MCP, connector type and connector credential dependencies.
 import { randomUUID } from "node:crypto";
-import { vi } from "vitest";
+import { vi, type Mock } from "vitest";
 import type { ConnectorType } from "../../packages/broker/src/aws/connector-types.js";
 import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
 import type { ConnectorCredentialsConfiguration, CredentialRegistry } from "../../packages/broker/src/aws/credentials.js";
@@ -16,6 +16,37 @@ export const orchestratorPrincipal = `arn:aws:sts::${account}:assumed-role/Agent
 
 /** The broker handler; `context` is what Lambda passes (its request ID), absent for a direct call. */
 export type Handler = (event: unknown, context?: { awsRequestId?: string }) => Promise<{ statusCode: number; body: string }>;
+
+type SlackBrokerInput = {
+  [key: string]: unknown;
+  documentClient: FakeDynamoDb;
+  s3: { send: Mock | ((command: never) => Promise<unknown>) };
+  deleteEc2Session?: Mock<(workspaceId: string) => Promise<void>>;
+  tableName: string;
+  artifactBucketName: string;
+  issuer: string;
+  adminClaim: string;
+  adminValues: string[];
+  callbackSigningKey: string;
+  repositoryGrants: RepositoryGrantService;
+  githubPullRequests: { reconcilePullRequest: Mock; getPullRequest: Mock; updatePullRequest: Mock };
+  codeBuild: { start: Mock; status: Mock };
+  githubMcp?: GitHubMcpDependencies;
+  connectorTypes?: Record<string, ConnectorType>;
+  connectorCredentials?: ConnectorCredentialsConfiguration;
+  credentialRegistry?: CredentialRegistry;
+  developer?: DeveloperApiConfiguration;
+  turnRecordsTableName?: string;
+  slackThreadsTableName?: string;
+  slack?: { orchestratorRoleArn: string; memberWorkspaceLimit: number; organizationWorkspaceLimit: number };
+};
+
+type SlackBrokerHarness = {
+  db: FakeDynamoDb;
+  handler: Handler;
+  deleteEc2Session: Mock<(workspaceId: string) => Promise<void>> | undefined;
+  brokerInput: SlackBrokerInput;
+};
 
 export interface SlackBrokerModule {
   createAwsBrokerHandler: (dependencies: never) => Handler;
@@ -66,7 +97,7 @@ export function createBroker(options: {
   realism?: FakeDynamoDbOptions["realism"];
   /** "eventual": a read without ConsistentRead may see an item's previous version once after a write. */
   consistency?: FakeDynamoDbOptions["consistency"];
-} = {}) {
+} = {}): SlackBrokerHarness {
   if (!loaded) throw new Error("call loadSlackBroker() in a beforeAll before createBroker()");
   const db = new FakeDynamoDb({ ...(options.realism === undefined ? {} : { realism: options.realism }), ...(options.consistency === undefined ? {} : { consistency: options.consistency }) });
   const deleteEc2Session = options.deleteEc2Session === null ? undefined : vi.fn(options.deleteEc2Session ?? (async () => undefined));

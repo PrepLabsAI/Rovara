@@ -12,7 +12,7 @@ const TASK = "44444444-4444-4444-8444-444444444444";
 const WORKSPACE = "11111111-1111-4111-8111-111111111111";
 const RUNNING = "22222222-2222-4222-8222-222222222222";
 const message = (text = "run the linter"): SlackRequestMessage => ({ version: 1, eventId: "Ev0000000201", thread, userId: "U0PRIYA001", text, receivedAt: "2026-09-29T10:00:00.000Z" });
-const workspace = (operationId: string | null): SlackThreadWorkspaceResult => ({
+const workspace = (operationId: string | null): Extract<SlackThreadWorkspaceResult, { outcome: "WORKSPACE" }> => ({
   outcome: "WORKSPACE", workspaceId: WORKSPACE, status: operationId === null ? "READY" : "BUSY", operationId, created: false,
   orchestratorInstructions: "Delegate work.", sharedTask: { taskId: TASK, developerName: "Maya Chen" },
 });

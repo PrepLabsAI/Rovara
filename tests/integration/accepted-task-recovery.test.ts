@@ -7,7 +7,7 @@ describe("accepted task recovery", () => {
     const registry = new InMemoryRegistry();
     const ownerKey = "a".repeat(64);
     const now = new Date().toISOString();
-    const workspace = await registry.createDefault({
+    const workspaceInput: Parameters<typeof registry.createDefault>[0] & { environmentDigest: string } = {
       deploymentMode: "ec2-ebs" as const,
       id: randomUUID(),
       ownerKey,
@@ -21,7 +21,8 @@ describe("accepted task recovery", () => {
       fence: 1,
       createdAt: now,
       updatedAt: now,
-    });
+    };
+    const workspace = await registry.createDefault(workspaceInput);
     const operations = new OperationStore(registry);
     const request = { requestId: randomUUID(), conversationId: randomUUID(), prompt: "run remotely" };
     const accepted = await operations.acceptTask(workspace.id, ownerKey, request);

@@ -2,9 +2,9 @@
 // through conditional writes, and checked against the stored document and the one access rule.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { COMMENT_RATE, NUDGE_WINDOW_MS, TaskCommentSchema, type TaskComment } from "@agentx/contracts";
+import { COMMENT_RATE, NUDGE_WINDOW_MS, TaskCommentSchema, sharedTaskKey, type TaskComment } from "@agentx/contracts";
 import {
-  createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor, setSuggestion, takeRate,
+  createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor, queueCommentAnswer, setSuggestion, takeRate,
 } from "../../packages/broker/src/developer/page-comments.js";
 import { resolveTaskAccess } from "../../packages/broker/src/developer/task-access.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
@@ -204,6 +204,91 @@ describe("page comments", () => {
     const stale = await refusal(editTaskComment(fixture.deps, await access(fixture, SAM), { commentId: written.commentId, rev: 1, text: "Third" }));
     expect(stale.pageReason).toBe("changed");
     expect((stored(fixture, written.commentId) as unknown as TaskComment).text).toBe("Second");
+  });
+
+  it("writes nothing when PEOPLE appears or changes after page authority was resolved", async () => {
+    const appeared = waitingTask();
+    const staleLegacyActor = await access(appeared, SAM);
+    appeared.db.set({ pk: `DEVTASK#${appeared.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people: [] });
+
+    await expect(createTaskComment(appeared.deps, staleLegacyActor, {
+      requestId: randomUUID(), document: "plan", version: 1, target: { kind: "document" }, text: "stale", ask: false,
+    })).rejects.toBeDefined();
+    expect(appeared.db.find((item) => item.entityType === "TASK_COMMENT" || item.entityType === "TASK_RATE")).toEqual([]);
+
+    const changed = waitingTask();
+    const original = await comment(changed, SAM);
+    const stalePeopleActor = { ...await access(changed, SAM), peopleRevision: 1 };
+    changed.db.set({ pk: `DEVTASK#${changed.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 2, orphaned: false, people: [] });
+    await expect(editTaskComment(changed.deps, stalePeopleActor, { commentId: original.comment.commentId, rev: 1, text: "changed" })).rejects.toBeDefined();
+    expect((stored(changed, original.comment.commentId) as unknown as TaskComment).text).toBe(original.comment.text);
+  });
+
+  it("writes no comment or rate item when the task closes after authority was resolved", async () => {
+    const fixture = waitingTask();
+    const stale = await access(fixture, SAM);
+    fixture.close();
+
+    await expect(createTaskComment(fixture.deps, stale, {
+      requestId: randomUUID(), document: "plan", version: 1, target: { kind: "document" }, text: "late comment", ask: false,
+    })).rejects.toBeDefined();
+    expect(fixture.db.find((item) => item.entityType === "TASK_COMMENT" || item.entityType === "TASK_RATE")).toEqual([]);
+  });
+
+  it("writes no edit or delete when the task closes after authority was resolved", async () => {
+    for (const change of ["edit", "delete"] as const) {
+      const fixture = waitingTask();
+      const written = (await comment(fixture, SAM)).comment;
+      const stale = await access(fixture, SAM);
+      fixture.close();
+      const action = change === "edit"
+        ? editTaskComment(fixture.deps, stale, { commentId: written.commentId, rev: 1, text: "late edit" })
+        : deleteTaskComment(fixture.deps, stale, { commentId: written.commentId, rev: 1 });
+
+      await expect(action).rejects.toBeDefined();
+      expect(stored(fixture, written.commentId)).toMatchObject({ text: written.text, rev: 1 });
+      expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, `RATE#change#${SAM.developerId}`)).toBeUndefined();
+    }
+  });
+
+  it("writes no suggestion or rate item when the task closes after authority was resolved", async () => {
+    const fixture = waitingTask();
+    const stale = await access(fixture, SAM);
+    fixture.close();
+
+    await expect(setSuggestion(fixture.deps, stale, { document: "plan", decisionId: "d1", optionId: "above" })).rejects.toBeDefined();
+    expect(await listSuggestions(fixture.deps, fixture.taskId)).toEqual([]);
+    expect(fixture.db.get(`DEVTASK#${fixture.taskId}`, `RATE#suggestion#${SAM.developerId}`)).toBeUndefined();
+  });
+
+  it("does not queue or spend ask limits when the task closes after the comment was read", async () => {
+    const fixture = waitingTask();
+    const stale = await access(fixture, SAM);
+    const written = (await comment(fixture, SAM)).comment;
+    const share = stale.task.share!;
+    fixture.db.set({ ...sharedTaskKey({ teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs! }),
+      taskId: fixture.taskId, workflowThread: true });
+    fixture.close();
+    let sent = 0;
+
+    const outcome = await queueCommentAnswer({ ...fixture.deps, slackRequestQueue: { send: async () => { sent += 1; } } }, {
+      task: stale.task, comment: written, caller: SAM, access: stale,
+    });
+    expect(outcome.outcome).toBe("failed");
+    expect(sent).toBe(0);
+    expect(stored(fixture, written.commentId)?.ask).toBeUndefined();
+    expect(fixture.db.find((item) => item.entityType === "TASK_RATE" && String(item.sk).startsWith("RATE#ask"))).toEqual([]);
+  });
+
+  it("writes no comment when the current document changes after authority was resolved", async () => {
+    const fixture = waitingTask();
+    const stale = await access(fixture, SAM);
+    fixture.addVersion("plan", pagePlan({ title: "New plan" }));
+
+    await expect(createTaskComment(fixture.deps, stale, {
+      requestId: randomUUID(), document: "plan", version: 1, target: { kind: "document" }, text: "stale document", ask: false,
+    })).rejects.toBeDefined();
+    expect(fixture.db.find((item) => item.entityType === "TASK_COMMENT" || item.entityType === "TASK_RATE")).toEqual([]);
   });
 
   it("the 301st item is refused", async () => {

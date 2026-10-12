@@ -4,7 +4,7 @@ import { z } from "zod";
 import { EnvironmentNameSchema } from "./environments.js";
 import { looseCopy } from "./loose.js";
 import { DeveloperTaskPolicySchema } from "./project.js";
-import { SlackChannelIdSchema, SlackUserIdSchema } from "./slack.js";
+import { SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 import { WorkspaceStatusSchema } from "./workspace.js";
 
 export const DEVELOPER_API_VERSION = "1.2";
@@ -145,6 +145,26 @@ export type ChannelMembersResponse =
   | { ok: true; memberOf: string[] }
   | { ok: false; error: "slack_unavailable" }
   | { ok: false; error: "invalid_request" };
+
+/** Internal, fresh identity and membership proof for a task person. It is never an HTTP route. */
+export const TaskPersonProofRequestSchema = z
+  .object({
+    kind: z.literal("task-person-proof"),
+    slackUserId: SlackUserIdSchema,
+    channelIds: z.array(SlackChannelIdSchema).max(CHANNEL_MEMBERS_MAX_CHANNELS),
+  })
+  .strict();
+export type TaskPersonProofRequest = z.infer<typeof TaskPersonProofRequestSchema>;
+
+export const TaskPersonProofResponseSchema = z.discriminatedUnion("ok", [
+  z.object({
+    ok: z.literal(true),
+    user: z.object({ id: SlackUserIdSchema, teamId: SlackTeamIdSchema, name: z.string().min(1).max(1024) }).strict(),
+    memberOf: z.array(SlackChannelIdSchema).max(CHANNEL_MEMBERS_MAX_CHANNELS),
+  }).strict(),
+  z.object({ ok: z.literal(false), error: z.enum(["invalid_request", "slack_unavailable", "ineligible"]) }).strict(),
+]);
+export type TaskPersonProofResponse = z.infer<typeof TaskPersonProofResponseSchema>;
 
 /** R10: the names and privacy of bound channels, read by DeveloperIdentity with the bot token. */
 export const ChannelInfoRequestSchema = z

@@ -2267,6 +2267,12 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "CALLBACK_SIGNING_KEY": {
               "Ref": "CallbackSigningKey",
             },
+            "CHATGPT_CONNECTION_KEY_ARN": {
+              "Fn::GetAtt": [
+                "ChatGptConnectionKey03C49F9D",
+                "Arn",
+              ],
+            },
             "CONNECTOR_SECRET_PREFIX": "agentx/staging/connectors/",
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
@@ -3137,6 +3143,19 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               },
             },
             {
+              "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "ChatGptConnectionKey03C49F9D",
+                  "Arn",
+                ],
+              },
+            },
+            {
               "Action": "cloudwatch:DescribeAlarms",
               "Effect": "Allow",
               "Resource": {
@@ -3239,6 +3258,50 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         ],
       },
       "Type": "AWS::IAM::Policy",
+    },
+    "ChatGptConnectionKey03C49F9D": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "Description": "AgentX: seals developers' Sign in with ChatGPT tokens",
+        "EnableKeyRotation": true,
+        "KeyPolicy": {
+          "Statement": [
+            {
+              "Action": "kms:*",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PendingWindowInDays": 7,
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::KMS::Key",
+      "UpdateReplacePolicy": "Delete",
     },
     "ConnectorBrokenAlarmBE25C37B": {
       "Properties": {

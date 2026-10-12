@@ -13,6 +13,9 @@ import { scriptedPrompter } from "../support/init-fakes.js";
 class FakeTty extends EventEmitter {
   isTTY = true;
   rawModes: boolean[] = [];
+  override removeListener(event: string, listener: (...args: never[]) => void): this {
+    return super.removeListener(event, listener as never);
+  }
   setRawMode(mode: boolean) { this.rawModes.push(mode); return this; }
   resume() { return this; }
   pause() { return this; }
@@ -20,6 +23,9 @@ class FakeTty extends EventEmitter {
 
 class FakePipe extends EventEmitter {
   isTTY = false;
+  override removeListener(event: string, listener: (...args: never[]) => void): this {
+    return super.removeListener(event, listener as never);
+  }
   resume() { return this; }
   pause() { return this; }
 }

@@ -12,7 +12,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "model.chatgpt"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number];
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -127,6 +127,12 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          */
         workflowReviewFeedback: WorkflowReviewFeedbackSchema.optional(),
         model: ModelSelectionSchema.optional(),
+        /**
+         * Sign in with ChatGPT (#341): the task runs on its owner's ChatGPT plan, with this model, and the worker asks
+         * the control plane for the owner's access token through its callback capability. `model` stays the install's
+         * default, which the worker uses when the plan cannot be. Sent only to a worker whose /ping lists "model.chatgpt".
+         */
+        chatgpt: z.object({ model: ModelSelectionSchema }).strict().optional(),
         modelSelectionDiagnostic: z.string().min(1).max(512).optional(),
         /**
          * Spec 051 (P-1): the project's current readiness commands, which the worker reruns when the agent finishes.

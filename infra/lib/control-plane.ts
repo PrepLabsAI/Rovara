@@ -329,6 +329,7 @@ export class ControlPlaneStack extends Stack {
       conditions: { ArnNotEquals: { "aws:PrincipalArn": dispatcher.role!.roleArn } },
     }));
     new CfnOutput(this, "InvokeSigningKeyArn", { value: invokeSigningKey.keyArn });
+
     new lambda.EventSourceMapping(this, "DispatchQueueMapping", {
       target: dispatcher,
       eventSourceArn: dispatchQueue.queueArn,
@@ -724,6 +725,17 @@ export class ControlPlaneStack extends Stack {
         retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
       },
     });
+    new scheduler.CfnSchedule(this, "WorkflowMergeRecoverySchedule", {
+      flexibleTimeWindow: { mode: "OFF" },
+      scheduleExpression: "rate(1 minute)",
+      state: "ENABLED",
+      target: {
+        arn: broker.functionArn,
+        roleArn: githubRecoveryRole.roleArn,
+        input: JSON.stringify({ source: "agentx.workflow-merge-recovery" }),
+        retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
+      },
+    });
     // Gap 6: re-run any workflow dispatch (an automatic review start) left behind after its result committed.
     const workflowDispatchRecoveryRole = new iam.Role(this, "WorkflowDispatchRecoveryRole", {
       assumedBy: schedulerPrincipal,
@@ -793,6 +805,18 @@ export class ControlPlaneStack extends Stack {
       new DeveloperSignIn(this, "DeveloperSignIn", {
         naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
       });
+      // Sign in with ChatGPT (#338): seals each developer's ChatGPT tokens in the State table. A
+      // connection belongs to a signed-in developer, so it exists only where developer sign-in
+      // does. Only the broker encrypts and decrypts with it, always under an encryption context
+      // naming the developer and the field. Deleting it (with the stack) only leaves connections to redo.
+      const chatGptConnectionKey = new kms.Key(this, "ChatGptConnectionKey", {
+        description: "AgentX: seals developers' Sign in with ChatGPT tokens",
+        enableKeyRotation: true,
+        pendingWindow: Duration.days(7),
+        removalPolicy: RemovalPolicy.DESTROY,
+      });
+      chatGptConnectionKey.grant(broker, "kms:Encrypt", "kms:Decrypt");
+      broker.addEnvironment("CHATGPT_CONNECTION_KEY_ARN", chatGptConnectionKey.keyArn);
       // Spec 025 phase 25c: sharing, named environments only (D14).
       const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, notifyOperator });
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and

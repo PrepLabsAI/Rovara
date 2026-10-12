@@ -3,18 +3,22 @@
 // planning, confirming and applying in one call.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResultSchema, ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import { z } from "zod";
 import { ADMIN_AUDIT_TOOLS, ADMIN_CHANGE_TOOLS, APPLY_UNKNOWN_STEP, ADMIN_READ_TOOLS, DEVELOPER_TOOLS, REQUIRED_CHANGE_ADMIN_MINOR, ToolError, adminApiFits, createAgentXMcpServer, type AdminControlPlaneClient, type AdminOffer, type ToolContext } from "../../packages/mcp/src/index.js";
 import { agentxMcpServer } from "../../packages/cli/src/mcp/serve.js";
 import { saveDeveloperEnvironment, developerTokenKey } from "../../packages/cli/src/developer/config.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
-import { toolError } from "../support/mcp-tool-error.js";
+import { toolError as parseToolError } from "../support/mcp-tool-error.js";
 
 const CHANGE = "55555555-5555-4555-8555-555555555555";
+function toolError(result: Awaited<ReturnType<Client["callTool"]>>) {
+  return parseToolError(CallToolResultSchema.parse(result));
+}
 const pending = { changeId: CHANGE, kind: "bind_channel" as const, status: "pending" as const, effect: "Bind channel #ledger-dev (C0LEDGER01) to project ledger.", methodsOffered: ["elicitation" as const], createdAt: "2026-10-02T09:00:00.000Z", expiresAt: "2026-10-02T09:10:00.000Z" };
 
 interface ConnectOptions {
@@ -275,7 +279,7 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
   it("says channel names work with or without #", () => {
     const bind = ADMIN_CHANGE_TOOLS.find((tool) => tool.name === "agentx_admin_bind_channel")!;
     const unbind = ADMIN_CHANGE_TOOLS.find((tool) => tool.name === "agentx_admin_unbind_channel")!;
-    for (const tool of [bind, unbind]) expect(tool.inputSchema.channel?.description).toContain("with or without #");
+    for (const tool of [bind, unbind]) expect(z.globalRegistry.get(tool.inputSchema.channel!)?.description).toContain("with or without #");
   });
 });
 
@@ -301,14 +305,20 @@ describe("the change tools' admin API (C17, E18, Q11)", () => {
 const URL_BASE = "https://abc123.execute-api.us-east-1.amazonaws.com";
 const ISSUER = `${URL_BASE}/v1/auth`;
 const ADMIN_TOKEN = "admin-access-token-planted-9c1e";
+const fetchRequestUrl = (input: Parameters<typeof globalThis.fetch>[0]): string => {
+  if (input instanceof Request) return input.url;
+  if (input instanceof URL) return input.href;
+  if (typeof input === "string") return input;
+  throw new Error("unexpected fetch request input");
+};
 
 async function served(options: { adminApiVersion: string; confirm?: { elicitation: boolean; slack: boolean }; slackLinked?: boolean; elicitation: boolean }) {
   const home = await mkdtemp(join(tmpdir(), "agentx-change-mcp-"));
   const tokenStore = new InMemoryTokenStore();
   await saveDeveloperEnvironment(home, "staging", { url: URL_BASE, issuer: ISSUER, tokenEndpoint: `${ISSUER}/token`, revocationEndpoint: `${ISSUER}/revoke` });
   await tokenStore.set(developerTokenKey(ISSUER), { accessToken: "developer-token", refreshToken: `agxr_${"a".repeat(43)}`, expiresAt: Date.now() + 3_600_000 });
-  const fetch = vi.fn(async (input: string | URL) => {
-    const url = new URL(String(input));
+  const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+    const url = new URL(fetchRequestUrl(input));
     if (url.pathname === "/v1/auth/.well-known/agentx-configuration") return Response.json({ env: "staging", apiVersion: "1.2", adminApiVersion: options.adminApiVersion, ...(options.confirm === undefined ? {} : { confirm: options.confirm }) });
     if (url.pathname === "/v1/admin/me") return Response.json({ issuer: ISSUER, subject: "s", slack: { linked: options.slackLinked === true, ...(options.slackLinked === true ? { userId: "U0123456789" } : { reason: "no_match" }) } });
     if (url.pathname === "/v1/admin/changes") return Response.json({ changes: [] });
@@ -344,7 +354,7 @@ describe("agentx mcp's change tool offer (FR-028, FR-041)", () => {
     const unlinked = await served({ adminApiVersion: "1.1", confirm: { elicitation: true, slack: true }, slackLinked: false, elicitation: false });
     await expect.poll(async () => (await unlinked.client.listTools()).tools.length).toBe(all - ADMIN_CHANGE_TOOLS.length);
     expect(toolError(await unlinked.client.callTool({ name: "agentx_admin_grant_project_access", arguments: { project: "ledger", developer: "U0123456789" } }))).toMatchObject({ code: "CONFIRMATION_UNAVAILABLE" });
-    expect(unlinked.fetch.mock.calls.some((entry) => new URL(String(entry[0])).pathname === "/v1/admin/changes" && (entry as unknown as [string, RequestInit])[1].method === "POST")).toBe(false);
+    expect(unlinked.fetch.mock.calls.some((entry) => new URL(fetchRequestUrl(entry[0])).pathname === "/v1/admin/changes" && (entry as unknown as [string, RequestInit])[1].method === "POST")).toBe(false);
     const linked = await served({ adminApiVersion: "1.1", confirm: { elicitation: false, slack: true }, slackLinked: true, elicitation: false });
     await expect.poll(async () => (await linked.client.listTools()).tools.length).toBe(all);
   });

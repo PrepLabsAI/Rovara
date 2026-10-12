@@ -3,6 +3,7 @@ import { posix as posixPath } from "node:path";
 import { cancelCallbackForbidden, verifyCancelCallbackCapability } from "./cancel-callback-capability.js";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { KMSClient } from "@aws-sdk/client-kms";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import {
   DeleteCommand,
@@ -185,7 +186,7 @@ import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKe
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
-import { isWebhookSecretMissing } from "../github-app.js";
+import { GithubMergeRateLimitError, isWebhookSecretMissing } from "../github-app.js";
 import { createGitHubAppCredentials } from "./github-credentials.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
@@ -212,9 +213,15 @@ import {
 import { aiToolTurn, completedTurn, developerFooter, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
-import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
+import { developerIdForSlackUser } from "./admin-actions.js";
+import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
+import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
+import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
+import { chatGptHostId } from "../chatgpt/oauth.js";
+import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -333,7 +340,7 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
   /** Reads the GitHub webhook HMAC key from the configured GitHub App secret; `refresh` asks for a fresh read of the secret. */
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
@@ -344,6 +351,8 @@ interface AwsBrokerDependencies {
   slack?: SlackServiceConfiguration;
   /** Spec 025 developer sign-in; absent when the deployment has none, and /v1/dev/* answers NOT_FOUND. */
   developer?: DeveloperApiConfiguration;
+  /** Sign in with ChatGPT (#338): each developer's ChatGPT connection; absent without its key. */
+  chatgpt?: ChatGptConnections;
   githubMcp?: GitHubMcpDependencies;
   catalogs: CatalogCache<ScopeDiscovery>;
   credentialRegistry?: CredentialRegistry;
@@ -651,7 +660,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.workflow-dispatch-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -667,6 +676,20 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "github.webhook_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
         return json({ error: "recovery_failed" }, "github-webhook-recovery", 500);
+      }
+    }
+    if (isWorkflowMergeRecoveryEvent(event)) {
+      try {
+        const result = await runDueWorkflowMergeRecovery({
+          documentClient: dependencies.documentClient,
+          tableName: dependencies.tableName,
+          now: Date.now,
+          reconcile: (taskId, budget) => reconcileWorkflowMergeRecoveryTask(dependencies, taskId, budget),
+        });
+        return json(result, "workflow-merge-recovery");
+      } catch (error) {
+        console.log(JSON.stringify({ component: "broker", event: "workflow.merge_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
+        return json({ error: "recovery_failed" }, "workflow-merge-recovery", 500);
       }
     }
     // Gap 6: the scheduled sweep that re-runs any workflow dispatch left behind after its result committed.
@@ -689,6 +712,20 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
         return json({ error: "recovery_failed" }, "workflow-dispatch-recovery", 500);
+      }
+    }
+    // Sign in with ChatGPT from Slack (#340): the ingress asks, as the Slack user's own developer.
+    if (isSlackChatGptCommandEvent(event) || isSlackChatGptFinishEvent(event)) {
+      try {
+        return json(await answerSlackChatGpt({
+          ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
+          ...(dependencies.developer?.slackTeamId === undefined ? {} : { slackTeamId: dependencies.developer.slackTeamId }),
+        }, event), "slack-ingress");
+      } catch (error) {
+        if (error instanceof AgentXError) {
+          return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        }
+        return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
     if (isSlackStopTaskEvent(event)) {
@@ -760,6 +797,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (event.routeKey === FEEDBACK_REVIEW_ROUTE_KEY) {
         if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
         return await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+          ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
       }
       // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
@@ -828,7 +866,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json(await handleSwebenchCallback(swebenchDependencies(dependencies), request.headers["x-agentx-callback-capability"], evalCallback.runId, evalCallback.action, parseBody(request.body)), request.requestId);
       }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -918,6 +956,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
         return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+          ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url), request.requestId);
       }
 
@@ -947,6 +986,12 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return request.method === "POST"
           ? json(await dependencies.credentialRegistry.register(identity, body), request.requestId, 201)
           : json(await dependencies.credentialRegistry.list(identity), request.requestId);
+      }
+      // #343: Sign in with ChatGPT, for rovara doctor.
+      if (request.method === "GET" && url.pathname === "/v1/admin/chatgpt") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (!dependencies.chatgpt) throw agentXError("NOT_FOUND", "Sign in with ChatGPT is not set up in this deployment");
+        return json(await dependencies.chatgpt.health(), request.requestId);
       }
       if (request.method === "GET" && url.pathname === "/v1/admin/turns") {
         if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
@@ -3108,6 +3153,9 @@ async function taskOperationParts(
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
   const resolvedModel = await resolveProjectModel(dependencies, settings);
+  // #341: a task whose owner connected a working ChatGPT plan runs on it; `model` stays the default it falls back to.
+  const chatgpt = dependencies.chatgpt === undefined ? undefined
+    : await chatGptTaskSelection(dependencies.chatgpt, chatGptOwner(await workspaceTaskOwner(dependencies, workspace.id), input.requester.requestedBy, developerIdForSlackUser));
   const operationId = randomUUID();
   const fence = workspace.fence + 1;
   const operation = operationRecord({
@@ -3127,6 +3175,7 @@ async function taskOperationParts(
     ...input.requester,
   });
   operation.settingsRevision = settings.definition.revision;
+  if (chatgpt !== undefined) operation.chatgptDeveloperId = chatgpt.developerId;
   // A PR feedback review this release starts is given only the owner's notes for its round; its answer is checked against that alone.
   if (input.workflowFeedbackReview !== undefined) operation.feedbackNotesScoped = true;
   // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
@@ -3159,7 +3208,7 @@ async function taskOperationParts(
     workspaceId: workspace.id,
     fence,
     projectRevision: workspace.projectRevision,
-    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW", input.workflowFeedbackApproval !== undefined),
+    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW", input.workflowFeedbackApproval !== undefined, chatgpt !== undefined),
     payload: {
       conversationId: input.conversationId,
       prompt,
@@ -3176,6 +3225,7 @@ async function taskOperationParts(
       ...(input.workflowReviewPlan === undefined ? {} : { workflowReviewPlan: input.workflowReviewPlan }),
       ...(input.workflowReviewFeedback === undefined ? {} : { workflowReviewFeedback: input.workflowReviewFeedback }),
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
+      ...(chatgpt === undefined ? {} : { chatgpt: { model: chatgpt.model } }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
       // Spec 051 (P-1): the checks the worker reruns when the agent finishes. The latest revision's readiness, as
       // publicationProject merges it, since that is what publication gates on. None when the project has none.
@@ -3200,6 +3250,59 @@ async function codingPlanChecksInstructions(dependencies: AwsBrokerDependencies,
 }
 
 /** Whether the workspace belongs to a developer task with the gated workflow. */
+/**
+ * #341: a running ChatGPT task's owner's current access token, for the worker's next model requests. The refresh token
+ * never leaves the control plane, and only the task the owner's plan was chosen for gets it.
+ */
+async function chatGptTaskToken(dependencies: AwsBrokerDependencies, operation: OperationRecord): Promise<{ accessToken: string; expiresAt: string }> {
+  if (operation.kind !== "task" || operation.chatgptDeveloperId === undefined || dependencies.chatgpt === undefined) {
+    throw agentXError("CALLBACK_FORBIDDEN", "this operation does not run on a ChatGPT plan");
+  }
+  const token = await dependencies.chatgpt.accessToken(operation.chatgptDeveloperId);
+  return { accessToken: token.access, expiresAt: new Date(token.expiresAt).toISOString() };
+}
+
+/**
+ * #342: a ChatGPT task's worker stopped using the plan. The connection learns why, so the owner's next tasks start
+ * right: a plan at its limit waits an hour, a refused connection is revoked, a model list is read again. The task
+ * keeps the reason, once, for the warning its thread is shown.
+ */
+async function recordChatGptFallback(dependencies: AwsBrokerDependencies, operation: OperationRecord, value: unknown): Promise<{ recorded: boolean }> {
+  const reason = object(value, "ChatGPT status").reason;
+  if (reason !== "limit" && reason !== "revoked" && reason !== "model") throw agentXError("CONFIG_INVALID", "reason must be limit, revoked or model");
+  if (operation.kind !== "task" || operation.chatgptDeveloperId === undefined || dependencies.chatgpt === undefined) {
+    throw agentXError("CALLBACK_FORBIDDEN", "this operation does not run on a ChatGPT plan");
+  }
+  const developerId = operation.chatgptDeveloperId;
+  try {
+    await dependencies.documentClient.send(new UpdateCommand({
+      TableName: dependencies.tableName, Key: operationKey(operation.workspaceId, operation.id),
+      UpdateExpression: "SET chatgptFallback = :reason", ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(chatgptFallback)",
+      ExpressionAttributeValues: { ":reason": reason },
+    }));
+  } catch (error) {
+    // Told already (a retried callback): the connection was marked the first time.
+    if (isConditional(error)) return { recorded: false };
+    throw error;
+  }
+  if (reason === "limit") await dependencies.chatgpt.markStatus(developerId, "limit-reached");
+  else if (reason === "revoked") await dependencies.chatgpt.markStatus(developerId, "revoked");
+  else {
+    // Best effort: a list that cannot be read now is read at the next model refusal.
+    await dependencies.chatgpt.refreshModels(developerId).catch((error: unknown) => {
+      console.log(JSON.stringify({ component: "broker", event: "chatgpt.models_refresh_failed", operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
+    });
+  }
+  console.log(JSON.stringify({ component: "broker", event: "chatgpt.fallback", operationId: operation.id, reason }));
+  return { recorded: true };
+}
+
+/** #341: the developer who owns the task a workspace runs, or undefined for a workspace that runs no developer task. */
+async function workspaceTaskOwner(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<string | undefined> {
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
+  return pointer === undefined ? undefined : (await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId)))?.developerId;
+}
+
 async function gatedTaskWorkspace(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<boolean> {
   const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
   return pointer !== undefined && (await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId)))?.workflow !== undefined;
@@ -4407,6 +4510,8 @@ async function handleCallback(
   if (action !== "result" && TERMINAL.has(operation.status)) {
     throw agentXError("STALE_FENCE", "terminal operations cannot publish more output");
   }
+  if (action === "chatgpt-token") return json(await chatGptTaskToken(dependencies, operation), request.requestId);
+  if (action === "chatgpt-status") return json(await recordChatGptFallback(dependencies, operation, parseBody(request.body)), request.requestId);
   const body = parseBody(request.body);
   if (action === "events") {
     const accepted = await appendEvents(dependencies, operation, body);
@@ -5682,9 +5787,18 @@ async function refreshTaskFeedbackForOwnerDecision(dependencies: AwsBrokerDepend
 }
 
 /** Reconcile every PR webhook against GitHub; comments and delivery order never grant authority. */
-export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"], deliveryId: string): Promise<void> {
-  const getFeedback = dependencies.githubPullRequests.getPullRequestFeedback;
-  if (getFeedback === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "current GitHub feedback collection is not configured");
+export async function processGithubWorkflowEvent(
+  dependencies: AwsBrokerDependencies,
+  event: ReceivedGithubWebhook["event"],
+  deliveryId: string,
+  options?: { observationMode: "merge"; budget: GithubMergeReadBudget; release: "queue" },
+): Promise<void> {
+  const getFeedback = options === undefined
+    ? dependencies.githubPullRequests.getPullRequestFeedback
+    : dependencies.githubPullRequests.getPullRequestMergeObservation;
+  if (getFeedback === undefined) throw agentXError("RUNTIME_UNAVAILABLE", options === undefined
+    ? "current GitHub feedback collection is not configured"
+    : "current GitHub merge observation is not configured");
   await reconcileTaskPullRequestFeedback({
     documentClient: dependencies.documentClient, tableName: dependencies.tableName,
     repositoryFullName: event.fullName, number: event.number, deliveryId,
@@ -5694,7 +5808,10 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
       const project = await requireProject(dependencies, projectName, revision);
       return project.definition.repositories.find(repository => repository.name === repositoryId)?.url;
     },
-    getCurrentFeedback: (url, number) => getFeedback.call(dependencies.githubPullRequests, url, number),
+    getCurrentFeedback: async (url, number) => options === undefined
+      ? dependencies.githubPullRequests.getPullRequestFeedback!.call(dependencies.githubPullRequests, url, number)
+      : { pullRequest: await dependencies.githubPullRequests.getPullRequestMergeObservation!.call(dependencies.githubPullRequests, url, number, options.budget), comments: [], threads: [] },
+    ...(options === undefined ? {} : { observationMode: options.observationMode }),
     recordedHead: async (workspaceId, repositoryId, number) => (await getItem<PullRequestRecord>(dependencies, pullRequestKey(workspaceId, repositoryId, number)))?.expectedHeadCommit,
     ...(dependencies.githubPullRequests.getCommitParents === undefined ? {} : {
       commitParents: (url: string, commit: string) => dependencies.githubPullRequests.getCommitParents!(url, commit),
@@ -5775,17 +5892,100 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
   });
   const linked = await getItem<GithubWorkflowPullRequestRecord>(dependencies, githubWorkflowPullRequestKey(event.fullName, event.number));
   // A merge that finished the task gives back its slot and workspace (again for a redelivery, which changes nothing).
-  if (linked !== undefined) await releaseIfFinished(dependencies, linked.taskId);
-  if (linked !== undefined) {
+  if (linked !== undefined && options?.release !== "queue") await releaseIfFinished(dependencies, linked.taskId);
+  if (linked !== undefined && options?.release !== "queue") {
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(linked.taskId));
     if (task !== undefined && dependencies.developer !== undefined) {
       const caller = { developerId: task.developerId, sessionId: "github-webhook", amr: task.provider, name: task.developerName };
       const routeDependencies = developerTaskRouteDependencies({
         documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
         now: Date.now, tasks: developerTaskActions(dependencies),
-      }, caller);
+      }, caller, undefined, null);
       await startTaskWorkflowFeedbackReviewFromWebhook(routeDependencies, task.taskId);
     }
+  }
+}
+
+const MERGE_RECOVERY_RETRY_MS = 5 * 60_000;
+
+async function stronglyRead<T>(dependencies: AwsBrokerDependencies, key: { pk: string; sk: string }): Promise<T | undefined> {
+  const response = await dependencies.documentClient.send(new GetCommand({
+    TableName: dependencies.tableName,
+    Key: key,
+    ConsistentRead: true,
+  })) as { Item?: T };
+  return response.Item;
+}
+
+async function mergeRecoveryReleaseConfirmed(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord): Promise<boolean> {
+  const workspace = await stronglyRead<Record<string, unknown>>(dependencies, workspaceKey(task.workspaceId));
+  if (workspace?.status !== "CLOSED") return false;
+  if (task.releasedAt !== undefined) return true;
+  const [member, organization] = await Promise.all([
+    stronglyRead<Record<string, unknown>>(dependencies, task.charge.member),
+    stronglyRead<Record<string, unknown>>(dependencies, task.charge.organization),
+  ]);
+  if (member === undefined || organization === undefined) return false;
+  if (!Number.isInteger(member.count) || (member.count as number) < 0
+    || !Number.isInteger(organization.count) || (organization.count as number) < 0) return false;
+  if (member.tasks !== undefined && (!(member.tasks instanceof Set) || member.tasks.has(task.taskId))) return false;
+  return true;
+}
+
+/** Reconciles one recovery row using one exact reverse-linked PR and the bounded merge-only GitHub reader. */
+export async function reconcileWorkflowMergeRecoveryTask(
+  dependencies: AwsBrokerDependencies,
+  taskId: string,
+  budget: GithubMergeReadBudget,
+): Promise<MergeRecoveryResult> {
+  const retry = (): MergeRecoveryResult => ({ kind: "RETRY", retryAt: Date.now() + MERGE_RECOVERY_RETRY_MS, scope: "task" });
+  const task = await stronglyRead<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (task === undefined) return { kind: "MISSING" };
+  if (task.closedAt !== undefined || task.releasedAt !== undefined) {
+    return await mergeRecoveryReleaseConfirmed(dependencies, task) ? { kind: "TERMINAL", release: "confirmed" } : retry();
+  }
+  const pullRequests = task.workflow?.pullRequests ?? [];
+  let selected: { fullName: string; number: number } | undefined;
+  for (const pullRequest of pullRequests) {
+    const parsed = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/.exec(pullRequest.url);
+    if (parsed === null || Number(parsed[2]) !== pullRequest.number) continue;
+    const linked = await stronglyRead<GithubWorkflowPullRequestRecord>(dependencies, githubWorkflowPullRequestKey(parsed[1]!, pullRequest.number));
+    if (linked?.taskId === task.taskId && linked.workspaceId === task.workspaceId && linked.repositoryId === pullRequest.repositoryId
+      && linked.number === pullRequest.number && linked.url === pullRequest.url && linked.candidateDigest === pullRequest.candidateDigest) {
+      selected = { fullName: parsed[1]!, number: pullRequest.number };
+      break;
+    }
+  }
+  if (selected === undefined) return retry();
+  try {
+    await processGithubWorkflowEvent(dependencies, {
+      kind: "PULL_REQUEST",
+      action: "closed",
+      installationId: 0,
+      repositoryId: 0,
+      fullName: selected.fullName,
+      number: selected.number,
+    }, `merge-recovery-${taskId}`, { observationMode: "merge", budget, release: "queue" });
+  } catch (error) {
+    if (error instanceof GithubMergeRateLimitError) return { kind: "RETRY", retryAt: error.retryAt, scope: "github-global" };
+    return retry();
+  }
+  const fresh = await stronglyRead<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (fresh === undefined) return { kind: "MISSING" };
+  if (fresh.closedAt !== undefined || fresh.releasedAt !== undefined) {
+    return await mergeRecoveryReleaseConfirmed(dependencies, fresh) ? { kind: "TERMINAL", release: "confirmed" } : retry();
+  }
+  if (fresh.workflow?.stage !== "MERGED" || fresh.workflow.state !== "COMPLETE" || fresh.workflow.outcome !== "MERGED") {
+    return { kind: "OBSERVED" };
+  }
+  try {
+    await enqueueFinishedTaskRelease({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, taskId);
+    const marker = await stronglyRead<Record<string, unknown>>(dependencies, { pk: "FINISHED_RELEASE", sk: `TASK#${taskId}` });
+    return marker?.entityType === "FINISHED_RELEASE" && marker.taskId === taskId
+      ? { kind: "TERMINAL", release: "queued" }
+      : retry();
+  } catch {
+    return retry();
   }
 }
 
@@ -5856,6 +6056,10 @@ export async function retryGithubWebhookAsAdministrator(dependencies: AwsBrokerD
 
 function isGithubWebhookRecoveryEvent(event: unknown): event is { source: "agentx.github-webhook-recovery" } {
   return event !== null && typeof event === "object" && (event as { source?: unknown }).source === "agentx.github-webhook-recovery";
+}
+
+function isWorkflowMergeRecoveryEvent(event: unknown): event is { source: "agentx.workflow-merge-recovery" } {
+  return event !== null && typeof event === "object" && (event as { source?: unknown }).source === "agentx.workflow-merge-recovery";
 }
 
 
@@ -5929,7 +6133,9 @@ async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies
  * Run one dispatch row: start its step if the task is still exactly where the row says, then delete the row.
  * STALE (the task moved on, closed, or never matched) deletes the row too; RETRY keeps it for the sweep. Never throws.
  */
-async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: WorkflowDispatchRecord): Promise<"DISPATCHED" | "STALE" | "RETRY"> {
+type AccessPausedWorkflowDispatch = WorkflowDispatchRecord & { taskAccessPausedAt?: string };
+
+async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: AccessPausedWorkflowDispatch): Promise<"DISPATCHED" | "STALE" | "RETRY"> {
   const key = { pk: item.pk, sk: item.sk };
   const remove = async () => {
     try {
@@ -5939,6 +6145,9 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Wo
     }
   };
   try {
+    // Access pauses are lifted only by an explicit, freshly authorized owner retry. Recovery sweeps,
+    // ownership restoration and takeover may still encounter the row but never restart its work.
+    if (item.taskAccessPausedAt !== undefined) return "RETRY";
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
     const workflow = task?.workflow;
     const due = item.kind === "REVIEW" ? workflow?.stage === "REVIEW" && workflow.state === "WAITING"
@@ -5952,7 +6161,7 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Wo
     const routeDependencies = developerTaskRouteDependencies({
       documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
       now: Date.now, tasks: developerTaskActions(dependencies), refreshTaskFeedback: (taskId) => refreshTaskFeedbackForOwnerDecision(dependencies, taskId),
-    }, caller);
+    }, caller, undefined, null);
     const expected = { workflowRevision: item.workflowRevision, candidateDigest: item.candidateDigest };
     // A fix for the pull requests already open is pushed to them by the same start, which sees they exist.
     const outcome = item.kind === "PUBLISH" || item.kind === "UPDATE"
@@ -5961,6 +6170,27 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Wo
     await remove();
     return outcome === "STALE" ? "STALE" : "DISPATCHED";
   } catch (error) {
+    // PEOPLE-backed work with no current freshly qualified owner stays parked on its durable
+    // dispatch row. It does not consume the bounded infrastructure failure budget; only a later
+    // explicit owner action can start or redrive work.
+    if (error instanceof AgentXError && error.code === "TASK_ACCESS_DENIED") {
+      try {
+        const pausedAt = new Date().toISOString();
+        await dependencies.documentClient.send(new UpdateCommand({
+          TableName: dependencies.tableName, Key: key,
+          UpdateExpression: "SET taskAccessPausedAt = :pausedAt REMOVE dispatchDuePk, dispatchDueSk",
+          ConditionExpression: "workflowRevision = :revision AND #kind = :kind AND candidateDigest = :candidate AND attribute_not_exists(taskAccessPausedAt)",
+          ExpressionAttributeNames: { "#kind": "kind" },
+          ExpressionAttributeValues: { ":pausedAt": pausedAt, ":revision": item.workflowRevision, ":kind": item.kind, ":candidate": item.candidateDigest },
+        }));
+      } catch (pauseError) {
+        if (!isConditional(pauseError)) {
+          console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_access_pause_failed", taskId: item.taskId,
+            error: pauseError instanceof Error ? pauseError.name : "unknown" }));
+        }
+      }
+      return "RETRY";
+    }
     console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_failed", taskId: item.taskId, kind: item.kind, attempt: (item.attempts ?? 0) + 1,
       error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
     await recordWorkflowDispatchFailure(dependencies, item);
@@ -6268,7 +6498,7 @@ async function completedWorkflowItems(
       TableName: dependencies.tableName,
       Key: taskKey(task.taskId),
       UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :ready",
+      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :ready AND attribute_not_exists(closedAt)",
       ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
       ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": "PULL_REQUEST", ":ready": "READY" },
     } }, ...(existingIndex === undefined ? [{ Put: {
@@ -6278,7 +6508,8 @@ async function completedWorkflowItems(
     } }] : []),
     // More repositories to go: the next draft pull request is due, as the first one was after the reviews.
     ...(next.stage === "PULL_REQUEST" && next.state === "READY" && next.candidate !== undefined
-      ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "PUBLISH", next.candidate.digest, now)] : [])];
+      ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "PUBLISH", next.candidate.digest, now)] : []),
+    ...((task.workflow.pullRequests ?? []).length === 0 ? [mergeRecoveryItem(dependencies.tableName, task.taskId, now)] : [])];
   }
   if (operation.kind === "maintain") return completedPullRequestUpdateItems(dependencies, operation, task as DeveloperTaskRecord & { workflow: WorkflowSnapshot }, terminalStatus, now, result, terminalError);
   if (operation.kind !== "task" || operation.workflowMode === undefined || task.workflow.state !== "RUNNING") return [];
@@ -6431,18 +6662,24 @@ async function completedWorkflowItems(
     } else {
       const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
       const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
-      const reviews = Array.isArray(reported.workflowReviews) ? reported.workflowReviews : [];
+      const reviews = reported.workflowReviews;
       let reviewFailure = "independent candidate review was invalid, incomplete, or stale";
       try {
+        if (!Array.isArray(reviews)) throw new Error("review result has an invalid report collection");
         const candidate = createCandidateManifest(repositories as CandidateRepository[]);
-        if (task.workflow.stage !== "REVIEW" || task.workflow.candidate?.digest !== candidate.digest
-          || reviews.length !== 2
-          || reviews.some((review) => review === null || typeof review !== "object" || (review as Record<string, unknown>).operationId !== operation.id)) {
+        if (task.workflow.stage !== "REVIEW" || task.workflow.candidate?.digest !== candidate.digest) {
           throw new Error("review result is stale, incomplete, or came from another operation");
+        }
+        // Validate every report's complete contract and provenance before deciding that a role is missing.
+        for (const review of reviews) {
+          if (review === null || typeof review !== "object" || (review as Record<string, unknown>).operationId !== operation.id) {
+            throw new Error("review result is stale, incomplete, or came from another operation");
+          }
+          submitWorkflowReview(task.workflow, review, now);
         }
         // Exactly one code review and one security review: two of one kind would leave the stage waiting for the other.
         const roles = reviews.map((review) => (review as Record<string, unknown>).role).sort();
-        if (roles[0] !== "CRITIC" || roles[1] !== "SECURITY") {
+        if (roles.length !== 2 || roles[0] !== "CRITIC" || roles[1] !== "SECURITY") {
           reviewFailure = WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE;
           throw new Error("review result does not hold one code review and one security review");
         }
@@ -7871,7 +8108,9 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
     ...(teamId === "" ? {} : { slackTeamId: teamId }),
     since: developerSinceFromEnvironment(process.env),
     signInTableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"),
+    taskPeopleConfiguration: { peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true" },
     channelMembers: channelMembersThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    taskPersonProof: taskPersonProofThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     channelInfo: channelInfoThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     slackUserByEmail: slackUserByEmailThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     slackAuthCheck: slackAuthCheckThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
@@ -7897,6 +8136,15 @@ function slackRequestQueue(queueUrl: string): SlackRequestQueue {
   };
 }
 const developer = developerConfiguration();
+
+// Sign in with ChatGPT (#338): set only where the control plane has the connection key.
+const chatGptKeyArn = process.env.CHATGPT_CONNECTION_KEY_ARN;
+const chatgpt = chatGptKeyArn === undefined || chatGptKeyArn === "" ? undefined : chatGptConnections({
+  documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), fetch, now: Date.now,
+  sealer: kmsChatGptSealer(new KMSClient(awsClientConfiguration), chatGptKeyArn),
+  // The key is this install's own, so its ARN names the install to OpenAI.
+  hostId: chatGptHostId(chatGptKeyArn),
+});
 
 // Spec 025 A13: the health route's probes (health-probes.ts); clients are called only per request.
 const cloudWatch = new CloudWatchClient(awsClientConfiguration);
@@ -7930,6 +8178,7 @@ export const handler = createAwsBrokerHandler({
       } }
     : {}),
   ...(developer ? { developer } : {}),
+  ...(chatgpt ? { chatgpt } : {}),
   // Spec 025 A12: set only here, so a test harness without its own `me` never reaches the network.
   adminReads: {
     me: { issuer: requiredEnvironment("OIDC_ISSUER"), fetch, ...(developer?.slackUserByEmail === undefined ? {} : { slackUserByEmail: developer.slackUserByEmail }) },

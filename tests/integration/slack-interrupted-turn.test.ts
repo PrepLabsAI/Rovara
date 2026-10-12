@@ -15,7 +15,7 @@ import {
   ABANDONED_TASK_CANCEL_FAILED_TEXT, ABANDONED_TASK_FINISHED_TEXT, ABANDONED_TASK_TEXT, CONTINUE_TEXT, HANDOFF_APPROVED_TEXT, HANDOFF_FINAL_CANCEL_FAILED_TEXT,
   HANDOFF_FINAL_FINISHED_TEXT, HANDOFF_FINAL_IDLE_TEXT, HANDOFF_FINAL_TEXT, HANDOFF_TASK_TEXT, HANDOFF_TEXT, RESUME_NOT_FOUND_TEXT, TurnHandedOffError, type ActiveTurn, type TurnNote,
 } from "../../packages/slack-service/src/interrupted-turn.js";
-import { processSlackRequest, type CancelOutcome, type ProcessorDependencies, type ThreadState, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { processSlackRequest, type CancelOutcome, type ProcessorDependencies, type ThreadServiceApi, type ThreadState, type TurnInput } from "../../packages/slack-service/src/processor.js";
 import { agentXError } from "../../packages/contracts/src/index.js";
 import { preparationFailedMessage } from "../../packages/slack-service/src/messages.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -54,7 +54,7 @@ function harness(turn: (input: TurnInput) => Promise<string>, options: {
   }));
   const finish = vi.fn(async () => undefined);
   const taskResult = vi.fn(options.taskResult ?? (async (_workspace: string, operationId: string) => ({ status: "SUCCEEDED", response: `finished ${operationId}` })));
-  const waitForOperation = vi.fn(async () => ({ status: "SUCCEEDED" }));
+  const waitForOperation = vi.fn<ThreadServiceApi["waitForOperation"]>(async () => ({ status: "SUCCEEDED" }));
   // A task still running when the turn gives up: the broker queues its cancel.
   const cancelOperation = vi.fn(options.cancelOperation ?? (async (): Promise<CancelOutcome> => ({ outcome: "requested" })));
   const saveActiveTurn = vi.fn(async (_subject: string, active: ActiveTurn) => {
@@ -304,7 +304,10 @@ describe("resuming a redelivered turn", () => {
   it("uses the operation's status alone when the thread API cannot read task results", async () => {
     const { posts, dependencies, meta, waitForOperation } = harness(async () => "unused");
     const api = dependencies.api;
-    dependencies.api = (message) => ({ ...api(message), taskResult: undefined });
+    dependencies.api = (message) => {
+      const withoutTaskResult = { ...api(message), taskResult: undefined };
+      return withoutTaskResult as unknown as ReturnType<ProcessorDependencies["api"]>;
+    };
     waitForOperation.mockResolvedValueOnce({ status: "SUCCEEDED" });
     meta.activeTurn = remembered("EvWORK000024");
     await processSlackRequest(slackMessage("EvWORK000024", "fix the bug"), dependencies, { finalAttempt: false, redelivered: true });

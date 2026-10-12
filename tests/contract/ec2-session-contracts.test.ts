@@ -124,7 +124,8 @@ describe("registering an ec2-ebs project from the CLI module", () => {
 
   it("sends a valid binding and refuses an invalid one before contacting the control plane", async () => {
     const fetchImplementation = vi.fn(async () => new Response(JSON.stringify({ duplicate: false }), { status: 201 }));
-    await registerProject({ controlPlaneUrl: "https://control.example.test", accessToken: "token", definition, runtimeBinding: binding }, fetchImplementation);
+    const mutableBinding = { ...binding, subnets: binding.subnets.map((subnet) => ({ ...subnet })) };
+    await registerProject({ controlPlaneUrl: "https://control.example.test", accessToken: "token", definition, runtimeBinding: mutableBinding }, fetchImplementation);
     const [, init] = fetchImplementation.mock.calls[0] as unknown as [string, RequestInit];
     expect(JSON.parse(init.body as string)).toMatchObject({ runtimeBinding: binding });
 
@@ -159,6 +160,7 @@ describe("admin project register flags (#84)", () => {
 
 describe("the SESSION record", () => {
   const workspaceId = randomUUID();
+  type Mutable<T> = { -readonly [K in keyof T]: T[K] };
   const ready = {
     workspaceId,
     state: "READY",
@@ -184,7 +186,7 @@ describe("the SESSION record", () => {
     expect(WorkspaceSessionSchema.parse({
       workspaceId, state: "PROVISIONING", generation: 1, availabilityZone: "us-east-1a", subnetId: ready.subnetId,
     })).toMatchObject({ state: "PROVISIONING" });
-    const withoutInstance: Partial<typeof ready> = { ...ready };
+    const withoutInstance: Mutable<Partial<typeof ready>> = { ...ready };
     delete withoutInstance.instanceId;
     delete withoutInstance.privateIp;
     expect(WorkspaceSessionSchema.parse({ ...withoutInstance, state: "STOPPED" })).toMatchObject({ state: "STOPPED" });
@@ -196,7 +198,7 @@ describe("the SESSION record", () => {
   });
 
   it("refuses records whose fields contradict their state", () => {
-    const withoutIp: Partial<typeof ready> = { ...ready };
+    const withoutIp: Mutable<Partial<typeof ready>> = { ...ready };
     delete withoutIp.privateIp;
     expect(() => WorkspaceSessionSchema.parse(withoutIp)).toThrow(/privateIp is required while READY/);
     expect(() => WorkspaceSessionSchema.parse({ ...ready, state: "STOPPED" })).toThrow(/instanceId must be absent once STOPPED/);
