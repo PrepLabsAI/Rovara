@@ -11,6 +11,8 @@ type Message = TranscriptContext["messages"][number];
 export type WorkflowTurn = { role: "PLAN" | "CODE" | "SECURITY" | "CODER" | "FEEDBACK"; userText: string };
 type ReviewRole = "CODE" | "SECURITY";
 type ReviewFinding = { text: string; origin: "INTRODUCED" | "PRE_EXISTING"; severity?: "HIGH" | "MEDIUM" | "LOW"; file?: string; line?: number; advisory?: boolean } | string;
+const PI_SUMMARIZATION_SYSTEM_PROMPT = "You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.\n\nDo NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.";
+const INERT_COMPACTION_CHECKPOINT = "Earlier conversation context was summarized. Continue the existing task from its original request and later messages. This checkpoint makes no workflow or evidence claims.";
 
 function textOf(message: Message | undefined): string {
   const content = (message as { content?: unknown } | undefined)?.content;
@@ -27,6 +29,15 @@ export function firstUserText(context: TranscriptContext): string {
 /** True when the model is being called again after its own tool call returned. */
 export function lastIsToolResult(context: TranscriptContext): boolean {
   return (context.messages.at(-1) as { role?: string } | undefined)?.role === "toolResult";
+}
+
+/** Pi builds compaction requests with this trusted system prompt and exactly one user prompt. */
+function isPiCompactionContext(context: TranscriptContext): boolean {
+  const [system, request] = context.messages;
+  return context.messages.length === 2
+    && (system as { role?: string }).role === "system"
+    && textOf(system) === PI_SUMMARIZATION_SYSTEM_PROMPT
+    && (request as { role?: string }).role === "user";
 }
 
 export const reviewerReply = {
@@ -131,13 +142,26 @@ export function workflowModel(script: {
   let afterEdits: string[] = [];
   let lastCoderUserText: string | undefined;
   let editsStarted = false;
+  const reviewRolesBySession = new Map<string, ReviewRole>();
   const queues: Record<ReviewRole, FauxResponseStep[]> = { CODE: [...(script.reviews?.CODE ?? [])], SECURITY: [...(script.reviews?.SECURITY ?? [])] };
   return async (context, options, state, model) => {
+    if (isPiCompactionContext(context)) return fauxAssistantMessage(INERT_COMPACTION_CHECKPOINT);
     const prompt = firstUserText(context);
     const openingCall = !context.messages.some((message) => ["assistant", "toolResult"].includes((message as { role?: string }).role ?? ""));
     // Only a session's opening call is recorded; later calls in the session (tool results, a format retry) repeat the same first message.
     if (openingCall) script.prompts?.push(prompt);
     const latestUserText = textOf([...context.messages].reverse().find((message) => (message as { role?: string }).role === "user"));
+    const sessionId = options?.sessionId;
+    const rememberedRole = sessionId === undefined ? undefined : reviewRolesBySession.get(sessionId);
+    const role = rememberedRole ?? reviewRole(prompt);
+    if (role !== undefined && sessionId !== undefined && rememberedRole === undefined) reviewRolesBySession.set(sessionId, role);
+    if (role !== undefined) {
+      script.turns?.push({ role, userText: latestUserText });
+      const queue = queues[role];
+      const next = queue.length > 1 ? queue.shift() : queue[0];
+      const step = next ?? reviewerReply.pass();
+      return typeof step === "function" ? step(context, options, state, model) : step;
+    }
     // The implementation turn reopens the planning conversation, so the planner is chosen by the latest user turn.
     if (latestUserText.includes("Planning phase only")) {
       script.turns?.push({ role: "PLAN", userText: latestUserText });
@@ -160,14 +184,6 @@ export function workflowModel(script: {
       const answer = script.feedback?.(prompt) ?? feedbackCriticReply(prompt, { repositoryId: "demo", path: "greeting.ts", testPath: "greeting.test.ts" });
       if (typeof answer === "string") return fauxAssistantMessage(answer);
       return typeof answer === "function" ? answer(context, options, state, model) : answer;
-    }
-    const role = reviewRole(prompt);
-    if (role !== undefined) {
-      script.turns?.push({ role, userText: latestUserText });
-      const queue = queues[role];
-      const next = queue.length > 1 ? queue.shift() : queue[0];
-      const step = next ?? reviewerReply.pass();
-      return typeof step === "function" ? step(context, options, state, model) : step;
     }
     script.turns?.push({ role: "CODER", userText: latestUserText });
     // Reopened implementation turns may retain planning/history messages; a genuinely fresh transcript is also a

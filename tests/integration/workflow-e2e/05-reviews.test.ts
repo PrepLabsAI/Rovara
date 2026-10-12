@@ -100,10 +100,96 @@ describe("Suite 5: reviews", () => {
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
   }, 120_000);
 
-  // The worker always reports both roles; a result with one report (WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, "The reviews
-  // didn't return one code review and one security review...") needs a worker that leaves one out. The harness has no
-  // seam to rewrite a worker's result (only to fail or crash a run), and adding one is outside this task's scope.
-  it.todo("5.8 incomplete reviews (only one report) are said with Retry reviews");
+  it("5.8 a real review run missing one valid report is said with Retry reviews and can retry on the same candidate", async () => {
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
+    await atPlanReview(e2e);
+    let actualCritic: { operationId: string; candidateDigest: string } | undefined;
+    let actualRoles: string[] = [];
+    let actualReports: Array<{ operationId: string; candidateDigest: string; role: string }> = [];
+    let actualReviewOperationId: string | undefined;
+    let actualCandidateDigest: string | undefined;
+    e2e.worker.rewriteNextResult("task:REVIEW", (result) => {
+      const reported = result as { workflowCandidateRepositories: unknown[]; workflowReviews: Array<{ operationId: string; candidateDigest: string; role: string }> };
+      actualRoles = reported.workflowReviews.map((review) => review.role).sort();
+      actualReports = reported.workflowReviews.map(({ operationId, candidateDigest, role }) => ({ operationId, candidateDigest, role }));
+      actualReviewOperationId = e2e.invocations.filter((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW").at(-1)?.operationId;
+      actualCandidateDigest = e2e.workflow().candidate?.digest;
+      actualCritic = reported.workflowReviews.find((review) => review.role === "CRITIC");
+      return { ...reported, workflowReviews: reported.workflowReviews.filter((review) => review.role === "CRITIC") };
+    });
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    const candidate = e2e.workflow().candidate!;
+
+    const reviewRuns = () => e2e.invocations.filter((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW");
+    expect(reviewRuns()).toHaveLength(1);
+    expect(e2e.workflow()).toMatchObject({ stage: "REVIEW", state: "BLOCKED", candidate: { digest: candidate.digest }, blockReason: "The reviews didn't return one code review and one security review. Use Retry reviews to run them again." });
+    const card = e2e.slack.lastPostWithAction("agentx_workflow_retry_reviews");
+    expect(card.text).toBe("The checks passed, but the reviews couldn't finish. The reviews didn't return one code review and one security review. Use Retry reviews to run them again. Nothing was sent to GitHub.");
+    expect(actionIds(card)).toEqual(["agentx_workflow_retry_reviews", "agentx_workflow_close"]);
+    expect(e2e.github.pushes.size).toBe(0);
+    expect(e2e.github.pullRequests).toEqual([]);
+
+    const firstReviewId = reviewRuns()[0]!.operationId;
+    expect(actualRoles).toEqual(["CRITIC", "SECURITY"]);
+    expect(actualReports).toHaveLength(2);
+    expect(actualReviewOperationId).toBe(firstReviewId);
+    expect(actualCandidateDigest).toBe(candidate.digest);
+    expect(actualReports.map(({ operationId, candidateDigest }) => ({ operationId, candidateDigest }))).toEqual([
+      { operationId: firstReviewId, candidateDigest: candidate.digest },
+      { operationId: firstReviewId, candidateDigest: candidate.digest },
+    ]);
+    expect(e2e.turns.filter((turn) => turn.role === "CODE" || turn.role === "SECURITY").map((turn) => turn.role)).toEqual(["CODE", "SECURITY"]);
+    expect(actualCritic).toMatchObject({ operationId: firstReviewId, candidateDigest: candidate.digest });
+    await e2e.click("agentx_workflow_retry_reviews");
+    await e2e.settle();
+
+    const retriedRuns = reviewRuns();
+    expect(retriedRuns).toHaveLength(2);
+    expect(retriedRuns[1]!.operationId).not.toBe(firstReviewId);
+    expect(e2e.turns.filter((turn) => turn.role === "CODE" || turn.role === "SECURITY").map((turn) => turn.role)).toEqual(["CODE", "SECURITY", "CODE", "SECURITY"]);
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", candidate: { digest: candidate.digest }, reviews: [
+      { operationId: retriedRuns[1]!.operationId, candidateDigest: candidate.digest, role: "CRITIC" },
+      { operationId: retriedRuns[1]!.operationId, candidateDigest: candidate.digest, role: "SECURITY" },
+    ] });
+    expect(runs(e2e).filter((run) => run === "IMPLEMENT")).toHaveLength(1);
+    expect(runs(e2e).filter((run) => run === "CHECKS")).toHaveLength(0);
+    expect(e2e.github.pullRequests).toHaveLength(1);
+    expect(e2e.github.pullRequests[0]!.tree).toBe(candidate.repositories[0]!.treeSha);
+    expectNoJargon(e2e);
+  }, 120_000);
+
+  it("5.8 read-only review-only tasks do not claim automated checks when a report is missing", async () => {
+    const e2e = await createWorkflowE2E({ readiness: [], model: { plan: PLAN, edits: EDITS } });
+    await atPlanReview(e2e);
+    let actualReports: Array<{ operationId: string; candidateDigest: string; role: string }> = [];
+    let actualReviewOperationId: string | undefined;
+    let actualCandidateDigest: string | undefined;
+    e2e.worker.rewriteNextResult("task:REVIEW", (result) => {
+      const reported = result as { workflowCandidateRepositories: unknown[]; workflowReviews: Array<{ operationId: string; candidateDigest: string; role: string }> };
+      actualReports = reported.workflowReviews.map(({ operationId, candidateDigest, role }) => ({ operationId, candidateDigest, role }));
+      actualReviewOperationId = e2e.invocations.filter((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW").at(-1)?.operationId;
+      actualCandidateDigest = e2e.workflow().candidate?.digest;
+      return { ...reported, workflowReviews: reported.workflowReviews.filter((review) => review.role === "CRITIC") };
+    });
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "REVIEW", state: "BLOCKED" });
+    expect(actualReports).toHaveLength(2);
+    expect(actualReviewOperationId).toBeDefined();
+    expect(actualCandidateDigest).toBeDefined();
+    expect(actualReports.map(({ operationId, candidateDigest }) => ({ operationId, candidateDigest }))).toEqual([
+      { operationId: actualReviewOperationId, candidateDigest: actualCandidateDigest },
+      { operationId: actualReviewOperationId, candidateDigest: actualCandidateDigest },
+    ]);
+    expect(actualReports.map(({ role }) => role).sort()).toEqual(["CRITIC", "SECURITY"]);
+    expect(e2e.turns.filter((turn) => turn.role === "CODE" || turn.role === "SECURITY").map((turn) => turn.role)).toEqual(["CODE", "SECURITY"]);
+    const card = e2e.slack.lastPostWithAction("agentx_workflow_retry_reviews");
+    expect(card.text).toBe("No automated check applied, and the reviews couldn't finish. The reviews didn't return one code review and one security review. Use Retry reviews to run them again. Nothing was sent to GitHub.");
+    expect(card.text).not.toContain("checks passed");
+    expect(e2e.github.pushes.size).toBe(0);
+    expect(e2e.github.pullRequests).toEqual([]);
+  }, 120_000);
 
   it("5.9 says the reviews couldn't start automatically once AgentX gives up starting them, with Retry reviews that works", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
