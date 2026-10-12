@@ -13,7 +13,7 @@ export type TaskPeopleConfirmationView = {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SLACK_THREAD_URL = /^https:\/\/slack\.com\/archives\/[CG][A-Z0-9]{2,31}\/p\d{16}$/;
-const unavailable = '<section class="task-people" aria-labelledby="task-people-heading"><h2 id="task-people-heading">People unavailable</h2><p>Try again later.</p></section>';
+const unavailable = '<section class="task-people" id="task-people" aria-labelledby="task-people-heading"><h2 id="task-people-heading">People unavailable</h2><p>Try again later.</p></section>';
 
 function roleLabel(role: TaskPeopleView["people"][number]["role"]): string {
   switch (role) {
@@ -70,7 +70,7 @@ export function renderTaskPeoplePanel(taskId: string, view: TaskPeopleView): str
   const takeover = view.canTakeOwnership
     ? `<form class="task-people-takeover" data-people-take-ownership-form data-people-revision="${view.revision}"><p>Taking ownership does not restart work.</p><button type="button" disabled>Take ownership</button><span class="task-people-status" role="status" aria-live="polite"></span></form>`
     : "";
-  return `<section class="task-people" aria-labelledby="task-people-heading"><h2 id="task-people-heading">People</h2><ul class="task-people-list">${people}</ul>${add}${takeover}</section>`;
+  return `<section class="task-people" id="task-people" aria-labelledby="task-people-heading"><h2 id="task-people-heading">People</h2><ul class="task-people-list">${people}</ul>${add}${takeover}</section>`;
 }
 
 export function renderTaskPeopleUnavailable(): string {

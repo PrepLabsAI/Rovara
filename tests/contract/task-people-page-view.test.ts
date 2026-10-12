@@ -39,6 +39,17 @@ describe("task People page presentation", () => {
     expect(html).not.toContain("people/add");
   });
 
+  it("provides the same anchor targeted by confirmation Cancel", () => {
+    const panel = renderTaskPeoplePanel(TASK_ID, view());
+    const unavailable = renderTaskPeopleUnavailable();
+    const confirmation = renderTaskPeopleConfirmation({ kind: "takeOwnership", taskId: TASK_ID, requestId: "44444444-4444-4444-8444-444444444444", expiresAt: "2026-10-11T12:10:00.000Z" });
+    const href = confirmation.match(/<a href="([^"]+)">Cancel<\/a>/)?.[1] ?? "";
+    const target = href.split("#")[1] ?? "";
+    expect(target).toBe("task-people");
+    expect(panel).toContain(`id="${target}"`);
+    expect(unavailable).toContain(`id="${target}"`);
+  });
+
   it("renders only existing-person role controls for managers and leaves them disabled", () => {
     const html = renderTaskPeoplePanel(TASK_ID, view({ canManage: true, addPeopleUrl: "https://slack.com/archives/C0PEOPLE1/p1791720000123456" }));
     expect(html).toContain('data-people-role-form');
@@ -74,7 +85,7 @@ describe("task People page presentation", () => {
     for (const addPeopleUrl of [
       "",
       `/v1/tasks/${TASK_ID}/people/add`,
-      "javascript:alert(1)",
+      "ftp://example.invalid/people",
       "https://evil.example/archives/C0PEOPLE1/p1791720000123456",
       "https://slack.com.evil.example/archives/C0PEOPLE1/p1791720000123456",
       "https://slack.com/archives/C0PEOPLE1/p1791720000123456?next=https://evil.example",
@@ -94,8 +105,10 @@ describe("task People page presentation", () => {
     expect(html).toContain("&lt;b&gt;");
     expect(html).not.toContain("<b>");
     expect(html).not.toContain("onerror");
-    const displayed = html.match(/&lt;b&gt;.*?&lt;\/b&gt;/)?.[0] ?? "";
-    expect(displayed.length).toBeLessThanOrEqual(80);
+    const heading = html.match(/<h3>([\s\S]*?)<\/h3>/)?.[1] ?? "";
+    const visibleName = heading.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&").replace(/&quot;/g, "\"").replace(/&#39;/g, "'").trim();
+    expect(visibleName).not.toBe("");
+    expect(Array.from(visibleName).length).toBe(80);
     expect(html).toContain("Current access: Commenter");
   });
 
