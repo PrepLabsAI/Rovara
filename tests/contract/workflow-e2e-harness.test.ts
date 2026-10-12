@@ -3,6 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { execFileSync } from "node:child_process";
 import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, parsePlanDocument } from "@agentx/contracts";
+import { fauxProvider, normalizeContext } from "@earendil-works/pi-ai";
 import { LOST_COMPUTE_ERROR, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../support/workflow-e2e.js";
 import { OMAR } from "../support/developer-task-broker.js";
 import { feedbackCriticReply, workflowModel } from "../support/faux-scripts.js";
@@ -58,17 +59,23 @@ describe("workflow E2E harness", () => {
 
   it("resets coder command queues for a fresh session with the same prompt, without resetting within-session tool turns", async () => {
     const step = workflowModel({ plan: PLAN, edits: EDITS, beforeEditsCommands: ["echo before"], afterEditsCommands: ["echo after"] });
-    const user = (text: string) => ({ role: "user", content: [{ type: "text", text }], timestamp: 0 });
+    if (typeof step !== "function") throw new Error("workflowModel did not return a callable response step");
+    type Message = Parameters<typeof step>[0]["messages"][number];
+    const user = (text: string): Message => ({ role: "user", content: [{ type: "text", text }], timestamp: 0 });
+    const assistant: Message = { role: "assistant", content: [], api: "openai-completions", provider: "openai", model: "test-model",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: 0 };
+    const toolResult: Message = { role: "toolResult", toolCallId: "call-1", toolName: "bash", content: [], isError: false, timestamp: 0 };
+    const faux = fauxProvider();
+    const model = faux.getModel();
+    if (model === undefined) throw new Error("fauxProvider did not provide its default model");
     const samePrompt = "Implement the approved plan.";
-    const call = (messages: unknown[]) => step({ messages }, undefined, undefined, undefined) as Promise<{ content: Array<{ type: string; name?: string }> }>;
-    const names = async (messages: unknown[]) => (await call(messages)).content.map((part) => part.name ?? part.type);
+    const call = (messages: Message[]) => step(normalizeContext({ messages }), undefined, faux.state, model) as Promise<{ content: Array<{ type: string; name?: string }> }>;
+    const names = async (messages: Message[]) => (await call(messages)).content.map((part) => part.name ?? part.type);
     const opening = [user(samePrompt)];
     expect(await names(opening)).toEqual(["bash"]);
-    expect(await names([...opening, { role: "assistant", content: [] }, { role: "toolResult", content: [] }])).toEqual(["write"]);
-    expect(await names([...opening, { role: "assistant", content: [] }, { role: "toolResult", content: [] },
-      { role: "assistant", content: [] }, { role: "toolResult", content: [] }])).toEqual(["bash"]);
-    expect(await names([...opening, { role: "assistant", content: [] }, { role: "toolResult", content: [] },
-      { role: "assistant", content: [] }, { role: "toolResult", content: [] }, { role: "assistant", content: [] }, { role: "toolResult", content: [] }])).toEqual(["text"]);
+    expect(await names([...opening, assistant, toolResult])).toEqual(["write"]);
+    expect(await names([...opening, assistant, toolResult, assistant, toolResult])).toEqual(["bash"]);
+    expect(await names([...opening, assistant, toolResult, assistant, toolResult, assistant, toolResult])).toEqual(["text"]);
     // A new Pi session starts with the same user text but has no prior assistant or tool-result messages.
     expect(await names([user(samePrompt)])).toEqual(["bash"]);
   });

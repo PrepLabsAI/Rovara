@@ -6550,14 +6550,19 @@ async function completedWorkflowItems(
       let reviewFailure = "independent candidate review was invalid, incomplete, or stale";
       try {
         const candidate = createCandidateManifest(repositories as CandidateRepository[]);
-        if (task.workflow.stage !== "REVIEW" || task.workflow.candidate?.digest !== candidate.digest
-          || reviews.length !== 2
-          || reviews.some((review) => review === null || typeof review !== "object" || (review as Record<string, unknown>).operationId !== operation.id)) {
+        if (task.workflow.stage !== "REVIEW" || task.workflow.candidate?.digest !== candidate.digest) {
           throw new Error("review result is stale, incomplete, or came from another operation");
+        }
+        // Validate every report's complete contract and provenance before deciding that a role is missing.
+        for (const review of reviews) {
+          if (review === null || typeof review !== "object" || (review as Record<string, unknown>).operationId !== operation.id) {
+            throw new Error("review result is stale, incomplete, or came from another operation");
+          }
+          submitWorkflowReview(task.workflow, review, now);
         }
         // Exactly one code review and one security review: two of one kind would leave the stage waiting for the other.
         const roles = reviews.map((review) => (review as Record<string, unknown>).role).sort();
-        if (roles[0] !== "CRITIC" || roles[1] !== "SECURITY") {
+        if (roles.length !== 2 || roles[0] !== "CRITIC" || roles[1] !== "SECURITY") {
           reviewFailure = WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE;
           throw new Error("review result does not hold one code review and one security review");
         }
