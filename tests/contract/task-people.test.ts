@@ -7,6 +7,7 @@ import {
   getTaskPeople,
   takeTaskOwnership,
   getTaskPeopleCapabilities,
+  getTaskPeoplePresentation,
   taskAccessFence,
   type TaskPeopleDependencies,
   type TaskPersonCheck,
@@ -294,6 +295,15 @@ const isPeopleMutation = (command: unknown) => {
 };
 
 describe("task people", () => {
+  it("reads immutable task-local presentation names through matching PERSON and PERSON_SUBJECT records", async () => {
+    const h = harness({ enabled: false });
+    const personId = "22222222-2222-4222-8222-222222222222";
+    h.seedPerson(B, personId);
+    await expect(getTaskPeoplePresentation(h.deps, TASK_ID)).resolves.toEqual([{ personId, developerId: B, name: MEMBER.name }]);
+    h.db.set({ ...(h.db.get(`DEVTASK#${TASK_ID}`, `PERSON_SUBJECT#${B}`)!), personId: "33333333-3333-4333-8333-333333333333" });
+    await expect(getTaskPeoplePresentation(h.deps, TASK_ID)).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });
+  });
+
   it("keeps a cold People read visibly unavailable while changes are disabled and writes nothing", async () => {
     const h = harness({ enabled: false });
     const before = structuredClone(h.db.items);
