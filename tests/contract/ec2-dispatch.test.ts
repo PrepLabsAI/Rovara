@@ -4,7 +4,7 @@ import { WorkerInvocationSchema, type Ec2RuntimeBinding, type WorkerInvocation }
 import { createDispatcherHandler, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
 import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
 import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
-import type { Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
+import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import { appendOperationEvent } from "../../packages/broker/src/aws/operation-events.js";
 import { SessionManager, workspaceBinding } from "../../packages/broker/src/aws/sessions.js";
 import { verifyInvokeAuthorization, invocationMatchesClaims } from "../../packages/worker/src/invoke-auth.js";
@@ -57,6 +57,18 @@ describe("ec2-ebs delivery", () => {
     await expect(deliver(record, record.invocation)).resolves.toBe("WAITING_FOR_TASK_ACCESS");
     expect(signInvocation).not.toHaveBeenCalled();
     expect(post).not.toHaveBeenCalled();
+  });
+
+  it("creates a fresh task guard after readiness and after ping with current Lambda time", async () => {
+    const guardTaskDispatch = vi.fn<NonNullable<Ec2DeliveryDependencies["guardTaskDispatch"]>>(async () => "ALLOWED");
+    const { deliver } = delivery({ guardTaskDispatch });
+    const record = recordFor();
+    let remaining = 15_000;
+
+    await expect(deliver(record, record.invocation, { remainingTimeMs: () => remaining-- })).resolves.toBe("DELIVERED");
+    expect(guardTaskDispatch).toHaveBeenCalledTimes(2);
+    expect(typeof guardTaskDispatch.mock.calls[0]?.[1]?.remainingTimeMs).toBe("function");
+    expect(typeof guardTaskDispatch.mock.calls[1]?.[1]?.remainingTimeMs).toBe("function");
   });
 
   it("posts the invocation to the worker with a token the worker's own verifier accepts", async () => {
@@ -646,6 +658,23 @@ describe("the dispatcher with ec2-ebs records", () => {
     expect(markFailed).not.toHaveBeenCalled();
   });
 
+  it("passes invocation remaining time into the initial pre-compute guard", async () => {
+    const record = recordFor();
+    const guardTaskDispatch = vi.fn<(record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">>(async () => "PARKED");
+    const markDispatching = vi.fn(async () => true);
+    const handler = createDispatcherHandler({
+      markDispatching, markDelivered: async () => undefined, markFailed: async () => undefined,
+      guardTaskDispatch, deliverEc2: async () => "DELIVERED", log: () => undefined,
+    });
+
+    await expect(handler({ Records: [{ messageId: "initial", body: JSON.stringify(record) }] }, {
+      getRemainingTimeInMillis: () => 8_000,
+    })).resolves.toEqual({ batchItemFailures: [] });
+    expect(guardTaskDispatch).toHaveBeenCalledTimes(1);
+    expect(typeof guardTaskDispatch.mock.calls[0]?.[1]?.remainingTimeMs).toBe("function");
+    expect(markDispatching).not.toHaveBeenCalled();
+  });
+
   it("acknowledges a parked record without marking it delivered or using a retry", async () => {
     const { handler, markDelivered } = dispatcher(async () => "WAITING_FOR_SESSION");
     const record = recordFor();
@@ -663,6 +692,23 @@ describe("the dispatcher with ec2-ebs records", () => {
     expect(await failing.handler({ Records: [{ messageId: "m2", body: JSON.stringify(record), attributes: { ApproximateReceiveCount: "1" } }] }))
       .toEqual({ batchItemFailures: [{ itemIdentifier: "m2" }] });
     expect(failing.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("fails the current and remaining batch items before starting another guard inside the pause reserve", async () => {
+    const first = recordFor();
+    const second = recordFor();
+    const guardTaskDispatch = vi.fn(async () => "ALLOWED" as const);
+    const markDispatching = vi.fn(async () => true);
+    const handler = createDispatcherHandler({
+      guardTaskDispatch, markDispatching, markDelivered: async () => undefined, markFailed: async () => undefined,
+      deliverEc2: async () => "DELIVERED", log: () => undefined,
+    });
+
+    await expect(handler({ Records: [first, second].map((record, index) => ({ messageId: `m${index + 1}`, body: JSON.stringify(record) })) }, {
+      getRemainingTimeInMillis: () => 2_000,
+    })).resolves.toEqual({ batchItemFailures: [{ itemIdentifier: "m1" }, { itemIdentifier: "m2" }] });
+    expect(guardTaskDispatch).not.toHaveBeenCalled();
+    expect(markDispatching).not.toHaveBeenCalled();
   });
 });
 

@@ -3,14 +3,22 @@ import { agentXError } from "@agentx/contracts";
 import type { DurableOutboxRecord } from "./lambda.js";
 import { taskOpen } from "../developer/task-access.js";
 import { resolveTaskDispatchPeople, type CheckTaskPerson } from "../developer/task-people.js";
-import { taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord } from "../developer/task-records.js";
+import { taskKey, taskOwnerKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord } from "../developer/task-records.js";
+import type { ProjectAuthorityWitness } from "../developer/task-project-access.js";
+import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
 
 type TransactItem = NonNullable<TransactWriteCommandInput["TransactItems"]>[number];
 
 export interface TaskDispatchAccessDependencies {
-  documentClient: { send(command: unknown): Promise<unknown> };
+  documentClient: { send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> };
   tableName: string;
   checkTaskPerson?: CheckTaskPerson;
+  /** One admission shared by every read, owner, and optimistic retry for this guard. */
+  admission?: TaskAuthorityAdmission;
+  /** Lambda context time remaining; pause writes must retain their independent reserve. */
+  remainingTimeMs?: () => number;
+  /** Production People composition requires one fresh State authority witness in the final fence. */
+  stateAuthorityWitnessForOwnerActor?: (task: DeveloperTaskRecord, ownerActorId: string) => Promise<(ProjectAuthorityWitness & { taskId: string; developerId: string; project: string }) | undefined>;
 }
 
 export type TaskDispatchGuard = (record: DurableOutboxRecord) => Promise<"ALLOWED" | "PARKED">;
@@ -94,6 +102,7 @@ async function allowedStillCurrent(
   pointer: DeveloperTaskPointerRecord,
   task: DeveloperTaskRecord,
   peopleRevision: number | undefined,
+  authorityWitness?: ProjectAuthorityWitness & { taskId: string; developerId: string; project: string },
 ): Promise<boolean> {
   const workflow = task.workflow;
   const taskCondition = workflow === undefined
@@ -106,8 +115,7 @@ async function allowedStillCurrent(
   const peopleCondition = peopleRevision === undefined
     ? { ConditionExpression: "attribute_not_exists(pk)" }
     : { ConditionExpression: "#revision = :revision", ExpressionAttributeNames: { "#revision": "revision" }, ExpressionAttributeValues: { ":revision": peopleRevision } };
-  try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+  const checks: TransactItem[] = [
       { ConditionCheck: { TableName: deps.tableName, Key: taskPointerKey(record.workspaceId), ConditionExpression: "taskId = :taskId", ExpressionAttributeValues: { ":taskId": pointer.taskId } } },
       { ConditionCheck: { TableName: deps.tableName, Key: taskKey(task.taskId), ...taskCondition } },
       { ConditionCheck: { TableName: deps.tableName, Key: { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE" }, ...peopleCondition } },
@@ -116,7 +124,49 @@ async function allowedStillCurrent(
         ExpressionAttributeValues: { ":fence": record.invocation.fence, ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING" } } },
       { ConditionCheck: { TableName: deps.tableName, Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: "META" },
         ConditionExpression: "fence = :fence AND activeOperationId = :operationId", ExpressionAttributeValues: { ":fence": record.invocation.fence, ":operationId": record.operationId } } },
-    ] }));
+  ];
+  if (authorityWitness !== undefined) {
+    const witness = authorityWitness;
+    const expectedRevisionSk = `REV#${String(witness.projectRevision.revision).padStart(12, "0")}`;
+    if (witness.taskId !== task.taskId || witness.project !== task.project || witness.projectRevision.pk !== `PROJECT#${task.project}`
+      || witness.projectRevision.sk !== expectedRevisionSk || !Number.isSafeInteger(witness.projectRevision.revision)
+      || witness.projectRevision.revision < 0 || (witness.access !== "granted" && witness.access !== "channel")) return false;
+    const definitionNames = { "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks" };
+    const definitionValues = { ":revision": witness.projectRevision.revision } as Record<string, unknown>;
+    const definitionPolicy = witness.projectRevision.developerTasksPresent
+      ? "#definition.#revision = :revision AND #definition.#developerTasks = :developerTasks"
+      : "#definition.#revision = :revision AND attribute_not_exists(#definition.#developerTasks)";
+    if (witness.projectRevision.developerTasksPresent) definitionValues[":developerTasks"] = witness.projectRevision.developerTasks;
+    checks.push({ ConditionCheck: { TableName: deps.tableName, Key: { pk: witness.projectRevision.pk, sk: witness.projectRevision.sk },
+      ConditionExpression: definitionPolicy, ExpressionAttributeNames: definitionNames, ExpressionAttributeValues: definitionValues } });
+    if (witness.access === "granted") {
+      const membership = witness.membership;
+      if (membership === undefined || membership.pk !== `MEMBER#${witness.developerId}` || membership.sk !== `PROJECT#${task.project}`
+        || membership.projectName !== task.project || membership.role !== "developer") return false;
+      checks.push({ ConditionCheck: { TableName: deps.tableName, Key: { pk: membership.pk, sk: membership.sk },
+        ConditionExpression: "projectName = :project AND #role = :developer", ExpressionAttributeNames: { "#role": "role" },
+        ExpressionAttributeValues: { ":project": task.project, ":developer": "developer" } } });
+    } else {
+      const binding = witness.binding;
+      if (binding === undefined || binding.pk !== `SLACK_BINDING#${binding.teamId}` || binding.sk !== `CHANNEL#${binding.channelId}`
+        || binding.projectName !== task.project || typeof binding.updatedAt !== "string" || binding.updatedAt.length === 0) return false;
+      checks.push({ ConditionCheck: { TableName: deps.tableName, Key: { pk: binding.pk, sk: binding.sk },
+        ConditionExpression: "teamId = :teamId AND channelId = :channelId AND projectName = :projectName AND updatedAt = :updatedAt",
+        ExpressionAttributeValues: { ":teamId": binding.teamId, ":channelId": binding.channelId, ":projectName": task.project, ":updatedAt": binding.updatedAt } } });
+    }
+  }
+  const unique = new Map<string, TransactItem>();
+  for (const check of checks) {
+    const condition = Object.values(check)[0] as { Key?: { pk?: unknown; sk?: unknown } } | undefined;
+    if (condition?.Key === undefined) return false;
+    const key = `${String(condition.Key.pk)}\0${String(condition.Key.sk)}`;
+    const prior = unique.get(key);
+    if (prior !== undefined && JSON.stringify(prior) !== JSON.stringify(check)) return false;
+    unique.set(key, check);
+  }
+  if (unique.size >= 100) return false;
+  try {
+    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [...unique.values()] }));
     return true;
   } catch (error) {
     if (conditional(error)) return false;
@@ -133,12 +183,35 @@ export async function guardTaskDispatch(deps: TaskDispatchAccessDependencies, re
   // Terminal cleanup is independent of owner availability. It must be able to release compute,
   // workspace slots and charge after the last owner departs.
   if (record.invocation.kind === "close" || record.invocation.kind === "cancel") return "ALLOWED";
-  const stored = await get<{ status?: string }>(deps, outboxKey(record.id));
+  const guardDeps: TaskDispatchAccessDependencies = deps.admission === undefined ? deps : {
+    ...deps,
+    documentClient: {
+      async send(command: unknown): Promise<unknown> {
+        if (command instanceof GetCommand || command instanceof QueryCommand) {
+          const abortSignal = deps.admission!.admitStateRead();
+          const response = await deps.documentClient.send(command, { abortSignal });
+          deps.admission!.assertOpen();
+          return response;
+        }
+        if (command instanceof TransactWriteCommand && deps.remainingTimeMs !== undefined) {
+          const remaining = deps.remainingTimeMs();
+          if (remaining <= TASK_PAUSE_RESERVE_MS) throw agentXError("RUNTIME_UNAVAILABLE", "task access pause reserve is unavailable");
+          return deps.documentClient.send(command, { abortSignal: AbortSignal.timeout(remaining) });
+        }
+        return deps.documentClient.send(command);
+      },
+    },
+  };
+  deps.admission?.assertOpen();
+  const stored = await get<{ status?: string }>(guardDeps, outboxKey(record.id));
   if (stored?.status === "WAITING_FOR_TASK_ACCESS") return "PARKED";
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const pointer = await get<DeveloperTaskPointerRecord>(deps, taskPointerKey(record.workspaceId));
-    if (pointer === undefined) return "ALLOWED";
-    const task = await get<DeveloperTaskRecord>(deps, taskKey(pointer.taskId));
+    const pointer = await get<DeveloperTaskPointerRecord>(guardDeps, taskPointerKey(record.workspaceId));
+    if (pointer === undefined) {
+      deps.admission?.assertOpen();
+      return "ALLOWED";
+    }
+    const task = await get<DeveloperTaskRecord>(guardDeps, taskKey(pointer.taskId));
     // A PARKED answer acknowledges the SQS message, so it is returned only after a durable pause
     // exists. Broken task state is retried instead of silently dropping the invocation.
     if (task === undefined || task.workspaceId !== record.workspaceId) {
@@ -147,16 +220,40 @@ export async function guardTaskDispatch(deps: TaskDispatchAccessDependencies, re
     if (!taskOpen(task) || task.workflow?.state === "COMPLETE") {
       throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch is no longer open");
     }
-    const access = await resolveTaskDispatchPeople(deps, task);
+    const access = await resolveTaskDispatchPeople(guardDeps, task);
     if (access === undefined || access.status === "ALLOWED") {
-      if (await allowedStillCurrent(deps, record, pointer, task, access?.peopleRevision)) return "ALLOWED";
+      let witness: (ProjectAuthorityWitness & { taskId: string; developerId: string; project: string }) | undefined;
+      if (access?.status === "ALLOWED" && deps.stateAuthorityWitnessForOwnerActor !== undefined) {
+        const ownerActorId = access.ownerActorIds[0];
+        if (ownerActorId === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch authority witness is unavailable");
+        try {
+          witness = await deps.stateAuthorityWitnessForOwnerActor(task, ownerActorId);
+        } catch {
+          if (deps.remainingTimeMs !== undefined && deps.remainingTimeMs() <= TASK_PAUSE_RESERVE_MS) {
+            throw agentXError("RUNTIME_UNAVAILABLE", "task access pause reserve is unavailable");
+          }
+          await park(guardDeps, record, pointer, task, access.peopleRevision, "PROOF_UNAVAILABLE");
+          return "PARKED";
+        }
+        if (witness === undefined) continue;
+        if (taskOwnerKey(witness.developerId, task.taskId) !== ownerActorId) throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch authority witness is unavailable");
+      }
+      if (await allowedStillCurrent(guardDeps, record, pointer, task, access?.peopleRevision, witness)) {
+        deps.admission?.assertOpen();
+        return "ALLOWED";
+      }
       continue;
     }
-    await park(deps, record, pointer, task, access.peopleRevision, access.status === "OWNERLESS" ? "OWNERLESS" : "PROOF_UNAVAILABLE");
+    if (deps.remainingTimeMs !== undefined && deps.remainingTimeMs() <= TASK_PAUSE_RESERVE_MS) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "task access pause reserve is unavailable");
+    }
+    await park(guardDeps, record, pointer, task, access.peopleRevision, access.status === "OWNERLESS" ? "OWNERLESS" : "PROOF_UNAVAILABLE");
     return "PARKED";
   }
   throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch access changed while it was being verified");
 }
+
+const TASK_PAUSE_RESERVE_MS = 2_000;
 
 interface PausedTaskDispatch {
   taskId: string;

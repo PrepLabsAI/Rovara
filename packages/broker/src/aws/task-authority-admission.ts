@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { agentXError } from "@agentx/contracts";
 
 export const TASK_AUTHORITY_MAX_MS = 6_000;
@@ -10,6 +11,8 @@ const HEX64 = /^[a-f0-9]{64}$/;
 const unavailable = () => agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
 
 export interface TaskAuthorityAdmission {
+  /** Correlates every remote proof issued under this one guard; never changes during retries. */
+  readonly id: string;
   readonly deadlineAt: number;
   assertOpen(): void;
   remainingMs(): number;
@@ -24,6 +27,7 @@ export interface TaskAuthorityAdmission {
 }
 
 export function createTaskAuthorityAdmission(input: { now(): number; lambdaRemainingMs: number }): TaskAuthorityAdmission {
+  const id = randomUUID();
   const startedAt = input.now();
   const safeLambdaRemaining = Number.isFinite(input.lambdaRemainingMs) ? Math.max(0, input.lambdaRemainingMs) : 0;
   const deadlineAt = Math.min(startedAt + TASK_AUTHORITY_MAX_MS, startedAt + safeLambdaRemaining - TASK_AUTHORITY_CONTEXT_RESERVE_MS);
@@ -75,6 +79,7 @@ export function createTaskAuthorityAdmission(input: { now(): number; lambdaRemai
   };
 
   return {
+    id,
     deadlineAt,
     assertOpen,
     remainingMs,

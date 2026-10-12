@@ -166,6 +166,35 @@ export const TaskPersonProofResponseSchema = z.discriminatedUnion("ok", [
 ]);
 export type TaskPersonProofResponse = z.infer<typeof TaskPersonProofResponseSchema>;
 
+/** Bounded internal Lambda envelope for fresh task-dispatch proof. Never an HTTP request shape. */
+export const TaskDispatchProofRequestSchema = z.object({
+  kind: z.literal("task-dispatch-person-proof"),
+  request: TaskPersonProofRequestSchema,
+  admission: z.object({
+    version: z.literal(1),
+    id: z.string().uuid(),
+    deadlineAt: z.number().int().nonnegative(),
+    remainingMs: z.number().int().min(1).max(6_000),
+    slackCallsLimit: z.number().int().min(1).max(100),
+  }).strict(),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.request.channelIds).size !== value.request.channelIds.length) {
+    context.addIssue({ code: "custom", path: ["request", "channelIds"], message: "channel IDs must be unique" });
+  }
+});
+export type TaskDispatchProofRequest = z.infer<typeof TaskDispatchProofRequestSchema>;
+
+export const TaskDispatchProofResponseSchema = z.object({
+  kind: z.literal("task-dispatch-person-proof-result"),
+  admissionId: z.string().uuid(),
+  usage: z.object({
+    slackCallsUsed: z.number().int().min(0).max(100),
+    completedAt: z.number().int().nonnegative(),
+  }).strict(),
+  result: TaskPersonProofResponseSchema,
+}).strict();
+export type TaskDispatchProofResponse = z.infer<typeof TaskDispatchProofResponseSchema>;
+
 /** Internal complete fresh channel directory for Task People. It is never an HTTP route. */
 export const TaskChannelPeopleRequestSchema = z.object({
   kind: z.literal("task-channel-people"),

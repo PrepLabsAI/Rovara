@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import {
   SlackTeamIdSchema,
@@ -10,9 +11,10 @@ import {
   type ProjectAccessSubject,
   type TaskPersonIdentityDependencies,
 } from "../developer/task-person-identity.js";
-import type { ProjectAuthorityReader } from "../developer/task-project-access.js";
+import type { ProjectAuthorityReader, ProjectAuthorityWitness } from "../developer/task-project-access.js";
 import { readProjectAuthority } from "../developer/task-project-access.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
+import { taskOwnerKey } from "../developer/task-records.js";
 import { META, type DeveloperRecord } from "../developer/store.js";
 import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
 
@@ -103,6 +105,7 @@ function identityDependencies(input: {
   trustedCaller?: TaskPersonIdentityDependencies["trustedCaller"];
   admission: TaskAuthorityAdmission;
   ports: TaskPersonRuntimePorts;
+  onProjectAuthority(witness: ProjectAuthorityWitness): void;
 }): TaskPersonIdentityDependencies {
   const { task, developerId, slackTeamId, admission, ports } = input;
   const readBindings = async (project: string): Promise<readonly string[]> => {
@@ -149,7 +152,11 @@ function identityDependencies(input: {
         ...(subject.slackUserId === undefined ? {} : { slackUserId: subject.slackUserId }),
         admission,
       });
-      if (result.kind === "allowed") return;
+      if (result.kind === "allowed") {
+        if (result.witness === undefined) throw unavailable();
+        input.onProjectAuthority(result.witness);
+        return;
+      }
       if (result.kind === "denied" && result.reason === "project-access") throw refused();
       if (result.kind === "not-found") throw agentXError("PROJECT_NOT_FOUND", "task person project was not found");
       if (result.kind === "denied" && result.reason === "tasks-disabled") throw agentXError("PROJECT_TASKS_DISABLED", "task person project tasks are disabled");
@@ -160,6 +167,10 @@ function identityDependencies(input: {
 }
 
 export type CheckTaskPerson = (task: DeveloperTaskRecord, developerId: string) => ReturnType<typeof checkTaskPersonIdentity>;
+export interface TaskPersonRuntime {
+  checkTaskPerson: CheckTaskPerson;
+  stateAuthorityWitnessForOwnerActor(task: DeveloperTaskRecord, ownerActorId: string): Promise<(ProjectAuthorityWitness & { taskId: string; developerId: string; project: string }) | undefined>;
+}
 
 /** Creates a guard-local checker. Its injected ports expose only the bounded People read set. */
 export function createTaskPersonRuntime(input: {
@@ -171,23 +182,49 @@ export function createTaskPersonRuntime(input: {
   uuid(): string;
   trustedCaller?: TaskPersonIdentityDependencies["trustedCaller"];
   checkIdentity?: typeof checkTaskPersonIdentity;
-}): { checkTaskPerson: CheckTaskPerson } {
+}): TaskPersonRuntime {
   const checkIdentity = input.checkIdentity ?? checkTaskPersonIdentity;
+  const witnesses = new Map<string, ProjectAuthorityWitness & { taskId: string; developerId: string; project: string }>();
+  const witnessKey = (taskId: string, developerId: string) => `${taskId}\0${developerId}`;
   return {
     async checkTaskPerson(task, developerId) {
+      witnesses.delete(witnessKey(task.taskId, developerId));
       input.admission.admitIdentity(developerId);
       input.admission.assertOpen();
       if (!UUID.test(task.taskId) || !SlackTeamIdSchema.safeParse(input.slackTeamId).success) throw refused();
+      let projectWitness: ProjectAuthorityWitness | undefined;
       const dependencies = identityDependencies({
         task, developerId, stateTableName: input.stateTableName, slackTeamId: input.slackTeamId,
         now: () => input.now(), uuid: () => input.uuid(),
         ...(input.trustedCaller === undefined ? {} : { trustedCaller: input.trustedCaller }),
         admission: input.admission,
         ports: input.ports,
+        onProjectAuthority(witness) { projectWitness = witness; },
       });
       const result = await checkIdentity(dependencies, task, developerId);
       input.admission.assertOpen();
+      if (result.eligible && result.channelMember && projectWitness !== undefined) witnesses.set(witnessKey(task.taskId, developerId), {
+        ...projectWitness, taskId: task.taskId, developerId, project: task.project,
+      });
       return result;
+    },
+    async stateAuthorityWitnessForOwnerActor(task, ownerActorId) {
+      const witness = [...witnesses.values()].find((candidate) => candidate.taskId === task.taskId
+        && candidate.project === task.project && taskOwnerKey(candidate.developerId, task.taskId) === ownerActorId);
+      if (witness === undefined) return undefined;
+      input.admission.assertOpen();
+      const latest = await input.ports.projectAuthorityReader.latestRevision(task.project, input.admission, input.admission.admitStateRead());
+      input.admission.assertOpen();
+      const revision = latest.revision;
+      const validRevision = revision !== undefined && Number.isSafeInteger(revision.revision) && revision.revision >= 0
+        && typeof revision.definition === "object" && revision.definition !== null && !Array.isArray(revision.definition);
+      const samePolicy = latest.complete && validRevision && revision !== undefined
+        && revision.pk === witness.projectRevision.pk && revision.sk === witness.projectRevision.sk
+        && revision.revision === witness.projectRevision.revision
+        && Object.hasOwn(revision.definition, "developerTasks") === witness.projectRevision.developerTasksPresent
+        && (!witness.projectRevision.developerTasksPresent || isDeepStrictEqual(revision.definition.developerTasks, witness.projectRevision.developerTasks));
+      if (!samePolicy) return undefined;
+      return witness;
     },
   };
 }

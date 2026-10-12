@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import type { Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import { guardTaskDispatch, resumeTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
+import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
+import type { ProjectAuthorityWitness } from "../../packages/broker/src/developer/task-project-access.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";
@@ -53,6 +56,157 @@ function harness(withPeople = true) {
 }
 
 describe("task dispatch access", () => {
+  it.each(["deleted", "downgraded"] as const)("requalifies after the sole developer grant is %s before the final State fence", async (change) => {
+    const h = harness();
+    const revision = {
+      pk: "PROJECT#payments", sk: "REV#000000000007",
+      definition: { revision: 7, developerTasks: { enabled: true, channelMembersMayUse: false } },
+    };
+    const membership = { pk: `MEMBER#${OWNER}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" };
+    h.db.set(revision);
+    h.db.set(membership);
+    h.checkTaskPerson.mockImplementationOnce(async () => ({
+      subject: { developerId: OWNER, slackUserId: OWNER_SLACK },
+      identity: { developerId: OWNER, slackUserId: OWNER_SLACK, name: "Avery", method: "slack" as const, issuer: "https://slack.com", subject: OWNER_SLACK },
+      eligible: true, channelMember: true,
+    })).mockImplementation(async () => ({
+      subject: { developerId: OWNER, slackUserId: OWNER_SLACK },
+      identity: { developerId: OWNER, slackUserId: OWNER_SLACK, name: "Avery", method: "slack" as const, issuer: "https://slack.com", subject: OWNER_SLACK },
+      eligible: false, channelMember: true,
+    }));
+    let changed = false;
+    const documentClient = {
+      async send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> {
+        void options;
+        if (!changed && command instanceof TransactWriteCommand) {
+          const input = command.input as { TransactItems?: Array<{ ConditionCheck?: { Key?: { pk?: string; sk?: string } } }> };
+          if (input.TransactItems?.some((item) => item.ConditionCheck?.Key?.pk === membership.pk && item.ConditionCheck.Key.sk === membership.sk)) {
+            changed = true;
+            if (change === "deleted") h.db.delete(membership.pk, membership.sk);
+            else h.db.set({ ...membership, role: "administrator" });
+          }
+        }
+        return h.db.send(command as never);
+      },
+    };
+    const witness: ProjectAuthorityWitness & { taskId: string; developerId: string; project: string } = {
+      taskId: TASK_ID, developerId: OWNER, project: "payments", access: "granted",
+      projectRevision: { pk: revision.pk, sk: revision.sk, revision: 7, developerTasksPresent: true, developerTasks: revision.definition.developerTasks },
+      membership: { pk: membership.pk, sk: membership.sk, projectName: "payments", role: "developer" },
+    };
+    await expect(guardTaskDispatch({
+      documentClient, tableName: "state", checkTaskPerson: h.checkTaskPerson,
+      stateAuthorityWitnessForOwnerActor: async (_task, actorId) => actorId === taskOwnerKey(OWNER, TASK_ID) ? witness : undefined,
+    }, h.outbox)).resolves.toBe("PARKED");
+    expect(changed).toBe(true);
+    expect(h.checkTaskPerson).toHaveBeenCalledTimes(2);
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe("WAITING_FOR_TASK_ACCESS");
+  });
+
+  it.each(["binding", "policy"] as const)("requalifies after the qualifying channel %s changes before the final State fence", async (changedWitness) => {
+    const h = harness();
+    const revision = {
+      pk: "PROJECT#payments", sk: "REV#000000000007",
+      definition: { revision: 7, developerTasks: { enabled: true, channelMembersMayUse: true } },
+    };
+    const binding = { pk: "SLACK_BINDING#T0PEOPLE1", sk: "CHANNEL#C0PEOPLE1", teamId: "T0PEOPLE1", channelId: "C0PEOPLE1", projectName: "payments", updatedAt: "2026-10-11T10:00:00.000Z" };
+    h.db.set(revision);
+    h.db.set(binding);
+    h.checkTaskPerson.mockImplementationOnce(async () => ({
+      subject: { developerId: OWNER, slackUserId: OWNER_SLACK },
+      identity: { developerId: OWNER, slackUserId: OWNER_SLACK, name: "Avery", method: "slack" as const, issuer: "https://slack.com", subject: OWNER_SLACK },
+      eligible: true, channelMember: true,
+    })).mockImplementation(async () => ({
+      subject: { developerId: OWNER, slackUserId: OWNER_SLACK },
+      identity: { developerId: OWNER, slackUserId: OWNER_SLACK, name: "Avery", method: "slack" as const, issuer: "https://slack.com", subject: OWNER_SLACK },
+      eligible: false, channelMember: true,
+    }));
+    let changed = false;
+    const documentClient = {
+      async send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> {
+        void options;
+        if (!changed && command instanceof TransactWriteCommand) {
+          const input = command.input as { TransactItems?: Array<{ ConditionCheck?: { Key?: { pk?: string; sk?: string } } }> };
+          const pk = changedWitness === "binding" ? binding.pk : revision.pk;
+          const sk = changedWitness === "binding" ? binding.sk : revision.sk;
+          if (input.TransactItems?.some((item) => item.ConditionCheck?.Key?.pk === pk && item.ConditionCheck.Key.sk === sk)) {
+            changed = true;
+            if (changedWitness === "binding") h.db.set({ ...binding, updatedAt: "2026-10-12T10:00:00.000Z" });
+            else h.db.set({ ...revision, definition: { ...revision.definition, developerTasks: { enabled: true, channelMembersMayUse: false } } });
+          }
+        }
+        return h.db.send(command as never);
+      },
+    };
+    const witness: ProjectAuthorityWitness & { taskId: string; developerId: string; project: string } = {
+      taskId: TASK_ID, developerId: OWNER, project: "payments", access: "channel",
+      projectRevision: { pk: revision.pk, sk: revision.sk, revision: 7, developerTasksPresent: true, developerTasks: revision.definition.developerTasks },
+      binding,
+    };
+    await expect(guardTaskDispatch({
+      documentClient, tableName: "state", checkTaskPerson: h.checkTaskPerson,
+      stateAuthorityWitnessForOwnerActor: async (_task, actorId) => actorId === taskOwnerKey(OWNER, TASK_ID) ? witness : undefined,
+    }, h.outbox)).resolves.toBe("PARKED");
+    expect(changed).toBe(true);
+    expect(h.checkTaskPerson).toHaveBeenCalledTimes(2);
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe("WAITING_FOR_TASK_ACCESS");
+  });
+
+  it("parks without demoting the owner when the final authority query is unavailable", async () => {
+    const h = harness();
+    await expect(guardTaskDispatch({
+      documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson,
+      stateAuthorityWitnessForOwnerActor: async () => { throw new Error("project query unavailable"); },
+    }, h.outbox)).resolves.toBe("PARKED");
+    expect(h.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")?.people).toEqual([
+      { developerId: OWNER, slackUserId: OWNER_SLACK, name: "Avery", role: "owner" },
+    ]);
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe("WAITING_FOR_TASK_ACCESS");
+  });
+
+  it("requalifies through current channel policy after a direct developer grant is removed", async () => {
+    const h = harness();
+    const revision = {
+      pk: "PROJECT#payments", sk: "REV#000000000007",
+      definition: { revision: 7, developerTasks: { enabled: true, channelMembersMayUse: true } },
+    };
+    const membership = { pk: `MEMBER#${OWNER}`, sk: "PROJECT#payments", projectName: "payments", role: "developer" };
+    const binding = { pk: "SLACK_BINDING#T0PEOPLE1", sk: "CHANNEL#C0PEOPLE1", teamId: "T0PEOPLE1", channelId: "C0PEOPLE1", projectName: "payments", updatedAt: "2026-10-11T10:00:00.000Z" };
+    h.db.set(revision);
+    h.db.set(membership);
+    h.db.set(binding);
+    let grantRemoved = false;
+    const documentClient = {
+      async send(command: unknown, options?: { abortSignal?: AbortSignal }): Promise<unknown> {
+        void options;
+        if (!grantRemoved && command instanceof TransactWriteCommand) {
+          const input = command.input as { TransactItems?: Array<{ ConditionCheck?: { Key?: { pk?: string; sk?: string } } }> };
+          if (input.TransactItems?.some((item) => item.ConditionCheck?.Key?.pk === membership.pk && item.ConditionCheck.Key.sk === membership.sk)) {
+            grantRemoved = true;
+            h.db.delete(membership.pk, membership.sk);
+          }
+        }
+        return h.db.send(command as never);
+      },
+    };
+    const projectRevision = { pk: revision.pk, sk: revision.sk, revision: 7, developerTasksPresent: true, developerTasks: revision.definition.developerTasks };
+    const directWitness: ProjectAuthorityWitness & { taskId: string; developerId: string; project: string } = {
+      taskId: TASK_ID, developerId: OWNER, project: "payments", access: "granted", projectRevision,
+      membership: { pk: membership.pk, sk: membership.sk, projectName: "payments", role: "developer" },
+    };
+    const channelWitness: ProjectAuthorityWitness & { taskId: string; developerId: string; project: string } = {
+      taskId: TASK_ID, developerId: OWNER, project: "payments", access: "channel", projectRevision, binding,
+    };
+    let witnessReads = 0;
+    await expect(guardTaskDispatch({
+      documentClient, tableName: "state", checkTaskPerson: h.checkTaskPerson,
+      stateAuthorityWitnessForOwnerActor: async (_task, actorId) => actorId !== taskOwnerKey(OWNER, TASK_ID)
+        ? undefined : (witnessReads++ === 0 ? directWitness : channelWitness),
+    }, h.outbox)).resolves.toBe("ALLOWED");
+    expect(grantRemoved).toBe(true);
+    expect(witnessReads).toBe(2);
+  });
+
   it("leaves legacy work without a PEOPLE sidecar unchanged", async () => {
     const h = harness(false);
     await expect(guardTaskDispatch({ documentClient: h.db, tableName: "state" }, h.outbox)).resolves.toBe("ALLOWED");
@@ -80,6 +234,13 @@ describe("task dispatch access", () => {
     expect(h.db.find((item) => String(item.sk).includes("TASK_ACCESS"))).toEqual([]);
   });
 
+  it("counts every guard GetItem against the single shared authority admission", async () => {
+    const h = harness();
+    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
+    await expect(guardTaskDispatch({ documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson, admission }, h.outbox)).resolves.toBe("ALLOWED");
+    expect(admission.remainingStateReads()).toBe(124);
+  });
+
   it("refuses a positive proof whose PEOPLE revision changes before acceptance", async () => {
     const h = harness();
     h.checkTaskPerson.mockImplementation(async () => {
@@ -94,6 +255,36 @@ describe("task dispatch access", () => {
 
     await expect(guardTaskDispatch({ documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson }, h.outbox)).resolves.toBe("PARKED");
     expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe("WAITING_FOR_TASK_ACCESS");
+  });
+
+  it("refuses ALLOWED when the shared admission expires during proof before the final State fence", async () => {
+    const h = harness();
+    let now = 1_000;
+    const admission = createTaskAuthorityAdmission({ now: () => now, lambdaRemainingMs: 20_000 });
+    h.checkTaskPerson.mockImplementation(async () => {
+      now = admission.deadlineAt;
+      return {
+        subject: { developerId: OWNER, slackUserId: OWNER_SLACK },
+        identity: { developerId: OWNER, slackUserId: OWNER_SLACK, name: "Avery", method: "slack" as const, issuer: "https://slack.com", subject: OWNER_SLACK },
+        eligible: true, channelMember: true,
+      };
+    });
+
+    await expect(guardTaskDispatch({ documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson, admission }, h.outbox))
+      .rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe("QUEUED");
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "TASK_ACCESS_PAUSE")).toBeUndefined();
+  });
+
+  it("retries rather than acknowledging if the pause reserve is exhausted", async () => {
+    const h = harness();
+    h.checkTaskPerson.mockResolvedValue({ ...(await h.checkTaskPerson()), eligible: false, channelMember: false });
+
+    await expect(guardTaskDispatch({
+      documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson, remainingTimeMs: () => 2_000,
+    }, h.outbox)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe("QUEUED");
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "TASK_ACCESS_PAUSE")).toBeUndefined();
   });
 
   it("refuses normal delivery while a terminal workflow awaits its closedAt write", async () => {

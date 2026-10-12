@@ -11,6 +11,7 @@ import {
   type ChannelMembersResponse,
   type SlackAuthCheckResponse,
   type TaskPersonProofResponse,
+  type TaskPersonProofRequest,
   type TaskChannelPeopleResponse,
   type TaskPeopleDisplayReadRequest,
   type TaskPeopleDisplayReadResponse,
@@ -23,6 +24,8 @@ export interface SlackDirectory {
   channelMembers(userId: string, channelIds: readonly string[]): Promise<ChannelMembersResponse>;
   /** A fresh users.info and complete membership read that never reuses display caches or reads. */
   taskPersonProof(userId: string, channelIds: readonly string[]): Promise<TaskPersonProofResponse>;
+  /** Fresh dispatch-only proof with an endpoint-supplied deadline and explicit Slack call meter. */
+  taskDispatchPersonProof(request: TaskPersonProofRequest, admission: { deadlineAt: number; slackCallsLimit: number; abortSignal?: AbortSignal }): Promise<{ result: TaskPersonProofResponse; slackCallsUsed: number }>;
   /** Complete, fresh and bounded identities from the named channels; no display cache or in-flight read is reused. */
   taskChannelPeople(channelIds: readonly string[]): Promise<TaskChannelPeopleResponse>;
   /** Request-scoped, metered Task People display read. Old proof/list methods remain unchanged. */
@@ -69,7 +72,22 @@ interface SlackUser {
 }
 type Reply = { status: number; body: Record<string, unknown> };
 type Budget = { left: number };
-type DisplayFetchAdmission = { readonly deadlineAt: number; readonly slackCallsLimit: number; slackCallsUsed: number };
+type DisplayFetchAdmission = { readonly deadlineAt: number; readonly slackCallsLimit: number; readonly abortSignal?: AbortSignal; slackCallsUsed: number };
+
+function withAbortSignal<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return promise;
+  const abortError = () => signal.reason instanceof Error ? signal.reason : new Error("deadline reached");
+  if (signal.aborted) return Promise.reject(new Error("deadline reached"));
+  return new Promise<T>((resolve, reject) => {
+    const cleanup = () => signal.removeEventListener("abort", abort);
+    const abort = () => { cleanup(); reject(abortError()); };
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then((value) => { cleanup(); resolve(value); }, (error: unknown) => {
+      cleanup();
+      reject(error instanceof Error ? error : new Error("credential lookup failed"));
+    });
+  });
+}
 
 const errorCode = (error: unknown): string | undefined => {
   const code = typeof error === "string" ? error.replace(/[^a-z_]/g, "").slice(0, 64) : "";
@@ -101,7 +119,7 @@ export function slackDirectory(input: {
   const get = async (method: string, query: Record<string, string>, timeoutMs = TIMEOUT_MS, admission?: DisplayFetchAdmission): Promise<Reply | undefined> => {
     let token: string;
     try {
-      token = await input.botToken();
+      token = await withAbortSignal(input.botToken(), admission?.abortSignal);
     } catch {
       return problem(method, undefined, "bot_token_unavailable");
     }
@@ -115,7 +133,9 @@ export function slackDirectory(input: {
     try {
       const url = new URL(`https://slack.com/api/${method}`);
       for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
-      response = await input.fetch(url, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(Math.max(1, Math.min(TIMEOUT_MS, timeoutMs))) });
+      const timeoutSignal = AbortSignal.timeout(Math.max(1, Math.min(TIMEOUT_MS, timeoutMs)));
+      const signal = admission?.abortSignal === undefined ? timeoutSignal : AbortSignal.any([admission.abortSignal, timeoutSignal]);
+      response = await input.fetch(url, { headers: { authorization: `Bearer ${token}` }, signal });
     } catch {
       return problem(method, undefined, "unreachable");
     }
@@ -347,6 +367,16 @@ export function slackDirectory(input: {
     },
     async taskPersonProof(userId, channelIds) {
       return taskPersonProof(userId, channelIds);
+    },
+    async taskDispatchPersonProof(request, limits) {
+      const admission: DisplayFetchAdmission = {
+        deadlineAt: Math.min(limits.deadlineAt, input.now() + 6_000),
+        slackCallsLimit: Math.min(limits.slackCallsLimit, 100),
+      ...(limits.abortSignal === undefined ? {} : { abortSignal: limits.abortSignal }),
+        slackCallsUsed: 0,
+      };
+      const result = await taskPersonProof(request.slackUserId, request.channelIds, admission);
+      return { result, slackCallsUsed: admission.slackCallsUsed };
     },
     async taskChannelPeople(channelIds) {
       return taskChannelPeople(channelIds);

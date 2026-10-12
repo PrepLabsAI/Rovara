@@ -13,6 +13,17 @@ describe("task authority admission", () => {
     expect(() => admission.assertOpen()).toThrow();
   });
 
+  it("binds one stable UUID to the full guard admission", () => {
+    const first = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
+    const second = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
+    const firstId = first.id;
+    const secondId = second.id;
+
+    expect(firstId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    expect(first.id).toBe(firstId);
+    expect(secondId).not.toBe(firstId);
+  });
+
   it("refuses a state read when the context reserve leaves no authority budget", () => {
     const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 2_000 });
 
