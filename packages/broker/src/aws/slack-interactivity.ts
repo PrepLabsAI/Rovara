@@ -62,6 +62,11 @@ import {
   type WorkflowPath,
 } from "./slack-workflow-choice.js";
 import { detailsActionHandler, dynamoTurnDetailsReader } from "./slack-details.js";
+import {
+  CHATGPT_OPEN_ACTION, CHATGPT_PASTE_ACTION, CHATGPT_PASTE_SUBMISSION, chatGptPasteModal, chatGptSubmission, isHandedOffChatGptFinish, runHandedOffChatGptFinish,
+  type HandedOffChatGptFinish,
+} from "./slack-chatgpt.js";
+import { chatPostEphemeral } from "./slack-web.js";
 import { WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { FEEDBACK_REVIEW_RETRY_ACTION, WORKFLOW_ACTION_IDS, answeredWorkflowCard, cleanLine, slackText, workflowModalCopy } from "../developer/workflow-messages.js";
 
@@ -127,6 +132,8 @@ export interface SlackInteractivityDependencies {
     handleAction(action: SlackBlockAction): Promise<void>;
     handleSubmission(payload: Record<string, unknown>): Promise<void>;
   };
+  /** #340: the pasted ChatGPT address; the answer is Slack's response to the form. Absent: the form just closes. */
+  chatgptSubmission?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
 
 /** What an admin hears, privately, once a Confirm press is handed to the broker (spec 025 E14). */
@@ -365,6 +372,10 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
     }
     if (payload.type === "view_submission") {
       const callbackId = asRecord(payload.view).callback_id;
+      if (callbackId === CHATGPT_PASTE_SUBMISSION) {
+        if (dependencies.chatgptSubmission === undefined) return respond(200, { response_action: "clear" });
+        return respond(200, await dependencies.chatgptSubmission(payload));
+      }
       if (callbackId !== "agentx_workflow_review_submission" && callbackId !== "agentx_workflow_checks_retry_submission" && callbackId !== "agentx_feedback_review_changes_submission"
         && callbackId !== WORKFLOW_CLOSE_SUBMISSION && callbackId !== WORKFLOW_FINDINGS_SUBMISSION) return respond(200, { response_action: "clear" });
       // The close confirmation has no input to attach an error to, so a refusal replaces the modal with its reason.
@@ -549,6 +560,30 @@ function parseBlockActions(payload: Record<string, unknown>, requestStartedAt: n
       triggerId: typeof payload.trigger_id === "string" ? payload.trigger_id : "",
       actionTs: typeof entry.action_ts === "string" ? entry.action_ts : messageTs.data,
     }] : []),
+  };
+}
+
+/**
+ * #340: the buttons on a ChatGPT connect answer. Sign in with ChatGPT is a link, and Slack still reports its press;
+ * Paste the address opens the form, for a member of the thread's own workspace only.
+ */
+export function chatGptActionHandler(deps: {
+  openView: (triggerId: string, view: Record<string, unknown>, timeoutMs?: number) => Promise<void>;
+  respondEphemeral: (responseUrl: string, text: string) => Promise<void>;
+}): SlackActionHandler {
+  return {
+    matches: (actionId) => actionId === CHATGPT_PASTE_ACTION || actionId === CHATGPT_OPEN_ACTION,
+    async handle(action) {
+      if (action.actionId === CHATGPT_OPEN_ACTION) return;
+      if (action.userTeamId !== action.thread.teamId || (action.workspaceTeamId !== "" && action.workspaceTeamId !== action.thread.teamId)) {
+        await deps.respondEphemeral(action.responseUrl, "ChatGPT can be connected only by a member of this Slack workspace.");
+        return;
+      }
+      // The answer is ephemeral, so its own timestamp is not the thread's: the button carries the thread.
+      const threadTs = SlackMessageTimestampSchema.safeParse(action.value);
+      const metadata = { channel: action.thread.channelId, threadTs: threadTs.success ? threadTs.data : action.thread.threadTs };
+      await deps.openView(action.triggerId, chatGptPasteModal(metadata), Math.max(500, 2_500 - (Date.now() - action.requestStartedAt)));
+    },
   };
 }
 
@@ -800,14 +835,28 @@ export function createAwsSlackInteractivityHandler() {
     respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text),
     replaceCard: (responseUrl, message) => respondReplace(responseUrl, message),
   }, event);
+  const openView = async (triggerId: string, view: Record<string, unknown>, timeoutMs?: number) => {
+    await slackApi((await secrets()).botToken, "views.open", { trigger_id: triggerId, view }, fetch, timeoutMs);
+  };
+  // #340: finishing a ChatGPT connection can outlast Slack's three seconds, so it runs in an asynchronous invoke of
+  // this same Lambda, which has the rest of its own timeout for the broker.
+  const chatgptFinish = (event: HandedOffChatGptFinish) => runHandedOffChatGptFinish({
+    finish: (input) => invokeBroker({ source: "agentx.slack-ingress", action: "chatgpt-finish", ...input }, HANDED_OFF_START_TIMEOUT_MS),
+    updateView: async (viewId, view) => slackApi((await secrets()).botToken, "views.update", { view_id: viewId, view }, fetch, 5_000),
+    postEphemeral: async (input) => chatPostEphemeral((await secrets()).botToken, input),
+    log,
+  }, event);
   const interactivity = createSlackInteractivityHandler({
     secrets,
     log,
+    ...(brokerFunctionName === undefined ? {} : {
+      chatgptSubmission: (payload: Record<string, unknown>) => chatGptSubmission({ handOff: (event) => handOffToSelf(lambda, event) }, payload),
+    }),
     ...(adminChange === undefined ? {} : { adminChange }),
     ...(workflow === undefined ? {} : { workflow }),
     // The module's own respondEphemeral, for a button no handler knows.
     respondEphemeral,
-    handlers: [confirmationActionHandler({
+    handlers: [chatGptActionHandler({ openView, respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text) }), confirmationActionHandler({
       async loadConfirmation(subject) {
         const response = await documentClient.send(new GetCommand({ TableName: threadsTableName, Key: confirmationKey(subject), ConsistentRead: true }));
         return pendingConfirmationFromItem(response.Item);
@@ -853,12 +902,13 @@ export function createAwsSlackInteractivityHandler() {
       log,
     })],
   });
-  return async (event: HttpApiV2Event | HandedOffWorkflowStart): Promise<HttpResponse> => {
+  return async (event: HttpApiV2Event | HandedOffWorkflowStart | HandedOffChatGptFinish): Promise<HttpResponse> => {
     if (isHandedOffWorkflowStart(event)) {
       const outcome = await chosenStart(event);
       log("workflow.handed_off_start", { outcome });
       return respond(200, { outcome });
     }
+    if (isHandedOffChatGptFinish(event)) return respond(200, { outcome: await chatgptFinish(event) });
     return interactivity(event);
   };
 }
@@ -867,7 +917,7 @@ export function createAwsSlackInteractivityHandler() {
 const HANDED_OFF_START_TIMEOUT_MS = 7_000;
 
 /** This Lambda's own name, as Lambda sets it; a Quick or Full start is handed to an asynchronous invoke of it. */
-async function handOffToSelf(lambda: LambdaClient, event: HandedOffWorkflowStart): Promise<void> {
+async function handOffToSelf(lambda: LambdaClient, event: HandedOffWorkflowStart | HandedOffChatGptFinish): Promise<void> {
   const functionName = process.env.AWS_LAMBDA_FUNCTION_NAME;
   if (functionName === undefined) throw new Error("AWS_LAMBDA_FUNCTION_NAME is not set");
   const response = await lambda.send(new InvokeCommand({ FunctionName: functionName, InvocationType: "Event", Payload: Buffer.from(JSON.stringify(event)) }));
