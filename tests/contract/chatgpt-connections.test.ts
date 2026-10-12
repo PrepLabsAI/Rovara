@@ -90,7 +90,7 @@ describe("OpenAI's side of Sign in with ChatGPT", () => {
     expect(parseChatGptCallback(`${CHATGPT_CALLBACK_URL}?code=c&scope=s&state=st&client_id=oaiapp_1`)).toEqual({ code: "c", state: "st", clientId: "oaiapp_1" });
     expect(() => parseChatGptCallback("not an address")).toThrow("copy the whole address that starts with http://127.0.0.1:1455/");
     expect(() => parseChatGptCallback("https://evil.example.com/auth/callback?code=c&state=s&client_id=x")).toThrow("http://127.0.0.1:1455/auth/callback");
-    expect(() => parseChatGptCallback(`${CHATGPT_CALLBACK_URL}?error=access_denied&state=s`)).toThrow("ChatGPT did not connect (access_denied)");
+    expect(() => parseChatGptCallback(`${CHATGPT_CALLBACK_URL}?error=access_denied&state=s`)).toThrow("ChatGPT was not connected: the sign-in was declined on OpenAI's page");
     expect(() => parseChatGptCallback(`${CHATGPT_CALLBACK_URL}?error=<script>&state=s`)).toThrow(/^CONFIG_INVALID: ChatGPT did not connect$/);
     expect(() => parseChatGptCallback(`${CHATGPT_CALLBACK_URL}?state=s&client_id=x`)).toThrow("that address has no sign-in code");
   });

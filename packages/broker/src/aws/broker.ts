@@ -215,6 +215,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
+import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
@@ -696,6 +697,20 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
         return json({ error: "recovery_failed" }, "workflow-dispatch-recovery", 500);
+      }
+    }
+    // Sign in with ChatGPT from Slack (#340): the ingress asks, as the Slack user's own developer.
+    if (isSlackChatGptCommandEvent(event) || isSlackChatGptFinishEvent(event)) {
+      try {
+        return json(await answerSlackChatGpt({
+          ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
+          ...(dependencies.developer?.slackTeamId === undefined ? {} : { slackTeamId: dependencies.developer.slackTeamId }),
+        }, event), "slack-ingress");
+      } catch (error) {
+        if (error instanceof AgentXError) {
+          return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        }
+        return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
     if (isSlackStopTaskEvent(event)) {
