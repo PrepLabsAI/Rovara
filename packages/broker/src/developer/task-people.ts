@@ -116,7 +116,7 @@ function samePrincipal(left: TaskPersonIdentity, right: TaskPersonIdentity): boo
     && left.issuer === right.issuer && left.subject === right.subject;
 }
 
-async function get(deps: TaskPeopleDependencies, key: { pk: string; sk: string }): Promise<Record<string, unknown> | undefined> {
+async function get(deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName">, key: { pk: string; sk: string }): Promise<Record<string, unknown> | undefined> {
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true })) as { Item?: unknown };
   return isRecord(response.Item) ? response.Item : undefined;
 }
@@ -129,7 +129,7 @@ async function loadTask(deps: TaskPeopleDependencies, taskId: string): Promise<D
   return item as unknown as DeveloperTaskRecord;
 }
 
-async function loadPeople(deps: TaskPeopleDependencies, taskId: string): Promise<TaskPeople | undefined> {
+async function loadPeople(deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName">, taskId: string): Promise<TaskPeople | undefined> {
   const item = await get(deps, peopleKey(taskId));
   if (item === undefined) return undefined;
   const parsed = parsePeople(item);
@@ -175,16 +175,19 @@ async function allPeople(deps: TaskPeopleDependencies, taskId: string): Promise<
   return found;
 }
 
-async function checked(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, developerId: string): Promise<TaskPersonCheck> {
+async function checkedFresh(deps: Pick<TaskPeopleDependencies, "checkTaskPerson">, task: DeveloperTaskRecord, developerId: string): Promise<TaskPersonCheck> {
   if (deps.checkTaskPerson === undefined) return denied();
-  let result: TaskPersonCheck;
-  try { result = await deps.checkTaskPerson(task, developerId); } catch { return denied(); }
+  const result = await deps.checkTaskPerson(task, developerId);
   const identity = result.identity;
   if (result.subject.developerId !== developerId || result.subject.slackUserId !== identity.slackUserId
     || identity.developerId !== developerId || !SlackUserIdSchema.safeParse(identity.slackUserId).success
     || typeof identity.name !== "string" || safeName(identity.name, identity.slackUserId) !== identity.name
     || typeof result.eligible !== "boolean" || typeof result.channelMember !== "boolean") return denied();
   return result;
+}
+
+async function checked(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, developerId: string): Promise<TaskPersonCheck> {
+  try { return await checkedFresh(deps, task, developerId); } catch { return denied(); }
 }
 
 function preflight(items: readonly TransactItem[]): void {
@@ -475,6 +478,34 @@ export async function resolveTaskPeopleAccess(
     role, peopleRevision: people.revision, ownerActorIds: owners, orphaned: people.orphaned,
     canTakeOwnership: people.orphaned && role !== null && proof?.eligible === true && proof.channelMember,
   };
+}
+
+/**
+ * Fresh effective owners for a system successor/final delivery. Missing PEOPLE preserves legacy
+ * work. Definite proof loss is ownerless; proof transport or malformed proof remains UNKNOWN and
+ * must be parked by the caller without rewriting the sidecar.
+ */
+export async function resolveTaskDispatchPeople(
+  deps: Pick<TaskPeopleDependencies, "documentClient" | "tableName" | "checkTaskPerson">,
+  task: DeveloperTaskRecord,
+): Promise<{ peopleRevision: number; ownerActorIds: readonly string[]; status: "ALLOWED" | "OWNERLESS" | "UNKNOWN" } | undefined> {
+  const people = await loadPeople(deps, task.taskId);
+  if (people === undefined) return undefined;
+  if (people.orphaned) return { peopleRevision: people.revision, ownerActorIds: [], status: "OWNERLESS" };
+  if (deps.checkTaskPerson === undefined) return { peopleRevision: people.revision, ownerActorIds: [], status: "UNKNOWN" };
+  const owners: string[] = [];
+  let unknown = false;
+  for (const person of people.people) {
+    if (person.role !== "owner") continue;
+    try {
+      const proof = await checkedFresh(deps, task, person.developerId);
+      if (proof.eligible && proof.channelMember) owners.push(taskOwnerKey(person.developerId, task.taskId));
+    } catch {
+      unknown = true;
+    }
+  }
+  if (owners.length > 0) return { peopleRevision: people.revision, ownerActorIds: owners, status: "ALLOWED" };
+  return { peopleRevision: people.revision, ownerActorIds: [], status: unknown ? "UNKNOWN" : "OWNERLESS" };
 }
 
 export async function getTaskPeople(deps: TaskPeopleDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView> {

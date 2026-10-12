@@ -218,7 +218,7 @@ import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
+import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
@@ -5900,7 +5900,7 @@ export async function processGithubWorkflowEvent(
       const routeDependencies = developerTaskRouteDependencies({
         documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
         now: Date.now, tasks: developerTaskActions(dependencies),
-      }, caller);
+      }, caller, undefined, null);
       await startTaskWorkflowFeedbackReviewFromWebhook(routeDependencies, task.taskId);
     }
   }
@@ -6133,7 +6133,9 @@ async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies
  * Run one dispatch row: start its step if the task is still exactly where the row says, then delete the row.
  * STALE (the task moved on, closed, or never matched) deletes the row too; RETRY keeps it for the sweep. Never throws.
  */
-async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: WorkflowDispatchRecord): Promise<"DISPATCHED" | "STALE" | "RETRY"> {
+type AccessPausedWorkflowDispatch = WorkflowDispatchRecord & { taskAccessPausedAt?: string };
+
+async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: AccessPausedWorkflowDispatch): Promise<"DISPATCHED" | "STALE" | "RETRY"> {
   const key = { pk: item.pk, sk: item.sk };
   const remove = async () => {
     try {
@@ -6143,6 +6145,9 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Wo
     }
   };
   try {
+    // Access pauses are lifted only by an explicit, freshly authorized owner retry. Recovery sweeps,
+    // ownership restoration and takeover may still encounter the row but never restart its work.
+    if (item.taskAccessPausedAt !== undefined) return "RETRY";
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
     const workflow = task?.workflow;
     const due = item.kind === "REVIEW" ? workflow?.stage === "REVIEW" && workflow.state === "WAITING"
@@ -6156,7 +6161,7 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Wo
     const routeDependencies = developerTaskRouteDependencies({
       documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
       now: Date.now, tasks: developerTaskActions(dependencies), refreshTaskFeedback: (taskId) => refreshTaskFeedbackForOwnerDecision(dependencies, taskId),
-    }, caller);
+    }, caller, undefined, null);
     const expected = { workflowRevision: item.workflowRevision, candidateDigest: item.candidateDigest };
     // A fix for the pull requests already open is pushed to them by the same start, which sees they exist.
     const outcome = item.kind === "PUBLISH" || item.kind === "UPDATE"
@@ -6165,6 +6170,27 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Wo
     await remove();
     return outcome === "STALE" ? "STALE" : "DISPATCHED";
   } catch (error) {
+    // PEOPLE-backed work with no current freshly qualified owner stays parked on its durable
+    // dispatch row. It does not consume the bounded infrastructure failure budget; only a later
+    // explicit owner action can start or redrive work.
+    if (error instanceof AgentXError && error.code === "TASK_ACCESS_DENIED") {
+      try {
+        const pausedAt = new Date().toISOString();
+        await dependencies.documentClient.send(new UpdateCommand({
+          TableName: dependencies.tableName, Key: key,
+          UpdateExpression: "SET taskAccessPausedAt = :pausedAt REMOVE dispatchDuePk, dispatchDueSk",
+          ConditionExpression: "workflowRevision = :revision AND #kind = :kind AND candidateDigest = :candidate AND attribute_not_exists(taskAccessPausedAt)",
+          ExpressionAttributeNames: { "#kind": "kind" },
+          ExpressionAttributeValues: { ":pausedAt": pausedAt, ":revision": item.workflowRevision, ":kind": item.kind, ":candidate": item.candidateDigest },
+        }));
+      } catch (pauseError) {
+        if (!isConditional(pauseError)) {
+          console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_access_pause_failed", taskId: item.taskId,
+            error: pauseError instanceof Error ? pauseError.name : "unknown" }));
+        }
+      }
+      return "RETRY";
+    }
     console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_failed", taskId: item.taskId, kind: item.kind, attempt: (item.attempts ?? 0) + 1,
       error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
     await recordWorkflowDispatchFailure(dependencies, item);
@@ -8082,7 +8108,9 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
     ...(teamId === "" ? {} : { slackTeamId: teamId }),
     since: developerSinceFromEnvironment(process.env),
     signInTableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"),
+    taskPeopleConfiguration: { peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true" },
     channelMembers: channelMembersThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    taskPersonProof: taskPersonProofThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     channelInfo: channelInfoThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     slackUserByEmail: slackUserByEmailThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     slackAuthCheck: slackAuthCheckThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),

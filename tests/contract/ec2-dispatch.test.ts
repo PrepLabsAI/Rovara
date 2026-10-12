@@ -46,6 +46,19 @@ function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}) {
 }
 
 describe("ec2-ebs delivery", () => {
+  it("rechecks task access after compute is ready and parks before signing or POST", async () => {
+    const signInvocation = vi.fn(kmsSign);
+    const { deliver, post } = delivery({
+      sign: signInvocation,
+      guardTaskDispatch: async () => "PARKED",
+    });
+    const record = recordFor();
+
+    await expect(deliver(record, record.invocation)).resolves.toBe("WAITING_FOR_TASK_ACCESS");
+    expect(signInvocation).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
+  });
+
   it("posts the invocation to the worker with a token the worker's own verifier accepts", async () => {
     const { deliver, post } = delivery();
     const record = recordFor();
@@ -76,6 +89,16 @@ describe("ec2-ebs delivery", () => {
       return { ...record, invocation };
     }
     const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
+
+    it("parks a task before asking the worker which optional fields it supports", async () => {
+      const workerFeatures = vi.fn(async () => ["model.chatgpt"]);
+      const current = delivery({ workerFeatures, guardTaskDispatch: async () => "PARKED" });
+      const record = taskRecord({ chatgpt: { model: { provider: "openai", modelId: "gpt-6.1-sol" } } });
+
+      await expect(current.deliver(record, record.invocation)).resolves.toBe("WAITING_FOR_TASK_ACCESS");
+      expect(workerFeatures).not.toHaveBeenCalled();
+      expect(current.post).not.toHaveBeenCalled();
+    });
 
     it("keeps a task's ChatGPT plan for a worker that can use it, and drops it for one that cannot, which runs the default (#341)", async () => {
       const chatgpt = { model: { provider: "openai", modelId: "gpt-6.1-sol" } };
@@ -601,6 +624,27 @@ describe("the dispatcher with ec2-ebs records", () => {
     const handler = createDispatcherHandler({ markDispatching: async () => true, markDelivered, markFailed, deliverEc2, log: () => undefined });
     return { handler, markDelivered, markFailed };
   }
+
+  it("acknowledges a durably access-parked duplicate without invoking or consuming failure attempts", async () => {
+    const record = recordFor();
+    const markDispatching = vi.fn(async () => true);
+    const markDelivered = vi.fn(async () => undefined);
+    const markFailed = vi.fn(async () => undefined);
+    const deliverEc2 = vi.fn(async () => "DELIVERED" as const);
+    const handler = createDispatcherHandler({
+      markDispatching, markDelivered, markFailed, deliverEc2,
+      guardTaskDispatch: async () => "PARKED",
+      maxAttempts: 1,
+      log: () => undefined,
+    });
+
+    await expect(handler({ Records: [{ messageId: "access-parked", body: JSON.stringify(record), attributes: { ApproximateReceiveCount: "99" } }] }))
+      .resolves.toEqual({ batchItemFailures: [] });
+    expect(markDispatching).not.toHaveBeenCalled();
+    expect(deliverEc2).not.toHaveBeenCalled();
+    expect(markDelivered).not.toHaveBeenCalled();
+    expect(markFailed).not.toHaveBeenCalled();
+  });
 
   it("acknowledges a parked record without marking it delivered or using a retry", async () => {
     const { handler, markDelivered } = dispatcher(async () => "WAITING_FOR_SESSION");

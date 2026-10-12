@@ -18,7 +18,7 @@ const WORKER_PORT = 8080;
 const TOKEN_LIFETIME_SECONDS = 60;
 export const STARTING_COMPUTE_MESSAGE = "Starting workspace compute";
 
-export type Ec2Delivery = "DELIVERED" | "WAITING_FOR_SESSION";
+export type Ec2Delivery = "DELIVERED" | "WAITING_FOR_SESSION" | "WAITING_FOR_TASK_ACCESS";
 
 export interface Ec2DeliveryDependencies {
   sessions: Pick<SessionManager, "ensureSession">;
@@ -33,6 +33,8 @@ export interface Ec2DeliveryDependencies {
    * worker built before them. Without it, no optional field is sent.
    */
   workerFeatures?: (url: string) => Promise<readonly string[]>;
+  /** Rechecks fresh PEOPLE authority after compute is ready, immediately before signing and POST. */
+  guardTaskDispatch?: (record: Ec2OutboxRecord) => Promise<"ALLOWED" | "PARKED">;
   now?: () => number;
 }
 
@@ -50,7 +52,9 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
       await dependencies.progress(record, STARTING_COMPUTE_MESSAGE);
       return "WAITING_FOR_SESSION";
     }
+    if (await dependencies.guardTaskDispatch?.(record) === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures);
+    if (await dependencies.guardTaskDispatch?.(record) === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const payload = workerInvokeTokenPayload({
       workspaceId: record.workspaceId,
       generation: session.generation,
