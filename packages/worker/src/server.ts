@@ -177,9 +177,12 @@ async function executeInBackground(invocation: WorkerInvocation, state: WorkerSe
  * Spec 051 Ruling Y: a task that ends failed or cancelled with a regression AgentX found carries its report, so the
  * broker keeps the regression standing. No other failure sends a result.
  */
-function checksResult(error: unknown): { result?: { checks: unknown } } {
+function checksResult(error: unknown): { result?: { checks?: unknown; workflowDependenciesResult?: unknown } } {
   const checks = typeof error === "object" && error !== null && "checks" in error ? error.checks : undefined;
-  return checks === undefined ? {} : { result: { checks } };
+  const workflowDependenciesResult = typeof error === "object" && error !== null && "workflowDependenciesResult" in error ? error.workflowDependenciesResult : undefined;
+  return checks === undefined && workflowDependenciesResult === undefined ? {} : {
+    result: { ...(checks === undefined ? {} : { checks }), ...(workflowDependenciesResult === undefined ? {} : { workflowDependenciesResult }) },
+  };
 }
 
 async function reportTerminal(

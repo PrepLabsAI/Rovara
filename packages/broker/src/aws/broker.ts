@@ -52,6 +52,10 @@ import {
   workflowPullRequestTrees,
   workflowSelectedChecks,
   blockWorkflow,
+  WorkflowDependencyResultSchema,
+  WorkflowSnapshotSchema,
+  taskGraphOrder,
+  validateTaskGraph,
   completeWorkflowFeedbackReview,
   createCandidateManifest,
   WORKFLOW_HISTORY_REWRITTEN_MESSAGE,
@@ -127,6 +131,7 @@ import {
   type ProjectDefinition,
   type ProjectCommand,
   type WorkflowFeedbackApprovalBinding,
+  type WorkflowDependencyInvocation,
   type WorkflowReviewBase,
   type WorkflowReviewChecks,
   type WorkflowReviewPlan,
@@ -3250,7 +3255,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[]; slackThread?: SlackThread },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[]; slackThread?: SlackThread },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -3268,8 +3273,10 @@ async function taskOperationParts(
     ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
     ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
+    ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
     requestId: input.requestId,
-    payloadHash: hashJson({ conversationId: input.conversationId, prompt: input.prompt }),
+    payloadHash: hashJson({ conversationId: input.conversationId, prompt: input.prompt,
+      ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }) }),
     status: "ACCEPTED",
     fence,
     createdAt: now,
@@ -3326,6 +3333,7 @@ async function taskOperationParts(
       ...(input.workflowMode === "PLAN" ? { planFormat: "structured" as const } : {}),
       ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
       ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
+      ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
       ...(input.workflowBase === undefined ? {} : { workflowBase: input.workflowBase }),
       ...(input.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: input.workflowReviewChecks }),
       ...(input.workflowReviewPlan === undefined ? {} : { workflowReviewPlan: input.workflowReviewPlan }),
@@ -3420,13 +3428,14 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[] } = {},
+  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[] } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
-  const requestHash = hashJson({ conversationId: request.conversationId, prompt: request.prompt });
+  const requestHash = hashJson({ conversationId: request.conversationId, prompt: request.prompt,
+    ...(options.workflowDependencies === undefined ? {} : { workflowDependencies: options.workflowDependencies }) });
   const idempotencyKey = {
     pk: `IDEMPOTENCY#${identity.ownerKey}#${workspaceId}`,
     sk: `REQUEST#${request.requestId}`,
@@ -3466,6 +3475,7 @@ async function acceptTask(
     ...(options.workflowPhase === undefined ? {} : { workflowPhase: options.workflowPhase }),
     ...(options.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: options.workflowFeedbackReview }),
     ...(options.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: options.workflowFeedbackApproval }),
+    ...(options.workflowDependencies === undefined ? {} : { workflowDependencies: options.workflowDependencies }),
     ...(options.workflowBase === undefined ? {} : { workflowBase: options.workflowBase }),
     ...(options.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: options.workflowReviewChecks }),
     ...(options.workflowReviewPlan === undefined ? {} : { workflowReviewPlan: options.workflowReviewPlan }),
@@ -6865,12 +6875,39 @@ async function completedWorkflowItems(
   /** The record of the comments the planner answered, committed with the plan it answered them in. */
   let recordedReplies: ReturnType<typeof plannerRepliesItem> | undefined;
   if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") {
+    const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
+    const dependencyBinding = operation.workflowDependencies;
+    const dependencyResult = dependencyBinding === undefined ? undefined : WorkflowDependencyResultSchema.safeParse(reported.workflowDependenciesResult);
+    const dependencyOrder = dependencyBinding === undefined ? [] : taskGraphOrder(dependencyBinding.graph);
+    const dependencyResultValid = dependencyBinding !== undefined && dependencyResult?.success === true
+      && dependencyResult.data.taskId === dependencyBinding.graph.taskId
+      && dependencyResult.data.graphDigest === dependencyBinding.approval.graphDigest
+      && dependencyResult.data.runId === dependencyBinding.approval.runId
+      && dependencyResult.data.operationId === operation.id
+      && dependencyResult.data.workflowRevision === dependencyBinding.approval.workflowRevision
+      && task.workflow.workflowDependenciesApproval?.artifactDigest === dependencyBinding.approval.artifactDigest
+      && task.workflow.workflowDependenciesApproval.graphDigest === dependencyBinding.approval.graphDigest
+      && task.workflow.workflowDependenciesApproval.workflowRevision === dependencyBinding.approval.workflowRevision
+      && task.workflow.workflowDependenciesApproval.actorId === dependencyBinding.approval.actorId
+      && task.workflow.workflowDependenciesApproval.runId === dependencyBinding.approval.runId
+      && dependencyResult.data.items.every((item, index) => item.itemId === dependencyOrder[index]
+        && item.sequence > 0 && item.operationId === operation.id
+        && (index === 0
+          ? dependencyBinding.resumeTreeSha === undefined || item.baseTreeSha === dependencyBinding.resumeTreeSha
+          : dependencyResult.data.items[index - 1]?.state === "IMPLEMENTED"
+            && dependencyResult.data.items[index - 1]?.candidateTreeSha === item.baseTreeSha));
+    const graphItemsComplete = dependencyBinding !== undefined && dependencyResult?.success === true
+      && dependencyResult.data.status === "SUCCEEDED"
+      && dependencyResult.data.items.length === dependencyBinding.graph.items.length
+      && dependencyResult.data.items.every((item) => item.state === "IMPLEMENTED");
     if (terminalStatus !== "SUCCEEDED") {
       next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_HISTORY_REWRITTEN_MESSAGE) === true ? WORKFLOW_HISTORY_REWRITTEN_MESSAGE
         : terminalError?.includes(WORKFLOW_NO_CODE_CHANGE_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.noCodeChanged
         : workflowRunEndedReason(operation.workflowMode, terminalStatus), now);
+      if (dependencyResultValid && dependencyResult?.success === true && dependencyResult.data.status !== "SUCCEEDED") {
+        next = WorkflowSnapshotSchema.parse({ ...next, workflowDependenciesProgress: dependencyResult.data.items });
+      }
     } else {
-      const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
       const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
       const checkedRepositories = Array.isArray(reported.workflowCheckCandidateRepositories) ? reported.workflowCheckCandidateRepositories : [];
       const checks = CheckReportSchema.safeParse(reported.checks);
@@ -6881,6 +6918,15 @@ async function completedWorkflowItems(
       // Review only: the tests the rerun found regressed, for the owner's message and a send-back.
       let regressedChecks: string[] | undefined;
       try {
+        if (dependencyBinding !== undefined && (!dependencyResultValid || !graphItemsComplete)) {
+          verificationFailure = "approved work breakdown result is missing, stale or incomplete";
+          throw new Error(verificationFailure);
+        }
+        if (dependencyBinding === undefined && task.workflow.workflowDependenciesApproval !== undefined && operation.workflowMode === "IMPLEMENT"
+          && task.workflow.stage === "IMPLEMENT") {
+          verificationFailure = "approved work breakdown was not carried into this implementation";
+          throw new Error(verificationFailure);
+        }
         if (operation.workflowMode === "CHECKS" && task.workflow.stage !== "VERIFY") {
           verificationFailure = WORKFLOW_BLOCK_REASONS.checkRetryStale;
           throw new Error("verification retry stage changed");
@@ -6911,6 +6957,10 @@ async function completedWorkflowItems(
         const candidateInput = repositories as CandidateRepository[];
         const candidate = createCandidateManifest(candidateInput);
         const checkedCandidate = createCandidateManifest(checkedRepositories as CandidateRepository[]);
+        if (dependencyBinding !== undefined && dependencyResult?.success === true && dependencyResult.data.candidateDigest !== candidate.digest) {
+          verificationFailure = "work breakdown result does not bind the final combined candidate";
+          throw new Error(verificationFailure);
+        }
         if (candidate.repositories.map((repository) => repository.repositoryId).sort().join("\n") !== expectedRepositoryIds.join("\n")) {
           verificationFailure = WORKFLOW_BLOCK_REASONS.repositoriesIncomplete;
           throw new Error("candidate repositories are incomplete");
@@ -6994,10 +7044,16 @@ async function completedWorkflowItems(
           },
           now,
         });
+        if (dependencyBinding !== undefined && dependencyResult?.success === true) {
+          next = WorkflowSnapshotSchema.parse({ ...next, workflowDependenciesProgress: dependencyResult.data.items });
+        }
       } catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "workflow.verification_blocked", taskId: task.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown", reason: verificationFailure, ...(verificationDetail === undefined ? {} : { detail: verificationDetail }) }));
         next = verificationFailure === WORKFLOW_BLOCK_REASONS.fixChangedNothing ? blockWorkflow(task.workflow, verificationFailure, now)
           : blockWorkflow(verifying, verificationFailure, now, regressedChecks === undefined ? {} : { regressedChecks });
+        if (dependencyResultValid && dependencyResult?.success === true) {
+          next = WorkflowSnapshotSchema.parse({ ...next, workflowDependenciesProgress: dependencyResult.data.items });
+        }
       }
     }
   } else if (operation.workflowMode === "REVIEW") {
@@ -7188,6 +7244,11 @@ async function storePlanAnswer(
     } } : {}),
   });
   if (!parsed.ok) return unreadable(parsed.errors);
+  if (parsed.plan.workBreakdown !== undefined) {
+    if (project.definition.repositories.length !== 1) return unreadable(["ordered work is available only for a task pinned to one registered repository"]);
+    const graphValidation = validateTaskGraph(parsed.plan.workBreakdown, { taskId: task.taskId, repositoryId: project.definition.repositories[0]!.name });
+    if (!graphValidation.ok) return unreadable(graphValidation.errors);
+  }
   // The owner's real request (and the replies this step was given) is what the plan says it is for, not the planner's words.
   const step = await planStepComments(dependencies, task, artifactType);
   const plan: PlanDocument = planWithCommentIds({ ...parsed.plan, why: await planWhyEntries(dependencies, task, parsed.plan.why) }, step, previousVersion);

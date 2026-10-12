@@ -98,4 +98,26 @@ describe("decideWorkflow with the owner's answers", () => {
     // A decision recorded before this change still reads.
     expect(WorkflowDecisionSchema.parse(decision)).toEqual(decision);
   });
+
+  it("binds a graph approval to its exact graph digest, plan artifact, revision, actor and run", () => {
+    const graphDigest = "c".repeat(64);
+    const refuse = (patch: Record<string, unknown>, optionDigest?: string) => expect(() => decideWorkflow(
+      waiting(), request(patch), actor,
+      { ...markdownOptions, ...(optionDigest === undefined ? {} : { workBreakdownDigest: optionDigest }) },
+    )).toThrow(WorkflowTransitionError);
+    refuse({}, graphDigest);
+    refuse({ workBreakdownDigest: "d".repeat(64) }, graphDigest);
+    refuse({ workBreakdownDigest: graphDigest }, undefined);
+    refuse({ decision: "REQUEST_CHANGES", workBreakdownDigest: graphDigest }, graphDigest);
+
+    const approval = decideWorkflow(waiting(), request({ workBreakdownDigest: graphDigest }), actor, { ...options, workBreakdownDigest: graphDigest });
+    const binding = approval.workflowDependenciesApproval;
+    expect(binding).toMatchObject({
+      artifactDigest: plan.sha256, graphDigest, workflowRevision: waiting().revision, actorId: actor.actorId,
+    });
+    expect(binding?.runId).toMatch(/^[a-f0-9-]{36}$/);
+    expect(approval.decisions.at(-1)?.workBreakdownDigest).toBe(graphDigest);
+    expect(decideWorkflow(approval, request({ workBreakdownDigest: graphDigest }), actor, { ...options, workBreakdownDigest: graphDigest })).toEqual(approval);
+    expect(() => decideWorkflow(approval, request({ workBreakdownDigest: "d".repeat(64) }), actor, { ...options, workBreakdownDigest: "d".repeat(64) })).toThrow(/already used/);
+  });
 });

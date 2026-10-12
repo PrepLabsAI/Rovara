@@ -2,6 +2,7 @@ import { z } from "zod";
 import { WORKFLOW_PLAN_MAX_BYTES, WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckProposalSchema, WorkflowFeedbackApprovalBindingSchema, WorkflowReviewBaseSchema } from "./task-workflow.js";
 import { ProjectCommandSchema, StoredProjectDefinitionSchema } from "./project.js";
 import { ModelSelectionSchema, type ModelSelection } from "./models.js";
+import { WorkflowDependencyInvocationSchema } from "./workflow-dependencies.js";
 
 export const AGENTX_PROTOCOL_VERSION = 1 as const;
 
@@ -12,7 +13,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "model.chatgpt"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "model.chatgpt", "task.workflowDependencies"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number];
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -104,6 +105,8 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         planFormat: z.literal("structured").optional(),
         workflowFeedbackReview: z.object({ taskId: z.string().uuid(), workflowRevision: z.number().int().positive(), candidateDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
         workflowFeedbackApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
+        /** One approved same-repository dependency graph, sent only to workers advertising task.workflowDependencies. */
+        workflowDependencies: WorkflowDependencyInvocationSchema.optional(),
         /**
          * The task's pinned base commit per repository (the workflow's reviewBase). The worker records it in the
          * candidate and reviewers see the diff from it. Sent only to a worker whose /ping lists "task.workflowBase".
@@ -162,6 +165,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         }
         if (payload.workflowFeedbackApproval !== undefined && payload.workflowMode !== "IMPLEMENT") {
           context.addIssue({ code: "custom", path: ["workflowFeedbackApproval"], message: "feedback approval binding requires implementation mode" });
+        }
+        if (payload.workflowDependencies !== undefined && payload.workflowMode !== "IMPLEMENT") {
+          context.addIssue({ code: "custom", path: ["workflowDependencies"], message: "a work breakdown requires implementation mode" });
         }
       }),
   }).strict(),
