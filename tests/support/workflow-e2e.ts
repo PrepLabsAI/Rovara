@@ -15,6 +15,7 @@ import {
   agentXError,
   SlackChannelBindingSchema,
   SlackRequestMessageSchema,
+  TaskPeopleViewSchema,
   WorkerInvocationSchema,
   WorkflowSnapshotSchema,
   sharedTaskKey,
@@ -25,6 +26,10 @@ import {
   type SlackRequestMessage,
   type SlackThread,
   type TaskQuestionRoute,
+  type TaskPeopleDisplayReadRequest,
+  type TaskPeopleDisplayReadResponse,
+  type TaskPersonProofRequest,
+  type TaskPersonProofResponse,
   type WorkerInvocation,
   type WorkflowOptionalCheck,
   type WorkflowSnapshot,
@@ -65,7 +70,7 @@ import { inspectWorkspaceForClose } from "../../packages/worker/src/close-worksp
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import type { CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
-import { DEV_ISSUER, MAYA, createDeveloperTaskBroker, recordStream, type Developer } from "./developer-task-broker.js";
+import { DEV_ISSUER, MAYA, bindChannel, createDeveloperTaskBroker, recordStream, type Developer } from "./developer-task-broker.js";
 import { signedInClient, type ToolAnswer } from "./mcp-broker-client.js";
 import { FAUX_MODEL, fauxModelRuntime } from "./faux-model.js";
 import { workflowModel, type WorkflowTurn } from "./faux-scripts.js";
@@ -305,9 +310,20 @@ export async function createWorkflowE2E(options: {
   /** The open tasks one person may have (the stack's per-person workspace limit); absent, the default 3. */
   memberLimit?: number;
   /** Fresh People authority used by the real dispatch guard; absent proof fails closed for retained PEOPLE. */
-  taskPeople?: { changesEnabled?: boolean; checkTaskPerson?: CheckTaskPerson };
+  taskPeople?: {
+    changesEnabled?: boolean;
+    checkTaskPerson?: CheckTaskPerson;
+    taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>;
+    taskPeopleDisplayRead?: (request: TaskPeopleDisplayReadRequest) => Promise<TaskPeopleDisplayReadResponse>;
+    inviteTaskPerson?: (input: { teamId: string; channelId: string; slackUserId: string }) => Promise<"accepted" | "unknown">;
+    boundChannels?: readonly string[];
+    developers?: readonly Developer[];
+  };
 } = {}) {
   const github = new FakeGitHub(options.github?.realism === undefined ? {} : { realism: options.github.realism });
+  const taskPeopleConfiguration = options.taskPeople?.changesEnabled === undefined
+    ? undefined
+    : { peopleChangesEnabled: options.taskPeople.changesEnabled };
   const mergeObservationRequests: string[] = [];
   // The webhook secret GitHub signs with, and the copy the broker's container has cached (it re-reads on { refresh: true }).
   let configuredSecret: string | null = options.webhookSecret === undefined ? WEBHOOK_SECRET : options.webhookSecret;
@@ -333,9 +349,14 @@ export async function createWorkflowE2E(options: {
     register: false,
     ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.channelMembers === undefined ? {} : { channelMembers: options.channelMembers }),
-    ...((options.slackRequestQueue === undefined && options.taskPeople?.changesEnabled === undefined) ? {} : { developerExtra: {
+    ...((options.slackRequestQueue === undefined && options.taskPeople?.changesEnabled === undefined
+      && options.taskPeople?.taskPersonProof === undefined && options.taskPeople?.taskPeopleDisplayRead === undefined
+      && options.taskPeople?.inviteTaskPerson === undefined) ? {} : { developerExtra: {
       ...(options.slackRequestQueue === undefined ? {} : { slackRequestQueue: options.slackRequestQueue }),
-      ...(options.taskPeople?.changesEnabled === undefined ? {} : { taskPeopleConfiguration: { peopleChangesEnabled: options.taskPeople.changesEnabled } }),
+      ...(taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration }),
+      ...(options.taskPeople?.taskPersonProof === undefined ? {} : { taskPersonProof: options.taskPeople.taskPersonProof }),
+      ...(options.taskPeople?.taskPeopleDisplayRead === undefined ? {} : { taskPeopleDisplayRead: options.taskPeople.taskPeopleDisplayRead }),
+      ...(options.taskPeople?.inviteTaskPerson === undefined ? {} : { inviteTaskPerson: options.taskPeople.inviteTaskPerson }),
     } }),
     ...(options.consistency === undefined ? {} : { consistency: options.consistency }),
     brokerExtra: {
@@ -354,9 +375,17 @@ export async function createWorkflowE2E(options: {
     startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
   db.set({ pk: `DEVELOPER#${SLACK_MAYA.developerId}`, sk: "META", developerId: SLACK_MAYA.developerId, provider: "slack", displayName: SLACK_MAYA.name,
     slackUserId: SLACK_MAYA.slackUserId, firstSignInAt: "x", lastSignInAt: "x", revoked: false });
+  for (const developer of options.taskPeople?.developers ?? []) {
+    db.set({ pk: `SESSION#${developer.sessionId}`, sk: "META", sessionId: developer.sessionId, developerId: developer.developerId, amr: developer.provider,
+      startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
+    db.set({ pk: `DEVELOPER#${developer.developerId}`, sk: "META", developerId: developer.developerId, provider: developer.provider,
+      displayName: developer.name, ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
+      firstSignInAt: "x", lastSignInAt: "x", revoked: false });
+  }
   const readiness = options.readiness ?? [E2E_CHECK];
   await registerSlackProject(harness.handler, { readiness,
     ...(options.optionalChecks === undefined ? {} : { developerTasks: { optionalWorkflowChecks: options.optionalChecks } }) });
+  for (const channelId of options.taskPeople?.boundChannels ?? []) await bindChannel(harness.handler, channelId);
   // After setup, every call that reaches the broker is recorded: an HTTP route, or an event's source and action.
   const brokerCalls: string[] = [];
   const handler: Handler = async (event, context) => {
@@ -807,6 +836,7 @@ export async function createWorkflowE2E(options: {
       return { canvasId: id, permalink: `https://acme.slack.com/docs/${SLACK_TEAM}/${id}` };
     },
     reviewUrlBase: REVIEW_URL_BASE,
+    ...(options.taskPeople?.changesEnabled === undefined ? {} : { peopleChangesEnabled: options.taskPeople.changesEnabled }),
     now: () => Date.now(), log: () => undefined, deliveryFailed: () => { noticeDeliveryFailures += 1; },
   });
   /** Stream to queue, then every queued notice once; failed ones stay queued. */
@@ -906,6 +936,11 @@ export async function createWorkflowE2E(options: {
   // Slack's interactivity endpoint.
   /** Set by `failNextHandOff`: the next press the Slack handler hands to the broker fails, as a Lambda invoke can. */
   let handOffFails = false;
+  const peopleReplies: Array<{ action: string; statusCode: number; body: Record<string, unknown> }> = [];
+  const invokePeople = async (action: string, input: Record<string, unknown>) => {
+    const response = await handler({ source: "agentx.slack-ingress", action, ...input });
+    return { statusCode: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
+  };
   const handOff = async (action: string, input: Record<string, unknown>): Promise<void> => {
     if (handOffFails) { handOffFails = false; throw Object.assign(new Error("the broker invoke failed"), { name: "ServiceException" }); }
     await brokerEvent(handler, action, input);
@@ -918,6 +953,29 @@ export async function createWorkflowE2E(options: {
     workflow: workflowSlackHandlers({
       // A read's own copy, as a DynamoDB read is: the handler must not see (or change) the table's live item.
       loadTask: async (id) => db.reorder(structuredClone(db.get(`DEVTASK#${id}`, "META"))),
+      authorize: async (taskId, userId, thread, taskAction) => {
+        const answer = await invokePeople("task-people-authorize", { taskId, userId, thread, taskAction });
+        if (answer.statusCode !== 200) throw new Error("task authorization refused");
+      },
+      getPeople: async (input) => {
+        const answer = await invokePeople("task-people-read", input);
+        peopleReplies.push({ action: "read", ...answer });
+        if (answer.statusCode !== 200) throw new Error("People read refused");
+        return TaskPeopleViewSchema.parse({
+          revision: answer.body.revision, orphaned: answer.body.orphaned, people: answer.body.people,
+          canManage: answer.body.canManage, canTakeOwnership: answer.body.canTakeOwnership, addPeopleUrl: answer.body.addPeopleUrl,
+        });
+      },
+      changePeople: async (input) => {
+        const answer = await invokePeople("task-people-change", input);
+        peopleReplies.push({ action: "change", ...answer });
+        if (answer.statusCode !== 200) throw new Error("People change refused");
+      },
+      takePeopleOwnership: async (input) => {
+        const answer = await invokePeople("task-people-take-ownership", input);
+        peopleReplies.push({ action: "takeOwnership", ...answer });
+        if (answer.statusCode !== 200) throw new Error("People ownership refused");
+      },
       openView: (triggerId, view) => slack.openView(triggerId, view),
       submit: (input) => handOff("workflow-decision", input),
       retryChecks: (input) => handOff("workflow-retry", input),
@@ -988,6 +1046,8 @@ export async function createWorkflowE2E(options: {
   const mcpClients = new Map<string, Awaited<ReturnType<typeof signedInClient>>>();
 
   let sequence = 0;
+  let interactionSequence = 0;
+  const slackActionTimestamps: string[] = [];
   const journey = {
     /** Runs, as the PlanEvidence Lambda would, every job the broker started since the last call; answers what each did. */
     async runPlanEvidenceJobs(): Promise<PlanEvidenceRunOutcome[]> {
@@ -1037,7 +1097,7 @@ export async function createWorkflowE2E(options: {
         });
       }
     },
-    db, s3, handler, slack, github, mergeObservationRequests, repoDirectory, baseCommit, baseTree: github.commits.get(baseCommit)!, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, agentCheckRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs, dispatchReceipts,
+    db, s3, handler, slack, github, mergeObservationRequests, repoDirectory, baseCommit, baseTree: github.commits.get(baseCommit)!, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, agentCheckRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs, dispatchReceipts, slackActionTimestamps,
     ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE, canvasesDeleted,
     /** The broker's EC2 session deleter: each call removes one workspace's compute. */
     deleteEc2Session,
@@ -1163,13 +1223,16 @@ export async function createWorkflowE2E(options: {
     async click(actionId: string, clickOptions: { user?: string; messageTs?: string; deliver?: "once" | "twice" } = {}): Promise<void> {
       const post = clickOptions.messageTs === undefined ? slack.lastPostWithAction(actionId) : slack.postWithAction(actionId, clickOptions.messageTs);
       const value = actionElement(post.blocks, actionId)?.value ?? "";
+      interactionSequence += 1;
+      const actionTs = `1695500100.${String(interactionSequence).padStart(6, "0")}`;
       const payload = {
         type: "block_actions", user: { id: clickOptions.user ?? MAYA.slackUserId, team_id: SLACK_TEAM }, team: { id: SLACK_TEAM },
         container: { channel_id: post.channel, message_ts: post.ts, thread_ts: post.threadTs }, message: { ts: post.ts, thread_ts: post.threadTs, text: post.text },
-        response_url: RESPONSE_URL, trigger_id: "1.2.3", actions: [{ action_id: actionId, value, action_ts: "1695500100.000001" }],
+        response_url: RESPONSE_URL, trigger_id: "1.2.3", actions: [{ action_id: actionId, value, action_ts: actionTs }],
       };
+      slackActionTimestamps.push(actionTs);
       await interact(payload);
-      if (clickOptions.deliver === "twice") await interact(payload);
+      if (clickOptions.deliver === "twice") { slackActionTimestamps.push(actionTs); await interact(payload); }
     },
 
     /** Runs the steps at once (each a press, a mention or a delivery) and waits for all of them. */
@@ -1290,6 +1353,15 @@ export async function createWorkflowE2E(options: {
         if (outbox === undefined) throw new Error(`no outbox record for operation ${operationId}`);
         return (await deliverThroughDispatcher(WorkerInvocationSchema.parse(outbox.invocation), receiveCount)) !== undefined;
       },
+      /** Redelivers an existing outbox message through the real dispatcher and runs it when delivery succeeds. */
+      redeliver: async (operationId: string, receiveCount = 1): Promise<boolean> => {
+        const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0];
+        if (outbox === undefined) throw new Error(`no outbox record for operation ${operationId}`);
+        const delivered = await deliverThroughDispatcher(WorkerInvocationSchema.parse(outbox.invocation), receiveCount);
+        if (delivered === undefined) return false;
+        await runInvocation(delivered);
+        return true;
+      },
       /**
        * Deploy skew: the next feedback review's input reads as an older broker built it (`rewrite` turns this broker's
        * owner-approved requirements text into that broker's), while its answer is checked by this broker. By default the run
@@ -1303,6 +1375,15 @@ export async function createWorkflowE2E(options: {
       crashed,
       /** Invocations the dispatcher failed instead of delivering, with the error it recorded. */
       deliveryFailures,
+    },
+
+    people: {
+      /** Changes only the already-injected mutation flag; retained People remains enforced by production reads and guards. */
+      changesEnabled(value: boolean): void {
+        if (taskPeopleConfiguration === undefined) throw new Error("Task People configuration was not injected");
+        taskPeopleConfiguration.peopleChangesEnabled = value;
+      },
+      replies: peopleReplies,
     },
 
     /**

@@ -19,15 +19,18 @@ afterEach(() => {
 describe("the control-plane client (FR-027)", () => {
   it("uses strict People routes and never sends confirmation or actor authority", async () => {
     const people = { revision: 1, orphaned: false, people: [], canManage: true, canTakeOwnership: false, addPeopleUrl: "https://slack.com/archives/C0123456789/p1695500000000001" };
+    const transportRequestId = "http-people-request-1";
+    const pending = { status: "PENDING", requestId: start.requestId, confirmationUrl: "https://agentx.example.test/confirm", expiresAt: "2026-10-11T10:10:00.000Z" };
     const fetch = vi.fn()
-      .mockResolvedValueOnce(reply(200, people))
-      .mockResolvedValueOnce(reply(200, { status: "PENDING", requestId: start.requestId, confirmationUrl: "https://agentx.example.test/confirm", expiresAt: "2026-10-11T10:10:00.000Z" }))
-      .mockResolvedValueOnce(reply(200, { status: "COMMITTED", view: people }))
-      .mockResolvedValueOnce(reply(200, { status: "COMMITTED", view: people }));
+      .mockResolvedValueOnce(reply(200, { view: people, requestId: transportRequestId }))
+      .mockResolvedValueOnce(reply(200, { change: pending, requestId: transportRequestId }))
+      .mockResolvedValueOnce(reply(200, { change: { status: "COMMITTED", view: people }, requestId: transportRequestId }))
+      .mockResolvedValueOnce(reply(200, { change: { status: "COMMITTED", view: people }, requestId: transportRequestId }));
     const api = client(fetch);
     await expect(api.getTaskPeople(view.taskId)).resolves.toEqual(people);
-    await api.setTaskPerson(view.taskId, { requestId: start.requestId, expectedPeopleRevision: 1, personId: "22222222-2222-4222-8222-222222222222", role: "viewer" });
-    await api.takeTaskOwnership(view.taskId, { requestId: start.requestId, expectedPeopleRevision: 1 });
+    await expect(api.setTaskPerson(view.taskId, { requestId: start.requestId, expectedPeopleRevision: 1,
+      personId: "22222222-2222-4222-8222-222222222222", role: "viewer" })).resolves.toEqual(pending);
+    await expect(api.takeTaskOwnership(view.taskId, { requestId: start.requestId, expectedPeopleRevision: 1 })).resolves.toMatchObject({ status: "COMMITTED", view: people });
     await expect(api.getTaskPeopleRequest(view.taskId, start.requestId)).resolves.toMatchObject({ status: "COMMITTED" });
     expect(fetch.mock.calls.map((call) => String(call[0]))).toEqual([
       `https://agentx.example.test/v1/dev/tasks/${view.taskId}/people`,
@@ -37,6 +40,28 @@ describe("the control-plane client (FR-027)", () => {
     ]);
     expect(JSON.stringify(fetch.mock.calls)).not.toContain("confirmed");
     expect(JSON.stringify(fetch.mock.calls)).not.toContain("authority");
+  });
+
+  it.each([
+    ["missing transport request ID", { view: { revision: 1, orphaned: false, people: [], canManage: true, canTakeOwnership: false } }],
+    ["wrong transport request ID type", { view: { revision: 1, orphaned: false, people: [], canManage: true, canTakeOwnership: false }, requestId: 7 }],
+    ["extra transport field", { view: { revision: 1, orphaned: false, people: [], canManage: true, canTakeOwnership: false }, requestId: "http-view", extra: true }],
+    ["malformed inner view", { view: { revision: 1, orphaned: false, people: [], canManage: true, canTakeOwnership: false, extra: true }, requestId: "http-view" }],
+  ])("refuses a People view envelope with %s", async (_name, response) => {
+    await expect(client(async () => reply(200, response)).getTaskPeople(view.taskId)).rejects.toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
+  });
+
+  it.each([
+    ["missing change", { requestId: "http-change" }],
+    ["missing transport request ID", { change: { status: "PENDING", requestId: start.requestId, confirmationUrl: "https://agentx.example.test/confirm", expiresAt: "2026-10-11T10:10:00.000Z" } }],
+    ["wrong transport request ID type", { change: { status: "PENDING", requestId: start.requestId, confirmationUrl: "https://agentx.example.test/confirm", expiresAt: "2026-10-11T10:10:00.000Z" }, requestId: false }],
+    ["extra transport field", { change: { status: "PENDING", requestId: start.requestId, confirmationUrl: "https://agentx.example.test/confirm", expiresAt: "2026-10-11T10:10:00.000Z" }, requestId: "http-change", extra: true }],
+    ["malformed proposal identity", { change: { status: "PENDING", requestId: "http-change", confirmationUrl: "https://agentx.example.test/confirm", expiresAt: "2026-10-11T10:10:00.000Z" }, requestId: "http-change" }],
+    ["malformed committed view", { change: { status: "COMMITTED", view: { revision: 1, orphaned: false, people: [], canManage: true, canTakeOwnership: false, extra: true } }, requestId: "http-change" }],
+  ])("refuses a People change envelope with %s", async (_name, response) => {
+    await expect(client(async () => reply(200, response)).setTaskPerson(view.taskId, { requestId: start.requestId,
+      expectedPeopleRevision: 1, personId: "22222222-2222-4222-8222-222222222222", role: "viewer" }))
+      .rejects.toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
   });
   it("sends the token and a trace ID, and parses a response with fields it does not know", async () => {
     const fetch = vi.fn(async () => reply(200, { task: { ...view, later: true }, requestId: "r" }));

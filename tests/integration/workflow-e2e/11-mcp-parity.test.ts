@@ -3,18 +3,55 @@
 // MCP-started Quick task to its draft PR, a Slack-started task decided through MCP, each recovery tool against its Slack
 // button, PR feedback decided through MCP [R4, decision D4], and agentx_get_task's next step at every stage.
 import { describe, expect, it } from "vitest";
-import { openReviewFindings } from "@agentx/contracts";
+import { SLACK_OIDC_ISSUER, openReviewFindings, type TaskPeopleDisplayReadRequest, type TaskPersonProofRequest } from "@agentx/contracts";
+import { developerIdForSlackUser } from "../../../packages/broker/src/aws/admin-actions.js";
+import type { CheckTaskPerson } from "../../../packages/broker/src/developer/task-people.js";
+import { taskOwnerKey } from "../../../packages/broker/src/developer/task-records.js";
 import { reviewerFindings, reviewerHangs } from "../../support/model-fixtures.js";
 import { feedbackCriticReply } from "../../support/faux-scripts.js";
 import { OMAR } from "../../support/developer-task-broker.js";
 import { visibleSlackText } from "../../support/strict-slack.js";
-import { createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
+import { SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { EDITS, MERGED, PLAN, PUSHED_FIX, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
 
 const WAITING_FOR_MERGE = "Waiting for the pull request to be merged. Review and merge it on GitHub; the task finishes when it's merged.";
 const FEEDBACK_READY = (revision: number) => `PR feedback is ready for your decision. Read it with agentx_get_pr_feedback, then approve, request changes or dismiss it with agentx_decide_pr_feedback and expected_revision ${revision}. Nothing changes in the code until you approve.`;
 const SAVED_NOTE = "Got it. I saved your note for the next round of PR feedback; the pull request stays as it is.";
 const FIX_APPROVED = "PR feedback approved. Updating the code now; the checks and reviews run again after.";
+const BAILEY = { slackUserId: "U0BAILEY01", name: "Bailey Stone" };
+const SLACK_BAILEY = { ...BAILEY, developerId: developerIdForSlackUser(BAILEY.slackUserId), provider: "slack" as const, sessionId: "s-bailey-slack" };
+const SECOND_CHANNEL = "C0PEOPLE01";
+
+function taskPeopleDirectory(baileyInTaskChannel = true) {
+  const members = new Map<string, Set<string>>([
+    [SLACK_MAYA.slackUserId!, new Set(["C0123456789"])],
+    [BAILEY.slackUserId, new Set([...(baileyInTaskChannel ? ["C0123456789"] : []), SECOND_CHANNEL])],
+  ]);
+  const names = new Map([[SLACK_MAYA.slackUserId!, SLACK_MAYA.name], [BAILEY.slackUserId, BAILEY.name]]);
+  const proof = async (request: TaskPersonProofRequest) => {
+    const name = names.get(request.slackUserId);
+    if (name === undefined) return { ok: false as const, error: "ineligible" as const };
+    return { ok: true as const, user: { id: request.slackUserId, teamId: "T0BSHLLUGBD", name },
+      memberOf: [...(members.get(request.slackUserId) ?? [])].filter((channel) => request.channelIds.includes(channel)) };
+  };
+  const display = async (request: TaskPeopleDisplayReadRequest) => request.operation === "proof"
+    ? { operation: "proof" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: await proof(request.request) }
+    : { operation: "directory" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const,
+      users: [...names].map(([id, name]) => ({ id, teamId: "T0BSHLLUGBD", name,
+        memberOf: [...(members.get(id) ?? [])].filter((channel) => request.request.channelIds.includes(channel)) })) } };
+  const check: CheckTaskPerson = async (_task, developerId) => {
+    const found = [...names].find(([slackUserId]) => developerIdForSlackUser(slackUserId) === developerId);
+    const slackUserId = found?.[0] ?? SLACK_MAYA.slackUserId!;
+    const name = found?.[1] ?? SLACK_MAYA.name;
+    return {
+      subject: { developerId, slackUserId },
+      identity: { developerId, slackUserId, name, method: "slack", issuer: SLACK_OIDC_ISSUER, subject: slackUserId },
+      eligible: found !== undefined,
+      channelMember: found !== undefined && (members.get(slackUserId)?.size ?? 0) > 0,
+    };
+  };
+  return { members, proof, display, check };
+}
 
 /** The MCP answer's text, which an AI tool reads; fails the test on a tool error. */
 async function tool(e2e: WorkflowE2E, name: string, args: Record<string, unknown>, who?: Parameters<WorkflowE2E["mcp"]>[2]) {
@@ -311,5 +348,176 @@ describe("Suite 11: MCP parity", () => {
     expect(workflowOf(merged)).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
     expect(merged.text).toContain("The pull request is merged. This task is complete.");
     expect(merged.text).not.toContain("agentx_open_pull_request");
+  }, 120_000);
+
+  it("11.7 signed People, MCP proposals and a current-owner Retry preserve the parked operation", async () => {
+    const directory = taskPeopleDirectory(false);
+    const linkedExternal = { developerId: "f".repeat(64), name: "Maya External", provider: "oidc" as const,
+      sessionId: "s-maya-external", slackUserId: SLACK_MAYA.slackUserId! };
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
+      changesEnabled: true, checkTaskPerson: directory.check, taskPersonProof: directory.proof, taskPeopleDisplayRead: directory.display,
+      developers: [linkedExternal, SLACK_BAILEY], boundChannels: [SECOND_CHANNEL],
+    } });
+    await atPlanReview(e2e);
+    await e2e.click("agentx_task_people");
+    expect(e2e.people.replies).toEqual([expect.objectContaining({ action: "read", statusCode: 200 })]);
+    await e2e.submitView({
+      task_person: { person: { selected_user: BAILEY.slackUserId } },
+      task_role: { role: { selected_option: { value: "viewer" } } },
+    });
+    await e2e.deliverNotices();
+    const committed = e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")!;
+    expect(committed).toMatchObject({ revision: 2, orphaned: false, people: [
+      expect.objectContaining({ slackUserId: SLACK_MAYA.slackUserId, role: "owner" }),
+      expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "viewer" }),
+    ] });
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toEqual([
+      expect.objectContaining({ actorDeveloperId: SLACK_MAYA.developerId, afterRole: "viewer" }),
+    ]);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toEqual([
+      expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "viewer", status: "SENT", attempts: 1 }),
+    ]);
+    directory.members.get(BAILEY.slackUserId)!.add("C0123456789");
+
+    const view = await tool(e2e, "agentx_get_task_people", { task_id: e2e.taskId() });
+    const person = (view.value.people as Array<{ person_id: string; name: string }>).find((entry) => entry.name === BAILEY.name)!;
+    const beforeProposal = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
+    const proposed = await tool(e2e, "agentx_set_task_person", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555555",
+      expected_people_revision: 2, person_id: person.person_id, role: "commenter" });
+    expect(proposed.value).toMatchObject({ status: "PENDING", request_id: "11711111-2222-4333-8444-555555555555" });
+    const polled = await tool(e2e, "agentx_get_task_people_request", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555555" });
+    expect(polled.value).toMatchObject({ status: "PENDING", request_id: "11711111-2222-4333-8444-555555555555",
+      confirmation_url: proposed.value.confirmation_url, expires_at: proposed.value.expires_at });
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforeProposal);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(1);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toHaveLength(1);
+
+    const external = await e2e.mcp("agentx_set_task_person", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555556",
+      expected_people_revision: 2, person_id: person.person_id, role: "owner" }, linkedExternal);
+    expect(external.isError).toBe(true);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforeProposal);
+
+    e2e.people.changesEnabled(false);
+    const disabled = await e2e.mcp("agentx_set_task_person", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555557",
+      expected_people_revision: 2, person_id: person.person_id, role: "owner" });
+    expect(disabled.isError).toBe(true);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforeProposal);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(1);
+    e2e.people.changesEnabled(true);
+
+    const invocationsBeforeApproval = e2e.invocations.length;
+    const charge = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge);
+    await e2e.click("agentx_workflow_approve");
+    directory.members.get(SLACK_MAYA.slackUserId!)!.clear();
+    await e2e.settle();
+    const queued = e2e.db.find((item) => item.entityType === "OUTBOX"
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
+    expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({
+      status: "WAITING_FOR_TASK_ACCESS", operationId: queued.operationId, invocation: queued.invocation,
+    });
+    expect(e2e.invocations).toHaveLength(invocationsBeforeApproval);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge).toEqual(charge);
+
+    const peopleRepliesBeforeTakeover = e2e.people.replies.length;
+    await e2e.click("agentx_task_people", { user: BAILEY.slackUserId });
+    expect(e2e.people.replies.slice(peopleRepliesBeforeTakeover)).toEqual([expect.objectContaining({ action: "read", statusCode: 200 })]);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toMatchObject({ orphaned: true,
+      people: [expect.objectContaining({ slackUserId: SLACK_MAYA.slackUserId, role: "denied" }), expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "viewer" })] });
+    expect(e2e.slack.views.at(-1)?.view).toMatchObject({ callback_id: "agentx_task_take_ownership" });
+    const beforeTakeoverProposal = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
+    const takeoverProposal = await tool(e2e, "agentx_take_task_ownership", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555559",
+      expected_people_revision: beforeTakeoverProposal!.revision }, SLACK_BAILEY);
+    expect(takeoverProposal.value).toMatchObject({ status: "PENDING", request_id: "11711111-2222-4333-8444-555555555559" });
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(beforeTakeoverProposal);
+    await e2e.submitView({}, { user: BAILEY.slackUserId });
+    const taken = e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")!;
+    expect(taken).toMatchObject({ orphaned: false, people: [
+      expect.objectContaining({ slackUserId: SLACK_MAYA.slackUserId, role: "denied" }),
+      expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "owner" }),
+    ] });
+    expect(e2e.db.get(String(queued.pk), String(queued.sk))?.status).toBe("WAITING_FOR_TASK_ACCESS");
+    expect(e2e.invocations).toHaveLength(invocationsBeforeApproval);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge).toEqual(charge);
+
+    await tool(e2e, "agentx_retry_workflow", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555558",
+      instructions: "Continue the accepted coding run." }, SLACK_BAILEY);
+    expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({ status: "PENDING", operationId: queued.operationId, invocation: queued.invocation });
+    expect(e2e.db.find((item) => item.entityType === "TASK_ACCESS_RETRY")).toEqual([
+      expect.objectContaining({ operationId: queued.operationId, actorId: taskOwnerKey(SLACK_BAILEY.developerId, e2e.taskId()) }),
+    ]);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")).toMatchObject({
+      developerId: SLACK_MAYA.developerId, slackUserId: SLACK_MAYA.slackUserId,
+    });
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge).toEqual(charge);
+    expect(await e2e.worker.redeliver(String(queued.operationId))).toBe(true);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    e2e.github.merge(e2e.github.pullRequests[0]!.number);
+    expect(await e2e.githubWebhook(e2e.github.pullRequests[0]!.number, { merged: true })).toBe(200);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+  }, 120_000);
+
+  it("11.8 a signed owner invite is bounded when unknown and notifies once after confirmed membership", async () => {
+    const roleSubmission = {
+      task_person: { person: { selected_user: BAILEY.slackUserId } },
+      task_role: { role: { selected_option: { value: "owner" } } },
+    };
+    const viewerSubmission = {
+      task_person: { person: { selected_user: BAILEY.slackUserId } },
+      task_role: { role: { selected_option: { value: "viewer" } } },
+    };
+
+    const unknownDirectory = taskPeopleDirectory(false);
+    const unknownInvitations: Array<{ teamId: string; channelId: string; slackUserId: string }> = [];
+    const unknown = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
+      changesEnabled: true, checkTaskPerson: unknownDirectory.check, taskPersonProof: unknownDirectory.proof,
+      taskPeopleDisplayRead: unknownDirectory.display, boundChannels: [SECOND_CHANNEL],
+      inviteTaskPerson: async (input) => { unknownInvitations.push(input); return "unknown"; },
+    } });
+    await atPlanReview(unknown);
+    await unknown.click("agentx_task_people");
+    const beforeUnknown = structuredClone(unknown.db.get(`DEVTASK#${unknown.taskId()}`, "PEOPLE"));
+    await expect(unknown.submitView(roleSubmission)).rejects.toThrow("the modal refused the submission");
+    expect(unknownInvitations).toEqual([{ teamId: "T0BSHLLUGBD", channelId: "C0123456789", slackUserId: BAILEY.slackUserId }]);
+    expect(unknown.db.get(`DEVTASK#${unknown.taskId()}`, "PEOPLE")).toEqual(beforeUnknown);
+    expect(unknown.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toEqual([]);
+    expect(unknown.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toEqual([]);
+    await unknown.click("agentx_workflow_approve");
+    await unknown.settle();
+    unknown.github.merge(unknown.github.pullRequests[0]!.number);
+    expect(await unknown.githubWebhook(unknown.github.pullRequests[0]!.number, { merged: true })).toBe(200);
+    await unknown.settle();
+
+    const directory = taskPeopleDirectory(false);
+    const invitations: Array<{ teamId: string; channelId: string; slackUserId: string }> = [];
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
+      changesEnabled: true, checkTaskPerson: directory.check, taskPersonProof: directory.proof, taskPeopleDisplayRead: directory.display, boundChannels: [SECOND_CHANNEL],
+      inviteTaskPerson: async (input) => { invitations.push(input); directory.members.get(input.slackUserId)?.add(input.channelId); return "accepted"; },
+    } });
+    await atPlanReview(e2e);
+    await e2e.click("agentx_task_people");
+    e2e.stream.duplicateNext();
+    await e2e.submitView(viewerSubmission);
+    await e2e.deliverNotices();
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toEqual([
+      expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "viewer", status: "SENT", attempts: 1 }),
+    ]);
+    await e2e.click("agentx_task_people");
+    await e2e.submitView(roleSubmission);
+    expect(invitations).toEqual([{ teamId: "T0BSHLLUGBD", channelId: "C0123456789", slackUserId: BAILEY.slackUserId }]);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toMatchObject({ revision: 3, orphaned: false,
+      people: [expect.objectContaining({ role: "owner" }), expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "owner" })] });
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(2);
+    expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toEqual([
+      expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "viewer", status: "SENT", attempts: 1 }),
+    ]);
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    e2e.github.merge(e2e.github.pullRequests[0]!.number);
+    expect(await e2e.githubWebhook(e2e.github.pullRequests[0]!.number, { merged: true })).toBe(200);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
   }, 120_000);
 });
