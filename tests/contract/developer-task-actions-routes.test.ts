@@ -133,6 +133,21 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     expect((await post("pull-requests", { requestId: randomUUID(), title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
   });
 
+  it("refuses every legacy mutation on a terminal workflow before closedAt, with no effects", async () => {
+    const { db, post, taskId, turns, task } = await finished();
+    const record = db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown>;
+    record.workflow = { revision: 2, stage: "MERGED", state: "COMPLETE", outcome: "MERGED" };
+    expect(record.closedAt).toBeUndefined();
+    const beforeTurns = turns().length;
+    const beforeOperations = db.find((item) => item.entityType === "OPERATION" && item.workspaceId === task.workspaceId).length;
+
+    expect((await post("continue", { requestId: randomUUID(), instructions: "more" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
+    expect((await post("cancel", { requestId: randomUUID() })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
+    expect((await post("pull-requests", { requestId: randomUUID(), title: "x" })).body.error).toEqual({ code: "CONFIG_INVALID", message: "this task is closed; start a new one with agentx_start_task" });
+    expect(turns()).toHaveLength(beforeTurns);
+    expect(db.find((item) => item.entityType === "OPERATION" && item.workspaceId === task.workspaceId)).toHaveLength(beforeOperations);
+  });
+
   it("redacts a secret in the instructions from the accepted record but sends them unchanged to the worker", async () => {
     const planted = "xoxb-2222222222-planted-secret";
     const { db, post, active, turns } = await finished();

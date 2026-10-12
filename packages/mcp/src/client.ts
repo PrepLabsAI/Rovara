@@ -10,6 +10,8 @@ import {
   DeveloperPullRequestResponseSchema,
   DeveloperTaskListResponseSchema,
   DeveloperTaskResponseSchema,
+  TaskPeopleChangeResponseSchema,
+  TaskPeopleViewResponseSchema,
   type AgentXConfigurationConfirm,
   type ContinueDeveloperTaskRequest,
   type DeveloperCloseResponse,
@@ -21,6 +23,10 @@ import {
   type DeveloperTaskView,
   type ShareDeveloperTaskRequest,
   type StartDeveloperTaskRequest,
+  type TaskPeopleChangeResult,
+  type TaskPeopleRoleRequest,
+  type TaskPeopleTakeOwnershipRequest,
+  type TaskPeopleView,
   type WorkflowDecisionRequest,
   type WorkflowFeedbackFindingsDecisionRequest,
   type WorkflowFeedbackReviewRetryRequest,
@@ -70,6 +76,10 @@ export interface ControlPlaneClient {
   openPullRequest(taskId: string, request: DeveloperPullRequestRequest): Promise<DeveloperPullRequestResponse>;
   /** Spec 025 FR-030: shares the task, or changes a shared task's mode (API 1.2). */
   shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskView>;
+  getTaskPeople(taskId: string): Promise<TaskPeopleView>;
+  getTaskPeopleRequest(taskId: string, requestId: string): Promise<TaskPeopleChangeResult>;
+  setTaskPerson(taskId: string, request: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult>;
+  takeTaskOwnership(taskId: string, request: TaskPeopleTakeOwnershipRequest): Promise<TaskPeopleChangeResult>;
 }
 
 /** Spec 025 A1: adminApiVersion is absent from a control plane from before 25d. */
@@ -254,5 +264,9 @@ export function httpControlPlaneClient(options: {
     closeTask: (taskId, requestId, discardUnpublished = false) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, true, { busyStep: CLOSE_BUSY_STEP }),
     openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
     shareTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/share"), request, true, { busyStep: SHARE_BUSY_STEP })),
+    getTaskPeople: async (taskId) => (await call(TaskPeopleViewResponseSchema, "GET", path(taskId, "/people"))).view,
+    getTaskPeopleRequest: async (taskId, requestId) => (await call(TaskPeopleChangeResponseSchema, "GET", path(taskId, `/people/requests/${encodeURIComponent(requestId)}`))).change,
+    setTaskPerson: async (taskId, request) => (await call(TaskPeopleChangeResponseSchema, "POST", path(taskId, "/people/role"), request)).change,
+    takeTaskOwnership: async (taskId, request) => (await call(TaskPeopleChangeResponseSchema, "POST", path(taskId, "/people/take-ownership"), request)).change,
   };
 }

@@ -2,7 +2,8 @@
 // Spec 025 FR-054, C11, C13, C14: a shared thread's service calls, resolved by the broker.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { indexExpiresAt } from "@agentx/contracts";
+import { indexExpiresAt, SLACK_OIDC_ISSUER } from "@agentx/contracts";
+import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { MAYA, createDeveloperTaskBroker, markThreadPosted, teammate } from "../support/developer-task-broker.js";
 import { SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
 
@@ -18,8 +19,14 @@ function result(body: Record<string, unknown>): Record<string, unknown> {
 const OLDER_REQUEST = { includeIntegrations: true, includeSettingsRevision: true, includeConnectors: true, includeAllConnectorTypes: true, includeRecoverableOperations: true, lazyPreparation: true, includeActionPolicy: true };
 const WORKSPACE_REQUEST = { ...OLDER_REQUEST, includeSharedTask: true };
 
-async function continueThread(mode: "view" | "continue" = "continue") {
-  const harness = await createDeveloperTaskBroker();
+async function continueThread(mode: "view" | "continue" = "continue", peopleProof?: "current" | "unknown") {
+  const harness = await createDeveloperTaskBroker(peopleProof === undefined ? {} : { developerExtra: {
+    taskPeopleConfiguration: { peopleChangesEnabled: false },
+    taskPersonProof: async (request) => {
+      if (peopleProof === "unknown") throw new Error("identity proof unavailable");
+      return { ok: true, user: { id: request.slackUserId, teamId: SLACK_TEAM, name: request.slackUserId }, memberOf: request.channelIds };
+    },
+  } });
   const response = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix it", client: "claude-code", shareToChannel: true, shareMode: mode });
   const taskId = (response.body.task as { taskId: string }).taskId;
   const workspaceId = (harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string }).workspaceId;
@@ -29,7 +36,17 @@ async function continueThread(mode: "view" | "continue" = "continue") {
   const subject = markThreadPosted(harness.db, taskId);
   const ensure = (body: Record<string, unknown> = WORKSPACE_REQUEST) => teammate(harness.handler, subject, PRIYA, "POST", "/v1/service/threads/workspace", { requestId: randomUUID(), ...body });
   const workspaces = () => harness.db.find((item) => item.entityType === "WORKSPACE").length;
-  return { ...harness, taskId, workspaceId, subject, active, ensure, workspaces };
+  const seedPeople = (role: "owner" | "viewer" | "denied", userId = PRIYA) => {
+    const developerId = developerIdForSlackUser(userId);
+    const personId = randomUUID();
+    const createdAt = new Date().toISOString();
+    harness.db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 3, orphaned: false,
+      people: [{ developerId, slackUserId: userId, name: userId, role }] });
+    harness.db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId, developerId,
+      slackUserId: userId, name: userId, method: "slack", issuer: SLACK_OIDC_ISSUER, subject: userId, createdAt });
+    harness.db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON_SUBJECT#${developerId}`, schemaVersion: 1, personId, developerId, createdAt });
+  };
+  return { ...harness, taskId, workspaceId, subject, active, ensure, workspaces, seedPeople };
 }
 
 async function channelTask(h: Awaited<ReturnType<typeof continueThread>>, name?: string) {
@@ -304,6 +321,73 @@ describe("stop in a shared thread (Q8)", () => {
     expect(response.statusCode).toBe(403);
     expect(JSON.parse(response.body)).toMatchObject({ error: { code: "FORBIDDEN" } });
     expect(h.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toEqual([]);
+  });
+
+  it("uses a fresh current PEOPLE Owner proof for a present sidecar, even while People changes are off", async () => {
+    const h = await continueThread("continue", "current");
+    await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "keep going" });
+    h.seedPeople("owner");
+    const response = await h.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: threadOf(h.subject), userId: PRIYA });
+    expect(JSON.parse(response.body)).toMatchObject({ outcome: "CANCEL_REQUESTED" });
+    expect(h.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toEqual([
+      expect.objectContaining({ requestedBy: { teamId: SLACK_TEAM, userId: PRIYA } }),
+    ]);
+  });
+
+  it.each([
+    ["viewer", "viewer", "current"],
+    ["denied", "denied", "current"],
+    ["unknown Owner proof", "owner", "unknown"],
+  ] as const)("does not let a present PEOPLE sidecar fall through to legacy stop for %s", async (_label, role, proof) => {
+    const h = await continueThread("continue", proof);
+    await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "keep going" });
+    h.seedPeople(role);
+    const response = await h.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: threadOf(h.subject), userId: PRIYA });
+    expect(JSON.parse(response.body)).toMatchObject({ outcome: "NOT_OWNER" });
+    expect(h.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toEqual([]);
+    expect(h.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string }).kind === "cancel")).toEqual([]);
+  });
+
+  it("does not let a malformed present PEOPLE sidecar fall through to legacy stop", async () => {
+    const h = await continueThread();
+    await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "keep going" });
+    h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 0, orphaned: false, people: [] });
+    const response = await h.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: threadOf(h.subject), userId: PRIYA });
+    expect(JSON.parse(response.body)).toMatchObject({ outcome: "NOT_OWNER" });
+    expect(h.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toEqual([]);
+    expect(h.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string }).kind === "cancel")).toEqual([]);
+  });
+
+  it("fences a first PEOPLE sidecar created after absence was read before a legacy stop commits", async () => {
+    const h = await continueThread();
+    await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/continue`, { requestId: randomUUID(), instructions: "keep going" });
+    const owner = h.db.get(`DEVTASK#${h.taskId}`, "META")!.developerId as string;
+    const personId = randomUUID();
+    const createdAt = new Date().toISOString();
+    const firstPeople = { pk: `DEVTASK#${h.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
+      people: [{ developerId: owner, slackUserId: MAYA.slackUserId!, name: MAYA.name, role: "owner" }] };
+    const send = h.db.send;
+    let installed = false;
+    h.db.send = async (command) => {
+      const result = await send(command);
+      if (!installed && command.constructor.name === "GetCommand"
+        && (command.input.Key as { pk?: string; sk?: string } | undefined)?.pk === `DEVTASK#${h.taskId}`
+        && (command.input.Key as { sk?: string } | undefined)?.sk === "PEOPLE") {
+        installed = true;
+        h.db.set(firstPeople);
+        h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId,
+          developerId: owner, slackUserId: MAYA.slackUserId!, name: MAYA.name, method: "slack", issuer: SLACK_OIDC_ISSUER,
+          subject: MAYA.slackUserId!, createdAt });
+        h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `PERSON_SUBJECT#${owner}`, schemaVersion: 1, personId, developerId: owner, createdAt });
+      }
+      return result;
+    };
+    const response = await h.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: threadOf(h.subject), userId: PRIYA });
+    expect(installed).toBe(true);
+    expect(response.statusCode).toBe(409);
+    expect(JSON.parse(response.body)).toMatchObject({ error: { code: "WORKSPACE_BUSY" } });
+    expect(h.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toEqual([]);
+    expect(h.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string }).kind === "cancel")).toEqual([]);
   });
 
   it("stops nothing when the channel now serves another project (F16)", async () => {

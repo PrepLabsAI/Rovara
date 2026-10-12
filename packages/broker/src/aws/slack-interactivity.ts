@@ -15,6 +15,7 @@ import {
   SlackTeamIdSchema,
   SlackThreadSchema,
   SlackUserIdSchema,
+  TaskPeopleViewSchema,
   WORKFLOW_RESOLVE_FINDINGS_MAX,
   WorkflowSnapshotSchema,
   openReviewFindings,
@@ -34,6 +35,7 @@ import {
   type PendingConfirmation,
   type SlackRequestMessage,
   type SlackThread,
+  type TaskPeopleView,
   type WorkflowCheck,
   type WorkflowCheckPolicy,
   type WorkflowOpenFinding,
@@ -377,7 +379,8 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
         return respond(200, await dependencies.chatgptSubmission(payload));
       }
       if (callbackId !== "agentx_workflow_review_submission" && callbackId !== "agentx_workflow_checks_retry_submission" && callbackId !== "agentx_feedback_review_changes_submission"
-        && callbackId !== WORKFLOW_CLOSE_SUBMISSION && callbackId !== WORKFLOW_FINDINGS_SUBMISSION) return respond(200, { response_action: "clear" });
+        && callbackId !== WORKFLOW_CLOSE_SUBMISSION && callbackId !== WORKFLOW_FINDINGS_SUBMISSION
+        && callbackId !== "agentx_task_people_submission" && callbackId !== "agentx_task_take_ownership") return respond(200, { response_action: "clear" });
       // The close confirmation has no input to attach an error to, so a refusal replaces the modal with its reason.
       if (callbackId === WORKFLOW_CLOSE_SUBMISSION) {
         try {
@@ -387,6 +390,19 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
         } catch (error) {
           log("workflow.submission_failed", { errorName: errorName(error) });
           return respond(200, { response_action: "update", view: closeRefusedView(error instanceof WorkflowInteractionRefusal ? error.message : "I couldn't close the task. Close this form and try again.") });
+        }
+      }
+      if (callbackId === "agentx_task_take_ownership") {
+        try {
+          if (dependencies.workflow === undefined) throw new WorkflowInteractionRefusal("Task People is unavailable.");
+          await dependencies.workflow.handleSubmission(payload);
+          return respond(200, { response_action: "clear" });
+        } catch (error) {
+          log("workflow.submission_failed", { errorName: errorName(error) });
+          const current = asRecord(payload.view);
+          const blocks: unknown[] = Array.isArray(current.blocks) ? current.blocks as unknown[] : [];
+          return respond(200, { response_action: "update", view: { ...current,
+            blocks: [{ type: "section", text: { type: "mrkdwn", text: error instanceof WorkflowInteractionRefusal ? error.message : "Task ownership changed. Close this form and try again." } }, ...blocks] } });
         }
       }
       if (dependencies.workflow === undefined) {
@@ -403,6 +419,7 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
         if (error instanceof WorkflowFormErrors) return respond(200, { response_action: "errors", errors: error.errors });
         const field = callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note"
           : callbackId === WORKFLOW_FINDINGS_SUBMISSION ? firstInputBlock(asRecord(payload.view))
+          : callbackId === "agentx_task_people_submission" ? "task_person"
           : callbackId === "agentx_workflow_checks_retry_submission" || error instanceof WorkflowCheckSelectionRequired ? checksErrorBlock(asRecord(payload.view)) : "workflow_feedback";
         // A refusal the form can tell (not the owner, another workspace, a step that moved on) reads as itself.
         return respond(200, { response_action: "errors", errors: { [field]: error instanceof WorkflowCheckSelectionRequired || error instanceof WorkflowInteractionRefusal
@@ -768,11 +785,36 @@ export function createAwsSlackInteractivityHandler() {
     if (response.FunctionError !== undefined || response.Payload === undefined) throw new Error(`broker ${String(event.action)} failed`);
     return JSON.parse(Buffer.from(response.Payload).toString("utf8")) as BrokerReply;
   };
+  const taskPeopleRefusal = (answer: BrokerReply, fallback: string): WorkflowInteractionRefusal => {
+    try {
+      const message = asRecord(asRecord(JSON.parse(answer.body ?? "")).error).message;
+      return new WorkflowInteractionRefusal(typeof message === "string" && message.length > 0 ? message : fallback);
+    } catch { return new WorkflowInteractionRefusal(fallback); }
+  };
   const choices = createDynamoWorkflowChoiceStore({ documentClient, tableName: threadsTableName });
   const workflow = stateTableName && brokerFunctionName ? workflowSlackHandlers({
     async loadTask(taskId) {
       const response = await documentClient.send(new GetCommand({ TableName: stateTableName, Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConsistentRead: true, ProjectionExpression: "pk, sk, slackUserId, #share, workflow", ExpressionAttributeNames: { "#share": "share" } })) as { Item?: Record<string, unknown> };
       return response.Item;
+    },
+    async authorize(taskId, userId, thread, taskAction) {
+      const answer = await invokeBroker({ source: "agentx.slack-ingress", action: "task-people-authorize", taskId, userId, thread, taskAction }, SLACK_FETCH_TIMEOUT_MILLISECONDS);
+      if (answer.statusCode !== 200) throw new Error("task authorization refused");
+    },
+    async getPeople(input) {
+      const answer = await invokeBroker({ source: "agentx.slack-ingress", action: "task-people-read", ...input }, SLACK_FETCH_TIMEOUT_MILLISECONDS);
+      if (answer.statusCode !== 200) throw new Error("People read refused");
+      const parsed = asRecord(JSON.parse(answer.body ?? ""));
+      return TaskPeopleViewSchema.parse({ revision: parsed.revision, orphaned: parsed.orphaned, people: parsed.people,
+        canManage: parsed.canManage, canTakeOwnership: parsed.canTakeOwnership, addPeopleUrl: parsed.addPeopleUrl });
+    },
+    async changePeople(input) {
+      const answer = await invokeBroker({ source: "agentx.slack-ingress", action: "task-people-change", ...input }, SLACK_FETCH_TIMEOUT_MILLISECONDS);
+      if (answer.statusCode !== 200) throw taskPeopleRefusal(answer, "Task access changed before the role could be saved.");
+    },
+    async takePeopleOwnership(input) {
+      const answer = await invokeBroker({ source: "agentx.slack-ingress", action: "task-people-take-ownership", ...input }, SLACK_FETCH_TIMEOUT_MILLISECONDS);
+      if (answer.statusCode !== 200) throw taskPeopleRefusal(answer, "Task ownership changed before it could be saved.");
     },
     openView: async (triggerId, view) => slackApi((await secrets()).botToken, "views.open", { trigger_id: triggerId, view }),
     async submit(input) {
@@ -1034,6 +1076,30 @@ function slackActionRequestId(action: SlackBlockAction): string {
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
 }
 
+const SLACK_SECTION_TEXT_LIMIT = 3000;
+const SLACK_MODAL_BLOCK_LIMIT = 100;
+
+function taskPeopleListSections(people: TaskPeopleView["people"]): string[] {
+  if (people.length === 0) return ["No people are available."];
+  const sections: string[] = [];
+  let lines: string[] = [];
+  let length = 0;
+  for (const person of people) {
+    const line = `${person.you ? "You" : cleanLine(person.name, 80)} — ${person.role}`;
+    if (line.length > SLACK_SECTION_TEXT_LIMIT) throw new WorkflowInteractionRefusal("A task People entry cannot fit in a Slack section.");
+    const separatorLength = lines.length === 0 ? 0 : 1;
+    if (length + separatorLength + line.length > SLACK_SECTION_TEXT_LIMIT) {
+      sections.push(lines.join("\n"));
+      lines = [];
+      length = 0;
+    }
+    length += (lines.length === 0 ? 0 : 1) + line.length;
+    lines.push(line);
+  }
+  if (lines.length > 0) sections.push(lines.join("\n"));
+  return sections;
+}
+
 export function workflowSlackHandlers(deps: {
   loadTask(taskId: string): Promise<Record<string, unknown> | undefined>;
   openView(triggerId: string, view: Record<string, unknown>): Promise<void>;
@@ -1071,6 +1137,10 @@ export function workflowSlackHandlers(deps: {
   answerWorkflowChoice?(input: { thread: SlackThread; userId: string; choiceId: string; messageTs: string }): Promise<WorkflowChoiceOutcome>;
   /** Answers the member who pressed a button, privately (Slack's response_url). */
   respondEphemeral?(responseUrl: string, text: string): Promise<void>;
+  authorize?(taskId: string, userId: string, thread: SlackThread, action: "decide" | "retry" | "publish" | "feedback" | "close" | "control"): Promise<void>;
+  getPeople?(input: { taskId: string; userId: string; thread: SlackThread }): Promise<TaskPeopleView>;
+  changePeople?(input: { taskId: string; requestId: string; expectedPeopleRevision: number; slackUserId: string; role: "owner" | "commenter" | "viewer" | "denied"; userId: string; thread: SlackThread }): Promise<void>;
+  takePeopleOwnership?(input: { taskId: string; requestId: string; expectedPeopleRevision: number; userId: string; thread: SlackThread }): Promise<void>;
 }) {
   /**
    * A button whose press was handed to the broker: the member hears `ack` privately, and nothing else changes. The card
@@ -1088,12 +1158,21 @@ export function workflowSlackHandlers(deps: {
   const sameWorkspace = (userTeamId: string, workspaceTeamId: string, thread: SlackThread, refusal: string): void => {
     if (workspaceTeamId !== thread.teamId || userTeamId !== thread.teamId) throw new WorkflowInteractionRefusal(refusal);
   };
+  const requireOwnerAction = async (task: Record<string, unknown>, taskId: string, userId: string, thread: SlackThread,
+    action: "decide" | "retry" | "publish" | "feedback" | "close" | "control", legacyMessage: string, mention = true): Promise<void> => {
+    if (deps.authorize !== undefined) {
+      try { await deps.authorize(taskId, userId, thread, action); } catch { throw new WorkflowInteractionRefusal(legacyMessage); }
+      return;
+    }
+    if (task.slackUserId !== userId) {
+      const owner = SlackUserIdSchema.safeParse(task.slackUserId);
+      throw new WorkflowInteractionRefusal(mention && owner.success ? legacyMessage.replace("the task owner", `<@${owner.data}>`) : legacyMessage);
+    }
+  };
   const currentFeedbackReview = async (value: FeedbackReviewActionValue, userId: string, userTeamId: string, workspaceTeamId: string, thread: SlackThread) => {
     const task = await deps.loadTask(value.taskId);
-    if (!task || task.slackUserId !== userId) {
-      const owner = SlackUserIdSchema.safeParse(task?.slackUserId);
-      throw new WorkflowInteractionRefusal(owner.success ? `Only <@${owner.data}> can decide this PR feedback.` : "Only the task owner can decide this PR feedback.");
-    }
+    if (!task) throw new WorkflowInteractionRefusal(WORKFLOW_BUTTON_OUT_OF_DATE);
+    await requireOwnerAction(task, value.taskId, userId, thread, "feedback", "Only the task owner can decide this PR feedback.");
     const share = asRecord(task.share);
     if (workspaceTeamId !== thread.teamId || userTeamId !== thread.teamId || share.teamId !== thread.teamId
       || share.channelId !== thread.channelId || share.threadTs !== thread.threadTs) throw new WorkflowInteractionRefusal("This PR feedback belongs to another Slack workspace or thread.");
@@ -1119,10 +1198,8 @@ export function workflowSlackHandlers(deps: {
   const loadOwnedThreadTask = async (value: WorkflowActionValue, who: { userId: string; userTeamId: string; workspaceTeamId: string }, thread: SlackThread) => {
     sameWorkspace(who.userTeamId, who.workspaceTeamId, thread, "This approval must be used from the task's AgentX workspace.");
     const task = await deps.loadTask(value.taskId);
-    if (!task || task.slackUserId !== who.userId) {
-      const owner = SlackUserIdSchema.safeParse(task?.slackUserId);
-      throw new WorkflowInteractionRefusal(owner.success ? `Only <@${owner.data}> can approve this step.` : "Only the task owner can approve this step.");
-    }
+    if (!task) throw new WorkflowInteractionRefusal(WORKFLOW_APPROVAL_OUT_OF_DATE);
+    await requireOwnerAction(task, value.taskId, who.userId, thread, "decide", "Only the task owner can approve this step.");
     const share = asRecord(task.share);
     if (share.teamId !== thread.teamId || share.channelId !== thread.channelId || share.threadTs !== thread.threadTs) throw new WorkflowInteractionRefusal("This approval belongs to another Slack thread.");
     const parsed = WorkflowSnapshotSchema.safeParse(task.workflow);
@@ -1171,10 +1248,8 @@ export function workflowSlackHandlers(deps: {
       throw new WorkflowInteractionRefusal("This button must be used from the task's AgentX workspace.");
     }
     const task = await deps.loadTask(input.taskId);
-    if (!task || task.slackUserId !== input.userId) {
-      const owner = SlackUserIdSchema.safeParse(task?.slackUserId);
-      throw new WorkflowInteractionRefusal(owner.success ? `Only <@${owner.data}> can ${what}.` : `Only the task owner can ${what}.`);
-    }
+    if (!task) throw new WorkflowInteractionRefusal(STALE_WORKFLOW_BUTTON);
+    await requireOwnerAction(task, input.taskId, input.userId, input.thread, "control", `Only the task owner can ${what}.`);
     const share = asRecord(task.share);
     if (share.teamId !== input.thread.teamId || share.channelId !== input.thread.channelId || share.threadTs !== input.thread.threadTs) {
       throw new WorkflowInteractionRefusal("This button belongs to another Slack thread.");
@@ -1196,7 +1271,8 @@ export function workflowSlackHandlers(deps: {
   };
   const currentVerificationRetry = async (taskId: string, revision: number, userId: string, thread: SlackThread) => {
     const task = await deps.loadTask(taskId);
-    if (!task || task.slackUserId !== userId) throw new WorkflowInteractionRefusal("Only the task owner can retry verification.");
+    if (!task) throw new WorkflowInteractionRefusal("This verification retry is no longer available.");
+    await requireOwnerAction(task, taskId, userId, thread, "retry", "Only the task owner can retry verification.");
     const share = asRecord(task.share);
     if (share.teamId !== thread.teamId || share.channelId !== thread.channelId || share.threadTs !== thread.threadTs) {
       throw new WorkflowInteractionRefusal("This verification retry belongs to another Slack thread.");
@@ -1211,7 +1287,8 @@ export function workflowSlackHandlers(deps: {
   };
   const currentReviewRetry = async (taskId: string, revision: number, candidateDigest: string, userId: string, thread: SlackThread) => {
     const task = await deps.loadTask(taskId);
-    if (!task || task.slackUserId !== userId) throw new WorkflowInteractionRefusal("Only the task owner can retry reviews.");
+    if (!task) throw new WorkflowInteractionRefusal("This review retry is no longer available.");
+    await requireOwnerAction(task, taskId, userId, thread, "retry", "Only the task owner can retry reviews.");
     const share = asRecord(task.share);
     if (share.teamId !== thread.teamId || share.channelId !== thread.channelId || share.threadTs !== thread.threadTs) {
       throw new WorkflowInteractionRefusal("This review retry belongs to another Slack thread.");
@@ -1226,6 +1303,41 @@ export function workflowSlackHandlers(deps: {
   };
   return {
     async handleAction(action: SlackBlockAction) {
+      if (action.actionId === "agentx_task_people") {
+        let value: Record<string, unknown>;
+        try { value = asRecord(JSON.parse(action.value)); } catch { throw new WorkflowInteractionRefusal(STALE_WORKFLOW_BUTTON); }
+        if (typeof value.taskId !== "string" || !CHANGE_ID.test(value.taskId) || action.triggerId === "") throw new WorkflowInteractionRefusal(STALE_WORKFLOW_BUTTON);
+        sameWorkspace(action.userTeamId, action.workspaceTeamId, action.thread, "This People form belongs to another Slack workspace.");
+        if (deps.getPeople === undefined) throw new WorkflowInteractionRefusal("Task People is unavailable.");
+        let people: TaskPeopleView;
+        try { people = await deps.getPeople({ taskId: value.taskId, userId: action.userId, thread: action.thread }); }
+        catch { throw new WorkflowInteractionRefusal("Task People is unavailable."); }
+        const metadata = JSON.stringify({ taskId: value.taskId, expectedPeopleRevision: people.revision, requestId: slackActionRequestId(action), thread: action.thread });
+        const listBlocks = taskPeopleListSections(people.people).map((text) => ({ type: "section", text: { type: "mrkdwn", text } }));
+        if (people.canTakeOwnership && !people.canManage) {
+          const blocks = [...listBlocks, { type: "section", text: { type: "mrkdwn", text: "This task has no current owner. Taking ownership does not restart it." } }];
+          if (blocks.length > SLACK_MODAL_BLOCK_LIMIT) throw new WorkflowInteractionRefusal("The complete task People list is too large to open in Slack.");
+          await deps.openView(action.triggerId, { type: "modal", callback_id: "agentx_task_take_ownership", private_metadata: metadata,
+            title: { type: "plain_text", text: "Task people" }, submit: { type: "plain_text", text: "Take ownership" }, close: { type: "plain_text", text: "Cancel" },
+            blocks });
+          return;
+        }
+        const blocks: Array<Record<string, unknown>> = [...listBlocks];
+        if (people.canManage) blocks.push(
+          { type: "input", block_id: "task_person", label: { type: "plain_text", text: "Person" }, element: { type: "users_select", action_id: "person", placeholder: { type: "plain_text", text: "Choose a person" } } },
+          { type: "input", block_id: "task_role", label: { type: "plain_text", text: "Role" }, element: { type: "static_select", action_id: "role", options: [
+            { text: { type: "plain_text", text: "Add to channel and make owner" }, value: "owner" },
+            { text: { type: "plain_text", text: "Commenter" }, value: "commenter" },
+            { text: { type: "plain_text", text: "Viewer" }, value: "viewer" },
+            { text: { type: "plain_text", text: "Remove access" }, value: "denied" },
+          ] } },
+        );
+        if (blocks.length > SLACK_MODAL_BLOCK_LIMIT) throw new WorkflowInteractionRefusal("The complete task People list is too large to open in Slack.");
+        await deps.openView(action.triggerId, { type: "modal", callback_id: "agentx_task_people_submission", private_metadata: metadata,
+          title: { type: "plain_text", text: "Task people" }, ...(people.canManage ? { submit: { type: "plain_text", text: "Save role" } } : {}),
+          close: { type: "plain_text", text: "Close" }, blocks });
+        return;
+      }
       if (action.actionId === WORKFLOW_PATH_ANSWER_ACTION) {
         let choiceId: unknown;
         try { choiceId = asRecord(JSON.parse(action.value)).choiceId; } catch { choiceId = undefined; }
@@ -1352,7 +1464,8 @@ export function workflowSlackHandlers(deps: {
         if (taskId === undefined || !Number.isInteger(retry.revision)) throw new WorkflowInteractionRefusal("This retry is no longer available.");
         if (action.workspaceTeamId !== action.thread.teamId || action.userTeamId !== action.thread.teamId) throw new WorkflowInteractionRefusal("This retry must be used from the task's AgentX workspace.");
         const task = await deps.loadTask(taskId);
-        if (!task || task.slackUserId !== action.userId) throw new WorkflowInteractionRefusal("Only the task owner can retry opening the pull request.");
+        if (!task) throw new WorkflowInteractionRefusal("This retry is no longer available.");
+        await requireOwnerAction(task, taskId, action.userId, action.thread, "publish", "Only the task owner can retry opening the pull request.", false);
         const share = asRecord(task.share);
         if (share.teamId !== action.thread.teamId || share.channelId !== action.thread.channelId || share.threadTs !== action.thread.threadTs) {
           throw new WorkflowInteractionRefusal("This retry belongs to another Slack thread.");
@@ -1374,10 +1487,8 @@ export function workflowSlackHandlers(deps: {
         if (taskId === undefined || reviewDigest === undefined) throw new WorkflowInteractionRefusal(FEEDBACK_REVIEW_CHANGED);
         sameWorkspace(action.userTeamId, action.workspaceTeamId, action.thread, "This review belongs to another Slack workspace or thread.");
         const task = await deps.loadTask(taskId);
-        if (!task || task.slackUserId !== action.userId) {
-          const owner = SlackUserIdSchema.safeParse(task?.slackUserId);
-          throw new WorkflowInteractionRefusal(owner.success ? `Only <@${owner.data}> can retry this review.` : "Only the task owner can retry this review.");
-        }
+        if (!task) throw new WorkflowInteractionRefusal("This review retry is no longer available.");
+        await requireOwnerAction(task, taskId, action.userId, action.thread, "feedback", "Only the task owner can retry this review.");
         const share = asRecord(task.share);
         if (share.teamId !== action.thread.teamId || share.channelId !== action.thread.channelId || share.threadTs !== action.thread.threadTs) {
           throw new WorkflowInteractionRefusal("This review belongs to another Slack workspace or thread.");
@@ -1475,6 +1586,36 @@ export function workflowSlackHandlers(deps: {
     },
     async handleSubmission(payload: Record<string, unknown>) {
       const view = asRecord(payload.view);
+      if (view.callback_id === "agentx_task_people_submission" || view.callback_id === "agentx_task_take_ownership") {
+        let metadata: Record<string, unknown>;
+        try { metadata = asRecord(JSON.parse(typeof view.private_metadata === "string" ? view.private_metadata : "")); }
+        catch { throw new WorkflowInteractionRefusal("This People request is no longer available."); }
+        const taskId = typeof metadata.taskId === "string" && CHANGE_ID.test(metadata.taskId) ? metadata.taskId : undefined;
+        const requestId = typeof metadata.requestId === "string" && CHANGE_ID.test(metadata.requestId) ? metadata.requestId : undefined;
+        const revision = metadata.expectedPeopleRevision;
+        const submittedThread = SlackThreadSchema.safeParse(metadata.thread);
+        const user = SlackUserIdSchema.safeParse(asRecord(payload.user).id);
+        const userTeam = SlackTeamIdSchema.safeParse(asRecord(payload.user).team_id);
+        const workspaceTeam = SlackTeamIdSchema.safeParse(asRecord(payload.team).id);
+        if (taskId === undefined || requestId === undefined || !Number.isSafeInteger(revision) || Number(revision) < 1 || !submittedThread.success || !user.success
+          || !userTeam.success || !workspaceTeam.success || userTeam.data !== submittedThread.data.teamId || workspaceTeam.data !== submittedThread.data.teamId) {
+          throw new WorkflowInteractionRefusal("This People request belongs to another Slack workspace.");
+        }
+        if (view.callback_id === "agentx_task_take_ownership") {
+          if (deps.takePeopleOwnership === undefined) throw new WorkflowInteractionRefusal("Task People is unavailable.");
+          await deps.takePeopleOwnership({ taskId, requestId, expectedPeopleRevision: Number(revision), userId: user.data, thread: submittedThread.data });
+          return;
+        }
+        const values = asRecord(asRecord(view.state).values);
+        const slackUserId = SlackUserIdSchema.safeParse(asRecord(asRecord(values.task_person).person).selected_user);
+        const roleValue = asRecord(asRecord(asRecord(values.task_role).role).selected_option).value;
+        if (!slackUserId.success || (roleValue !== "owner" && roleValue !== "commenter" && roleValue !== "viewer" && roleValue !== "denied")) {
+          throw new WorkflowFormErrors({ task_person: "Choose a current workspace member and role." });
+        }
+        if (deps.changePeople === undefined) throw new WorkflowInteractionRefusal("Task People is unavailable.");
+        await deps.changePeople({ taskId, requestId, expectedPeopleRevision: Number(revision), slackUserId: slackUserId.data, role: roleValue, userId: user.data, thread: submittedThread.data });
+        return;
+      }
       if (view.callback_id === WORKFLOW_CLOSE_SUBMISSION) {
         let metadata: Record<string, unknown>;
         try { metadata = asRecord(JSON.parse(typeof view.private_metadata === "string" ? view.private_metadata : "")); }

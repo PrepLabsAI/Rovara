@@ -138,6 +138,18 @@ describe("conversations.members (FR-013)", () => {
 });
 
 describe("fresh task person proof", () => {
+  it("lists a complete fresh bounded channel directory without reusing warm membership", async () => {
+    const channels = { C0PAY0001: ["U0MAYA001", "U0OTHER01"] };
+    const { dir } = directory([
+      { userId: "U0MAYA001", name: "Maya Chen" },
+      { userId: "U0OTHER01", name: "Other Owner" },
+    ], channels);
+    await dir.channelMembers("U0OTHER01", ["C0PAY0001"]);
+    channels.C0PAY0001 = ["U0MAYA001"];
+    await expect(dir.taskChannelPeople(["C0PAY0001"])).resolves.toEqual({ ok: true, users: [
+      { id: "U0MAYA001", teamId: TEAM, name: "Maya Chen", memberOf: ["C0PAY0001"] },
+    ] });
+  });
   it("warm_membership_cache_does_not_keep_departed_owner_authorized", async () => {
     const channels = { C0PAY0001: ["U0MAYA001"] };
     const { dir, fetch } = directory([{ userId: "U0MAYA001", name: "Maya Chen" }], channels);
@@ -195,21 +207,21 @@ describe("fresh task person proof", () => {
 
   it("rejects a deleted, bot, foreign, Slack Connect, mismatched, or malformed user", async () => {
     const base = { ok: true, user: { id: "U0MAYA001", team_id: TEAM, deleted: false, is_bot: false, real_name: "Maya Chen" } };
-    const cases: unknown[] = [
-      { ...base, user: { ...base.user, deleted: true } },
-      { ...base, user: { ...base.user, is_bot: true } },
-      { ...base, user: { ...base.user, team_id: "T0OTHER1" } },
-      { ...base, user: { ...base.user, is_stranger: true } },
-      { ...base, user: { ...base.user, id: "U0OTHER01" } },
-      { ...base, user: { ...base.user, id: "not-a-slack-id" } },
-      { ok: true, user: null },
+    const cases: Array<{ reply: unknown; error: "ineligible" | "slack_unavailable" }> = [
+      { reply: { ...base, user: { ...base.user, deleted: true } }, error: "ineligible" },
+      { reply: { ...base, user: { ...base.user, is_bot: true } }, error: "ineligible" },
+      { reply: { ...base, user: { ...base.user, team_id: "T0OTHER1" } }, error: "ineligible" },
+      { reply: { ...base, user: { ...base.user, is_stranger: true } }, error: "ineligible" },
+      { reply: { ...base, user: { ...base.user, id: "U0OTHER01" } }, error: "slack_unavailable" },
+      { reply: { ...base, user: { ...base.user, id: "not-a-slack-id" } }, error: "slack_unavailable" },
+      { reply: { ok: true, user: null }, error: "slack_unavailable" },
     ];
-    for (const reply of cases) {
+    for (const { reply, error } of cases) {
       const fetch: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
         ? Response.json(reply)
         : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
       const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0 });
-      await expect(dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error: "ineligible" });
+      await expect(dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error });
     }
   });
 
@@ -221,14 +233,45 @@ describe("fresh task person proof", () => {
     const withoutFlags = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch: fetchWithoutFlags, now: () => T0 });
     await expect(withoutFlags.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toMatchObject({ ok: true });
 
-    const malformedFlags: Array<Record<string, unknown>> = [{ deleted: [] }, { is_stranger: {} }];
+    const malformedFlags: Array<Record<string, unknown>> = [{ deleted: [] }, { is_bot: [] }, { is_stranger: {} }];
     for (const fields of malformedFlags) {
       const fetch: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
         ? Response.json({ ...eligible, user: { ...eligible.user, ...fields } })
         : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
       const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0 });
-      await expect(dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error: "ineligible" });
+      await expect(dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error: "slack_unavailable" });
     }
+  });
+
+  it("requires readable primary and enterprise membership facts before deciding task-person eligibility", async () => {
+    const base = { id: "U0MAYA001", team_id: TEAM, is_bot: false };
+    const unknownUsers: unknown[] = [
+      { id: base.id, is_bot: false },
+      { ...base, team_id: [TEAM] },
+      { ...base, team_id: "T0OTHER1", enterprise_user: null },
+      { ...base, team_id: "T0OTHER1", enterprise_user: { teams: TEAM } },
+      { ...base, team_id: "T0OTHER1", enterprise_user: { teams: [TEAM, {}] } },
+      { id: base.id, team_id: TEAM },
+    ];
+    for (const user of unknownUsers) {
+      const fetch: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
+        ? Response.json({ ok: true, user })
+        : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
+      const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0 });
+      await expect(dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error: "slack_unavailable" });
+    }
+
+    const linkedFetch: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
+      ? Response.json({ ok: true, user: { ...base, team_id: "T0OTHER1", enterprise_user: { teams: [TEAM] } } })
+      : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
+    const linked = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch: linkedFetch, now: () => T0 });
+    await expect(linked.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toMatchObject({ ok: true });
+
+    const foreignFetch: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
+      ? Response.json({ ok: true, user: { ...base, team_id: "T0OTHER1" } })
+      : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
+    const foreign = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch: foreignFetch, now: () => T0 });
+    await expect(foreign.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error: "ineligible" });
   });
 
   it("fails closed on malformed members, partial paging, caps, and timeouts", async () => {

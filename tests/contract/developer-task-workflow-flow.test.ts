@@ -216,6 +216,17 @@ describe("native developer task workflow", () => {
         return { subject: { developerId, slackUserId: who.slackUserId! }, identity: { developerId, slackUserId: who.slackUserId!, name: who.name, method: "slack", issuer: "https://slack.com", subject: who.slackUserId! },
           eligible: eligible.get(developerId) !== false, channelMember: eligible.get(developerId) !== false };
       },
+      createTaskPeopleDisplayAdmission: () => ({
+        assertOpen() {}, admitIdentity() {}, noteNativeIdentity() {}, close() {},
+        async proof() { throw new Error("unused direct display proof"); },
+        async directory() { throw new Error("unused direct display directory"); },
+      }),
+      listTaskPeople: () => Promise.resolve([creator, nextOwner].map((who) => {
+        const eligibleNow = eligible.get(who.developerId) !== false;
+        return { subject: { developerId: who.developerId, slackUserId: who.slackUserId! },
+          identity: { developerId: who.developerId, slackUserId: who.slackUserId!, name: who.name, method: "slack" as const, issuer: "https://slack.com", subject: who.slackUserId! },
+          eligible: eligibleNow, channelMember: eligibleNow };
+      })),
     };
     expect(await guardTaskDispatch(peopleDeps, outbox as never)).toBe("PARKED");
     expect(harness.db.get(`OUTBOX#${outboxId}`, "OUTBOX")?.status).toBe("WAITING_FOR_TASK_ACCESS");
@@ -1525,6 +1536,47 @@ describe("native developer task workflow", () => {
     expect(shared.workflowThread).toBeUndefined();
     const stop = await harness.handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: MAYA.slackUserId });
     expect(JSON.parse(stop.body)).toMatchObject({ outcome: "NOTHING_RUNNING" });
+  });
+
+  it("uses current People control authority for an API-created continue share", async () => {
+    const creatorSlack = "U0R3OWN01";
+    const ownerSlack = "U0R3OWN02";
+    const creator: Developer = { developerId: developerIdForSlackUser(creatorSlack), name: creatorSlack, provider: "slack", sessionId: "s-r3-shared-creator", slackUserId: creatorSlack };
+    const harness = await createDeveloperTaskBroker({
+      channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }),
+      developerExtra: { taskPeopleConfiguration: { peopleChangesEnabled: true },
+        taskPersonProof: async (request) => ({ ok: true, user: { id: request.slackUserId, teamId: SLACK_TEAM, name: request.slackUserId }, memberOf: request.channelIds }) },
+    });
+    harness.db.set({ pk: `SESSION#${creator.sessionId}`, sk: "META", sessionId: creator.sessionId, developerId: creator.developerId,
+      amr: "slack", slackUserId: creatorSlack, startedAt: new Date(Date.now() - 1_000).toISOString(), endsAt: Math.floor(Date.now() / 1_000) + 3_600 });
+    harness.db.set({ pk: `DEVELOPER#${creator.developerId}`, sk: "META", developerId: creator.developerId, provider: "slack", issuer: "https://slack.com",
+      subject: creatorSlack, slackUserId: creatorSlack, displayName: creatorSlack, firstSignInAt: "x", lastSignInAt: "x", revoked: false });
+    const started = await harness.dev(creator, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Shared control fixture",
+      client: "mcp-review", workflow: true, workflowPath: "QUICK", shareToChannel: true, shareMode: "continue" });
+    expect(started.status).toBe(200);
+    const taskId = String((started.body.task as { taskId: string }).taskId);
+    const task = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workspaceId: string };
+    const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000181" };
+    markThreadPosted(harness.db, taskId, thread.threadTs);
+    const prepare = operations(harness, task.workspaceId).find((item) => item.kind === "prepare")!;
+    await harness.finish(task.workspaceId, String(prepare.id), "SUCCEEDED", PREPARED);
+    const people = [
+      { developerId: creator.developerId, slackUserId: creatorSlack, name: creatorSlack, role: "viewer" },
+      { developerId: developerIdForSlackUser(ownerSlack), slackUserId: ownerSlack, name: ownerSlack, role: "owner" },
+    ];
+    harness.db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people });
+    for (const person of people) {
+      const personId = randomUUID();
+      harness.db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId, developerId: person.developerId,
+        slackUserId: person.slackUserId, name: person.name, method: "slack", issuer: "https://slack.com", subject: person.slackUserId, createdAt: new Date().toISOString() });
+      harness.db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON_SUBJECT#${person.developerId}`, schemaVersion: 1, personId, developerId: person.developerId, createdAt: new Date().toISOString() });
+    }
+    const refused = await harness.handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: creatorSlack });
+    expect(JSON.parse(refused.body)).toMatchObject({ outcome: "NOT_OWNER" });
+    expect(operations(harness, task.workspaceId).filter((item) => item.kind === "cancel")).toHaveLength(0);
+    const accepted = await harness.handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: ownerSlack });
+    expect(JSON.parse(accepted.body)).toMatchObject({ outcome: "CANCEL_REQUESTED" });
+    expect(operations(harness, task.workspaceId).filter((item) => item.kind === "cancel")).toHaveLength(1);
   });
 
   it("accepts a Slack owner's workflow approval using the same stable developer identity as task start", async () => {

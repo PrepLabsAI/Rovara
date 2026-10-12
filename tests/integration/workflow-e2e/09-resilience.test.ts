@@ -4,12 +4,24 @@
 // ways, the item size limit, and DynamoDB's map order on every read [LIVE-BUG B3]. 9.13 (old stored records) is covered by
 // slack-workflow-e2e.test.ts.
 import { describe, expect, it } from "vitest";
-import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, WORKFLOW_PLAN_MAX_BYTES } from "@agentx/contracts";
-import { LOST_COMPUTE_ERROR, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
+import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, WORKFLOW_PLAN_MAX_BYTES, WorkerInvocationSchema, WorkflowSnapshotSchema,
+  type TaskPersonProofRequest,
+  type Ec2RuntimeBinding, type WorkerInvocation } from "@agentx/contracts";
+import { createEc2Delivery } from "../../../packages/broker/src/aws/ec2-delivery.js";
+import type { Ec2OutboxRecord } from "../../../packages/broker/src/aws/lambda.js";
+import { LOST_COMPUTE_ERROR, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
+import type { CheckTaskPerson } from "../../../packages/broker/src/developer/task-people.js";
 import { DYNAMODB_ITEM_MAX_BYTES } from "../../support/fake-dynamodb.js";
 import { planAnswer, planDocument } from "../../support/plan-documents.js";
 import { visibleSlackText } from "../../support/strict-slack.js";
 import { EDITS, MERGED, OPENED_PR, PLAN, PUSHED_FIX, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
+import { loadRollback0212Parser } from "../../support/rollback-0212-parser.js";
+
+/** Feature list exported by the source commit pinned in rollback-0.2.12/provenance.json. */
+const ROLLBACK_0212_WORKER_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks",
+  "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree",
+  "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate",
+  "task.codeAnchors", "task.workflowReviewFeedback"] as const;
 
 const READY_ONE = /^PR feedback is ready: 1 comment; 1 recommendation\./;
 const STILL_WATCHING = "I'm still watching the pull request and will finish this task when it's merged.";
@@ -37,6 +49,25 @@ function feedbackFindings(prompt: string): unknown[] {
 const delivery = (e2e: WorkflowE2E, id: string) => e2e.db.get(`GITHUB_DELIVERY#${id}`, "META");
 const fixPushes = (e2e: WorkflowE2E) => e2e.github.pushLog.filter((push) => push.during === "maintain" && e2e.github.tokens.has(push.token));
 const posted = (e2e: WorkflowE2E, prefix: string) => e2e.slack.posts.filter((post) => visibleSlackText(post.text).startsWith(prefix));
+
+function retainOwner(e2e: WorkflowE2E): void {
+  const taskId = e2e.taskId();
+  const task = e2e.db.get(`DEVTASK#${taskId}`, "META")!;
+  e2e.db.set({
+    pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
+    people: [{ developerId: task.developerId, slackUserId: task.slackUserId, name: task.developerName, role: "owner" }],
+  });
+}
+
+const freshOwner = (eligible = true): CheckTaskPerson => async (task, developerId) => {
+  if (task.slackUserId === undefined) throw new Error("the workflow owner has no Slack identity");
+  return {
+    subject: { developerId, slackUserId: task.slackUserId },
+    identity: { developerId, slackUserId: task.slackUserId, name: "Maya Chen", method: "slack",
+      issuer: "https://issuer.example", subject: task.slackUserId },
+    eligible, channelMember: eligible,
+  };
+};
 
 async function merged(e2e: WorkflowE2E, number: number): Promise<void> {
   e2e.github.merge(number);
@@ -150,7 +181,7 @@ describe("Suite 9: resilience", () => {
     const approvedFirst = decisions.find((decision) => decision.decision === "APPROVE");
     if (approvedFirst === undefined) {
       // The approval was refused as stale, and the new feedback reviewed.
-      expect(e2e.slack.ephemerals.map((message) => message.text)).toContain("The feedback changed since this card; a new review is starting.");
+      expect(e2e.slack.ephemerals.map((message) => message.text)).toContain("That approval is out of date. Use the latest message in this thread.");
       expect(counts.feedback).toBe(2);
     } else {
       // The fix went ahead bound to the first comment only; the second is reviewed after the push.
@@ -543,6 +574,206 @@ describe("Suite 9: resilience", () => {
     const reads = e2e.db.readOrders.get("DEVTASK#META")!;
     expect(reads.reads).toBeGreaterThan(50);
     expect(reads.reordered).toBe(reads.reads);
+    void logged;
+  }, 120_000);
+
+  it("9.20 an accepted coding run with retained People but unavailable proof stays parked through redelivery and recovery", async () => {
+    const unavailableProof: CheckTaskPerson = async () => { throw new Error("fresh identity proof is unavailable"); };
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: { changesEnabled: false, checkTaskPerson: unavailableProof } });
+    await atPlanReview(e2e);
+    const runsBeforeApproval = e2e.invocations.length;
+    const charge = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge);
+    await e2e.click("agentx_workflow_approve");
+    await expect(e2e.settle(0)).rejects.toThrow("the workflow did not settle within 0 steps");
+    const queued = e2e.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
+    retainOwner(e2e);
+    const people = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")!);
+    await e2e.settle();
+    expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({
+      status: "WAITING_FOR_TASK_ACCESS", operationId: queued.operationId, invocation: queued.invocation,
+    });
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge).toEqual(charge);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+    expect(people).toMatchObject({ revision: 1, orphaned: false, people: [expect.objectContaining({ role: "owner" })] });
+    expect(e2e.invocations).toHaveLength(runsBeforeApproval);
+    expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+    expect(e2e.dispatchReceipts.filter((receipt) => receipt.operationId === queued.operationId)).toEqual([
+      { operationId: queued.operationId, phase: "DISPATCH_GUARD", outcome: "PARKED" },
+    ]);
+    expect(await e2e.worker.dispatchAgain(String(queued.operationId), 9)).toBe(false);
+    expect((await e2e.runRecovery()).lostOperations).toEqual([]);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+    e2e.worker.taskPerson(freshOwner());
+    const receiptsBeforeProofRecovery = e2e.dispatchReceipts.length;
+    const turnsBeforeProofRecovery = e2e.turns.length;
+    expect(await e2e.worker.dispatchAgain(String(queued.operationId))).toBe(false);
+    expect((await e2e.runRecovery()).lostOperations).toEqual([]);
+    expect(await e2e.worker.dispatchAgain(String(queued.operationId), 99)).toBe(false);
+    expect(e2e.db.get(String(queued.pk), String(queued.sk))?.status).toBe("WAITING_FOR_TASK_ACCESS");
+    expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({ operationId: queued.operationId, invocation: queued.invocation });
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge).toEqual(charge);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+    expect(e2e.dispatchReceipts.slice(receiptsBeforeProofRecovery)).toEqual([
+      { operationId: queued.operationId, phase: "DISPATCH_GUARD", outcome: "PARKED" },
+      { operationId: queued.operationId, phase: "DISPATCH_GUARD", outcome: "PARKED" },
+    ]);
+    expect(e2e.invocations).toHaveLength(runsBeforeApproval);
+    expect(e2e.turns).toHaveLength(turnsBeforeProofRecovery);
+    expect(e2e.worker.deliveryFailures).toEqual([]);
+    void logged;
+  }, 120_000);
+
+  it("9.21 a freshly authorized retained owner passes both dispatch guards and reaches the worker", async () => {
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: { changesEnabled: false, checkTaskPerson: freshOwner() } });
+    await atPlanReview(e2e);
+    await e2e.click("agentx_workflow_approve");
+    retainOwner(e2e);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "REVIEW", state: "WAITING" });
+    const implement = e2e.invocations.find((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "IMPLEMENT")!;
+    expect(e2e.dispatchReceipts.filter((receipt) => receipt.operationId === implement.operationId)).toEqual([
+      { operationId: implement.operationId, phase: "DISPATCH_GUARD", outcome: "ALLOWED" },
+      { operationId: implement.operationId, phase: "EC2_GUARD", outcome: "ALLOWED" },
+      { operationId: implement.operationId, phase: "FEATURE_PROBE" },
+      { operationId: implement.operationId, phase: "EC2_GUARD", outcome: "ALLOWED" },
+      { operationId: implement.operationId, phase: "POST" },
+    ]);
+    void logged;
+  }, 120_000);
+
+  it("9.22 owner loss during the asynchronous feature probe is caught by the final guard before POST", async () => {
+    let eligible = true;
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
+      checkTaskPerson: async (task, developerId) => freshOwner(eligible)(task, developerId),
+    } });
+    await atPlanReview(e2e);
+    await e2e.click("agentx_workflow_approve");
+    await expect(e2e.settle(0)).rejects.toThrow("the workflow did not settle within 0 steps");
+    const queued = e2e.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
+    retainOwner(e2e);
+    e2e.worker.beforeFeatureProbe(() => { eligible = false; });
+    const runsBeforeApproval = e2e.invocations.length;
+    await e2e.settle();
+    expect(e2e.dispatchReceipts.filter((receipt) => receipt.operationId === queued.operationId)).toEqual([
+      { operationId: queued.operationId, phase: "DISPATCH_GUARD", outcome: "ALLOWED" },
+      { operationId: queued.operationId, phase: "EC2_GUARD", outcome: "ALLOWED" },
+      { operationId: queued.operationId, phase: "FEATURE_PROBE" },
+      { operationId: queued.operationId, phase: "EC2_GUARD", outcome: "PARKED" },
+    ]);
+    expect(e2e.db.get(String(queued.pk), String(queued.sk))?.status).toBe("WAITING_FOR_TASK_ACCESS");
+    expect(e2e.invocations).toHaveLength(runsBeforeApproval);
+    void logged;
+  }, 120_000);
+
+  it("9.23 merge recovery still queues and releases cleanup exactly once when retained People proof is unavailable", async () => {
+    const { e2e, pullRequest } = await waiting({ taskPeople: { changesEnabled: false } });
+    retainOwner(e2e);
+    const task = e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META") as { charge: { member: { pk: string; sk: string } } };
+    const member = task.charge.member;
+    expect(e2e.db.get(member.pk, member.sk)?.count).toBe(1);
+    e2e.github.merge(pullRequest.number);
+    e2e.clock.advance(5 * 60_000);
+    expect((await e2e.runMergeRecovery()).body).toMatchObject({ attempted: 1, reconciled: 1, deferred: 0 });
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE", outcome: "MERGED" });
+    expect(e2e.db.get("FINISHED_RELEASE", `TASK#${e2e.taskId()}`)).toBeDefined();
+    expect(e2e.deleteEc2Session).not.toHaveBeenCalled();
+    expect(e2e.db.get(member.pk, member.sk)?.count).toBe(1);
+    await e2e.runRecovery();
+    await e2e.settle();
+    expect(e2e.db.get(member.pk, member.sk)?.count).toBe(0);
+    expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
+    await e2e.runRecovery();
+    expect(e2e.db.get(member.pk, member.sk)?.count).toBe(0);
+    expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
+    void logged;
+  }, 120_000);
+
+  it("9.24 the pinned 0.2.12 parser accepts a current candidate-bearing final snapshot and broker-only People adds no worker fields", async () => {
+    const parser = await loadRollback0212Parser();
+    const ownerProofRequests: TaskPersonProofRequest[] = [];
+    const { e2e, pullRequest } = await waiting({ taskPeople: { changesEnabled: false, checkTaskPerson: freshOwner(),
+      taskPersonProof: async (request: TaskPersonProofRequest) => {
+        ownerProofRequests.push(request);
+        if (request.slackUserId !== SLACK_MAYA.slackUserId) return { ok: false, error: "ineligible" };
+        const channelId = "C0123456789";
+        return { ok: true, user: { id: SLACK_MAYA.slackUserId, teamId: "T0BSHLLUGBD", name: SLACK_MAYA.name },
+          memberOf: request.channelIds.includes(channelId) ? [channelId] : [] };
+      } } });
+    retainOwner(e2e);
+    const snapshot = e2e.workflow();
+    const candidate = snapshot.candidate!;
+    expect(snapshot).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(candidate.digest).toMatch(/^[0-9a-f]{64}$/);
+    expect(snapshot.verification?.candidateDigest).toBe(candidate.digest);
+    expect(candidate.repositories[0]!.treeSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(snapshot.reviews).toEqual(expect.arrayContaining([expect.objectContaining({ candidateDigest: snapshot.candidate!.digest })]));
+    expect(WorkflowSnapshotSchema.safeParse(snapshot).success).toBe(true);
+    expect(parser.WorkflowSnapshotSchema.safeParse(snapshot).success).toBe(true);
+    const initialTaskInvocations = e2e.invocations.filter((invocation) => invocation.kind === "task");
+    expect(initialTaskInvocations.length).toBeGreaterThan(0);
+    for (const invocation of initialTaskInvocations) {
+      expect(Object.prototype.hasOwnProperty.call(invocation.payload, "people")).toBe(false);
+      expect(Object.prototype.hasOwnProperty.call(invocation.payload, "taskPeople")).toBe(false);
+    }
+
+    const comment = e2e.github.comment(pullRequest.number, "octocat", "Please trim the name.");
+    const webhookResult = await e2e.webhook({ kind: "issue_comment", number: pullRequest.number, comment });
+    if (webhookResult.status !== 200) throw new Error(`feedback webhook failed: ${JSON.stringify(webhookResult)}`);
+    expect(ownerProofRequests.some((request) => request.slackUserId === SLACK_MAYA.slackUserId
+      && request.channelIds.includes("C0123456789"))).toBe(true);
+    await e2e.settle();
+    expect((await e2e.feedbackPage()).status).toBe(200);
+    const feedbackPage = await e2e.feedbackPage(undefined, { api: true });
+    expect(feedbackPage.status).toBe(200);
+    const feedback = JSON.parse(feedbackPage.body) as { revision: number; reviewDigest: string; proposalDigest: string; bundleDigests: string[] };
+    const approval = await e2e.feedbackDecision({ requestId: crypto.randomUUID(), expectedRevision: feedback.revision,
+      reviewDigest: feedback.reviewDigest, proposalDigest: feedback.proposalDigest, bundleDigests: feedback.bundleDigests,
+      decision: "APPROVE", selectedFindingIds: ["finding-1"] });
+    if (approval.status !== 200) throw new Error(`feedback approval failed: ${JSON.stringify(approval)}`);
+    await e2e.settle();
+
+    const approvedInvocation = e2e.invocations.find((invocation): invocation is Extract<WorkerInvocation, { kind: "task" }> =>
+      invocation.kind === "task" && invocation.payload.workflowFeedbackApproval !== undefined);
+    if (approvedInvocation === undefined) throw new Error("a real feedback approval must dispatch its bound implementation invocation");
+    const feedbackBinding = approvedInvocation.payload.workflowFeedbackApproval;
+    if (feedbackBinding === undefined) throw new Error("the implementation invocation must retain its feedback approval binding");
+    expect(feedbackBinding).toMatchObject({ candidateDigest: candidate.digest, reviewDigest: feedback.reviewDigest,
+      proposalDigest: feedback.proposalDigest, bundleDigests: feedback.bundleDigests });
+    expect(feedbackBinding.selectedFindingIds).toEqual(["finding-1"]);
+    expect(approvedInvocation.payload.workflowMode).toBe("IMPLEMENT");
+    expect(approvedInvocation.payload).not.toHaveProperty("model");
+    const outboxRow = e2e.db.find((item) => item.entityType === "OUTBOX" && item.operationId === approvedInvocation.operationId)[0];
+    if (outboxRow === undefined) throw new Error("the actual implementation invocation must retain its durable outbox record");
+    const outbox = outboxRow as unknown as Ec2OutboxRecord;
+    expect(outbox.invocation).toEqual(approvedInvocation);
+    let postedBody: string | undefined;
+    const binding: Ec2RuntimeBinding = { deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0",
+      subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0aaaaaaaaaaaaaaaa" }], volumeSizeGiB: 20, volumeType: "gp3" };
+    const deliver = createEc2Delivery({
+      sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "10.0.0.9" }) },
+      binding: async () => binding,
+      sign: async () => new Uint8Array([1, 2, 3]),
+      post: async (_url, init) => { postedBody = init.body; return { status: 202, body: "" }; },
+      progress: async () => undefined,
+      workerFeatures: async () => ROLLBACK_0212_WORKER_FEATURES,
+    });
+    await expect(deliver(outbox, approvedInvocation)).resolves.toBe("DELIVERED");
+    if (postedBody === undefined) throw new Error("production EC2 delivery must POST the feature-negotiated feedback invocation");
+    const sent: unknown = JSON.parse(postedBody);
+    expect(WorkerInvocationSchema.safeParse(sent).success).toBe(true);
+    expect(parser.WorkerInvocationSchema.safeParse(sent).success).toBe(true);
+    expect(sent).toEqual(approvedInvocation);
+    expect(JSON.stringify(sent)).toBe(postedBody);
+    if (typeof sent !== "object" || sent === null || !("payload" in sent)) throw new Error("the POST body must be a task invocation");
+    const sentPayload = sent.payload as typeof approvedInvocation.payload;
+    expect(sentPayload.model).toEqual(approvedInvocation.payload.model);
+    expect(sentPayload.modelSelectionDiagnostic).toEqual(approvedInvocation.payload.modelSelectionDiagnostic);
+    expect(sentPayload).not.toHaveProperty("model");
+    expect(sentPayload.workflowMode).toBe("IMPLEMENT");
+    expect(sentPayload.workflowFeedbackApproval).toEqual(feedbackBinding);
+    expect(sentPayload.workflowFeedbackApproval?.candidateDigest).toBe(candidate.digest);
+    expect(Object.prototype.hasOwnProperty.call(sentPayload, "people")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(sentPayload, "taskPeople")).toBe(false);
     void logged;
   }, 120_000);
 });

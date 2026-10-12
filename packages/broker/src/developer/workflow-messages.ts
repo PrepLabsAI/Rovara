@@ -9,6 +9,8 @@ import { WORKFLOW_ACTION_IDS } from "./workflow-actions.js";
 
 export interface WorkflowMessageContext {
   taskId: string;
+  /** E: default-off Task People control on Slack workflow cards. */
+  peopleEnabled?: boolean | undefined;
   ownerSlackUserId?: string | undefined;
   workflow: WorkflowSnapshot;
   /** Where the full document reads (a Canvas, or the task page); absent when no link could be made. */
@@ -797,11 +799,14 @@ export function workflowMessage(context: WorkflowMessageContext): WorkflowMessag
   if (copy === undefined) return undefined;
   const replies = laterRepliesLine(context);
   const text = replies === undefined ? copy.text : `${copy.text}\n${replies}`;
+  const buttons = context.peopleEnabled === true
+    ? [...copy.buttons, { type: "button", action_id: "agentx_task_people", text: { type: "plain_text", text: "People" }, value: JSON.stringify({ taskId: context.taskId }) }]
+    : copy.buttons;
   return {
     text,
     blocks: [
       ...slackSectionTexts(text).map((section) => ({ type: "section", text: { type: "mrkdwn", text: section } })),
-      ...(copy.buttons.length === 0 ? [] : [{ type: "actions", elements: copy.buttons }]),
+      ...(buttons.length === 0 ? [] : [{ type: "actions", elements: buttons }]),
     ],
   };
 }

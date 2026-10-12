@@ -131,8 +131,15 @@ function samePrincipal(left: TaskPersonIdentity, right: TaskPersonIdentity): boo
     && left.issuer === right.issuer && left.subject === right.subject;
 }
 
-async function persistIdentity(deps: TaskPersonIdentityDependencies, taskId: string, identity: TaskPersonIdentity): Promise<TaskPersonIdentity> {
+async function persistIdentity(
+  deps: TaskPersonIdentityDependencies,
+  taskId: string,
+  identity: TaskPersonIdentity,
+  assertOpen?: () => void,
+): Promise<TaskPersonIdentity> {
+  assertOpen?.();
   const existing = await registryBySubject(deps, taskId, identity.developerId);
+  assertOpen?.();
   if (existing !== undefined) return samePrincipal(existing, identity) ? existing : refuse();
   const personId = deps.uuid();
   if (!UUID.test(personId)) return refuse();
@@ -140,14 +147,18 @@ async function persistIdentity(deps: TaskPersonIdentityDependencies, taskId: str
   const person: TaskPersonRecord = { pk: taskPk(taskId), sk: personSk(personId), schemaVersion: 1, personId, ...identity, createdAt };
   const reverse: TaskPersonSubjectRecord = { pk: taskPk(taskId), sk: subjectSk(identity.developerId), schemaVersion: 1, personId, developerId: identity.developerId, createdAt };
   try {
+    assertOpen?.();
     await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Put: { TableName: deps.tableName, Item: person, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: deps.tableName, Item: reverse, ConditionExpression: "attribute_not_exists(pk)" } },
     ] }));
+    assertOpen?.();
     return identity;
   } catch (error) {
     if (!conditional(error)) throw error;
+    assertOpen?.();
     const winner = await registryBySubject(deps, taskId, identity.developerId);
+    assertOpen?.();
     return winner !== undefined && samePrincipal(winner, identity) ? winner : refuse();
   }
 }
@@ -232,6 +243,52 @@ export async function resolveTaskPickerPerson(
   const subject = { developerId: developerIdForSlackUser(slackUserId), slackUserId };
   const proof = await qualify(deps, stored, subject);
   return persistIdentity(deps, stored.taskId, nativeIdentity(slackUserId, proof.name));
+}
+
+/** E: resolves a signed Slack picker selection to its immutable opaque task person. */
+export async function resolveTaskPickerPersonWithId(
+  deps: TaskPersonIdentityDependencies,
+  task: DeveloperTaskRecord,
+  slackUserId: string,
+): Promise<{ personId: string; identity: TaskPersonIdentity }> {
+  const identity = await resolveTaskPickerPerson(deps, task, slackUserId);
+  const reverse = await getItem(deps, taskPk(task.taskId), subjectSk(identity.developerId));
+  if (reverse === undefined || reverse.pk !== taskPk(task.taskId) || reverse.sk !== subjectSk(identity.developerId)
+    || reverse.schemaVersion !== 1 || reverse.developerId !== identity.developerId || typeof reverse.personId !== "string" || !UUID.test(reverse.personId)) return refuse();
+  return { personId: reverse.personId, identity };
+}
+
+/** Registers a complete fresh Slack directory result without re-reading Slack or creating sessions. */
+export async function registerTaskChannelPeople(
+  deps: TaskPersonIdentityDependencies,
+  task: DeveloperTaskRecord,
+  users: readonly { id: string; teamId: string; name: string; memberOf: readonly string[] }[],
+  assertOpen?: () => void,
+): Promise<readonly TaskPersonIdentity[]> {
+  assertOpen?.();
+  const stored = await currentTask(deps, task.taskId);
+  assertOpen?.();
+  if (stored.project !== task.project || stored.developerId !== task.developerId || stored.provider !== task.provider || stored.slackUserId !== task.slackUserId) return refuse();
+  const identities: TaskPersonIdentity[] = [];
+  for (const user of users) {
+    assertOpen?.();
+    if (user.teamId !== deps.slackTeamId || !SlackUserIdSchema.safeParse(user.id).success) return unavailable();
+    const identity = nativeIdentity(user.id, safeName(user.name, user.id));
+    let accessError: unknown;
+    try {
+      await deps.targetProjectAccess({ developerId: identity.developerId, slackUserId: user.id }, stored.project, user.memberOf);
+    } catch (error) {
+      accessError = error;
+    }
+    assertOpen?.();
+    if (accessError !== undefined) {
+      if (accessError instanceof Error && (accessError as Error & { code?: string }).code === "PROJECT_ACCESS_DENIED") continue;
+      return unavailable();
+    }
+    identities.push(await persistIdentity(deps, stored.taskId, identity, assertOpen));
+    assertOpen?.();
+  }
+  return identities;
 }
 
 async function storedIdentityStatus(deps: TaskPersonIdentityDependencies, identity: TaskPersonIdentity): Promise<"current" | "ineligible"> {

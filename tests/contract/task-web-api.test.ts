@@ -25,7 +25,8 @@ function fakeDeps(overrides: Partial<TaskWebApiDependencies> = {}): TaskWebApiDe
     calls,
     origin: DEV_ISSUER,
     authenticateSession: async (sessionId) => (sessionId === SESSION_ID ? caller : undefined),
-    taskState: async (who) => { calls.push({ name: "state", caller: who }); return { revision: 4, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 1 }], commentSeq: 2 }; },
+    taskState: async (who) => { calls.push({ name: "state", caller: who }); return { revision: 4, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 1 }], commentSeq: 2,
+      canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: false, canTakeOwnership: false }; },
     listComments: async (who) => { calls.push({ name: "comments", caller: who }); return { comments: [] }; },
     createComment: record("createComment"),
     editComment: record("editComment"),
@@ -152,7 +153,8 @@ describe("task page API", () => {
     const deps = fakeDeps();
     const kept = await call(deps, get(api("state")));
     expect(kept.statusCode).toBe(200);
-    expect(kept.json).toEqual({ revision: 4, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 1 }], commentSeq: 2, csrf: CSRF });
+    expect(kept.json).toEqual({ revision: 4, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 1 }], commentSeq: 2,
+      canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: false, canTakeOwnership: false, csrf: CSRF });
     expect(kept.headers["set-cookie"]).toBe(`__Host-agentx_review_csrf=${CSRF}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=900`);
     expect(kept.headers["cache-control"]).toContain("no-store");
     const fresh = await call(deps, get(api("state"), cookies(null)));
@@ -285,7 +287,9 @@ describe("task page API through the broker", () => {
     for (const who of [MAYA, LEE]) {
       const answer = await t.send(who, "GET", `/review/${t.id}/task/api/state`);
       expect(answer.statusCode).toBe(200);
-      expect(answer.json).toEqual({ revision: t.revision, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 1 }], commentSeq: 0, csrf: CSRF });
+      expect(answer.json).toEqual({ revision: t.revision, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 1 }], commentSeq: 0,
+        canRead: true, canComment: true, canSuggest: who === LEE, canDecide: who === MAYA, canAsk: false,
+        canManagePeople: false, canTakeOwnership: false, csrf: CSRF });
     }
   });
 
@@ -316,8 +320,8 @@ describe("task page API through the broker", () => {
     const before = lookups;
     const teammate = await t.harness.dev(LEE, "POST", `/v1/dev/tasks/${t.id}/workflow/decision`, body);
     expect(teammate.status).toBe(404);
-    // Only owners decide, so a non-owner is refused before any channel-membership lookup.
-    expect(lookups).toBe(before);
+    // Current task authority is rechecked before the non-owner is refused.
+    expect(lookups).toBeGreaterThan(before);
     expect((teammate.body.error as { code: string }).code).toBe("TASK_NOT_FOUND");
     const outsider = await t.harness.dev(NIA, "POST", `/v1/dev/tasks/${t.id}/workflow/decision`, body);
     expect(outsider.body.error).toEqual(teammate.body.error);

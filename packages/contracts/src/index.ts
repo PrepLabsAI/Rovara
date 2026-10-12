@@ -44,3 +44,4 @@ export * from "./checks-reply.js";
 export * from "./cancel-callback-key.js";
 export * from "./cli-distribution.js";
 export * from "./task-comments.js";
+export * from "./task-people.js";

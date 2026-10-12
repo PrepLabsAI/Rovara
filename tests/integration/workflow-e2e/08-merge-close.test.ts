@@ -5,12 +5,16 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { WORKFLOW_BLOCK_REASONS, agentXError } from "@agentx/contracts";
+import { developerIdForSlackUser } from "../../../packages/broker/src/aws/admin-actions.js";
 import { CLOSED_REPLY } from "../../../packages/broker/src/developer/share-messages.js";
 import { SLACK_TEAM } from "../../support/slack-broker.js";
 import { createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { EDITS, FIXED, MERGED, PLAN, TEAMMATE, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
 
 const OWNER = "U0MAYA001";
+const CO_OWNER = "U0COOWNER01";
+const REVOKED_VIEWER = "U0REVOKED01";
+const UNKNOWN_VIEWER = "U0UNKNOWN01";
 const CLOSING = "Closing this task. Its workspace is being released; I'll post here when it's closed, usually within two minutes.";
 const REOPENED = "PR #1 was reopened, so I'm following it again.";
 const OUT_OF_DATE = "That button is out of date. Use the latest message in this thread.";
@@ -43,6 +47,27 @@ const CLOSE_AFTER_FIX_STARTED = "An approved fix started after you opened this, 
 const fixPushes = (e2e: WorkflowE2E) => e2e.github.pushLog.filter((push) => push.during === "maintain" && e2e.github.tokens.has(push.token));
 /** What the thread said after the task's completion. */
 const afterCompletion = (e2e: WorkflowE2E) => said(e2e).slice(said(e2e).indexOf(MERGED) + 1);
+
+function grantCurrentCoOwner(e2e: WorkflowE2E): void {
+  const taskId = e2e.taskId();
+  const people = [
+    { slackUserId: OWNER, role: "owner" as const },
+    { slackUserId: CO_OWNER, role: "owner" as const },
+    { slackUserId: REVOKED_VIEWER, role: "viewer" as const },
+    { slackUserId: UNKNOWN_VIEWER, role: "viewer" as const },
+  ].map((person) => ({ ...person, developerId: developerIdForSlackUser(person.slackUserId) }));
+  e2e.db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
+    people: people.map(({ slackUserId, developerId, role }) => ({ slackUserId, developerId, name: slackUserId, role })) });
+  for (const { slackUserId, developerId } of people) {
+    const personId = randomUUID();
+    const createdAt = new Date().toISOString();
+    e2e.db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId, developerId, slackUserId,
+      name: slackUserId, method: "slack", issuer: "https://slack.com", subject: slackUserId, createdAt });
+    e2e.db.set({ pk: `DEVTASK#${taskId}`, sk: `PERSON_SUBJECT#${developerId}`, schemaVersion: 1, personId, developerId, createdAt });
+  }
+  e2e.db.set({ pk: `DEVELOPER#${developerIdForSlackUser(REVOKED_VIEWER)}`, sk: "META", developerId: developerIdForSlackUser(REVOKED_VIEWER),
+    provider: "slack", slackUserId: REVOKED_VIEWER, revoked: true, firstSignInAt: "fixture", lastSignInAt: "fixture" });
+}
 
 describe("Suite 8: merge and close", () => {
   journeySuite();
@@ -77,6 +102,41 @@ describe("Suite 8: merge and close", () => {
     expect([...e2e.slack.responses.map((response) => response.text), ...e2e.slack.ephemerals.map((message) => message.text)].at(-1)).toBe(OUT_OF_DATE);
     expect(e2e.workflow().revision).toBe(revision);
     expect(runs(e2e).filter((run) => run === "IMPLEMENT")).toHaveLength(1);
+  }, 120_000);
+
+  it("8.3b a current co-owner sees a retired proposal as out of date without an effect", async () => {
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: editsOrFix }, taskPeople: {
+      changesEnabled: true,
+      taskPersonProof: async (request) => request.slackUserId === UNKNOWN_VIEWER
+        ? { ok: false, error: "slack_unavailable" }
+        : { ok: true, user: { id: request.slackUserId, teamId: SLACK_TEAM, name: request.slackUserId }, memberOf: request.channelIds },
+    } });
+    const pullRequest = await openDraftPr(e2e);
+    await comment(e2e, pullRequest.number);
+    await e2e.settle();
+    const card = e2e.slack.lastPostWithAction("agentx_feedback_review_recommended");
+    grantCurrentCoOwner(e2e);
+    await mergeWebhook(e2e, pullRequest.number);
+    await e2e.settle();
+    const revision = e2e.workflow().revision;
+
+    await e2e.click("agentx_feedback_review_recommended", { messageTs: card.ts, user: CO_OWNER });
+    await e2e.settle();
+    expect([...e2e.slack.responses.map((response) => response.text), ...e2e.slack.ephemerals.map((message) => message.text)].at(-1)).toBe(OUT_OF_DATE);
+    expect(e2e.workflow().revision).toBe(revision);
+    expect(runs(e2e).filter((run) => run === "IMPLEMENT")).toHaveLength(1);
+
+    const terminal = structuredClone(e2e.workflow());
+    const sidecar = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
+    for (const user of [REVOKED_VIEWER, UNKNOWN_VIEWER]) {
+      await e2e.click("agentx_feedback_review_recommended", { messageTs: card.ts, user });
+      await e2e.settle();
+      expect([...e2e.slack.responses.map((response) => response.text), ...e2e.slack.ephemerals.map((message) => message.text)].at(-1))
+        .toBe("Only the task owner can decide this PR feedback.");
+      expect(e2e.workflow()).toEqual(terminal);
+      expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(sidecar);
+      expect(runs(e2e).filter((run) => run === "IMPLEMENT")).toHaveLength(1);
+    }
   }, 120_000);
 
   it("8.4 a merge of the reviewed code while the fix is coded completes the task, and the fix is never pushed", async () => {

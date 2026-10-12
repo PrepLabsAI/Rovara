@@ -7,7 +7,7 @@ import {
   remoteJwksCache,
   unconfiguredProvider,
 } from "../../packages/broker/src/aws/developer-identity.js";
-import { CHANNEL_MEMBERS_MAX_CHANNELS, TaskPersonProofRequestSchema, TaskPersonProofResponseSchema } from "@agentx/contracts";
+import { CHANNEL_MEMBERS_MAX_CHANNELS, TaskPeopleDisplayReadRequestSchema, TaskPeopleDisplayReadResponseSchema, TaskPersonProofRequestSchema, TaskPersonProofResponseSchema } from "@agentx/contracts";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { ProviderNotConfiguredError, slackSignInProvider } from "../../packages/broker/src/developer/providers.js";
 import type { HttpResult } from "../../packages/broker/src/developer/server.js";
@@ -777,5 +777,20 @@ describe("task person proof invoke contract", () => {
     ]) expect(TaskPersonProofRequestSchema.safeParse(invalid).success).toBe(false);
     expect(TaskPersonProofResponseSchema.safeParse({ ok: true, user: { id: maya.userId, teamId: TEAM, name: maya.name }, memberOf: ["C0OTHER01"] }).success).toBe(true);
     expect(await h.handler({ ...request, extra: true } as never)).toEqual({ ok: false, error: "invalid_request" });
+  });
+});
+
+describe("task People metered display invoke contract", () => {
+  it("returns strict actual Slack usage and rejects an old unmetered shape", async () => {
+    const h = identityHarness({ slackUsers: [maya], channels: { C0PAY0001: [maya.userId] } });
+    const request = { kind: "task-people-display-read" as const, operation: "directory" as const,
+      admission: { version: 1 as const, deadlineAt: h.now() + 20_000, slackCallsLimit: 2 },
+      request: { kind: "task-channel-people" as const, channelIds: ["C0PAY0001"] },
+      remainingNewIdentities: 100, knownNativeSlackUserIds: [] };
+    expect(TaskPeopleDisplayReadRequestSchema.parse(request)).toEqual(request);
+    expect(TaskPeopleDisplayReadResponseSchema.parse(await h.handler(request))).toMatchObject({
+      operation: "directory", admission: { version: 1, slackCallsUsed: 2 }, result: { ok: true, users: [{ id: maya.userId }] },
+    });
+    expect(await h.handler({ ...request, admission: undefined } as never)).toEqual({ ok: false, error: "invalid_request" });
   });
 });
