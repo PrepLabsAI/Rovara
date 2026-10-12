@@ -302,8 +302,16 @@ describe("task people", () => {
     const teamId = TEAM;
     const channelId = CHANNEL;
     const developerId = developerIdForSlackUser(userId);
-    const cases = [{ deleted: [] }, { id: "U0OTHER01" }, { is_stranger: {} }];
-    for (const malformed of cases) {
+    const cases: Array<{ label: string; user: Record<string, unknown> }> = [
+      { label: "missing primary team", user: { id: userId, is_bot: false } },
+      { label: "malformed primary team", user: { id: userId, is_bot: false, team_id: [teamId] } },
+      { label: "null enterprise linkage", user: { id: userId, is_bot: false, team_id: "T0OTHER1", enterprise_user: null } },
+      { label: "incomplete enterprise linkage", user: { id: userId, is_bot: false, team_id: "T0OTHER1", enterprise_user: {} } },
+      { label: "unreadable enterprise teams", user: { id: userId, is_bot: false, team_id: "T0OTHER1", enterprise_user: { teams: teamId } } },
+      { label: "missing required bot flag", user: { id: userId, team_id: teamId } },
+      { label: "partially malformed enterprise teams", user: { id: userId, is_bot: false, team_id: "T0OTHER1", enterprise_user: { teams: [teamId, {}] } } },
+    ];
+    for (const enabled of [false, true]) for (const { label, user: malformedUser } of cases) {
       const db = new FakeDynamoDb();
       const record = task({ developerId, slackUserId: userId, developerName: "Maya", share: {
         teamId, channelId, threadTs: "1695500000.000001", mode: "view", sharedReason: "requested", sharedAt: new Date(START).toISOString(),
@@ -312,20 +320,22 @@ describe("task people", () => {
       const people = { pk: `DEVTASK#${TASK_ID}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
         people: [{ developerId, slackUserId: userId, name: "Maya", role: "owner" }] };
       db.set(people);
-      let userInfo = { id: userId, team_id: teamId, is_bot: false, ...malformed };
+      let userInfo: Record<string, unknown> = malformedUser;
+      let proofCalls = 0;
       const directory = slackDirectory({ teamId, now: () => START, botToken: async () => "INERT", fetch: async (input) => {
         const url = typeof input === "string" ? new URL(input) : input instanceof URL ? input : new URL(input.url);
-        if (url.pathname.endsWith("/users.info")) return Response.json({ ok: true, user: userInfo });
+        if (url.pathname.endsWith("/users.info")) { proofCalls += 1; return Response.json({ ok: true, user: userInfo }); }
         return Response.json({ ok: true, members: [userId], response_metadata: { next_cursor: "" } });
       } });
       const identityDeps = { documentClient: db, tableName: "state", slackTeamId: teamId, now: () => START, uuid: () => TASK_ID,
         taskPersonProof: async (request: { slackUserId: string; channelIds: readonly string[] }) => directory.taskPersonProof(request.slackUserId, request.channelIds),
         developerRecord: async () => undefined, projectChannelIds: async () => [channelId], targetProjectAccess: async () => undefined };
       const deps: TaskPeopleDependencies = { documentClient: db, tableName: "state", now: () => START,
-        taskPeopleConfiguration: { peopleChangesEnabled: false },
+        taskPeopleConfiguration: { peopleChangesEnabled: enabled },
         checkTaskPerson: async (currentTask, id) => checkTaskPersonIdentity(identityDeps, currentTask, id) };
 
-      await expect(resolveTaskPeopleAccess(deps, record, developerId)).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });
+      await expect(resolveTaskPeopleAccess(deps, record, developerId), `${label}; mutation=${enabled}`).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });
+      expect(proofCalls, `${label}; mutation=${enabled}`).toBeGreaterThan(0);
       expect(db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")).toEqual(people);
       expect(db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(0);
       expect(db.find((item) => item.entityType === "TASK_PEOPLE_OUTBOX")).toHaveLength(0);
@@ -336,31 +346,37 @@ describe("task people", () => {
     }
   });
 
-  it("still demotes an owner when fresh Slack proof establishes definite deletion", async () => {
+  it("still demotes an owner when fresh Slack proof establishes definite deletion or foreign membership", async () => {
     const userId = "U0MAYA001";
     const developerId = developerIdForSlackUser(userId);
-    const db = new FakeDynamoDb();
-    const record = task({ developerId, slackUserId: userId, share: { teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000001",
-      mode: "view", sharedReason: "requested", sharedAt: new Date(START).toISOString() } });
-    db.set(record as unknown as Record<string, unknown>);
-    const people = { pk: `DEVTASK#${TASK_ID}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
-      people: [{ developerId, slackUserId: userId, name: "Maya", role: "owner" }] };
-    db.set(people);
-    const directory = slackDirectory({ teamId: TEAM, now: () => START, botToken: async () => "INERT", fetch: async (input) => {
-      const url = typeof input === "string" ? new URL(input) : input instanceof URL ? input : new URL(input.url);
-      return url.pathname.endsWith("/users.info")
-        ? Response.json({ ok: true, user: { id: userId, team_id: TEAM, is_bot: false, deleted: true } })
-        : Response.json({ ok: true, members: [userId], response_metadata: { next_cursor: "" } });
-    } });
-    const identityDeps = { documentClient: db, tableName: "state", slackTeamId: TEAM, now: () => START, uuid: () => TASK_ID,
-      taskPersonProof: async (request: { slackUserId: string; channelIds: readonly string[] }) => directory.taskPersonProof(request.slackUserId, request.channelIds),
-      developerRecord: async () => undefined, projectChannelIds: async () => [CHANNEL], targetProjectAccess: async () => undefined };
-    const deps: TaskPeopleDependencies = { documentClient: db, tableName: "state", now: () => START,
-      taskPeopleConfiguration: { peopleChangesEnabled: false },
-      checkTaskPerson: async (currentTask, id) => checkTaskPersonIdentity(identityDeps, currentTask, id) };
+    const exclusions = [
+      { label: "deleted", user: { id: userId, team_id: TEAM, is_bot: false, deleted: true } },
+      { label: "foreign membership", user: { id: userId, team_id: "T0OTHER1", is_bot: false } },
+    ];
+    for (const enabled of [false, true]) for (const { user } of exclusions) {
+      const db = new FakeDynamoDb();
+      const record = task({ developerId, slackUserId: userId, share: { teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000001",
+        mode: "view", sharedReason: "requested", sharedAt: new Date(START).toISOString() } });
+      db.set(record as unknown as Record<string, unknown>);
+      const people = { pk: `DEVTASK#${TASK_ID}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
+        people: [{ developerId, slackUserId: userId, name: "Maya", role: "owner" }] };
+      db.set(people);
+      const directory = slackDirectory({ teamId: TEAM, now: () => START, botToken: async () => "INERT", fetch: async (input) => {
+        const url = typeof input === "string" ? new URL(input) : input instanceof URL ? input : new URL(input.url);
+        return url.pathname.endsWith("/users.info")
+          ? Response.json({ ok: true, user })
+          : Response.json({ ok: true, members: [userId], response_metadata: { next_cursor: "" } });
+      } });
+      const identityDeps = { documentClient: db, tableName: "state", slackTeamId: TEAM, now: () => START, uuid: () => TASK_ID,
+        taskPersonProof: async (request: { slackUserId: string; channelIds: readonly string[] }) => directory.taskPersonProof(request.slackUserId, request.channelIds),
+        developerRecord: async () => undefined, projectChannelIds: async () => [CHANNEL], targetProjectAccess: async () => undefined };
+      const deps: TaskPeopleDependencies = { documentClient: db, tableName: "state", now: () => START,
+        taskPeopleConfiguration: { peopleChangesEnabled: enabled },
+        checkTaskPerson: async (currentTask, id) => checkTaskPersonIdentity(identityDeps, currentTask, id) };
 
-    await expect(resolveTaskPeopleAccess(deps, record, developerId)).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });
-    expect(db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")).toMatchObject({ revision: 2, orphaned: true, people: [{ role: "denied" }] });
+      await expect(resolveTaskPeopleAccess(deps, record, developerId)).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });
+      expect(db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")).toMatchObject({ revision: 2, orphaned: true, people: [{ role: "denied" }] });
+    }
   });
 
   it("reads immutable task-local presentation names through matching PERSON and PERSON_SUBJECT records", async () => {
