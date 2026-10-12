@@ -206,6 +206,24 @@ describe("page comments", () => {
     expect((stored(fixture, written.commentId) as unknown as TaskComment).text).toBe("Second");
   });
 
+  it("writes nothing when PEOPLE appears or changes after page authority was resolved", async () => {
+    const appeared = waitingTask();
+    const staleLegacyActor = await access(appeared, SAM);
+    appeared.db.set({ pk: `DEVTASK#${appeared.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people: [] });
+
+    await expect(createTaskComment(appeared.deps, staleLegacyActor, {
+      requestId: randomUUID(), document: "plan", version: 1, target: { kind: "document" }, text: "stale", ask: false,
+    })).rejects.toBeDefined();
+    expect(appeared.db.find((item) => item.entityType === "TASK_COMMENT" || item.entityType === "TASK_RATE")).toEqual([]);
+
+    const changed = waitingTask();
+    const original = await comment(changed, SAM);
+    const stalePeopleActor = { ...await access(changed, SAM), peopleRevision: 1 };
+    changed.db.set({ pk: `DEVTASK#${changed.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 2, orphaned: false, people: [] });
+    await expect(editTaskComment(changed.deps, stalePeopleActor, { commentId: original.comment.commentId, rev: 1, text: "changed" })).rejects.toBeDefined();
+    expect((stored(changed, original.comment.commentId) as unknown as TaskComment).text).toBe(original.comment.text);
+  });
+
   it("the 301st item is refused", async () => {
     const fixture = waitingTask();
     await comment(fixture, SAM);

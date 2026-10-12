@@ -2,7 +2,7 @@
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
 // reads the deployment mode (FR-024).
 import { createHash, randomUUID } from "node:crypto";
-import { DeleteCommand, GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   CHANNEL_PRIVACY_NOT_SET_UP,
   PLAN_WHY_REQUEST_MAX_CHARS,
@@ -143,6 +143,7 @@ import {
   startIdempotencyKey,
   taskIndexKey,
   taskKey,
+  taskOwnerKey,
   taskOwnerLabel,
   taskPointerKey,
   taskShare,
@@ -160,6 +161,7 @@ import type { DeveloperTaskActions, TransactItems } from "./developer-task-actio
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { setupWatchKey } from "./stuck-setup.js";
+import { resumeTaskDispatch } from "./task-dispatch-access.js";
 import { feedbackReviewNoticeId } from "../developer/notifications.js";
 import { feedbackNoticeToDecisionMeasure, feedbackRecommendationMeasure } from "../developer/feedback-review-measures.js";
 import { documentSummaryLines, isFeedbackReviewFailure, workflowDocumentName } from "../developer/workflow-messages.js";
@@ -167,7 +169,8 @@ import type { TaskDocumentKind, TaskDocumentView, TaskFreshness } from "./task-w
 import type { PageCommentInput, PageDecisionInput, PageSuggestionInput, TaskPageState } from "./task-web-api.js";
 import { pageCommentViews, type CommentViewContext, type PageCommentView } from "./plan-page/comments.js";
 import type { PlanAnchor } from "./plan-page/render-plan.js";
-import { can, pageAccess, resolveTaskAccess } from "../developer/task-access.js";
+import { can, pageAccess, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
+import { resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
 import { inertReplyText } from "../developer/prompt-text.js";
 import {
   commentCounterKey, commentKey, counterTouch, createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor,
@@ -372,6 +375,59 @@ export async function loadOwnedTask(deps: DeveloperTaskRouteDependencies, caller
   return task;
 }
 
+interface AuthorizedTask extends TaskAccess {
+  actorId: string;
+  authority: { actorId: string; ownerIds: readonly string[] };
+}
+
+/** Current human authority plus the exact PEOPLE revision every write must retain. */
+async function authorizeTaskAction(
+  deps: DeveloperTaskRouteDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+  action: TaskAction,
+): Promise<AuthorizedTask> {
+  const access = await resolveTaskAccess(deps, caller, taskId, action);
+  const actorId = taskOwnerKey(caller.developerId, taskId);
+  return { ...access, actorId, authority: { actorId, ownerIds: access.ownerActorIds } };
+}
+
+/** Rechecks current role for a historical/terminal answer without requiring the task to remain open. */
+async function authorizeTaskActor(
+  deps: DeveloperTaskRouteDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+  action: TaskAction,
+): Promise<AuthorizedTask> {
+  const access = await authorizeTaskAction(deps, caller, taskId, "read");
+  if (!can(access.role, action)) throw agentXError("TASK_NOT_FOUND", "no task here that you can see");
+  return access;
+}
+
+async function systemTaskAccess(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<TaskAccess | undefined> {
+  const access = await resolveTaskDispatchPeople(deps, task);
+  if (access === undefined) return undefined;
+  if (access.status !== "ALLOWED") throw agentXError("TASK_ACCESS_DENIED", "task access could not be verified");
+  return { task, role: "owner", peopleRevision: access.peopleRevision, ownerActorIds: access.ownerActorIds };
+}
+
+const accessFence = (deps: Pick<DeveloperTaskRouteDependencies, "tableName">, access: TaskAccess) =>
+  taskAccessFence(deps.tableName, access.task.taskId, access.peopleRevision);
+
+async function resumeParkedTaskDispatch(
+  deps: DeveloperTaskRouteDependencies,
+  access: AuthorizedTask,
+  request: { requestId: string },
+): Promise<{ task: DeveloperTaskView } | undefined> {
+  if (access.peopleRevision === undefined) return undefined;
+  const resumed = await resumeTaskDispatch(deps, {
+    task: access.task, peopleRevision: access.peopleRevision, actorId: access.actorId,
+    requestId: request.requestId, payloadHash: hashJson(request),
+  });
+  if (!resumed) return undefined;
+  return { task: await taskView(deps, access.task, { events: 0, details: false }) };
+}
+
 const FEEDBACK_REPORT_MAX_BYTES = 1_000_000;
 /** The review page's next step for a PR feedback review that could not be completed. */
 const FEEDBACK_REVIEW_RETRY_FROM_SLACK = "Retry the review from the Slack thread of this task.";
@@ -380,7 +436,7 @@ const FEEDBACK_BUNDLE_TOTAL_MAX_BYTES = 8_000_000;
 
 /** Return a private review only after current task ownership and every stored digest are verified. */
 export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<Record<string, unknown>> {
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const task = (await authorizeTaskAction(deps, caller, taskId, "feedback")).task;
   const workflow = task.workflow;
   const review = workflow?.feedbackReview;
   const decision = workflow?.feedbackDecisions?.find(item => item.reviewDigest === review?.reviewRef?.sha256);
@@ -527,12 +583,13 @@ export async function submitWorkflowFeedbackDecision(
   taskId: string,
   input: { requestId: string; expectedRevision: number; reviewDigest: string; proposalDigest: string; bundleDigests: string[]; decision: "APPROVE" | "REQUEST_CHANGES" | "DISMISS"; selectedFindingIds: string[]; ownerNote?: string | undefined },
 ): Promise<{ status: string; nextAction: string }> {
-  let task = await loadOwnedTask(deps, caller, taskId);
+  let access = await authorizeTaskAction(deps, caller, taskId, "feedback");
+  let task = access.task;
   let current = task.workflow;
   if (current === undefined) throw agentXError("NOT_FOUND", "PR feedback review not found");
   const prior = current.feedbackDecisions?.find(decision => decision.requestId === input.requestId);
   if (prior !== undefined) {
-    const same = prior.actorId === task.ownerKey && prior.actorRole === "TASK_OWNER" && prior.workflowRevision === input.expectedRevision
+    const same = prior.actorId === access.actorId && prior.actorRole === "TASK_OWNER" && prior.workflowRevision === input.expectedRevision
       && prior.decision === input.decision && prior.reviewDigest === input.reviewDigest
       && prior.proposalDigest === input.proposalDigest && JSON.stringify(prior.bundleDigests) === JSON.stringify(input.bundleDigests)
       && JSON.stringify(prior.selectedFindingIds) === JSON.stringify(input.selectedFindingIds) && prior.ownerNote === input.ownerNote;
@@ -542,7 +599,8 @@ export async function submitWorkflowFeedbackDecision(
   if (deps.refreshTaskFeedback === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "current GitHub PR feedback cannot be verified for this decision");
   await deps.refreshTaskFeedback(taskId);
   const beforeRefresh = current;
-  task = await loadOwnedTask(deps, caller, taskId);
+  access = await authorizeTaskAction(deps, caller, taskId, "feedback");
+  task = access.task;
   current = task.workflow;
   refuseIfFeedbackRecollected(beforeRefresh, current, input);
   if (current === undefined) throw agentXError("NOT_FOUND", "PR feedback review not found");
@@ -556,7 +614,7 @@ export async function submitWorkflowFeedbackDecision(
       requestId: input.requestId, expectedRevision: input.expectedRevision, reviewDigest: input.reviewDigest,
       proposalDigest: input.proposalDigest, bundleDigests: input.bundleDigests,
       selectedFindingIds: input.selectedFindingIds, decision: input.decision, ...(input.ownerNote === undefined ? {} : { ownerNote: input.ownerNote }),
-    }, { actorId: task.ownerKey, role: "TASK_OWNER" }, decidedAt);
+    }, { actorId: access.actorId, role: "TASK_OWNER" }, decidedAt, access.authority);
   } catch (error) {
     if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
     throw error;
@@ -612,7 +670,8 @@ export async function submitWorkflowFeedbackDecision(
     // transaction atomically stores approval, operation, and outbox; the worker then reauthorizes
     // the exact decision before it reads the workspace or starts code.
     await deps.refreshTaskFeedback(taskId);
-    const latest = await loadOwnedTask(deps, caller, taskId);
+    const latestAccess = await authorizeTaskAction(deps, caller, taskId, "feedback");
+    const latest = latestAccess.task;
     refuseIfFeedbackRecollected(current, latest.workflow, input);
     if (latest.workflow?.revision !== current.revision || latest.workflow.feedbackReview?.reviewRef?.sha256 !== input.reviewDigest
       || latest.workflow.feedbackReview.reviewRef.proposalDigest !== input.proposalDigest
@@ -640,9 +699,12 @@ export async function submitWorkflowFeedbackDecision(
         ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.feedbackReview.#reviewStatus = :pending AND workflow.feedbackReview.reviewRef.sha256 = :reviewDigest AND workflow.feedbackReview.reviewRef.proposalDigest = :proposalDigest AND attribute_not_exists(closedAt)",
         ExpressionAttributeNames: { "#stage": "stage", "#state": "state", "#reviewStatus": "status" },
         ExpressionAttributeValues: { ":workflow": running, ":now": iso(deps), ":revision": current.revision, ":stage": "WAIT_FOR_MERGE", ":state": "WAITING", ":pending": "PENDING", ":reviewDigest": input.reviewDigest, ":proposalDigest": input.proposalDigest },
-      } }], { sharedTask: latest.shared === true, workflowMode: "IMPLEMENT", ...(readiness === undefined ? {} : { readiness }), workflowFeedbackApproval: approval, ...taskBaseOption(latest, running) });
+      } }, accessFence(deps, latestAccess)], { sharedTask: latest.shared === true, workflowMode: "IMPLEMENT", ...(readiness === undefined ? {} : { readiness }), workflowFeedbackApproval: approval, ...taskBaseOption(latest, running) });
     } catch (error) {
-      if (isConditional(error)) throw agentXError("CONFIG_INVALID", "the feedback decision changed before dispatch; reload the review");
+      if (isConditional(error)) {
+        await authorizeTaskAction(deps, caller, taskId, "feedback");
+        throw agentXError("CONFIG_INVALID", "the feedback decision changed before dispatch; reload the review");
+      }
       throw error;
     }
     emitFeedbackDecisionMeasures(deps, current, input, noticeAt, decidedAt);
@@ -655,9 +717,12 @@ export async function submitWorkflowFeedbackDecision(
       ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.feedbackReview.#status = :pending AND workflow.feedbackReview.reviewRef.sha256 = :reviewDigest AND workflow.feedbackReview.reviewRef.proposalDigest = :proposalDigest",
       ExpressionAttributeNames: { "#stage": "stage", "#state": "state", "#status": "status" },
       ExpressionAttributeValues: { ":workflow": next, ":now": iso(deps), ":revision": current.revision, ":stage": "WAIT_FOR_MERGE", ":state": "WAITING", ":pending": "PENDING", ":reviewDigest": input.reviewDigest, ":proposalDigest": input.proposalDigest },
-    } }]);
+    } }, accessFence(deps, access)]);
   } catch (error) {
-    if (isConditional(error)) throw agentXError("CONFIG_INVALID", "the review changed; reload it before deciding");
+    if (isConditional(error)) {
+      await authorizeTaskActor(deps, caller, taskId, "feedback");
+      throw agentXError("CONFIG_INVALID", "the review changed; reload it before deciding");
+    }
     throw error;
   }
   emitFeedbackDecisionMeasures(deps, current, input, noticeAt, decidedAt);
@@ -1287,7 +1352,8 @@ function busy(error: unknown, taskId: string): never {
 
 async function continueTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "continue");
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const access = await authorizeTaskAction(deps, caller, taskId, "control");
+  const { task } = access;
   if (task.workflow !== undefined) throw agentXError("WORKSPACE_BUSY", GATED_TASK_TURN_REFUSAL);
   const turns = turnTable(deps);
   await actionableWorkspace(deps, task);
@@ -1301,8 +1367,10 @@ async function continueTask(deps: DeveloperTaskRouteDependencies, caller: Develo
         party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: request.instructions, response: `Continuing task ${taskId} as operation ${operation.id}.`, operationId: operation.id,
       })),
+      accessFence(deps, access),
     ], { sharedTask: task.shared === true });
   } catch (error) {
+    if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "control");
     return busyOrClosing(deps, task, error);
   }
   const view = await taskView(deps, task, { events: 0, details: false });
@@ -1314,17 +1382,17 @@ async function continueTask(deps: DeveloperTaskRouteDependencies, caller: Develo
  * The task a caller may decide, through the one access rule (resolveTaskAccess and the role table). Anyone whose role may
  * not decide, and anyone who may not see the task at all, gets the answer a missing task gets, as before.
  */
-async function decidableTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<DeveloperTaskRecord> {
+async function decidableTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<AuthorizedTask> {
   const notYours = () => agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
   let access: Awaited<ReturnType<typeof resolveTaskAccess>>;
   try {
-    access = await resolveTaskAccess(deps, caller, taskId, "decide");
+    access = await authorizeTaskAction(deps, caller, taskId, "decide");
   } catch (error) {
     if (error instanceof AgentXError && (error.code === "TASK_NOT_FOUND" || error.code === "TASK_ACCESS_DENIED")) throw notYours();
     throw error;
   }
   if (!can(access.role, "decide")) throw notYours();
-  return access.task;
+  return access as AuthorizedTask;
 }
 
 /**
@@ -1340,11 +1408,12 @@ export async function decideTaskWorkflow(
   options: { via?: "PAGE"; note?: string } = {},
 ): Promise<{ task: DeveloperTaskView }> {
   const request = parse(WorkflowDecisionRequestSchema, value, deps, "workflow-decision");
-  const task = await decidableTask(deps, caller, taskId);
+  const access = await decidableTask(deps, caller, taskId);
+  const { task } = access;
   if (task.workflow === undefined) throw agentXError("NOT_FOUND", "this task does not have a workflow record");
   const workflow = task.workflow;
   const prior = workflow.decisions.find((decision) => decision.requestId === request.requestId);
-  const actor = { actorId: task.ownerKey, role: "TASK_OWNER" as const };
+  const actor = { actorId: access.actorId, role: "TASK_OWNER" as const };
   const decideOptions = { now: iso(deps), allowedSkipStages: [] as WorkflowStage[], ...(options.via === undefined ? {} : { via: options.via }) };
   const refused = (current: WorkflowSnapshot) => {
     // Only the owner decides, so whoever is refused here is the owner: a task started in Slack keeps no name for them, but
@@ -1363,7 +1432,7 @@ export async function decideTaskWorkflow(
   };
   const transition = (decisionRequest: WorkflowDecisionRequest, decisions?: ReadonlyArray<{ id: string; optionIds: string[]; recommended: string }>) => {
     try {
-      return decideWorkflow(workflow, decisionRequest, actor, { ...decideOptions, ...(decisions === undefined ? {} : { decisions }) });
+      return decideWorkflow(workflow, decisionRequest, actor, { ...decideOptions, authority: access.authority, ...(decisions === undefined ? {} : { decisions }) });
     } catch (error) {
       if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
       throw error;
@@ -1426,10 +1495,10 @@ export async function decideTaskWorkflow(
       ConditionExpression: "workflow.revision = :revision AND workflow.#state = :waiting",
       ExpressionAttributeNames: { "#state": "state" },
       ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":waiting": "WAITING" },
-    } }]);
+    } }, accessFence(deps, access)]);
     // A rejected plan ends the task: it gives back its slot and its workspace now.
     await releaseFinishedTaskQuietly(deps, taskId);
-    const fresh = await loadOwnedTask(deps, caller, taskId);
+    const fresh = (await authorizeTaskAction(deps, caller, taskId, "decide")).task;
     return { task: await taskView(deps, fresh, { events: 0, details: false }) };
   }
   await actionableWorkspace(deps, task);
@@ -1506,23 +1575,24 @@ export async function decideTaskWorkflow(
       ...detailItems,
       ...lockItems,
       ...(included.length === 0 ? [] : [counterTouch(deps, taskId)]),
+      accessFence(deps, access),
     ], { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}) });
     });
   } catch (error) {
     // Another decision got there first: the same request (a double press) is that decision; any other is refused with
     // who decided. That is checked before the comment locks: a decision that won with the same comment also fails its lock.
-    const fresh = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
-    if (fresh?.workflow?.decisions.some((decision) => decision.requestId === request.requestId) === true) {
+    const fresh = (await authorizeTaskAction(deps, caller, taskId, "decide")).task;
+    if (fresh.workflow?.decisions.some((decision) => decision.requestId === request.requestId) === true) {
       return { task: await taskView(deps, fresh, { events: 0, details: false }) };
     }
-    if (fresh?.workflow !== undefined && fresh.workflow.revision !== workflow.revision) throw refused(fresh.workflow);
+    if (fresh.workflow !== undefined && fresh.workflow.revision !== workflow.revision) throw refused(fresh.workflow);
     const reasons = (error as { extraCancellation?: string[] }).extraCancellation;
     if (reasons !== undefined && lockItems.some((_, index) => reasons[lockOffset + index] === "ConditionalCheckFailed")) {
       throw Object.assign(agentXError("IDEMPOTENCY_CONFLICT", COMMENT_CHANGED_MESSAGE), { pageReason: "comment_changed" });
     }
     return busyOrClosing(deps, task, error);
   }
-  const fresh = await loadOwnedTask(deps, caller, taskId);
+  const fresh = (await authorizeTaskAction(deps, caller, taskId, "decide")).task;
   const view = await taskView(deps, fresh, { events: 0, details: false });
   await syncIndex(deps, fresh, view.status, view.updatedAt);
   return { task: view };
@@ -1598,12 +1668,15 @@ function keptProposedIds(policy: WorkflowCheckPolicy | undefined): string[] {
 
 async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-retry");
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const access = await authorizeTaskAction(deps, caller, taskId, "retry");
+  const resumed = await resumeParkedTaskDispatch(deps, access, request);
+  if (resumed !== undefined) return resumed;
+  const { task } = access;
   const priorVerificationRetry = task.workflow?.verificationRetries?.find((retry) => retry.requestId === request.requestId);
   if (priorVerificationRetry !== undefined) {
     const submittedIds = request.selectedOptionalCheckIds ?? task.workflow?.checkPolicy?.selectedOptionalIds ?? [];
     const submittedProposedIds = request.selectedProposedCheckIds ?? keptProposedIds(task.workflow?.checkPolicy);
-    if (priorVerificationRetry.actorId !== task.ownerKey
+    if (priorVerificationRetry.actorId !== access.actorId
       || JSON.stringify(priorVerificationRetry.selectedOptionalCheckIds) !== JSON.stringify(submittedIds)
       || JSON.stringify(priorVerificationRetry.selectedProposedCheckIds ?? keptProposedIds(task.workflow?.checkPolicy)) !== JSON.stringify(submittedProposedIds)) {
       throw agentXError("IDEMPOTENCY_CONFLICT", "this retry request ID was already used for a different check selection");
@@ -1644,7 +1717,7 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       state: "RUNNING",
       checkPolicy: { ...policy, selectedOptionalIds, selectedProposedIds },
       verificationRetries: [...(workflow.verificationRetries ?? []), {
-        requestId: request.requestId, actorId: task.ownerKey, selectedOptionalCheckIds: selectedOptionalIds, selectedProposedCheckIds: selectedProposedIds, at: receivedAt,
+        requestId: request.requestId, actorId: access.actorId, selectedOptionalCheckIds: selectedOptionalIds, selectedProposedCheckIds: selectedProposedIds, at: receivedAt,
       }],
       updatedAt: receivedAt,
     };
@@ -1666,11 +1739,13 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
           receivedAt, finishedAt: iso(deps), request: request.instructions,
           response: `AgentX is rerunning the selected checks without code-editing tools as operation ${operation.id}.`, operationId: operation.id,
         })),
+        accessFence(deps, access),
       ], { sharedTask: task.shared === true, workflowMode: "CHECKS", readiness: selectedReadiness, ...taskBaseOption(task, next) });
     } catch (error) {
+      if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "retry");
       return busyOrClosing(deps, task, error);
     }
-    const fresh = await loadOwnedTask(deps, caller, taskId);
+    const fresh = (await authorizeTaskAction(deps, caller, taskId, "retry")).task;
     const view = await taskView(deps, fresh, { events: 0, details: false });
     await syncIndex(deps, fresh, view.status, view.updatedAt);
     return { task: view };
@@ -1681,7 +1756,7 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
     : (await deps.actions.operations(task.workspaceId)).find((operation) => operation.requestId === request.requestId
       && (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "PLAN"));
   if (replayed !== undefined) return { task: await taskView(deps, task, { events: 0, details: false }) };
-  if (task.workflow?.stage === "IMPLEMENT" && task.workflow.state === "BLOCKED") return retryWorkflowImplementation(deps, caller, task, request);
+  if (task.workflow?.stage === "IMPLEMENT" && task.workflow.state === "BLOCKED") return retryWorkflowImplementation(deps, caller, access, request);
   if (task.workflow === undefined || task.workflow.state !== "BLOCKED" || task.workflow.stage !== "PLAN") {
     throw agentXError("CONFIG_INVALID", "this action can retry blocked planning or coding, or run selected checks for blocked verification or a change ready to publish");
   }
@@ -1713,12 +1788,14 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
           party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
           request: request.instructions, response: `Restarting the planning stage as operation ${operation.id}.`, operationId: operation.id,
         })),
+        accessFence(deps, access),
       ], { sharedTask: task.shared === true, workflowMode: "PLAN", ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(next.reviewPhase === undefined ? {} : { workflowPhase: next.reviewPhase }) });
     });
   } catch (error) {
+    if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "retry");
     return busyOrClosing(deps, task, error);
   }
-  const fresh = await loadOwnedTask(deps, caller, taskId);
+  const fresh = (await authorizeTaskAction(deps, caller, taskId, "retry")).task;
   const view = await taskView(deps, fresh, { events: 0, details: false });
   await syncIndex(deps, fresh, view.status, view.updatedAt);
   return { task: view };
@@ -1748,9 +1825,10 @@ const NO_PUBLISH_NOTE = "Do not push branches or create pull requests; AgentX ha
  * `prompt` gets the replies' prompt section ("" when there are none).
  */
 async function queueWorkflowCoding(
-  deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord & { workflow: WorkflowSnapshot },
+  deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, access: AuthorizedTask & { task: DeveloperTaskRecord & { workflow: WorkflowSnapshot } },
   input: { requestId: string; prompt: (notes: string) => string; next: WorkflowSnapshot; request: string; response: string },
 ): Promise<{ task: DeveloperTaskView }> {
+  const { task } = access;
   const { workflow } = task;
   const receivedAt = iso(deps);
   try {
@@ -1768,12 +1846,14 @@ async function queueWorkflowCoding(
           party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
           request: input.request, response: `${input.response} as operation ${operation.id}.`, operationId: operation.id,
         })),
+        accessFence(deps, access),
       ], { sharedTask: task.shared === true, workflowMode: "IMPLEMENT", ...selectedCheckCommands(input.next), ...taskBaseOption(task, input.next) });
     });
   } catch (error) {
+    if (isConditional(error)) await authorizeTaskAction(deps, caller, task.taskId, "control");
     return busyOrClosing(deps, task, error);
   }
-  const fresh = await loadOwnedTask(deps, caller, task.taskId);
+  const fresh = (await authorizeTaskAction(deps, caller, task.taskId, "control")).task;
   const view = await taskView(deps, fresh, { events: 0, details: false });
   await syncIndex(deps, fresh, view.status, view.updatedAt);
   return { task: view };
@@ -1781,8 +1861,9 @@ async function queueWorkflowCoding(
 
 /** Task 16: the owner retries coding that stopped (IMPLEMENT/BLOCKED) on the same approved plan. */
 async function retryWorkflowImplementation(
-  deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, task: DeveloperTaskRecord, request: z.infer<typeof ContinueDeveloperTaskRequestSchema>,
+  deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, access: AuthorizedTask, request: z.infer<typeof ContinueDeveloperTaskRequestSchema>,
 ): Promise<{ task: DeveloperTaskView }> {
+  const { task } = access;
   const workflow = task.workflow!;
   if (request.expectedRevision !== undefined && request.expectedRevision !== workflow.revision) {
     throw agentXError("IDEMPOTENCY_CONFLICT", "this retry is out of date; refresh the task and try again");
@@ -1793,7 +1874,7 @@ async function retryWorkflowImplementation(
   void _blockReason;
   const next: WorkflowSnapshot = { ...unblocked, revision: workflow.revision + 1, state: "RUNNING", updatedAt: iso(deps) };
   const prompt = (notes: string) => `Implement the human-approved plan below. The previous coding run stopped before it finished; continue from the current code. Follow its ordered steps, run the listed checks, and report results and limitations. ${NO_PUBLISH_NOTE}\n\nOwner note: ${request.instructions}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
-  return queueWorkflowCoding(deps, caller, { ...task, workflow }, { requestId: request.requestId, prompt, next,
+  return queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId: request.requestId, prompt, next,
     request: request.instructions, response: "Restarting the coding step" });
 }
 
@@ -1805,7 +1886,8 @@ async function retryWorkflowImplementation(
  */
 export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-send-back");
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const access = await authorizeTaskAction(deps, caller, taskId, "control");
+  const { task } = access;
   const workflow = task.workflow;
   if (workflow === undefined) throw agentXError("NOT_FOUND", "this task does not have a workflow record");
   const prior = workflow.decisions.find((decision) => decision.requestId === request.requestId);
@@ -1818,7 +1900,7 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
   const receivedAt = iso(deps);
   let returned: WorkflowSnapshot;
   try {
-    returned = returnWorkflowToImplementation(workflow, { requestId: request.requestId, actorId: task.ownerKey, reason: request.instructions, now: receivedAt });
+    returned = returnWorkflowToImplementation(workflow, { requestId: request.requestId, actorId: access.actorId, reason: request.instructions, now: receivedAt }, access.authority);
   } catch (error) {
     if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
     throw error;
@@ -1829,7 +1911,7 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
   const problems = sendBackProblemsPromptSection(sendBackProblems(workflow), promptTagId(task, request.requestId));
   const prompt = (notes: string) => `Address the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nOwner note (the owner's own instructions for this step): ${request.instructions}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
   const next: WorkflowSnapshot = { ...returned, revision: returned.revision + 1, state: "RUNNING", updatedAt: receivedAt };
-  return queueWorkflowCoding(deps, caller, { ...task, workflow }, { requestId: request.requestId, prompt, next,
+  return queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId: request.requestId, prompt, next,
     request: request.instructions, response: "AgentX sent the change back to coding" });
 }
 
@@ -1841,7 +1923,8 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
  */
 export async function resolveTaskWorkflowFindings(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(WorkflowResolveFindingsInputSchema, value, deps, "workflow-review-findings");
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const access = await authorizeTaskAction(deps, caller, taskId, "decide");
+  const { task } = access;
   const workflow = task.workflow;
   if (workflow === undefined) throw agentXError("NOT_FOUND", "this task does not have a workflow record");
   const prior = workflow.decisions.find((decision) => decision.requestId === request.requestId);
@@ -1855,7 +1938,7 @@ export async function resolveTaskWorkflowFindings(deps: DeveloperTaskRouteDepend
   const receivedAt = iso(deps);
   let next: WorkflowSnapshot;
   try {
-    next = resolveWorkflowReviewFindings(workflow, request, { actorId: task.ownerKey }, { now: receivedAt });
+    next = resolveWorkflowReviewFindings(workflow, request, { actorId: access.actorId }, { now: receivedAt }, access.authority);
   } catch (error) {
     if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
     throw error;
@@ -1874,7 +1957,7 @@ export async function resolveTaskWorkflowFindings(deps: DeveloperTaskRouteDepend
     const ownerNotes = instructions.length === 0 ? "none beyond fixing the problems." : `\n${instructions.join("\n")}`;
     const prompt = (notes: string) => `Address only the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nOwner instructions for these problems (the owner's own instructions for this step; the numbers follow the order the problems are listed in): ${ownerNotes}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
     const running: WorkflowSnapshot = { ...next, revision: next.revision + 1, state: "RUNNING", updatedAt: receivedAt };
-    return queueWorkflowCoding(deps, caller, { ...task, workflow }, { requestId: request.requestId, prompt, next: running,
+    return queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId: request.requestId, prompt, next: running,
       request: `Fix ${toFix.length} review finding${toFix.length === 1 ? "" : "s"}`, response: "AgentX sent the findings to fix back to coding" });
   }
   // Every finding accepted. When both reviews now stand the pull request is due, committed with the decision as a
@@ -1887,13 +1970,16 @@ export async function resolveTaskWorkflowFindings(deps: DeveloperTaskRouteDepend
       ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
       ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
       ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":stage": "REVIEW", ":state": "BLOCKED", ":candidate": request.candidateDigest },
-    } }, ...(ready ? [workflowDispatchItem(deps.tableName, taskId, next.revision, workflowPullRequestUpdateDue(next) ? "UPDATE" : "PUBLISH", request.candidateDigest, receivedAt)] : [])]);
+    } }, ...(ready ? [workflowDispatchItem(deps.tableName, taskId, next.revision, workflowPullRequestUpdateDue(next) ? "UPDATE" : "PUBLISH", request.candidateDigest, receivedAt)] : []), accessFence(deps, access)]);
   } catch (error) {
-    if (isConditional(error)) throw agentXError("IDEMPOTENCY_CONFLICT", "these findings are out of date; refresh the task and try again");
+    if (isConditional(error)) {
+      await authorizeTaskAction(deps, caller, taskId, "decide");
+      throw agentXError("IDEMPOTENCY_CONFLICT", "these findings are out of date; refresh the task and try again");
+    }
     throw error;
   }
   if (ready) await startAcceptedPublication(deps, taskId, next);
-  const fresh = await loadOwnedTask(deps, caller, taskId);
+  const fresh = (await authorizeTaskAction(deps, caller, taskId, "decide")).task;
   const view = await taskView(deps, fresh, { events: 0, details: false });
   await syncIndex(deps, fresh, view.status, view.updatedAt);
   return { task: view };
@@ -1918,7 +2004,8 @@ async function startAcceptedPublication(deps: DeveloperTaskRouteDependencies, ta
 /** Re-drive only the task's current terminal revision and, when present, its exact manifest candidate. */
 async function retryTaskCanvasCloseout(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ status: "retry_requested"; workflowRevision: number; manifestDigest?: string }> {
   const request = parse(CanvasCloseoutRetryRequestSchema, value, deps, "canvas-closeout-retry");
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const access = await authorizeTaskActor(deps, caller, taskId, "retry");
+  const { task } = access;
   const closeout = task.workflow?.canvasCloseout;
   const attempt = task.workflow?.canvasCloseoutAttempt;
   const workflowRevision = task.workflow?.revision;
@@ -1943,18 +2030,18 @@ async function retryTaskCanvasCloseout(deps: DeveloperTaskRouteDependencies, cal
     throw agentXError("IDEMPOTENCY_CONFLICT", "this request_id was already used for a different closeout snapshot");
   }
   const retry = { requestId: request.requestId, workflowRevision, ...(request.manifestDigest === undefined ? {} : { manifestDigest: request.manifestDigest }),
-    actorId: task.workflow.ownerId, requestedAt: iso(deps), dispatchAttempt: (existing?.dispatchAttempt ?? 0) + 1 };
+    actorId: access.actorId, requestedAt: iso(deps), dispatchAttempt: (existing?.dispatchAttempt ?? 0) + 1 };
   try {
-    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: taskKey(taskId),
-      UpdateExpression: "SET canvasCloseoutRetry = :retry",
+    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [{ Update: {
+      TableName: deps.tableName, Key: taskKey(taskId), UpdateExpression: "SET canvasCloseoutRetry = :retry",
       ConditionExpression: `workflow.revision = :revision AND ${task.canvasCloseoutVersion === undefined ? "attribute_not_exists(canvasCloseoutVersion)" : "canvasCloseoutVersion = :version"}`,
       ExpressionAttributeValues: { ":retry": retry, ":revision": workflowRevision,
         ...(task.canvasCloseoutVersion === undefined ? {} : { ":version": task.canvasCloseoutVersion }) },
-    }));
+    } }, accessFence(deps, access)] }));
     return { status: "retry_requested", workflowRevision, ...(request.manifestDigest === undefined ? {} : { manifestDigest: request.manifestDigest }) };
   } catch (error) {
     if (!isConditional(error)) throw error;
-    const fresh = await loadOwnedTask(deps, caller, taskId);
+    const fresh = (await authorizeTaskActor(deps, caller, taskId, "retry")).task;
     if (fresh.canvasCloseoutRetry?.requestId === request.requestId && fresh.canvasCloseoutRetry.workflowRevision === workflowRevision
       && fresh.canvasCloseoutRetry.manifestDigest === request.manifestDigest
       && fresh.canvasCloseoutRetry.dispatchAttempt >= retry.dispatchAttempt) {
@@ -1966,7 +2053,10 @@ async function retryTaskCanvasCloseout(deps: DeveloperTaskRouteDependencies, cal
 
 async function startTaskWorkflowReview(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-review");
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const access = await authorizeTaskAction(deps, caller, taskId, "retry");
+  const resumed = await resumeParkedTaskDispatch(deps, access, request);
+  if (resumed !== undefined) return resumed;
+  const { task } = access;
   const workflow = task.workflow;
   // Task 16: a blocked review may be retried on the same checked code whatever stopped it, findings included.
   const retrying = workflow?.stage === "REVIEW" && workflow.state === "BLOCKED";
@@ -1983,11 +2073,12 @@ async function startTaskWorkflowReview(deps: DeveloperTaskRouteDependencies, cal
   }
   await actionableWorkspace(deps, task);
   try {
-    await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, request.requestId, request.instructions);
+    await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, request.requestId, request.instructions, access);
   } catch (error) {
+    if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "retry");
     return busyOrClosing(deps, task, error);
   }
-  const fresh = await loadOwnedTask(deps, caller, taskId);
+  const fresh = (await authorizeTaskAction(deps, caller, taskId, "retry")).task;
   const view = await taskView(deps, fresh, { events: 0, details: false });
   await syncIndex(deps, fresh, view.status, view.updatedAt);
   return { task: view };
@@ -2089,6 +2180,7 @@ async function queueWorkflowReview(
   workflow: WorkflowSnapshot & { candidate: NonNullable<WorkflowSnapshot["candidate"]> },
   requestId: string,
   note: string,
+  access?: TaskAccess,
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   const receivedAt = iso(deps);
   const candidateDigest = workflow.candidate.digest;
@@ -2110,6 +2202,7 @@ async function queueWorkflowReview(
       party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
       request: "Run independent candidate reviews", response: `Independent code and security reviews started as operation ${operation.id}.`, operationId: operation.id,
     })),
+    ...(access === undefined ? [] : [accessFence(deps, access)]),
   ], { sharedTask: task.shared === true, workflowMode: "REVIEW", ...taskBaseOption(task, next), ...workflowReviewChecksOption(workflow), ...reviewPlan, ...reviewFeedback });
 }
 
@@ -2133,11 +2226,12 @@ export async function startTaskWorkflowReviewFromSystem(
     || workflow.verification?.candidateDigest !== expected.candidateDigest
     || (workflow.verification.results.length === 0 && !(workflow.verification.reviewOnly === true && workflowIsReviewOnly(workflow.checkPolicy)))
     || workflow.verification.results.some((result) => result.status !== "PASS")) return "STALE";
+  const dispatchAccess = await systemTaskAccess(deps, task);
   const workspace = await deps.actions.workspace(task.workspaceId);
   if (workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
   const requestId = workflowRequestId("agentx-auto-review", taskId, expected.workflowRevision, expected.candidateDigest);
   const note = workflow.verification.reviewOnly === true ? AUTOMATIC_REVIEW_ONLY_NOTE : AUTOMATIC_REVIEW_NOTE;
-  const accepted = await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, requestId, note);
+  const accepted = await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, requestId, note, dispatchAccess);
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
 
@@ -2382,7 +2476,7 @@ export async function createPageComment(deps: DeveloperTaskRouteDependencies, ca
   let comment = created.comment;
   let askRefused: "limited" | undefined;
   if (input.ask && !created.duplicate && can(actor.role, "ask")) {
-    const asked = await queueCommentAnswer(deps, { task: actor.task, comment, caller });
+    const asked = await queueCommentAnswer(deps, { task: actor.task, comment, caller, access: actor });
     comment = asked.comment;
     if (asked.outcome === "limited") askRefused = "limited";
   }
@@ -2859,7 +2953,7 @@ export async function startTaskWorkflowPublicationFromSystem(
   deps: DeveloperTaskRouteDependencies,
   taskId: string,
   expected: { workflowRevision: number; candidateDigest: string },
-  origin: { taskPageUrl?: string; ownerRetry?: boolean },
+  origin: { taskPageUrl?: string; ownerRetry?: boolean; ownerAccess?: Pick<TaskAccess, "peopleRevision"> },
 ): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
   const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
   const workflow = task?.workflow;
@@ -2867,6 +2961,7 @@ export async function startTaskWorkflowPublicationFromSystem(
   if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== expected.workflowRevision
     || !(ownerRetry ? workflowPublicationRetryable(workflow) : workflow.stage === "PULL_REQUEST" && workflow.state === "READY")
     || workflow.candidate === undefined || workflow.candidate.digest !== expected.candidateDigest) return "STALE";
+  const dispatchAccess = origin.ownerAccess ?? await systemTaskAccess(deps, task);
   const workspace = await deps.actions.workspace(task.workspaceId);
   if (workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
   const repository = [...workflow.candidate.repositories].sort((left, right) => left.repositoryId.localeCompare(right.repositoryId))
@@ -2874,7 +2969,7 @@ export async function startTaskWorkflowPublicationFromSystem(
   // Every repository has its pull request: an approved fix whose checks and reviews passed is pushed to them instead.
   if (repository === undefined) {
     return workflow.state === "READY" && workflowPullRequestUpdateDue(workflow)
-      ? startTaskWorkflowPullRequestUpdate(deps, task, { ...workflow, candidate: workflow.candidate }, expected)
+      ? startTaskWorkflowPullRequestUpdate(deps, task, { ...workflow, candidate: workflow.candidate }, expected, dispatchAccess)
       : "STALE";
   }
   const attempt = 1 + await deps.actions.failedPublications(task.workspaceId, { repositoryId: repository.repositoryId, candidateDigest: expected.candidateDigest, treeSha: repository.treeSha });
@@ -2912,6 +3007,7 @@ export async function startTaskWorkflowPublicationFromSystem(
         request: ownerRetry ? "Retry opening the pull request" : "Open the draft pull request",
         response: `AgentX is opening a draft pull request on ${repository.repositoryId} as operation ${operation.id}.`, operationId: operation.id,
       })),
+      ...(dispatchAccess === undefined ? [] : [taskAccessFence(deps.tableName, taskId, dispatchAccess.peopleRevision)]),
     ], { workflowCandidate: { repositoryId: repository.repositoryId, treeSha: repository.treeSha, candidateDigest: expected.candidateDigest,
       ...(baseCommitSha === undefined ? {} : { baseCommitSha }) } });
   } catch (error) {
@@ -2926,7 +3022,7 @@ export async function startTaskWorkflowPublicationFromSystem(
   // (still running, or just finished) needs the task ready to record its pull request.
   if (accepted.duplicate && workflow.state === "BLOCKED") {
     try {
-      await deps.actions.transact([taskItem]);
+      await deps.actions.transact([taskItem, ...(dispatchAccess === undefined ? [] : [taskAccessFence(deps.tableName, taskId, dispatchAccess.peopleRevision)])]);
     } catch (error) {
       if (!isConditional(error)) throw error;
     }
@@ -2950,6 +3046,7 @@ async function startTaskWorkflowPullRequestUpdate(
   task: DeveloperTaskRecord,
   workflow: WorkflowSnapshot & { candidate: NonNullable<WorkflowSnapshot["candidate"]> },
   expected: { workflowRevision: number; candidateDigest: string },
+  ownerAccess?: Pick<TaskAccess, "peopleRevision">,
 ): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
   const pullRequest = nextWorkflowPullRequestUpdate(workflow);
   const repository = workflow.candidate.repositories.find((entry) => entry.repositoryId === pullRequest?.repositoryId);
@@ -2964,7 +3061,8 @@ async function startTaskWorkflowPullRequestUpdate(
     const now = iso(deps);
     try {
       await deps.actions.transact([{ Update: { TableName: deps.tableName, Key: taskKey(task.taskId), UpdateExpression: "SET workflow = :workflow, updatedAt = :now", ...unchanged,
-        ExpressionAttributeValues: { ":workflow": blockWorkflowPullRequestUpdate(workflow, { numbers: [pullRequest.number], cause, now }), ":now": now, ...at } } }]);
+        ExpressionAttributeValues: { ":workflow": blockWorkflowPullRequestUpdate(workflow, { numbers: [pullRequest.number], cause, now }), ":now": now, ...at } } },
+      ...(ownerAccess === undefined ? [] : [taskAccessFence(deps.tableName, task.taskId, ownerAccess.peopleRevision)])]);
     } catch (error) {
       if (!isConditional(error)) throw error;
     }
@@ -2986,6 +3084,7 @@ async function startTaskWorkflowPullRequestUpdate(
         request: "Push the approved fix to the pull request",
         response: `AgentX is pushing the approved fix to pull request #${pullRequest.number} on ${repository.repositoryId} as operation ${operation.id}.`, operationId: operation.id,
       })),
+      ...(ownerAccess === undefined ? [] : [taskAccessFence(deps.tableName, task.taskId, ownerAccess.peopleRevision)]),
     ], { candidateDigest: expected.candidateDigest, treeSha: repository.treeSha, baseCommitSha, expectedHeadCommit: pullRequest.headSha });
   } catch (error) {
     if (error instanceof AgentXError && error.code === "STALE_FENCE") {
@@ -3013,7 +3112,10 @@ async function startTaskWorkflowPullRequestUpdate(
 /** The owner asks AgentX to open the draft pull request again: after a failed publication, or after AgentX gave up. */
 async function retryTaskWorkflowPublication(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(WorkflowPublishRetryRequestSchema, value, deps, "workflow-publish-retry");
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const access = await authorizeTaskAction(deps, caller, taskId, "publish");
+  const resumed = await resumeParkedTaskDispatch(deps, access, request);
+  if (resumed !== undefined) return resumed;
+  const { task } = access;
   const workflow = task.workflow;
   if (workflow === undefined || workflow.candidate === undefined || !workflowPublicationRetryable(workflow)) {
     throw agentXError("CONFIG_INVALID", "AgentX can retry opening the pull request only after the checks and reviews passed and before it is open");
@@ -3025,12 +3127,13 @@ async function retryTaskWorkflowPublication(deps: DeveloperTaskRouteDependencies
   let outcome: Awaited<ReturnType<typeof startTaskWorkflowPublicationFromSystem>>;
   try {
     outcome = await startTaskWorkflowPublicationFromSystem(deps, taskId, { workflowRevision: workflow.revision, candidateDigest: workflow.candidate.digest },
-      { ownerRetry: true, ...(deps.issuer === undefined ? {} : { taskPageUrl: taskPageUrl(deps.issuer, taskId) }) });
+      { ownerRetry: true, ownerAccess: access, ...(deps.issuer === undefined ? {} : { taskPageUrl: taskPageUrl(deps.issuer, taskId) }) });
   } catch (error) {
+    if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "publish");
     return busyOrClosing(deps, task, error);
   }
   if (outcome === "STALE") throw agentXError("IDEMPOTENCY_CONFLICT", "this retry is out of date; refresh the task and try again");
-  const fresh = await loadOwnedTask(deps, caller, taskId);
+  const fresh = (await authorizeTaskAction(deps, caller, taskId, "publish")).task;
   const view = await taskView(deps, fresh, { events: 0, details: false });
   await syncIndex(deps, fresh, view.status, view.updatedAt);
   return { task: view };
@@ -3042,7 +3145,8 @@ async function retryTaskWorkflowPublication(deps: DeveloperTaskRouteDependencies
  */
 async function keepTaskWorkflowPullRequests(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(WorkflowPublishRetryRequestSchema, value, deps, "workflow-keep-pull-requests");
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const access = await authorizeTaskAction(deps, caller, taskId, "decide");
+  const { task } = access;
   const workflow = task.workflow;
   if (workflow === undefined) throw agentXError("NOT_FOUND", "this task does not have a workflow record");
   // A repeated request answers as the first, but only when that request was this same Keep at this revision.
@@ -3058,21 +3162,24 @@ async function keepTaskWorkflowPullRequests(deps: DeveloperTaskRouteDependencies
   const now = iso(deps);
   let next: WorkflowSnapshot;
   try {
-    next = keepWorkflowPullRequests(workflow, { requestId: request.requestId, actorId: task.ownerKey, now });
+    next = keepWorkflowPullRequests(workflow, { requestId: request.requestId, actorId: access.actorId, now }, access.authority);
   } catch (error) {
     if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
     throw error;
   }
   try {
-    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: taskKey(taskId),
+    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [{ Update: { TableName: deps.tableName, Key: taskKey(taskId),
       UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
       ConditionExpression: "workflow.revision = :revision AND attribute_not_exists(closedAt)",
-      ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": workflow.revision } }));
+      ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": workflow.revision } } }, accessFence(deps, access)] }));
   } catch (error) {
-    if (isConditional(error)) throw agentXError("IDEMPOTENCY_CONFLICT", "this request is out of date; refresh the task and try again");
+    if (isConditional(error)) {
+      await authorizeTaskAction(deps, caller, taskId, "decide");
+      throw agentXError("IDEMPOTENCY_CONFLICT", "this request is out of date; refresh the task and try again");
+    }
     throw error;
   }
-  const fresh = await loadOwnedTask(deps, caller, taskId);
+  const fresh = (await authorizeTaskAction(deps, caller, taskId, "decide")).task;
   const view = await taskView(deps, fresh, { events: 0, details: false });
   await syncIndex(deps, fresh, view.status, view.updatedAt);
   return { task: view };
@@ -3104,7 +3211,7 @@ export async function startTaskWorkflowFeedbackReviewFromWebhook(
  * write, conditioned on the task still being exactly `stored`: either the review started and the task is RUNNING, or
  * nothing changed. False when the workspace cannot take it now.
  */
-async function acceptFeedbackReview(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, stored: WorkflowSnapshot, collecting: WorkflowSnapshot): Promise<boolean> {
+async function acceptFeedbackReview(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, stored: WorkflowSnapshot, collecting: WorkflowSnapshot, access?: AuthorizedTask): Promise<boolean> {
   if (task.closedAt !== undefined || collecting.candidate === undefined || collecting.feedbackReview?.status !== "COLLECTING") return false;
   const workspace = await deps.actions.workspace(task.workspaceId);
   if (!feedbackReviewWorkspaceReady(task, workspace)) return false;
@@ -3130,6 +3237,7 @@ async function acceptFeedbackReview(deps: DeveloperTaskRouteDependencies, task: 
         party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt: now, finishedAt: iso(deps),
         request: "Review linked PR feedback", response: "Read-only PR feedback review started as operation " + operation.id + ".", operationId: operation.id,
       }), ConditionExpression: "attribute_not_exists(pk)" } },
+      ...(access === undefined ? [] : [accessFence(deps, access)]),
     ], { sharedTask: task.shared === true, workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReview: binding, ...taskBaseOption(task, next) });
     return true;
   } catch (error) {
@@ -3165,7 +3273,8 @@ export async function retryTaskWorkflowFeedbackReview(
   taskId: string,
   input: { reviewDigest: string },
 ): Promise<{ started: boolean; note?: string }> {
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const access = await authorizeTaskAction(deps, caller, taskId, "feedback");
+  const { task } = access;
   const current = task.workflow;
   if (current === undefined) throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_STALE);
   const workspace = await actionableWorkspace(deps, task);
@@ -3175,18 +3284,24 @@ export async function retryTaskWorkflowFeedbackReview(
     // Already retried: a review still collecting (never started) is started now; one running or done is left alone.
     if (review?.status !== "COLLECTING" || current.state !== "WAITING") return { started: false };
     if (!feedbackReviewWorkspaceReady(task, workspace)) throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_BUSY);
-    if (!await acceptFeedbackReview(deps, task, current, current)) throw await feedbackRetryRefusal(deps, task, current);
+    if (!await acceptFeedbackReview(deps, task, current, current, access)) {
+      await authorizeTaskActor(deps, caller, taskId, "feedback");
+      throw await feedbackRetryRefusal(deps, task, current);
+    }
     return { started: true, note: FEEDBACK_REVIEW_RETRY_STARTED };
   }
   let collecting: WorkflowSnapshot;
   try {
-    collecting = retryWorkflowFeedbackReview(current, { reviewDigest: input.reviewDigest, actor: { actorId: task.ownerKey, role: "TASK_OWNER" }, now: iso(deps) });
+    collecting = retryWorkflowFeedbackReview(current, { reviewDigest: input.reviewDigest, actor: { actorId: access.actorId, role: "TASK_OWNER" }, now: iso(deps) }, access.authority);
   } catch (error) {
     if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_STALE);
     throw error;
   }
   if (!feedbackReviewWorkspaceReady(task, workspace)) throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_BUSY);
-  if (!await acceptFeedbackReview(deps, task, current, collecting)) throw await feedbackRetryRefusal(deps, task, current);
+  if (!await acceptFeedbackReview(deps, task, current, collecting, access)) {
+    await authorizeTaskActor(deps, caller, taskId, "feedback");
+    throw await feedbackRetryRefusal(deps, task, current);
+  }
   return { started: true, note: FEEDBACK_REVIEW_RETRY_STARTED };
 }
 
@@ -3221,7 +3336,8 @@ export async function captureWorkflowFeedbackNote(
     || Buffer.byteLength(input.text.trim(), "utf8") > 1_000) throw agentXError("CONFIG_INVALID", "Slack feedback note is empty or too long");
   const requestId = slackEventRequestId(eventId);
   for (let attempt = 0; attempt < 3; attempt += 1) {
-    const task = await loadOwnedTask(deps, caller, taskId);
+    const access = await authorizeTaskActor(deps, caller, taskId, "feedback");
+    const { task } = access;
     if (task.slackUserId !== userId || caller.slackUserId !== userId
       || task.share?.teamId !== thread.teamId || task.share.channelId !== thread.channelId || task.share.threadTs !== thread.threadTs) {
       throw agentXError("FORBIDDEN", "only the task owner may add a note in this task thread");
@@ -3240,19 +3356,18 @@ export async function captureWorkflowFeedbackNote(
     if ((current.feedbackNotes?.length ?? 0) >= 100) throw agentXError("RUNTIME_UNAVAILABLE", "the feedback note limit has been reached");
     const now = iso(deps);
     const note = WorkflowFeedbackNoteSchema.parse({
-      schemaVersion: 1, requestId, actorId: task.ownerKey, source: "THREAD_REPLY", sourceId: eventId,
+      schemaVersion: 1, requestId, actorId: access.actorId, source: "THREAD_REPLY", sourceId: eventId,
       text: input.text.trim(), at: now,
       slack: { teamId: thread.teamId, channelId: thread.channelId, threadTs: thread.threadTs, userId, messageTs, eventId },
     });
     const next = { ...current, revision: current.revision + 1, feedbackNotes: [...(current.feedbackNotes ?? []), note], updatedAt: now };
     try {
-      await deps.documentClient.send(new UpdateCommand({
-        TableName: deps.tableName, Key: taskKey(taskId),
-        UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [{ Update: {
+        TableName: deps.tableName, Key: taskKey(taskId), UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
         ConditionExpression: "workflow.revision = :revision AND workflow.feedbackReview.#status = :pending AND attribute_not_exists(closedAt)",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": current.revision, ":pending": "PENDING" },
-      }));
+      } }, accessFence(deps, access)] }));
       return { captured: true };
     } catch (error) {
       if (!isConditional(error)) throw error;
@@ -3647,7 +3762,8 @@ const CANCEL_PAYLOAD_HASH = hashJson({ action: "cancel" });
 
 async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(DeveloperTaskActionRequestSchema, value, deps, "cancel");
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const access = await authorizeTaskAction(deps, caller, taskId, "control");
+  const { task } = access;
   // Final review M2: a closed task is refused as continue refuses it, before anything is written,
   // so a repeat after the close answers "this task is closed" like any new call.
   if (task.closedAt !== undefined) throw agentXError("CONFIG_INVALID", CLOSED_TASK);
@@ -3683,10 +3799,12 @@ async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: Develope
         } },
         marker,
         record("Cancelled before the instructions ran."),
+        accessFence(deps, access),
       ]);
       handled = true;
     } catch (error) {
       if (!isConditional(error)) throw error;
+      await authorizeTaskAction(deps, caller, taskId, "control");
       // The same cancel, sent again, committed first.
       if (await repeated()) return current();
       // The prepare's result queued the instructions meanwhile: cancel the running task instead.
@@ -3700,8 +3818,10 @@ async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: Develope
       outcome = (await deps.actions.cancelRunning(developerTaskIdentity(task), workspace, (operation) => [
         record("Asked the worker to stop.", operation.id),
         marker,
+        accessFence(deps, access),
       ])).outcome;
     } catch (error) {
+      if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "control");
       // The same cancel, sent again, committed first (its marker failed this transaction).
       if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY" && await repeated()) return current();
       // The task moved on while the cancel was written: the code stays, the words name the tool.
@@ -3715,8 +3835,9 @@ async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: Develope
       // record to join. It is written with the cancel's idempotency item in its own transaction.
       // A failed write is counted and logged, and never hides the answer.
       try {
-        await deps.actions.transact([marker, record("Nothing was running.")]);
+        await deps.actions.transact([marker, record("Nothing was running."), accessFence(deps, access)]);
       } catch (error) {
+        if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "control");
         if (!isConditional(error)) turnRecordFailed(deps, error);
       }
     }
@@ -3732,7 +3853,8 @@ async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: Develope
  */
 async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<DeveloperPullRequestResponse> {
   const request = parse(DeveloperPullRequestRequestSchema, value, deps, "pull-request");
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const access = await authorizeTaskAction(deps, caller, taskId, "publish");
+  const { task } = access;
   // Task 12: the workflow opens its own draft of the checked code; MCP and Slack follow it, nobody opens another.
   if (task.workflow !== undefined) throw agentXError("CONFIG_INVALID", GATED_TASK_PULL_REQUEST_REFUSAL);
   const turns = turnTable(deps);
@@ -3760,8 +3882,10 @@ async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: Dev
         party: partyOfTask(task), turnId: randomUUID(), action: "pull_request", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: `${request.title}\n\n${request.body ?? ""}`, response: `Opening a pull request on ${repository} as operation ${operation.id}.`, operationId: operation.id,
       })),
+      accessFence(deps, access),
     ]);
   } catch (error) {
+    if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "publish");
     return busyOrClosing(deps, task, error);
   }
   const published = PullRequestResultSchema.safeParse(accepted.operation.result);
@@ -4206,9 +4330,9 @@ function notClosedMessage(reads: WorkspaceReads, operation: Operation | undefine
 }
 
 /** A setup-failed task's close (ruling F15: its accepted record commits with the close). */
-async function closeNeverStarted(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, record: TransactItems[number], receivedAt: string): Promise<void> {
+async function closeNeverStarted(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, record: TransactItems[number], receivedAt: string, access?: AuthorizedTask): Promise<void> {
   try {
-    await finishTaskClose(deps, task, undefined, [record], receivedAt);
+    await finishTaskClose(deps, task, undefined, [record, ...(access === undefined ? [] : [accessFence(deps, access)])], receivedAt);
   } catch (error) {
     // The compute refuses while it is starting or stopping: its own words, not busy()'s.
     if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY") throw agentXError("TASK_BUSY", COMPUTE_STOPPING);
@@ -4229,7 +4353,8 @@ async function closeNeverStarted(deps: DeveloperTaskRouteDependencies, task: Dev
  */
 async function closeTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<DeveloperCloseResponse> {
   const request = parse(DeveloperTaskCloseRequestSchema, value, deps, "close");
-  let task = await loadOwnedTask(deps, caller, taskId);
+  let access = await authorizeTaskActor(deps, caller, taskId, "close");
+  let task = access.task;
   const turns = turnTable(deps);
   const receivedAt = iso(deps);
   const record = (response: string, operationId?: string) => putNew(turns, aiToolTurn({
@@ -4242,7 +4367,7 @@ async function closeTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     const workspace = await deps.actions.workspace(task.workspaceId);
     if (workspace.status === "PREPARATION_FAILED") {
       // A task whose setup failed has nothing to check: it closes now and frees its slot.
-      await closeNeverStarted(deps, task, record("Closed; the task's workspace never started."), receivedAt);
+      await closeNeverStarted(deps, task, record("Closed; the task's workspace never started."), receivedAt, access);
     } else if (workspace.status === "PREPARING") {
       throw agentXError("TASK_BUSY", `task ${taskId} is still starting; cancel it with agentx_cancel_task, then close it once it has stopped`);
     } else if (workspace.status !== "CLOSED") {
@@ -4252,15 +4377,18 @@ async function closeTask(deps: DeveloperTaskRouteDependencies, caller: Developer
         // operation and writes nothing; otherwise the record commits with the preflight (R12).
         started = await deps.actions.startClose(developerTaskIdentity(task), workspace, request.requestId, (operation) => [
           record("Checking the workspace for unpublished work before closing.", operation.id),
+          accessFence(deps, access),
         ], request.discard_unpublished === true);
       } catch (error) {
+        if (isConditional(error)) await authorizeTaskActor(deps, caller, taskId, "close");
         busy(error, taskId);
       }
       operation = (await deps.actions.operations(task.workspaceId)).find((entry) => entry.id === started.operationId);
       if (operation?.status === "SUCCEEDED") unpublished = unpublishedOf(operation.result);
     }
     await resumeClose(deps, task);
-    task = await loadOwnedTask(deps, caller, taskId);
+    access = await authorizeTaskActor(deps, caller, taskId, "close");
+    task = access.task;
   }
   const reads = await workspaceReads(deps, task);
   if (operation === undefined && reads.workspace.closeOperationId !== undefined) {
@@ -4388,7 +4516,8 @@ const REUSED_REQUEST = "this request_id was already used for another action on t
  */
 async function shareTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ShareDeveloperTaskRequestSchema, value, deps, "share");
-  let task = await loadOwnedTask(deps, caller, taskId);
+  let access = await authorizeTaskAction(deps, caller, taskId, "control");
+  let task = access.task;
   const turns = turnTable(deps);
   const idempotencyKey = shareIdempotencyKey(task, request.requestId);
   const payloadHash = hashJson({ action: "share", shareMode: request.shareMode ?? null, channel: request.channel ?? null });
@@ -4407,13 +4536,14 @@ async function shareTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     const receivedAt = iso(deps);
     const share = await nextShare(deps, caller, task, request, receivedAt);
     if (share === "unchanged") return answer();
-    const items = shareItems(deps, turns, task, share, {
+    const items = [...shareItems(deps, turns, task, share, {
       idempotencyKey, payloadHash, receivedAt,
       request: `share ${request.shareMode ?? "default mode"}${request.channel === undefined ? "" : ` in ${request.channel}`}`,
-    });
+    }), accessFence(deps, access)];
     try {
       await deps.actions.transact(items);
-      task = await loadOwnedTask(deps, caller, taskId);
+      access = await authorizeTaskAction(deps, caller, taskId, "control");
+      task = access.task;
       return answer();
     } catch (error) {
       if (!isConditional(error)) throw error;
@@ -4421,7 +4551,8 @@ async function shareTask(deps: DeveloperTaskRouteDependencies, caller: Developer
       const concurrent = await get<{ payloadHash: string }>(deps, idempotencyKey);
       if (concurrent !== undefined) return shareTask(deps, caller, taskId, value);
       // The notifier (or a close) changed the task meanwhile: decide again from a fresh read.
-      task = await loadOwnedTask(deps, caller, taskId);
+      access = await authorizeTaskAction(deps, caller, taskId, "control");
+      task = access.task;
     }
   }
   throw agentXError("WORKSPACE_BUSY", "the task changed while sharing; try agentx_share_task again");

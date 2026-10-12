@@ -66,6 +66,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const MAX_CHANNELS = 50;
 
 const refuse = (): never => { throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified"); };
+const unavailable = (): never => { throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable"); };
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const conditional = (error: unknown) => error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException");
 const taskPk = (taskId: string) => `DEVTASK#${taskId}`;
@@ -149,41 +150,62 @@ async function persistIdentity(deps: TaskPersonIdentityDependencies, taskId: str
   }
 }
 
+type Qualification = { eligible: true; channelMember: boolean; name: string } | { eligible: false; channelMember: boolean };
+
+async function qualifyCurrent(
+  deps: TaskPersonIdentityDependencies,
+  task: DeveloperTaskRecord,
+  subject: ProjectAccessSubject,
+): Promise<Qualification> {
+  if (typeof deps.taskPersonProof !== "function") return unavailable();
+  let channels: readonly string[];
+  try {
+    channels = await deps.projectChannelIds(task.project);
+  } catch {
+    return unavailable();
+  }
+  const channelIds = [...new Set([...channels, ...(task.share === undefined ? [] : [task.share.channelId])])].sort();
+  if (channelIds.length > MAX_CHANNELS || channelIds.some((channelId) => !SlackChannelIdSchema.safeParse(channelId).success)) return unavailable();
+  const request = TaskPersonProofRequestSchema.safeParse({ kind: "task-person-proof", slackUserId: subject.slackUserId, channelIds });
+  if (!request.success) return unavailable();
+  let raw: TaskPersonProofResponse;
+  try {
+    raw = await deps.taskPersonProof(request.data);
+  } catch {
+    return unavailable();
+  }
+  const parsed = TaskPersonProofResponseSchema.safeParse(raw);
+  if (!parsed.success) return unavailable();
+  if (!parsed.data.ok) return parsed.data.error === "ineligible" ? { eligible: false, channelMember: false } : unavailable();
+  const memberOf = parsed.data.memberOf;
+  const requested = new Set(channelIds);
+  if (parsed.data.user.id !== subject.slackUserId || parsed.data.user.teamId !== deps.slackTeamId
+    || (task.share !== undefined && task.share.teamId !== deps.slackTeamId)
+    || new Set(memberOf).size !== memberOf.length || memberOf.some((channelId) => !requested.has(channelId))) return unavailable();
+  const channelMember = task.share === undefined || memberOf.includes(task.share.channelId);
+  try {
+    await deps.targetProjectAccess(subject, task.project, memberOf);
+  } catch (error) {
+    if (error instanceof Error && (error as Error & { code?: string }).code === "PROJECT_ACCESS_DENIED") {
+      return { eligible: false, channelMember };
+    }
+    return unavailable();
+  }
+  return { eligible: true, channelMember, name: safeName(parsed.data.user.name, parsed.data.user.id) };
+}
+
 async function qualify(
   deps: TaskPersonIdentityDependencies,
   task: DeveloperTaskRecord,
   subject: ProjectAccessSubject,
 ): Promise<{ name: string }> {
-  if (typeof deps.taskPersonProof !== "function") return refuse();
-  let channels: readonly string[];
+  let result: Qualification;
   try {
-    channels = await deps.projectChannelIds(task.project);
+    result = await qualifyCurrent(deps, task, subject);
   } catch {
     return refuse();
   }
-  const channelIds = [...new Set(channels)].sort();
-  if (channelIds.length > MAX_CHANNELS || channelIds.some((channelId) => !SlackChannelIdSchema.safeParse(channelId).success)) return refuse();
-  const request = TaskPersonProofRequestSchema.safeParse({ kind: "task-person-proof", slackUserId: subject.slackUserId, channelIds });
-  if (!request.success) return refuse();
-  let raw: TaskPersonProofResponse;
-  try {
-    raw = await deps.taskPersonProof(request.data);
-  } catch {
-    return refuse();
-  }
-  const parsed = TaskPersonProofResponseSchema.safeParse(raw);
-  if (!parsed.success || !parsed.data.ok) return refuse();
-  const memberOf = parsed.data.memberOf;
-  const requested = new Set(channelIds);
-  if (parsed.data.user.id !== subject.slackUserId || parsed.data.user.teamId !== deps.slackTeamId
-    || (task.share !== undefined && task.share.teamId !== deps.slackTeamId)
-    || new Set(memberOf).size !== memberOf.length || memberOf.some((channelId) => !requested.has(channelId))) return refuse();
-  try {
-    await deps.targetProjectAccess(subject, task.project, memberOf);
-  } catch {
-    return refuse();
-  }
-  return { name: safeName(parsed.data.user.name, parsed.data.user.id) };
+  return result.eligible ? { name: result.name } : refuse();
 }
 
 function nativeIdentity(slackUserId: string, name: string): TaskPersonIdentity {
@@ -210,21 +232,76 @@ export async function resolveTaskPickerPerson(
   return persistIdentity(deps, stored.taskId, nativeIdentity(slackUserId, proof.name));
 }
 
-async function verifyStoredIdentity(deps: TaskPersonIdentityDependencies, identity: TaskPersonIdentity): Promise<void> {
+async function storedIdentityStatus(deps: TaskPersonIdentityDependencies, identity: TaskPersonIdentity): Promise<"current" | "ineligible"> {
   if (identity.method === "slack") {
     if (identity.issuer !== SLACK_OIDC_ISSUER || identity.subject !== identity.slackUserId || identity.developerId !== developerIdForSlackUser(identity.slackUserId)) return refuse();
-    return;
+    return "current";
   }
   if (identity.issuer === SLACK_OIDC_ISSUER || identity.developerId !== ownerKeyForSubject(identity.issuer, identity.subject)) return refuse();
   let record: DeveloperRecord | undefined;
   try {
     record = await deps.developerRecord(identity.developerId);
   } catch {
-    return refuse();
+    return unavailable();
   }
-  if (record === undefined || record.revoked !== false || record.provider !== "oidc" || record.developerId !== identity.developerId
+  if (record === undefined || typeof record.revoked !== "boolean" || record.provider !== "oidc" || record.developerId !== identity.developerId
     || record.issuer !== identity.issuer || record.subject !== identity.subject || record.slackUserId !== identity.slackUserId
     || ownerKeyForSubject(record.issuer, record.subject) !== record.developerId) return refuse();
+  return record.revoked ? "ineligible" : "current";
+}
+
+async function verifyStoredIdentity(deps: TaskPersonIdentityDependencies, identity: TaskPersonIdentity): Promise<void> {
+  let status: "current" | "ineligible";
+  try {
+    status = await storedIdentityStatus(deps, identity);
+  } catch {
+    return refuse();
+  }
+  if (status !== "current") return refuse();
+}
+
+/**
+ * D2: side-effect-free current qualification for an exact task developer identity. A proven loss
+ * returns eligible=false; unavailable or malformed proof throws so callers cannot reconcile it as
+ * a departure. No registry, sign-in or session row is created here.
+ */
+export async function checkTaskPersonIdentity(
+  deps: TaskPersonIdentityDependencies,
+  task: DeveloperTaskRecord,
+  developerId: string,
+): Promise<{ subject: ProjectAccessSubject; identity: TaskPersonIdentity; eligible: boolean; channelMember: boolean }> {
+  if (!HEX64.test(developerId)) return refuse();
+  const stored = await currentTask(deps, task.taskId);
+  if (stored.project !== task.project || stored.developerId !== task.developerId || stored.provider !== task.provider || stored.slackUserId !== task.slackUserId) return refuse();
+  let identity = await registryBySubject(deps, stored.taskId, developerId);
+  if (identity === undefined) {
+    if (developerId !== stored.developerId || !SlackUserIdSchema.safeParse(stored.slackUserId).success) return refuse();
+    if (stored.provider === "slack") {
+      if (developerId !== developerIdForSlackUser(stored.slackUserId!)) return refuse();
+      identity = nativeIdentity(stored.slackUserId!, safeName(stored.developerName, stored.slackUserId!));
+    } else {
+      let record: DeveloperRecord | undefined;
+      try {
+        record = await deps.developerRecord(developerId);
+      } catch {
+        return unavailable();
+      }
+      if (record === undefined || record.provider !== "oidc" || record.developerId !== developerId || typeof record.issuer !== "string"
+        || typeof record.subject !== "string" || !SlackUserIdSchema.safeParse(record.slackUserId).success
+        || ownerKeyForSubject(record.issuer, record.subject) !== developerId) return refuse();
+      identity = {
+        developerId, slackUserId: record.slackUserId!, name: safeName(record.displayName, record.slackUserId!),
+        method: "oidc", issuer: record.issuer, subject: record.subject,
+      };
+    }
+  }
+  const status = await storedIdentityStatus(deps, identity);
+  const subject = { developerId, slackUserId: identity.slackUserId };
+  if (status === "ineligible") return { subject, identity, eligible: false, channelMember: false };
+  const proof = await qualifyCurrent(deps, stored, subject);
+  return proof.eligible
+    ? { subject, identity: { ...identity, name: proof.name }, eligible: true, channelMember: proof.channelMember }
+    : { subject, identity, eligible: false, channelMember: proof.channelMember };
 }
 
 export async function resolveTaskPersonId(

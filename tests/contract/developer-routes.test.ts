@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentXError, type ChannelInfoRequest, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
-import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerSinceFromEnvironment, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
+import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
+import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
+import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { identityHarness, localSigner } from "../support/developer-fakes.js";
@@ -536,6 +538,53 @@ describe("checkProjectAccess, FR-018's first three checks (FR-013, FR-014, FR-04
     db.set({ pk: "PROJECT#ledger", sk: "REV#000000000003", entityType: "PROJECT", definition: { name: "ledger", revision: 3, developerTasks: { enabled: false } } });
     channelMembers.mockResolvedValueOnce({ ok: true, memberOf: [] });
     expect((await refusal("ledger")).code).toBe("PROJECT_ACCESS_DENIED");
+  });
+});
+
+describe("D2 task-person route dependencies", () => {
+  const maya: DeveloperCaller = { developerId, sessionId: "s-1", amr: "slack", name: "Maya Chen", slackUserId: "U0MAYA001" };
+  const taskId = "11111111-1111-4111-8111-111111111111";
+  const nativeDeveloperId = developerIdForSlackUser("U0MAYA001");
+  const task = {
+    pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId,
+    developerId: nativeDeveloperId, provider: "slack", developerName: "Maya Chen", slackUserId: "U0MAYA001",
+    project: "payments-api", share: { teamId: "T0TEAM1", channelId: "C0PAY0001" },
+  } as DeveloperTaskRecord;
+
+  it("propagates the exact default-off people configuration", () => {
+    (config as DeveloperApiConfiguration & { taskPeopleConfiguration: { peopleChangesEnabled: boolean } }).taskPeopleConfiguration = { peopleChangesEnabled: false };
+    const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, maya);
+    expect(Reflect.get(route, "taskPeopleConfiguration")).toEqual({ peopleChangesEnabled: false });
+  });
+
+  it("checks an exact task principal through fresh proof without writing identity state", async () => {
+    db.set(task as unknown as Record<string, unknown>);
+    const proof = vi.fn(async () => ({
+      ok: true as const,
+      user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" },
+      memberOf: ["C0PAY0001"],
+    }));
+    config.taskPersonProof = proof;
+    const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, maya);
+    const check = Reflect.get(route, "checkTaskPerson") as ((value: DeveloperTaskRecord, id: string) => Promise<Record<string, unknown>>) | undefined;
+
+    await expect(check?.(task, nativeDeveloperId)).resolves.toMatchObject({
+      subject: { developerId: nativeDeveloperId, slackUserId: "U0MAYA001" },
+      identity: { developerId: nativeDeveloperId, method: "slack" },
+      eligible: true,
+      channelMember: true,
+    });
+    expect(proof).toHaveBeenCalledWith({ kind: "task-person-proof", slackUserId: "U0MAYA001", channelIds: ["C0PAY0001"] });
+    expect(db.find((item) => String(item.sk).startsWith("PERSON#") || String(item.sk).startsWith("PERSON_SUBJECT#"))).toEqual([]);
+  });
+
+  it("fails closed when the trusted fresh-proof port is absent", async () => {
+    db.set(task as unknown as Record<string, unknown>);
+    delete config.taskPersonProof;
+    const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, maya);
+    const check = Reflect.get(route, "checkTaskPerson") as ((value: DeveloperTaskRecord, id: string) => Promise<Record<string, unknown>>) | undefined;
+
+    await expect(check?.(task, nativeDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
   });
 });
 

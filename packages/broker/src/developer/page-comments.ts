@@ -16,6 +16,7 @@ import { isConditional } from "../aws/broker-shared.js";
 import { plainName } from "../aws/task-web.js";
 import { loadWorkflowDocument, type LoadedDocument } from "./plan-artifacts.js";
 import { can, taskOpen, type TaskAccess } from "./task-access.js";
+import { taskAccessFence } from "./task-people.js";
 import { plannerRepliesKey, type DeveloperTaskRecord } from "./task-records.js";
 
 type CommentDependencies = Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName" | "actions" | "now" | "log">;
@@ -184,8 +185,10 @@ export async function takeRate(
   key: { taskId: string; kind: "comment" | "suggestion" | "change" | "ask"; actor: string },
   limit: number,
   windowMs: number,
+  access?: Pick<TaskAccess, "peopleRevision">,
 ): Promise<boolean> {
-  return takeRateAt(deps, rateKey(key.taskId, key.kind, key.actor), limit, windowMs);
+  return takeRateAt(deps, rateKey(key.taskId, key.kind, key.actor), limit, windowMs,
+    access === undefined ? undefined : { taskId: key.taskId, ...(access.peopleRevision === undefined ? {} : { peopleRevision: access.peopleRevision }) });
 }
 
 /** `takeRate` for any rate item. */
@@ -194,15 +197,25 @@ async function takeRateAt(
   Key: { pk: string; sk: string },
   limit: number,
   windowMs: number,
+  access?: { taskId: string; peopleRevision?: number },
 ): Promise<boolean> {
   const window = Math.floor(deps.now() / windowMs) * windowMs;
+  const write = async (Update: Record<string, unknown>): Promise<void> => {
+    if (access === undefined) {
+      await deps.documentClient.send(new UpdateCommand(Update as never));
+      return;
+    }
+    await deps.documentClient.send(new TransactWriteCommand({
+      TransactItems: [{ Update }, taskAccessFence(deps.tableName, access.taskId, access.peopleRevision)] as never,
+    }));
+  };
   const increment = async (): Promise<boolean> => {
     try {
-      await deps.documentClient.send(new UpdateCommand({
+      await write({
         TableName: deps.tableName, Key, UpdateExpression: "SET #count = #count + :one",
         ConditionExpression: "windowStart = :window AND #count < :limit",
         ExpressionAttributeNames: { "#count": "count" }, ExpressionAttributeValues: { ":one": 1, ":window": window, ":limit": limit },
-      }));
+      });
       return true;
     } catch (error) {
       if (!isConditional(error)) throw error;
@@ -211,11 +224,11 @@ async function takeRateAt(
   };
   if (await increment()) return true;
   try {
-    await deps.documentClient.send(new UpdateCommand({
+    await write({
       TableName: deps.tableName, Key, UpdateExpression: "SET entityType = :type, windowStart = :window, #count = :one",
       ConditionExpression: "attribute_not_exists(windowStart) OR windowStart < :window",
       ExpressionAttributeNames: { "#count": "count" }, ExpressionAttributeValues: { ":type": "TASK_RATE", ":window": window, ":one": 1 },
-    }));
+    });
     return true;
   } catch (error) {
     if (!isConditional(error)) throw error;
@@ -310,7 +323,7 @@ export async function createTaskComment(
   // A full task is said before any of the writer's limit is spent; the transaction checks the cap again.
   const stored = await getItem(deps, commentCounterKey(task.taskId));
   if (typeof stored?.count === "number" && stored.count >= TASK_COMMENT_ITEMS_MAX) throw pageRefusal("task_full");
-  if (!await takeRate(deps, { taskId: task.taskId, kind: "comment", actor: caller.developerId }, COMMENT_RATE.comments, COMMENT_RATE.windowMs)) {
+  if (!await takeRate(deps, { taskId: task.taskId, kind: "comment", actor: caller.developerId }, COMMENT_RATE.comments, COMMENT_RATE.windowMs, actor)) {
     throw pageRefusal("slow_down");
   }
 
@@ -334,6 +347,7 @@ export async function createTaskComment(
       },
     });
   }
+  items.push(taskAccessFence(deps.tableName, task.taskId, actor.peopleRevision));
   try {
     await deps.documentClient.send(new TransactWriteCommand({ TransactItems: items as never }));
   } catch (error) {
@@ -344,7 +358,7 @@ export async function createTaskComment(
         if (raced !== undefined) return { comment: raced, duplicate: true };
       }
       if (codes[1] === "ConditionalCheckFailed") throw pageRefusal("task_full");
-      if (codes[2] === "ConditionalCheckFailed") {
+      if (codes[2] === "ConditionalCheckFailed" && parent !== undefined) {
         const now = parent === undefined ? undefined : await getComment(deps, task.taskId, parent.commentId);
         throw pageRefusal(now !== undefined && (now.replyCount ?? 0) >= COMMENT_THREAD_REPLIES_MAX ? "thread_full" : "not_here");
       }
@@ -366,7 +380,7 @@ async function changeableComment(deps: CommentDependencies, actor: PageActor, co
   if (comment.deletedAt !== undefined) throw pageRefusal("gone");
   if (comment.rev !== rev) throw pageRefusal("changed");
   // Edits and deletes are limited as new comments are: each one is a write every open page sees.
-  if (!await takeRate(deps, { taskId: actor.task.taskId, kind: "change", actor: actor.caller.developerId }, COMMENT_RATE.changes, COMMENT_RATE.windowMs)) {
+  if (!await takeRate(deps, { taskId: actor.task.taskId, kind: "change", actor: actor.caller.developerId }, COMMENT_RATE.changes, COMMENT_RATE.windowMs, actor)) {
     throw pageRefusal("slow_down");
   }
   return comment;
@@ -387,6 +401,7 @@ async function writeChange(deps: CommentDependencies, actor: PageActor, comment:
           },
         },
         counterTouch(deps, comment.taskId),
+        taskAccessFence(deps.tableName, comment.taskId, actor.peopleRevision),
       ] as never,
     }));
   } catch (error) {
@@ -431,7 +446,7 @@ export async function setSuggestion(deps: CommentDependencies, actor: PageActor,
   if (loaded === undefined || decision === undefined || (input.optionId !== null && !decision.options.some((option) => option.id === input.optionId))) {
     throw pageRefusal("not_here");
   }
-  if (!await takeRate(deps, { taskId: task.taskId, kind: "suggestion", actor: caller.developerId }, COMMENT_RATE.suggestions, COMMENT_RATE.windowMs)) {
+  if (!await takeRate(deps, { taskId: task.taskId, kind: "suggestion", actor: caller.developerId }, COMMENT_RATE.suggestions, COMMENT_RATE.windowMs, actor)) {
     throw pageRefusal("slow_down");
   }
   const Key = suggestionKey(task.taskId, input.document, input.decisionId, caller.developerId);
@@ -452,7 +467,7 @@ export async function setSuggestion(deps: CommentDependencies, actor: PageActor,
     write = { Put: { TableName: deps.tableName, Item: { ...Key, entityType: "TASK_SUGGESTION", ...suggestion }, ...guard } };
   }
   try {
-    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [write, counterTouch(deps, task.taskId)] as never }));
+    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [write, counterTouch(deps, task.taskId), taskAccessFence(deps.tableName, task.taskId, actor.peopleRevision)] as never }));
   } catch (error) {
     if (error instanceof Error && error.name === "TransactionCanceledException") throw pageRefusal("changed");
     throw error;
@@ -581,7 +596,13 @@ export interface SlackRequestQueue {
 type AskDependencies = CommentDependencies & { slackRequestQueue?: SlackRequestQueue | undefined };
 
 /** Records what became of a question to AgentX on the comment, conditioned on the comment being the one the page wrote. */
-async function setAsk(deps: CommentDependencies, comment: TaskComment, state: NonNullable<TaskComment["ask"]>["state"], expected?: NonNullable<TaskComment["ask"]>["state"]): Promise<TaskComment> {
+async function setAsk(
+  deps: CommentDependencies,
+  comment: TaskComment,
+  state: NonNullable<TaskComment["ask"]>["state"],
+  expected?: NonNullable<TaskComment["ask"]>["state"],
+  access?: Pick<TaskAccess, "peopleRevision">,
+): Promise<TaskComment> {
   const ask = { state, at: iso(deps) };
   await deps.documentClient.send(new TransactWriteCommand({
     TransactItems: [
@@ -595,6 +616,7 @@ async function setAsk(deps: CommentDependencies, comment: TaskComment, state: No
         },
       },
       counterTouch(deps, comment.taskId),
+      ...(access === undefined ? [] : [taskAccessFence(deps.tableName, comment.taskId, access.peopleRevision)]),
     ] as never,
   }));
   return { ...comment, ask };
@@ -609,7 +631,7 @@ async function setAsk(deps: CommentDependencies, comment: TaskComment, state: No
  */
 export async function queueCommentAnswer(
   deps: AskDependencies,
-  input: { task: DeveloperTaskRecord; comment: TaskComment; caller: DeveloperCaller },
+  input: { task: DeveloperTaskRecord; comment: TaskComment; caller: DeveloperCaller; access?: Pick<TaskAccess, "peopleRevision"> },
 ): Promise<{ outcome: "queued" | "limited" | "unavailable" | "failed"; comment: TaskComment }> {
   const { task, comment, caller } = input;
   let answering: TaskComment | undefined;
@@ -622,7 +644,7 @@ export async function queueCommentAnswer(
     const startedInSlack = shared?.taskId === task.taskId && shared.workflowThread === true && shared.closedAt === undefined;
     const queue = deps.slackRequestQueue;
     if (queue === undefined || share === undefined || threadTs === undefined || !startedInSlack || userId === undefined || comment.author.kind !== "person") {
-      return { outcome: "unavailable", comment: await setAsk(deps, comment, "unavailable") };
+      return { outcome: "unavailable", comment: await setAsk(deps, comment, "unavailable", undefined, input.access) };
     }
     // The message is built (and checked) before anything is spent or marked.
     const message = SlackPageCommentMessageSchema.parse({
@@ -644,8 +666,9 @@ export async function queueCommentAnswer(
       { key: askRateAcrossTasksKey(caller.developerId), limit: AGENTX_ASK_RATE.perPersonAllTasksPerHour },
     ];
     for (const entry of limits) if (!await rateRoom(deps, entry.key, entry.limit, HOUR_MS)) return { outcome: "limited", comment };
-    for (const entry of limits) if (!await takeRateAt(deps, entry.key, entry.limit, HOUR_MS)) return { outcome: "limited", comment };
-    answering = await setAsk(deps, comment, "answering");
+    for (const entry of limits) if (!await takeRateAt(deps, entry.key, entry.limit, HOUR_MS,
+      input.access === undefined ? undefined : { taskId: task.taskId, ...(input.access.peopleRevision === undefined ? {} : { peopleRevision: input.access.peopleRevision }) })) return { outcome: "limited", comment };
+    answering = await setAsk(deps, comment, "answering", undefined, input.access);
     await queue.send({
       body: JSON.stringify(message),
       groupId: createHash("sha256").update(`page-comment\0${task.taskId}`, "utf8").digest("hex"),

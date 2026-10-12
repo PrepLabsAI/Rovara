@@ -53,7 +53,7 @@ export type RuntimeBinding = LegacyRuntimeBinding | Ec2RuntimeBinding;
  * is not ready waits in WAITING_FOR_SESSION; moving it back to PENDING makes the publisher, which
  * re-publishes PENDING records on MODIFY, queue it again.
  */
-export type OutboxStatus = "PENDING" | "QUEUED" | "WAITING_FOR_SESSION" | "DELIVERED" | "FAILED";
+export type OutboxStatus = "PENDING" | "QUEUED" | "WAITING_FOR_SESSION" | "WAITING_FOR_TASK_ACCESS" | "DELIVERED" | "FAILED";
 
 interface OutboxRecordBase {
   id: string;

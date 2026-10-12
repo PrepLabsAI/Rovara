@@ -115,6 +115,19 @@ describe("session manager: first provisioning", () => {
 });
 
 describe("session manager: ready", () => {
+  it("never unparks task-access-paused work when compute becomes ready", async () => {
+    const { db, sessions, workspaceId, session } = setup();
+    const { outboxId } = seedOperation(db, workspaceId);
+    await sessions.ensureSession({ workspaceId, binding, waitingOutboxId: outboxId });
+    db.set({ ...db.get(`OUTBOX#${outboxId}`, "OUTBOX")!, status: "WAITING_FOR_TASK_ACCESS" });
+    await sessions.markVolume(workspaceId, 1, "vol-0123456789abcdef0");
+    await sessions.markInstance(workspaceId, 1, "i-0123456789abcdef0", "10.42.128.10");
+
+    expect(await sessions.markReady(workspaceId, 1)).toEqual({ requeued: [] });
+    expect(db.get(`OUTBOX#${outboxId}`, "OUTBOX")?.status).toBe("WAITING_FOR_TASK_ACCESS");
+    expect(session()).not.toHaveProperty("waitingOutboxIds");
+  });
+
   it("becomes READY with its worker's address and sends parked work back to PENDING", async () => {
     const { db, sessions, workspaceId, session } = setup();
     const { outboxId } = seedOperation(db, workspaceId);
