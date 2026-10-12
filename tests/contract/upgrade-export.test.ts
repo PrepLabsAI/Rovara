@@ -14,7 +14,10 @@ const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 const ASSET = "a".repeat(64);
 const settings = { ...SETTINGS, access: { artifactBucket: "agentx-staging-access-artifactbucket-abc", cloudFormationRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-cloudformation", operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator", pullThroughPrefix: "agentx-staging" } };
-const CONTROL_PLANE_DECLARED = { CallbackSigningKey: {}, BudgetMonthlyUsd: {}, GitHubAppId: {}, DeveloperSignInSlack: {}, ConsoleSetting: {} };
+const CONTROL_PLANE_DECLARED = {
+  CallbackSigningKey: {}, BudgetMonthlyUsd: {}, GitHubAppId: {}, DeveloperSignInSlack: {}, ConsoleSetting: {},
+  TaskPeopleChangesEnabled: {}, TaskPeoplePublicInvitationsEnabled: {}, TaskPeoplePrivateInvitationsEnabled: {},
+};
 
 async function releaseWithPackage(declared: Record<string, unknown> = { CallbackSigningKey: {}, BudgetMonthlyUsd: {}, GitHubAppId: {} }, packageFile?: string): Promise<LoadedRelease> {
   const dir = await mkdtemp(join(tmpdir(), "agentx-upgrade-release-"));
@@ -97,6 +100,21 @@ describe("agentx upgrade --export (FR-026)", () => {
     expect(parameters.find((entry) => entry.ParameterKey === "DeveloperSignInSlack")).toBeUndefined();
     expect([...upgradeKeptParameterNames("control-plane")].sort()).toEqual([...OPERATOR_PARAMETERS["control-plane"], ...SECRET_PARAMETERS].sort());
     expect([...upgradeKeptParameterNames("slack")].sort()).toEqual([...OPERATOR_PARAMETERS.slack, ...SECRET_PARAMETERS].sort());
+  });
+
+  it("exports prior role and invitation settings independently", async () => {
+    const out = await freshDir();
+    await writeUpgradeBundle({
+      dir: out, settings, answers, release: await releaseWithPackage(CONTROL_PLANE_DECLARED), parts: ["control-plane"], outputs,
+      deployed: { "control-plane": {
+        CallbackSigningKey: "****", TaskPeopleChangesEnabled: "true",
+        TaskPeoplePublicInvitationsEnabled: "true", TaskPeoplePrivateInvitationsEnabled: "false",
+      } },
+    });
+    const parameters = JSON.parse(await readFile(join(out, "parameters", "control-plane.json"), "utf8")) as Array<Record<string, unknown>>;
+    expect(parameters).toContainEqual({ ParameterKey: "TaskPeopleChangesEnabled", UsePreviousValue: true });
+    expect(parameters).toContainEqual({ ParameterKey: "TaskPeoplePublicInvitationsEnabled", UsePreviousValue: true });
+    expect(parameters).toContainEqual({ ParameterKey: "TaskPeoplePrivateInvitationsEnabled", UsePreviousValue: true });
   });
 
   it("sends the stored sign-in, as agentx upgrade does, only for names the target declares (ruling F29)", async () => {

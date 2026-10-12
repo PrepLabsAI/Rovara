@@ -24,6 +24,14 @@ import { checkSlackClientId, checkSlackClientSecret, hasStoredSlackClient, SIGNI
 // in a Slack-started task's thread is saved as input for its next step (gap 2), and the ingress ignores,
 // without storing, every other channel message. Adding scopes later forces a reinstall (R10).
 export const SLACK_BOT_SCOPES: readonly string[] = ["app_mentions:read", "canvases:write", "channels:history", "channels:join", "channels:read", "chat:write", "files:read", "groups:history", "groups:read", "im:write", "users:read", "users:read.email"];
+/** Invitation scopes are selected independently and remain absent from all default install flows. */
+export function slackBotScopes(input: { publicInvitations?: boolean; privateInvitations?: boolean } = {}): string[] {
+  return [
+    ...SLACK_BOT_SCOPES,
+    ...(input.publicInvitations === true ? ["channels:write.invites"] : []),
+    ...(input.privateInvitations === true ? ["groups:write.invites"] : []),
+  ];
+}
 /** The Events API subscriptions: mentions, and messages in public and private channels the bot is in. */
 export const SLACK_BOT_EVENTS: readonly string[] = ["app_mention", "message.channels", "message.groups"];
 /** Sign in with Slack (OpenID Connect). */
@@ -86,11 +94,11 @@ export function slackBotDisplayName(appName: string): string {
   return name === "" ? "agentx" : name;
 }
 
-export function slackAppManifest(input: { appName: string; eventsUrl: string; interactivityUrl: string; signInCallbackUrl: string }): SlackManifest {
+export function slackAppManifest(input: { appName: string; eventsUrl: string; interactivityUrl: string; signInCallbackUrl: string; publicInvitations?: boolean; privateInvitations?: boolean }): SlackManifest {
   return {
     display_information: { name: input.appName, description: "AgentX: ask in Slack, and AgentX works in your repositories and trackers." },
     features: { bot_user: { display_name: slackBotDisplayName(input.appName), always_online: true } },
-    oauth_config: { redirect_urls: [input.signInCallbackUrl], scopes: { bot: [...SLACK_BOT_SCOPES], user: [...SLACK_USER_SCOPES] } },
+    oauth_config: { redirect_urls: [input.signInCallbackUrl], scopes: { bot: slackBotScopes(input), user: [...SLACK_USER_SCOPES] } },
     settings: {
       event_subscriptions: { request_url: input.eventsUrl, bot_events: [...SLACK_BOT_EVENTS] },
       interactivity: { is_enabled: true, request_url: input.interactivityUrl },

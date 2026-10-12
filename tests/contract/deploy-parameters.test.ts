@@ -307,4 +307,15 @@ describe("deploy parameters", () => {
   it("leaves the template defaults when no sign-in is stored", () => {
     expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("DeveloperSignInSlack");
   });
+
+  it("keeps People mutation controls as operator parameters without setting them from sign-in answers", () => {
+    expect(OPERATOR_PARAMETERS["control-plane"]).toEqual(expect.arrayContaining([
+      "TaskPeopleChangesEnabled",
+      "TaskPeoplePublicInvitationsEnabled",
+      "TaskPeoplePrivateInvitationsEnabled",
+    ]));
+    expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("TaskPeopleChangesEnabled");
+    expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("TaskPeoplePublicInvitationsEnabled");
+    expect(stackParameters("control-plane", answers(), outputs, { packages: true })).not.toHaveProperty("TaskPeoplePrivateInvitationsEnabled");
+  });
 });
