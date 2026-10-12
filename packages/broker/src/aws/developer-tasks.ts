@@ -100,6 +100,9 @@ import {
   type PlanClaim,
   type PlanDocument,
   planSummaryLines,
+  validateTaskGraph,
+  taskGraphDigest,
+  taskGraphOrder,
   type PlanDocumentKind,
   WORKFLOW_THREAD_NOTE_MAX_CHARS,
   WORKFLOW_THREAD_NOTES_MAX,
@@ -116,6 +119,7 @@ import {
   sendBackProblems,
   WORKFLOW_REGRESSION_INSTRUCTION,
   type WorkflowSendBackProblem,
+  type WorkflowDependencyInvocation,
   WorkflowResolveFindingsInputSchema,
   TaskPeopleRoleRequestSchema,
   TaskPeopleTakeOwnershipRequestSchema,
@@ -195,6 +199,8 @@ export interface DeveloperTaskRouteDependencies {
   slackTeamId?: string;
   /** C: absent is write-disabled; an existing PEOPLE sidecar remains authoritative either way. */
   taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
+  /** Spec 059: absent is the safe default; production factories intentionally leave graph starts disabled. */
+  workflowDependenciesEnabled?: boolean;
   /** C: trusted exact-principal eligibility and bound-channel proof; never supplied by a request body. */
   checkTaskPerson?: (task: DeveloperTaskRecord, developerId: string, admission?: TaskPeopleDisplayAdmission) => Promise<{
     subject: { developerId: string; slackUserId?: string };
@@ -1597,9 +1603,9 @@ export async function decideTaskWorkflow(
     }
     return error;
   };
-  const transition = (decisionRequest: WorkflowDecisionRequest, decisions?: ReadonlyArray<{ id: string; optionIds: string[]; recommended: string }>) => {
+  const transition = (decisionRequest: WorkflowDecisionRequest, decisions?: ReadonlyArray<{ id: string; optionIds: string[]; recommended: string }>, workBreakdownDigest?: string) => {
     try {
-      return decideWorkflow(workflow, decisionRequest, actor, { ...decideOptions, authority: access.authority, ...(decisions === undefined ? {} : { decisions }) });
+      return decideWorkflow(workflow, decisionRequest, actor, { ...decideOptions, authority: access.authority, ...(decisions === undefined ? {} : { decisions }), ...(workBreakdownDigest === undefined ? {} : { workBreakdownDigest }) });
     } catch (error) {
       if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
       throw error;
@@ -1619,6 +1625,25 @@ export async function decideTaskWorkflow(
   const decisions = loaded?.format === "structured"
     ? loaded.plan.decisions.map((decision) => ({ id: decision.id, optionIds: decision.options.map((option) => option.id), recommended: decision.recommended }))
     : undefined;
+  const planGraph = loaded?.format === "structured" ? loaded.plan.workBreakdown : undefined;
+  let workBreakdownDigest: string | undefined;
+  if (planGraph !== undefined && request.decision === "APPROVE") {
+    if (prior === undefined && deps.workflowDependenciesEnabled !== true) throw agentXError("CONFIG_INVALID", "ordered work plans are saved but this broker is not enabled to start them");
+    const pinnedProject = await deps.actions.projectRevision(task.project, task.startingRevision);
+    if (pinnedProject === undefined || pinnedProject.definition.repositories.length !== 1) {
+      throw agentXError("CONFIG_INVALID", "ordered work is available only when this task is pinned to one registered repository");
+    }
+    const validated = validateTaskGraph(planGraph, { taskId, repositoryId: pinnedProject.definition.repositories[0]!.name });
+    if (!validated.ok) throw agentXError("CONFIG_INVALID", `the approved work breakdown is invalid: ${validated.errors.join("; ")}`);
+    workBreakdownDigest = taskGraphDigest(validated.graph);
+    if (request.workBreakdownDigest !== undefined && request.workBreakdownDigest !== workBreakdownDigest) {
+      throw agentXError("CONFIG_INVALID", "the work breakdown changed; refresh the plan before deciding");
+    }
+  } else if (request.workBreakdownDigest !== undefined) {
+    throw agentXError("CONFIG_INVALID", "the current plan has no work breakdown to approve");
+  }
+  const boundDecisionRequest = workBreakdownDigest === undefined || request.workBreakdownDigest !== undefined
+    ? request : { ...request, workBreakdownDigest };
 
   if (prior !== undefined) {
     // A replay keeps its first comment set: the IDs recorded with it, never the comments open now.
@@ -1627,7 +1652,7 @@ export async function decideTaskWorkflow(
     if (request.includedCommentIds !== undefined && !sameIdSet(request.includedCommentIds, recorded)) {
       throw agentXError("CONFIG_INVALID", "request ID was already used for a different workflow decision");
     }
-    transition({ ...request, includedCommentIds: request.includedCommentIds ?? recorded }, decisions);
+    transition({ ...boundDecisionRequest, includedCommentIds: request.includedCommentIds ?? recorded }, decisions, workBreakdownDigest);
     return { task: await taskView(deps, task, { events: 0, details: false }) };
   }
 
@@ -1652,8 +1677,8 @@ export async function decideTaskWorkflow(
     throw agentXError("CONFIG_INVALID", REQUEST_CHANGES_NEEDS_INPUT);
   }
   const decisionRequest: WorkflowDecisionRequest = included.length === 0 && request.includedCommentIds === undefined
-    ? request : { ...request, includedCommentIds: included.map((comment) => comment.commentId) };
-  let next = transition(decisionRequest, decisions);
+    ? boundDecisionRequest : { ...boundDecisionRequest, includedCommentIds: included.map((comment) => comment.commentId) };
+  let next = transition(decisionRequest, decisions, workBreakdownDigest);
   const receivedAt = iso(deps);
   if (request.decision === "REJECT") {
     await deps.actions.transact([{ Update: {
@@ -1704,6 +1729,8 @@ export async function decideTaskWorkflow(
   const retired = mode === "PLAN" ? await retiredClaimIdList(deps, workflow) : [];
   // Only a coding run checks its work: a planning run, here revising a plan the owner did not approve, gets no proposed command.
   const selectedReadiness = next.checkPolicy === undefined || mode !== "IMPLEMENT" ? undefined : workflowSelectedChecks(next.checkPolicy).map((check) => check.command);
+  const workflowDependencies = mode === "IMPLEMENT" && planGraph !== undefined && next.workflowDependenciesApproval !== undefined
+    ? { graph: planGraph, approval: next.workflowDependenciesApproval } : undefined;
   // The decision's detail, beside the task (never inside it), when there is anything to keep beyond the decision itself.
   const detailItems = request.answers === undefined && included.length === 0 && options.note === undefined ? [] : [putNew(deps.tableName, {
     ...decisionDetailKey(taskId, request.requestId), entityType: "WORKFLOW_DECISION_DETAIL",
@@ -1743,7 +1770,7 @@ export async function decideTaskWorkflow(
       ...lockItems,
       ...(included.length === 0 ? [] : [counterTouch(deps, taskId)]),
       accessFence(deps, access),
-    ], { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}) });
+    ], { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}), ...(workflowDependencies === undefined ? {} : { workflowDependencies }) });
     });
   } catch (error) {
     // Another decision got there first: the same request (a double press) is that decision; any other is refused with
@@ -1978,6 +2005,28 @@ async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow
   return { text: loaded.markdown, sha256: plan.sha256 };
 }
 
+/** Reload the exact whole-plan artifact bound by the Owner so a retry cannot fall back to plain coding. */
+async function approvedWorkflowDependencies(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<WorkflowDependencyInvocation | undefined> {
+  const approval = workflow.workflowDependenciesApproval;
+  if (approval === undefined) return undefined;
+  const artifact = workflow.artifacts.find((entry) => entry.type === "plan" && entry.sha256 === approval.artifactDigest);
+  if (artifact === undefined) throw agentXError("WORKSPACE_NOT_READY", "the approved work breakdown plan is missing");
+  const loaded = await loadWorkflowDocument((objectKey, maxBytes) => deps.actions.readArtifact(objectKey, maxBytes), artifact, {});
+  const graph = loaded?.format === "structured" ? loaded.plan.workBreakdown : undefined;
+  if (graph === undefined || taskGraphDigest(graph) !== approval.graphDigest) {
+    throw agentXError("WORKSPACE_NOT_READY", "the approved work breakdown failed its digest check");
+  }
+  const progress = workflow.workflowDependenciesProgress ?? [];
+  const order = taskGraphOrder(graph);
+  if (progress.length === 0 || progress.some((entry, index) => entry.itemId !== order[index] || entry.state === "STARTED")) {
+    throw agentXError("CONFIG_INVALID", "this ordered run has no complete retained checkpoint to retry safely");
+  }
+  const last = progress.at(-1)!;
+  const resumeTreeSha = last.state === "IMPLEMENTED" ? last.candidateTreeSha : last.baseTreeSha;
+  if (resumeTreeSha === undefined) throw agentXError("CONFIG_INVALID", "the stopped ordered run has no usable tree checkpoint");
+  return { graph, approval, resumeTreeSha };
+}
+
 /** The commands of the project's required checks, the approved plan's proposed ones and the owner's selected optional ones, in that order. */
 function selectedCheckCommands(workflow: WorkflowSnapshot): { readiness?: WorkflowCheckPolicy["required"][number]["command"][] } {
   const policy = workflow.checkPolicy;
@@ -1993,7 +2042,7 @@ const NO_PUBLISH_NOTE = "Do not push branches or create pull requests; AgentX ha
  */
 async function queueWorkflowCoding(
   deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, access: AuthorizedTask & { task: DeveloperTaskRecord & { workflow: WorkflowSnapshot } },
-  input: { requestId: string; prompt: (notes: string) => string; next: WorkflowSnapshot; request: string; response: string },
+  input: { requestId: string; prompt: (notes: string) => string; next: WorkflowSnapshot; request: string; response: string; workflowDependencies?: WorkflowDependencyInvocation },
 ): Promise<{ task: DeveloperTaskView }> {
   const { task } = access;
   const { workflow } = task;
@@ -2014,7 +2063,7 @@ async function queueWorkflowCoding(
           request: input.request, response: `${input.response} as operation ${operation.id}.`, operationId: operation.id,
         })),
         accessFence(deps, access),
-      ], { sharedTask: task.shared === true, workflowMode: "IMPLEMENT", ...selectedCheckCommands(input.next), ...taskBaseOption(task, input.next) });
+      ], { sharedTask: task.shared === true, workflowMode: "IMPLEMENT", ...selectedCheckCommands(input.next), ...taskBaseOption(task, input.next), ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }) });
     });
   } catch (error) {
     if (isConditional(error)) await authorizeTaskAction(deps, caller, task.taskId, "control");
@@ -2037,12 +2086,16 @@ async function retryWorkflowImplementation(
   }
   await actionableWorkspace(deps, task);
   const plan = await approvedCodingPlan(deps, workflow);
+  const workflowDependencies = await approvedWorkflowDependencies(deps, workflow);
+  if (workflowDependencies !== undefined && deps.workflowDependenciesEnabled !== true) {
+    throw agentXError("CONFIG_INVALID", "the approved ordered work plan is retained, but this broker is not enabled to retry it");
+  }
   const { blockReason: _blockReason, ...unblocked } = workflow;
   void _blockReason;
   const next: WorkflowSnapshot = { ...unblocked, revision: workflow.revision + 1, state: "RUNNING", updatedAt: iso(deps) };
   const prompt = (notes: string) => `Implement the human-approved plan below. The previous coding run stopped before it finished; continue from the current code. Follow its ordered steps, run the listed checks, and report results and limitations. ${NO_PUBLISH_NOTE}\n\nOwner note: ${request.instructions}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
   return queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId: request.requestId, prompt, next,
-    request: request.instructions, response: "Restarting the coding step" });
+    request: request.instructions, response: workflowDependencies === undefined ? "Restarting the coding step" : "Restarting the approved ordered work plan", ...(workflowDependencies === undefined ? {} : { workflowDependencies }) });
 }
 
 /**
@@ -2074,12 +2127,16 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
   }
   await actionableWorkspace(deps, task);
   const plan = await approvedCodingPlan(deps, workflow);
+  const workflowDependencies = await approvedWorkflowDependencies(deps, workflow);
+  if (workflowDependencies !== undefined && deps.workflowDependenciesEnabled !== true) {
+    throw agentXError("CONFIG_INVALID", "the approved ordered work plan is retained, but this broker is not enabled to continue it");
+  }
   // The problems are reviewer and check output, marked untrusted; the owner's note stays outside, as the instruction.
   const problems = sendBackProblemsPromptSection(sendBackProblems(workflow), promptTagId(task, request.requestId));
   const prompt = (notes: string) => `Address the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nOwner note (the owner's own instructions for this step): ${request.instructions}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
   const next: WorkflowSnapshot = { ...returned, revision: returned.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   return queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId: request.requestId, prompt, next,
-    request: request.instructions, response: "AgentX sent the change back to coding" });
+    request: request.instructions, response: workflowDependencies === undefined ? "AgentX sent the change back to coding" : "AgentX restarted the approved ordered work plan", ...(workflowDependencies === undefined ? {} : { workflowDependencies }) });
 }
 
 /**
@@ -2915,6 +2972,7 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     path: workflow?.path ?? "QUICK", revision: workflow?.revision ?? 0, stage: taskPageStep(workflow, task.closedAt !== undefined), role: owner ? "owner" : "reader",
     documents, ...(unverified.length === 0 ? {} : { unverified }), checks, checksRan: results.length > 0, ...(checksNote === undefined ? {} : { checksNote }), findings,
     ...(acceptedFindings.length === 0 ? {} : { acceptedFindings }),
+    ...(workflow?.workflowDependenciesProgress === undefined ? {} : { workflowDependenciesProgress: workflow.workflowDependenciesProgress }),
     pullRequests: (workflow?.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state })),
     history, access: pageAccess(access), ...(capabilities.peopleRevision === undefined ? {} : { peopleRevision: capabilities.peopleRevision }), canManagePeople: capabilities.canManagePeople,
     canTakeOwnership: capabilities.canTakeOwnership, comments, suggestions: shownSuggestions, askAvailable: await commentAnswersAvailable(deps, task),

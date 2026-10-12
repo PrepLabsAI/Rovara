@@ -34,6 +34,8 @@ export interface VerificationOptions {
   recorder: CommandRecorder;
   /** AgentX's result. Called again if Pi settles again later (a queued message); the last call is the result. */
   onReport: (report: CheckReport) => void | Promise<void>;
+  /** Graph implementation: intermediate item settles defer checks until the final item. */
+  shouldRun?: () => boolean;
   /**
    * Called when the agent is given its extra try, with the first round's report (`regression`, extraTry `given`). It is
    * the result if no second settle follows and the signal did not fire (Ruling N); a stopped run reports stopped.
@@ -134,6 +136,7 @@ export function verificationExtension(options: VerificationOptions): InlineExten
           await options.onReport(value);
           return {};
         };
+        if (options.shouldRun !== undefined && !options.shouldRun()) return {};
         try {
           // Review Focus 3: a model error is no finish to check; Pi skips this hook on an abort, but not on every one.
           if (event.outcome === "error") {
