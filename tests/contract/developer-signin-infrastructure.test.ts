@@ -318,7 +318,7 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
     });
   });
 
-  it("reads the state table's stream as its second and last reader, filtered to task, pointer and developer-operation changes (C7)", () => {
+  it("reads the state table's stream as its second and last reader, filtered to task, pointer and ended-operation changes (C7)", () => {
     const mappings = streamMappings(named);
     expect(mappings).toHaveLength(2);
     const notifierMapping = mappings.find(([, mapping]) => JSON.stringify(mapping.Properties.FunctionName).includes("DeveloperTaskNotifierFunction"))![1];
@@ -326,7 +326,9 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
     expect(patterns).toEqual([
       { dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK"] } } } },
       { dynamodb: { NewImage: { entityType: { S: ["DEVELOPER_TASK_POINTER"] } } } },
-      { dynamodb: { NewImage: { entityType: { S: ["OPERATION"] }, requestedBy: { M: { kind: { S: ["developer"] } } }, status: { S: ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"] } } } },
+      // #342: every ended operation, so one that left its owner's ChatGPT plan says so; the code keeps a developer's
+      // own for their notices and drops the rest.
+      { dynamodb: { NewImage: { entityType: { S: ["OPERATION"] }, status: { S: ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"] } } } },
       // Spec 025 E13: a fourth filter on this same mapping, never a third reader.
       { dynamodb: { NewImage: { entityType: { S: ["ADMIN_CHANGE"] } } } },
       // Task 19: a fifth, for refused Slack presses, on this same mapping. Spec 061: comment nudges share it, since a
@@ -372,17 +374,19 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
     // The task read is chosen by its leading keys, not by position among the GetItem statements.
     const reads = dynamo.filter((statement) => allows(statement, "dynamodb:GetItem") && (statement.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"].includes("DEVTASK#*"));
     expect(reads).toHaveLength(1);
-    expect([...(reads[0]!.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"]].sort()).toEqual(["DEVTASK#*", "OPERATION#*", "WORKSPACE#*"]);
+    expect([...(reads[0]!.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"]].sort()).toEqual(["CHATGPT_NOTICE#*", "DEVTASK#*", "OPERATION#*", "WORKSPACE#*"]);
     expect(actionsOf(reads[0]!).sort()).toEqual(["dynamodb:GetItem", "dynamodb:Query"]);
     const keysOf = (statement: Statement) => (statement.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"];
     const writes = dynamo.filter((statement) => allows(statement, "dynamodb:PutItem") || allows(statement, "dynamodb:UpdateItem"));
-    expect(writes).toHaveLength(3);
+    expect(writes).toHaveLength(4);
     // The task and its notice markers are put and updated; a shared thread record is only put;
-    // an admin change (spec 025 E13) is only read and updated, never put.
+    // an admin change (spec 025 E13) is only read and updated, never put; a ChatGPT fallback's notice
+    // marker (#342) is only put.
     expect(writes.map((statement) => ({ actions: actionsOf(statement).sort(), keys: keysOf(statement) }))).toEqual(expect.arrayContaining([
       { actions: ["dynamodb:PutItem", "dynamodb:UpdateItem"], keys: ["DEVTASK#*"] },
       { actions: ["dynamodb:PutItem"], keys: ["SHARED_TASK#*"] },
       { actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"], keys: ["ADMIN_CHANGE#*"] },
+      { actions: ["dynamodb:PutItem"], keys: ["CHATGPT_NOTICE#*"] },
     ]));
   });
 
