@@ -87,8 +87,9 @@ describe("private channel names for a member admin (A11, Q7 as answered)", () =>
     : Response.json({ sub: "admin-subject", email: "ada@example.com", email_verified: true }));
   const channelInfo = async (request: { channelIds: string[] }) => ({ ok: true as const, channels: request.channelIds.map((channelId) => (channelId === "C0PRIVATE01" ? { channelId, name: "secret-launch", isPrivate: true } : { channelId, name: "payments-dev", isPrivate: false })) });
   async function broker(options: { linked: boolean; member: boolean; membersFail?: boolean; membersThrow?: boolean; name?: string }) {
+    const name = options.name;
     const harness = await createAdminReadBroker({
-      channelInfo: options.name === undefined ? channelInfo : async (request) => ({ ok: true as const, channels: (await channelInfo(request)).channels.map((channel) => (channel.isPrivate ? { ...channel, name: options.name } : channel)) }),
+      channelInfo: name === undefined ? channelInfo : async (request) => ({ ok: true as const, channels: (await channelInfo(request)).channels.map((channel) => (channel.isPrivate ? { ...channel, name } : channel)) }),
       channelMembers: async (request) => (options.membersThrow ? Promise.reject(Object.assign(new Error("members down"), { name: "TimeoutError" })) : options.membersFail ? { ok: false, error: "slack_unavailable" } : { ok: true, memberOf: options.member && request.slackUserId === "U0ADA00001" ? request.channelIds.filter((id) => id === "C0PRIVATE01") : [] }),
       brokerExtra: { adminReads: { me: { issuer, fetch: userinfo, slackUserByEmail: async () => (options.linked ? { ok: true, userId: "U0ADA00001" } : { ok: true }) } } },
     });

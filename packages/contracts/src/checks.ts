@@ -85,6 +85,7 @@ export const CheckReportSchema = z.object({
 export type CheckReport = z.infer<typeof CheckReportSchema>;
 
 const TEST_HEADS: readonly (readonly string[])[] = [
+  ["node", "--test"],
   ["npm", "test"], ["npm", "run", "test"], ["pnpm", "test"], ["yarn", "test"], ["pytest"],
   ["python", "-m", "pytest"], ["go", "test"], ["cargo", "test"], ["make", "test"], ["mvn", "test"],
   ["gradle", "test"], ["./gradlew", "test"], ["bundle", "exec", "rspec"], ["phpunit"], ["tox"],
@@ -104,7 +105,7 @@ const UNQUOTED = /^[A-Za-z0-9_@%+=:,./-]$/;
 const QUOTED = /^[\x20-\x7e]*$/;
 const QUOTED_SPECIAL = /[$`\\"']/;
 /** Arguments that change files or never end when replayed: snapshot updates and watch modes. */
-const REFUSED_ARGUMENTS = new Set(["-u", "--updateSnapshot", "--update-snapshots", "--update", "--snapshot-update", "--ci=false"]);
+const REFUSED_ARGUMENTS = new Set(["-u", "--updateSnapshot", "--update-snapshots", "--update", "--snapshot-update", "--ci=false", "--test-update-snapshots"]);
 
 /** A word as written (`raw`, quotes included), as the shell reads it (`value`), and where it sits in the command. */
 interface ShellWord { raw: string; value: string; start: number; end: number }
@@ -201,7 +202,7 @@ function escapesWorkspace(word: string): boolean {
  */
 function simpleTest(parsed: readonly ShellWord[]): boolean {
   if (parsed.length === 0) return false;
-  if (parsed.some(({ value }) => escapesWorkspace(value) || REFUSED_ARGUMENTS.has(value) || value.startsWith("--watch"))) return false;
+  if (parsed.some(({ value }) => escapesWorkspace(value) || REFUSED_ARGUMENTS.has(value) || value.startsWith("--watch") || value.startsWith("--test-update-snapshots="))) return false;
   // Assignments, `timeout` and the runner itself are matched as written: quoting is allowed in arguments only.
   const words = parsed.map(({ raw }) => raw);
   let index = 0;

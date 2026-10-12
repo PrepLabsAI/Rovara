@@ -11,6 +11,8 @@ type Message = TranscriptContext["messages"][number];
 export type WorkflowTurn = { role: "PLAN" | "CODE" | "SECURITY" | "CODER" | "FEEDBACK"; userText: string };
 type ReviewRole = "CODE" | "SECURITY";
 type ReviewFinding = { text: string; origin: "INTRODUCED" | "PRE_EXISTING"; severity?: "HIGH" | "MEDIUM" | "LOW"; file?: string; line?: number; advisory?: boolean } | string;
+const PI_SUMMARIZATION_SYSTEM_PROMPT = "You are a context summarization assistant. Your task is to read a conversation between a user and an AI assistant, then produce a structured summary following the exact format specified.\n\nDo NOT continue the conversation. Do NOT respond to any questions in the conversation. ONLY output the structured summary.";
+const INERT_COMPACTION_CHECKPOINT = "Earlier conversation context was summarized. Continue the existing task from its original request and later messages. This checkpoint makes no workflow or evidence claims.";
 
 function textOf(message: Message | undefined): string {
   const content = (message as { content?: unknown } | undefined)?.content;
@@ -27,6 +29,15 @@ export function firstUserText(context: TranscriptContext): string {
 /** True when the model is being called again after its own tool call returned. */
 export function lastIsToolResult(context: TranscriptContext): boolean {
   return (context.messages.at(-1) as { role?: string } | undefined)?.role === "toolResult";
+}
+
+/** Pi builds compaction requests with this trusted system prompt and exactly one user prompt. */
+function isPiCompactionContext(context: TranscriptContext): boolean {
+  const [system, request] = context.messages;
+  return context.messages.length === 2
+    && (system as { role?: string }).role === "system"
+    && textOf(system) === PI_SUMMARIZATION_SYSTEM_PROMPT
+    && (request as { role?: string }).role === "user";
 }
 
 export const reviewerReply = {
@@ -111,6 +122,10 @@ export function workflowModel(script: {
   plan: string | ((latestUserText: string) => string);
   /** The coder's file writes, or a function of the latest user message (a PR feedback fix reaches the coder as a later turn). */
   edits: Array<{ path: string; content: string }> | ((latestUserText: string) => Array<{ path: string; content: string }>);
+  /** Real worker bash commands to run one at a time before file writes in each coder session. */
+  beforeEditsCommands?: readonly string[];
+  /** Real worker bash commands to run one at a time after file writes in each coder session. */
+  afterEditsCommands?: readonly string[];
   /**
    * The PR feedback critic's answer to its prompt (or a response step, such as `reviewerHangs`); absent, it recommends fixing
    * every comment in repo/demo's greeting.ts.
@@ -123,12 +138,30 @@ export function workflowModel(script: {
 }): FauxResponseStep {
   // Copied so that shifting never changes the caller's arrays.
   let lastPlan: string | undefined;
+  let beforeEdits: string[] = [];
+  let afterEdits: string[] = [];
+  let lastCoderUserText: string | undefined;
+  let editsStarted = false;
+  const reviewRolesBySession = new Map<string, ReviewRole>();
   const queues: Record<ReviewRole, FauxResponseStep[]> = { CODE: [...(script.reviews?.CODE ?? [])], SECURITY: [...(script.reviews?.SECURITY ?? [])] };
   return async (context, options, state, model) => {
+    if (isPiCompactionContext(context)) return fauxAssistantMessage(INERT_COMPACTION_CHECKPOINT);
     const prompt = firstUserText(context);
+    const openingCall = !context.messages.some((message) => ["assistant", "toolResult"].includes((message as { role?: string }).role ?? ""));
     // Only a session's opening call is recorded; later calls in the session (tool results, a format retry) repeat the same first message.
-    if (!context.messages.some((message) => ["assistant", "toolResult"].includes((message as { role?: string }).role ?? ""))) script.prompts?.push(prompt);
+    if (openingCall) script.prompts?.push(prompt);
     const latestUserText = textOf([...context.messages].reverse().find((message) => (message as { role?: string }).role === "user"));
+    const sessionId = options?.sessionId;
+    const rememberedRole = sessionId === undefined ? undefined : reviewRolesBySession.get(sessionId);
+    const role = rememberedRole ?? reviewRole(prompt);
+    if (role !== undefined && sessionId !== undefined && rememberedRole === undefined) reviewRolesBySession.set(sessionId, role);
+    if (role !== undefined) {
+      script.turns?.push({ role, userText: latestUserText });
+      const queue = queues[role];
+      const next = queue.length > 1 ? queue.shift() : queue[0];
+      const step = next ?? reviewerReply.pass();
+      return typeof step === "function" ? step(context, options, state, model) : step;
+    }
     // The implementation turn reopens the planning conversation, so the planner is chosen by the latest user turn.
     if (latestUserText.includes("Planning phase only")) {
       script.turns?.push({ role: "PLAN", userText: latestUserText });
@@ -152,18 +185,27 @@ export function workflowModel(script: {
       if (typeof answer === "string") return fauxAssistantMessage(answer);
       return typeof answer === "function" ? answer(context, options, state, model) : answer;
     }
-    const role = reviewRole(prompt);
-    if (role !== undefined) {
-      script.turns?.push({ role, userText: latestUserText });
-      const queue = queues[role];
-      const next = queue.length > 1 ? queue.shift() : queue[0];
-      const step = next ?? reviewerReply.pass();
-      return typeof step === "function" ? step(context, options, state, model) : step;
-    }
     script.turns?.push({ role: "CODER", userText: latestUserText });
+    // Reopened implementation turns may retain planning/history messages; a genuinely fresh transcript is also a
+    // boundary even when its first user message matches the prior coder turn.
+    if (openingCall || latestUserText !== lastCoderUserText) {
+      beforeEdits = [...(script.beforeEditsCommands ?? [])];
+      afterEdits = [...(script.afterEditsCommands ?? [])];
+      editsStarted = false;
+      lastCoderUserText = latestUserText;
+    }
+    if (beforeEdits.length > 0) {
+      const command = beforeEdits.shift()!;
+      return fauxAssistantMessage([fauxToolCall("bash", { command }, { id: `before-edit-${beforeEdits.length}` })], { stopReason: "toolUse" });
+    }
     const edits = typeof script.edits === "function" ? script.edits(latestUserText) : script.edits;
     // With no edits there is nothing to call a tool for, so the coder reports done straight away.
-    if (lastIsToolResult(context) || edits.length === 0) return fauxAssistantMessage(`Done.\n\n${DONE}`);
+    if (lastIsToolResult(context) && editsStarted && afterEdits.length > 0) {
+      const command = afterEdits.shift()!;
+      return fauxAssistantMessage([fauxToolCall("bash", { command }, { id: `after-edit-${afterEdits.length}` })], { stopReason: "toolUse" });
+    }
+    if ((lastIsToolResult(context) && editsStarted) || edits.length === 0) return fauxAssistantMessage(`Done.\n\n${DONE}`);
+    editsStarted = true;
     return fauxAssistantMessage(
       edits.map((edit, index) => fauxToolCall("write", { path: edit.path, content: edit.content }, { id: `edit-${index}` })),
       { stopReason: "toolUse" },

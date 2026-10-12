@@ -5,6 +5,18 @@ import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckI
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const ActorIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
+export interface WorkflowOwnerAuthority { actorId: string; ownerIds: readonly string[] }
+
+function workflowOwnerAuthorized(legacyOwnerId: string, actorId: string, authority?: WorkflowOwnerAuthority): boolean {
+  if (!ActorIdSchema.safeParse(actorId).success) return false;
+  if (authority === undefined) return actorId === legacyOwnerId;
+  return authority.actorId === actorId
+    && authority.ownerIds.length > 0
+    && authority.ownerIds.every((ownerId) => ActorIdSchema.safeParse(ownerId).success)
+    && new Set(authority.ownerIds).size === authority.ownerIds.length
+    && authority.ownerIds.includes(actorId);
+}
+
 export const WORKFLOW_PLAN_MAX_BYTES = 32_768;
 /** The worker's refusal when a coding run leaves every repository as it was when the task started: nothing to check or publish. */
 export const WORKFLOW_NO_CODE_CHANGE_MESSAGE = "the coding run left the code as it was when the task started";
@@ -1465,10 +1477,10 @@ export function completeWorkflowFeedbackReview(currentInput: unknown, input: {
  */
 export function retryWorkflowFeedbackReview(currentInput: unknown, input: {
   reviewDigest: string; actor: { actorId: string; role: "TASK_OWNER" | "PROJECT_ADMIN" }; now: string;
-}): WorkflowSnapshot {
+}, authority?: WorkflowOwnerAuthority): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   const review = current.feedbackReview;
-  if (input.actor.role !== "TASK_OWNER" || input.actor.actorId !== current.ownerId) {
+  if (input.actor.role !== "TASK_OWNER" || !workflowOwnerAuthorized(current.ownerId, input.actor.actorId, authority)) {
     throw new WorkflowTransitionError("only the task owner can retry the PR feedback review");
   }
   if (current.stage !== "WAIT_FOR_MERGE" || current.state !== "WAITING" || review === undefined || review.status !== "PENDING"
@@ -1486,10 +1498,10 @@ export function retryWorkflowFeedbackReview(currentInput: unknown, input: {
 export function decideWorkflowFeedbackFindings(currentInput: unknown, input: {
   requestId: string; expectedRevision: number; reviewDigest: string; proposalDigest: string;
   bundleDigests: string[]; selectedFindingIds: string[]; decision: "APPROVE" | "REQUEST_CHANGES" | "DISMISS"; ownerNote?: string;
-}, actor: { actorId: string; role: "TASK_OWNER" | "PROJECT_ADMIN" }, now: string): WorkflowSnapshot {
+}, actor: { actorId: string; role: "TASK_OWNER" | "PROJECT_ADMIN" }, now: string, authority?: WorkflowOwnerAuthority): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   const review = current.feedbackReview;
-  if (actor.role !== "TASK_OWNER" || actor.actorId !== current.ownerId || !ActorIdSchema.safeParse(actor.actorId).success) {
+  if (actor.role !== "TASK_OWNER" || !workflowOwnerAuthorized(current.ownerId, actor.actorId, authority)) {
     throw new WorkflowTransitionError("only the task owner can decide PR feedback findings");
   }
   if (current.stage !== "WAIT_FOR_MERGE" || current.state !== "WAITING" || current.revision !== input.expectedRevision
@@ -1669,9 +1681,10 @@ export function workflowSendBackOffered(workflow: {
 export function returnWorkflowToImplementation(
   currentInput: unknown,
   input: { requestId: string; actorId: string; reason: string; now: string; source?: "SEND_BACK" | "FINDINGS" },
+  authority?: WorkflowOwnerAuthority,
 ): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
-  if (!ActorIdSchema.safeParse(input.actorId).success || input.actorId !== current.ownerId) {
+  if (!workflowOwnerAuthorized(current.ownerId, input.actorId, authority)) {
     throw new WorkflowTransitionError("only the task owner can send this work back to coding");
   }
   if (current.stage === "PULL_REQUEST" && (current.pullRequests?.length ?? 0) > 0) {
@@ -1759,9 +1772,13 @@ export function workflowKeepPullRequestsOffered(workflow: WorkflowSnapshot): boo
 }
 
 /** The owner keeps the pull requests as they are after an approved fix changed nothing: the task waits for the merge again. */
-export function keepWorkflowPullRequests(currentInput: unknown, input: { requestId: string; actorId: string; now: string }): WorkflowSnapshot {
+export function keepWorkflowPullRequests(
+  currentInput: unknown,
+  input: { requestId: string; actorId: string; now: string },
+  authority?: WorkflowOwnerAuthority,
+): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
-  if (!ActorIdSchema.safeParse(input.actorId).success || input.actorId !== current.ownerId) {
+  if (!workflowOwnerAuthorized(current.ownerId, input.actorId, authority)) {
     throw new WorkflowTransitionError("only the task owner can keep the pull request as it is");
   }
   try {
@@ -1881,9 +1898,10 @@ export function resolveWorkflowReviewFindings(
   rawInput: unknown,
   actor: { actorId: string },
   options: { now: string },
+  authority?: WorkflowOwnerAuthority,
 ): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
-  if (!ActorIdSchema.safeParse(actor.actorId).success || actor.actorId !== current.ownerId) {
+  if (!workflowOwnerAuthorized(current.ownerId, actor.actorId, authority)) {
     throw new WorkflowTransitionError("only the task owner can resolve review findings");
   }
   const parsed = WorkflowResolveFindingsInputSchema.safeParse(rawInput);
@@ -1923,7 +1941,7 @@ export function resolveWorkflowReviewFindings(
   const summary = `${accepts.length} accepted, ${fixes} to fix`;
   const withAccepted = WorkflowSnapshotSchema.parse({ ...current, acceptedFindings });
   if (fixes > 0) {
-    return returnWorkflowToImplementation(withAccepted, { requestId: input.requestId, actorId: actor.actorId, reason: summary, now: options.now, source: "FINDINGS" });
+    return returnWorkflowToImplementation(withAccepted, { requestId: input.requestId, actorId: actor.actorId, reason: summary, now: options.now, source: "FINDINGS" }, authority);
   }
   const decision = WorkflowDecisionSchema.parse({
     requestId: input.requestId, workflowRevision: current.revision, decision: "APPROVE", actorId: actor.actorId,
@@ -1993,12 +2011,18 @@ export function decideWorkflow(
     /** The decided plan's decisions; required when the request carries answers. Absent for a Markdown document. */
     decisions?: ReadonlyArray<{ id: string; optionIds: readonly string[]; recommended: string }>;
     via?: "PAGE";
+    authority?: WorkflowOwnerAuthority;
   },
 ): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   const request = WorkflowDecisionRequestSchema.safeParse(requestInput);
   const actorId = ActorIdSchema.safeParse(actor.actorId);
   if (!request.success || !actorId.success) throw new WorkflowTransitionError("workflow decision is invalid");
+  if (options.authority !== undefined
+    ? actor.role !== "TASK_OWNER" || !workflowOwnerAuthorized(current.ownerId, actor.actorId, options.authority)
+    : actor.role === "TASK_OWNER" && !workflowOwnerAuthorized(current.ownerId, actor.actorId)) {
+    throw new WorkflowTransitionError("only the task owner may decide this workflow stage");
+  }
   const commentsIncluded = request.data.includedCommentIds?.length ?? 0;
 
   const prior = current.decisions.find((decision) => decision.requestId === request.data.requestId);
@@ -2027,9 +2051,6 @@ export function decideWorkflow(
   const selectedOptionalCheckIds = request.data.selectedOptionalCheckIds ?? current.checkPolicy?.selectedOptionalIds ?? [];
   if (current.checkPolicy !== undefined && selectedOptionalCheckIds.some((id) => !current.checkPolicy?.optional.some((check) => check.id === id))) {
     throw new WorkflowTransitionError("decision selected an optional check not approved by project policy");
-  }
-  if (actor.role === "TASK_OWNER" && actor.actorId !== current.ownerId) {
-    throw new WorkflowTransitionError("only the task owner may decide this workflow stage");
   }
   const currentPlan = current.artifacts.filter((artifact) => artifact.type === (current.path === "QUICK" || current.reviewPhase === "IMPLEMENTATION_PLAN" ? "plan" : current.reviewPhase === "REQUIREMENTS" ? "requirements" : "design")).at(-1);
   if (currentPlan === undefined || request.data.artifactDigest !== currentPlan.sha256) {

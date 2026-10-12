@@ -56,11 +56,8 @@ describe("Suite 12: install, upgrade and doctor", () => {
     expect(e2e.workflow().revision).toBe(before.revision);
   }, 120_000);
 
-  // Decision D1 (made here): the publish message keeps its copy. It is true once the webhook is set up, and agentx doctor
-  // already warns, with the fix, when the App's webhook or its secret is missing. What is still missing is a sweep that
-  // reconciles open linked pull requests, so a merge made while no webhook was set up still completes the task; that needs
-  // a schedule, an index of tasks waiting for a merge and a rate-limited GitHub read per task, which is not a small change.
-  it.todo("12.4 D1: a pull request merged while no webhook was set up completes its task once AgentX reconciles open linked pull requests (needs a reconcile sweep)");
+  // Decision D1's no-webhook completion is executable in 12-merge-recovery.test.ts: both absent and configured secrets
+  // use the same scheduled, candidate-bound merge observation and durable release hand-off.
 
   it("12.5 [LIVE-BUG B11] GitHub signs with a changed secret: the broker reads the secret again, accepts the delivery, and one review follows", async () => {
     const { e2e, counts, pullRequest } = await waiting();

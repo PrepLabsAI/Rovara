@@ -28,6 +28,8 @@ describe("StrictSlackWeb refuses what Slack refuses", () => {
     expect(await codeAsync(() => slack.openView("1.2.3", modal({ blocks: Array.from({ length: 101 }, () => section("x")) })))).toBe("invalid_blocks");
     expect(await codeAsync(() => slack.openView("1.2.3", modal({ blocks: [input({ type: "checkboxes", action_id: "selected_options", options: options(11) })] })))).toBe("invalid_blocks");
     expect(await codeAsync(() => slack.openView("1.2.3", modal({ blocks: [input({ type: "multi_static_select", action_id: "selected_options", options: options(2, "x".repeat(76)) })] })))).toBe("invalid_blocks");
+    expect(await codeAsync(() => slack.openView("1.2.3", modal({ blocks: [input({ type: "users_select", action_id: "person", options: options(1) })] })))).toBe("invalid_blocks");
+    expect(await codeAsync(() => slack.openView("1.2.3", modal({ blocks: [input({ type: "users_select", action_id: "person" })] })))).toBe("ok");
     expect(await codeAsync(() => slack.openView("", modal({})))).toBe("invalid_trigger");
     expect(await codeAsync(() => slack.openView("1.2.3", modal({ blocks: [input({ type: "multi_static_select", action_id: "selected_options", options: options(14) })] })))).toBe("ok");
   });

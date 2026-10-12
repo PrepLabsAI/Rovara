@@ -4,6 +4,7 @@ import { slackDirectory } from "../../packages/broker/src/developer/slack-direct
 import { BOT_TOKEN, T0, TEAM, fakeSlack, routeFetch } from "../support/developer-fakes.js";
 
 type Problem = { method: string; status: number | undefined; error: string };
+const requestUrl = (input: Parameters<typeof fetch>[0]) => new URL(input instanceof URL ? input.href : typeof input === "string" ? input : input.url);
 
 function directory(users: Parameters<typeof fakeSlack>[0]["users"], channels: Record<string, string[]> = {}, options: { maxCallsPerRequest?: number; botToken?: string; channelInfo?: Record<string, { name: string; isPrivate?: boolean }> } = {}) {
   let clock = T0;
@@ -133,6 +134,170 @@ describe("conversations.members (FR-013)", () => {
     const dir = slackDirectory({ teamId: undefined, botToken: async () => BOT_TOKEN, fetch: routeFetch(fake.handler), now: () => T0 });
     expect(await dir.channelMembers("U0MAYA001", ["C0PAY0001"])).toEqual({ ok: false, error: "slack_unavailable" });
     expect(await dir.userStatus("U0MAYA001")).toBe("unavailable");
+  });
+});
+
+describe("fresh task person proof", () => {
+  it("lists a complete fresh bounded channel directory without reusing warm membership", async () => {
+    const channels = { C0PAY0001: ["U0MAYA001", "U0OTHER01"] };
+    const { dir } = directory([
+      { userId: "U0MAYA001", name: "Maya Chen" },
+      { userId: "U0OTHER01", name: "Other Owner" },
+    ], channels);
+    await dir.channelMembers("U0OTHER01", ["C0PAY0001"]);
+    channels.C0PAY0001 = ["U0MAYA001"];
+    await expect(dir.taskChannelPeople(["C0PAY0001"])).resolves.toEqual({ ok: true, users: [
+      { id: "U0MAYA001", teamId: TEAM, name: "Maya Chen", memberOf: ["C0PAY0001"] },
+    ] });
+  });
+  it("warm_membership_cache_does_not_keep_departed_owner_authorized", async () => {
+    const channels = { C0PAY0001: ["U0MAYA001"] };
+    const { dir, fetch } = directory([{ userId: "U0MAYA001", name: "Maya Chen" }], channels);
+    expect(await dir.channelMembers("U0MAYA001", ["C0PAY0001"])).toEqual({ ok: true, memberOf: ["C0PAY0001"] });
+
+    channels.C0PAY0001.length = 0;
+
+    expect(await dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).toEqual({
+      ok: true,
+      user: { id: "U0MAYA001", teamId: TEAM, name: "Maya Chen" },
+      memberOf: [],
+    });
+    expect(membersCalls(fetch)).toBe(2);
+  });
+
+  it("invite_then_reread_ignores_cached_preinvite_state", async () => {
+    const channels = { C0PAY0001: [] as string[] };
+    const { dir, fetch } = directory([{ userId: "U0MAYA001", name: "Maya Chen" }], channels);
+    expect(await dir.channelMembers("U0MAYA001", ["C0PAY0001"])).toEqual({ ok: true, memberOf: [] });
+
+    channels.C0PAY0001.push("U0MAYA001");
+
+    expect(await dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).toMatchObject({ ok: true, memberOf: ["C0PAY0001"] });
+    expect(membersCalls(fetch)).toBe(2);
+  });
+
+  it("does not join a previously in-flight display read", async () => {
+    let releaseFirst: (() => void) | undefined;
+    const firstStarted = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let calls = 0;
+    const fetch: typeof globalThis.fetch = async (input) => {
+      const url = requestUrl(input);
+      if (url.pathname === "/api/users.info") return Response.json({ ok: true, user: { id: "U0MAYA001", team_id: TEAM, deleted: false, is_bot: false, real_name: "Maya Chen" } });
+      if (url.pathname === "/api/conversations.members") {
+        calls += 1;
+        if (calls === 1) {
+          await firstStarted;
+          return Response.json({ ok: true, members: ["U0MAYA001"], response_metadata: { next_cursor: "" } });
+        }
+        return Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
+      }
+      throw new Error(`unexpected Slack method: ${url.pathname}`);
+    };
+    const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0 });
+    const display = dir.channelMembers("U0MAYA001", ["C0PAY0001"]);
+    while (calls === 0) await Promise.resolve();
+
+    const proof = await dir.taskPersonProof("U0MAYA001", ["C0PAY0001"]);
+    releaseFirst!();
+
+    expect(proof).toMatchObject({ ok: true, memberOf: [] });
+    await expect(display).resolves.toEqual({ ok: true, memberOf: ["C0PAY0001"] });
+    expect(calls).toBe(2);
+  });
+
+  it("rejects a deleted, bot, foreign, Slack Connect, mismatched, or malformed user", async () => {
+    const base = { ok: true, user: { id: "U0MAYA001", team_id: TEAM, deleted: false, is_bot: false, real_name: "Maya Chen" } };
+    const cases: Array<{ reply: unknown; error: "ineligible" | "slack_unavailable" }> = [
+      { reply: { ...base, user: { ...base.user, deleted: true } }, error: "ineligible" },
+      { reply: { ...base, user: { ...base.user, is_bot: true } }, error: "ineligible" },
+      { reply: { ...base, user: { ...base.user, team_id: "T0OTHER1" } }, error: "ineligible" },
+      { reply: { ...base, user: { ...base.user, is_stranger: true } }, error: "ineligible" },
+      { reply: { ...base, user: { ...base.user, id: "U0OTHER01" } }, error: "slack_unavailable" },
+      { reply: { ...base, user: { ...base.user, id: "not-a-slack-id" } }, error: "slack_unavailable" },
+      { reply: { ok: true, user: null }, error: "slack_unavailable" },
+    ];
+    for (const { reply, error } of cases) {
+      const fetch: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
+        ? Response.json(reply)
+        : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
+      const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0 });
+      await expect(dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error });
+    }
+  });
+
+  it("accepts absent optional eligibility flags and rejects unreadable present flags", async () => {
+    const eligible = { ok: true, user: { id: "U0MAYA001", team_id: TEAM, is_bot: false, real_name: "Maya Chen" } };
+    const fetchWithoutFlags: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
+      ? Response.json(eligible)
+      : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
+    const withoutFlags = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch: fetchWithoutFlags, now: () => T0 });
+    await expect(withoutFlags.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toMatchObject({ ok: true });
+
+    const malformedFlags: Array<Record<string, unknown>> = [{ deleted: [] }, { is_bot: [] }, { is_stranger: {} }];
+    for (const fields of malformedFlags) {
+      const fetch: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
+        ? Response.json({ ...eligible, user: { ...eligible.user, ...fields } })
+        : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
+      const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0 });
+      await expect(dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error: "slack_unavailable" });
+    }
+  });
+
+  it("requires readable primary and enterprise membership facts before deciding task-person eligibility", async () => {
+    const base = { id: "U0MAYA001", team_id: TEAM, is_bot: false };
+    const unknownUsers: unknown[] = [
+      { id: base.id, is_bot: false },
+      { ...base, team_id: [TEAM] },
+      { ...base, team_id: "T0OTHER1", enterprise_user: null },
+      { ...base, team_id: "T0OTHER1", enterprise_user: { teams: TEAM } },
+      { ...base, team_id: "T0OTHER1", enterprise_user: { teams: [TEAM, {}] } },
+      { id: base.id, team_id: TEAM },
+    ];
+    for (const user of unknownUsers) {
+      const fetch: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
+        ? Response.json({ ok: true, user })
+        : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
+      const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0 });
+      await expect(dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error: "slack_unavailable" });
+    }
+
+    const linkedFetch: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
+      ? Response.json({ ok: true, user: { ...base, team_id: "T0OTHER1", enterprise_user: { teams: [TEAM] } } })
+      : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
+    const linked = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch: linkedFetch, now: () => T0 });
+    await expect(linked.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toMatchObject({ ok: true });
+
+    const foreignFetch: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
+      ? Response.json({ ok: true, user: { ...base, team_id: "T0OTHER1" } })
+      : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
+    const foreign = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch: foreignFetch, now: () => T0 });
+    await expect(foreign.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error: "ineligible" });
+  });
+
+  it("fails closed on malformed members, partial paging, caps, and timeouts", async () => {
+    const user = { ok: true, user: { id: "U0MAYA001", team_id: TEAM, deleted: false, is_bot: false, real_name: "Maya Chen" } };
+    for (const members of [
+      { ok: true, members: ["not-a-slack-id"], response_metadata: { next_cursor: "" } },
+      { ok: true, members: ["U0MAYA001"], response_metadata: { next_cursor: 42 } },
+      { ok: true, members: ["U0MAYA001"], response_metadata: { next_cursor: "next" } },
+    ]) {
+      let memberCalls = 0;
+      const fetch: typeof globalThis.fetch = async (input) => {
+        const url = requestUrl(input);
+        if (url.pathname === "/api/users.info") return Response.json(user);
+        memberCalls += 1;
+        if (memberCalls > 1) throw new TypeError("timed out");
+        return Response.json(members);
+      };
+      const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0, maxPages: 1 });
+      await expect(dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error: "slack_unavailable" });
+    }
+
+    const channels = Object.fromEntries(Array.from({ length: CHANNEL_MEMBERS_MAX_CHANNELS }, (_, index) => [`C0CH${String(index).padStart(5, "0")}`, ["U0MAYA001"]]));
+    const { dir, fetch } = directory([{ userId: "U0MAYA001", name: "Maya Chen" }], channels);
+    const result = await dir.taskPersonProof("U0MAYA001", Object.keys(channels));
+    expect(result).toMatchObject({ ok: true, memberOf: Object.keys(channels) });
+    expect(fetch.calls.filter((call) => call.includes("users.info") || call.includes("conversations.members"))).toHaveLength(51);
   });
 });
 

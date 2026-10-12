@@ -10,6 +10,7 @@ import {
 import { createPageComment, listPageComments, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { deleteTaskComment, editTaskComment, takeAskRateAcrossTasks, takeRate } from "../../packages/broker/src/developer/page-comments.js";
+import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { MAYA, createDeveloperTaskBroker, teammate } from "../support/developer-task-broker.js";
 import { planAnswer } from "../support/plan-documents.js";
 import { pagePlan } from "../support/page-tasks.js";
@@ -301,7 +302,10 @@ describe("asking AgentX to answer a page comment", () => {
     const t = await waitingTask();
     const deleted = await t.comment({ text: "Why below?" });
     const edited = await t.comment({ text: "Why above?" });
-    const actor = { task: t.harness.db.get(`DEVTASK#${t.taskId}`, "META") as never, caller: t.owner, role: "owner" as const };
+    const actor = {
+      task: t.harness.db.get(`DEVTASK#${t.taskId}`, "META") as never, caller: t.owner, role: "owner" as const,
+      ownerActorIds: [taskOwnerKey(t.owner.developerId, t.taskId)],
+    };
     await deleteTaskComment(t.deps, actor, { commentId: deleted.comment.id, rev: 1 });
     await editTaskComment(t.deps, actor, { commentId: edited.comment.id, rev: 1, text: "Why above, really?" });
     for (const commentId of [deleted.comment.id, edited.comment.id]) {
@@ -317,7 +321,10 @@ describe("asking AgentX to answer a page comment", () => {
   it("an edit counts as after the ask whatever the clocks say", async () => {
     const t = await waitingTask();
     const edited = await t.comment({ text: "Why above?" });
-    const actor = { task: t.harness.db.get(`DEVTASK#${t.taskId}`, "META") as never, caller: t.owner, role: "owner" as const };
+    const actor = {
+      task: t.harness.db.get(`DEVTASK#${t.taskId}`, "META") as never, caller: t.owner, role: "owner" as const,
+      ownerActorIds: [taskOwnerKey(t.owner.developerId, t.taskId)],
+    };
     // The edit is stamped by a clock a minute behind the one that stamped the ask.
     (t.deps as { now: () => number }).now = () => Date.now() - 60_000;
     await editTaskComment(t.deps, actor, { commentId: edited.comment.id, rev: 1, text: "Why above, really?" });

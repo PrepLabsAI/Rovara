@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentXError, type ChannelInfoRequest, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
-import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerSinceFromEnvironment, type DeveloperApiConfiguration, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
+import { AgentXError, type ChannelInfoRequest, type ChannelMembersRequest, type ChannelMembersResponse, type TaskPersonProofRequest } from "@agentx/contracts";
+import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
+import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
+import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
+import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
+import { getTaskPeople } from "../../packages/broker/src/developer/task-people.js";
 import { adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { identityHarness, localSigner } from "../support/developer-fakes.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -339,6 +343,65 @@ describe("the channel check through the DeveloperIdentity function", () => {
   });
 });
 
+describe("the fresh task person proof through the DeveloperIdentity function", () => {
+  const request = { kind: "task-person-proof" as const, slackUserId: "U0MAYA001", channelIds: ["C0LEDGER1", "C0PAY0001"] };
+  const reply = (value: unknown) => ({ Payload: new TextEncoder().encode(JSON.stringify(value)) });
+
+  it("sends the exact request and accepts one fully scoped proof", async () => {
+    const invoke = vi.fn(async (payload: Uint8Array) => {
+      void payload;
+      return reply({ ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0PAY0001"] });
+    });
+    await expect(taskPersonProofThroughLambda(invoke)(request)).resolves.toEqual({
+      ok: true,
+      user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" },
+      memberOf: ["C0PAY0001"],
+    });
+    expect(JSON.parse(new TextDecoder().decode(invoke.mock.calls[0]![0]))).toEqual(request);
+  });
+
+  it("refuses old capability and malformed, mismatched, duplicate, or out-of-scope proof", async () => {
+    const badReplies = [
+      { ok: false, error: "invalid_request" },
+      { ok: true, user: { id: "U0OTHER01", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0PAY0001"] },
+      { ok: true, user: { id: "U0MAYA001", teamId: "bad-team", name: "Maya Chen" }, memberOf: ["C0PAY0001"] },
+      { ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0PAY0001", "C0PAY0001"] },
+      { ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0OTHER01"] },
+      { ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "" }, memberOf: [] },
+      { ok: false, error: "unknown" },
+    ];
+    for (const value of badReplies) {
+      const answer = await taskPersonProofThroughLambda(async () => reply(value))(request);
+      expect(answer.ok).toBe(false);
+    }
+  });
+
+  it("passes through a verified ineligible answer without turning it into availability", async () => {
+    await expect(taskPersonProofThroughLambda(async () => reply({ ok: false, error: "ineligible" }))(request))
+      .resolves.toEqual({ ok: false, error: "ineligible" });
+  });
+});
+
+describe("the metered Task People display read through DeveloperIdentity", () => {
+  const request = { kind: "task-people-display-read" as const, operation: "proof" as const,
+    admission: { version: 1 as const, deadlineAt: 2_000_000_000_000, slackCallsLimit: 2 },
+    request: { kind: "task-person-proof" as const, slackUserId: "U0MAYA001", channelIds: ["C0PAY0001"] } };
+  const reply = (value: unknown) => ({ Payload: new TextEncoder().encode(JSON.stringify(value)) });
+
+  it("accepts the operation-matched receipt and refuses lost, skewed, or mismatched usage", async () => {
+    const good = { operation: "proof", admission: { version: 1, slackCallsUsed: 2 }, result: {
+      ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0PAY0001"],
+    } };
+    await expect(taskPeopleDisplayReadThroughLambda(async () => reply(good))(request)).resolves.toEqual(good);
+    for (const invoke of [
+      async () => ({}),
+      async () => reply({ ok: false, error: "invalid_request" }),
+      async () => reply({ ...good, admission: { version: 1, slackCallsUsed: 3 } }),
+      async () => reply({ operation: "directory", admission: { version: 1, slackCallsUsed: 1 }, result: { ok: true, users: [] } }),
+    ]) await expect(taskPeopleDisplayReadThroughLambda(invoke)(request)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+  });
+});
+
 describe("GET /v1/dev/projects with the task policy (FR-014, FR-016)", () => {
   it("adds each project's policy from its latest revision", async () => {
     db.set({ pk: "PROJECT#payments-api", sk: "REV#000000000008", entityType: "PROJECT", definition: { name: "payments-api", revision: 8, developerTasks: { enabled: true, share: "required", shareMode: { default: "view", allowContinue: false }, channelMembersMayUse: true } } });
@@ -418,6 +481,17 @@ describe("checkProjectAccess, FR-018's first three checks (FR-013, FR-014, FR-04
     expect(channelMembers).toHaveBeenLastCalledWith({ kind: "channel-members", slackUserId: "U0MAYA001", channelIds: ["C0PAY0001"] });
   });
 
+  it("uses supplied fresh proof for a target subject without a session or cached Slack lookup", async () => {
+    const subject = { developerId, slackUserId: "U0MAYA001" };
+    channelMembers.mockRejectedValue(new Error("cached path must not run"));
+
+    await expect(checkProjectAccess(deps(), subject, "payments-api", { freshMemberOf: ["C0PAY0001"] }))
+      .resolves.toMatchObject({ access: "channel", channelIds: ["C0PAY0001"] });
+    await expect(checkProjectAccess(deps(), subject, "ledger", { freshMemberOf: ["C0PAY0001"] }))
+      .rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
+    expect(channelMembers).not.toHaveBeenCalled();
+  });
+
   it("answers PROJECT_NOT_FOUND for a project with no revision or an invalid name, without asking Slack", async () => {
     expect(await refusal("nope")).toEqual({ code: "PROJECT_NOT_FOUND", message: "project `nope` doesn't exist in this AgentX" });
     expect((await refusal("../PROJECT#solo")).code).toBe("PROJECT_NOT_FOUND");
@@ -486,6 +560,138 @@ describe("checkProjectAccess, FR-018's first three checks (FR-013, FR-014, FR-04
     db.set({ pk: "PROJECT#ledger", sk: "REV#000000000003", entityType: "PROJECT", definition: { name: "ledger", revision: 3, developerTasks: { enabled: false } } });
     channelMembers.mockResolvedValueOnce({ ok: true, memberOf: [] });
     expect((await refusal("ledger")).code).toBe("PROJECT_ACCESS_DENIED");
+  });
+});
+
+describe("D2 task-person route dependencies", () => {
+  const maya: DeveloperCaller = { developerId, sessionId: "s-1", amr: "slack", name: "Maya Chen", slackUserId: "U0MAYA001" };
+  const taskId = "11111111-1111-4111-8111-111111111111";
+  const nativeDeveloperId = developerIdForSlackUser("U0MAYA001");
+  const task = {
+    pk: `DEVTASK#${taskId}`, sk: "META", entityType: "DEVELOPER_TASK", taskId,
+    developerId: nativeDeveloperId, provider: "slack", developerName: "Maya Chen", slackUserId: "U0MAYA001",
+    project: "payments-api", share: { teamId: "T0TEAM1", channelId: "C0PAY0001" },
+  } as DeveloperTaskRecord;
+
+  it("propagates the exact default-off people configuration", () => {
+    (config as DeveloperApiConfiguration & { taskPeopleConfiguration: { peopleChangesEnabled: boolean } }).taskPeopleConfiguration = { peopleChangesEnabled: false };
+    const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, maya);
+    expect(Reflect.get(route, "taskPeopleConfiguration")).toEqual({ peopleChangesEnabled: false });
+  });
+
+  it("checks an exact task principal through fresh proof without writing identity state", async () => {
+    db.set(task as unknown as Record<string, unknown>);
+    const proof = vi.fn(async () => ({
+      ok: true as const,
+      user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" },
+      memberOf: ["C0PAY0001"],
+    }));
+    config.taskPersonProof = proof;
+    const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, maya);
+    const check = Reflect.get(route, "checkTaskPerson") as ((value: DeveloperTaskRecord, id: string) => Promise<Record<string, unknown>>) | undefined;
+
+    await expect(check?.(task, nativeDeveloperId)).resolves.toMatchObject({
+      subject: { developerId: nativeDeveloperId, slackUserId: "U0MAYA001" },
+      identity: { developerId: nativeDeveloperId, method: "slack" },
+      eligible: true,
+      channelMember: true,
+    });
+    expect(proof).toHaveBeenCalledWith({ kind: "task-person-proof", slackUserId: "U0MAYA001", channelIds: ["C0PAY0001"] });
+    expect(db.find((item) => String(item.sk).startsWith("PERSON#") || String(item.sk).startsWith("PERSON_SUBJECT#"))).toEqual([]);
+  });
+
+  it("propagates the exact authenticated native caller for fresh qualification", async () => {
+    const nativeMaya: DeveloperCaller = { ...maya, developerId: nativeDeveloperId };
+    const otherCreator = { ...task, developerId: developerIdForSlackUser("U0OTHER001"), slackUserId: "U0OTHER001", developerName: "Other Creator" };
+    db.set(otherCreator);
+    config.taskPersonProof = vi.fn(async (request: TaskPersonProofRequest) => ({
+      ok: true as const, user: { id: request.slackUserId, teamId: "T0TEAM1", name: nativeMaya.name }, memberOf: ["C0PAY0001"],
+    }));
+    const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, nativeMaya);
+    const check = Reflect.get(route, "checkTaskPerson") as (value: DeveloperTaskRecord, id: string) => Promise<Record<string, unknown>>;
+
+    await expect(check(otherCreator, nativeDeveloperId)).resolves.toMatchObject({
+      subject: { developerId: nativeDeveloperId, slackUserId: nativeMaya.slackUserId },
+      identity: { developerId: nativeDeveloperId, method: "slack", subject: nativeMaya.slackUserId },
+      eligible: true,
+    });
+    expect(db.find((item) => String(item.sk).startsWith("PERSON#") || String(item.pk).startsWith("SESSION#") && item.sessionId !== "s-1")).toEqual([]);
+  });
+
+  it("fails closed when the trusted fresh-proof port is absent", async () => {
+    db.set(task as unknown as Record<string, unknown>);
+    delete config.taskPersonProof;
+    const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, maya);
+    const check = Reflect.get(route, "checkTaskPerson") as ((value: DeveloperTaskRecord, id: string) => Promise<Record<string, unknown>>) | undefined;
+
+    await expect(check?.(task, nativeDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+  });
+
+  it("stops registering later directory identities when the first new write crosses the display deadline", async () => {
+    const firstNewSlackUserId = "U0NEW0001";
+    const secondNewSlackUserId = "U0NEW0002";
+    const caller = { ...maya, developerId: nativeDeveloperId };
+    let clock = T0;
+    db.set(task as unknown as Record<string, unknown>);
+    db.set({
+      pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
+      people: [{ developerId: nativeDeveloperId, slackUserId: "U0MAYA001", name: "Maya Chen", role: "owner" }],
+    });
+    db.set({
+      pk: `DEVTASK#${taskId}`, sk: "PERSON#22222222-2222-4222-8222-222222222222", schemaVersion: 1,
+      personId: "22222222-2222-4222-8222-222222222222", developerId: nativeDeveloperId,
+      slackUserId: "U0MAYA001", name: "Maya Chen", method: "slack", issuer: "https://slack.com", subject: "U0MAYA001",
+      createdAt: new Date(T0).toISOString(),
+    });
+    db.set({
+      pk: `DEVTASK#${taskId}`, sk: `PERSON_SUBJECT#${nativeDeveloperId}`, schemaVersion: 1,
+      personId: "22222222-2222-4222-8222-222222222222", developerId: nativeDeveloperId, createdAt: new Date(T0).toISOString(),
+    });
+    const originalSend = db.send.bind(db);
+    const newRegistryWrites: string[] = [];
+    vi.spyOn(db, "send").mockImplementation(async (command) => {
+      const transactItems = (command as { input?: { TransactItems?: Array<{ Put?: { Item?: Record<string, unknown> } }> } }).input?.TransactItems;
+      const slackUserId = transactItems?.find((item) => String(item.Put?.Item?.sk).startsWith("PERSON#"))?.Put?.Item?.slackUserId;
+      const answer = await originalSend(command);
+      if (slackUserId === firstNewSlackUserId || slackUserId === secondNewSlackUserId) {
+        newRegistryWrites.push(String(slackUserId));
+        if (slackUserId === firstNewSlackUserId) clock += 20_001;
+      }
+      return answer;
+    });
+    const users = new Map([
+      ["U0MAYA001", "Maya Chen"],
+      [firstNewSlackUserId, "First New Person"],
+      [secondNewSlackUserId, "Second New Person"],
+    ]);
+    const directory = slackDirectory({
+      teamId: "T0TEAM1", botToken: async () => "INERT", now: () => clock,
+      fetch: async (input) => {
+        const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+        if (url.pathname.endsWith("conversations.members")) {
+          return new Response(JSON.stringify({ ok: true, members: [...users.keys()], response_metadata: { next_cursor: "" } }));
+        }
+        const slackUserId = url.searchParams.get("user") ?? "";
+        return new Response(JSON.stringify({ ok: true, user: {
+          id: slackUserId, team_id: "T0TEAM1", name: users.get(slackUserId), is_bot: false, deleted: false, is_stranger: false,
+        } }));
+      },
+    });
+    config.taskPeopleConfiguration = { peopleChangesEnabled: false };
+    config.taskPeopleDisplayRead = (request) => directory.taskPeopleDisplayRead(request);
+    const route = developerTaskRouteDependencies(
+      { documentClient: db, tableName: "state", developer: config, now: () => clock },
+      caller,
+    );
+
+    await expect(getTaskPeople(route, caller, taskId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+
+    expect(newRegistryWrites).toEqual([firstNewSlackUserId]);
+    const newlyStored = db.find((item) => item.pk === `DEVTASK#${taskId}`
+      && (item.slackUserId === firstNewSlackUserId || item.slackUserId === secondNewSlackUserId));
+    expect(newlyStored.filter((item) => String(item.sk).startsWith("PERSON#"))).toHaveLength(1);
+    expect(db.get(`DEVTASK#${taskId}`, `PERSON_SUBJECT#${developerIdForSlackUser(firstNewSlackUserId)}`)).toBeDefined();
+    expect(db.get(`DEVTASK#${taskId}`, `PERSON_SUBJECT#${developerIdForSlackUser(secondNewSlackUserId)}`)).toBeUndefined();
   });
 });
 

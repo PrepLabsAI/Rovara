@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
+import type { ContainerImageAssetMetadataEntry } from "@aws-cdk/cloud-assembly-schema";
 import { describe, expect, it } from "vitest";
 import { accumulateAsset, assetSignatureMismatch, buildRelease, type PackageAccumulator } from "../../scripts/release/build.js";
 import { ReleaseManifestSchema } from "../../scripts/release/manifest.js";
@@ -207,6 +208,20 @@ describe("accumulateAsset", () => {
     expect(() =>
       accumulateAsset(packagesById, { ...zipAsset, packaging: "container-image" }, "slack", "/tmp/wherever"),
     ).toThrow(/unsupported asset packaging "container-image"/);
+  });
+
+  it("rejects an actual no-S3 container asset before adding a package", () => {
+    const packagesById = new Map<string, PackageAccumulator>();
+    const containerAsset: ContainerImageAssetMetadataEntry = {
+      packaging: "container-image",
+      id: "container-asset",
+      sourceHash: "a".repeat(64),
+      path: "docker",
+    };
+    expect(() => accumulateAsset(packagesById, containerAsset, "slack", "/tmp/wherever")).toThrow(
+      'unsupported asset packaging "container-image" for asset container-asset in the slack template; only zip-packaged Lambda code assets are supported here, images are published separately',
+    );
+    expect(packagesById.size).toBe(0);
   });
 
   it("accumulates the same asset id used by two different stacks under one package", () => {

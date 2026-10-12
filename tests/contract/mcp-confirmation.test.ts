@@ -6,6 +6,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema, type ElicitResult } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
+import type { ToolCall } from "../../packages/mcp/src/tools.js";
 import { ADMIN_SIGN_IN_STEP, APPLY_UNKNOWN_STEP, CHANGE_PENDING_STEP, SLACK_POLL_MS, ToolError, changeError, confirmChange, createAgentXMcpServer, httpAdminClient, httpControlPlaneClient, type AdminControlPlaneClient, type ToolContext, type ToolDefinition } from "../../packages/mcp/src/index.js";
 import type { AdminChangeView } from "../../packages/contracts/src/index.js";
 
@@ -26,7 +27,7 @@ function run(admin: Partial<AdminControlPlaneClient>, extra: Record<string, unkn
 describe("the confirmation driver (FR-041)", () => {
   it("applies after the pop-up's yes, reporting when it asked and when it was answered", async () => {
     const applyChange = vi.fn(async () => view({ status: "applied", methodUsed: "elicitation" }));
-    const elicit = vi.fn(async () => "accept" as const);
+    const elicit = vi.fn<NonNullable<ToolCall["elicit"]>>(async () => "accept");
     const { run: r } = run({ applyChange }, { elicit });
     expect(await confirmChange(r)).toMatchObject({ outcome: "applied" });
     expect(elicit).toHaveBeenCalledWith(expect.stringContaining("Bind channel #ledger-dev"), expect.any(Number), expect.anything());
@@ -79,7 +80,7 @@ describe("the confirmation driver (FR-041)", () => {
 
 describe("the confirmation driver's edges (FR-041, FR-052, R1)", () => {
   it("shows the view's effect in the pop-up, which the broker already makes the planning admin's, and no other field (final review M8)", async () => {
-    const elicit = vi.fn(async () => "accept" as const);
+    const elicit = vi.fn<NonNullable<ToolCall["elicit"]>>(async () => "accept");
     // The broker puts the member planner's text in effect itself (viewOf); a confirmationEffect field is never read.
     const change = { ...view({ effect: "Bind channel #payroll (C0SECRET01, a private channel) to project ledger." }), confirmationEffect: "Some other text a newer control plane sent." };
     const { run: r } = run({ applyChange: async () => view({ status: "applied" }) }, { elicit, change });
@@ -89,7 +90,7 @@ describe("the confirmation driver's edges (FR-041, FR-052, R1)", () => {
   });
 
   it("gives the pop-up at most 9 minutes, and always ends it before the change expires", async () => {
-    const elicit = vi.fn(async () => "accept" as const);
+    const elicit = vi.fn<NonNullable<ToolCall["elicit"]>>(async () => "accept");
     const { run: r } = run({ applyChange: async () => view({ status: "applied" }) }, { elicit });
     await confirmChange(r);
     const timeout = elicit.mock.calls[0]?.[1] ?? 0;
@@ -498,9 +499,9 @@ describe("follow-up: a timed-out pop-up can still fall back to Slack (Review Foc
 
   it("leaves Slack's minute and the 30 second margin when Slack is offered, and keeps the cap when it is not", async () => {
     const timeouts: number[] = [];
-    for (const methodsOffered of [["elicitation", "slack"], ["elicitation"]]) {
-      const elicit = vi.fn(async (_message: string, timeoutMs: number) => { timeouts.push(timeoutMs); return "accept" as const; });
-      const { run: r } = run({ applyChange: async () => view({ status: "applied" }) }, { elicit, change: view({ methodsOffered }) });
+    for (const methodsOffered of [["elicitation", "slack"], ["elicitation"]] as const) {
+      const elicit = vi.fn<NonNullable<ToolCall["elicit"]>>(async (_message, timeoutMs) => { timeouts.push(timeoutMs); return "accept"; });
+      const { run: r } = run({ applyChange: async () => view({ status: "applied" }) }, { elicit, change: view({ methodsOffered: [...methodsOffered] }) });
       await confirmChange(r);
     }
     expect(timeouts).toEqual([Math.min(9 * 60_000, left - 30_000 - 60_000), Math.min(9 * 60_000, left - 30_000)]);

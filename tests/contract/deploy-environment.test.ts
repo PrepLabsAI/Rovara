@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
-import { deployEnvironment, keptOperatorParameters, type DeployAnswers } from "../../packages/cli/src/deploy/deploy-environment.js";
+import { deployEnvironment, keptOperatorParameters, type DeployAnswers, type DeployEnvironmentInput } from "../../packages/cli/src/deploy/deploy-environment.js";
 import { PROTECTED_PARTS, type DeployRequest, type StackDeployer, type StackOutputs } from "../../packages/cli/src/deploy/deployer.js";
 import { OPERATOR_PARAMETERS, type DeployPart } from "../../packages/cli/src/deploy/parameters.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
@@ -730,11 +730,12 @@ describe("an upgrade keeps what the operator set (OPERATOR_PARAMETERS)", () => {
     // Forces the guard before the loop and the loop to disagree: the reader is there when the guard
     // looks, and gone when the control plane deploys. Skipping would reset the budget silently.
     let reads = 0;
-    const input = {
+    type GetterBoundaryInput = Omit<DeployEnvironmentInput, "deployedParameters"> & { deployedParameters: DeployEnvironmentInput["deployedParameters"] | undefined };
+    const input: GetterBoundaryInput = {
       mode: "upgrade" as const, engine: "templates" as const, answers: baseAnswers(), release: fakeRelease(), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
       get deployedParameters() { reads += 1; return reads === 1 ? nothingDeployed : undefined; },
     };
-    await expect(deployEnvironment(input)).rejects.toThrow("an upgrade must read the deployed stacks' parameters");
+    await expect(deployEnvironment(input as DeployEnvironmentInput)).rejects.toThrow("an upgrade must read the deployed stacks' parameters");
     expect(upgrade.requests.filter((request) => request.part === "control-plane")).toEqual([]);
   });
 

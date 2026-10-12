@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import type { PlanDocument } from "@agentx/contracts";
 import { createTaskWeb, type TaskDocumentEntry, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
 import { TASK_PAGE_DECIDING_COPY, TASK_PAGE_DECIDING_SCRIPT } from "../../packages/broker/src/aws/task-page-assets.js";
+import { renderTaskPeopleConfirmation, renderTaskPeoplePanel } from "../../packages/broker/src/aws/task-people-page-view.js";
 import type { PageCommentView } from "../../packages/broker/src/aws/plan-page/comments.js";
 import { fakeStorage, makeEvent, parseHtml, type FakeDocument, type FakeElement } from "../support/fake-dom.js";
 import { planDocument } from "../support/plan-documents.js";
@@ -55,6 +56,9 @@ async function pageHtml(options: PageOptions = {}): Promise<string> {
   expect(answer.statusCode).toBe(200);
   return answer.body;
 }
+function withCapabilities(html: string, values: Record<string, unknown>): string {
+  return html.replace(/(<script type="application\/json" id="agentx-page-data">)([\s\S]*?)(<\/script>)/, (_all, start: string, raw: string, end: string) => `${start}${JSON.stringify({ ...JSON.parse(raw), ...values })}${end}`);
+}
 
 interface Reply { status: number; body?: unknown }
 interface Sent { url: string; method: string; headers: Record<string, string>; body: Record<string, string> }
@@ -68,12 +72,13 @@ function boot(html: string, options: { storage?: ReturnType<typeof fakeStorage>;
   const timers: Array<{ fn: () => void; at: number; id: number }> = [];
   const clock = { now: 1_000_000 };
   const reloads: number[] = [];
+  const navigations: string[] = [];
   let uuids = 0;
   let timerId = 0;
   const respond = options.respond ?? (() => ({ status: 200, body: {} }));
   const sandbox: Record<string, unknown> = {
     document,
-    location: { hash: "", search: "", pathname: `/review/${taskId}/task`, reload: () => { reloads.push(clock.now); } },
+    location: { hash: "", search: "", pathname: `/review/${taskId}/task`, reload: () => { reloads.push(clock.now); }, assign: (value: string) => { navigations.push(value); } },
     setTimeout: (fn: unknown, ms: number) => {
       if (typeof fn !== "function") throw new Error("string timers are not allowed");
       timerId += 1;
@@ -117,7 +122,7 @@ function boot(html: string, options: { storage?: ReturnType<typeof fakeStorage>;
     clock.now = until;
   };
   const byId = (name: string) => document.getElementById(name)!;
-  return { document, storage, sent, pending, timers, clock, reloads, settle, advance, byId };
+  return { document, storage, sent, pending, timers, clock, reloads, navigations, settle, advance, byId };
 }
 type Page = ReturnType<typeof boot>;
 
@@ -126,6 +131,499 @@ const posts = (page: Page, path: string) => page.sent.filter((entry) => entry.me
 const commentBoxes = (page: Page) => page.byId("decide-comments-list").querySelectorAll("input[type=checkbox]");
 
 describe("the deciding and commenting script", () => {
+  it("submits a server-bound People role proposal and navigates only to its validated local confirmation", async () => {
+    const personId = id(80), requestId = id(81);
+    const panel = renderTaskPeoplePanel(taskId, { revision: 4, orphaned: false, canManage: true, canTakeOwnership: false,
+      people: [{ personId, name: "Lee", role: "commenter", you: false, effectiveRole: "commenter" }] });
+    const html = withCapabilities((await pageHtml()).replace("</main>", `${panel}</main>`), {
+      canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 4,
+    });
+    const page = boot(html, { respond: (entry) => entry.url.endsWith("/api/people/role")
+      ? { status: 202, body: { status: "PENDING", requestId, confirmationUrl: "https://untrusted.example/ignored", expiresAt: "2026-10-12T12:10:00.000Z" } }
+      : { status: 200, body: {} } });
+    const form = page.document.querySelector("[data-people-role-form]")!;
+    const select = form.querySelector("select")!;
+    select.value = "viewer";
+    form.querySelector("button")!.click();
+    await page.settle();
+    expect(posts(page, "/api/people/role")[0]!.body).toEqual({ requestId: id(1).replace(/^00000000-0000-4000-8000-/, "aaaaaaaa-aaaa-4aaa-8aaa-"), expectedPeopleRevision: 4, personId, role: "viewer" });
+    expect(page.navigations).toEqual([`/review/${taskId}/task/people/confirm/${requestId}`]);
+  });
+
+  it("suppresses a late People callback after current access is demoted", async () => {
+    const personId = id(82);
+    const panel = renderTaskPeoplePanel(taskId, { revision: 4, orphaned: false, canManage: true, canTakeOwnership: false,
+      people: [{ personId, name: "Lee", role: "commenter", you: false, effectiveRole: "commenter" }] });
+    const html = withCapabilities((await pageHtml()).replace("</main>", `${panel}</main>`), {
+      canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 4,
+    });
+    const page = boot(html, { respond: (entry) => {
+      if (entry.url.endsWith("/api/people/role")) return undefined;
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [], commentSeq: 3, csrf: "n".repeat(43),
+        canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 5 } };
+      return { status: 200, body: {} };
+    } });
+    const button = page.document.querySelector("[data-people-role-form] button")!;
+    button.click();
+    await page.advance(20_000);
+    expect(button.disabled).toBe(true);
+    page.pending[0]!({ status: 200, body: { status: "COMMITTED", view: {} } });
+    await page.settle();
+    expect(page.reloads).toEqual([]);
+    expect(page.navigations).toEqual([]);
+  });
+
+  it("confirms only the request named by the confirmation control", async () => {
+    const requestId = id(83);
+    const confirmation = renderTaskPeopleConfirmation({ taskId, requestId, expiresAt: "2026-10-12T12:10:00.000Z", kind: "takeOwnership" });
+    const html = withCapabilities((await pageHtml()).replace("</main>", `${confirmation}</main>`), {
+      canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: true, peopleRevision: 4,
+    });
+    const page = boot(html, { respond: (entry) => entry.url.endsWith(`/api/people/requests/${requestId}/confirm`)
+      ? { status: 200, body: { status: "COMMITTED", view: {} } } : { status: 200, body: {} } });
+    page.document.querySelector("[data-people-confirm]")!.click();
+    await page.settle();
+    expect(posts(page, `/api/people/requests/${requestId}/confirm`)[0]!.body).toEqual({ requestId });
+    expect(page.reloads).toHaveLength(1);
+  });
+  it("applies a current owner-to-viewer projection while keeping this task's unsent drafts", async () => {
+    const storage = fakeStorage();
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 4 });
+    const page = boot(html, { storage, respond: (entry) => entry.url.endsWith("/api/state") ? { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 5 } } : { status: 200, body: {} } });
+    radio(page, "d1", "above").click();
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const commentForm = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    commentForm.querySelector("textarea")!.type_("unfinished comment");
+    const ask = commentForm.querySelector("input[type=checkbox]")!;
+    ask.checked = true;
+    const article = page.document.getElementById("comment-" + id(2))!;
+    article.querySelector(".comment-delete")!.click();
+    const deleteControl = article.querySelector(".comment-confirm")!.querySelectorAll("button")[0]!;
+    page.byId("decide-approve").click();
+    commentBoxes(page)[0]!.click();
+    page.byId("decide-note").type_("unfinished note");
+    await page.advance(20_000);
+    expect(page.sent.filter((entry) => entry.url.endsWith("/api/state"))).toHaveLength(1);
+    expect(page.byId("decide-approve").disabled).toBe(true);
+    expect(page.byId("decide-approve").hidden).toBe(true);
+    expect(page.byId("decide-dialog").open).toBe(false);
+    expect(radio(page, "d1", "above").checked).toBe(true);
+    expect(commentForm.querySelector("textarea")!.disabled).toBe(true);
+    expect(commentForm.querySelectorAll("button").find((button) => button.textContent === "Post")!.disabled).toBe(true);
+    expect(ask.checked).toBe(true);
+    expect(ask.disabled).toBe(true);
+    expect(deleteControl.disabled).toBe(true);
+    expect(commentBoxes(page)[0]!.checked).toBe(false);
+    expect(page.byId("decide-note").value).toBe("unfinished note");
+    expect(page.byId("decide-note").disabled).toBe(true);
+    expect(commentForm.querySelector("textarea")!.value).toBe("unfinished comment");
+    expect((JSON.parse(storage.getItem(`agentx:${taskId}:coding-plan`)!) as { note: string }).note).toBe("unfinished note");
+  });
+
+  it("clears only this task's drafts and ignores stale permission snapshots after reader removal", async () => {
+    const storage = fakeStorage();
+    storage.setItem(`agentx:${taskId}:coding-plan`, JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "private" }));
+    storage.setItem("agentx:other-task:coding-plan", JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "other" }));
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 4 });
+    const page = boot(html, { storage, respond: (entry) => entry.url.endsWith("/api/state") ? { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [], commentSeq: 3, csrf: "n".repeat(43), canRead: false, peopleRevision: 5 } } : { status: 200, body: {} } });
+    await page.advance(20_000);
+    expect(page.sent.filter((entry) => entry.url.endsWith("/api/state"))).toHaveLength(1);
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).toBeNull();
+    expect(storage.getItem("agentx:other-task:coding-plan")).not.toBeNull();
+    expect(page.document.querySelector("main")!.hidden).toBe(true);
+  });
+
+  it("clears this task immediately when a write response says its reader was removed", async () => {
+    const storage = fakeStorage();
+    storage.setItem(`agentx:${taskId}:coding-plan`, JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "private" }));
+    storage.setItem("agentx:other-task:coding-plan", JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "other" }));
+    const page = boot(await pageHtml(), { storage, respond: (entry) => entry.method === "POST" ? { status: 404, body: { error: "not_found" } } : { status: 200, body: {} } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("private comment");
+    form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await page.settle();
+    expect(page.document.querySelector("main")!.hidden).toBe(true);
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).toBeNull();
+    expect(storage.getItem("agentx:other-task:coding-plan")).not.toBeNull();
+  });
+
+  it("ignores a late comment success after the first complete projection demotes a legacy page", async () => {
+    const storage = fakeStorage();
+    const page = boot(await pageHtml(), { storage, respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 1 } };
+      if (entry.method === "POST") return undefined;
+      return { status: 200, body: {} };
+    } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("keep the late result out");
+    form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await page.advance(20_000);
+    page.pending[0]!({ status: 200, body: { comment: comment(77) } });
+    await page.settle();
+    expect(form.querySelector("textarea")!.value).toBe("keep the late result out");
+    expect(form.querySelectorAll("button").find((button) => button.textContent === "Post")!.disabled).toBe(true);
+    expect(page.document.getElementById("comment-" + id(77))).toBeNull();
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).toContain("keep the late result out");
+  });
+
+  it.each([403, 404])("invalidates handlers and pending writes when state returns %i", async (status) => {
+    const storage = fakeStorage();
+    storage.setItem(`agentx:${taskId}:coding-plan`, JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "private" }));
+    storage.setItem("agentx:other-task:coding-plan", JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "other" }));
+    const page = boot(await pageHtml(), { storage, respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) return { status, body: { error: "reader_removed" } };
+      if (entry.method === "POST") return undefined;
+      return { status: 200, body: {} };
+    } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("late");
+    form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await page.advance(20_000);
+    page.pending[0]!({ status: 200, body: { comment: comment(78) } });
+    await page.settle();
+    expect(page.document.querySelector("main")!.hidden).toBe(true);
+    expect(page.document.getElementById("comment-" + id(78))).toBeNull();
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).toBeNull();
+    expect(storage.getItem("agentx:other-task:coding-plan")).not.toBeNull();
+    const before = posts(page, "/comments").length;
+    form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await page.advance(60_000);
+    expect(posts(page, "/comments")).toHaveLength(before);
+    expect(page.sent.filter((entry) => entry.url.endsWith("/api/state"))).toHaveLength(1);
+    expect(page.timers).toHaveLength(0);
+  });
+
+  it.each([403, 404])("clears the exact task after a write response returns %i", async (status) => {
+    const storage = fakeStorage();
+    storage.setItem(`agentx:${taskId}:coding-plan`, JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "private" }));
+    storage.setItem("agentx:other-task:coding-plan", JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "other" }));
+    const page = boot(await pageHtml(), { storage, respond: (entry) => entry.method === "POST" ? { status, body: { error: "reader_removed" } } : { status: 200, body: {} } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("remove me");
+    form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await page.settle();
+    expect(page.document.querySelector("main")!.hidden).toBe(true);
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).toBeNull();
+    expect(storage.getItem("agentx:other-task:coding-plan")).not.toBeNull();
+  });
+
+  it("does not repost a comment after CSRF refusal refreshes to a denied projection", async () => {
+    let postCount = 0;
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 1 });
+    const page = boot(html, { respond: (entry) => {
+      if (entry.method === "POST") { postCount += 1; return { status: 403, body: { error: "request_refused" } }; }
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 2 } };
+      return { status: 200, body: {} };
+    } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("safe retry");
+    form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await page.settle();
+    expect(postCount).toBe(1);
+  });
+
+  it("keeps the task and its drafts after the single CSRF retry is refused", async () => {
+    let postCount = 0;
+    const storage = fakeStorage();
+    storage.setItem(`agentx:${taskId}:coding-plan`, JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: { "claim:2": "saved draft" }, excluded: [], note: "saved note" }));
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 1 });
+    const page = boot(html, { storage, respond: (entry) => {
+      if (entry.method === "POST") { postCount += 1; return { status: 403, body: { error: "request_refused" } }; }
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 2 } };
+      return { status: 200, body: {} };
+    } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("unsent text");
+    form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await page.settle();
+    expect(postCount).toBe(2);
+    expect(page.document.querySelector("main")!.hidden).toBe(false);
+    expect(form.querySelector("textarea")!.value).toBe("unsent text");
+    expect(form.querySelector(".comment-error")!.textContent).not.toBe("");
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).toContain("unsent text");
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).toContain("saved note");
+  });
+
+  it("releases an obsolete comment request latch when Ask alone is revoked", async () => {
+    let postCount = 0;
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 1 });
+    const page = boot(html, { respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: false, canManagePeople: true, canTakeOwnership: false, peopleRevision: 2 } };
+      if (entry.method === "POST") { postCount += 1; return postCount === 1 ? undefined : { status: 500, body: {} }; }
+      return { status: 200, body: {} };
+    } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("ordinary comment");
+    const post = form.querySelectorAll("button").find((button) => button.textContent === "Post")!;
+    post.click();
+    await page.advance(20_000);
+    expect(form.querySelector("input[type=checkbox]")!.disabled).toBe(true);
+    page.pending[0]!({ status: 500, body: {} });
+    await page.settle();
+    expect(post.disabled).toBe(false);
+    post.click();
+    await page.settle();
+    expect(postCount).toBe(2);
+    expect(post.disabled).toBe(false);
+    expect(form.querySelector("textarea")!.value).toBe("ordinary comment");
+    expect(page.document.querySelector("main")!.hidden).toBe(false);
+  });
+
+  it("does not retry a refused POST when current state is unknown", async () => {
+    let postCount = 0;
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 1 });
+    const page = boot(html, { respond: (entry) => {
+      if (entry.method === "POST") { postCount += 1; return { status: 403, body: { error: "request_refused" } }; }
+      if (entry.url.endsWith("/api/state")) return { status: 503, body: {} };
+      return { status: 200, body: {} };
+    } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("unknown state");
+    form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await page.settle();
+    expect(postCount).toBe(1);
+    expect(page.document.querySelector("main")!.hidden).toBe(false);
+    expect(form.querySelector("textarea")!.value).toBe("unknown state");
+  });
+
+  it("ignores late edit and delete completions after access changes", async () => {
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 1 });
+    const makePage = () => boot(html, { respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 2 } };
+      if (entry.method === "POST") return undefined;
+      return { status: 200, body: {} };
+    } });
+    const edited = makePage();
+    const original = edited.document.getElementById("comment-" + id(2))!;
+    original.querySelector(".comment-edit")!.click();
+    const editForm = original.querySelector(".comment-form")!;
+    editForm.querySelector("textarea")!.type_("late edit");
+    editForm.querySelectorAll("button").find((button) => button.textContent === "Save")!.click();
+    await edited.advance(20_000);
+    edited.pending[0]!({ status: 200, body: { comment: comment(2, { text: "late edit" }) } });
+    await edited.settle();
+    expect(edited.document.getElementById("comment-" + id(2))).toBe(original);
+    expect(editForm.querySelector("textarea")!.value).toBe("late edit");
+    expect(editForm.querySelectorAll("button").find((button) => button.textContent === "Save")!.disabled).toBe(true);
+
+    const deleted = makePage();
+    const article = deleted.document.getElementById("comment-" + id(2))!;
+    article.querySelector(".comment-delete")!.click();
+    const confirmation = article.querySelector(".comment-confirm")!;
+    const remove = confirmation.querySelectorAll("button").find((button) => button.textContent === "Delete")!;
+    remove.click();
+    await deleted.advance(20_000);
+    deleted.pending[0]!({ status: 200, body: { comment: comment(2, { deleted: true }) } });
+    await deleted.settle();
+    expect(deleted.document.getElementById("comment-" + id(2))).toBe(article);
+    expect(remove.disabled).toBe(true);
+  });
+
+  it("ignores late suggestion success and decision failure after access changes", async () => {
+    const state = { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 2 };
+    const makePage = (html: string) => boot(html, { respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: state };
+      if (entry.method === "POST") return undefined;
+      return { status: 200, body: {} };
+    } });
+    const suggestionHtml = withCapabilities(await pageHtml({ access: commenter }), { canRead: true, canComment: true, canSuggest: true, canDecide: false, canAsk: true, canManagePeople: false, canTakeOwnership: false, peopleRevision: 1 });
+    const suggested = makePage(suggestionHtml);
+    const suggest = suggested.document.querySelector('.decision[data-decision="d2"] .suggest')!;
+    suggest.click();
+    await suggested.advance(20_000);
+    suggested.pending[0]!({ status: 200, body: {} });
+    await suggested.settle();
+    expect(suggest.disabled).toBe(true);
+    expect(suggest.getAttribute("data-mine")).toBeNull();
+
+    const decisionHtml = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 1 });
+    const decided = makePage(decisionHtml);
+    decided.byId("decide-approve").click();
+    decided.byId("decide-note").type_("keep decision draft");
+    decided.byId("decide-submit").click();
+    await decided.advance(20_000);
+    decided.pending[0]!({ status: 500, body: {} });
+    await decided.settle();
+    expect(decided.reloads).toHaveLength(0);
+    expect(decided.byId("decide-note").value).toBe("keep decision draft");
+    expect(decided.byId("decide-submit").disabled).toBe(true);
+  });
+
+  it("keeps every write control disabled after late failures and ignores late decision success", async () => {
+    const legacyHtml = await pageHtml();
+    const fullProjection = { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 1 };
+    const denied = { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 2 };
+    const makePage = (html: string) => boot(html, { respond: (entry) => entry.url.endsWith("/api/state") ? { status: 200, body: denied } : entry.method === "POST" ? undefined : { status: 200, body: {} } });
+
+    const commentPage = makePage(legacyHtml);
+    commentPage.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const commentForm = commentPage.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    commentForm.querySelector("textarea")!.type_("comment draft");
+    commentForm.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await commentPage.advance(20_000);
+    commentPage.pending[0]!({ status: 500, body: {} });
+    await commentPage.settle();
+    expect(commentForm.querySelectorAll("button").find((button) => button.textContent === "Post")!.disabled).toBe(true);
+
+    const editPage = makePage(withCapabilities(legacyHtml, fullProjection));
+    const editArticle = editPage.document.getElementById("comment-" + id(2))!;
+    editArticle.querySelector(".comment-edit")!.click();
+    const editForm = editArticle.querySelector(".comment-form")!;
+    editForm.querySelectorAll("button").find((button) => button.textContent === "Save")!.click();
+    await editPage.advance(20_000);
+    editPage.pending[0]!({ status: 500, body: {} });
+    await editPage.settle();
+    expect(editForm.querySelectorAll("button").find((button) => button.textContent === "Save")!.disabled).toBe(true);
+
+    const deletePage = makePage(withCapabilities(legacyHtml, fullProjection));
+    const deleteArticle = deletePage.document.getElementById("comment-" + id(2))!;
+    deleteArticle.querySelector(".comment-delete")!.click();
+    const deleteConfirm = deleteArticle.querySelector(".comment-confirm")!;
+    const deleteButton = deleteConfirm.querySelectorAll("button").find((button) => button.textContent === "Delete")!;
+    deleteButton.click();
+    await deletePage.advance(20_000);
+    deletePage.pending[0]!({ status: 500, body: {} });
+    await deletePage.settle();
+    expect(deleteButton.disabled).toBe(true);
+
+    const suggestHtml = withCapabilities(await pageHtml({ access: commenter }), { ...fullProjection, canDecide: false, canManagePeople: false });
+    const suggestPage = makePage(suggestHtml);
+    const suggestButton = suggestPage.document.querySelector('.decision[data-decision="d2"] .suggest')!;
+    suggestButton.click();
+    await suggestPage.advance(20_000);
+    suggestPage.pending[0]!({ status: 500, body: {} });
+    await suggestPage.settle();
+    expect(suggestButton.disabled).toBe(true);
+
+    const decisionPage = makePage(withCapabilities(legacyHtml, fullProjection));
+    decisionPage.byId("decide-approve").click();
+    decisionPage.byId("decide-submit").click();
+    await decisionPage.advance(20_000);
+    decisionPage.pending[0]!({ status: 200, body: { revision: 8 } });
+    await decisionPage.settle();
+    expect(decisionPage.reloads).toHaveLength(0);
+    expect(decisionPage.byId("decide-submit").disabled).toBe(true);
+  });
+
+  it("does not apply a decision response after demotion and later promotion", async () => {
+    const granted = { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 3 };
+    const denied = { ...granted, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, peopleRevision: 2 };
+    let tick = 0;
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 1 });
+    const page = boot(html, { respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) { tick += 1; return { status: 200, body: tick === 1 ? denied : granted }; }
+      if (entry.method === "POST") return undefined;
+      return { status: 200, body: {} };
+    } });
+    page.byId("decide-approve").click();
+    page.byId("decide-submit").click();
+    await page.advance(20_000);
+    expect(page.byId("decide-approve").hidden).toBe(true);
+    await page.advance(20_000);
+    expect(page.sent.filter((entry) => entry.url.endsWith("/api/state"))).toHaveLength(2);
+    page.pending[0]!({ status: 200, body: { revision: 8 } });
+    await page.settle();
+    expect(page.reloads).toHaveLength(0);
+    expect(page.byId("decide-submit").disabled).toBe(false);
+  });
+
+  it("turns off Ask independently while retaining the allowed comment", async () => {
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: false, canDecide: false, canAsk: true, canManagePeople: false, canTakeOwnership: false, peopleRevision: 1 });
+    const page = boot(html, { respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: true, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 2 } };
+      return { status: 201, body: { comment: comment(79) } };
+    } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("ordinary comment");
+    const ask = form.querySelector("input[type=checkbox]")!;
+    ask.checked = true;
+    await page.advance(20_000);
+    expect(ask.disabled).toBe(true);
+    form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await page.settle();
+    expect(posts(page, "/comments")[0]!.body.ask).toBe(false);
+  });
+
+  it("leaves drafts and access unchanged for a 503 or malformed projection", async () => {
+    const storage = fakeStorage();
+    storage.setItem(`agentx:${taskId}:coding-plan`, JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "unknown stays" }));
+    let tick = 0;
+    const page = boot(withCapabilities(await pageHtml(), { canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 2 }), { storage, respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) { tick += 1; return tick === 1 ? { status: 503, body: {} } : { status: 200, body: { canRead: true, canComment: true, canDecide: true, peopleRevision: 3 } }; }
+      return { status: 200, body: {} };
+    } });
+    await page.advance(20_000);
+    expect(page.byId("decide-approve").disabled).toBe(true);
+    await page.advance(20_000);
+    expect(page.byId("decide-approve").disabled).toBe(true);
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).not.toBeNull();
+    expect(page.document.querySelector("main")!.hidden).toBe(false);
+  });
+
+  it("does not restore revoked write rights from an older or incomplete projection", async () => {
+    let tick = 0;
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 5 });
+    const page = boot(html, { respond: (entry) => {
+      if (!entry.url.endsWith("/api/state")) return { status: 200, body: {} };
+      tick += 1;
+      const rights = tick === 1
+        ? { canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 6 }
+        : tick === 2
+          ? { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 5 }
+          : { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false };
+      return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), ...rights } };
+    } });
+    await page.advance(20_000);
+    expect(page.byId("decide-approve").disabled).toBe(true);
+    await page.advance(20_000);
+    expect(page.byId("decide-approve").disabled).toBe(true);
+    await page.advance(20_000);
+    expect(page.byId("decide-approve").disabled).toBe(true);
+  });
+
+  it("keeps legacy permission snapshots and their draft behavior until a complete projection arrives", async () => {
+    const storage = fakeStorage();
+    storage.setItem(`agentx:${taskId}:coding-plan`, JSON.stringify({ v: 1, at: 1_000_000, answers: { d1: "above" }, opened: ["d1"], drafts: {}, excluded: [], note: "legacy draft" }));
+    const page = boot(await pageHtml(), { storage, respond: (entry) => entry.url.endsWith("/api/state")
+      ? { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43) } }
+      : { status: 200, body: {} } });
+    await page.advance(20_000);
+    expect(page.byId("decide-approve").disabled).toBe(false);
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).not.toBeNull();
+    expect(page.document.querySelector("main")!.hidden).toBe(false);
+  });
+
+  it("preserves contextual comment labels and target keys when comments refresh", async () => {
+    let seq = 3;
+    const page = boot(await pageHtml({ comments: [comment(1, { target: { kind: "claim", id: "2" } }), comment(3, { target: { kind: "decision", id: "d1" } }), comment(4, { target: { kind: "document" } })] }), { respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: seq, csrf: "n".repeat(43) } };
+      if (entry.url.endsWith("/api/comments")) return { status: 200, body: { comments: [], suggestions: [] } };
+      return { status: 200, body: {} };
+    } });
+    const expected = [["claim:2", "Comment on 2"], ["decision:d1", "Comment on this decision"], ["document", "Comment on this document"]] as const;
+    for (const [target, label] of expected) {
+      const button = page.document.querySelector(`.comment-open[data-target="${target}"]`)!;
+      expect(button.textContent).toBe(label);
+      expect(button.hidden).toBe(false);
+    }
+    seq = 4;
+    await page.advance(20_000);
+    for (const [target, label] of expected) {
+      const button = page.document.querySelector(`.comment-open[data-target="${target}"]`)!;
+      expect(button.textContent).toBe(label);
+      expect(button.hidden).toBe(false);
+    }
+  });
+
   it("the script builds no markup from strings", () => {
     for (const banned of ["innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "new Function", "setAttribute(\"on", "setAttribute('on", ".onclick", "location.href", "location=", "location ="]) {
       expect(TASK_PAGE_DECIDING_SCRIPT, banned).not.toContain(banned);

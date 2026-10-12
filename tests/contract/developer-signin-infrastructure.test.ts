@@ -12,6 +12,18 @@ type Statement = { Effect?: string; Sid?: string; Action: string | string[]; Res
 type TemplateJson = { Parameters: Record<string, Record<string, unknown>>; Resources: Record<string, Resource>; Outputs: Record<string, { Value: unknown }> };
 type Ref = { Ref: string };
 
+function leadingKeysOf(statement: Statement): string[] {
+  const scopedKeys = statement.Condition?.["ForAllValues:StringLike"];
+  if (typeof scopedKeys !== "object" || scopedKeys === null || !("dynamodb:LeadingKeys" in scopedKeys)) {
+    throw new Error("expected a DynamoDB leading-keys condition");
+  }
+  const keys = scopedKeys["dynamodb:LeadingKeys"];
+  if (!Array.isArray(keys) || !keys.every((key: unknown) => typeof key === "string")) {
+    throw new Error("expected DynamoDB leading keys to be strings");
+  }
+  return keys.filter((key: unknown): key is string => typeof key === "string");
+}
+
 let named: TemplateJson;
 let legacy: TemplateJson;
 
@@ -333,8 +345,9 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
       { dynamodb: { NewImage: { entityType: { S: ["ADMIN_CHANGE"] } } } },
       // Task 19: a fifth, for refused Slack presses, on this same mapping. Spec 061: comment nudges share it, since a
       // mapping takes five filters by default.
-      { dynamodb: { NewImage: { entityType: { S: ["WORKFLOW_ACTION_REFUSAL", "TASK_COMMENT_NUDGE"] } } } },
+      { dynamodb: { NewImage: { entityType: { S: ["WORKFLOW_ACTION_REFUSAL", "TASK_COMMENT_NUDGE", "TASK_PEOPLE_NOTIFICATION"] } } } },
     ]);
+    expect(JSON.stringify(patterns.at(-1))).toContain("TASK_PEOPLE_NOTIFICATION");
     expect(notifierMapping.Properties).toMatchObject({ StartingPosition: "LATEST", MaximumRecordAgeInSeconds: 3600, MaximumRetryAttempts: 10, BisectBatchOnFunctionError: true });
     // A batch that still fails (the notice queue refusing sends, say) leaves a record of its shard and
     // sequence numbers, never its item images, and the operator is told.
@@ -372,11 +385,11 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
       for (const forbidden of ["dynamodb:Scan", "dynamodb:DeleteItem", "dynamodb:BatchWriteItem"]) expect(allows(statement, forbidden)).toBe(false);
     }
     // The task read is chosen by its leading keys, not by position among the GetItem statements.
-    const reads = dynamo.filter((statement) => allows(statement, "dynamodb:GetItem") && (statement.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"].includes("DEVTASK#*"));
+    const reads = dynamo.filter((statement) => allows(statement, "dynamodb:GetItem") && leadingKeysOf(statement).includes("DEVTASK#*"));
     expect(reads).toHaveLength(1);
-    expect([...(reads[0]!.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"]].sort()).toEqual(["CHATGPT_NOTICE#*", "DEVTASK#*", "OPERATION#*", "WORKSPACE#*"]);
+    expect([...leadingKeysOf(reads[0]!)].sort()).toEqual(["CHATGPT_NOTICE#*", "DEVTASK#*", "OPERATION#*", "WORKSPACE#*"]);
     expect(actionsOf(reads[0]!).sort()).toEqual(["dynamodb:GetItem", "dynamodb:Query"]);
-    const keysOf = (statement: Statement) => (statement.Condition!["ForAllValues:StringLike"] as Record<string, string[]>)["dynamodb:LeadingKeys"];
+    const keysOf = (statement: Statement) => leadingKeysOf(statement);
     const writes = dynamo.filter((statement) => allows(statement, "dynamodb:PutItem") || allows(statement, "dynamodb:UpdateItem"));
     expect(writes).toHaveLength(4);
     // The task and its notice markers are put and updated; a shared thread record is only put;

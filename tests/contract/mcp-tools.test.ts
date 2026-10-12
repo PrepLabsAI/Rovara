@@ -1,16 +1,20 @@
 // tests/contract/mcp-tools.test.ts
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { WORKFLOW_REVIEW_FAILURE_REASONS, workflowFindingFingerprint, type DeveloperTaskView } from "@agentx/contracts";
 import {
   DEVELOPER_TOOLS, NEXT_STEPS, REQUIRED_SERVER_MINOR, ToolError, UPGRADE_AGENTX_STEP, compatibilityChecker, createAgentXMcpServer, httpControlPlaneClient,
   type ControlPlaneClient, type ToolContext,
 } from "../../packages/mcp/src/index.js";
-import { toolError } from "../support/mcp-tool-error.js";
+import { toolError as parseToolError } from "../support/mcp-tool-error.js";
 
 const TASK = "44444444-4444-4444-8444-444444444444";
 const PLANTED = "xoxb-3333333333-planted-secret";
+function toolError(result: Awaited<ReturnType<Client["callTool"]>>) {
+  return parseToolError(CallToolResultSchema.parse(result));
+}
 const view = (status: DeveloperTaskView["status"], extra: Partial<DeveloperTaskView> = {}): DeveloperTaskView => ({
   taskId: TASK, title: "Fix the flaky retry test", project: "payments", status, startingRevision: 7, client: "Claude Code", shared: false,
   createdAt: "2026-09-27T12:00:00.000Z", updatedAt: "2026-09-27T12:00:00.000Z", events: [], ...extra,
@@ -42,7 +46,7 @@ describe("the tool list (FR-027, FR-028, SC-010)", () => {
     expect(tools.map((tool) => tool.name)).toEqual([
       "agentx_whoami", "agentx_list_projects", "agentx_start_task", "agentx_start_workflow", "agentx_get_task", "agentx_wait_for_task",
       "agentx_list_tasks", "agentx_continue_task", "agentx_decide_workflow", "agentx_review_workflow_candidate", "agentx_retry_workflow",
-      "agentx_send_workflow_back", "agentx_resolve_review_findings", "agentx_retry_workflow_publish", "agentx_keep_pull_request", "agentx_get_pr_feedback", "agentx_decide_pr_feedback", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request",
+      "agentx_send_workflow_back", "agentx_resolve_review_findings", "agentx_retry_workflow_publish", "agentx_keep_pull_request", "agentx_get_pr_feedback", "agentx_decide_pr_feedback", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request", "agentx_get_task_people", "agentx_get_task_people_request", "agentx_set_task_person", "agentx_take_task_ownership",
     ]);
     for (const tool of tools) expect(tool.outputSchema, tool.name).toBeDefined();
     expect(JSON.stringify(tools)).not.toContain("\u2014");
@@ -734,7 +738,7 @@ describe("versions (FR-048, R23, ruling S1)", () => {
 
 describe("agentx_open_pull_request and agentx_close_task return at once (R22, Owner decision 6)", () => {
   it("opens a draft and answers with the started operation, calling AgentX once", async () => {
-    const openPullRequest = vi.fn(async () => ({ task: view("RUNNING"), operationId: "55555555-5555-4555-8555-555555555555", operationStatus: "ACCEPTED" as const }));
+    const openPullRequest = vi.fn<ControlPlaneClient["openPullRequest"]>(async () => ({ task: view("RUNNING"), operationId: "55555555-5555-4555-8555-555555555555", operationStatus: "ACCEPTED" }));
     const result = await (await connect({ openPullRequest })).callTool({ name: "agentx_open_pull_request", arguments: { task_id: TASK, title: "Fix the retry test" } });
     expect(result.structuredContent).toMatchObject({ operation_id: "55555555-5555-4555-8555-555555555555", operation_status: "ACCEPTED", task: { task_id: TASK, status: "RUNNING" } });
     expect(result.structuredContent).not.toHaveProperty("timed_out");
@@ -745,7 +749,7 @@ describe("agentx_open_pull_request and agentx_close_task return at once (R22, Ow
 
   it("returns the PR's URL when a retried call finds it already published", async () => {
     const pullRequest = { repository: "demo", number: 42, url: "https://github.com/example/demo/pull/42", state: "open" as const };
-    const openPullRequest = vi.fn(async () => ({ task: view("SUCCEEDED"), operationId: "55555555-5555-4555-8555-555555555555", operationStatus: "SUCCEEDED" as const, pullRequest }));
+    const openPullRequest = vi.fn<ControlPlaneClient["openPullRequest"]>(async () => ({ task: view("SUCCEEDED"), operationId: "55555555-5555-4555-8555-555555555555", operationStatus: "SUCCEEDED", pullRequest }));
     const result = await (await connect({ openPullRequest })).callTool({ name: "agentx_open_pull_request", arguments: { task_id: TASK, title: "x", request_id: "66666666-6666-4666-8666-666666666666" } });
     expect(result.structuredContent).toMatchObject({ operation_status: "SUCCEEDED", pull_request: pullRequest });
     expect(openPullRequest.mock.calls[0]?.[1]).toMatchObject({ requestId: "66666666-6666-4666-8666-666666666666" });

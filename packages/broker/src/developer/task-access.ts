@@ -4,30 +4,44 @@ import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { agentXError } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
-import { taskKey, type DeveloperTaskRecord } from "./task-records.js";
+import { resolveTaskPeopleAccess, type TaskRole } from "./task-people.js";
+import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
 
-/** `owner`: the task's developer. `commenter`: a member of the task's channel who can use its project. */
-export type TaskRole = "owner" | "commenter";
-export type TaskAction = "read" | "comment" | "suggest" | "decide" | "ask";
+export type { TaskRole } from "./task-people.js";
+export type TaskAction = "read" | "peopleRead" | "comment" | "suggest" | "decide" | "ask" | "peopleManage" | "takeOwnership" | "retry" | "publish" | "feedback" | "close" | "control";
 
 export const TASK_ACTION_ROLES: Record<TaskAction, readonly TaskRole[]> = {
-  read: ["owner", "commenter"],
+  read: ["owner", "commenter", "viewer"],
+  peopleRead: ["owner", "commenter", "viewer"],
   comment: ["owner", "commenter"],
   suggest: ["commenter"],
   decide: ["owner"],
   ask: ["owner", "commenter"],
+  peopleManage: ["owner"],
+  takeOwnership: ["owner", "commenter", "viewer"],
+  retry: ["owner"],
+  publish: ["owner"],
+  feedback: ["owner"],
+  close: ["owner"],
+  control: ["owner"],
 };
 
 export function can(role: TaskRole, action: TaskAction): boolean {
   return TASK_ACTION_ROLES[action].includes(role);
 }
 
-/** A reader's access to one task: the task as stored, and their role on it. */
-export interface TaskAccess { task: DeveloperTaskRecord; role: TaskRole }
+/** A reader's access to one task, including the exact PEOPLE revision later writes must fence. */
+export interface TaskAccess {
+  task: DeveloperTaskRecord;
+  role: TaskRole;
+  peopleRevision?: number;
+  ownerActorIds: readonly string[];
+}
 
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-type AccessDependencies = Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName" | "checkAccess" | "channelMember" | "slackTeamId" | "log">;
+type AccessDependencies = Pick<DeveloperTaskRouteDependencies,
+  "documentClient" | "tableName" | "checkAccess" | "channelMember" | "slackTeamId" | "log" | "now" | "taskPeopleConfiguration" | "checkTaskPerson">;
 
 const log = (deps: Pick<DeveloperTaskRouteDependencies, "log">, entry: Record<string, unknown>) =>
   (deps.log ?? ((line) => console.log(JSON.stringify({ component: "broker", ...line }))))(entry);
@@ -45,7 +59,26 @@ export async function resolveTaskAccess(deps: AccessDependencies, caller: Develo
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: taskKey(taskId), ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
   const task = response.Item;
   if (task === undefined) throw notFound();
-  if (task.developerId === caller.developerId) return { task, role: "owner" };
+  try {
+    const people = await resolveTaskPeopleAccess(deps, task, caller.developerId);
+    if (people !== undefined) {
+      if (action !== undefined) {
+        const read = action === "read" || action === "peopleRead";
+        if ((!read && !taskOpen(task)) || !can(people.role, action)
+          || (action === "takeOwnership" && !people.canTakeOwnership)
+          || ((action === "peopleManage" || action === "takeOwnership") && deps.taskPeopleConfiguration?.peopleChangesEnabled !== true)) throw notFound();
+      }
+      return { task, role: people.role, peopleRevision: people.peopleRevision, ownerActorIds: people.ownerActorIds };
+    }
+  } catch {
+    throw notFound();
+  }
+  const legacyOwners = [taskOwnerKey(task.developerId, task.taskId)];
+  const legacyPeopleAction = action === "peopleManage" || action === "takeOwnership";
+  if (task.developerId === caller.developerId) {
+    if (legacyPeopleAction || (action !== undefined && action !== "read" && action !== "peopleRead" && !taskOpen(task))) throw notFound();
+    return { task, role: "owner", ownerActorIds: legacyOwners };
+  }
   // An action only owners may take needs no project or channel lookup for anyone else: they read as not found.
   if (action !== undefined && TASK_ACTION_ROLES[action].every((role) => role === "owner")) throw notFound();
   let usesProject = false;
@@ -69,7 +102,9 @@ export async function resolveTaskAccess(deps: AccessDependencies, caller: Develo
     if (deps.slackTeamId === undefined || share.teamId !== deps.slackTeamId) throw notFound();
     throw Object.assign(agentXError("TASK_ACCESS_DENIED", "you can't open this task yet"), { owners: [ownerNameForReaders(task.developerName)] });
   }
-  return { task, role: "commenter" };
+  if (legacyPeopleAction || (action !== undefined && (!can("commenter", action)
+    || (action !== "read" && action !== "peopleRead" && !taskOpen(task))))) throw notFound();
+  return { task, role: "commenter", ownerActorIds: legacyOwners };
 }
 
 /**

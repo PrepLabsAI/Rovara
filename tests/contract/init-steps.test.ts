@@ -1,7 +1,7 @@
 // The step runner for `agentx init`: runs steps under the environment lock, records each outcome
 // in SSM as soon as it is known, skips a done step on every later run (FR-019), never records a
 // failed step (so the next run retries it), and records but stops on a waiting step (FR-035).
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 import { agentXError } from "@agentx/contracts";
 import { initSteps } from "../../packages/cli/src/init/commands.js";
 import { emptyProgress, installProgressParameterName, readInstallProgress, writeInstallProgress, type InitStepId } from "../../packages/cli/src/init/install-state.js";
@@ -21,11 +21,11 @@ const LOCK = "/agentx/staging/lock";
 interface TestStep {
   id: InitStepId;
   title: string;
-  run: ReturnType<typeof vi.fn>;
+  run: Mock<InitStep<unknown>["run"]>;
 }
 
 function step(id: InitStepId, run: () => Promise<StepOutcome> = async () => ({ status: "done" })): TestStep {
-  return { id, title: `step ${id}`, run: vi.fn(run) };
+  return { id, title: `step ${id}`, run: vi.fn<InitStep<unknown>["run"]>(run) };
 }
 
 const run = (store: MemoryParameterStore, steps: ReadonlyArray<InitStep<unknown>>, extra: Partial<Parameters<typeof runInitSteps>[0]> = {}) =>

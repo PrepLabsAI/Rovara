@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AgentXError } from "@agentx/contracts";
+import type { DeployEvent } from "../../packages/cli/src/deploy/deployer.js";
 import { CDK_CONSTRUCT_IDS, assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import { sourceReleaseVersion, synthDeclaredParameters } from "../../packages/cli/src/deploy/cdk-source.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
@@ -194,7 +195,7 @@ describe("cdk engine", () => {
     const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
     const runner = recordingRunner(dir, { "agentx-staging-control-plane": { ApiEndpoint: "https://x" } });
     const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
-    const events: Array<{ kind: string; stackName: string }> = [];
+    const events: DeployEvent[] = [];
     await deployer.deploy({
       part: "control-plane",
       stackName: "agentx-staging-control-plane",
@@ -217,7 +218,7 @@ describe("cdk engine", () => {
       },
     };
     const deployer = cdkDeployer({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito", outputsDir: dir, outputs: async () => undefined });
-    const events: Array<{ kind: string; stackName: string }> = [];
+    const events: DeployEvent[] = [];
     await expect(
       deployer.deploy({
         part: "control-plane",

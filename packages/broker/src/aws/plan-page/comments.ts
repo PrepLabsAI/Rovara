@@ -291,7 +291,7 @@ function commentHtml(comment: PageCommentView, context: { shownVersion: number; 
  * for someone who may comment (hidden until the script turns it on). `threads` holds the top-level comments and their
  * replies; replies whose comment is not among them are left out.
  */
-export function renderThreads(threads: readonly PageCommentView[], context: { shownVersion: number; canComment: boolean; target: string; label?: string; /** false: the Comment control sits elsewhere (a checks row). */ open?: boolean }): string {
+export function renderThreads(threads: readonly PageCommentView[], context: { shownVersion: number; canComment: boolean; target: string; label?: string; controlLabel?: string; /** false: the Comment control sits elsewhere (a checks row). */ open?: boolean }): string {
   const top = threads.filter((comment) => comment.parentId === undefined);
   const items = top.map((comment) => {
     const replies = threads.filter((reply) => reply.parentId === comment.id);
@@ -299,7 +299,7 @@ export function renderThreads(threads: readonly PageCommentView[], context: { sh
     return `<li class="thread">${commentHtml(comment, context, false)}${replyList}</li>`;
   }).join("");
   const list = items === "" ? "" : `<ol class="threads">${items}</ol>`;
-  const open = context.canComment && context.open !== false ? `<button type="button" class="comment-open" data-target="${escapeHtml(context.target)}" hidden>Comment</button>` : "";
+  const open = context.canComment && context.open !== false ? `<button type="button" class="comment-open" data-target="${escapeHtml(context.target)}" hidden>${t(context.controlLabel ?? "Comment")}</button>` : "";
   if (list === "" && open === "") return "";
   const label = context.label === undefined ? "" : `<h4 class="comments-label">${t(context.label)}</h4>`;
   return `<section class="comments" data-comments="${escapeHtml(context.target)}">${label}${list}${open}</section>`;

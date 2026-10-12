@@ -22,7 +22,7 @@ function styles(html: string): string {
 export function pageChecks(html: string): LiveCheckResult[] {
   const css = styles(html);
   const viewport = /<meta name="viewport" content="([^"]*)">/.exec(html)?.[1]?.replace(/\s+/g, "") ?? "";
-  const buttons = [...html.matchAll(/<button\b([^>]*)>(Approve|Request changes|Comment|Reply|Edit|Delete)<\/button>/g)];
+  const buttons = [...html.matchAll(/<button\b([^>]*)>(Approve|Request changes|Comment(?: on [^<]*)?|Reply|Edit|Delete)<\/button>/g)];
   return [
     { name: "fits a phone screen", ok: viewport.includes("width=device-width") && viewport.includes("viewport-fit=cover") },
     { name: "the decide bar clears the home indicator", ok: css.includes("env(safe-area-inset-bottom)") },
@@ -34,14 +34,17 @@ export function pageChecks(html: string): LiveCheckResult[] {
   ];
 }
 
-const STATE_KEYS = new Set(["revision", "waiting", "stage", "documents", "commentSeq", "csrf"]);
+const STATE_KEYS = new Set(["revision", "waiting", "stage", "documents", "commentSeq", "csrf", "peopleRevision",
+  "canRead", "canComment", "canSuggest", "canDecide", "canAsk", "canManagePeople", "canTakeOwnership"]);
 
 /** The page's state answer (`api/state`): where the task stands and a fresh token, and nothing else. */
 export function stateChecks(state: Record<string, unknown>): LiveCheckResult[] {
+  const permissions = ["canRead", "canComment", "canSuggest", "canDecide", "canAsk", "canManagePeople", "canTakeOwnership"];
   return [
     { name: "says where the task stands", ok: typeof state.revision === "number" && typeof state.waiting === "boolean" && typeof state.stage === "string" && Array.isArray(state.documents) },
     { name: "carries a fresh token", ok: typeof state.csrf === "string" && /^[A-Za-z0-9_-]{32,64}$/.test(state.csrf) },
-    { name: "carries only where the task stands", ok: Object.keys(state).every((key) => STATE_KEYS.has(key)) },
+    { name: "carries current access without names", ok: permissions.every((key) => typeof state[key] === "boolean")
+      && (state.peopleRevision === undefined || Number.isSafeInteger(state.peopleRevision)) && Object.keys(state).every((key) => STATE_KEYS.has(key)) },
   ];
 }
 
@@ -53,6 +56,8 @@ export const LIVE_CHECKLIST: readonly string[] = [
   "VoiceOver on iPhone: the Approve dialog's title, its sections and the Send button are read out, and errors are announced.",
   "A second person in the channel opens the same page: they can comment and press Suggest this, the owner sees their suggestion, and they cannot approve.",
   "The Full path with one Request changes: requirements, design and coding plan, with one Request changes sending two comments; the next version shows AgentX's answer under each, and the card says how many it answered.",
+  "People at 360, 390 and 1280 px in light and dark mode: review a role change, Cancel with the keyboard and confirm with Enter; focus and content stay on screen.",
+  "While a People request is open, have an owner remove or demote this reader; this task's draft stays on demotion, clears on removal, and a late callback does not restore controls.",
 ];
 
 /** The --page link, checked: https only (the review cookie is sent with every request) and a task page path. */

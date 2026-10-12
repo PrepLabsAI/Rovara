@@ -402,6 +402,41 @@ describe("planner answers to comments sent with an Approve", () => {
     expect(parseCommentAnswers(answersBlock([{ comment: "c1", outcome: "done", reason: "As comment c1 asked." }]), refs)).toHaveLength(1);
   });
 
+  it("keeps each planner answer bound to its own included comment across every named list", () => {
+    const refs = new Set(["c1", "c2", "c3", "c4", "c20"]);
+    const rejected = [
+      "As comments c1 and c2 asked.", "As comments c2 and c1 asked.",
+      "As comments c1, c2, and c3 asked.", "As comments c1, c2, or c3 asked.",
+      "As comments c1 & c2 asked.", "As comments C1 AND C2 asked.",
+      "As comment c1 and comments c3 or c2 asked.", "As comments c1, c2, and C3; then comments c4 and c2 asked.",
+    ];
+    for (const reason of rejected) expect(parseCommentAnswers(answersBlock([{ comment: "c1", outcome: "done", reason }]), refs)).toEqual([]);
+
+    const accepted = [
+      "As comment c1 asked.", "As comments c1 and c1 asked.", "As comment c9 asked.",
+      "Kept the C4 diagram.", "Added the c2 flag.", "Use c2.js, c2-x and c2/readme.",
+    ];
+    for (const reason of accepted) expect(parseCommentAnswers(answersBlock([{ comment: "c1", outcome: "done", reason }]), refs)).toHaveLength(1);
+  });
+
+  it("does not attribute comment-shaped filenames or partial identifiers", () => {
+    const refs = new Set(["c1", "c2", "c20"]);
+    for (const reason of ["As comment c2.js shows.", "As comment c2-x shows.", "As comment c2/readme shows.", "As comment c20x shows."]) {
+      expect(parseCommentAnswers(answersBlock([{ comment: "c1", outcome: "done", reason }]), refs)).toHaveLength(1);
+    }
+    expect(parseCommentAnswers(answersBlock([{ comment: "c1", outcome: "done", reason: "As comments c1 and c2 asked." }]), refs)).toEqual([]);
+  });
+
+  it("checks the full normalized answer before shortening its displayed reason", () => {
+    const refs = new Set(["c1", "c2"]);
+    const hiddenOther = `${"a".repeat(200)} comments c2`;
+    const ownOnly = `${"a".repeat(200)} comments c1`;
+    expect(parseCommentAnswers(answersBlock([{ comment: "c1", outcome: "done", reason: hiddenOther }]), refs)).toEqual([]);
+    const parsed = parseCommentAnswers(answersBlock([{ comment: "c1", outcome: "done", reason: ownOnly }]), refs);
+    expect(parsed).toHaveLength(1);
+    expect(parsed[0]!.reason.length).toBeLessThanOrEqual(200);
+  });
+
   it("the planner is asked for the answers after an Approve with comments, and not when the approval has none", async () => {
     const t = await designApproved();
     expect(t.prompt()).toContain("agentx-comment-answers");
@@ -471,6 +506,15 @@ describe("plain references in AgentX text", () => {
     expect(plainPageRefs("Comment C3 is covered.", { decisions })).toBe("That comment is covered.");
     for (const text of ["in decision d9", "decisions d1, d2 and d9", "comment c1, c2 and c3", "Decision D1"]) expect(plainPageRefs(text, { decisions })).not.toMatch(/\b[dc][0-9]\b/i);
   });
+  it("turns every named comment in a list into plain page language", () => {
+    expect(plainPageRefs("comments c1, c2, and c3 were addressed.", { decisions })).toBe("those comments were addressed.");
+    expect(plainPageRefs("comments c1, c2, or c3 were addressed.", { decisions })).toBe("those comments were addressed.");
+    expect(plainPageRefs("Comments C1 AND C2 were addressed.", { decisions })).toBe("Those comments were addressed.");
+    for (const text of ["comment c2.js is a file.", "comment c2-x is a flag.", "comment c2/readme is a path.", "comment c20x is a name."]) {
+      expect(plainPageRefs(text, { decisions })).toBe(text);
+    }
+  });
+
   it("leaves real text alone: files, flags and code that merely look like a label", () => {
     for (const text of ["Use d3.js for the chart.", "Run `c1` first.", "The d1 schema is unchanged.", "Renamed the c2 flag.", "See v1.d1 and c1/readme and d2-x.", "Move d3 to the left."]) {
       expect(plainPageRefs(text, { decisions })).toBe(text);

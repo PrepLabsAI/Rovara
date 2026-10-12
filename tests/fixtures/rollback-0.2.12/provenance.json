@@ -1,0 +1,394 @@
+{
+  "status": "LOCAL_DERIVED_NOT_PUBLISHED",
+  "releaseVersion": "0.2.12",
+  "manifestSha256": "85b32a891001ad0ae4d180a46630035ac6d125dd21c7224ee37bc7b369567f80",
+  "zip": "packages/16edced13be82a7926e681815bda3cc727dbe9a566e9976b85832a3e729621ab.zip",
+  "zipSha256": "7c8971f2cc5460aec614850832e913c2e7065f57cdbb5a033a2bec313bf4b9d8",
+  "sourceMapSha256": "c84baa7a6e5ff0d53d4d36e94fd5e2564776135dba1b407b901f4bc0b1114df2",
+  "gitCommit": "8db81509d3c4726252f01d6627c43c46becd6e21",
+  "gitTree": "53f9a8dea22945e7d21d579baf587d1f4c75e9bf",
+  "runtime": "v22.23.3",
+  "versions": {
+    "typescript": "5.9.3",
+    "esbuild": "0.28.2",
+    "zod": "4.6.5"
+  },
+  "options": {
+    "format": "esm",
+    "platform": "node",
+    "target": "node22",
+    "minify": true,
+    "treeShaking": true,
+    "legalComments": "none"
+  },
+  "exports": [
+    "WorkerInvocationSchema",
+    "WorkflowSnapshotSchema"
+  ],
+  "bundleSha256": "4f61072bd5c19de3080f59322a5f8dcd4add178341d4a8d839cd1109e87d987f",
+  "bundleBytes": 521388,
+  "verifiedContracts": [
+    {
+      "sourcePath": "../../../packages/contracts/dist/environments.js",
+      "gitPath": "packages/contracts/src/environments.ts",
+      "gitSourceSha256": "013e248e5b1e2f3990ce73ac5bbe8c031c43ee7173671c93d86c73894406c1a0",
+      "shippedCompiledSha256": "27964061d8bfdd1381130c96206258b0244fb966e012b3ba27c43542077e5b22"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/access-policies.js",
+      "gitPath": "packages/contracts/src/access-policies.ts",
+      "gitSourceSha256": "bc451ab474592a7ff23b14cd88021429b011b158931e91e1537f65a433233718",
+      "shippedCompiledSha256": "d76b57702116fd669a4497e1fd7406726e5a99defd2b2bc4aad72f627897a915"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/item-paths.js",
+      "gitPath": "packages/contracts/src/item-paths.ts",
+      "gitSourceSha256": "10eede10be5bfd9d733466f9d37a9d37ea072b675ab54a88e22490164df5fcc8",
+      "shippedCompiledSha256": "c987a3fd14d4b02836b8f05c9c7a46145849a43406ae1660d11fdcb2f8d2326c"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/github-mcp.js",
+      "gitPath": "packages/contracts/src/github-mcp.ts",
+      "gitSourceSha256": "b47cf23ae24ad8d7908da8ddae22c855d6fc69a17356b809ace04f1263a96379",
+      "shippedCompiledSha256": "a6b74aace9c3f4f031df3e0a74b42a3bcfdc4e54d9ab027aef6383bfab4cde3a"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/mcp-connector.js",
+      "gitPath": "packages/contracts/src/mcp-connector.ts",
+      "gitSourceSha256": "42d16ea98608f6b927627f6c9f1264437bb7454c7d3c5a43426b2f4ea8a8cc55",
+      "shippedCompiledSha256": "877d4db8ad9abbfceccd958f2a5073256e6733c458b7df0cdba5be0b701e1aac"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/names.js",
+      "gitPath": "packages/contracts/src/names.ts",
+      "gitSourceSha256": "39ac2f4699ffe61d20341e875d2df93d1af308db4763926764e58812925be482",
+      "shippedCompiledSha256": "39ac2f4699ffe61d20341e875d2df93d1af308db4763926764e58812925be482"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/connectors.js",
+      "gitPath": "packages/contracts/src/connectors.ts",
+      "gitSourceSha256": "a8175c68d53be95b8698c1fc961a695607db8670738fd84c7c1703bc274eebf6",
+      "shippedCompiledSha256": "7004788a6e2a85f8d08312848af1fc5c60b32ce0376a3cc8e639a9c409ce5806"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/action-policy.js",
+      "gitPath": "packages/contracts/src/action-policy.ts",
+      "gitSourceSha256": "0eb17449a8e30a82078f3f3b68c1857d02737c5db72f0045f0d12f95527bd0d2",
+      "shippedCompiledSha256": "5cc312805e275d7e285afe0ab408fc8fbe08cc8666748086876d1dc85912a057"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/models.js",
+      "gitPath": "packages/contracts/src/models.ts",
+      "gitSourceSha256": "eaeb010889f9b09adef136192e1157627a9dab1b113c684d493a903db173fe4e",
+      "shippedCompiledSha256": "9ef3d0630ca02d2d3a44b68a4b624c1d8b1937e06c960fdec8254921bc68b8cc"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/model-providers.js",
+      "gitPath": "packages/contracts/src/model-providers.ts",
+      "gitSourceSha256": "94993f6e938797b083cea5cc936ce75e30315f826c653aa2887e6ef24348ffd1",
+      "shippedCompiledSha256": "f7f9cb9202d577d92e1737b97d46330f119b6862e99e4b583ad4829134157348"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/errors.js",
+      "gitPath": "packages/contracts/src/errors.ts",
+      "gitSourceSha256": "d95edc456e93a55646950b4ff5908a03b15082be5a7ebd4d57807a42f1009e40",
+      "shippedCompiledSha256": "4287bd67e8ccf13d878d45cdd10ff4c306b79cabe7d0aff1fec52e9de5c0101b"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/credentials.js",
+      "gitPath": "packages/contracts/src/credentials.ts",
+      "gitSourceSha256": "1f46ebfaa36f73075affc4b69a5f20d78ba7005d132662d31d4b03260481377f",
+      "shippedCompiledSha256": "a3f6a9bc3549bffa30914573b2f9faf97890094424cf35bac7fdbfad0f3cf0fd"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/loose.js",
+      "gitPath": "packages/contracts/src/loose.ts",
+      "gitSourceSha256": "6470caa5b5882edbf0ee0dc910333d0770bf5aa10570ec2163843406c4afdae5",
+      "shippedCompiledSha256": "cf45dca2c70bc13945b58454e1e06bd5afb62c3fe747f97f8a33847b9a2ad92f"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/project.js",
+      "gitPath": "packages/contracts/src/project.ts",
+      "gitSourceSha256": "50a7401776473961de009cf2f0a55383b781e66023c2d09504e05558f353634d",
+      "shippedCompiledSha256": "3c3a898191e245707fcc67bbc59b0c18f82936df51b3b86e080fdbb8e7b2a1be"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/redaction.js",
+      "gitPath": "packages/contracts/src/redaction.ts",
+      "gitSourceSha256": "c34eda9abb30bda61b96c14fa57f603862dadb2e2eae74ac1dcf658ccd435b3d",
+      "shippedCompiledSha256": "47be715bc12a8d8497807b9a57746e363eb903fa7e314e75efb0df1912d9a61f"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/workspace.js",
+      "gitPath": "packages/contracts/src/workspace.ts",
+      "gitSourceSha256": "483f366500c6662e57051f4ee4b6f05da4c69c8ff848f2cb7a73732110f562c7",
+      "shippedCompiledSha256": "e6b4607a814471f24cbeafae8bb176b4158e692469e99874734b1248e9dbb8d9"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/slack.js",
+      "gitPath": "packages/contracts/src/slack.ts",
+      "gitSourceSha256": "8513d7c77ad06bbd1b0f48bcef042fe6b1f8958e03752838829cf2d98fe423e0",
+      "shippedCompiledSha256": "1ffc34ffaa274ffab31ea80e5bb82d565cc7d56c9802f627673d76fcbd32e262"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/developer.js",
+      "gitPath": "packages/contracts/src/developer.ts",
+      "gitSourceSha256": "4d429f4a26279afd6862af962986615bc55a14122a5161e510fe609a33d4d550",
+      "shippedCompiledSha256": "9ce6fb78cb70528bd08fc853faa03739c91271c61222e44559d9d9ae571067d9"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/developer-tasks.js",
+      "gitPath": "packages/contracts/src/developer-tasks.ts",
+      "gitSourceSha256": "7bf3125fe2ce86f9b5332f5019e6698924506e03154943d78880cec5b3f031b7",
+      "shippedCompiledSha256": "717d6c1570474d51a23f17079c66dbbab6c9b9fca60b5770c768b97320948de5"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/display-name.js",
+      "gitPath": "packages/contracts/src/display-name.ts",
+      "gitSourceSha256": "dcb93f137e88c72afe6ba99fd52a625da3e2051649374d4310fe420cc59a0f84",
+      "shippedCompiledSha256": "63a64541986890075313c12ec4d68aafd25b6abf3263992cfa4b6000704831c1"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/operation.js",
+      "gitPath": "packages/contracts/src/operation.ts",
+      "gitSourceSha256": "2c9e74c4caddadf008d6b1f1bb011ab5f175b4dd0cd0846d628873b9baac5ede",
+      "shippedCompiledSha256": "cd6e34b6b5a5d49d76706ddd2c799869a47124388cb5b6cce6e25bcd3edb0eb9"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/task-workflow.js",
+      "gitPath": "packages/contracts/src/task-workflow.ts",
+      "gitSourceSha256": "c7b4e53dc8b3aa49fa4d74307bca753e3eede2bd6d74629a6b047348ca449419",
+      "shippedCompiledSha256": "bdb570c53548b815a86010e6e8061fd721f5daf99b031cbd0f8a7ea17a050e1b"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/workflow-check-input.js",
+      "gitPath": "packages/contracts/src/workflow-check-input.ts",
+      "gitSourceSha256": "03bfc60bd96d6b721baa759526b9b2f48db6de41d58ff6b01a2757c7ab08d505",
+      "shippedCompiledSha256": "9037cb15c72ec40cd148c64c61a09552078933be4d9358398d09ad541c06ac81"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/workflow-proposed-checks.js",
+      "gitPath": "packages/contracts/src/workflow-proposed-checks.ts",
+      "gitSourceSha256": "8ad1379cad3edeb705c8532ab5bee8662b7b74626e8cc55dfd34fc6e6ebced60",
+      "shippedCompiledSha256": "8ee974159bc36d1c3d0ded4039a9d985c16f67080033782960a428a2c30f3266"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/canonical-json.js",
+      "gitPath": "packages/contracts/src/canonical-json.ts",
+      "gitSourceSha256": "5e8022c81c0a06b7146f923a557dace6319f11fc5bb31386506a66ef5c557ddb",
+      "shippedCompiledSha256": "27356036f05f3cf9773781a367f3403891cbdaa38768861667f0fe5eea1402e3"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/workflow-plan-document.js",
+      "gitPath": "packages/contracts/src/workflow-plan-document.ts",
+      "gitSourceSha256": "5cb1493affed0a147d67b0cc0853295bc8589818c6fee93cf0864ae649f186f3",
+      "shippedCompiledSha256": "560a9ea58b3f6249d6ee7f115075e4931de418dc1ce6fe4184b65ea45c7e4836"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/protocol.js",
+      "gitPath": "packages/contracts/src/protocol.ts",
+      "gitSourceSha256": "bc1fbd947ed0989d2d9f0dbd71f8d1cab264b86fe7963e44d35a6966d356c813",
+      "shippedCompiledSha256": "31610fc2c4325d05b66705f1b90ccd32df1abf15dcfbab1c28882503bd32e277"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/release.js",
+      "gitPath": "packages/contracts/src/release.ts",
+      "gitSourceSha256": "05bf87076579bf0026b7fea75b9e749e1e8950aee7ce0567b9849070c3e813f6",
+      "shippedCompiledSha256": "c6cd630540ffcae60ee57a838653c6c1f911bae9ee27c58964ee9c27234d3b62"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/session.js",
+      "gitPath": "packages/contracts/src/session.ts",
+      "gitSourceSha256": "2d249ae04adf0cd427c0a503f2fa92ac45bf0adae99adb728160b9776ee30245",
+      "shippedCompiledSha256": "cd3f9c07cf5ffaaf57d041b9c24b7e24c70eefe99b16b4c22b4207359a591af1"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/slack-confirmation.js",
+      "gitPath": "packages/contracts/src/slack-confirmation.ts",
+      "gitSourceSha256": "22b1a8b588e50b4a1708ee9144fea05eaa9e5dfb2cb2999acc41d9345a5027d7",
+      "shippedCompiledSha256": "c633e1a0573914a3f08916f9e0be0c559860202056492b359a9f86d9311f4027"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/usage.js",
+      "gitPath": "packages/contracts/src/usage.ts",
+      "gitSourceSha256": "b1c485f18b336362ca953949d1335e0a38a6d942085954bb3af1df63a705e96b",
+      "shippedCompiledSha256": "b8f97bdbd4353bab501a1644390154db0d62c1a4e24ba2ff6852dc14774afede"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/turns.js",
+      "gitPath": "packages/contracts/src/turns.ts",
+      "gitSourceSha256": "eacfe701a8ebf73785af15268c066b14c27b0ebcfc05728aa372287781025f84",
+      "shippedCompiledSha256": "0c11b5667652397149c6b3b76e8a6405e068bea8d3b6fea1a56d10044e980fe3"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/slack-details.js",
+      "gitPath": "packages/contracts/src/slack-details.ts",
+      "gitSourceSha256": "11d0d85c04e102e8198661e0cbda0efe3bea3901056de77891a2415baf22f93d",
+      "shippedCompiledSha256": "23f7ddd555b0e450f08b292154eb947e51d043e68158a94bd098b17597494fe4"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/slack-routing.js",
+      "gitPath": "packages/contracts/src/slack-routing.ts",
+      "gitSourceSha256": "010425d8f0b607c92f67ce3aa408cdd8371b0803d11cbe14202dd1e1960ebca7",
+      "shippedCompiledSha256": "94063744bd9e58984253d1d78e53febe9394d91878d9707ec087fdefb20d5648"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/admin.js",
+      "gitPath": "packages/contracts/src/admin.ts",
+      "gitSourceSha256": "b34a26deaf04ac9c2b1d602271357d0be4258e9e6caba56dc6871be5f7e2e694",
+      "shippedCompiledSha256": "8fd8ed7fa54fe3973bac432cca20a586a22d3869ce3b10685bb57a9d6aeb873f"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/admin-changes.js",
+      "gitPath": "packages/contracts/src/admin-changes.ts",
+      "gitSourceSha256": "c522781b3cbe8390030e8827de18299f9ebd613eed77bc2018fdf2c76dfa0502",
+      "shippedCompiledSha256": "5102aa92abde86033ac4e79a163ded582f75100caf3cefaa200bd378529cfa30"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/checks.js",
+      "gitPath": "packages/contracts/src/checks.ts",
+      "gitSourceSha256": "8533588304d98e9440d996f70314b1f93c08fa92be10830da061eefc5ea8ed0c",
+      "shippedCompiledSha256": "05810639e7c2eaf26b8bffb91d678186d7cf4febd9f7a4f966cc7c2f905086eb"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/swebench.js",
+      "gitPath": "packages/contracts/src/swebench.ts",
+      "gitSourceSha256": "9957c6386318a3f035df0637665cc9a496f35c3170223ea3257048e34f908ecc",
+      "shippedCompiledSha256": "cccc75af5f775bd96c0a4657272aae92b1e08c186eaf1c1896b01140125bd398"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/eval-batch.js",
+      "gitPath": "packages/contracts/src/eval-batch.ts",
+      "gitSourceSha256": "7931f8fc31610aae9928c115e37b519128af7ac2ddb8e89f95442b5ab390c03e",
+      "shippedCompiledSha256": "c3759d44d9569f294d8d591557bfaa39acee74410ae3b43fd10912100a30a9d5"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/checks-section.js",
+      "gitPath": "packages/contracts/src/checks-section.ts",
+      "gitSourceSha256": "20fc4bf8329ed280aa08e9449f538d4d823e5e0ffe4474f9f6a6b00dce3fe667",
+      "shippedCompiledSha256": "06b8ad766f15ac3774d077f8091e34f09acd641e58f8fa1a7a3ce1233e8ea727"
+    },
+    {
+      "sourcePath": "../../../packages/contracts/dist/task-comments.js",
+      "gitPath": "packages/contracts/src/task-comments.ts",
+      "gitSourceSha256": "e495f0f9a74e6e6c8afdaec6d7c92942eeb49f24d690c16b3b50298952c0b848",
+      "shippedCompiledSha256": "7af444ce4a216d0af83139387bd7b6c5bff21ae9e3008cffcd5a7ac882aebd19"
+    }
+  ],
+  "shippedZodSourcesMatched": 94,
+  "bundleInputs": [
+    "node_modules/zod/v4/core/util.js",
+    "node_modules/zod/v4/core/core.js",
+    "node_modules/zod/v4/core/errors.js",
+    "node_modules/zod/v4/core/parse.js",
+    "node_modules/zod/v4/core/regexes.js",
+    "node_modules/zod/v4/core/checks.js",
+    "node_modules/zod/v4/core/doc.js",
+    "node_modules/zod/v4/core/versions.js",
+    "node_modules/zod/v4/core/schemas.js",
+    "node_modules/zod/v4/core/memoizer.js",
+    "node_modules/zod/v4/locales/ar.js",
+    "node_modules/zod/v4/locales/az.js",
+    "node_modules/zod/v4/locales/be.js",
+    "node_modules/zod/v4/locales/bg.js",
+    "node_modules/zod/v4/locales/bn.js",
+    "node_modules/zod/v4/locales/ca.js",
+    "node_modules/zod/v4/locales/ckb.js",
+    "node_modules/zod/v4/locales/cs.js",
+    "node_modules/zod/v4/locales/da.js",
+    "node_modules/zod/v4/locales/de.js",
+    "node_modules/zod/v4/locales/el.js",
+    "node_modules/zod/v4/locales/en.js",
+    "node_modules/zod/v4/locales/eo.js",
+    "node_modules/zod/v4/locales/es.js",
+    "node_modules/zod/v4/locales/fa.js",
+    "node_modules/zod/v4/locales/fi.js",
+    "node_modules/zod/v4/locales/fr.js",
+    "node_modules/zod/v4/locales/fr-CA.js",
+    "node_modules/zod/v4/locales/gu.js",
+    "node_modules/zod/v4/locales/he.js",
+    "node_modules/zod/v4/locales/hi.js",
+    "node_modules/zod/v4/locales/hr.js",
+    "node_modules/zod/v4/locales/hu.js",
+    "node_modules/zod/v4/locales/hy.js",
+    "node_modules/zod/v4/locales/id.js",
+    "node_modules/zod/v4/locales/is.js",
+    "node_modules/zod/v4/locales/it.js",
+    "node_modules/zod/v4/locales/ja.js",
+    "node_modules/zod/v4/locales/ka.js",
+    "node_modules/zod/v4/locales/km.js",
+    "node_modules/zod/v4/locales/kh.js",
+    "node_modules/zod/v4/locales/kn.js",
+    "node_modules/zod/v4/locales/ko.js",
+    "node_modules/zod/v4/locales/lt.js",
+    "node_modules/zod/v4/locales/mk.js",
+    "node_modules/zod/v4/locales/ms.js",
+    "node_modules/zod/v4/locales/ne.js",
+    "node_modules/zod/v4/locales/nl.js",
+    "node_modules/zod/v4/locales/nn.js",
+    "node_modules/zod/v4/locales/no.js",
+    "node_modules/zod/v4/locales/ota.js",
+    "node_modules/zod/v4/locales/ps.js",
+    "node_modules/zod/v4/locales/pl.js",
+    "node_modules/zod/v4/locales/pt.js",
+    "node_modules/zod/v4/locales/pt-BR.js",
+    "node_modules/zod/v4/locales/ro.js",
+    "node_modules/zod/v4/locales/ru.js",
+    "node_modules/zod/v4/locales/sk.js",
+    "node_modules/zod/v4/locales/sl.js",
+    "node_modules/zod/v4/locales/sv.js",
+    "node_modules/zod/v4/locales/ta.js",
+    "node_modules/zod/v4/locales/tg.js",
+    "node_modules/zod/v4/locales/th.js",
+    "node_modules/zod/v4/locales/tk.js",
+    "node_modules/zod/v4/locales/tr.js",
+    "node_modules/zod/v4/locales/uk.js",
+    "node_modules/zod/v4/locales/ua.js",
+    "node_modules/zod/v4/locales/ur.js",
+    "node_modules/zod/v4/locales/uz.js",
+    "node_modules/zod/v4/locales/vi.js",
+    "node_modules/zod/v4/locales/zh-CN.js",
+    "node_modules/zod/v4/locales/zh-TW.js",
+    "node_modules/zod/v4/locales/yo.js",
+    "node_modules/zod/v4/locales/index.js",
+    "node_modules/zod/v4/core/registries.js",
+    "node_modules/zod/v4/core/compile.js",
+    "node_modules/zod/v4/core/api.js",
+    "node_modules/zod/v4/core/to-json-schema.js",
+    "node_modules/zod/v4/core/json-schema-processors.js",
+    "node_modules/zod/v4/core/json-schema-generator.js",
+    "node_modules/zod/v4/core/json-schema.js",
+    "node_modules/zod/v4/core/index.js",
+    "node_modules/zod/v4/classic/checks.js",
+    "node_modules/zod/v4/classic/errors.js",
+    "node_modules/zod/v4/classic/parse.js",
+    "node_modules/zod/v4/classic/schemas.js",
+    "node_modules/zod/v4/classic/compat.js",
+    "node_modules/zod/v4/classic/iso.js",
+    "node_modules/zod/v4/classic/from-json-schema.js",
+    "node_modules/zod/v4/core/visit.js",
+    "node_modules/zod/v4/classic/deep-partial.js",
+    "node_modules/zod/v4/classic/in-out.js",
+    "node_modules/zod/v4/classic/coerce.js",
+    "node_modules/zod/v4/classic/external.js",
+    "node_modules/zod/index.js",
+    "legacy:packages/contracts/dist/item-paths.js",
+    "legacy:packages/contracts/dist/github-mcp.js",
+    "legacy:packages/contracts/dist/mcp-connector.js",
+    "legacy:packages/contracts/dist/names.js",
+    "legacy:packages/contracts/dist/connectors.js",
+    "legacy:packages/contracts/dist/action-policy.js",
+    "legacy:packages/contracts/dist/models.js",
+    "legacy:packages/contracts/dist/redaction.js",
+    "legacy:packages/contracts/dist/project.js",
+    "legacy:packages/contracts/dist/workflow-check-input.js",
+    "legacy:packages/contracts/dist/task-workflow.js",
+    "legacy:packages/contracts/dist/protocol.js",
+    "legacy:packages/contracts/dist/parser-entry.js"
+  ],
+  "producerSha256": "d8b4e8d90b2921e8492c6f1726b02727247dc3581de49fddd0d56e697790679f",
+  "limitations": [
+    "Reconstructed pure schemas, not original Lambda bundle execution",
+    "No current workflow compatibility test or semantic authorization rollback approval"
+  ]
+}

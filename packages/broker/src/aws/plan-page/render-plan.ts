@@ -86,7 +86,7 @@ interface Context {
 }
 
 /** The threads on one place of the document, with the Comment control for someone who may comment; "" when comments are not shown. */
-function threadsHtml(context: Context, key: string, options: { label?: string; open?: boolean } = {}): string {
+function threadsHtml(context: Context, key: string, options: { label?: string; controlLabel?: string; open?: boolean } = {}): string {
   if (context.input.comments === undefined || !context.input.current) return "";
   return renderThreads(context.threads.get(key) ?? [], { shownVersion: context.input.version, canComment: context.commenting, target: key, ...options });
 }
@@ -105,7 +105,7 @@ const decisionAnchor = (context: Context, decisionId: string): string => `${cont
 export const checksAnchor = (version: number): string => `coding-plan-v${version}-checks`;
 
 function codeLines(lines: string[], startLine: number): string {
-  const rows = lines.map((line, offset) => `<span class="ln">${startLine + offset}</span>${t(line)}`).join("\n");
+  const rows = lines.map((line, offset) => `<span class="code-line"><span class="ln">${startLine + offset}</span><span class="code-text">${t(line)}</span></span>`).join("\n");
   return `<pre><code>${rows}</code></pre>`;
 }
 
@@ -209,7 +209,7 @@ function decisionHtml(context: Context, decision: PlanDecision, withLink: boolea
   const note = '<p class="decision-note">Approve in Slack uses AgentX\'s answer.</p>';
   const key = `decision:${decision.id}`;
   const suggestions = context.input.current ? (context.input.suggestions ?? []).filter((suggestion) => suggestion.decisionId === decision.id) : [];
-  const after = `${note}${suggestionLines(suggestions, decision.options)}${threadsHtml(context, key)}`;
+  const after = `${note}${suggestionLines(suggestions, decision.options)}${threadsHtml(context, key, { controlLabel: "Comment on this decision" })}`;
   if (context.input.deciding === true && context.input.current) {
     // The owner's answer controls: one radio per option, AgentX's answer chosen to start with.
     const options = decision.options.map((option) => {
@@ -247,7 +247,7 @@ async function claimHtml(context: Context, claim: PlanClaim, level: number, open
   const id = claimAnchor(context.input.anchor, context.input.version, claim.id);
   const key = `claim:${claim.id}`;
   const count = commentCountBadge(context.threads.get(key)?.length ?? 0);
-  return `<details id="${escapeHtml(id)}" class="claim level-${level}"${open ? " open" : ""}><summary><span class="claim-id">${t(claim.id)}</span> <span class="claim-text">${t(claim.text)}</span>${badges(context, claim)}${count}</summary><div class="claim-body">${evidence.join("")}${decisions}${children}${threadsHtml(context, key)}</div></details>`;
+  return `<details id="${escapeHtml(id)}" class="claim level-${level}"${open ? " open" : ""}><summary><span class="claim-id">${t(claim.id)}</span> <span class="claim-text">${t(claim.text)}</span>${badges(context, claim)}${count}</summary><div class="claim-body">${evidence.join("")}${decisions}${children}${threadsHtml(context, key, { controlLabel: `Comment on ${claim.id}` })}</div></details>`;
 }
 
 /** The first five claims of a level, then the rest folded away. Only the first five claims of level 1 start open. */
@@ -336,19 +336,19 @@ function otherChecks(context: Context): Array<{ id: string; label: string }> {
 
 function checksHtml(context: Context): string {
   const { checks = [] } = context.input;
-  const others = otherChecks(context).map((check) => threadsHtml(context, `check:${check.id}`, { label: check.label, open: false })).join("");
+  const others = otherChecks(context).map((check) => threadsHtml(context, `check:${check.id}`, { label: check.label, controlLabel: `Comment on ${check.label}`, open: false })).join("");
   if (checks.length === 0) return others === "" ? "" : `<section id="${escapeHtml(checksAnchor(context.input.version))}" class="checks"><h3>Checks</h3>${others}</section>`;
   // Class names let the stylesheet keep the short columns whole and, on a phone, stack each check as one block.
   const commentControl = (check: NonNullable<RenderPlanInput["checks"]>[number]) => check.id === undefined || !context.commenting || context.input.comments === undefined || !context.input.current ? ""
-    : ` <button type="button" class="comment-open" data-target="check:${t(check.id)}" data-label="${t(check.label)}" hidden>Comment</button>`;
-  const threads = checks.map((check) => check.id === undefined ? "" : threadsHtml(context, `check:${check.id}`, { label: check.label, open: false })).join("");
+    : ` <button type="button" class="comment-open" data-target="check:${t(check.id)}" data-label="${t(check.label)}" hidden>${t(`Comment on ${check.label}`)}</button>`;
+  const threads = checks.map((check) => check.id === undefined ? "" : threadsHtml(context, `check:${check.id}`, { label: check.label, controlLabel: `Comment on ${check.label}`, open: false })).join("");
   const rows = checks.map((check) => `<tr><td class="check-label">${t(check.label)}${commentControl(check)}</td><td class="check-from">${check.proposed ? "Proposed" : "Project"}</td><td class="check-proves">${check.proves.length === 0 ? "None" : check.proves.map((id) => provesLink(context, id)).join(", ")}</td><td class="check-status">${t(check.status)}</td></tr>`).join("");
   return `<section id="${escapeHtml(checksAnchor(context.input.version))}" class="checks"><h3>Checks</h3><table><thead><tr><th class="check-label">Check</th><th class="check-from">From</th><th class="check-proves">Proves</th><th class="check-status">Status</th></tr></thead><tbody>${rows}</tbody></table>${threads}${others}</section>`;
 }
 
 /** "Comments on this document": the whole-document threads, and the Comment control for someone who may comment. */
 function documentCommentsHtml(context: Context): string {
-  const threads = threadsHtml(context, "document");
+  const threads = threadsHtml(context, "document", { controlLabel: "Comment on this document" });
   return threads === "" ? "" : `<section class="doc-comments"><h3>Comments on this document</h3>${threads}</section>`;
 }
 

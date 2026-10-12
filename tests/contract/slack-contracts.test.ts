@@ -88,12 +88,15 @@ describe("Slack contracts", () => {
 
   it("strictly validates close lifecycle results", () => {
     expect(SlackWorkspaceCloseStartResultSchema.parse({ outcome: "NOT_FOUND" })).toEqual({ outcome: "NOT_FOUND" });
-    expect(SlackWorkspaceCloseStartResultSchema.parse({
+    const preflight = SlackWorkspaceCloseStartResultSchema.parse({
       outcome: "PREFLIGHT",
       workspaceId: "11111111-1111-4111-8111-111111111111",
       operationId: "22222222-2222-4222-8222-222222222222",
       status: "RUNNING",
-    }).status).toBe("RUNNING");
+    });
+    expect(preflight.outcome).toBe("PREFLIGHT");
+    if (preflight.outcome !== "PREFLIGHT") throw new Error("expected preflight result");
+    expect(preflight.status).toBe("RUNNING");
     expect(SlackWorkspaceCloseCompleteResultSchema.parse({
       outcome: "CLOSED",
       workspaceId: "11111111-1111-4111-8111-111111111111",

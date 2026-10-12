@@ -1,5 +1,5 @@
 // tests/contract/slack-interactivity.test.ts
-import { createHash, createHmac } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CONFIRMATION_TTL_MS,
@@ -12,6 +12,7 @@ import {
   confirmationBlocks,
   confirmationClickEventId,
   type PendingConfirmation,
+  type TaskPeopleDisplayReadRequest,
   type SlackRequestMessage,
   type WorkflowSnapshot,
 } from "../../packages/contracts/src/index.js";
@@ -38,6 +39,9 @@ import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import type { SendMessageCommand } from "@aws-sdk/client-sqs";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { StrictSlackWeb } from "../support/strict-slack.js";
+import { cleanLine, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 // Every workflow modal a test opens is checked against Slack's limits.
 const strict = new StrictSlackWeb();
@@ -53,6 +57,157 @@ const pending: PendingConfirmation = {
   postedAt: new Date(nowSeconds * 1_000 - 60_000).toISOString(), expiresAt: new Date(nowSeconds * 1_000 - 60_000 + CONFIRMATION_TTL_MS).toISOString(),
 };
 const text = "<@U0123456789>, before I go ahead, please confirm:\n• tracker__close_item: id=TRK-9 (destructive)";
+
+describe("signed Task People form", () => {
+  const taskId = "11111111-1111-4111-8111-111111111111";
+  const action: SlackBlockAction = { actionId: "agentx_task_people", value: JSON.stringify({ taskId }),
+      userId: requester, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "", requestStartedAt: nowSeconds * 1_000,
+      thread, messageTs: "1695500001.000002", messageText: "People", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" };
+
+  it("adds the People control only to explicitly enabled workflow cards", () => {
+    const workflow = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId, ownerId: "b".repeat(64), now: new Date(nowSeconds * 1_000).toISOString() }), stage: "PLAN_REVIEW", state: "WAITING" });
+    const enabled = JSON.stringify(workflowMessage({ taskId, workflow, peopleEnabled: true })?.blocks);
+    const disabled = JSON.stringify(workflowMessage({ taskId, workflow })?.blocks);
+    expect(enabled).toContain('"action_id":"agentx_task_people"');
+    expect(disabled).not.toContain('"action_id":"agentx_task_people"');
+  });
+
+  it("opens current People and submits an exact actor-bound role change", async () => {
+    let modal: Record<string, unknown> | undefined;
+    const changes: Array<Record<string, unknown>> = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => undefined,
+      getPeople: async () => ({ revision: 3, orphaned: false, people: [], canManage: true, canTakeOwnership: false, addPeopleUrl: "https://agentx.example.test/add" }),
+      changePeople: async (input) => { changes.push(input); },
+      openView: async (_trigger, view) => { modal = view; }, submit: async () => undefined });
+    await handlers.handleAction(action);
+    expect(modal).toMatchObject({ callback_id: "agentx_task_people_submission", submit: { text: "Save role" } });
+    await handlers.handleSubmission({ team: { id: thread.teamId }, user: { id: requester, team_id: thread.teamId }, view: {
+      callback_id: "agentx_task_people_submission", private_metadata: modal?.private_metadata, state: { values: {
+        task_person: { person: { selected_user: other } }, task_role: { role: { selected_option: { value: "owner" } } },
+      } },
+    } });
+    expect(changes).toEqual([expect.objectContaining({ taskId, userId: requester, thread, expectedPeopleRevision: 3, slackUserId: other, role: "owner" })]);
+    expect(changes[0]?.requestId).toEqual(expect.any(String));
+  });
+
+  it("binds the actual submitter/workspace and offers ownerless takeover without a role body", async () => {
+    let modal: Record<string, unknown> | undefined;
+    const takeovers: Array<Record<string, unknown>> = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => undefined,
+      getPeople: async () => ({ revision: 4, orphaned: true, people: [], canManage: false, canTakeOwnership: true, addPeopleUrl: "https://agentx.example.test/add" }),
+      takePeopleOwnership: async (input) => { takeovers.push(input); },
+      openView: async (_trigger, view) => { modal = view; }, submit: async () => undefined });
+    await handlers.handleAction(action);
+    expect(modal).toMatchObject({ callback_id: "agentx_task_take_ownership", submit: { text: "Take ownership" } });
+    await expect(handlers.handleSubmission({ team: { id: "T0FOREIGN1" }, user: { id: requester, team_id: thread.teamId }, view: {
+      callback_id: "agentx_task_take_ownership", private_metadata: modal?.private_metadata, state: { values: {} },
+    } })).rejects.toThrow(/workspace/);
+    await handlers.handleSubmission({ team: { id: thread.teamId }, user: { id: requester, team_id: thread.teamId }, view: {
+      callback_id: "agentx_task_take_ownership", private_metadata: modal?.private_metadata, state: { values: {} },
+    } });
+    expect(takeovers).toEqual([expect.objectContaining({ taskId, userId: requester, thread, expectedPeopleRevision: 4 })]);
+  });
+
+  const assertCompletePeopleList = async (mode: "manager" | "takeover" | "reader") => {
+    const takeover = mode === "takeover";
+    const manager = mode === "manager";
+    const roles = ["owner", "commenter", "viewer", "denied"] as const;
+    const people = Array.from({ length: 100 }, (_, index) => {
+      const prefix = `Person ${String(index + 1).padStart(3, "0")} `;
+      const suffix = index % 2 === 0 ? "éé" : "😀";
+      const role = roles[index % roles.length]!;
+      const name = index === 1 ? `${prefix}(Slack identity)` : index === 2 ? `${prefix}(OIDC identity)`
+        : `${prefix}${"&".repeat(80 - prefix.length - suffix.length)}${suffix}`;
+      return { personId: randomUUID(), name, role, effectiveRole: role === "denied" ? null : role, you: index === 0 };
+    });
+    const strict = new StrictSlackWeb();
+    const handlers = workflowSlackHandlers({ loadTask: async () => undefined,
+      getPeople: async () => ({ revision: 12, orphaned: takeover, people, canManage: manager, canTakeOwnership: takeover }),
+      openView: async (trigger, view) => { await strict.openView(trigger, view); }, submit: async () => undefined });
+
+    await handlers.handleAction(action);
+
+    expect(strict.views).toHaveLength(1);
+    const view = strict.views[0]!.view;
+    expect(view.callback_id).toBe(takeover ? "agentx_task_take_ownership" : "agentx_task_people_submission");
+    expect(view.submit).toEqual(takeover ? { type: "plain_text", text: "Take ownership" }
+      : manager ? { type: "plain_text", text: "Save role" } : undefined);
+    const blocks = view.blocks as Array<Record<string, unknown>>;
+    expect(blocks.length).toBeLessThanOrEqual(100);
+    const sections = blocks.filter((block) => block.type === "section");
+    const listSections = takeover ? sections.slice(0, -1) : sections;
+    const listTexts = listSections.map((block) => (block.text as { text: string }).text);
+    expect(listTexts.length).toBeGreaterThan(1);
+    expect(listTexts.every((text) => text.length <= 3_000)).toBe(true);
+    const expectedRows = people.map((person) => `${person.you ? "You" : cleanLine(person.name, 80)} — ${person.role}`);
+    expect(listTexts.flatMap((text) => text.split("\n"))).toEqual(expectedRows);
+    expect(expectedRows[0]).toBe("You — owner");
+    expect(expectedRows[1]).toBe("Person 002 (Slack identity) — commenter");
+    expect(expectedRows[2]).toBe("Person 003 (OIDC identity) — viewer");
+    if (takeover) {
+      expect((sections.at(-1)?.text as { text: string }).text).toBe("This task has no current owner. Taking ownership does not restart it.");
+      expect(blocks.filter((block) => block.type === "input")).toEqual([]);
+    } else if (manager) {
+      expect(blocks.filter((block) => block.type === "input").map((block) => block.block_id)).toEqual(["task_person", "task_role"]);
+      const roleBlock = blocks.find((block) => block.block_id === "task_role")!;
+      const roleSelect = (roleBlock.element as { options: Array<{ value: string }> });
+      expect(roleSelect.options.map((option) => option.value)).toEqual(["owner", "commenter", "viewer", "denied"]);
+    } else {
+      expect(blocks.filter((block) => block.type === "input")).toEqual([]);
+      expect(view.submit).toBeUndefined();
+    }
+  };
+
+  it("opens all 100 escaped Unicode names in bounded sections and retains the manager role controls", async () => {
+    await assertCompletePeopleList("manager");
+  });
+
+  it("opens all 100 escaped Unicode names in bounded sections and retains ownerless takeover", async () => {
+    await assertCompletePeopleList("takeover");
+  });
+
+  it("opens all 100 escaped Unicode names for a reader without submit or picker controls", async () => {
+    await assertCompletePeopleList("reader");
+  });
+
+  it("refuses a valid People change when the signed form is replayed from another task thread", async () => {
+    const ownerSlackUserId = "U0PEOPLE01";
+    const targetSlackUserId = "U0PEOPLE02";
+    const taskThread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000091" };
+    const names = new Map([[ownerSlackUserId, "Owner One"], [targetSlackUserId, "Person Two"]]);
+    const proof = async (request: { slackUserId: string; channelIds: readonly string[] }) => {
+      const name = names.get(request.slackUserId);
+      if (name === undefined) return { ok: false as const, error: "ineligible" as const };
+      return { ok: true as const, user: { id: request.slackUserId, teamId: SLACK_TEAM, name }, memberOf: [...request.channelIds] };
+    };
+    const broker = await createDeveloperTaskBroker({
+      channelMembers: async (request) => ({ ok: true, memberOf: [...request.channelIds] }),
+      developerExtra: {
+        taskPeopleConfiguration: { peopleChangesEnabled: true },
+        taskPersonProof: proof,
+        taskPeopleDisplayRead: async (request: TaskPeopleDisplayReadRequest) => request.operation === "proof"
+          ? { operation: "proof" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: await proof(request.request) }
+          : { operation: "directory" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const,
+            users: [...names].map(([id, name]) => ({ id, teamId: SLACK_TEAM, name,
+              memberOf: request.request.channelIds.filter((channelId) => channelId === taskThread.channelId) })) } },
+      },
+    });
+    const started = await broker.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread: taskThread,
+      userId: ownerSlackUserId, instructions: "Keep task People bound to this thread", workflowPath: "QUICK", requestId: randomUUID() });
+    expect(started.statusCode).toBe(200);
+    const startedBody = JSON.parse(started.body) as { taskId: string };
+    const read = await broker.handler({ source: "agentx.slack-ingress", action: "task-people-read", taskId: startedBody.taskId,
+      userId: ownerSlackUserId, thread: taskThread });
+    expect(read.statusCode).toBe(200);
+    const revision = (JSON.parse(read.body) as { revision: number }).revision;
+
+    const changed = await broker.handler({ source: "agentx.slack-ingress", action: "task-people-change", taskId: startedBody.taskId,
+      requestId: randomUUID(), expectedPeopleRevision: revision, userId: ownerSlackUserId, slackUserId: targetSlackUserId, role: "viewer",
+      thread: { ...taskThread, threadTs: "1695500000.000092" } });
+    expect(changed.statusCode).toBe(403);
+    expect(broker.db.find((item) => item.pk === `DEVTASK#${startedBody.taskId}` && item.entityType === "TASK_PEOPLE_PROPOSAL")).toHaveLength(0);
+  });
+});
 
 function payload(options: { actionId?: string; value?: string; user?: string; type?: string } = {}) {
   return {
@@ -316,6 +471,23 @@ describe("Slack native workflow review controls", () => {
     } });
     expect(submitted[0]).toMatchObject({ taskId, userId: requester, thread, expectedRevision: workflow.revision, artifactDigest: digest, decision: "APPROVE", selectedOptionalCheckIds: ["coverage"] });
     expect(submitted[1]?.requestId).toBe(submitted[0]?.requestId);
+  });
+
+  it("uses fresh broker authorization for a second owner and attributes the submitted decision to that actor", async () => {
+    let opened: Record<string, unknown> | undefined;
+    const authorize = vi.fn(async () => undefined);
+    const submitted: Array<Record<string, unknown>> = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => task, authorize,
+      openView: async (_trigger, view) => { opened = view; }, submit: async (input) => { submitted.push(input); } });
+    const press: SlackBlockAction = { actionId: "agentx_workflow_approve", value: JSON.stringify({ taskId, revision: workflow.revision, digest, decision: "APPROVE" }),
+      userId: other, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "", requestStartedAt: nowSeconds * 1_000,
+      thread, messageTs: "1695500001.000002", messageText: "plan", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" };
+    await handlers.handleAction(press);
+    await handlers.handleSubmission({ user: { id: other, team_id: thread.teamId }, team: { id: thread.teamId }, view: {
+      private_metadata: opened?.private_metadata, state: { values: { workflow_checks: { selected_options: { selected_options: [] } } } },
+    } });
+    expect(authorize).toHaveBeenCalledWith(taskId, other, thread, "decide");
+    expect(submitted).toContainEqual(expect.objectContaining({ taskId, userId: other, expectedRevision: workflow.revision }));
   });
 
   it("submits optional checks in one canonical order so a reordered resubmission is the same decision", async () => {

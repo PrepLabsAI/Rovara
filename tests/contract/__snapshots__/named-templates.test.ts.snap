@@ -4489,7 +4489,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["ADMIN_CHANGE"]}}}}",
             },
             {
-              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["WORKFLOW_ACTION_REFUSAL","TASK_COMMENT_NUDGE"]}}}}",
+              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["WORKFLOW_ACTION_REFUSAL","TASK_COMMENT_NUDGE","TASK_PEOPLE_NOTIFICATION"]}}}}",
             },
           ],
         },
@@ -11056,6 +11056,35 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
           "RoleArn": {
             "Fn::GetAtt": [
               "WorkflowDispatchRecoveryRole3D444D9C",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
+    "WorkflowMergeRecoverySchedule": {
+      "Properties": {
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "ScheduleExpression": "rate(1 minute)",
+        "State": "ENABLED",
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.workflow-merge-recovery"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 300,
+            "MaximumRetryAttempts": 2,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "GithubWebhookRecoveryRoleD4894C8E",
               "Arn",
             ],
           },

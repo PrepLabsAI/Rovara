@@ -22,8 +22,13 @@ async function ownerPage(): Promise<string> {
 
 describe("the task page live check", () => {
   it("passes the page the broker renders for an owner", async () => {
-    const results = pageChecks(await ownerPage());
+    const html = await ownerPage();
+    const results = pageChecks(html);
     expect(results.filter((result) => !result.ok)).toEqual([]);
+    expect(html).toContain(".evidence-code pre,.evidence-sketch pre{white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}");
+    expect(html).toContain(".code-line{display:inline-grid;grid-template-columns:auto minmax(0,1fr);vertical-align:top;width:100%}");
+    expect(html).toContain(".checks table{display:block;overflow-x:auto");
+    expect(html).not.toMatch(/(?:^|})pre\{[^}]*white-space/);
     expect(results.map((result) => result.name)).toEqual(expect.arrayContaining([
       "fits a phone screen", "the decide bar clears the home indicator", "controls are thumb-sized", "the dialog is full screen on a phone",
       "long words wrap", "the page script is on the page", "the controls are hidden until the script runs",
@@ -37,9 +42,10 @@ describe("the task page live check", () => {
   });
 
   it("reads the page's state answer: no names, no comment text, a fresh token", () => {
-    expect(stateChecks({ revision: 3, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 1 }], commentSeq: 0, csrf: "c".repeat(43) }).every((result) => result.ok)).toBe(true);
+    expect(stateChecks({ revision: 3, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 1 }], commentSeq: 0, csrf: "c".repeat(43),
+      peopleRevision: 2, canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false }).every((result) => result.ok)).toBe(true);
     const bad = stateChecks({ revision: 3, waiting: true, stage: "Coding plan", documents: [], commentSeq: 0, name: "Maya", text: "hi" });
-    expect(bad.filter((result) => !result.ok).map((result) => result.name)).toEqual(["carries a fresh token", "carries only where the task stands"]);
+    expect(bad.filter((result) => !result.ok).map((result) => result.name)).toEqual(["carries a fresh token", "carries current access without names"]);
   });
 
   it("the hands-on list covers each case the plan asks a person to try", () => {

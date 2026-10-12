@@ -9,6 +9,7 @@ import { failOutboxOperation } from "./outbox-failure.js";
 import { createEc2Delivery } from "./ec2-delivery.js";
 import { appendOperationEvent } from "./operation-events.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
+import { guardTaskDispatch } from "./task-dispatch-access.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
 
@@ -39,6 +40,8 @@ export interface DispatchLogEntry {
 }
 
 export function createDispatcherHandler(dependencies: {
+  /** Strongly checks and durably parks PEOPLE-backed work before any dispatch state or worker side effect. */
+  guardTaskDispatch?: (record: DurableOutboxRecord) => Promise<"ALLOWED" | "PARKED">;
   markDispatching: (record: DurableOutboxRecord) => Promise<boolean | void>;
   markDelivered: (id: string) => Promise<void>;
   markFailed: (record: DurableOutboxRecord, error: string) => Promise<void>;
@@ -57,6 +60,7 @@ export function createDispatcherHandler(dependencies: {
         const parsed = JSON.parse(message.body) as DurableOutboxRecord;
         const invocation = WorkerInvocationSchema.parse(parsed.invocation);
         record = { ...parsed, invocation };
+        if (await dependencies.guardTaskDispatch?.(record) === "PARKED") continue;
         const shouldInvoke = await dependencies.markDispatching(record);
         if (shouldInvoke === false) {
           await dependencies.markDelivered(record.id);
@@ -116,6 +120,9 @@ const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { reg
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration));
 const kms = new KMSClient(awsClientConfiguration);
 const sfn = new SFNClient(awsClientConfiguration);
+const taskDispatchGuard = (record: DurableOutboxRecord) => guardTaskDispatch({
+  documentClient, tableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"),
+}, record);
 /** A worker answers /invocations as soon as it has journaled the operation. */
 const WORKER_POST_TIMEOUT_MS = 10_000;
 /** Asking a worker what it parses (spec 053); one that does not answer gets no optional field. */
@@ -166,6 +173,7 @@ const deliverEc2 = createEc2Delivery({
     return { status: response.status, body: await response.text() };
   },
   workerFeatures: (url) => workerPingFeatures(url),
+  guardTaskDispatch: taskDispatchGuard,
   async progress(record, message) {
     await appendOperationEvent(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), {
       workspaceId: record.workspaceId,
@@ -178,6 +186,7 @@ const deliverEc2 = createEc2Delivery({
 });
 
 export const handler = createDispatcherHandler({
+  guardTaskDispatch: taskDispatchGuard,
   deliverEc2,
   maxAttempts: parseMaximumAttempts(process.env.MAX_DISPATCH_ATTEMPTS),
   async markDispatching(record) {

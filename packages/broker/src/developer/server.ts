@@ -10,6 +10,9 @@ import {
   ChannelInfoRequestSchema,
   ChannelByNameRequestSchema,
   ChannelMembersRequestSchema,
+  TaskPersonProofRequestSchema,
+  TaskChannelPeopleRequestSchema,
+  TaskPeopleDisplayReadRequestSchema,
   ADMIN_API_VERSION,
   DEVELOPER_API_VERSION,
   EndDeveloperSessionsRequestSchema,
@@ -23,6 +26,12 @@ import {
   type ChannelInfoResponse,
   type ChannelMembersRequest,
   type ChannelMembersResponse,
+  type TaskPersonProofRequest,
+  type TaskPersonProofResponse,
+  type TaskChannelPeopleRequest,
+  type TaskChannelPeopleResponse,
+  type TaskPeopleDisplayReadRequest,
+  type TaskPeopleDisplayReadResponse,
   type DeveloperSignInMethod,
   type EndDeveloperSessionsRequest,
   type EndDeveloperSessionsResponse,
@@ -473,8 +482,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname === "/v1/auth/browser/authorize" || pathname.startsWith("/v1/auth/callback/");
 
   return async (
-    event: HttpApiV2Event | ChannelMembersRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
-  ): Promise<HttpResult | ChannelMembersResult | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse> => {
+    event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | TaskPeopleDisplayReadRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
+  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | TaskPeopleDisplayReadResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse> => {
     if ("kind" in event) {
       if (event.kind === "end-developer-sessions") {
         const parsed = EndDeveloperSessionsRequestSchema.safeParse(event);
@@ -503,6 +512,24 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         const parsed = ChannelInfoRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
         return deps.directory.channelInfo(parsed.data.channelIds);
+      }
+      if (event.kind === "task-person-proof") {
+        const parsed = TaskPersonProofRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        return deps.directory.taskPersonProof(parsed.data.slackUserId, parsed.data.channelIds);
+      }
+      if (event.kind === "task-channel-people") {
+        const parsed = TaskChannelPeopleRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        return deps.directory.taskChannelPeople(parsed.data.channelIds);
+      }
+      if (event.kind === "task-people-display-read") {
+        const parsed = TaskPeopleDisplayReadRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        return deps.directory.taskPeopleDisplayRead({
+          ...parsed.data,
+          admission: { ...parsed.data.admission, deadlineAt: Math.min(parsed.data.admission.deadlineAt, deps.now() + 20_000) },
+        });
       }
       const parsed = ChannelMembersRequestSchema.safeParse(event);
       if (!parsed.success) return { ok: false, error: "invalid_request" };
