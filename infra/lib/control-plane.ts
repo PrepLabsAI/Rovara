@@ -819,7 +819,7 @@ export class ControlPlaneStack extends Stack {
           slackTeamId: signInParameters.slackTeamId,
           slackSecret,
           developerSignInTable: developerSignIn.table,
-          dispatcher: broker,
+          dispatcher,
         });
       }
       broker.addEnvironment("AGENTX_TASK_PEOPLE_CHANGES_ENABLED", signInParameters.taskPeopleChangesEnabled.valueAsString);

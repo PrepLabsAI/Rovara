@@ -1,6 +1,8 @@
-import { App } from "aws-cdk-lib";
+import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { skipLambdaBundling } from "../support/skip-bundling.js";
@@ -22,6 +24,39 @@ function namedTemplate(env: string, account = "944937319445", region = "us-east-
 
 function proofEntries(template: TemplateJson) {
   return Object.entries(template.Resources ?? {}).filter(([logicalId]) => logicalId.includes("TaskPersonProof"));
+}
+
+function appControlPlane(env: string): TemplateJson {
+  const stacks = buildAgentXApp({ agentxEnv: env }).node.children.filter((child): child is Stack => Stack.isStack(child));
+  const stack = stacks.find((candidate) => candidate.stackName === `agentx-${env}-control-plane`);
+  if (stack === undefined) throw new Error(`expected the real ${env} control-plane stack`);
+  return Template.fromStack(stack).toJSON();
+}
+
+function parentRemainderDigest(template: TemplateJson): string {
+  const remainder = structuredClone(template);
+  delete remainder.Parameters?.TaskPersonProofEnabled;
+  const conditions = remainder.Conditions ?? {};
+  for (const id of Object.keys(conditions)) if (id.includes("InstallTaskPersonProof")) delete conditions[id];
+  const resources = remainder.Resources ?? {};
+  for (const id of Object.keys(resources)) if (id.startsWith("TaskPersonProof")) delete resources[id];
+  const dispatchers = Object.entries(resources).filter(([id, resource]) => id.startsWith("Dispatcher") && resource.Type === "AWS::Lambda::Function");
+  expect(dispatchers, "the actual Dispatcher remains in the parent template remainder").toHaveLength(1);
+  const variables = dispatchers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
+  delete variables.Variables.TASK_PERSON_PROOF_FUNCTION_ARN;
+  delete variables.Variables.SLACK_TEAM_ID;
+  delete variables.Variables.DEVELOPER_SIGNIN_TABLE_NAME;
+  const establishedAssetHashNormalization = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
+  return createHash("sha256").update(establishedAssetHashNormalization).digest("hex");
+}
+
+function realAppControlPlane(env?: string): TemplateJson {
+  const app = buildAgentXApp(env === undefined ? {} : { agentxEnv: env });
+  const stacks = app.node.children.filter((child): child is Stack => Stack.isStack(child));
+  const stackName = env === undefined ? "AgentXControlPlane" : `agentx-${env}-control-plane`;
+  const stack = stacks.find((candidate) => candidate.stackName === stackName);
+  if (stack === undefined) throw new Error(`expected actual app control-plane stack ${stackName}`);
+  return Template.fromStack(stack).toJSON();
 }
 
 describe("the named TEST proof-only installation gate", () => {
@@ -46,6 +81,27 @@ describe("the named TEST proof-only installation gate", () => {
     expect(proofEntries(wrongAccount).length).toBeGreaterThan(0);
     expect(legacy.Parameters?.TaskPersonProofEnabled).toBeUndefined();
     expect(proofEntries(legacy)).toHaveLength(0);
+  });
+
+  it("preserves exact parent app templates outside the named proof addition", () => {
+    const named = realAppControlPlane("agentxlivetest123");
+    const foreign = realAppControlPlane("staging");
+    const legacy = realAppControlPlane();
+
+    for (const [label, template] of [["staging", foreign], ["legacy", legacy]] as const) {
+      expect(template.Parameters?.TaskPersonProofEnabled, `${label} has no proof-only parameter`).toBeUndefined();
+      expect(proofEntries(template), `${label} has no proof-only resources`).toHaveLength(0);
+      const dispatchers = Object.entries(template.Resources ?? {}).filter(([id, resource]) => id.startsWith("Dispatcher") && resource.Type === "AWS::Lambda::Function");
+      expect(dispatchers, `${label} has its ordinary Dispatcher`).toHaveLength(1);
+      const variables = dispatchers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
+      for (const key of ["TASK_PERSON_PROOF_FUNCTION_ARN", "SLACK_TEAM_ID", "DEVELOPER_SIGNIN_TABLE_NAME"]) {
+        expect(variables.Variables, `${label} has no proof-only ${key}`).not.toHaveProperty(key);
+      }
+    }
+
+    expect(parentRemainderDigest(named)).toBe("80dc8e7ce5dd33accdf00adf195b66a40c94f534bc9fa5ffbc39b959ce0b18e1");
+    expect(parentRemainderDigest(foreign)).toBe("9ea051a264736c3ce74ee99cba71fe580119087a5399344f455b9a7d2b6a8cc4");
+    expect(parentRemainderDigest(legacy)).toBe("59e51035978191661fbeb033626a3c12430cdcc80cf67575c799ad768aa132ec");
   });
 
   it("conditions the isolated proof resources on the switch, exact account and region", () => {
@@ -98,17 +154,19 @@ describe("the named TEST proof-only installation gate", () => {
   });
 
   it("limits the dispatcher addition to projected Developer GetItem and the published proof version", () => {
-    const approved = namedTemplate("agentxlivetest123");
+    const approved = appControlPlane("agentxlivetest123");
     const resources = approved.Resources ?? {};
+    const conditionId = Object.keys(approved.Conditions ?? {}).find((id) => id.includes("InstallTaskPersonProof"));
+    expect(conditionId).toBeDefined();
     const policy = Object.entries(resources).find(([id, resource]) => id.includes("TaskPersonProofDispatcherPolicy") && resource.Type === "AWS::IAM::Policy")?.[1];
     expect(policy).toBeDefined();
     const statements = (policy!.Properties!.PolicyDocument as { Statement: Array<Record<string, unknown>> }).Statement;
     expect(statements).toHaveLength(2);
     const getItem = statements.find((statement) => JSON.stringify(statement.Action).includes("dynamodb:GetItem"));
     const invoke = statements.find((statement) => JSON.stringify(statement.Action).includes("lambda:InvokeFunction"));
-    const dispatcher = Object.entries(resources).find(([, resource]) => resource.Type === "AWS::Lambda::Function"
-      && JSON.stringify(resource.Properties?.Environment).includes("TASK_PERSON_PROOF_FUNCTION_ARN"));
-    expect(dispatcher).toBeDefined();
+    const dispatcherEntries = Object.entries(resources).filter(([id, resource]) => id.startsWith("Dispatcher") && resource.Type === "AWS::Lambda::Function");
+    expect(dispatcherEntries).toHaveLength(1);
+    const dispatcher = dispatcherEntries[0];
     const dispatcherRole = ((dispatcher![1].Properties!.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"])[0];
     expect(policy!.Properties!.Roles).toEqual([{ Ref: dispatcherRole }]);
     const tableId = Object.keys(resources).find((id) => id.includes("DeveloperSignInTable"));
@@ -133,5 +191,39 @@ describe("the named TEST proof-only installation gate", () => {
       "TASK_PERSON_PROOF_FUNCTION_ARN", "SLACK_TEAM_ID", "DEVELOPER_SIGNIN_TABLE_NAME",
     ].sort());
     expect(JSON.stringify(variables.Variables.TASK_PERSON_PROOF_FUNCTION_ARN)).toContain("TaskPersonProofFunctionCurrentVersion");
+    for (const key of ["TASK_PERSON_PROOF_FUNCTION_ARN", "SLACK_TEAM_ID", "DEVELOPER_SIGNIN_TABLE_NAME"]) {
+      expect(JSON.stringify(variables.Variables[key])).toContain(conditionId);
+    }
+
+    const functions = Object.entries(resources).filter(([, resource]) => resource.Type === "AWS::Lambda::Function");
+    const roleFor = (resource: { Properties?: Record<string, unknown> }): string =>
+      ((resource.Properties!.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"])[0];
+    const purpose = (prefix: string) => {
+      const matches = functions.filter(([id]) => id.startsWith(prefix));
+      expect(matches, `expected exactly one ${prefix} Lambda`).toHaveLength(1);
+      return matches[0]!;
+    };
+    const [brokerId, broker] = purpose("Broker");
+    const [notifierId, notifier] = purpose("DeveloperTaskNotifier");
+    const [signInId, signIn] = purpose("DeveloperSignIn");
+    for (const [id, resource] of [[brokerId, broker], [notifierId, notifier], [signInId, signIn]] as const) {
+      const envVars = (resource.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
+      expect(envVars, `${id} must not receive proof-only runtime configuration`).not.toHaveProperty("TASK_PERSON_PROOF_FUNCTION_ARN");
+    }
+    const brokerVars = (broker.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(brokerVars.SLACK_TEAM_ID).toEqual({ Ref: "SlackTeamId" });
+    expect(brokerVars.DEVELOPER_SIGNIN_TABLE_NAME).toEqual({ Ref: tableId });
+    const notifierVars = (notifier.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(notifierVars.SLACK_TEAM_ID).toBeUndefined();
+    expect(notifierVars.DEVELOPER_SIGNIN_TABLE_NAME).toBeUndefined();
+    const signInVars = (signIn.Properties!.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(signInVars.SLACK_TEAM_ID).toEqual({ Ref: "SlackTeamId" });
+    expect(signInVars.DEVELOPER_SIGNIN_TABLE_NAME).toEqual({ Ref: tableId });
+
+    const proofPolicyRoles = policy!.Properties!.Roles as Array<{ Ref?: string }>;
+    expect(proofPolicyRoles).toEqual([{ Ref: dispatcherRole }]);
+    for (const [, otherFunction] of [[brokerId, broker], [notifierId, notifier], [signInId, signIn]] as const) {
+      expect(proofPolicyRoles).not.toContainEqual({ Ref: roleFor(otherFunction) });
+    }
   });
 });
