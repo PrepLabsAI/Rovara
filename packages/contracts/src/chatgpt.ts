@@ -16,6 +16,11 @@ export const CHATGPT_CONNECT_STATE_SECONDS = 10 * 60;
 export const CHATGPT_PLAN_LIMIT_ERROR = "subscription_sharing_usage_limit_exceeded";
 export const CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage";
 
+/** #343: an install's Sign in with ChatGPT is off until an admin turns it on; this model is preferred when a plan allows it. */
+export const CHATGPT_DEFAULT_PREFERRED_MODEL = "gpt-6.1-sol";
+/** A ChatGPT model ID, as OpenAI's model list names them (gpt-6.1-sol, gpt-5.5). */
+export const ChatGptModelIdSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/, "a model ID such as gpt-6.1-sol");
+
 export const CHATGPT_CONNECTION_STATUSES = ["connected", "limit-reached", "revoked"] as const;
 export type ChatGptConnectionStatus = (typeof CHATGPT_CONNECTION_STATUSES)[number];
 

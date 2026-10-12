@@ -62,6 +62,8 @@ function fakeOpenAi(options: { models?: number; scope?: string } = {}) {
 function harness(openAi = fakeOpenAi()) {
   let clock = 1_790_000_000_000;
   const db = new FakeDynamoDb();
+  // #343: an admin turned Sign in with ChatGPT on.
+  db.set({ pk: "SETTINGS", sk: "CHATGPT", entityType: "SETTING", enabled: true, preferredModel: "gpt-6.1-sol" });
   const connections = chatGptConnections({ documentClient: db, tableName: "state", sealer: SEALER, fetch: openAi.fetch, now: () => clock, hostId: HOST, sleep: async () => { clock += 500; } });
   /** What the browser ends on after Allow, for the state of `authorizeUrl`. */
   const callbackFor = (authorizeUrl: string, code = "the-code") => `${CHATGPT_CALLBACK_URL}?code=${code}&scope=x&state=${new URL(authorizeUrl).searchParams.get("state") ?? ""}&client_id=oaiapp_issued`;
@@ -233,6 +235,7 @@ describe("the developer routes for a ChatGPT connection", () => {
         chatgpt: (table) => chatGptConnections({ documentClient: table, tableName: "state", sealer: SEALER, fetch: openAi.fetch, now: () => Date.now(), hostId: HOST }),
       }),
     });
+    db.set({ pk: "SETTINGS", sk: "CHATGPT", entityType: "SETTING", enabled: true, preferredModel: "gpt-6.1-sol" });
     for (const id of [developerId, "e".repeat(64)]) {
       db.set({ pk: `SESSION#s-${id.slice(0, 4)}`, sk: "META", sessionId: `s-${id.slice(0, 4)}`, developerId: id, amr: "slack", startedAt: new Date(T0).toISOString(), endsAt: T0 / 1000 + 604_800 });
       db.set({ pk: `DEVELOPER#${id}`, sk: "META", developerId: id, provider: "slack", issuer: "https://slack.com", subject: id, displayName: "Dev", firstSignInAt: "x", lastSignInAt: "x", revoked: false });

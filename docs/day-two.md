@@ -179,6 +179,8 @@ set` (the CloudFormation console, say) are not recorded. Each key lives in exact
 | `models.orchestrator` | stack parameter ModelId on agentx-<env>-slack, and the settings | from init | tested with one call first |
 | `models.classifier` | stack parameter GateClassifierModelId on agentx-<env>-slack, and the settings | from init | tested with one call first |
 | `models.worker` | stack parameter ModelId on agentx-<env>-runtime, and the settings | from init | tested with one call first |
+| `models.chatgpt.enabled` | control-plane setting CHATGPT.enabled | false | true or false; [Sign in with ChatGPT](chatgpt.md); changes through the admin change path, with the admin sign-in |
+| `models.chatgpt.preferredModel` | control-plane setting CHATGPT.preferredModel | gpt-6.1-sol | used only where a person's plan allows it; changes through the admin change path, with the admin sign-in |
 | `limits.workspacesPerMember` | control-plane setting WORKSPACE_LIMITS.perPerson (install-time default SlackMemberWorkspaceLimit) | 3 | 1 to 50; changes through the admin change path, with the admin sign-in (`agentx --env <env> login --admin`) |
 | `limits.workspacesPerOrg` | control-plane setting WORKSPACE_LIMITS.perOrganization (install-time default SlackOrganizationWorkspaceLimit) | 20 | 1 to 1000; changes through the admin change path, with the admin sign-in |
 | `limits.threadTurnsPerMinute` | stack parameter SlackThreadTurnsPerMinute on agentx-<env>-control-plane | 6 | 1 to 60 |

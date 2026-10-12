@@ -41,11 +41,12 @@ describe("the model a ChatGPT task runs on (#341)", () => {
 });
 
 /** The control plane's connections, for the developers given; anyone else has none. */
-function connections(views: Record<string, ChatGptConnectionView | "unreadable">) {
+function connections(views: Record<string, ChatGptConnectionView | "unreadable">, settings = { enabled: true, preferredModel: "gpt-6.1-sol" }) {
   const markStatus = vi.fn<(developerId: string, status: string) => Promise<void>>(async () => undefined);
   const refreshModels = vi.fn<(developerId: string) => Promise<void>>(async () => undefined);
   const accessToken = vi.fn(async (developerId: string) => ({ access: `access-for-${developerId.slice(0, 6)}`, expiresAt: Date.parse("2026-10-11T13:00:00.000Z"), models: [] }));
   const service = {
+    settings: vi.fn(async () => settings),
     view: vi.fn(async (developerId: string) => {
       const view = views[developerId];
       if (view === "unreadable") throw Object.assign(new Error("DynamoDB unavailable"), { name: "InternalServerError" });

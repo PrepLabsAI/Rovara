@@ -35,7 +35,7 @@ export interface ConfigCommandContext {
 }
 
 /** The keys that change through the admin change path (spec 025 FR-053), not a stack update. */
-const CONFIG_KEYS_BY_CHANGE_PATH = new Set(CONFIG_KEYS.filter((entry) => entry.target.kind === "control-plane-setting").map((entry) => entry.key));
+const CONFIG_KEYS_BY_CHANGE_PATH = new Set(CONFIG_KEYS.filter((entry) => entry.target.kind === "control-plane-setting" || entry.target.kind === "chatgpt-setting").map((entry) => entry.key));
 
 const rowText = (rows: ConfigRow[]) => rows.map((row) => `${row.key.padEnd(28)} ${row.value}\n${" ".repeat(29)}${row.where}`).join("\n");
 

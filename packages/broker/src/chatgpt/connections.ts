@@ -15,9 +15,10 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { DecryptCommand, EncryptCommand, type KMSClient } from "@aws-sdk/client-kms";
 import {
-  CHATGPT_CONNECT_STATE_SECONDS, ChatGptConnectFinishRequestSchema, agentXError, AgentXError,
+  CHATGPT_CONNECT_STATE_SECONDS, CLI_COMMAND_NAME, ChatGptConnectFinishRequestSchema, agentXError, AgentXError,
   type ChatGptConnectionStatus, type ChatGptConnectionView, type ChatGptConnectStart,
 } from "@agentx/contracts";
+import { readChatGptSettings, type ChatGptSettings } from "./settings.js";
 import { chatGptAuthorization, chatGptModels, exchangeChatGptCode, parseChatGptCallback, refreshChatGptTokens } from "./oauth.js";
 
 /** How long before an access token's expiry it is refreshed: a request never starts with one about to expire. */
@@ -74,6 +75,8 @@ export interface ChatGptConnections {
   disconnect(developerId: string): Promise<ChatGptConnectionView>;
   /** A running task's owner's current access token, refreshed when needed (#341). */
   accessToken(developerId: string): Promise<ChatGptAccessToken>;
+  /** #343: the install's switch and preferred model. */
+  settings(): Promise<ChatGptSettings>;
   /** Records what a task found (#342): the plan's limit, or a model list that changed. */
   markStatus(developerId: string, status: ChatGptConnectionStatus, models?: string[]): Promise<void>;
   /** Reads the plan's allowed models again (#342: a task found its model no longer allowed) and keeps them. */
@@ -100,9 +103,17 @@ export function chatGptConnections(deps: ChatGptConnectionsDependencies): ChatGp
     ((await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: pkOf(developerId), sk }, ConsistentRead: true }))) as { Item?: T }).Item;
 
   const connection = (developerId: string) => get<ConnectionRecord>(developerId, "CONNECTION");
+  const settings = () => readChatGptSettings(deps);
+  // #343: connecting needs the admin's switch on; with it off, existing connections are kept but unused.
+  const requireEnabled = async () => {
+    if (!(await settings()).enabled) throw agentXError("FORBIDDEN", `Sign in with ChatGPT is turned off in this Rovara; ask an admin to turn it on with: ${CLI_COMMAND_NAME} config set models.chatgpt.enabled true`);
+  };
 
   return {
+    settings,
+
     async start(developerId) {
+      await requireEnabled();
       const authorization = chatGptAuthorization(deps.hostId);
       const expiresAt = deps.now() + CHATGPT_CONNECT_STATE_SECONDS * 1000;
       const pending: PendingRecord = {
@@ -115,6 +126,7 @@ export function chatGptConnections(deps: ChatGptConnectionsDependencies): ChatGp
     },
 
     async finish(developerId, request) {
+      await requireEnabled();
       const parsed = ChatGptConnectFinishRequestSchema.safeParse(request);
       if (!parsed.success) throw agentXError("CONFIG_INVALID", "send the address the browser ended on, or the code, state and client ID");
       const callback = "callbackUrl" in parsed.data ? parseChatGptCallback(parsed.data.callbackUrl) : parsed.data;

@@ -9,7 +9,7 @@ const declaredInInfra = (parameter: string) => new RegExp(`CfnParameter\\((this|
 describe("config keys (FR-048)", () => {
   it("has every key the spec names, plus the budget", () => {
     expect(CONFIG_KEYS.map((entry) => entry.key)).toEqual([
-      "models.orchestrator", "models.classifier", "models.worker",
+      "models.orchestrator", "models.classifier", "models.worker", "models.chatgpt.enabled", "models.chatgpt.preferredModel",
       "limits.workspacesPerMember", "limits.workspacesPerOrg", "limits.threadTurnsPerMinute",
       "slack.appPostedMessages", "alerts.address", "alerts.slowTurnMinutes",
       "budget.monthlyUsd", "budget.scope", "mcp.confirmElicitation",
@@ -28,6 +28,15 @@ describe("config keys (FR-048)", () => {
   it("routes the workspace limits to the control plane's setting, with the stack parameters as install-time defaults (spec 025 FR-053)", () => {
     expect(configKey("limits.workspacesPerMember").target).toEqual({ kind: "control-plane-setting", field: "perPerson", installDefault: { part: "control-plane", parameter: "SlackMemberWorkspaceLimit" } });
     expect(configKey("limits.workspacesPerOrg").target).toEqual({ kind: "control-plane-setting", field: "perOrganization", installDefault: { part: "control-plane", parameter: "SlackOrganizationWorkspaceLimit" } });
+  });
+
+  it("routes Sign in with ChatGPT's switch and preferred model to the control plane alone, off by default (#343)", () => {
+    expect(configKey("models.chatgpt.enabled")).toMatchObject({ target: { kind: "chatgpt-setting", field: "enabled" }, defaultValue: "false" });
+    expect(configKey("models.chatgpt.preferredModel")).toMatchObject({ target: { kind: "chatgpt-setting", field: "preferredModel" }, defaultValue: "gpt-6.1-sol" });
+    expect(configKey("models.chatgpt.enabled").parse(" true ")).toBe("true");
+    expect(() => configKey("models.chatgpt.enabled").parse("yes")).toThrow("models.chatgpt.enabled must be one of true, false; nothing changed");
+    expect(configKey("models.chatgpt.preferredModel").parse("gpt-5.5")).toBe("gpt-5.5");
+    expect(() => configKey("models.chatgpt.preferredModel").parse("gpt 5")).toThrow("models.chatgpt.preferredModel must be a model ID such as gpt-6.1-sol; nothing changed");
   });
 
   it("names only stack parameters the infrastructure declares", () => {
