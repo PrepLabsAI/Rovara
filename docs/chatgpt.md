@@ -90,6 +90,9 @@ turn, without starting over. That happens when:
 - **The plan no longer allows the model.** Rovara reads your plan's model list again, so your next task
   picks a model it allows.
 
+When such a task ends, Rovara says so once in its Slack thread, addressed to you, with what happened and
+what to do. A private task started from an AI tool has no thread, so nothing is posted.
+
 An OpenAI outage doesn't trigger this: the task fails as it would on any provider.
 
 ## How Rovara keeps your connection
