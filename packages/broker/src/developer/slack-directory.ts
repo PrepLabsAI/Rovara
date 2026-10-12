@@ -2,6 +2,7 @@
 // "unavailable": the caller fails closed for access and keeps sessions for refreshes (R18).
 import {
   CHANNEL_MEMBERS_MAX_CHANNELS,
+  SlackTeamIdSchema,
   SlackUserIdSchema,
   cleanDisplayName,
   redactAndCap,
@@ -139,6 +140,27 @@ export function slackDirectory(input: {
     : [];
   const inTeam = (user: SlackUser) =>
     user.deleted !== true && user.is_bot === false && (user.team_id === input.teamId || enterpriseTeams(user).includes(input.teamId ?? ""));
+  const taskPersonEligibility = (user: SlackUser): "eligible" | "ineligible" | "unknown" => {
+    const primaryTeam = SlackTeamIdSchema.safeParse(user.team_id);
+    if (!primaryTeam.success || typeof user.is_bot !== "boolean"
+      || (user.deleted !== undefined && typeof user.deleted !== "boolean")
+      || (user.is_stranger !== undefined && typeof user.is_stranger !== "boolean")) return "unknown";
+
+    const linkedTeams: string[] = [];
+    if (user.enterprise_user !== undefined) {
+      const enterpriseUser = user.enterprise_user;
+      if (typeof enterpriseUser !== "object" || enterpriseUser === null || Array.isArray(enterpriseUser)
+        || !Array.isArray(enterpriseUser.teams)) return "unknown";
+      for (const team of enterpriseUser.teams) {
+        const parsedTeam = SlackTeamIdSchema.safeParse(team);
+        if (!parsedTeam.success) return "unknown";
+        linkedTeams.push(parsedTeam.data);
+      }
+    }
+
+    if (user.deleted === true || user.is_bot || user.is_stranger === true) return "ineligible";
+    return primaryTeam.data === input.teamId || linkedTeams.includes(input.teamId ?? "") ? "eligible" : "ineligible";
+  };
   const userOf = (body: Record<string, unknown>): SlackUser => (typeof body.user === "object" && body.user !== null ? body.user : {});
 
   const proofName = (user: SlackUser, fallback: string): string => {
@@ -223,11 +245,12 @@ export function slackDirectory(input: {
     }
     const user = userOf(userReply.body);
     const parsedId = SlackUserIdSchema.safeParse(user.id);
-    const readableEligibilityFlags = (user.deleted === undefined || typeof user.deleted === "boolean")
-      && (user.is_stranger === undefined || typeof user.is_stranger === "boolean");
-    if (!parsedId.success || parsedId.data !== userId || !readableEligibilityFlags || !inTeam(user) || user.is_stranger === true) {
-      return { ok: false, error: "ineligible" };
+    if (!parsedId.success || parsedId.data !== userId) {
+      return { ok: false, error: "slack_unavailable" };
     }
+    const eligibility = taskPersonEligibility(user);
+    if (eligibility === "unknown") return { ok: false, error: "slack_unavailable" };
+    if (eligibility === "ineligible") return { ok: false, error: "ineligible" };
     const memberOf: string[] = [];
     for (const channelId of [...new Set(channelIds)].sort()) {
       const users = await freshChannelUsers(channelId, budget, admission?.deadlineAt, admission);
