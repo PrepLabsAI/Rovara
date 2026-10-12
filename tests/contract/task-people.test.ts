@@ -297,6 +297,54 @@ const isPeopleMutation = (command: unknown) => {
 };
 
 describe("task people", () => {
+  it("requires complete Slack identity classification for the metered People directory view", async () => {
+    const owner = "U0OWNER001";
+    const peer = "U0MEMBER01";
+    const variants: Array<{ label: string; user: Record<string, unknown>; unknown: boolean }> = [
+      { label: "missing primary team", user: { id: peer, is_bot: false }, unknown: true },
+      { label: "malformed bot flag", user: { id: peer, team_id: SLACK_TEAM, is_bot: [] }, unknown: true },
+      { label: "malformed enterprise teams", user: { id: peer, team_id: "T0OTHER1", is_bot: false, enterprise_user: { teams: [{}] } }, unknown: true },
+      { label: "definite foreign team", user: { id: peer, team_id: "T0OTHER1", is_bot: false }, unknown: false },
+      { label: "definite deletion", user: { id: peer, team_id: SLACK_TEAM, is_bot: false, deleted: true }, unknown: false },
+    ];
+    for (const variant of variants) {
+      let peerInfo: Record<string, unknown> = { id: peer, team_id: SLACK_TEAM, is_bot: false, name: "Peer" };
+      const directory = slackDirectory({ teamId: SLACK_TEAM, now: Date.now, botToken: async () => "INERT", fetch: async (input) => {
+        const url = typeof input === "string" ? new URL(input) : input instanceof URL ? input : new URL(input.url);
+        return url.pathname.endsWith("/users.info")
+          ? Response.json({ ok: true, user: url.searchParams.get("user") === peer ? peerInfo : { id: owner, team_id: SLACK_TEAM, is_bot: false, name: "Owner" } })
+          : Response.json({ ok: true, members: [owner, peer], response_metadata: { next_cursor: "" } });
+      } });
+      const h = await createDeveloperTaskBroker({ channelMembers: async (request) => ({ ok: true, memberOf: request.channelIds }), developerExtra: {
+        taskPeopleConfiguration: { peopleChangesEnabled: true },
+        taskPersonProof: async (request) => directory.taskPersonProof(request.slackUserId, request.channelIds),
+        taskPeopleDisplayRead: async (request) => directory.taskPeopleDisplayRead(request),
+      } });
+      const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000081" };
+      const start = await h.handler({ source: "agentx.slack-ingress", action: "start-workflow", userId: owner, thread,
+        workflowPath: "QUICK", instructions: "Complete People directory identity fixture", requestId: randomUUID() });
+      expect(start.statusCode).toBe(200);
+      const taskId = String((JSON.parse(start.body) as { taskId: string }).taskId);
+      const initialView = await h.handler({ source: "agentx.slack-ingress", action: "task-people-read", taskId, userId: owner, thread });
+      expect(initialView.statusCode).toBe(200);
+      const before = structuredClone(h.db.get(`DEVTASK#${taskId}`, "PEOPLE"));
+      expect(before).toBeDefined();
+      peerInfo = variant.user;
+
+      const response = await h.handler({ source: "agentx.slack-ingress", action: "task-people-read", taskId, userId: owner, thread });
+      if (variant.unknown) {
+        expect(response.statusCode, variant.label).toBe(503);
+        expect(h.db.get(`DEVTASK#${taskId}`, "PEOPLE")).toEqual(before);
+        expect(h.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(0);
+        expect(h.db.find((item) => item.entityType === "TASK_PEOPLE_OUTBOX")).toHaveLength(0);
+      } else {
+        expect(response.statusCode, variant.label).toBe(200);
+        expect(JSON.parse(response.body)).toMatchObject({ people: [{ name: "Owner", role: "owner" }] });
+        expect(h.db.get(`DEVTASK#${taskId}`, "PEOPLE")).toEqual(before);
+      }
+    }
+  });
+
   it("preserves existing People authority when the production Slack identity proof is UNKNOWN", async () => {
     const userId = "U0MAYA001";
     const teamId = TEAM;
