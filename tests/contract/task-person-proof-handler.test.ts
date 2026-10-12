@@ -47,4 +47,20 @@ describe("task person proof handler", () => {
     });
     await expect(handler(request)).rejects.toThrow();
   });
+
+  it("accepts one millisecond before the effective server deadline and rejects the exact deadline", async () => {
+    let nowCalls = 0;
+    let completedAt = 1_649;
+    const handler = createTaskPersonProofHandler({
+      now() { nowCalls += 1; return nowCalls === 1 ? 1_100 : completedAt; },
+      remainingTimeMs: () => 800,
+      expectedTeamId: "T123ABC",
+      async readProof() { return { result: positive, slackCallsUsed: 1 }; },
+    });
+    await expect(handler(request)).resolves.toMatchObject({ usage: { completedAt: 1_649 } });
+
+    nowCalls = 0;
+    completedAt = 1_650;
+    await expect(handler(request)).rejects.toThrow();
+  });
 });

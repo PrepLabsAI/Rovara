@@ -48,7 +48,7 @@ export function createTaskPersonProofHandler(ports: TaskPersonProofHandlerPorts)
     const completedAt = ports.now();
     const result = TaskPersonProofResponseSchema.safeParse(measured.result);
     if (!result.success || !Number.isSafeInteger(measured.slackCallsUsed) || measured.slackCallsUsed < 0
-      || measured.slackCallsUsed > slackCallsLimit || completedAt > deadlineAt
+      || measured.slackCallsUsed > slackCallsLimit || completedAt >= deadlineAt
       || ((result.data.ok || (!result.data.ok && result.data.error === "ineligible")) && measured.slackCallsUsed === 0)) throw unavailable();
     if (result.data.ok && (result.data.user.id !== request.request.slackUserId
       || result.data.user.teamId !== ports.expectedTeamId

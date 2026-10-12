@@ -136,7 +136,11 @@ const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientC
 const taskAuthorityDocumentClient = DynamoDBDocumentClient.from(new DynamoDBClient({ ...awsClientConfiguration, maxAttempts: 1 }));
 const kms = new KMSClient(awsClientConfiguration);
 const sfn = new SFNClient(awsClientConfiguration);
-const lambdaClient = new LambdaClient(awsClientConfiguration);
+export const taskPersonProofLambdaClient = new LambdaClient({ ...awsClientConfiguration, maxAttempts: 1 });
+
+export function taskPersonProofInvokeCommand(functionName: string, payload: Uint8Array): InvokeCommand {
+  return new InvokeCommand({ FunctionName: functionName, Payload: payload, InvocationType: "RequestResponse" });
+}
 
 function taskPersonRuntimePorts(input: {
   admission: ReturnType<typeof createTaskAuthorityAdmission>;
@@ -243,7 +247,7 @@ function taskPersonRuntimePorts(input: {
       now: () => Date.now(),
       expectedTeamId: input.slackTeamId,
       async invoke(payload, options) {
-        const response = await lambdaClient.send(new InvokeCommand({ FunctionName: input.proofArn, Payload: payload }), { abortSignal: options.abortSignal });
+        const response = await taskPersonProofLambdaClient.send(taskPersonProofInvokeCommand(input.proofArn, payload), { abortSignal: options.abortSignal });
         return { ...(response.FunctionError === undefined ? {} : { FunctionError: response.FunctionError }), ...(response.Payload === undefined ? {} : { Payload: response.Payload }) };
       },
     })(request),
