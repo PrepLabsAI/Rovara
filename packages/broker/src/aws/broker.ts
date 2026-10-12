@@ -213,6 +213,8 @@ import {
 import { aiToolTurn, completedTurn, developerFooter, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
+import { developerIdForSlackUser } from "./admin-actions.js";
+import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
@@ -834,7 +836,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json(await handleSwebenchCallback(swebenchDependencies(dependencies), request.headers["x-agentx-callback-capability"], evalCallback.runId, evalCallback.action, parseBody(request.body)), request.requestId);
       }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -3115,6 +3117,9 @@ async function taskOperationParts(
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
   const resolvedModel = await resolveProjectModel(dependencies, settings);
+  // #341: a task whose owner connected a working ChatGPT plan runs on it; `model` stays the default it falls back to.
+  const chatgpt = dependencies.chatgpt === undefined ? undefined
+    : await chatGptTaskSelection(dependencies.chatgpt, chatGptOwner(await workspaceTaskOwner(dependencies, workspace.id), input.requester.requestedBy, developerIdForSlackUser));
   const operationId = randomUUID();
   const fence = workspace.fence + 1;
   const operation = operationRecord({
@@ -3134,6 +3139,7 @@ async function taskOperationParts(
     ...input.requester,
   });
   operation.settingsRevision = settings.definition.revision;
+  if (chatgpt !== undefined) operation.chatgptDeveloperId = chatgpt.developerId;
   // A PR feedback review this release starts is given only the owner's notes for its round; its answer is checked against that alone.
   if (input.workflowFeedbackReview !== undefined) operation.feedbackNotesScoped = true;
   // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
@@ -3166,7 +3172,7 @@ async function taskOperationParts(
     workspaceId: workspace.id,
     fence,
     projectRevision: workspace.projectRevision,
-    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW", input.workflowFeedbackApproval !== undefined),
+    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW", input.workflowFeedbackApproval !== undefined, chatgpt !== undefined),
     payload: {
       conversationId: input.conversationId,
       prompt,
@@ -3183,6 +3189,7 @@ async function taskOperationParts(
       ...(input.workflowReviewPlan === undefined ? {} : { workflowReviewPlan: input.workflowReviewPlan }),
       ...(input.workflowReviewFeedback === undefined ? {} : { workflowReviewFeedback: input.workflowReviewFeedback }),
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
+      ...(chatgpt === undefined ? {} : { chatgpt: { model: chatgpt.model } }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
       // Spec 051 (P-1): the checks the worker reruns when the agent finishes. The latest revision's readiness, as
       // publicationProject merges it, since that is what publication gates on. None when the project has none.
@@ -3207,6 +3214,24 @@ async function codingPlanChecksInstructions(dependencies: AwsBrokerDependencies,
 }
 
 /** Whether the workspace belongs to a developer task with the gated workflow. */
+/**
+ * #341: a running ChatGPT task's owner's current access token, for the worker's next model requests. The refresh token
+ * never leaves the control plane, and only the task the owner's plan was chosen for gets it.
+ */
+async function chatGptTaskToken(dependencies: AwsBrokerDependencies, operation: OperationRecord): Promise<{ accessToken: string; expiresAt: string }> {
+  if (operation.kind !== "task" || operation.chatgptDeveloperId === undefined || dependencies.chatgpt === undefined) {
+    throw agentXError("CALLBACK_FORBIDDEN", "this operation does not run on a ChatGPT plan");
+  }
+  const token = await dependencies.chatgpt.accessToken(operation.chatgptDeveloperId);
+  return { accessToken: token.access, expiresAt: new Date(token.expiresAt).toISOString() };
+}
+
+/** #341: the developer who owns the task a workspace runs, or undefined for a workspace that runs no developer task. */
+async function workspaceTaskOwner(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<string | undefined> {
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
+  return pointer === undefined ? undefined : (await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId)))?.developerId;
+}
+
 async function gatedTaskWorkspace(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<boolean> {
   const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
   return pointer !== undefined && (await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId)))?.workflow !== undefined;
@@ -4414,6 +4439,7 @@ async function handleCallback(
   if (action !== "result" && TERMINAL.has(operation.status)) {
     throw agentXError("STALE_FENCE", "terminal operations cannot publish more output");
   }
+  if (action === "chatgpt-token") return json(await chatGptTaskToken(dependencies, operation), request.requestId);
   const body = parseBody(request.body);
   if (action === "events") {
     const accepted = await appendEvents(dependencies, operation, body);

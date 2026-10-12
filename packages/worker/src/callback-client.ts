@@ -84,6 +84,8 @@ export function createWorkerCallbackSinks(input: {
   codeBuildSink: CodeBuildSink;
   feedbackBundleReader: FeedbackBundleReader;
   authorizeFeedbackApproval: FeedbackApprovalAuthorizer;
+  /** #341: the task owner's ChatGPT access token, for a task that runs on their plan (unparsed; see chatgpt-token.ts). */
+  chatGptToken: () => Promise<unknown>;
 } {
   const fetchImplementation = input.fetchImplementation ?? fetch;
   const base = input.controlPlaneUrl.replace(/\/$/, "");
@@ -117,6 +119,7 @@ export function createWorkerCallbackSinks(input: {
   };
   return {
     eventSink: async (events) => post("events", { events }),
+    chatGptToken: async () => postForResult("chatgpt-token", {}),
     artifactSink: async (artifact) => post("artifacts", artifact),
     terminalSink: async (result) => post("result", {
       status: result.status,
