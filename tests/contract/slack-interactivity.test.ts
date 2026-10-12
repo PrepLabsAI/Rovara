@@ -12,6 +12,7 @@ import {
   confirmationBlocks,
   confirmationClickEventId,
   type PendingConfirmation,
+  type TaskPeopleDisplayReadRequest,
   type SlackRequestMessage,
   type WorkflowSnapshot,
 } from "../../packages/contracts/src/index.js";
@@ -38,7 +39,7 @@ import { PutCommand } from "@aws-sdk/lib-dynamodb";
 import type { SendMessageCommand } from "@aws-sdk/client-sqs";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { StrictSlackWeb } from "../support/strict-slack.js";
-import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
+import { cleanLine, workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
@@ -107,19 +108,73 @@ describe("signed Task People form", () => {
     expect(takeovers).toEqual([expect.objectContaining({ taskId, userId: requester, thread, expectedPeopleRevision: 4 })]);
   });
 
+  const assertCompletePeopleList = async (takeover: boolean) => {
+    const roles = ["owner", "commenter", "viewer", "denied"] as const;
+    const people = Array.from({ length: 100 }, (_, index) => {
+      const prefix = `Person ${String(index + 1).padStart(3, "0")} `;
+      const suffix = index % 2 === 0 ? "éé" : "😀";
+      const role = roles[index % roles.length]!;
+      return { personId: randomUUID(), name: `${prefix}${"&".repeat(80 - prefix.length - suffix.length)}${suffix}`, role,
+        effectiveRole: role === "denied" ? null : role, you: false };
+    });
+    const strict = new StrictSlackWeb();
+    const handlers = workflowSlackHandlers({ loadTask: async () => undefined,
+      getPeople: async () => ({ revision: 12, orphaned: takeover, people, canManage: !takeover, canTakeOwnership: takeover }),
+      openView: async (trigger, view) => { await strict.openView(trigger, view); }, submit: async () => undefined });
+
+    await handlers.handleAction(action);
+
+    expect(strict.views).toHaveLength(1);
+    const view = strict.views[0]!.view;
+    expect(view.callback_id).toBe(takeover ? "agentx_task_take_ownership" : "agentx_task_people_submission");
+    expect(view.submit).toEqual({ type: "plain_text", text: takeover ? "Take ownership" : "Save role" });
+    const blocks = view.blocks as Array<Record<string, unknown>>;
+    expect(blocks.length).toBeLessThanOrEqual(100);
+    const sections = blocks.filter((block) => block.type === "section");
+    const listSections = takeover ? sections.slice(0, -1) : sections;
+    const listTexts = listSections.map((block) => (block.text as { text: string }).text);
+    expect(listTexts.length).toBeGreaterThan(1);
+    expect(listTexts.every((text) => text.length <= 3_000)).toBe(true);
+    expect(listTexts.flatMap((text) => text.split("\n"))).toEqual(people.map((person) => `${cleanLine(person.name, 80)} — ${person.role}`));
+    if (takeover) {
+      expect((sections.at(-1)?.text as { text: string }).text).toBe("This task has no current owner. Taking ownership does not restart it.");
+      expect(blocks.filter((block) => block.type === "input")).toEqual([]);
+    } else {
+      expect(blocks.filter((block) => block.type === "input").map((block) => block.block_id)).toEqual(["task_person", "task_role"]);
+      const roleBlock = blocks.find((block) => block.block_id === "task_role")!;
+      const roleSelect = (roleBlock.element as { options: Array<{ value: string }> });
+      expect(roleSelect.options.map((option) => option.value)).toEqual(["owner", "commenter", "viewer", "denied"]);
+    }
+  };
+
+  it("opens all 100 escaped Unicode names in bounded sections and retains the manager role controls", async () => {
+    await assertCompletePeopleList(false);
+  });
+
+  it("opens all 100 escaped Unicode names in bounded sections and retains ownerless takeover", async () => {
+    await assertCompletePeopleList(true);
+  });
+
   it("refuses a valid People change when the signed form is replayed from another task thread", async () => {
     const ownerSlackUserId = "U0PEOPLE01";
     const targetSlackUserId = "U0PEOPLE02";
     const taskThread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000091" };
+    const names = new Map([[ownerSlackUserId, "Owner One"], [targetSlackUserId, "Person Two"]]);
+    const proof = async (request: { slackUserId: string; channelIds: readonly string[] }) => {
+      const name = names.get(request.slackUserId);
+      if (name === undefined) return { ok: false as const, error: "ineligible" as const };
+      return { ok: true as const, user: { id: request.slackUserId, teamId: SLACK_TEAM, name }, memberOf: [...request.channelIds] };
+    };
     const broker = await createDeveloperTaskBroker({
       channelMembers: async (request) => ({ ok: true, memberOf: [...request.channelIds] }),
       developerExtra: {
         taskPeopleConfiguration: { peopleChangesEnabled: true },
-        taskPersonProof: async (request) => ({
-          ok: true,
-          user: { id: request.slackUserId, teamId: SLACK_TEAM, name: request.slackUserId === ownerSlackUserId ? "Owner One" : "Person Two" },
-          memberOf: [...request.channelIds],
-        }),
+        taskPersonProof: proof,
+        taskPeopleDisplayRead: async (request: TaskPeopleDisplayReadRequest) => request.operation === "proof"
+          ? { operation: "proof" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: await proof(request.request) }
+          : { operation: "directory" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const,
+            users: [...names].map(([id, name]) => ({ id, teamId: SLACK_TEAM, name,
+              memberOf: request.request.channelIds.filter((channelId) => channelId === taskThread.channelId) })) } },
       },
     });
     const started = await broker.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread: taskThread,
