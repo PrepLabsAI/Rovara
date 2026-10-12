@@ -185,7 +185,7 @@ import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKe
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import type { GitHubAppCredentialProvider } from "../github-app.js";
-import { isWebhookSecretMissing } from "../github-app.js";
+import { GithubMergeRateLimitError, isWebhookSecretMissing } from "../github-app.js";
 import { createGitHubAppCredentials } from "./github-credentials.js";
 import { GITHUB_WEBHOOK_SIGNATURE_INVALID, GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileTaskPullRequestFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
@@ -214,7 +214,8 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -333,7 +334,7 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
   /** Reads the GitHub webhook HMAC key from the configured GitHub App secret; `refresh` asks for a fresh read of the secret. */
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
@@ -651,7 +652,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.workflow-dispatch-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -667,6 +668,20 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "github.webhook_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
         return json({ error: "recovery_failed" }, "github-webhook-recovery", 500);
+      }
+    }
+    if (isWorkflowMergeRecoveryEvent(event)) {
+      try {
+        const result = await runDueWorkflowMergeRecovery({
+          documentClient: dependencies.documentClient,
+          tableName: dependencies.tableName,
+          now: Date.now,
+          reconcile: (taskId, budget) => reconcileWorkflowMergeRecoveryTask(dependencies, taskId, budget),
+        });
+        return json(result, "workflow-merge-recovery");
+      } catch (error) {
+        console.log(JSON.stringify({ component: "broker", event: "workflow.merge_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
+        return json({ error: "recovery_failed" }, "workflow-merge-recovery", 500);
       }
     }
     // Gap 6: the scheduled sweep that re-runs any workflow dispatch left behind after its result committed.
@@ -5682,9 +5697,18 @@ async function refreshTaskFeedbackForOwnerDecision(dependencies: AwsBrokerDepend
 }
 
 /** Reconcile every PR webhook against GitHub; comments and delivery order never grant authority. */
-export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"], deliveryId: string): Promise<void> {
-  const getFeedback = dependencies.githubPullRequests.getPullRequestFeedback;
-  if (getFeedback === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "current GitHub feedback collection is not configured");
+export async function processGithubWorkflowEvent(
+  dependencies: AwsBrokerDependencies,
+  event: ReceivedGithubWebhook["event"],
+  deliveryId: string,
+  options?: { observationMode: "merge"; budget: GithubMergeReadBudget; release: "queue" },
+): Promise<void> {
+  const getFeedback = options === undefined
+    ? dependencies.githubPullRequests.getPullRequestFeedback
+    : dependencies.githubPullRequests.getPullRequestMergeObservation;
+  if (getFeedback === undefined) throw agentXError("RUNTIME_UNAVAILABLE", options === undefined
+    ? "current GitHub feedback collection is not configured"
+    : "current GitHub merge observation is not configured");
   await reconcileTaskPullRequestFeedback({
     documentClient: dependencies.documentClient, tableName: dependencies.tableName,
     repositoryFullName: event.fullName, number: event.number, deliveryId,
@@ -5694,7 +5718,10 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
       const project = await requireProject(dependencies, projectName, revision);
       return project.definition.repositories.find(repository => repository.name === repositoryId)?.url;
     },
-    getCurrentFeedback: (url, number) => getFeedback.call(dependencies.githubPullRequests, url, number),
+    getCurrentFeedback: async (url, number) => options === undefined
+      ? dependencies.githubPullRequests.getPullRequestFeedback!.call(dependencies.githubPullRequests, url, number)
+      : { pullRequest: await dependencies.githubPullRequests.getPullRequestMergeObservation!.call(dependencies.githubPullRequests, url, number, options.budget), comments: [], threads: [] },
+    ...(options === undefined ? {} : { observationMode: options.observationMode }),
     recordedHead: async (workspaceId, repositoryId, number) => (await getItem<PullRequestRecord>(dependencies, pullRequestKey(workspaceId, repositoryId, number)))?.expectedHeadCommit,
     ...(dependencies.githubPullRequests.getCommitParents === undefined ? {} : {
       commitParents: (url: string, commit: string) => dependencies.githubPullRequests.getCommitParents!(url, commit),
@@ -5775,8 +5802,8 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
   });
   const linked = await getItem<GithubWorkflowPullRequestRecord>(dependencies, githubWorkflowPullRequestKey(event.fullName, event.number));
   // A merge that finished the task gives back its slot and workspace (again for a redelivery, which changes nothing).
-  if (linked !== undefined) await releaseIfFinished(dependencies, linked.taskId);
-  if (linked !== undefined) {
+  if (linked !== undefined && options?.release !== "queue") await releaseIfFinished(dependencies, linked.taskId);
+  if (linked !== undefined && options?.release !== "queue") {
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(linked.taskId));
     if (task !== undefined && dependencies.developer !== undefined) {
       const caller = { developerId: task.developerId, sessionId: "github-webhook", amr: task.provider, name: task.developerName };
@@ -5786,6 +5813,89 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
       }, caller);
       await startTaskWorkflowFeedbackReviewFromWebhook(routeDependencies, task.taskId);
     }
+  }
+}
+
+const MERGE_RECOVERY_RETRY_MS = 5 * 60_000;
+
+async function stronglyRead<T>(dependencies: AwsBrokerDependencies, key: { pk: string; sk: string }): Promise<T | undefined> {
+  const response = await dependencies.documentClient.send(new GetCommand({
+    TableName: dependencies.tableName,
+    Key: key,
+    ConsistentRead: true,
+  })) as { Item?: T };
+  return response.Item;
+}
+
+async function mergeRecoveryReleaseConfirmed(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord): Promise<boolean> {
+  const workspace = await stronglyRead<Record<string, unknown>>(dependencies, workspaceKey(task.workspaceId));
+  if (workspace?.status !== "CLOSED") return false;
+  if (task.releasedAt !== undefined) return true;
+  const [member, organization] = await Promise.all([
+    stronglyRead<Record<string, unknown>>(dependencies, task.charge.member),
+    stronglyRead<Record<string, unknown>>(dependencies, task.charge.organization),
+  ]);
+  if (member === undefined || organization === undefined) return false;
+  if (!Number.isInteger(member.count) || (member.count as number) < 0
+    || !Number.isInteger(organization.count) || (organization.count as number) < 0) return false;
+  if (member.tasks !== undefined && (!(member.tasks instanceof Set) || member.tasks.has(task.taskId))) return false;
+  return true;
+}
+
+/** Reconciles one recovery row using one exact reverse-linked PR and the bounded merge-only GitHub reader. */
+export async function reconcileWorkflowMergeRecoveryTask(
+  dependencies: AwsBrokerDependencies,
+  taskId: string,
+  budget: GithubMergeReadBudget,
+): Promise<MergeRecoveryResult> {
+  const retry = (): MergeRecoveryResult => ({ kind: "RETRY", retryAt: Date.now() + MERGE_RECOVERY_RETRY_MS, scope: "task" });
+  const task = await stronglyRead<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (task === undefined) return { kind: "MISSING" };
+  if (task.closedAt !== undefined || task.releasedAt !== undefined) {
+    return await mergeRecoveryReleaseConfirmed(dependencies, task) ? { kind: "TERMINAL", release: "confirmed" } : retry();
+  }
+  const pullRequests = task.workflow?.pullRequests ?? [];
+  let selected: { fullName: string; number: number } | undefined;
+  for (const pullRequest of pullRequests) {
+    const parsed = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/.exec(pullRequest.url);
+    if (parsed === null || Number(parsed[2]) !== pullRequest.number) continue;
+    const linked = await stronglyRead<GithubWorkflowPullRequestRecord>(dependencies, githubWorkflowPullRequestKey(parsed[1]!, pullRequest.number));
+    if (linked?.taskId === task.taskId && linked.workspaceId === task.workspaceId && linked.repositoryId === pullRequest.repositoryId
+      && linked.number === pullRequest.number && linked.url === pullRequest.url && linked.candidateDigest === pullRequest.candidateDigest) {
+      selected = { fullName: parsed[1]!, number: pullRequest.number };
+      break;
+    }
+  }
+  if (selected === undefined) return retry();
+  try {
+    await processGithubWorkflowEvent(dependencies, {
+      kind: "PULL_REQUEST",
+      action: "closed",
+      installationId: 0,
+      repositoryId: 0,
+      fullName: selected.fullName,
+      number: selected.number,
+    }, `merge-recovery-${taskId}`, { observationMode: "merge", budget, release: "queue" });
+  } catch (error) {
+    if (error instanceof GithubMergeRateLimitError) return { kind: "RETRY", retryAt: error.retryAt, scope: "github-global" };
+    return retry();
+  }
+  const fresh = await stronglyRead<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (fresh === undefined) return { kind: "MISSING" };
+  if (fresh.closedAt !== undefined || fresh.releasedAt !== undefined) {
+    return await mergeRecoveryReleaseConfirmed(dependencies, fresh) ? { kind: "TERMINAL", release: "confirmed" } : retry();
+  }
+  if (fresh.workflow?.stage !== "MERGED" || fresh.workflow.state !== "COMPLETE" || fresh.workflow.outcome !== "MERGED") {
+    return { kind: "OBSERVED" };
+  }
+  try {
+    await enqueueFinishedTaskRelease({ documentClient: dependencies.documentClient, tableName: dependencies.tableName }, taskId);
+    const marker = await stronglyRead<Record<string, unknown>>(dependencies, { pk: "FINISHED_RELEASE", sk: `TASK#${taskId}` });
+    return marker?.entityType === "FINISHED_RELEASE" && marker.taskId === taskId
+      ? { kind: "TERMINAL", release: "queued" }
+      : retry();
+  } catch {
+    return retry();
   }
 }
 
@@ -5856,6 +5966,10 @@ export async function retryGithubWebhookAsAdministrator(dependencies: AwsBrokerD
 
 function isGithubWebhookRecoveryEvent(event: unknown): event is { source: "agentx.github-webhook-recovery" } {
   return event !== null && typeof event === "object" && (event as { source?: unknown }).source === "agentx.github-webhook-recovery";
+}
+
+function isWorkflowMergeRecoveryEvent(event: unknown): event is { source: "agentx.workflow-merge-recovery" } {
+  return event !== null && typeof event === "object" && (event as { source?: unknown }).source === "agentx.workflow-merge-recovery";
 }
 
 
@@ -6268,7 +6382,7 @@ async function completedWorkflowItems(
       TableName: dependencies.tableName,
       Key: taskKey(task.taskId),
       UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :ready",
+      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :ready AND attribute_not_exists(closedAt)",
       ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
       ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": "PULL_REQUEST", ":ready": "READY" },
     } }, ...(existingIndex === undefined ? [{ Put: {
@@ -6278,7 +6392,8 @@ async function completedWorkflowItems(
     } }] : []),
     // More repositories to go: the next draft pull request is due, as the first one was after the reviews.
     ...(next.stage === "PULL_REQUEST" && next.state === "READY" && next.candidate !== undefined
-      ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "PUBLISH", next.candidate.digest, now)] : [])];
+      ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "PUBLISH", next.candidate.digest, now)] : []),
+    ...((task.workflow.pullRequests ?? []).length === 0 ? [mergeRecoveryItem(dependencies.tableName, task.taskId, now)] : [])];
   }
   if (operation.kind === "maintain") return completedPullRequestUpdateItems(dependencies, operation, task as DeveloperTaskRecord & { workflow: WorkflowSnapshot }, terminalStatus, now, result, terminalError);
   if (operation.kind !== "task" || operation.workflowMode === undefined || task.workflow.state !== "RUNNING") return [];
