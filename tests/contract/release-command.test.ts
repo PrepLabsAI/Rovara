@@ -50,6 +50,7 @@ describe("shared release helpers", () => {
       skipChecks: true,
     });
     expect(() => parseReleaseArgs(["--region"], {})).toThrow(/requires a value/);
+    expect(() => parseReleaseArgs(["--region", "--profile"], {})).toThrow("--region requires a value");
     expect(() => parseReleaseArgs(["--surprise"], {})).toThrow(/unknown option/);
   });
 
