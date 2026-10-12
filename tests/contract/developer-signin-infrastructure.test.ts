@@ -116,6 +116,9 @@ describe("developer sign-in infrastructure (named environments)", () => {
     // FR-045: when each method was last turned on, in epoch seconds; "0" is never.
     expect(p.DeveloperSignInSlackSince).toMatchObject({ Type: "String", Default: "0", AllowedPattern: "^[0-9]{1,12}$" });
     expect(p.DeveloperOidcSince).toMatchObject({ Type: "String", Default: "0", AllowedPattern: "^[0-9]{1,12}$" });
+    expect(p.TaskPeopleChangesEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
+    expect(p.TaskPeoplePublicInvitationsEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
+    expect(p.TaskPeoplePrivateInvitationsEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
     for (const parameter of Object.values(p)) expect(JSON.stringify(parameter)).not.toContain("—");
   });
 
@@ -249,6 +252,11 @@ describe("developer sign-in infrastructure (named environments)", () => {
     ]));
     // FR-045: both functions get each method's enabled-since cutoff straight from its parameter.
     const variables = (prefix: string) => (named.Resources[functionId(named, prefix)]!.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(variables("Broker")).toMatchObject({
+      AGENTX_TASK_PEOPLE_CHANGES_ENABLED: { Ref: "TaskPeopleChangesEnabled" },
+      AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: { Ref: "TaskPeoplePublicInvitationsEnabled" },
+      AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED: { Ref: "TaskPeoplePrivateInvitationsEnabled" },
+    });
     for (const prefix of ["Broker", "DeveloperSignInFunction"]) {
       expect(variables(prefix).DEVELOPER_SIGNIN_SLACK_SINCE).toEqual({ Ref: "DeveloperSignInSlackSince" });
       expect(variables(prefix).DEVELOPER_OIDC_SINCE).toEqual({ Ref: "DeveloperOidcSince" });
@@ -264,7 +272,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
 describe("the legacy deployment (R3)", () => {
   it("has none of it", () => {
     const text = JSON.stringify(legacy);
-    for (const absent of ["SlackTeamId", "DeveloperSignIn", "DeveloperOidc", "agentx-developer-jwt", "/v1/dev/", "/v1/auth", "DEVELOPER_TOKEN_ISSUER", "developer-tokens"]) {
+    for (const absent of ["SlackTeamId", "DeveloperSignIn", "DeveloperOidc", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "agentx-developer-jwt", "/v1/dev/", "/v1/auth", "DEVELOPER_TOKEN_ISSUER", "developer-tokens"]) {
       expect(text).not.toContain(absent);
     }
     expect(ofType(legacy, "AWS::ApiGatewayV2::Authorizer")).toHaveLength(1);
@@ -327,6 +335,7 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
       NOTICE_QUEUE_URL: { Ref: idOf("AWS::SQS::Queue", "DeveloperTaskNotifierNoticeQueue") },
       SLACK_SECRET_ARN: { Ref: secretId },
       AGENTX_METRICS_NAMESPACE: "AgentX/staging",
+      AGENTX_TASK_PEOPLE_CHANGES_ENABLED: { Ref: "TaskPeopleChangesEnabled" },
     });
   });
 
