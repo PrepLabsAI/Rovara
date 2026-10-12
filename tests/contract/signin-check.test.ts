@@ -82,7 +82,8 @@ describe("agentx signin check (FR-046, R5)", () => {
     const checks = await checkDeveloperSignIn({ env: "staging", store, secrets, settings: stagingSettings, slackApi: api(), fetch: fetchOverride ?? fetchFor(slackAuthorize === undefined ? {} : { slackAuthorize }) });
     return checks.find((check) => check.name === "Slack redirect URL");
   }
-  const unverified = (why: string) => ({ name: "Slack redirect URL", ok: true, warn: true, detail: `not verified: ${why}, so it does not show whether ${CALLBACK} is a redirect URL; run agentx login ${API} to confirm` });
+  const unverified = (why: string) => ({ name: "Slack redirect URL", ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL: ${why}. If signing in on the task page works, you can ignore this warning. Otherwise run agentx login ${API} to check sign-in.` });
+  const unreachable = { name: "Slack redirect URL", ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL because the test request to slack.com failed. If signing in on the task page works, you can ignore this warning. Otherwise run agentx login ${API} to check sign-in.` };
 
   it("counts a redirect back to the callback as registered, even with an error that is not about redirect_uri (fix round 1, I2)", async () => {
     expect(await redirectCheckFor(redirectTo(`${CALLBACK}?error=access_denied&state=agentx-signin-check`))).toEqual({ name: "Slack redirect URL", ok: true, detail: `Slack sent a test sign-in request back to ${CALLBACK}, so it is a registered redirect URL` });
@@ -99,7 +100,10 @@ describe("agentx signin check (FR-046, R5)", () => {
     expect(await redirectCheckFor(new Response("<html>Sign in to your workspace</html>", { status: 200 }))).toEqual(unverified("Slack answered the test sign-in request with HTTP 200"));
     // "invalid" alone, without a redirect_uri error, says nothing about the redirect URL.
     expect(await redirectCheckFor(new Response("<p>redirect_uri ok, invalid team</p>", { status: 400 }))).toEqual(unverified("Slack answered the test sign-in request with HTTP 400"));
-    expect(await redirectCheckFor(undefined, async () => { throw new TypeError("fetch failed"); })).toMatchObject({ name: "Slack redirect URL", ok: true, warn: true });
+    expect(await redirectCheckFor(undefined, async () => { throw new TypeError("fetch failed"); })).toEqual(unreachable);
+    const unreadable = new Response("", { status: 200 });
+    Object.defineProperty(unreadable, "text", { value: async () => { throw new TypeError("body read failed"); } });
+    expect(await redirectCheckFor(unreadable)).toEqual(unverified("Slack answered the test sign-in request with HTTP 200"));
   });
 
   it("prints a warning as warn, not ok or FAIL", () => {

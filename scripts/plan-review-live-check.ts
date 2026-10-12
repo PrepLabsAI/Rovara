@@ -22,7 +22,7 @@ function styles(html: string): string {
 export function pageChecks(html: string): LiveCheckResult[] {
   const css = styles(html);
   const viewport = /<meta name="viewport" content="([^"]*)">/.exec(html)?.[1]?.replace(/\s+/g, "") ?? "";
-  const buttons = [...html.matchAll(/<button\b([^>]*)>(Approve|Request changes|Comment|Reply|Edit|Delete)<\/button>/g)];
+  const buttons = [...html.matchAll(/<button\b([^>]*)>(Approve|Request changes|Comment(?: on [^<]*)?|Reply|Edit|Delete)<\/button>/g)];
   return [
     { name: "fits a phone screen", ok: viewport.includes("width=device-width") && viewport.includes("viewport-fit=cover") },
     { name: "the decide bar clears the home indicator", ok: css.includes("env(safe-area-inset-bottom)") },
