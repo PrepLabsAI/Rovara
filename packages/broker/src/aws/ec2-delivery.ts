@@ -52,6 +52,7 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
       await dependencies.progress(record, STARTING_COMPUTE_MESSAGE);
       return "WAITING_FOR_SESSION";
     }
+    if (await dependencies.guardTaskDispatch?.(record) === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures);
     if (await dependencies.guardTaskDispatch?.(record) === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const payload = workerInvokeTokenPayload({

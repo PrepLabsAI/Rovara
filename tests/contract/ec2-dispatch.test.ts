@@ -90,6 +90,16 @@ describe("ec2-ebs delivery", () => {
     }
     const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
 
+    it("parks a task before asking the worker which optional fields it supports", async () => {
+      const workerFeatures = vi.fn(async () => ["model.chatgpt"]);
+      const current = delivery({ workerFeatures, guardTaskDispatch: async () => "PARKED" });
+      const record = taskRecord({ chatgpt: { model: { provider: "openai", modelId: "gpt-6.1-sol" } } });
+
+      await expect(current.deliver(record, record.invocation)).resolves.toBe("WAITING_FOR_TASK_ACCESS");
+      expect(workerFeatures).not.toHaveBeenCalled();
+      expect(current.post).not.toHaveBeenCalled();
+    });
+
     it("keeps a task's ChatGPT plan for a worker that can use it, and drops it for one that cannot, which runs the default (#341)", async () => {
       const chatgpt = { model: { provider: "openai", modelId: "gpt-6.1-sol" } };
       const model = { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" };
