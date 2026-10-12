@@ -8,6 +8,7 @@ import {
   type AdminChangeInput, type AdminChangeKind, type ChannelByNameRequest, type ConfirmationMethod, type ChannelByNameResponse, type ProjectDefinition,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import { chatGptSettingsOf, readChatGptSettingsRecord, writeChatGptSettings } from "../chatgpt/settings.js";
 import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, isWholeLimit, readWorkspaceLimits, WORKSPACE_LIMITS_KEY } from "../developer/limits.js";
 import {
   endSessions, grantProjectAccess, projectGrant, resolveDeveloper, revokeProjectAccess, setWorkspaceLimits,
@@ -497,6 +498,39 @@ const planLimits: Planner = async (deps, identity, input) => {
   };
 };
 
+/**
+ * #343: Sign in with ChatGPT's switch and preferred model. Off, nobody can connect and every task runs on the default
+ * model; connections are kept for when it is on again. The preferred model is used only where a person's plan allows it.
+ */
+const planChatGpt: Planner = async (deps, identity, input) => {
+  if (input.kind !== "set_chatgpt") throw new Error("wrong planner");
+  requireAdminClaim(identity);
+  if (input.enabled === undefined && input.preferredModel === undefined) throw agentXError("CONFIG_INVALID", "give enabled, preferred_model or both");
+  const record = await readChatGptSettingsRecord(deps.reads);
+  const current = chatGptSettingsOf(record);
+  const next = { enabled: input.enabled ?? current.enabled, preferredModel: input.preferredModel ?? current.preferredModel };
+  const now = (value: boolean) => (value ? "on" : "off");
+  const switchText = next.enabled === current.enabled
+    ? `Sign in with ChatGPT stays ${now(next.enabled)}.`
+    : next.enabled
+      ? "Turn Sign in with ChatGPT on: people can connect their own ChatGPT Plus or Pro plan, and the tasks they start run on it, moving to this Rovara's default model when the plan cannot serve them."
+      : "Turn Sign in with ChatGPT off: nobody can connect, and every task runs on this Rovara's default model. Existing connections are kept for when it is on again.";
+  const modelText = next.preferredModel === current.preferredModel
+    ? `Tasks prefer ${next.preferredModel} where a person's plan allows it.`
+    : `Tasks prefer ${next.preferredModel} (now ${current.preferredModel}) where a person's plan allows it; otherwise the best model the plan allows.`;
+  return {
+    effect: `${switchText} ${modelText}`,
+    details: { current, next },
+    snapshot: { setting: record === undefined ? null : { enabled: record.enabled ?? null, preferredModel: record.preferredModel ?? null, updatedAt: record.updatedAt ?? null } },
+    apply: async (applier, how) => ({ ...await writeChatGptSettings({ ...deps.reads, now: () => deps.actions.now() }, { issuer: applier.issuer, subject: applier.subject }, next, how?.method) }),
+    changedSince: (planned) => {
+      const was = planned.current as { enabled?: unknown; preferredModel?: unknown } | undefined;
+      if (was?.enabled === current.enabled && was.preferredModel === current.preferredModel) return undefined;
+      return `Sign in with ChatGPT changed after you asked: it is ${now(current.enabled)}, preferring ${current.preferredModel}; ask again if you still want it ${now(next.enabled)}, preferring ${next.preferredModel}`;
+    },
+  };
+};
+
 export const PLANNERS: Partial<Record<AdminChangeKind, Planner>> = {
   bind_channel: planBind,
   unbind_channel: planUnbind,
@@ -507,6 +541,7 @@ export const PLANNERS: Partial<Record<AdminChangeKind, Planner>> = {
   revoke_project_access: planRevoke,
   revoke_signin: planEndSessions,
   set_workspace_limits: planLimits,
+  set_chatgpt: planChatGpt,
 };
 
 /**

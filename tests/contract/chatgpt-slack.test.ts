@@ -72,6 +72,7 @@ async function rovara(options: { chatgpt?: boolean } = {}) {
       chatgpt: (table) => chatGptConnections({ documentClient: table, tableName: "state", sealer: SEALER, fetch: openAi, now: () => clock, hostId: "urn:uuid:00000000-0000-4000-8000-000000000000" }),
     }),
   });
+  db.set({ pk: "SETTINGS", sk: "CHATGPT", entityType: "SETTING", enabled: true, preferredModel: "gpt-6.1-sol" });
   const invokeBroker = async (event: Record<string, unknown>) => broker(event);
   const slack = new StrictSlackWeb();
   const queued: unknown[] = [];

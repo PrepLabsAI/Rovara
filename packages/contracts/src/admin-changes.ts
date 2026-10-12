@@ -4,6 +4,7 @@
 // What a client reads (the `...WireSchema` variants) is loose all the way down, like 25d's admin
 // answers: a newer control plane may add fields, kinds, statuses, methods, outcomes and refusal
 // reasons, and an older CLI must still read the answer (R23), so those are plain strings there.
+import { ChatGptModelIdSchema } from "./chatgpt.js";
 import { z } from "zod";
 import { INDEX_EXPIRY_ATTRIBUTE } from "./admin.js";
 import { looseCopy } from "./loose.js";
@@ -37,6 +38,8 @@ export const AdminChangeKindSchema = z.enum([
   "grant_project_access", "revoke_project_access", "revoke_signin", "set_workspace_limits",
   // Issue #205: an agentx config set change the CLI applies itself (a stack update) and records.
   "set_config",
+  // #343: Sign in with ChatGPT's switch and preferred model.
+  "set_chatgpt",
 ]);
 export type AdminChangeKind = z.infer<typeof AdminChangeKindSchema>;
 export const ConfirmationMethodSchema = z.enum(["elicitation", "slack", "cli"]);
@@ -55,6 +58,7 @@ export const AdminChangeInputSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("revoke_project_access"), project: AgentXNameSchema, developer: DeveloperRef }).strict(),
   z.object({ kind: z.literal("revoke_signin"), developer: DeveloperRef }).strict(),
   z.object({ kind: z.literal("set_workspace_limits"), perPerson: z.number().int().min(1).max(50).optional(), perOrganization: z.number().int().min(1).max(1_000).optional() }).strict(),
+  z.object({ kind: z.literal("set_chatgpt"), enabled: z.boolean().optional(), preferredModel: ChatGptModelIdSchema.optional() }).strict(),
 ]);
 export type AdminChangeInput = z.infer<typeof AdminChangeInputSchema>;
 

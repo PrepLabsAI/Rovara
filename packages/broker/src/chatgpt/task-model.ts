@@ -26,7 +26,11 @@ export async function chatGptTaskSelection(
 ): Promise<{ developerId: string; model: ModelSelection } | undefined> {
   if (connections === undefined || ownerDeveloperId === undefined) return undefined;
   let view: Awaited<ReturnType<ChatGptConnections["view"]>>;
+  let settings: Awaited<ReturnType<ChatGptConnections["settings"]>>;
   try {
+    // #343: with the admin's switch off, every task runs on the default; connections are kept for when it is on.
+    settings = await connections.settings();
+    if (!settings.enabled) return undefined;
     view = await connections.view(ownerDeveloperId);
   } catch (error) {
     // A task never fails because its owner's connection could not be read; it runs on the default.
@@ -34,7 +38,7 @@ export async function chatGptTaskSelection(
     return undefined;
   }
   if (!view.connected || view.status !== "connected") return undefined;
-  const modelId = chatGptTaskModel(view.models ?? []);
+  const modelId = chatGptTaskModel(view.models ?? [], settings.preferredModel);
   return modelId === undefined ? undefined : { developerId: ownerDeveloperId, model: { provider: "openai", modelId } };
 }
 
