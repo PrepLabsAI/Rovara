@@ -138,6 +138,18 @@ describe("conversations.members (FR-013)", () => {
 });
 
 describe("fresh task person proof", () => {
+  it("lists a complete fresh bounded channel directory without reusing warm membership", async () => {
+    const channels = { C0PAY0001: ["U0MAYA001", "U0OTHER01"] };
+    const { dir } = directory([
+      { userId: "U0MAYA001", name: "Maya Chen" },
+      { userId: "U0OTHER01", name: "Other Owner" },
+    ], channels);
+    await dir.channelMembers("U0OTHER01", ["C0PAY0001"]);
+    channels.C0PAY0001 = ["U0MAYA001"];
+    await expect(dir.taskChannelPeople(["C0PAY0001"])).resolves.toEqual({ ok: true, users: [
+      { id: "U0MAYA001", teamId: TEAM, name: "Maya Chen", memberOf: ["C0PAY0001"] },
+    ] });
+  });
   it("warm_membership_cache_does_not_keep_departed_owner_authorized", async () => {
     const channels = { C0PAY0001: ["U0MAYA001"] };
     const { dir, fetch } = directory([{ userId: "U0MAYA001", name: "Maya Chen" }], channels);
