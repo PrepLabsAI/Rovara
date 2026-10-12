@@ -195,9 +195,18 @@ describe("a developer's ChatGPT connection", () => {
     const { connections, callbackFor } = harness();
     await connections.finish("dev-alice", { callbackUrl: callbackFor((await connections.start("dev-alice")).authorizeUrl) });
     await connections.markStatus("dev-alice", "limit-reached", ["gpt-5.5"]);
-    expect(await connections.view("dev-alice")).toMatchObject({ connected: true, status: "limit-reached", models: ["gpt-5.5"] });
+    expect(await connections.view("dev-alice")).toMatchObject({ connected: true, status: "limit-reached", models: ["gpt-5.5"], statusAt: new Date(1_790_000_000_000).toISOString() });
     await connections.markStatus("dev-bob", "limit-reached");
     expect(await connections.view("dev-bob")).toEqual({ connected: false });
+  });
+
+  it("reads the plan's models again when a task found its model refused (#342)", async () => {
+    const { connections, callbackFor, db } = harness();
+    await connections.finish("dev-alice", { callbackUrl: callbackFor((await connections.start("dev-alice")).authorizeUrl) });
+    await connections.markStatus("dev-alice", "limit-reached", ["gpt-retired"]);
+    await connections.refreshModels("dev-alice");
+    expect(await connections.view("dev-alice")).toMatchObject({ status: "connected", models: ALLOWED });
+    expect(JSON.stringify(db.get("CHATGPT#dev-alice", "CONNECTION"))).not.toMatch(/"access-\d|"refresh-\d/);
   });
 });
 

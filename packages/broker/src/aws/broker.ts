@@ -851,7 +851,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json(await handleSwebenchCallback(swebenchDependencies(dependencies), request.headers["x-agentx-callback-capability"], evalCallback.runId, evalCallback.action, parseBody(request.body)), request.requestId);
       }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -3241,6 +3241,41 @@ async function chatGptTaskToken(dependencies: AwsBrokerDependencies, operation: 
   return { accessToken: token.access, expiresAt: new Date(token.expiresAt).toISOString() };
 }
 
+/**
+ * #342: a ChatGPT task's worker stopped using the plan. The connection learns why, so the owner's next tasks start
+ * right: a plan at its limit waits an hour, a refused connection is revoked, a model list is read again. The task
+ * keeps the reason, once, for the warning its thread is shown.
+ */
+async function recordChatGptFallback(dependencies: AwsBrokerDependencies, operation: OperationRecord, value: unknown): Promise<{ recorded: boolean }> {
+  const reason = object(value, "ChatGPT status").reason;
+  if (reason !== "limit" && reason !== "revoked" && reason !== "model") throw agentXError("CONFIG_INVALID", "reason must be limit, revoked or model");
+  if (operation.kind !== "task" || operation.chatgptDeveloperId === undefined || dependencies.chatgpt === undefined) {
+    throw agentXError("CALLBACK_FORBIDDEN", "this operation does not run on a ChatGPT plan");
+  }
+  const developerId = operation.chatgptDeveloperId;
+  try {
+    await dependencies.documentClient.send(new UpdateCommand({
+      TableName: dependencies.tableName, Key: operationKey(operation.workspaceId, operation.id),
+      UpdateExpression: "SET chatgptFallback = :reason", ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(chatgptFallback)",
+      ExpressionAttributeValues: { ":reason": reason },
+    }));
+  } catch (error) {
+    // Told already (a retried callback): the connection was marked the first time.
+    if (isConditional(error)) return { recorded: false };
+    throw error;
+  }
+  if (reason === "limit") await dependencies.chatgpt.markStatus(developerId, "limit-reached");
+  else if (reason === "revoked") await dependencies.chatgpt.markStatus(developerId, "revoked");
+  else {
+    // Best effort: a list that cannot be read now is read at the next model refusal.
+    await dependencies.chatgpt.refreshModels(developerId).catch((error: unknown) => {
+      console.log(JSON.stringify({ component: "broker", event: "chatgpt.models_refresh_failed", operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown" }));
+    });
+  }
+  console.log(JSON.stringify({ component: "broker", event: "chatgpt.fallback", operationId: operation.id, reason }));
+  return { recorded: true };
+}
+
 /** #341: the developer who owns the task a workspace runs, or undefined for a workspace that runs no developer task. */
 async function workspaceTaskOwner(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<string | undefined> {
   const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
@@ -4455,6 +4490,7 @@ async function handleCallback(
     throw agentXError("STALE_FENCE", "terminal operations cannot publish more output");
   }
   if (action === "chatgpt-token") return json(await chatGptTaskToken(dependencies, operation), request.requestId);
+  if (action === "chatgpt-status") return json(await recordChatGptFallback(dependencies, operation, parseBody(request.body)), request.requestId);
   const body = parseBody(request.body);
   if (action === "events") {
     const accepted = await appendEvents(dependencies, operation, body);

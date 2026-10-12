@@ -44,5 +44,7 @@ export const ChatGptConnectionViewSchema = z.object({
   connectedAt: z.string().optional(),
   /** The models this person's plan may use, as OpenAI listed them at the last check. */
   models: z.array(z.string()).optional(),
+  /** When a task last changed the status (#342): a limit reached at this time is tried again an hour later. */
+  statusAt: z.string().optional(),
 }).loose();
 export type ChatGptConnectionView = z.infer<typeof ChatGptConnectionViewSchema>;

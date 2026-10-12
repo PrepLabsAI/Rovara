@@ -61,6 +61,8 @@ interface ConnectionRecord {
   pk: string; sk: "CONNECTION";
   developerId: string; clientId: string; sealedRefresh: string; sealedAccess: string; accessExpiresAt: number;
   email?: string; connectedAt: string; models: string[]; status: ChatGptConnectionStatus; version: number; refreshingUntil?: number;
+  /** When a task last changed `status` (#342). */
+  statusAt?: string;
 }
 interface PendingRecord { pk: string; sk: "PENDING"; stateHash: string; sealedVerifier: string; expiresAt: number }
 
@@ -77,6 +79,8 @@ export interface ChatGptConnections {
   settings(): Promise<ChatGptSettings>;
   /** Records what a task found (#342): the plan's limit, or a model list that changed. */
   markStatus(developerId: string, status: ChatGptConnectionStatus, models?: string[]): Promise<void>;
+  /** Reads the plan's allowed models again (#342: a task found its model no longer allowed) and keeps them. */
+  refreshModels(developerId: string): Promise<void>;
 }
 
 const pkOf = (developerId: string) => `CHATGPT#${developerId}`;
@@ -87,7 +91,10 @@ const conditionFailed = (error: unknown) => error instanceof Error && error.name
 
 function viewOf(record: ConnectionRecord | undefined): ChatGptConnectionView {
   if (record === undefined) return { connected: false };
-  return { connected: record.status !== "revoked", status: record.status, ...(record.email === undefined ? {} : { email: record.email }), connectedAt: record.connectedAt, models: record.models };
+  return {
+    connected: record.status !== "revoked", status: record.status, ...(record.email === undefined ? {} : { email: record.email }), connectedAt: record.connectedAt, models: record.models,
+    ...(record.statusAt === undefined ? {} : { statusAt: record.statusAt }),
+  };
 }
 
 export function chatGptConnections(deps: ChatGptConnectionsDependencies): ChatGptConnections {
@@ -227,15 +234,20 @@ export function chatGptConnections(deps: ChatGptConnectionsDependencies): ChatGp
       try {
         await deps.documentClient.send(new UpdateCommand({
           TableName: deps.tableName, Key: { pk: pkOf(developerId), sk: "CONNECTION" },
-          UpdateExpression: `SET #status = :status${models === undefined ? "" : ", models = :models"}`,
+          UpdateExpression: `SET #status = :status, statusAt = :at${models === undefined ? "" : ", models = :models"}`,
           ConditionExpression: "attribute_exists(pk)",
           ExpressionAttributeNames: { "#status": "status" },
-          ExpressionAttributeValues: { ":status": status, ...(models === undefined ? {} : { ":models": models }) },
+          ExpressionAttributeValues: { ":status": status, ":at": new Date(deps.now()).toISOString(), ...(models === undefined ? {} : { ":models": models }) },
         }));
       } catch (error) {
         // Disconnected meanwhile: nothing to mark.
         if (!conditionFailed(error)) throw error;
       }
+    },
+
+    async refreshModels(developerId) {
+      const token = await this.accessToken(developerId);
+      await this.markStatus(developerId, "connected", await chatGptModels({ fetch: deps.fetch, access: token.access }));
     },
   };
 }
