@@ -6,6 +6,7 @@
 import { describe, expect, it } from "vitest";
 import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, WORKFLOW_PLAN_MAX_BYTES } from "@agentx/contracts";
 import { LOST_COMPUTE_ERROR, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
+import type { CheckTaskPerson } from "../../../packages/broker/src/developer/task-people.js";
 import { DYNAMODB_ITEM_MAX_BYTES } from "../../support/fake-dynamodb.js";
 import { planAnswer, planDocument } from "../../support/plan-documents.js";
 import { visibleSlackText } from "../../support/strict-slack.js";
@@ -37,6 +38,25 @@ function feedbackFindings(prompt: string): unknown[] {
 const delivery = (e2e: WorkflowE2E, id: string) => e2e.db.get(`GITHUB_DELIVERY#${id}`, "META");
 const fixPushes = (e2e: WorkflowE2E) => e2e.github.pushLog.filter((push) => push.during === "maintain" && e2e.github.tokens.has(push.token));
 const posted = (e2e: WorkflowE2E, prefix: string) => e2e.slack.posts.filter((post) => visibleSlackText(post.text).startsWith(prefix));
+
+function retainOwner(e2e: WorkflowE2E): void {
+  const taskId = e2e.taskId();
+  const task = e2e.db.get(`DEVTASK#${taskId}`, "META")!;
+  e2e.db.set({
+    pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
+    people: [{ developerId: task.developerId, slackUserId: task.slackUserId, name: task.developerName, role: "owner" }],
+  });
+}
+
+const freshOwner = (eligible = true): CheckTaskPerson => async (task, developerId) => {
+  if (task.slackUserId === undefined) throw new Error("the workflow owner has no Slack identity");
+  return {
+    subject: { developerId, slackUserId: task.slackUserId },
+    identity: { developerId, slackUserId: task.slackUserId, name: "Maya Chen", method: "slack",
+      issuer: "https://issuer.example", subject: task.slackUserId },
+    eligible, channelMember: eligible,
+  };
+};
 
 async function merged(e2e: WorkflowE2E, number: number): Promise<void> {
   e2e.github.merge(number);
@@ -543,6 +563,117 @@ describe("Suite 9: resilience", () => {
     const reads = e2e.db.readOrders.get("DEVTASK#META")!;
     expect(reads.reads).toBeGreaterThan(50);
     expect(reads.reordered).toBe(reads.reads);
+    void logged;
+  }, 120_000);
+
+  it("9.20 an accepted coding run with retained People but unavailable proof stays parked through redelivery and recovery", async () => {
+    const unavailableProof: CheckTaskPerson = async () => { throw new Error("fresh identity proof is unavailable"); };
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: { changesEnabled: false, checkTaskPerson: unavailableProof } });
+    await atPlanReview(e2e);
+    const runsBeforeApproval = e2e.invocations.length;
+    const charge = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge);
+    await e2e.click("agentx_workflow_approve");
+    await expect(e2e.settle(0)).rejects.toThrow("the workflow did not settle within 0 steps");
+    const queued = e2e.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
+    retainOwner(e2e);
+    const people = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")!);
+    await e2e.settle();
+    expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({
+      status: "WAITING_FOR_TASK_ACCESS", operationId: queued.operationId, invocation: queued.invocation,
+    });
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge).toEqual(charge);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+    expect(people).toMatchObject({ revision: 1, orphaned: false, people: [expect.objectContaining({ role: "owner" })] });
+    expect(e2e.invocations).toHaveLength(runsBeforeApproval);
+    expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+    expect(e2e.dispatchReceipts.filter((receipt) => receipt.operationId === queued.operationId)).toEqual([
+      { operationId: queued.operationId, phase: "DISPATCH_GUARD", outcome: "PARKED" },
+    ]);
+    expect(await e2e.worker.dispatchAgain(String(queued.operationId), 9)).toBe(false);
+    expect((await e2e.runRecovery()).lostOperations).toEqual([]);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+    e2e.worker.taskPerson(freshOwner());
+    const receiptsBeforeProofRecovery = e2e.dispatchReceipts.length;
+    const turnsBeforeProofRecovery = e2e.turns.length;
+    expect(await e2e.worker.dispatchAgain(String(queued.operationId))).toBe(false);
+    expect((await e2e.runRecovery()).lostOperations).toEqual([]);
+    expect(await e2e.worker.dispatchAgain(String(queued.operationId), 99)).toBe(false);
+    expect(e2e.db.get(String(queued.pk), String(queued.sk))?.status).toBe("WAITING_FOR_TASK_ACCESS");
+    expect(e2e.db.get(String(queued.pk), String(queued.sk))).toMatchObject({ operationId: queued.operationId, invocation: queued.invocation });
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge).toEqual(charge);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toEqual(people);
+    expect(e2e.dispatchReceipts.slice(receiptsBeforeProofRecovery)).toEqual([
+      { operationId: queued.operationId, phase: "DISPATCH_GUARD", outcome: "PARKED" },
+      { operationId: queued.operationId, phase: "DISPATCH_GUARD", outcome: "PARKED" },
+    ]);
+    expect(e2e.invocations).toHaveLength(runsBeforeApproval);
+    expect(e2e.turns).toHaveLength(turnsBeforeProofRecovery);
+    expect(e2e.worker.deliveryFailures).toEqual([]);
+    void logged;
+  }, 120_000);
+
+  it("9.21 a freshly authorized retained owner passes both dispatch guards and reaches the worker", async () => {
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: { changesEnabled: false, checkTaskPerson: freshOwner() } });
+    await atPlanReview(e2e);
+    await e2e.click("agentx_workflow_approve");
+    retainOwner(e2e);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "REVIEW", state: "WAITING" });
+    const implement = e2e.invocations.find((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "IMPLEMENT")!;
+    expect(e2e.dispatchReceipts.filter((receipt) => receipt.operationId === implement.operationId)).toEqual([
+      { operationId: implement.operationId, phase: "DISPATCH_GUARD", outcome: "ALLOWED" },
+      { operationId: implement.operationId, phase: "EC2_GUARD", outcome: "ALLOWED" },
+      { operationId: implement.operationId, phase: "FEATURE_PROBE" },
+      { operationId: implement.operationId, phase: "EC2_GUARD", outcome: "ALLOWED" },
+      { operationId: implement.operationId, phase: "POST" },
+    ]);
+    void logged;
+  }, 120_000);
+
+  it("9.22 owner loss during the asynchronous feature probe is caught by the final guard before POST", async () => {
+    let eligible = true;
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
+      checkTaskPerson: async (task, developerId) => freshOwner(eligible)(task, developerId),
+    } });
+    await atPlanReview(e2e);
+    await e2e.click("agentx_workflow_approve");
+    await expect(e2e.settle(0)).rejects.toThrow("the workflow did not settle within 0 steps");
+    const queued = e2e.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
+    retainOwner(e2e);
+    e2e.worker.beforeFeatureProbe(() => { eligible = false; });
+    const runsBeforeApproval = e2e.invocations.length;
+    await e2e.settle();
+    expect(e2e.dispatchReceipts.filter((receipt) => receipt.operationId === queued.operationId)).toEqual([
+      { operationId: queued.operationId, phase: "DISPATCH_GUARD", outcome: "ALLOWED" },
+      { operationId: queued.operationId, phase: "EC2_GUARD", outcome: "ALLOWED" },
+      { operationId: queued.operationId, phase: "FEATURE_PROBE" },
+      { operationId: queued.operationId, phase: "EC2_GUARD", outcome: "PARKED" },
+    ]);
+    expect(e2e.db.get(String(queued.pk), String(queued.sk))?.status).toBe("WAITING_FOR_TASK_ACCESS");
+    expect(e2e.invocations).toHaveLength(runsBeforeApproval);
+    void logged;
+  }, 120_000);
+
+  it("9.23 merge recovery still queues and releases cleanup exactly once when retained People proof is unavailable", async () => {
+    const { e2e, pullRequest } = await waiting({ taskPeople: { changesEnabled: false } });
+    retainOwner(e2e);
+    const task = e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META") as { charge: { member: { pk: string; sk: string } } };
+    const member = task.charge.member;
+    expect(e2e.db.get(member.pk, member.sk)?.count).toBe(1);
+    e2e.github.merge(pullRequest.number);
+    e2e.clock.advance(5 * 60_000);
+    expect((await e2e.runMergeRecovery()).body).toMatchObject({ attempted: 1, reconciled: 1, deferred: 0 });
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE", outcome: "MERGED" });
+    expect(e2e.db.get("FINISHED_RELEASE", `TASK#${e2e.taskId()}`)).toBeDefined();
+    expect(e2e.deleteEc2Session).not.toHaveBeenCalled();
+    expect(e2e.db.get(member.pk, member.sk)?.count).toBe(1);
+    await e2e.runRecovery();
+    await e2e.settle();
+    expect(e2e.db.get(member.pk, member.sk)?.count).toBe(0);
+    expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
+    await e2e.runRecovery();
+    expect(e2e.db.get(member.pk, member.sk)?.count).toBe(0);
+    expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
     void logged;
   }, 120_000);
 });
