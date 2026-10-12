@@ -21,7 +21,7 @@ import {
   type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
-import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
+import { createModelRuntimeWithFallback, type ChatGptFallback, type ChatGptFallbackReason } from "@agentx/model-runtime";
 import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
@@ -198,16 +198,45 @@ export function createDefaultPiSessionAdapter(options: { modelRuntime?: PiModelR
 
 export const defaultPiSessionAdapter: PiSessionAdapter = createDefaultPiSessionAdapter();
 
-/** #341: the adapter for a task on its owner's ChatGPT plan: every session asks `apiKey` for the plan's current token. */
-export function createChatGptPiSessionAdapter(apiKey: () => Promise<string>): PiSessionAdapter {
-  return createDefaultPiSessionAdapter({ modelRuntime: (model) => workerModelRuntime(model, apiKey) });
+/**
+ * #341: the adapter for a task on its owner's ChatGPT plan: every session asks `apiKey` for the plan's current token.
+ * #342: once the plan cannot serve a request, it and every later one run on `fallbackModel` (the install's default,
+ * whose runtime is made only then), and `onFallback` is told why, once per task.
+ */
+export function createChatGptPiSessionAdapter(
+  apiKey: () => Promise<string>,
+  fallbackModel?: WorkspaceModelConfiguration,
+  onFallback: (reason: ChatGptFallbackReason) => void = () => undefined,
+): PiSessionAdapter {
+  let fallbackRuntime: Promise<{ runtime: ModelRuntime; model: WorkspaceModelConfiguration }> | undefined;
+  let told = false;
+  const chatgptFallback: ChatGptFallback | undefined = fallbackModel === undefined ? undefined : {
+    async stream(context, options) {
+      fallbackRuntime ??= workerModelRuntime(fallbackModel);
+      const { runtime, model } = await fallbackRuntime;
+      const entry = runtime.getModel(model.provider, model.modelId);
+      if (entry === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `the default model ${model.provider}/${model.modelId} is unavailable`);
+      // The ChatGPT model's output limit is not the default model's: the default model's own applies.
+      const rest = { ...options };
+      delete rest.maxTokens;
+      return runtime.streamSimple(entry, context, rest);
+    },
+    // Every session of the task shares this adapter, so the task is told once.
+    onFallback(reason) {
+      if (told) return;
+      told = true;
+      onFallback(reason);
+    },
+  };
+  return createDefaultPiSessionAdapter({ modelRuntime: (model) => workerModelRuntime(model, apiKey, chatgptFallback) });
 }
 
 async function workerModelRuntime(
   configured: WorkspaceModelConfiguration,
   apiKey?: () => Promise<string>,
+  chatgptFallback?: ChatGptFallback,
 ): Promise<{ runtime: ModelRuntime; model: WorkspaceModelConfiguration }> {
-  const resolved = await createModelRuntimeWithFallback(configured, "worker", apiKey === undefined ? {} : { apiKey });
+  const resolved = await createModelRuntimeWithFallback(configured, "worker", apiKey === undefined ? {} : { apiKey, ...(chatgptFallback === undefined ? {} : { chatgptFallback }) });
   const modelRuntime = resolved.runtime;
   if (resolved.model.provider === "amazon-bedrock") {
     modelRuntime.registerNativeProvider(executionRoleBedrockProvider());

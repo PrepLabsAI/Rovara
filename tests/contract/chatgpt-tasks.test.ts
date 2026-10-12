@@ -42,6 +42,8 @@ describe("the model a ChatGPT task runs on (#341)", () => {
 
 /** The control plane's connections, for the developers given; anyone else has none. */
 function connections(views: Record<string, ChatGptConnectionView | "unreadable">) {
+  const markStatus = vi.fn<(developerId: string, status: string) => Promise<void>>(async () => undefined);
+  const refreshModels = vi.fn<(developerId: string) => Promise<void>>(async () => undefined);
   const accessToken = vi.fn(async (developerId: string) => ({ access: `access-for-${developerId.slice(0, 6)}`, expiresAt: Date.parse("2026-10-11T13:00:00.000Z"), models: [] }));
   const service = {
     view: vi.fn(async (developerId: string) => {
@@ -50,12 +52,14 @@ function connections(views: Record<string, ChatGptConnectionView | "unreadable">
       return view ?? { connected: false };
     }),
     accessToken,
+    markStatus,
+    refreshModels,
   } as unknown as ChatGptConnections;
-  return { service, accessToken };
+  return { service, accessToken, markStatus, refreshModels };
 }
 
 async function taskFor(user: string, views: Record<string, ChatGptConnectionView | "unreadable">) {
-  const { service, accessToken } = connections(views);
+  const { service, accessToken, markStatus, refreshModels } = connections(views);
   const { handler, db } = createBroker({ extra: { chatgpt: service } });
   await registerSlackProject(handler, { models });
   const workspace = await ensureWorkspace(handler, thread, user);
@@ -72,7 +76,11 @@ async function taskFor(user: string, views: Record<string, ChatGptConnectionView
     method: "POST", path: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/chatgpt-token`,
     headers: { "x-agentx-callback-capability": invocation.callbackCapability }, body: {},
   });
-  return { db, invocation, actions, askToken, accessToken, operation: db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`) };
+  const tellStatus = (body: unknown) => call(handler, {
+    method: "POST", path: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/chatgpt-status`,
+    headers: { "x-agentx-callback-capability": invocation.callbackCapability }, body,
+  });
+  return { db, invocation, actions, askToken, tellStatus, accessToken, markStatus, refreshModels, operation: db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`), current: () => db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`) };
 }
 
 const connected: ChatGptConnectionView = { connected: true, status: "connected", email: "maya@acme.com", models: ["gpt-5.5", "gpt-6.1-sol"] };
@@ -146,5 +154,48 @@ describe("the worker's side of a ChatGPT task (#341)", () => {
     info.mockRestore();
     const plain = await resolveTaskSessionModel({ model: payload.model }, undefined, environment);
     expect(plain).toEqual({ model: expect.objectContaining({ modelId: "project-model" }) as unknown });
+  });
+});
+
+describe("a ChatGPT task that stopped using the plan (#342)", () => {
+  const owner = () => developerIdForSlackUser(maya);
+
+  it("marks a plan at its limit, once, and keeps the reason on the task", async () => {
+    const h = await taskFor(maya, { [owner()]: connected });
+    expect(h.actions).toContain("chatgpt-status");
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    expect(await h.tellStatus({ reason: "limit" })).toMatchObject({ status: 200, body: { recorded: true } });
+    expect(await h.tellStatus({ reason: "limit" })).toMatchObject({ status: 200, body: { recorded: false } });
+    log.mockRestore();
+    expect(h.markStatus).toHaveBeenCalledTimes(1);
+    expect(h.markStatus).toHaveBeenCalledWith(owner(), "limit-reached");
+    expect(h.current()).toMatchObject({ chatgptFallback: "limit" });
+  });
+
+  it("revokes a refused connection, and reads the model list again for a refused model", async () => {
+    const revoked = await taskFor(maya, { [owner()]: connected });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    await revoked.tellStatus({ reason: "revoked" });
+    expect(revoked.markStatus).toHaveBeenCalledWith(owner(), "revoked");
+    const model = await taskFor(maya, { [owner()]: connected });
+    await model.tellStatus({ reason: "model" });
+    log.mockRestore();
+    expect(model.refreshModels).toHaveBeenCalledWith(owner());
+    expect(model.markStatus).not.toHaveBeenCalled();
+  });
+
+  it("takes only a known reason, and only from a task on a plan", async () => {
+    const h = await taskFor(maya, { [owner()]: connected });
+    expect(await h.tellStatus({ reason: "bored" })).toMatchObject({ status: 400, body: { error: { code: "CONFIG_INVALID" } } });
+    const plain = await taskFor(maya, {});
+    expect(await plain.tellStatus({ reason: "limit" })).toMatchObject({ body: { error: { code: "CALLBACK_FORBIDDEN" } } });
+  });
+
+  it("leaves a plan at its limit alone for an hour, then tries it again", async () => {
+    const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+    const recent = await taskFor(maya, { [owner()]: { ...connected, status: "limit-reached", statusAt: at(10) } });
+    expect(recent.invocation.payload).not.toHaveProperty("chatgpt");
+    const hourOld = await taskFor(maya, { [owner()]: { ...connected, status: "limit-reached", statusAt: at(61) } });
+    expect(hourOld.invocation.payload.chatgpt).toEqual({ model: { provider: "openai", modelId: "gpt-6.1-sol" } });
   });
 });

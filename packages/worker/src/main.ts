@@ -44,10 +44,10 @@ const state = createWorkerServerState(
       }
       if (invocation.kind === "task") {
         const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
-        const { chatGptToken, ...callbacks } = createWorkerCallbackSinks({ controlPlaneUrl, invocation });
+        const { chatGptToken, chatGptFallback, ...callbacks } = createWorkerCallbackSinks({ controlPlaneUrl, invocation });
         // #341: a task on its owner's ChatGPT plan; the token never leaves this process's memory.
         const session = await resolveTaskSessionModel(invocation.payload,
-          invocation.payload.chatgpt === undefined ? undefined : chatGptTokenSource(chatGptToken));
+          invocation.payload.chatgpt === undefined ? undefined : chatGptTokenSource(chatGptToken), process.env, chatGptFallback);
         return runTaskInvocation(invocation, {
           rootPath,
           model: session.model,

@@ -1,7 +1,7 @@
 import { MissingProviderSecret, defaultBedrockModel, type ModelRole } from "./config.js";
 import { openRouterRouting, readProviderKey, requireKeyedModel } from "./config.js";
 export { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel } from "./config.js";
-import { KEYED_MODEL_PROVIDERS, agentXError, isKeyedModelProvider, type KeyedModelProvider, type ModelIdentifier } from "@agentx/contracts";
+import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, agentXError, isKeyedModelProvider, type KeyedModelProvider, type ModelIdentifier } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type AnthropicMessagesCompat, type OpenAICompletionsCompat, type OpenAIResponsesCompat } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -18,6 +18,40 @@ export interface ModelRuntimeOptions {
    * request (it lasts an hour, and a task can run longer) instead of read from the OpenAI secret. OpenAI models only.
    */
   apiKey?: () => Promise<string>;
+  /**
+   * #342: where a ChatGPT task's requests go once its plan cannot serve them (its limit, a refused connection, a model
+   * it no longer allows). The request that found it goes there before Pi sees anything, and so does every later one.
+   */
+  chatgptFallback?: ChatGptFallback;
+}
+
+/** Why a ChatGPT task stopped using its plan (#342). */
+export type ChatGptFallbackReason = "limit" | "revoked" | "model";
+
+export interface ChatGptFallback {
+  /**
+   * Why the task stopped using its plan, set at the first request that fell back. Kept here, not per runtime, so every
+   * session of the task (its turn, its reviews) goes straight to the fallback once one request found it.
+   */
+  reason?: ChatGptFallbackReason;
+  /** The same request, on the install's default model. Options carry no ChatGPT key. */
+  stream(context: TranscriptContext, options: SimpleStreamOptions | undefined): Promise<AssistantMessageEventStream>;
+  /** Told once, at the first request that fell back. */
+  onFallback(reason: ChatGptFallbackReason): void;
+}
+
+/** A ChatGPT task's plan: its token, and where its requests go once it cannot serve them. */
+interface ChatGptPlan { apiKey: () => Promise<string>; fallback?: ChatGptFallback }
+
+/** OpenAI's words for a ChatGPT plan that no longer allows the model (the spike of 2026-10-11). */
+const CHATGPT_MODEL_REFUSAL = /not supported when using (?:Codex with )?a ChatGPT account/u;
+
+/** Why OpenAI refused a ChatGPT request, from its status and body, or undefined for a refusal a fallback does not fix. */
+function chatGptRefusal(status: number, body: string): ChatGptFallbackReason | undefined {
+  if (body.includes(CHATGPT_PLAN_LIMIT_ERROR)) return "limit";
+  if (status === 401 || status === 403) return "revoked";
+  if ((status === 400 || status === 404) && CHATGPT_MODEL_REFUSAL.test(body)) return "model";
+  return undefined;
 }
 
 /** Resolve missing-credential fallback before creating a session, so its model and usage agree. */
@@ -56,10 +90,12 @@ export async function createConfiguredModelRuntime(selected: ModelIdentifier & {
   if (options.apiKey !== undefined && provider !== "openai") throw agentXError("CONFIG_INVALID", "a ChatGPT plan can run only OpenAI models");
   const key = options.apiKey === undefined ? await readProviderKey(provider, environment[secretArnVariable] ?? "", options.readSecret) : await options.apiKey();
   const { api, baseUrl } = TRANSPORTS[provider];
+  const plan: ChatGptPlan | undefined = options.apiKey === undefined ? undefined
+    : { apiKey: options.apiKey, ...(options.chatgptFallback === undefined ? {} : { fallback: options.chatgptFallback }) };
   runtime.registerProvider(provider, {
     baseUrl, api,
     models: runtime.getModels(provider).map((entry) => ({ ...entry, api, baseUrl, compat: requestCompat(provider, entry.compat) })),
-    streamSimple: (entry, context, streamOptions) => safeProviderStream(provider, entry, context, streamOptions, routing, options.fetch, options.onUsage, options.apiKey),
+    streamSimple: (entry, context, streamOptions) => safeProviderStream(provider, entry, context, streamOptions, routing, options.fetch, options.onUsage, plan),
   });
   try { await runtime.setRuntimeApiKey(provider, key); }
   catch { throw agentXError("RUNTIME_UNAVAILABLE", `${label} credentials could not be initialized`); }
@@ -105,14 +141,18 @@ function eventModel(data: { model?: unknown; message?: { model?: unknown }; resp
   return data.model ?? data.message?.model ?? data.response?.model;
 }
 
-function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions | undefined, routing: Record<string, unknown> | undefined, transport: typeof fetch = fetch, onUsage = (record: Record<string, unknown>) => console.info(JSON.stringify(record)), apiKey?: () => Promise<string>) {
+function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions | undefined, routing: Record<string, unknown> | undefined, transport: typeof fetch = fetch, onUsage = (record: Record<string, unknown>) => console.info(JSON.stringify(record)), plan?: ChatGptPlan) {
   const output = createAssistantMessageEventStream();
+  const chatgpt = plan !== undefined;
   let failureStatus: number | undefined;
+  let refusal: ChatGptFallbackReason | undefined;
   let returnedModel: string | undefined;
   let returnedProvider: string | undefined;
   const observedFetch: typeof fetch = async (input, init) => {
     const response = await transport(input, init);
     if (!response.ok) failureStatus = response.status;
+    // A ChatGPT refusal is told apart by its body, which is read here and never kept, logged or shown.
+    if (!response.ok && plan?.fallback !== undefined) refusal = chatGptRefusal(response.status, (await response.clone().text().catch(() => "")).slice(0, 65_536));
     if (!response.ok || !response.body) return response;
     // Observe only the serving model and router provider identifiers; never record request/response bodies.
     const decoder = new TextDecoder();
@@ -137,13 +177,41 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     }));
     return new Response(body, { status: response.status, statusText: response.statusText, headers: response.headers });
   };
+  /** The rest of this request, and every later one, on the fallback; told once, with why. */
+  const fallBack = async (fallback: ChatGptFallback, reason: ChatGptFallbackReason) => {
+    if (fallback.reason === undefined) {
+      fallback.reason = reason;
+      try { fallback.onFallback(reason); } catch { /* Reporting must not fail the request it is about. */ }
+    }
+    const rest = { ...options };
+    delete rest.apiKey;
+    const replacement = await fallback.stream(context, rest);
+    for await (const event of replacement) output.push(event);
+    output.end(await replacement.result());
+  };
   void (async () => {
     try {
-      // A ChatGPT task's token is asked for each time, so a refreshed one replaces an expiring one.
-      const key = apiKey === undefined ? {} : { apiKey: await apiKey() };
-      const upstream = upstreamStream(provider, model, context, { ...options, ...key, fetch: observedFetch }, routing);
+      if (plan?.fallback?.reason !== undefined) return await fallBack(plan.fallback, plan.fallback.reason);
+      // A ChatGPT task's token is asked for each time, so a refreshed one replaces an expiring one. A token the
+      // control plane will not give (the connection was revoked) sends the request to the fallback.
+      let key: { apiKey?: string } = {};
+      if (plan !== undefined) {
+        try { key = { apiKey: await plan.apiKey() }; }
+        catch (error) {
+          if (plan.fallback === undefined) throw error;
+          return await fallBack(plan.fallback, "revoked");
+        }
+      }
+      // ChatGPT requests are not retried here: a plan's limit does not lift in seconds, and the fallback is ready.
+      const upstream = upstreamStream(provider, model, context, { ...options, ...key, ...(plan === undefined ? {} : { maxRetries: 0 }), fetch: observedFetch }, routing);
+      let started = false;
       for await (const event of upstream) {
-        if (event.type === "error") event.error.errorMessage = safeError(provider, event.reason === "aborted", failureStatus, apiKey !== undefined);
+        // Pi's first event comes only once OpenAI accepted the request, so an error first means nothing reached Pi yet.
+        if (!started && event.type === "error" && refusal !== undefined && plan?.fallback !== undefined && event.reason !== "aborted") {
+          return await fallBack(plan.fallback, refusal);
+        }
+        started = true;
+        if (event.type === "error") event.error.errorMessage = safeError(provider, event.reason === "aborted", failureStatus, chatgpt);
         if (event.type === "done" || event.type === "error") {
           const message = event.type === "done" ? event.message : event.error;
           // Pi retains the response in the transcript. This record also identifies the serving model
@@ -162,7 +230,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     } catch {
       const aborted = options?.signal?.aborted === true;
       const message: AssistantMessage = { role: "assistant", api: model.api, provider, model: model.id,
-        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: safeError(provider, aborted, failureStatus, apiKey !== undefined),
+        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: safeError(provider, aborted, failureStatus, chatgpt),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       };
       output.push({ type: "error", reason: aborted ? "aborted" : "error", error: message });

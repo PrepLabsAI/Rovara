@@ -86,6 +86,8 @@ export function createWorkerCallbackSinks(input: {
   authorizeFeedbackApproval: FeedbackApprovalAuthorizer;
   /** #341: the task owner's ChatGPT access token, for a task that runs on their plan (unparsed; see chatgpt-token.ts). */
   chatGptToken: () => Promise<unknown>;
+  /** #342: tells the control plane why the task stopped using its owner's ChatGPT plan. */
+  chatGptFallback: (reason: "limit" | "revoked" | "model") => Promise<void>;
 } {
   const fetchImplementation = input.fetchImplementation ?? fetch;
   const base = input.controlPlaneUrl.replace(/\/$/, "");
@@ -120,6 +122,7 @@ export function createWorkerCallbackSinks(input: {
   return {
     eventSink: async (events) => post("events", { events }),
     chatGptToken: async () => postForResult("chatgpt-token", {}),
+    chatGptFallback: async (reason) => post("chatgpt-status", { reason }),
     artifactSink: async (artifact) => post("artifacts", artifact),
     terminalSink: async (result) => post("result", {
       status: result.status,
