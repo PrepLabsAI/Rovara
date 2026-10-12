@@ -3,11 +3,15 @@ import { describe, expect, it, vi } from "vitest";
 import { createFeedbackReviewWeb, type FeedbackReviewWebDependencies } from "../../packages/broker/src/aws/feedback-review-web.js";
 import { getWorkflowFeedbackReview, submitWorkflowFeedbackDecision } from "../../packages/broker/src/aws/developer-tasks.js";
 import { authenticateDeveloperSessionId } from "../../packages/broker/src/aws/developer-routes.js";
-import { createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
+import { createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema, type TaskPersonProofRequest, type TaskPersonProofResponse, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
 import { createDeveloperTaskBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
-import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
+import { githubWorkflowPullRequestKey, taskOwnerKey, type DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { feedbackReviewNoticeId } from "../../packages/broker/src/developer/notifications.js";
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
+import { changeTaskPeople, type CheckTaskPerson, type StoredTaskRole, type TaskPeopleDependencies } from "../../packages/broker/src/developer/task-people.js";
+import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
+import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
+import { SLACK_TEAM } from "../support/slack-broker.js";
 
 const taskId = randomUUID();
 const origin = "https://agentx.example.test";
@@ -301,7 +305,8 @@ describe("authenticated PR feedback review web journey", () => {
 
 describe("broker-backed feedback review data", () => {
   /** `firstFinding` changes the first finding (and its reference): for example, to leave it to the owner as a question. */
-  async function preparedReview(prCount = 1, firstFinding: Record<string, unknown> = {}, checkPolicy?: WorkflowCheckPolicyInput, secondFinding: Record<string, unknown> = {}) {
+  async function preparedReview(prCount = 1, firstFinding: Record<string, unknown> = {}, checkPolicy?: WorkflowCheckPolicyInput,
+    secondFinding: Record<string, unknown> = {}, taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>) {
     const now = "2026-10-05T12:00:00.000Z";
     const repositories = prCount === 1 ? [{ repositoryId: "demo", number: 42 }] : [
       { repositoryId: "demo", number: 42 }, { repositoryId: "ui", number: 43 },
@@ -320,7 +325,12 @@ describe("broker-backed feedback review data", () => {
         headTreeSha: repositoryId === "ui" ? "b".repeat(40) : "e".repeat(40) },
       comments: githubFeedback.comments.map(comment => ({ ...comment, url: `${pullRequestUrl}#discussion_r1` })) };
     });
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getPullRequestFeedback: githubRead } } });
+    const harness = await createDeveloperTaskBroker({
+      brokerExtra: { githubPullRequests: { getPullRequestFeedback: githubRead } },
+      ...(taskPersonProof === undefined ? {} : { developerExtra: {
+        taskPeopleConfiguration: { peopleChangesEnabled: true }, taskPersonProof,
+      } }),
+    });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Handle retries", client: "test", workflow: true, workflowPath: "QUICK" });
     const taskId = String((started.body.task as { taskId: string }).taskId);
     const task = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { ownerKey: string; workspaceId: string };
@@ -392,6 +402,146 @@ describe("broker-backed feedback review data", () => {
       refreshTaskFeedback: async () => undefined, now: () => Date.parse(now) };
     return { harness, taskId, deps, workflow, bundleDigest: bundles[0]!.digest, bundleDigests: bundles.map(bundle => bundle.digest), reviewDigest, githubRead };
   }
+
+  const coOwner = { developerId: developerIdForSlackUser("U0COOWNER1"), slackUserId: "U0COOWNER1", name: "Bailey Co-owner",
+    sessionId: "s-feedback-co-owner", amr: "slack" as const };
+  const backupOwner = { developerId: developerIdForSlackUser("U0BACKUP01"), slackUserId: "U0BACKUP01", name: "Riley Backup" };
+
+  async function preparedPeopleApproval() {
+    let coOwnerProof: "eligible" | "departed" | "unknown" = "eligible";
+    const linkedExternal = new Map<string, { developerId: string; slackUserId: string; name: string; issuer: string; subject: string }>();
+    let pauseProof: Promise<void> | undefined;
+    let proofEntered: (() => void) | undefined;
+    const taskPersonProof = vi.fn(async (request: TaskPersonProofRequest) => {
+      if (request.slackUserId === coOwner.slackUserId && pauseProof !== undefined) { proofEntered?.(); await pauseProof; }
+      if (request.slackUserId === coOwner.slackUserId && coOwnerProof === "unknown") return { ok: false as const, error: "slack_unavailable" as const };
+      if (request.slackUserId === coOwner.slackUserId && coOwnerProof === "departed") return { ok: false as const, error: "ineligible" as const };
+      return { ok: true as const, user: { id: request.slackUserId, teamId: SLACK_TEAM,
+        name: request.slackUserId === coOwner.slackUserId ? coOwner.name : request.slackUserId === backupOwner.slackUserId ? backupOwner.name : MAYA.name }, memberOf: [...request.channelIds] };
+    });
+    const fixture = await preparedReview(1, {}, undefined, {}, taskPersonProof);
+    const createdAt = new Date().toISOString();
+    const ownerPersonId = randomUUID();
+    const coOwnerPersonId = randomUUID();
+    const backupOwnerPersonId = randomUUID();
+    fixture.harness.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: `PERSON#${ownerPersonId}`, schemaVersion: 1, personId: ownerPersonId,
+      developerId: MAYA.developerId, slackUserId: MAYA.slackUserId, name: MAYA.name, method: "slack", issuer: "https://slack.com", subject: MAYA.slackUserId, createdAt });
+    fixture.harness.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: `PERSON_SUBJECT#${MAYA.developerId}`, schemaVersion: 1,
+      personId: ownerPersonId, developerId: MAYA.developerId, createdAt });
+    fixture.harness.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: `PERSON#${coOwnerPersonId}`, schemaVersion: 1, personId: coOwnerPersonId,
+      developerId: coOwner.developerId, slackUserId: coOwner.slackUserId, name: coOwner.name, method: "slack", issuer: "https://slack.com", subject: coOwner.slackUserId, createdAt });
+    fixture.harness.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: `PERSON_SUBJECT#${coOwner.developerId}`, schemaVersion: 1,
+      personId: coOwnerPersonId, developerId: coOwner.developerId, createdAt });
+    fixture.harness.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: `PERSON#${backupOwnerPersonId}`, schemaVersion: 1, personId: backupOwnerPersonId,
+      developerId: backupOwner.developerId, slackUserId: backupOwner.slackUserId, name: backupOwner.name, method: "slack", issuer: "https://slack.com", subject: backupOwner.slackUserId, createdAt });
+    fixture.harness.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: `PERSON_SUBJECT#${backupOwner.developerId}`, schemaVersion: 1,
+      personId: backupOwnerPersonId, developerId: backupOwner.developerId, createdAt });
+    fixture.harness.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
+      people: [{ developerId: MAYA.developerId, slackUserId: MAYA.slackUserId, name: MAYA.name, role: "owner" }] });
+    const checkTaskPerson: CheckTaskPerson = async (_task, developerId) => {
+      const person = developerId === coOwner.developerId ? coOwner : developerId === backupOwner.developerId ? backupOwner
+        : linkedExternal.get(developerId) ?? { developerId: MAYA.developerId, slackUserId: MAYA.slackUserId!, name: MAYA.name };
+      const state = developerId === coOwner.developerId ? coOwnerProof : "eligible";
+      if (state === "unknown") throw new Error("proof unavailable");
+      return { subject: { developerId, slackUserId: person.slackUserId },
+        identity: { developerId, slackUserId: person.slackUserId, name: person.name,
+          method: linkedExternal.has(developerId) ? "oidc" : "slack",
+          issuer: linkedExternal.get(developerId)?.issuer ?? "https://slack.com",
+          subject: linkedExternal.get(developerId)?.subject ?? person.slackUserId },
+        eligible: state === "eligible", channelMember: state === "eligible" };
+    };
+    const peopleDeps: TaskPeopleDependencies = { ...fixture.deps, now: () => Date.parse("2026-10-05T12:00:00.000Z"),
+      taskPeopleConfiguration: { peopleChangesEnabled: true }, checkTaskPerson };
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId! };
+    await changeTaskPeople(peopleDeps, owner, fixture.taskId, { requestId: randomUUID(), expectedPeopleRevision: 1,
+      targetDeveloperId: coOwner.developerId, role: "owner" });
+    await changeTaskPeople(peopleDeps, owner, fixture.taskId, { requestId: randomUUID(), expectedPeopleRevision: 2,
+      targetDeveloperId: backupOwner.developerId, role: "owner" });
+    Object.assign(fixture.deps, { taskPeopleConfiguration: { peopleChangesEnabled: true }, checkTaskPerson });
+    await submitWorkflowFeedbackDecision(fixture.deps, coOwner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+    });
+    const approvedTask = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    const operation = fixture.harness.db.find(item => item.pk === `WORKSPACE#${approvedTask.workspaceId}` && item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT")[0]!;
+    const outbox = fixture.harness.db.find(item => item.entityType === "OUTBOX" && item.operationId === operation.id)[0]!;
+    const invocation = outbox.invocation as { payload?: { workflowFeedbackApproval?: unknown } };
+    const callback = () => fixture.harness.callback(approvedTask.workspaceId, String(operation.id), "feedback-approval", invocation.payload?.workflowFeedbackApproval);
+    const setCoOwnerRole = async (role: StoredTaskRole) => {
+      const people = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "PEOPLE") as { revision: number };
+      return changeTaskPeople(peopleDeps, owner, fixture.taskId, { requestId: randomUUID(), expectedPeopleRevision: people.revision,
+        targetDeveloperId: coOwner.developerId, role });
+    };
+    const linkExternalCommenter = () => {
+      const identity = { developerId: ownerKeyForSubject("https://login.example.test", "linked-co-owner"),
+        slackUserId: coOwner.slackUserId, name: "Bailey External", issuer: "https://login.example.test", subject: "linked-co-owner" };
+      linkedExternal.set(identity.developerId, identity);
+      const personId = randomUUID();
+      const createdAt = new Date().toISOString();
+      fixture.harness.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: `PERSON#${personId}`, schemaVersion: 1, personId,
+        ...identity, method: "oidc", createdAt });
+      fixture.harness.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: `PERSON_SUBJECT#${identity.developerId}`, schemaVersion: 1,
+        personId, developerId: identity.developerId, createdAt });
+      const people = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "PEOPLE") as { revision: number; orphaned: boolean; people: unknown[] };
+      fixture.harness.db.set({ ...people, revision: people.revision + 1, people: [...people.people,
+        { developerId: identity.developerId, slackUserId: identity.slackUserId, name: identity.name, role: "commenter" }] });
+      return identity;
+    };
+    return { ...fixture, callback, setCoOwnerRole, setProof: (value: typeof coOwnerProof) => { coOwnerProof = value; },
+      linkExternalCommenter,
+      pause: (proof: Promise<void>, entered: () => void) => { pauseProof = proof; proofEntered = entered; },
+      actorId: taskOwnerKey(coOwner.developerId, fixture.taskId) };
+  }
+
+  it("lets a current co-owner read retained COMPLETE/MERGED feedback, while terminal mutation remains refused", async () => {
+    const fixture = await preparedPeopleApproval();
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    fixture.harness.db.set({ ...task, workflow: { ...task.workflow!, stage: "MERGED", state: "COMPLETE" } });
+    const reader = { ...coOwner, sessionId: coOwner.sessionId, amr: "slack" as const };
+    const operationsBefore = fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION");
+    const decisionsBefore = task.workflow?.feedbackDecisions;
+
+    await expect(getWorkflowFeedbackReview(fixture.deps as never, reader, fixture.taskId))
+      .resolves.toMatchObject({ workflowStatus: "COMPLETE", workflowStage: "MERGED", reviewDigest: fixture.reviewDigest });
+    await expect(submitWorkflowFeedbackDecision(fixture.deps as never, reader, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest,
+      proposalDigest: "b".repeat(64), bundleDigests: [fixture.bundleDigest], decision: "DISMISS", selectedFindingIds: [],
+    })).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    const after = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    expect(after.workflow?.feedbackDecisions).toEqual(decisionsBefore);
+    expect(fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION")).toEqual(operationsBefore);
+  });
+
+  it.each([
+    ["viewer", "viewer" as const, "eligible" as const],
+    ["denied principal", "denied" as const, "eligible" as const],
+    ["unknown current proof", "owner" as const, "unknown" as const],
+  ])("refuses terminal feedback artifact reads for a %s before reading any artifact", async (_label, role, proof) => {
+    const fixture = await preparedPeopleApproval();
+    if (role !== "owner") await fixture.setCoOwnerRole(role);
+    fixture.setProof(proof);
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    fixture.harness.db.set({ ...task, workflow: { ...task.workflow!, stage: "MERGED", state: "COMPLETE" } });
+    const readArtifact = vi.spyOn(fixture.harness.actions, "readArtifact");
+    const failure = await getWorkflowFeedbackReview(fixture.deps as never, { ...coOwner, amr: "slack" }, fixture.taskId)
+      .then(() => undefined, (error: unknown) => error);
+
+    expect(failure).toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(readArtifact).not.toHaveBeenCalled();
+    expect(fixture.harness.db.find(item => item.entityType === "OUTBOX")).toHaveLength(2);
+  });
+
+  it("does not treat a separately linked external identity as the native co-owner's terminal feedback grant", async () => {
+    const fixture = await preparedPeopleApproval();
+    const external = fixture.linkExternalCommenter();
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    fixture.harness.db.set({ ...task, workflow: { ...task.workflow!, stage: "MERGED", state: "COMPLETE" } });
+    const readArtifact = vi.spyOn(fixture.harness.actions, "readArtifact");
+
+    await expect(getWorkflowFeedbackReview(fixture.deps as never, { ...external, sessionId: "s-external", amr: "oidc" }, fixture.taskId))
+      .rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
+    expect(readArtifact).not.toHaveBeenCalled();
+  });
 
   it("loads only the current owner's verified report and comment bundles through broker artifact reads", async () => {
     const fixture = await preparedReview();
@@ -770,6 +920,100 @@ describe("broker-backed feedback review data", () => {
     await expect(fixture.harness.callback(task.workspaceId, String(operation.id), "feedback-approval", invocation.payload?.workflowFeedbackApproval))
       .rejects.toThrow(/feedback approval|GitHub PR feedback changed|no longer current/i);
     expect(fixture.githubRead).toHaveBeenCalledWith("https://github.com/example/demo.git", 42);
+  });
+
+  it("authorizes the exact freshly eligible co-owner at worker start while retaining the creator-bound approval", async () => {
+    const fixture = await preparedPeopleApproval();
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    const decision = task.workflow?.feedbackDecisions?.at(-1);
+    const operation = fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT")[0]!;
+    expect(decision?.actorId).toBe(fixture.actorId);
+    expect(operation.workflowFeedbackApproval).toMatchObject({ ownerId: task.ownerKey });
+    await expect(fixture.callback()).resolves.toMatchObject({ authorized: true });
+  });
+
+  it.each(["viewer", "denied"] as const)("refuses the stored co-owner after an accepted demotion to %s", async (role) => {
+    const fixture = await preparedPeopleApproval();
+    await fixture.setCoOwnerRole(role);
+    await expect(fixture.callback()).rejects.toThrow(/feedback-approval callback failed/);
+  });
+
+  it("refuses an unavailable stored co-owner even while a different canonical owner remains freshly eligible", async () => {
+    const fixture = await preparedPeopleApproval();
+    fixture.setProof("unknown");
+    const people = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "PEOPLE") as { people: Array<{ developerId: string; role: string }> };
+    expect(people.people).toContainEqual(expect.objectContaining({ developerId: backupOwner.developerId, role: "owner" }));
+    await expect(fixture.callback()).rejects.toThrow(/feedback-approval callback failed/);
+  });
+
+  it("fences a co-owner role change that commits while fresh proof is in flight", async () => {
+    const fixture = await preparedPeopleApproval();
+    let releaseProof!: () => void;
+    const proofGate = new Promise<void>(resolve => { releaseProof = resolve; });
+    let proofStarted!: () => void;
+    const entered = new Promise<void>(resolve => { proofStarted = resolve; });
+    fixture.pause(proofGate, proofStarted);
+    const callback = fixture.callback();
+    await entered;
+    await fixture.setCoOwnerRole("viewer");
+    releaseProof();
+    await expect(callback).rejects.toThrow(/feedback-approval callback failed/);
+  });
+
+  it("fences a task close that commits while co-owner proof is in flight", async () => {
+    const fixture = await preparedPeopleApproval();
+    let releaseProof!: () => void;
+    const proofGate = new Promise<void>(resolve => { releaseProof = resolve; });
+    let proofStarted!: () => void;
+    const entered = new Promise<void>(resolve => { proofStarted = resolve; });
+    fixture.pause(proofGate, proofStarted);
+    const callback = fixture.callback();
+    await entered;
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META")!;
+    fixture.harness.db.set({ ...task, closedAt: "2026-10-05T12:01:00.000Z" });
+    releaseProof();
+    await expect(callback).rejects.toThrow(/feedback-approval callback failed/);
+  });
+
+  it("keeps the legacy no-People creator callback valid", async () => {
+    const fixture = await preparedReview();
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+    });
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    const operation = fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT")[0]!;
+    const outbox = fixture.harness.db.find(item => item.entityType === "OUTBOX" && item.operationId === operation.id)[0]!;
+    const approval = (outbox.invocation as { payload?: { workflowFeedbackApproval?: unknown } }).payload?.workflowFeedbackApproval;
+    await expect(fixture.harness.callback(task.workspaceId, String(operation.id), "feedback-approval", approval)).resolves.toMatchObject({ authorized: true });
+  });
+
+  it("fences People creation that commits after a legacy authorization read", async () => {
+    const fixture = await preparedReview();
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+    });
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    const operation = fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT")[0]!;
+    const outbox = fixture.harness.db.find(item => item.entityType === "OUTBOX" && item.operationId === operation.id)[0]!;
+    const approval = (outbox.invocation as { payload?: { workflowFeedbackApproval?: unknown } }).payload?.workflowFeedbackApproval;
+    const send = fixture.harness.db.send;
+    fixture.harness.db.send = async (command) => {
+      const input = (command as { constructor: { name: string }; input?: { Key?: { pk?: unknown; sk?: unknown } } }).input;
+      const response = await send(command);
+      if (command.constructor.name === "GetCommand" && input?.Key?.pk === `DEVTASK#${fixture.taskId}` && input.Key.sk === "PEOPLE"
+        && (response as { Item?: unknown }).Item === undefined) {
+        fixture.harness.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
+          people: [{ developerId: MAYA.developerId, slackUserId: MAYA.slackUserId, name: MAYA.name, role: "owner" }] });
+      }
+      return response;
+    };
+    await expect(fixture.harness.callback(task.workspaceId, String(operation.id), "feedback-approval", approval))
+      .rejects.toThrow(/feedback-approval callback failed/);
+    fixture.harness.db.send = send;
   });
 
   it("does not dispatch when the second fresh GitHub read advances the bound workflow", async () => {

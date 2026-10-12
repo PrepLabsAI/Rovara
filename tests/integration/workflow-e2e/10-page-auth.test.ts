@@ -10,9 +10,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
-import { SlackPageCommentMessageSchema, slackThreadSubject, type ChannelMembersRequest, type ChannelMembersResponse, type PlanDocument } from "@agentx/contracts";
-import { createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
-import { MAYA, OMAR, grantProject } from "../../support/developer-task-broker.js";
+import { SLACK_OIDC_ISSUER, SlackPageCommentMessageSchema, slackThreadSubject, type ChannelMembersRequest, type ChannelMembersResponse, type PlanDocument, type TaskPeopleDisplayReadRequest, type TaskPersonProofRequest } from "@agentx/contracts";
+import { createWorkflowE2E, SLACK_MAYA, type WorkflowE2E } from "../../support/workflow-e2e.js";
+import { MAYA, OMAR, grantProject, type Developer } from "../../support/developer-task-broker.js";
 import { SLACK_CHANNEL, call, orchestratorPrincipal } from "../../support/slack-broker.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../../support/faux-model.js";
 import { createFixtureDirectory } from "../../fixtures/index.js";
@@ -23,6 +23,9 @@ import { feedbackCriticReply } from "../../support/faux-scripts.js";
 import { reviewerFindings } from "../../support/model-fixtures.js";
 import { visibleSlackText } from "../../support/strict-slack.js";
 import { developerIdForSlackUser } from "../../../packages/broker/src/aws/admin-actions.js";
+import type { CheckTaskPerson } from "../../../packages/broker/src/developer/task-people.js";
+import { taskOwnerKey } from "../../../packages/broker/src/developer/task-records.js";
+import type { DeveloperTaskRecord } from "../../../packages/broker/src/developer/task-records.js";
 import type { SlackRequestQueue } from "../../../packages/broker/src/developer/page-comments.js";
 import { handlePageComment } from "../../../packages/slack-service/src/page-comment.js";
 import { runTaskAnswer } from "../../../packages/slack-service/src/task-question.js";
@@ -36,6 +39,8 @@ import { EDITS as GREET_EDITS, PLAN as GREET_PLAN, editsOrFix, journeySuite, ope
 const OWNER: PageReader = { developerId: developerIdForSlackUser(MAYA.slackUserId!), name: MAYA.name, slackUserId: MAYA.slackUserId! };
 /** A teammate in the project's Slack channel. */
 const SAM: PageReader = { developerId: "7".repeat(64), name: "Sam Lee", slackUserId: "U0SAMLEE01" };
+const NATIVE_SAM: PageReader = { ...SAM, developerId: developerIdForSlackUser(SAM.slackUserId!) };
+const SLACK_SAM: Developer = { ...NATIVE_SAM, provider: "slack", sessionId: "s-sam-native" };
 /** Someone on the same Slack workspace who may use the project but is not in the task's channel. */
 const PRIYA: PageReader = { developerId: "6".repeat(64), name: "Priya Shah", slackUserId: "U0PRIYA001" };
 /** Someone signed in with company sign-in: no Slack identity, not in the channel. */
@@ -65,6 +70,30 @@ const DAY = 24 * 60 * 60 * 1000;
 const members = async (request: ChannelMembersRequest): Promise<ChannelMembersResponse> => ({
   ok: true, memberOf: [MAYA.slackUserId, SAM.slackUserId].includes(request.slackUserId) ? request.channelIds.filter((id) => id === SLACK_CHANNEL) : [],
 });
+
+function taskPeopleDirectory() {
+  const names = new Map([[SLACK_MAYA.slackUserId!, SLACK_MAYA.name], [SLACK_SAM.slackUserId!, SLACK_SAM.name]]);
+  const memberships = new Map([...names.keys()].map((slackUserId) => [slackUserId, new Set([SLACK_CHANNEL])]));
+  const proof = async (request: TaskPersonProofRequest) => {
+    const name = names.get(request.slackUserId);
+    if (name === undefined) return { ok: false as const, error: "ineligible" as const };
+    return { ok: true as const, user: { id: request.slackUserId, teamId: "T0BSHLLUGBD", name },
+      memberOf: [...(memberships.get(request.slackUserId) ?? [])].filter((channelId) => request.channelIds.includes(channelId)) };
+  };
+  const display = async (request: TaskPeopleDisplayReadRequest) => request.operation === "proof"
+    ? { operation: "proof" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: await proof(request.request) }
+    : { operation: "directory" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const,
+      users: [...names].map(([id, name]) => ({ id, teamId: "T0BSHLLUGBD", name,
+        memberOf: [...(memberships.get(id) ?? [])].filter((channelId) => request.request.channelIds.includes(channelId)) })) } };
+  const check: CheckTaskPerson = async (task, developerId) => {
+    const entry = [...names].find(([slackUserId]) => developerIdForSlackUser(slackUserId) === developerId);
+    if (entry === undefined) throw new Error("fresh task person proof is unavailable");
+    const [slackUserId, name] = entry;
+    return { subject: { developerId, slackUserId }, identity: { developerId, slackUserId, name, method: "slack", issuer: SLACK_OIDC_ISSUER, subject: slackUserId },
+      eligible: true, channelMember: task.share === undefined || memberships.get(slackUserId)?.has(task.share.channelId) === true };
+  };
+  return { proof, display, check };
+}
 
 const codingRuns = (e2e: WorkflowE2E) => e2e.invocations.filter((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "IMPLEMENT");
 
@@ -308,15 +337,181 @@ describe("Suite 10: page and auth", () => {
     expect(sam.status).toBe(200);
     expect(sam.text()).toContain("You can read this task.");
     expect(sam.text()).toContain("Decisions are made in Slack.");
-    expect(sam.document.querySelector("#agentx-page-data")).toBeNull();
-    // A page opened now carries no token to post with; one left open from before the merge is refused in plain words.
-    expect((await openTaskPage(e2e, OWNER)).jar.csrf).toBeUndefined();
+    const stateIsland = sam.document.querySelector("#agentx-page-data")!;
+    expect(JSON.parse(stateIsland.textContent)).toEqual({
+      taskId: e2e.taskId(), csrf: sam.jar.csrf, revision: e2e.workflow().revision, role: "commenter",
+      canDecide: false, canComment: false, canSuggest: false, canAsk: false, canRead: true,
+      canManagePeople: false, canTakeOwnership: false, askAvailable: false, commentSeq: 0,
+    });
+    expect(sam.document.querySelector("#decide-approve")).toBeNull();
+    expect(sam.document.querySelector(".comment-open")).toBeNull();
+    expect(sam.document.querySelector("[data-people-role-form]")).toBeNull();
+    expect(sam.document.querySelector("[data-people-take-ownership-form]")).toBeNull();
+    expect(sam.document.querySelector("[data-people-confirm]")).toBeNull();
+    expect(sam.document.querySelector("#history")).not.toBeNull();
+    // The read-only state keeps its polling token, but both a current tab and one left open before the merge are refused.
+    const terminalOwner = await openTaskPage(e2e, OWNER);
+    expect(terminalOwner.jar.csrf).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(await pageApi(terminalOwner, e2e, "comments", commentBody({ kind: "document" }, "Another late thought.")))
+      .toEqual({ status: 409, body: { error: "changed", message: "This task is closed, so it takes no new comments." } });
     expect(await pageApi(early, e2e, "comments", commentBody({ kind: "document" }, "Late thought.")))
       .toEqual({ status: 409, body: { error: "changed", message: "This task is closed, so it takes no new comments." } });
     expect(peopleComments(e2e)).toEqual([]);
   }, 120_000);
 
-  it.todo("10.2 an explicit Viewer role, and the People form that grants it (spec 061 slice 3, not built yet): a channel member made a Viewer reads the page but cannot comment");
+  it("10.2 a co-owner carries one Full task through page, Slack and MCP decisions, a same-PR feedback fix and one merge cleanup", async () => {
+    const directory = taskPeopleDirectory();
+    const requirements = planDocument({ title: "Retry banner requirements", decisions: [], claims: [{ id: "1", text: "Show failed payments clearly." }] });
+    const revisedRequirements = planDocument({ title: "Retry banner requirements", decisions: [], claims: [{ id: "1", text: "Show failed payments clearly without hiding the amount." }] });
+    const design = planDocument({ title: "Retry banner design", decisions: [], claims: [{ id: "1", text: "Render the banner above the payment form." }] });
+    const codingPlan = planDocument({ title: "Retry banner coding plan", decisions: [], claims: [{ id: "1", text: "Add and test the banner in greeting.ts." }] });
+    let requirementsRuns = 0;
+    const e2e = await createWorkflowE2E({ canvas: "unavailable", channelMembers: members, taskPeople: {
+      changesEnabled: true, checkTaskPerson: directory.check, taskPersonProof: directory.proof, taskPeopleDisplayRead: directory.display,
+      developers: [SLACK_SAM],
+    }, model: { plan: (latest) => {
+      if (/You are writing the requirements/.test(latest)) return planAnswer(++requirementsRuns === 1 ? requirements : revisedRequirements);
+      if (/You are writing the design/.test(latest)) return planAnswer(design);
+      return planAnswer(codingPlan);
+    }, edits: editsOrFix, feedback: (prompt) => feedbackCriticReply(prompt, { repositoryId: "demo", path: "greeting.ts", testPath: "greeting.test.ts" }) } });
+    expect(await e2e.mention("full: Show a retry banner when a payment fails")).toBe(200);
+    await e2e.settle();
+    const originalTask = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META"))!;
+
+    await e2e.click("agentx_task_people");
+    await e2e.submitView({ task_person: { person: { selected_user: SLACK_SAM.slackUserId } },
+      task_role: { role: { selected_option: { value: "viewer" } } } });
+    const viewer = await openTaskPage(e2e, NATIVE_SAM, { search: "?doc=requirements", scripts: false });
+    expect(viewer.status).toBe(200);
+    expect(viewer.text()).toContain("You can read this task.");
+    expect(viewer.document.querySelector("#decide-approve")).toBeNull();
+    expect(viewer.document.querySelector(".comment-open")).toBeNull();
+
+    const owner = await openTaskPage(e2e, OWNER, { search: "?doc=requirements" });
+    const listed = await owner.fetch(`/review/${e2e.taskId()}/task/api/people`);
+    const people = await listed.json() as { revision: number; people: Array<{ personId: string; name: string }> };
+    const sam = people.people.find((person) => person.name === SLACK_SAM.name)!;
+    const roleRequestId = randomUUID();
+    expect(await pageApi(owner, e2e, "people/role", { requestId: roleRequestId, expectedPeopleRevision: people.revision,
+      personId: sam.personId, role: "owner" })).toMatchObject({ status: 202, body: { status: "PENDING", requestId: roleRequestId } });
+    const confirmation = await request(e2e, "GET", `/review/${e2e.taskId()}/task/people/confirm/${roleRequestId}`, { cookie: owner.jar.header() });
+    expect(confirmation.status).toBe(200);
+    expect(confirmation.body).toContain(SLACK_SAM.name);
+    expect(await pageApi(owner, e2e, `people/requests/${roleRequestId}/confirm`, { requestId: roleRequestId }))
+      .toMatchObject({ status: 200, body: { status: "COMMITTED" } });
+
+    const requirementsPage = await openTaskPage(e2e, NATIVE_SAM, { search: "?doc=requirements" });
+    requirementsPage.byId("decide-request-changes").click();
+    requirementsPage.byId("decide-note").type_("Keep the payment amount visible.");
+    requirementsPage.byId("decide-submit").click();
+    await requirementsPage.settle();
+    await e2e.settle();
+    expect(e2e.workflow().decisions.at(-1)).toMatchObject({ decision: "REQUEST_CHANGES", via: "PAGE", actorId: taskOwnerKey(SLACK_SAM.developerId, e2e.taskId()) });
+
+    const setSamRole = async (role: "viewer" | "owner" | "denied") => {
+      const response = await owner.fetch(`/review/${e2e.taskId()}/task/api/people`);
+      const current = await response.json() as { revision: number; people: Array<{ personId: string; name: string }> };
+      const target = current.people.find((person) => person.name === SLACK_SAM.name)!;
+      const requestId = randomUUID();
+      expect((await pageApi(owner, e2e, "people/role", { requestId, expectedPeopleRevision: current.revision,
+        personId: target.personId, role })).status).toBe(202);
+      expect((await pageApi(owner, e2e, `people/requests/${requestId}/confirm`, { requestId })).status).toBe(200);
+    };
+    await setSamRole("viewer");
+    const staleWorkflow = e2e.workflow();
+    expect((await pageApi(requirementsPage, e2e, "decision", { requestId: randomUUID(), expectedRevision: staleWorkflow.revision,
+      artifactDigest: staleWorkflow.artifacts.at(-1)!.sha256, decision: "APPROVE", answers: [], includedCommentIds: [] })).status).toBe(403);
+    const demoted = await openTaskPage(e2e, NATIVE_SAM, { search: "?doc=requirements", scripts: false });
+    expect(demoted.status).toBe(200);
+    expect(demoted.document.querySelector("#decide-approve")).toBeNull();
+    await setSamRole("denied");
+    e2e.people.changesEnabled(false);
+    expect((await openTaskPage(e2e, NATIVE_SAM, { search: "?doc=requirements", scripts: false })).status).toBe(404);
+    const disabledPeople = await owner.fetch(`/review/${e2e.taskId()}/task/api/people`);
+    const disabledView = await disabledPeople.json() as { revision: number; people: Array<{ personId: string; name: string }> };
+    const disabledSam = disabledView.people.find((person) => person.name === SLACK_SAM.name)!;
+    expect((await pageApi(owner, e2e, "people/role", { requestId: randomUUID(), expectedPeopleRevision: disabledView.revision,
+      personId: disabledSam.personId, role: "owner" })).status).not.toBe(202);
+    e2e.people.changesEnabled(true);
+    await setSamRole("owner");
+
+    const views = e2e.slack.views.length;
+    await e2e.click("agentx_workflow_approve", { user: SLACK_SAM.slackUserId! });
+    if (e2e.slack.views.length > views) await e2e.submitView({}, { user: SLACK_SAM.slackUserId! });
+    await e2e.settle();
+    expect(e2e.workflow().decisions.at(-1)).toMatchObject({ decision: "APPROVE", actorId: taskOwnerKey(SLACK_SAM.developerId, e2e.taskId()) });
+
+    const designWorkflow = e2e.workflow();
+    const designArtifact = designWorkflow.artifacts.at(-1)!;
+    const mcpDecision = await e2e.mcp("agentx_decide_workflow", { task_id: e2e.taskId(), request_id: randomUUID(), expected_revision: designWorkflow.revision,
+      decision: "APPROVE", reason: "The design is ready.", artifact_digest: designArtifact.sha256 }, SLACK_SAM);
+    expect(mcpDecision.isError).toBe(false);
+    await e2e.settle();
+    const coding = await openTaskPage(e2e, NATIVE_SAM, { search: "?doc=coding-plan" });
+    coding.byId("decide-approve").click();
+    coding.byId("decide-submit").click();
+    await coding.settle();
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(codingRuns(e2e)).toHaveLength(1);
+
+    const pullRequest = e2e.github.pullRequests[0]!;
+    const firstWorkflow = e2e.workflow();
+    const first = { number: pullRequest.number, branch: pullRequest.headBranch, commit: pullRequest.commit, candidate: firstWorkflow.candidate!.digest,
+      reviewOperations: firstWorkflow.reviews!.map((review) => review.operationId) };
+    const comment = e2e.github.comment(pullRequest.number, "octocat", "Please trim the name.");
+    expect(await e2e.githubWebhook(pullRequest.number, { comment })).toBe(200);
+    await e2e.settle();
+    expect((await e2e.feedbackPage(SLACK_SAM)).status).toBe(200);
+    const feedback = await e2e.feedbackPage(SLACK_SAM, { api: true });
+    const review = JSON.parse(feedback.body) as { revision: number; reviewDigest: string; proposalDigest: string; bundleDigests: string[] };
+    const decision = await e2e.feedbackDecision({ requestId: randomUUID(), expectedRevision: review.revision, reviewDigest: review.reviewDigest,
+      proposalDigest: review.proposalDigest, bundleDigests: review.bundleDigests, decision: "APPROVE", selectedFindingIds: ["finding-1"] }, { reader: SLACK_SAM });
+    expect(decision.status, JSON.stringify(decision.body)).toBe(200);
+    await e2e.settle();
+    const fixedWorkflow = e2e.workflow();
+    expect(e2e.github.pullRequests).toHaveLength(1);
+    expect(pullRequest.number).toBe(first.number);
+    expect(pullRequest.headBranch).toBe(first.branch);
+    expect(pullRequest.commit).not.toBe(first.commit);
+    expect(fixedWorkflow.candidate!.digest).not.toBe(first.candidate);
+    expect(fixedWorkflow.verification?.candidateDigest).toBe(fixedWorkflow.candidate!.digest);
+    expect(fixedWorkflow.reviews).toHaveLength(2);
+    expect(fixedWorkflow.reviews!.every((review) => review.candidateDigest === fixedWorkflow.candidate!.digest)).toBe(true);
+    expect(fixedWorkflow.reviews!.every((review) => !first.reviewOperations.includes(review.operationId))).toBe(true);
+    expect(fixedWorkflow.pullRequests![0]).toMatchObject({ number: first.number, candidateDigest: fixedWorkflow.candidate!.digest,
+      headTreeSha: fixedWorkflow.candidate!.repositories[0]!.treeSha });
+    expect(codingRuns(e2e)).toHaveLength(2);
+
+    const task = e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META") as unknown as DeveloperTaskRecord;
+    e2e.github.merge(pullRequest.number);
+    expect(await e2e.githubWebhook(pullRequest.number, { merged: true })).toBe(200);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+    expect(e2e.db.get(String(task.charge.member.pk), String(task.charge.member.sk))?.count).toBe(0);
+    expect(e2e.db.get(String(task.charge.organization.pk), String(task.charge.organization.sk))?.count).toBe(0);
+    expect(e2e.db.get(`WORKSPACE#${String(task.workspaceId)}`, "META")?.status).toBe("CLOSED");
+    expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")).toMatchObject({ developerId: originalTask.developerId,
+      ownerKey: originalTask.ownerKey, conversationId: originalTask.conversationId, charge: originalTask.charge });
+    expect(e2e.workflow().decisions.filter((entry) => entry.actorId === taskOwnerKey(SLACK_SAM.developerId, e2e.taskId()))).toHaveLength(4);
+    e2e.people.changesEnabled(false);
+    const terminal = await openTaskPage(e2e, NATIVE_SAM, { scripts: false });
+    expect(terminal.status).toBe(200);
+    expect(terminal.document.querySelector("#decide-approve")).toBeNull();
+    expect(terminal.document.querySelector(".comment-open")).toBeNull();
+    expect(terminal.text()).toContain(SLACK_SAM.name);
+    expect(terminal.text()).toContain("Merged");
+    const terminalPeople = await owner.fetch(`/review/${e2e.taskId()}/task/api/people`);
+    expect(terminalPeople.status).toBe(200);
+    const terminalView = await terminalPeople.json() as { revision: number; people: Array<{ personId: string; name: string }> };
+    const terminalSam = terminalView.people.find((person) => person.name === SLACK_SAM.name)!;
+    expect((await pageApi(owner, e2e, "people/role", { requestId: randomUUID(), expectedPeopleRevision: terminalView.revision,
+      personId: terminalSam.personId, role: "viewer" })).status).not.toBe(202);
+    expect(await e2e.githubWebhook(pullRequest.number, { merged: true })).toBe(200);
+    await e2e.settle();
+    expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
+  }, 180_000);
 
   it("10.3 the page fits a phone at every stage: the plan, failed checks, blocked reviews, waiting for the merge, merged; and so does the PR feedback page", async () => {
     const plan = await waitingPlan();
