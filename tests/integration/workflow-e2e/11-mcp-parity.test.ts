@@ -39,15 +39,15 @@ function taskPeopleDirectory(baileyInTaskChannel = true) {
     : { operation: "directory" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const,
       users: [...names].map(([id, name]) => ({ id, teamId: "T0BSHLLUGBD", name,
         memberOf: [...(members.get(id) ?? [])].filter((channel) => request.request.channelIds.includes(channel)) })) } };
-  const check: CheckTaskPerson = async (_task, developerId) => {
+  const check: CheckTaskPerson = async (task, developerId) => {
     const found = [...names].find(([slackUserId]) => developerIdForSlackUser(slackUserId) === developerId);
-    const slackUserId = found?.[0] ?? SLACK_MAYA.slackUserId!;
-    const name = found?.[1] ?? SLACK_MAYA.name;
+    if (found === undefined) throw new Error("fresh task person proof is unavailable");
+    const [slackUserId, name] = found;
     return {
       subject: { developerId, slackUserId },
       identity: { developerId, slackUserId, name, method: "slack", issuer: SLACK_OIDC_ISSUER, subject: slackUserId },
-      eligible: found !== undefined,
-      channelMember: found !== undefined && (members.get(slackUserId)?.size ?? 0) > 0,
+      eligible: true,
+      channelMember: task.share === undefined || members.get(slackUserId)?.has(task.share.channelId) === true,
     };
   };
   return { members, proof, display, check };
@@ -352,6 +352,16 @@ describe("Suite 11: MCP parity", () => {
 
   it("11.7 signed People, MCP proposals and a current-owner Retry preserve the parked operation", async () => {
     const directory = taskPeopleDirectory(false);
+    directory.members.get(SLACK_MAYA.slackUserId!)!.add(SECOND_CHANNEL);
+    await expect(directory.check({
+      pk: "DEVTASK#11711111-2222-4333-8444-555555555550", sk: "META", entityType: "DEVELOPER_TASK",
+      taskId: "11711111-2222-4333-8444-555555555550", developerId: SLACK_MAYA.developerId, provider: "slack",
+      developerName: SLACK_MAYA.name, slackUserId: SLACK_MAYA.slackUserId!, client: "slack", project: "payments", title: "People proof",
+      workspaceId: "11711111-2222-4333-8444-555555555551", ownerKey: "owner", conversationId: "conversation", startingRevision: 1,
+      charge: { member: { pk: "MEMBER#maya", sk: "USAGE" }, organization: { pk: "ORG#acme", sk: "USAGE" } },
+      shared: true, share: { teamId: "T0BSHLLUGBD", channelId: "C0123456789", mode: "continue", sharedReason: "requested", sharedAt: "2026-10-11T00:00:00.000Z" },
+      createdAt: "2026-10-11T00:00:00.000Z", updatedAt: "2026-10-11T00:00:00.000Z",
+    }, "e".repeat(64))).rejects.toThrow("fresh task person proof is unavailable");
     const linkedExternal = { developerId: "f".repeat(64), name: "Maya External", provider: "oidc" as const,
       sessionId: "s-maya-external", slackUserId: SLACK_MAYA.slackUserId! };
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
@@ -408,7 +418,8 @@ describe("Suite 11: MCP parity", () => {
     const invocationsBeforeApproval = e2e.invocations.length;
     const charge = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")!.charge);
     await e2e.click("agentx_workflow_approve");
-    directory.members.get(SLACK_MAYA.slackUserId!)!.clear();
+    directory.members.get(SLACK_MAYA.slackUserId!)!.delete("C0123456789");
+    expect([...directory.members.get(SLACK_MAYA.slackUserId!)!]).toEqual([SECOND_CHANNEL]);
     await e2e.settle();
     const queued = e2e.db.find((item) => item.entityType === "OUTBOX"
       && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "IMPLEMENT")[0]!;
@@ -422,7 +433,7 @@ describe("Suite 11: MCP parity", () => {
     await e2e.click("agentx_task_people", { user: BAILEY.slackUserId });
     expect(e2e.people.replies.slice(peopleRepliesBeforeTakeover)).toEqual([expect.objectContaining({ action: "read", statusCode: 200 })]);
     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toMatchObject({ orphaned: true,
-      people: [expect.objectContaining({ slackUserId: SLACK_MAYA.slackUserId, role: "denied" }), expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "viewer" })] });
+      people: [expect.objectContaining({ slackUserId: SLACK_MAYA.slackUserId, role: "commenter" }), expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "viewer" })] });
     expect(e2e.slack.views.at(-1)?.view).toMatchObject({ callback_id: "agentx_task_take_ownership" });
     const beforeTakeoverProposal = structuredClone(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE"));
     const takeoverProposal = await tool(e2e, "agentx_take_task_ownership", { task_id: e2e.taskId(), request_id: "11711111-2222-4333-8444-555555555559",
@@ -432,7 +443,7 @@ describe("Suite 11: MCP parity", () => {
     await e2e.submitView({}, { user: BAILEY.slackUserId });
     const taken = e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")!;
     expect(taken).toMatchObject({ orphaned: false, people: [
-      expect.objectContaining({ slackUserId: SLACK_MAYA.slackUserId, role: "denied" }),
+      expect.objectContaining({ slackUserId: SLACK_MAYA.slackUserId, role: "commenter" }),
       expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "owner" }),
     ] });
     expect(e2e.db.get(String(queued.pk), String(queued.sk))?.status).toBe("WAITING_FOR_TASK_ACCESS");
