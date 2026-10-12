@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId } from "@agentx/contracts";
 import { developerTaskIdentity, plannerRepliesKey } from "../../packages/broker/src/developer/task-records.js";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
-import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds } from "../../packages/broker/src/aws/developer-task-notifier.js";
+import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import type { Notice } from "../../packages/broker/src/developer/notifications.js";
 import { MAYA, createDeveloperTaskBroker, recordStream } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
@@ -49,7 +49,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   let clock = Date.now();
   let failing: string | undefined;
   const deliveryFailed = vi.fn();
-  const retryLater = vi.fn(async () => undefined);
+  const retryLater = vi.fn<NotifierDependencies["retryLater"]>(async () => undefined);
   const handle = createNotifierHandler({
     documentClient: options.documentClient?.(harness.db) ?? harness.db, tableName: "state",
     enqueue: async (notices) => { for (const notice of notices) queue.push({ notice, attempt: 0 }); },
@@ -1442,7 +1442,9 @@ describe("chat.postMessage", () => {
     expect(JSON.parse((ok.mock.calls[0] as unknown as [string, RequestInit & { body: string }])[1].body) as unknown).toMatchObject({ channel: SLACK_CHANNEL, thread_ts: "1695500000.000100", unfurl_links: false });
     const refused = vi.fn(async () => Response.json({ ok: false, error: "not_in_channel" }));
     await expect(chatPostMessage(BOT_TOKEN, { channel: SLACK_CHANNEL, text: "hi" }, refused as unknown as typeof fetch)).rejects.toMatchObject({ slackError: "not_in_channel" });
-    const error = await chatPostMessage(BOT_TOKEN, { channel: SLACK_CHANNEL, text: "hi" }, refused as unknown as typeof fetch).catch((caught: unknown) => caught as Error);
+    const error = await chatPostMessage(BOT_TOKEN, { channel: SLACK_CHANNEL, text: "hi" }, refused as unknown as typeof fetch).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(Error);
+    if (!(error instanceof Error)) throw new Error("expected chat.postMessage to reject with an Error");
     expect(error.message).not.toContain(BOT_TOKEN);
   });
 

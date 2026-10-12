@@ -713,11 +713,10 @@ describe("publication check results (#170)", () => {
 
   function withReadiness(
     fixture: Awaited<ReturnType<typeof createFixture>>,
-    readiness: Array<Record<string, unknown>>,
+    readiness: Extract<WorkerInvocation, { kind: "publish" }>['payload']['project']['readiness'],
   ): typeof fixture.invocation {
-    const invocation = structuredClone(fixture.invocation) as typeof fixture.invocation & {
-      payload: { project: { readiness: Array<Record<string, unknown>> } };
-    };
+    const invocation = structuredClone(fixture.invocation);
+    if (invocation.kind !== "publish") throw new Error("expected a publish invocation");
     invocation.payload.project.readiness = readiness;
     return invocation;
   }
@@ -833,11 +832,10 @@ describe("publication checks in a devcontainer (#183)", () => {
 
   function withReadiness(
     fixture: Awaited<ReturnType<typeof createFixture>>,
-    readiness: Array<Record<string, unknown>>,
+    readiness: Extract<WorkerInvocation, { kind: "publish" }>['payload']['project']['readiness'],
   ): typeof fixture.invocation {
-    const invocation = structuredClone(fixture.invocation) as typeof fixture.invocation & {
-      payload: { project: { readiness: Array<Record<string, unknown>> } };
-    };
+    const invocation = structuredClone(fixture.invocation);
+    if (invocation.kind !== "publish") throw new Error("expected a publish invocation");
     invocation.payload.project.readiness = readiness;
     return invocation;
   }

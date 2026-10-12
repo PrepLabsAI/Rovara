@@ -1,4 +1,4 @@
-import { vi } from "vitest";
+import { vi, type Mock } from "vitest";
 
 export const WORKSPACE_ID = "11111111-1111-4111-8111-111111111111";
 export const CONVERSATION_ID = "22222222-2222-4222-8222-222222222222";
@@ -16,7 +16,17 @@ export const LIFECYCLE_CASES = [
   { tool: "agentx_revert_pull_request", action: "revert", params: { repository: "web", pullRequestNumber: 12, title: "Revert #12" } },
 ] as const;
 
-export function managePullRequestApi() {
+type ManagePullRequestApi = {
+  submitTask: Mock;
+  taskStatus: Mock;
+  taskResult: Mock;
+  followUp: Mock;
+  createPullRequest: Mock;
+  managePullRequest: Mock<() => Promise<{ operation: { id: string } }>>;
+  pullRequestResult: Mock<() => Promise<{ status: "SUCCEEDED"; url: string }>>;
+};
+
+export function managePullRequestApi(): ManagePullRequestApi {
   return {
     submitTask: vi.fn(),
     taskStatus: vi.fn(),
