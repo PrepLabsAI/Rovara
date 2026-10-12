@@ -6,6 +6,8 @@ import { randomBytes } from "node:crypto";
 import { z } from "zod";
 import {
   CommentDocumentSchema, CommentTargetSchema, DECISION_COMMENTS_MAX, PAGE_API_BODY_MAX_BYTES, PAGE_NOTE_MAX_CHARS,
+  TaskPeopleRoleRequestSchema, TaskPeopleTakeOwnershipRequestSchema,
+  type TaskPeopleChangeResult, type TaskPeopleRoleRequest, type TaskPeopleTakeOwnershipRequest, type TaskPeopleView,
 } from "@agentx/contracts";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
@@ -14,7 +16,7 @@ import type { PlanAnchor } from "./plan-page/render-plan.js";
 import { CSRF_COOKIE, SESSION_COOKIE, csrfCookie, isCsrfToken, parseCookie, safeResponse, type WebResponse } from "./web-session.js";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-export const TASK_PAGE_API = new RegExp(`^/review/(${UUID})/task/api/(state|comments|comments/(${UUID})/(edit|delete)|suggestions|decision)$`, "i");
+export const TASK_PAGE_API = new RegExp(`^/review/(${UUID})/task/api/(state|comments|comments/(${UUID})/(edit|delete)|suggestions|decision|people|people/role|people/take-ownership|people/requests/(${UUID})(/confirm)?)$`, "i");
 /** Any path under the task page's API, known or not: it is the API's to answer, never the PR feedback page's. */
 export const TASK_PAGE_API_PREFIX = new RegExp(`^/review/(${UUID})/task/api(/|$)`, "i");
 
@@ -28,6 +30,14 @@ export interface TaskPageState {
   documents: Array<{ anchor: PlanAnchor; version: number }>;
   /** Moves whenever a comment, reply or suggestion is written. */
   commentSeq: number;
+  peopleRevision?: number;
+  canRead: boolean;
+  canComment: boolean;
+  canSuggest: boolean;
+  canDecide: boolean;
+  canAsk: boolean;
+  canManagePeople: boolean;
+  canTakeOwnership: boolean;
 }
 
 const DecisionIdSchema = z.string().max(4);
@@ -80,6 +90,11 @@ export interface TaskWebApiDependencies {
   setSuggestion(caller: DeveloperCaller, taskId: string, input: PageSuggestionInput): Promise<unknown>;
   /** Must refuse a caller who may not decide with an error carrying `pageReason: "owners_only"`. */
   decide(caller: DeveloperCaller, taskId: string, input: PageDecisionInput): Promise<{ revision: number }>;
+  getPeople?(caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView>;
+  proposePeopleRole?(caller: DeveloperCaller, taskId: string, input: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult>;
+  proposeOwnership?(caller: DeveloperCaller, taskId: string, input: TaskPeopleTakeOwnershipRequest): Promise<TaskPeopleChangeResult>;
+  getPeopleRequest?(caller: DeveloperCaller, taskId: string, requestId: string): Promise<TaskPeopleChangeResult>;
+  confirmPeopleRequest?(caller: DeveloperCaller, taskId: string, requestId: string): Promise<TaskPeopleChangeResult>;
 }
 
 const NOT_FOUND = { error: "not_found", message: "You don't have access to this task." };
@@ -128,12 +143,15 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
     if (route === null) return json(404, { error: "not_found" });
     const taskId = route[1]!.toLowerCase();
     const commentId = route[3]?.toLowerCase();
+    const peopleRequestId = route[5]?.toLowerCase();
     // `comments/<ID>/edit` and `comments/<ID>/delete` are the comments endpoint, for that comment.
     const endpoint = commentId === undefined ? route[2]!.toLowerCase() : "comments";
     const action = route[4]?.toLowerCase();
+    const peopleConfirm = route[6] !== undefined;
     const method = request.method.toUpperCase();
     // `state` is read, `comments` is read (GET) and written (POST), everything else is written.
-    const allowed = endpoint === "state" ? ["GET"] : endpoint === "comments" && commentId === undefined ? ["GET", "POST"] : ["POST"];
+    const allowed = endpoint === "state" || endpoint === "people" || (peopleRequestId !== undefined && !peopleConfirm)
+      ? ["GET"] : endpoint === "comments" && commentId === undefined ? ["GET", "POST"] : ["POST"];
     if (!allowed.includes(method)) {
       const refused = json(405, { error: "method_not_allowed" });
       refused.headers.allow = allowed.join(", ");
@@ -141,6 +159,14 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
     }
     try {
       if (method === "GET") {
+        if (endpoint === "people") {
+          if (deps.getPeople === undefined) return json(404, { error: "not_found" });
+          return json(200, await deps.getPeople(caller, taskId));
+        }
+        if (peopleRequestId !== undefined) {
+          if (deps.getPeopleRequest === undefined) return json(404, { error: "not_found" });
+          return json(200, await deps.getPeopleRequest(caller, taskId, peopleRequestId));
+        }
         if (endpoint === "comments") {
           const listed = await deps.listComments(caller, taskId);
           return json(200, { comments: listed.comments, suggestions: listed.suggestions ?? [] });
@@ -148,7 +174,12 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
         const state = await deps.taskState(caller, taskId);
         const current = parseCookie(request.headers, CSRF_COOKIE);
         const csrf = isCsrfToken(current) ? current : randomBytes(32).toString("base64url");
-        const response = json(200, { ...state, csrf });
+        const response = json(200, {
+          revision: state.revision, waiting: state.waiting, stage: state.stage, documents: state.documents, commentSeq: state.commentSeq,
+          ...(state.peopleRevision === undefined ? {} : { peopleRevision: state.peopleRevision }),
+          canRead: state.canRead, canComment: state.canComment, canSuggest: state.canSuggest, canDecide: state.canDecide,
+          canAsk: state.canAsk, canManagePeople: state.canManagePeople, canTakeOwnership: state.canTakeOwnership, csrf,
+        });
         response.headers["set-cookie"] = csrfCookie(csrf);
         return response;
       }
@@ -162,6 +193,29 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
         value = JSON.parse(body);
       } catch {
         return invalid();
+      }
+      if (endpoint === "people/role") {
+        if (deps.proposePeopleRole === undefined) return json(404, { error: "not_found" });
+        const parsed = TaskPeopleRoleRequestSchema.safeParse(value);
+        if (!parsed.success) return invalid();
+        const result = await deps.proposePeopleRole(caller, taskId, parsed.data);
+        return json(result.status === "PENDING" ? 202 : 200, result);
+      }
+      if (endpoint === "people/take-ownership") {
+        if (deps.proposeOwnership === undefined) return json(404, { error: "not_found" });
+        const parsed = TaskPeopleTakeOwnershipRequestSchema.safeParse(value);
+        if (!parsed.success) return invalid();
+        const result = await deps.proposeOwnership(caller, taskId, parsed.data);
+        return json(result.status === "PENDING" ? 202 : 200, result);
+      }
+      if (peopleRequestId !== undefined && peopleConfirm) {
+        if (deps.getPeopleRequest === undefined || deps.confirmPeopleRequest === undefined) return json(404, { error: "not_found" });
+        const parsed = z.object({ requestId: z.string().uuid() }).strict().safeParse(value);
+        if (!parsed.success || parsed.data.requestId.toLowerCase() !== peopleRequestId) return invalid();
+        const receipt = await deps.getPeopleRequest(caller, taskId, peopleRequestId);
+        if (receipt.status === "COMMITTED") return json(200, receipt);
+        const result = await deps.confirmPeopleRequest(caller, taskId, peopleRequestId);
+        return json(result.status === "PENDING" ? 202 : 200, result);
       }
       if (endpoint === "comments" && commentId !== undefined) {
         if (action === "edit") {

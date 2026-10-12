@@ -147,6 +147,14 @@ main>section,.kind{border-top:1px solid var(--line);padding:.5rem 0}
 .history{padding-left:1.2rem}
 .history time{color:var(--muted);font-size:.85rem}
 .accepted-by{color:var(--muted)}
+.task-people-list{list-style:none;margin:0;padding:0;display:grid;gap:.6rem}
+.task-people-person,.task-people-confirmation{border:1px solid var(--line);border-radius:.4rem;padding:.6rem;min-width:0}
+.task-people-person h3,.task-people-person p{margin:.2rem 0}
+.task-people-role{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.4rem .6rem;align-items:end;margin-top:.5rem}
+.task-people-role label,.task-people-status{grid-column:1/-1}
+.task-people select{min-height:2.75rem;max-width:100%;font:inherit;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:.4rem}
+.task-people-you{font-size:.75rem;border:1px solid currentColor;border-radius:999px;padding:0 .4rem}
+.task-people-takeover{margin-top:.75rem}.task-people-confirmation a{display:inline-block;margin-left:.75rem}
 [hidden]{display:none!important}
 .moved-on{position:sticky;top:0;z-index:1;display:flex;flex-wrap:wrap;align-items:center;gap:.5rem 1rem;margin:0 0 .75rem;padding:.5rem .8rem;background:var(--panel);border:1px solid var(--focus);border-radius:.4rem}
 .moved-on p{margin:0}
@@ -187,6 +195,7 @@ dialog::backdrop{background:rgba(0,0,0,.4)}
 #decide-dialog label{display:inline}#decide-dialog li{margin:.3rem 0}#decide-dialog input[type=checkbox]{min-width:1.25rem;min-height:1.25rem}
 @media (max-width:35rem){dialog{margin:0;width:100vw;max-width:100vw;height:100dvh;max-height:100dvh;border-radius:0}}
 @media (max-width:35rem){body{padding:1rem}
+.task-people-role{grid-template-columns:1fr}.task-people-role label,.task-people-status{grid-column:1}.task-people-role button{width:100%}
 .checks table,.checks tbody,.checks tr{display:block;overflow-x:visible}
 .checks thead{position:absolute;height:1px;overflow:hidden;clip-path:inset(50%)}
 .checks tr{border:1px solid var(--line);margin:.4rem 0;padding:.3rem .5rem}
@@ -277,6 +286,10 @@ export const TASK_PAGE_DECIDING_COPY = {
   suggestMany: " suggest: ",
   and: " and ",
   someone: "A teammate",
+  peopleReview: "Review this change",
+  peopleSending: "Sending…",
+  peoplePending: "Open the confirmation page to finish this change.",
+  peopleDone: "People updated.",
 } as const;
 
 /**
@@ -323,7 +336,7 @@ function applyProjection(state){
   var changed=canRead!==state.canRead||canComment!==state.canComment||canSuggest!==state.canSuggest||canDecide!==state.canDecide||canAsk!==state.canAsk||canManagePeople!==state.canManagePeople||canTakeOwnership!==state.canTakeOwnership;
   hasProjection=true;
   if(state.peopleRevision!==undefined)peopleRevision=state.peopleRevision;
-  canRead=state.canRead;canComment=canRead&&state.canComment;canSuggest=canRead&&state.canSuggest;canDecide=canRead&&state.canDecide;canAsk=canRead&&state.canAsk;canManagePeople=canRead&&state.canManagePeople;canTakeOwnership=canRead&&state.canTakeOwnership;
+  canRead=state.canRead;canComment=canRead&&state.canComment;canSuggest=canRead&&state.canSuggest;canDecide=canRead&&state.canDecide;canAsk=canRead&&state.canAsk&&state.askAvailable!==false;canManagePeople=canRead&&state.canManagePeople;canTakeOwnership=canRead&&state.canTakeOwnership;
   if(changed)accessGeneration+=1;
   applyCurrentAccess();
   return true;
@@ -379,6 +392,16 @@ function applyCurrentAccess(){
     for(i=0;i<dialogButtons.length;i++)dialogButtons[i].disabled=!canDecide&&dialogButtons[i].textContent!==COPY.cancel;
     if(!canDecide&&dialog.open&&typeof dialog.close==="function")dialog.close();
   }
+  var roleForms=document.querySelectorAll("[data-people-role-form]");
+  for(i=0;i<roleForms.length;i++){
+    var roleSelect=roleForms[i].querySelector("select"),roleButton=roleForms[i].querySelector("button");
+    if(roleSelect)roleSelect.disabled=!canManagePeople;
+    if(roleButton)roleButton.disabled=!canManagePeople;
+  }
+  var takeoverForms=document.querySelectorAll("[data-people-take-ownership-form]");
+  for(i=0;i<takeoverForms.length;i++){var takeoverButton=takeoverForms[i].querySelector("button");if(takeoverButton)takeoverButton.disabled=!canTakeOwnership;}
+  var peopleConfirm=document.querySelector("[data-people-confirm]");
+  if(peopleConfirm)peopleConfirm.disabled=!(canManagePeople||canTakeOwnership);
 }
 function hideRemovedTask(){
   var root=document.querySelector("main")||document.body;
@@ -397,8 +420,12 @@ function canPost(path,body){
   if(path==="decision")return canDecide;
   if(path==="suggestions")return canSuggest;
   if(path==="comments"||path.indexOf("comments/")===0)return canComment&&!(body&&body.ask===true&&!canAsk);
+  if(path==="people/role")return canManagePeople;
+  if(path==="people/take-ownership")return canTakeOwnership;
+  if(/^people\/requests\/[0-9a-f-]{36}\/confirm$/i.test(path))return canManagePeople||canTakeOwnership;
   return false;
 }
+function peoplePath(path){return path==="people/role"||path==="people/take-ownership"||path.indexOf("people/requests/")===0;}
 
 /* ---------- talking to the API ---------- */
 function call(method,path,body,retried){
@@ -413,6 +440,9 @@ function call(method,path,body,retried){
       if(answer.status===401)stopAccess(true);
       if(method==="POST"&&answer.status===403&&answer.body.error==="request_refused"&&!retried){
         return readState().then(function(state){return state&&requestGeneration===accessGeneration&&canPost(path,body)?call(method,path,body,true):{status:403,body:{error:"request_refused"}};});
+      }
+      if(peoplePath(path)&&((answer.status===403&&answer.body.error!=="request_refused")||answer.status===404)&&!retried){
+        return readState().then(function(){return answer;});
       }
       if((answer.status===403&&answer.body.error!=="request_refused")||answer.status===404)stopAccess(false);
       return answer;
@@ -1169,6 +1199,40 @@ function submit(){
   },function(){if(generation!==accessGeneration){sending=false;return;}sending=false;el("decide-submit").disabled=false;fail(COPY.unavailable,false);});
 }
 
+/* ---------- People changes: server-made proposals and explicit confirmation ---------- */
+function peopleStatus(form){return form.querySelector(".task-people-status");}
+function peopleReply(form,button,path,payload){
+  if(button.disabled)return;
+  var status=peopleStatus(form),generation=accessGeneration;
+  button.disabled=true;if(status)status.textContent=COPY.peopleSending;
+  call("POST",path,payload).then(function(answer){
+    if(generation!==accessGeneration)return;
+    if(answer.status===200&&answer.body.status==="COMMITTED"){if(status)status.textContent=COPY.peopleDone;location.reload();return;}
+    if(answer.status===202&&answer.body.status==="PENDING"&&UUID.test(str(answer.body.requestId))){
+      if(status)status.textContent=COPY.peoplePending;
+      location.assign("/review/"+taskId+"/task/people/confirm/"+String(answer.body.requestId).toLowerCase());return;
+    }
+    button.disabled=false;if(status)status.textContent=said(answer);button.focus();
+  },function(){if(generation!==accessGeneration)return;button.disabled=false;if(status)status.textContent=COPY.unavailable;button.focus();});
+}
+var peopleRoleForms=document.querySelectorAll("[data-people-role-form]");
+for(var pf=0;pf<peopleRoleForms.length;pf++)(function(form){
+  var select=form.querySelector("select"),button=form.querySelector("button"),person=form.getAttribute("data-person-id"),rev=Number(form.getAttribute("data-people-revision"));
+  if(!select||!button||!UUID.test(str(person))||!Number.isSafeInteger(rev))return;
+  button.addEventListener("click",function(){peopleReply(form,button,"people/role",{requestId:uuid(),expectedPeopleRevision:rev,personId:person,role:select.value});});
+})(peopleRoleForms[pf]);
+var peopleTakeForms=document.querySelectorAll("[data-people-take-ownership-form]");
+for(var pt=0;pt<peopleTakeForms.length;pt++)(function(form){
+  var button=form.querySelector("button"),rev=Number(form.getAttribute("data-people-revision"));if(!button||!Number.isSafeInteger(rev))return;
+  button.addEventListener("click",function(){peopleReply(form,button,"people/take-ownership",{requestId:uuid(),expectedPeopleRevision:rev});});
+})(peopleTakeForms[pt]);
+var peopleConfirm=document.querySelector("[data-people-confirm]");
+if(peopleConfirm){
+  var confirmId=peopleConfirm.getAttribute("data-people-confirm"),confirmForm=peopleConfirm.closest(".task-people-confirmation");
+  if(confirmForm&&UUID.test(str(confirmId)))peopleConfirm.addEventListener("click",function(){peopleReply(confirmForm,peopleConfirm,"people/requests/"+confirmId+"/confirm",{requestId:confirmId});});
+}
+applyCurrentAccess();
+
 /* ---------- the page's one poll ---------- */
 var banner=document.getElementById("moved-on");
 var EVERY=20000,QUIET_EVERY=60000,QUIET_AFTER=600000,IDLE_STOP=7200000;
@@ -1182,7 +1246,7 @@ function readState(){
     var state=answer.body;
     var acceptedProjection=state&&typeof state==="object"?applyProjection(state):false;
     if(stopped)return null;
-    if(hasProjection&&!acceptedProjection){if(!canRead)stopAccess(false);return null;}
+    if(hasProjection&&!acceptedProjection&& !canRead){stopAccess(false);return null;}
     if(hasProjection&&!canRead){stopAccess(false);return null;}
     if(TOKEN.test(str(state.csrf)))csrf=state.csrf;
     return state;

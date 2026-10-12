@@ -42,9 +42,10 @@ describe("the task page live check", () => {
   });
 
   it("reads the page's state answer: no names, no comment text, a fresh token", () => {
-    expect(stateChecks({ revision: 3, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 1 }], commentSeq: 0, csrf: "c".repeat(43) }).every((result) => result.ok)).toBe(true);
+    expect(stateChecks({ revision: 3, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 1 }], commentSeq: 0, csrf: "c".repeat(43),
+      peopleRevision: 2, canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false }).every((result) => result.ok)).toBe(true);
     const bad = stateChecks({ revision: 3, waiting: true, stage: "Coding plan", documents: [], commentSeq: 0, name: "Maya", text: "hi" });
-    expect(bad.filter((result) => !result.ok).map((result) => result.name)).toEqual(["carries a fresh token", "carries only where the task stands"]);
+    expect(bad.filter((result) => !result.ok).map((result) => result.name)).toEqual(["carries a fresh token", "carries current access without names"]);
   });
 
   it("the hands-on list covers each case the plan asks a person to try", () => {

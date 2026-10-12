@@ -181,6 +181,15 @@ async function allPeople(deps: TaskPeopleDependencies, taskId: string): Promise<
   return found;
 }
 
+/** Immutable task-local identity names for page history and pending proposal presentation. No current actor is substituted. */
+export async function getTaskPeoplePresentation(
+  deps: TaskPeopleDependencies,
+  taskId: string,
+): Promise<ReadonlyArray<{ personId: string; developerId: string; name: string }>> {
+  if (!TASK_ID.test(taskId)) return denied();
+  return (await allPeople(deps, taskId)).map(({ personId, identity }) => ({ personId, developerId: identity.developerId, name: identity.name }));
+}
+
 async function checkedFresh(deps: Pick<TaskPeopleDependencies, "checkTaskPerson">, task: DeveloperTaskRecord, developerId: string,
   admission?: TaskPeopleDisplayAdmission): Promise<TaskPersonCheck> {
   if (deps.checkTaskPerson === undefined) return denied();
