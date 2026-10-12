@@ -2,11 +2,12 @@
 // the payments project bound to the test channel, two signed-in developers, and worker callbacks.
 import { randomUUID } from "node:crypto";
 import { marshall } from "@aws-sdk/util-dynamodb";
-import { vi } from "vitest";
+import { vi, type Mock } from "vitest";
 import { sharedTaskKey, type ChannelInfoRequest, type ChannelInfoResponse, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
 import type { DeveloperApiConfiguration } from "../../packages/broker/src/aws/developer-routes.js";
 import type { DeveloperTaskActions } from "../../packages/broker/src/aws/developer-task-actions.js";
 import type { StreamRecord } from "../../packages/broker/src/developer/notifications.js";
+import type { TaskShare } from "../../packages/broker/src/developer/task-records.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { localSigner } from "./developer-fakes.js";
 import type { FakeDynamoDb, FakeDynamoDbOptions } from "./fake-dynamodb.js";
@@ -60,6 +61,18 @@ async function bearer(who: Developer): Promise<string> {
 /** A signed access token for `who`, as an `authorization` header value (Task 16 plants it in a token store). */
 export const bearerFor = bearer;
 
+type DeveloperTaskBrokerHarness = ReturnType<typeof createBroker> & {
+  actions: DeveloperTaskActions;
+  s3: ReturnType<typeof memoryS3>;
+  channelMembers: Mock<(request: ChannelMembersRequest) => Promise<ChannelMembersResponse>>;
+  channelInfo: Mock<(request: ChannelInfoRequest) => Promise<ChannelInfoResponse>>;
+  dev: (who: Developer, method: string, path: string, body?: unknown) => Promise<{ status: number; body: Record<string, unknown> }>;
+  callback: (workspaceId: string, operationId: string, action: string, body: unknown) => Promise<Record<string, unknown>>;
+  finish: (workspaceId: string, operationId: string, status: "SUCCEEDED" | "FAILED" | "CANCELLED" | "INTERRUPTED", detail?: { result?: unknown; error?: string }) => Promise<Record<string, unknown>>;
+  events: (workspaceId: string, operationId: string, events: Array<{ type: string; payload: unknown }>) => Promise<Record<string, unknown>>;
+  artifact: (workspaceId: string, operationId: string, name: string, content: string) => Promise<Record<string, unknown>>;
+};
+
 export async function createDeveloperTaskBroker(options: {
   memberLimit?: number;
   organizationLimit?: number;
@@ -77,7 +90,7 @@ export async function createDeveloperTaskBroker(options: {
   realism?: FakeDynamoDbOptions["realism"];
   /** "eventual": a read without ConsistentRead may see an item's previous version once after a write. */
   consistency?: FakeDynamoDbOptions["consistency"];
-} = {}) {
+} = {}): Promise<DeveloperTaskBrokerHarness> {
   const module = await loadSlackBroker() as unknown as { createDeveloperTaskActions: (input: never) => DeveloperTaskActions };
   const channelMembers = vi.fn(options.channelMembers ?? (async (request: ChannelMembersRequest): Promise<ChannelMembersResponse> => ({ ok: true, memberOf: request.slackUserId === MAYA.slackUserId ? request.channelIds.filter((id) => id === SLACK_CHANNEL) : [] })));
   const channelInfo = vi.fn((options.channelInfo === null ? undefined : options.channelInfo) ?? (async (request: ChannelInfoRequest): Promise<ChannelInfoResponse> => ({ ok: true, channels: request.channelIds.map((channelId) => ({ channelId, name: "payments-dev", isPrivate: false })) })));
@@ -178,8 +191,8 @@ export function grantProject(db: FakeDynamoDb, who: Developer, projectName = "pa
 
 /** What the notifier's start message leaves behind (Task 7): the thread on the task, and its record. */
 export function markThreadPosted(db: FakeDynamoDb, taskId: string, threadTs = "1695500000.000100"): string {
-  const task = db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { share: Record<string, unknown>; shareVersion: number; workspaceId: string; ownerKey: string; developerId: string; developerName: string; project: string };
-  const share = { ...task.share, threadTs };
+  const task = db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { share?: TaskShare; shareVersion: number; workspaceId: string; ownerKey: string; developerId: string; developerName: string; project: string };
+  const share = { ...task.share!, threadTs };
   db.set({ ...task, share, shareVersion: task.shareVersion + 1 });
   const thread = { teamId: String(share.teamId), channelId: String(share.channelId), threadTs };
   db.set({

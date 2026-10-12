@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResultSchema, ElicitRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { expect } from "vitest";
 import { agentxMcpServer } from "../../packages/cli/src/mcp/serve.js";
 import { developerTokenKey, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";
@@ -90,9 +90,10 @@ export async function signedInClient(harness: Harness, who: Developer | undefine
   const tool = async (name: string, args: Record<string, unknown> = {}): Promise<ToolAnswer> => {
     const result = await client.callTool({ name, arguments: args });
     answers.push(JSON.stringify(result));
-    if (result.isError === true) return { isError: true, value: {}, error: toolError(result) };
-    const text = (result.content as Array<{ type: string; text?: string }> | undefined)?.find((part) => part.type === "text")?.text;
-    return { isError: false, value: result.structuredContent as Record<string, unknown>, ...(text === undefined ? {} : { text }) };
+    const toolResult = "toolResult" in result ? CallToolResultSchema.parse(result.toolResult) : result;
+    if (toolResult.isError === true) return { isError: true, value: {}, error: toolError(toolResult) };
+    const text = (toolResult.content as Array<{ type: string; text?: string }> | undefined)?.find((part) => part.type === "text")?.text;
+    return { isError: false, value: toolResult.structuredContent as Record<string, unknown>, ...(text === undefined ? {} : { text }) };
   };
   /** FR-026 and the global constraints: neither token appears in any tool result or log line. */
   const expectNoTokenLeaked = () => {
@@ -152,7 +153,8 @@ export async function adminSignedInClient(harness: Harness, options: {
   const tool = async (name: string, args: Record<string, unknown> = {}): Promise<ToolAnswer> => {
     const result = await client.callTool({ name, arguments: args });
     answers.push(JSON.stringify(result));
-    return result.isError === true ? { isError: true, value: {}, error: toolError(result) } : { isError: false, value: result.structuredContent as Record<string, unknown> };
+    const toolResult = "toolResult" in result ? CallToolResultSchema.parse(result.toolResult) : result;
+    return toolResult.isError === true ? { isError: true, value: {}, error: toolError(toolResult) } : { isError: false, value: toolResult.structuredContent as Record<string, unknown> };
   };
   const names = async () => (await client.listTools()).tools.map((entry) => entry.name);
   return { tool, names, stderr, answers, asked, sent, developerToken };

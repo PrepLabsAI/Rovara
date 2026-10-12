@@ -8,7 +8,11 @@ export const ADMIN_SUBJECT = "admin-subject";
 /** The built-in GitHub App credential every deployment's broker lists, as the Lambda entry point configures it. */
 const GITHUB_APP_CREDENTIAL = { ref: "github-app", secretName: "arn:aws:secretsmanager:us-east-1:111122223333:secret:github-key" };
 
-export async function createAdminReadBroker(options: Parameters<typeof createDeveloperTaskBroker>[0] = {}) {
+type AdminReadHarness = Awaited<ReturnType<typeof createDeveloperTaskBroker>> & {
+  admin: (method: string, path: string, call?: { admin?: boolean; subject?: string; headers?: Record<string, string>; body?: unknown }) => Promise<{ status: number; body: Record<string, unknown> }>;
+};
+
+export async function createAdminReadBroker(options: Parameters<typeof createDeveloperTaskBroker>[0] = {}): Promise<AdminReadHarness> {
   // Like the deployed broker, connector credentials are configured, so GET /v1/admin/credentials answers.
   const connectorCredentials = { secrets: { read: async () => undefined }, githubApp: GITHUB_APP_CREDENTIAL };
   const harness = await createDeveloperTaskBroker({ ...options, brokerExtra: { connectorCredentials, ...options.brokerExtra } });

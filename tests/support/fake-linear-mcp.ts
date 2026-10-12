@@ -4,12 +4,12 @@
 import { once } from "node:events";
 import { readFileSync } from "node:fs";
 import { createServer, type IncomingHttpHeaders } from "node:http";
-import { connectMcp } from "@agentx/gateway";
+import { connectMcp, type McpConnection } from "@agentx/gateway";
 import type { ConnectorType } from "../../packages/broker/src/aws/connector-types.js";
 import { linearConnectorType } from "../../packages/broker/src/aws/linear-connector-type.js";
 import { vendorTools } from "./vendor-fixtures.js";
 
-export const LINEAR_FIXTURE_TOOLS = vendorTools("linear");
+export const LINEAR_FIXTURE_TOOLS: McpConnection["tools"] = vendorTools("linear");
 const GET_ISSUE = JSON.parse(readFileSync(new URL("../fixtures/vendors/linear-get-issue.json", import.meta.url), "utf8")) as Record<string, unknown>;
 export const CHARTERARC_TEAM_ID = "c408e946-78aa-4db8-923e-f78053dd954f";
 export const OTHER_TEAM_ID = "0b6f3f7e-5d1a-4c1e-9a53-2f0f5a8f1c11";
