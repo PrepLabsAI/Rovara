@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import type { WorkerInvocation } from "@agentx/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
   adaptHttpApiEvent,
@@ -7,6 +8,8 @@ import {
 } from "../../packages/broker/src/aws/lambda.js";
 import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
 import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
+import type { Ec2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js";
+import type { Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
 
 describe("AWS control-plane handlers", () => {
@@ -64,7 +67,11 @@ describe("AWS control-plane handlers", () => {
   });
 
   it("dispatches the stored invocation with server-owned runtime routing", async () => {
-    const deliverEc2 = vi.fn(async () => "DELIVERED" as const);
+    const remainingTimeValues: number[] = [];
+    const deliverEc2 = vi.fn(async (_record: Ec2OutboxRecord, _invocation: WorkerInvocation, context?: { remainingTimeMs: () => number }): Promise<Ec2Delivery> => {
+      remainingTimeValues.push(context?.remainingTimeMs() ?? -1);
+      return "DELIVERED" as const;
+    });
     const markDispatching = vi.fn(async () => undefined);
     const markDelivered = vi.fn(async () => undefined);
     const markFailed = vi.fn(async () => undefined);
@@ -92,10 +99,59 @@ describe("AWS control-plane handlers", () => {
     } as const;
 
     await handler({ Records: [{ messageId: "m1", body: JSON.stringify(outbox) }] });
-    expect(deliverEc2).toHaveBeenCalledWith(outbox, invocation);
+    expect(deliverEc2).toHaveBeenCalledOnce();
+    expect(deliverEc2.mock.calls[0]![0]).toStrictEqual(outbox);
+    expect(deliverEc2.mock.calls[0]![1]).toStrictEqual(invocation);
+    expect(typeof deliverEc2.mock.calls[0]![2]?.remainingTimeMs).toBe("function");
+    expect(remainingTimeValues).toEqual([60_000]);
     expect(markDispatching).toHaveBeenCalledWith(outbox);
     expect(markDelivered).toHaveBeenCalledWith(outbox.id);
     expect(markFailed).not.toHaveBeenCalled();
+  });
+
+  it("forwards the Lambda remaining-time callback to stored invocation delivery", async () => {
+    const remainingTimeValues: number[] = [];
+    const deliverEc2 = vi.fn(async (_record: Ec2OutboxRecord, _invocation: WorkerInvocation, deliveryContext?: { remainingTimeMs: () => number }): Promise<Ec2Delivery> => {
+      remainingTimeValues.push(deliveryContext?.remainingTimeMs() ?? -1);
+      return "DELIVERED" as const;
+    });
+    const handler = createDispatcherHandler({
+      deliverEc2,
+      markDispatching: vi.fn(async () => undefined),
+      markDelivered: vi.fn(async () => undefined),
+      markFailed: vi.fn(async () => undefined),
+    });
+    const operationId = randomUUID();
+    const workspaceId = randomUUID();
+    const invocation = {
+      protocolVersion: 1,
+      operationId,
+      workspaceId,
+      kind: "resume",
+      fence: 1,
+      projectRevision: 1,
+      callbackCapability: "c".repeat(64),
+      payload: {},
+    } as const;
+    const outbox = {
+      deploymentMode: "ec2-ebs" as const,
+      id: randomUUID(),
+      entityType: "OUTBOX",
+      status: "QUEUED",
+      operationId,
+      workspaceId,
+      invocation,
+    } as const;
+    const getRemainingTimeInMillis = vi.fn(() => 12_345);
+
+    await handler({ Records: [{ messageId: "m1", body: JSON.stringify(outbox) }] }, { getRemainingTimeInMillis });
+
+    expect(deliverEc2).toHaveBeenCalledOnce();
+    expect(deliverEc2.mock.calls[0]![0]).toStrictEqual(outbox);
+    expect(deliverEc2.mock.calls[0]![1]).toStrictEqual(invocation);
+    expect(typeof deliverEc2.mock.calls[0]![2]?.remainingTimeMs).toBe("function");
+    expect(remainingTimeValues).toEqual([12_345]);
+    expect(getRemainingTimeInMillis).toHaveBeenCalled();
   });
 
   it("retries transient dispatch errors and terminally fails the final attempt", async () => {

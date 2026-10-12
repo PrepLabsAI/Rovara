@@ -156,16 +156,80 @@ function withoutStuckCancelAlarm(template: unknown): unknown {
   return template;
 }
 
+/**
+ * Task People adds three false-default controls and passes their exact references to the Broker
+ * and DeveloperTaskNotifier. Verify those additions in full, remove only them, and keep the rest
+ * of the named-environment snapshot comparison strict.
+ */
+function withoutTaskPeopleControls(template: unknown): unknown {
+  const synthesized = template as {
+    Parameters: Record<string, unknown>;
+    Resources: Record<string, Resource>;
+  };
+  const parameters = synthesized.Parameters;
+  const expectedParameters = {
+    TaskPeopleChangesEnabled: {
+      AllowedValues: ["true", "false"],
+      Default: "false",
+      Description: "Whether task people role changes are enabled in this environment",
+      Type: "String",
+    },
+    TaskPeoplePublicInvitationsEnabled: {
+      AllowedValues: ["true", "false"],
+      Default: "false",
+      Description: "Whether task people may invite members to public channels in this environment",
+      Type: "String",
+    },
+    TaskPeoplePrivateInvitationsEnabled: {
+      AllowedValues: ["true", "false"],
+      Default: "false",
+      Description: "Whether task people may invite members to private channels in this environment",
+      Type: "String",
+    },
+  };
+  for (const [name, expected] of Object.entries(expectedParameters)) {
+    expect(parameters[name]).toStrictEqual(expected);
+    delete parameters[name];
+  }
+
+  const functions = Object.entries(synthesized.Resources).filter(([, resource]) => resource.Type === "AWS::Lambda::Function");
+  const variablesFor = (resource: Resource): Record<string, unknown> =>
+    (resource.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+  const brokerFunctions = functions.filter(([id]) => id.startsWith("Broker"));
+  expect(brokerFunctions).toHaveLength(1);
+  const brokerEnvironmentNames = [
+    "AGENTX_TASK_PEOPLE_CHANGES_ENABLED",
+    "AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED",
+    "AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED",
+  ];
+  const brokerVariables = variablesFor(brokerFunctions[0]![1]);
+  const expectedBrokerReferences = {
+    AGENTX_TASK_PEOPLE_CHANGES_ENABLED: { Ref: "TaskPeopleChangesEnabled" },
+    AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: { Ref: "TaskPeoplePublicInvitationsEnabled" },
+    AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED: { Ref: "TaskPeoplePrivateInvitationsEnabled" },
+  };
+  expect(Object.fromEntries(brokerEnvironmentNames.map((name) => [name, brokerVariables[name]]))).toStrictEqual(expectedBrokerReferences);
+  for (const name of brokerEnvironmentNames) delete brokerVariables[name];
+
+  const notifierFunctions = functions.filter(([id]) => id.startsWith("DeveloperTaskNotifier"));
+  expect(notifierFunctions).toHaveLength(1);
+  const notifierVariables = variablesFor(notifierFunctions[0]![1]);
+  expect(notifierVariables.AGENTX_TASK_PEOPLE_CHANGES_ENABLED).toStrictEqual({ Ref: "TaskPeopleChangesEnabled" });
+  delete notifierVariables.AGENTX_TASK_PEOPLE_CHANGES_ENABLED;
+  return template;
+}
+
 // Issue 157 changes the Slack service's code only. These snapshots were recorded from mainline
 // 4a605fd (re-recorded there when mainline merged in), so a named environment's templates must stay
-// as they were, apart from issue 46's dispatch dead-letter alarm, issue 173's reconciler backstop and
-// issue 195's stuck-cancel alarm, each checked and taken out above.
+// as they were, apart from issue 46's dispatch dead-letter alarm, issue 173's reconciler backstop,
+// issue 195's stuck-cancel alarm, and the false-default Task People controls, each checked and taken
+// out above.
 describe("named environment templates", () => {
   const stacks = buildAgentXApp({ agentxEnv: "staging" }).node.children.filter((child): child is Stack => Stack.isStack(child));
   for (const stack of stacks) {
     it(`${stack.stackName} is unchanged`, () => {
       const template = normalizedTemplate(stack);
-      expect(stack.stackName === "agentx-staging-control-plane" ? withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(template))) : template).toMatchSnapshot();
+      expect(stack.stackName === "agentx-staging-control-plane" ? withoutTaskPeopleControls(withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(template)))) : template).toMatchSnapshot();
     }, 120_000);
   }
 });
