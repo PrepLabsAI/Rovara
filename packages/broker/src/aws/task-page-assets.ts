@@ -414,7 +414,7 @@ function call(method,path,body,retried){
       if(method==="POST"&&answer.status===403&&answer.body.error==="request_refused"&&!retried){
         return readState().then(function(state){return state&&requestGeneration===accessGeneration&&canPost(path,body)?call(method,path,body,true):{status:403,body:{error:"request_refused"}};});
       }
-      if(answer.status===403||answer.status===404)stopAccess(false);
+      if((answer.status===403&&answer.body.error!=="request_refused")||answer.status===404)stopAccess(false);
       return answer;
     });
   });
@@ -799,7 +799,7 @@ function openCommentForm(place,key,trigger,parentId,text){
     var generation=accessGeneration;
     call("POST","comments",body).then(function(answer){
       if(answer.status===401){sending=false;form.fail(said(answer));return;}
-      if(generation!==accessGeneration)return;
+      if(generation!==accessGeneration){sending=false;return;}
       sending=false;form.submit.disabled=false;
       if((answer.status===201||answer.status===200)&&validComment(answer.body.comment)){
         close();
@@ -822,7 +822,7 @@ function openCommentForm(place,key,trigger,parentId,text){
         return;
       }
       form.fail(said(answer));
-    },function(){if(generation!==accessGeneration)return;sending=false;form.submit.disabled=false;form.fail(COPY.unavailable);});
+    },function(){if(generation!==accessGeneration){sending=false;return;}sending=false;form.submit.disabled=false;form.fail(COPY.unavailable);});
   });
   if(!text)form.area.focus();
   return form.box;
@@ -854,11 +854,11 @@ function editComment(article){
     sending=true;
     var generation=accessGeneration;
     call("POST","comments/"+id+"/edit",{rev:Number(article.getAttribute("data-rev"))||1,text:value}).then(function(answer){
-      if(generation!==accessGeneration)return;
+      if(generation!==accessGeneration){sending=false;return;}
       sending=false;
       if(answer.status===200&&validComment(answer.body.comment)){replaceComment(article,answer.body.comment);return;}
       form.fail(said(answer));
-    },function(){if(generation!==accessGeneration)return;sending=false;form.fail(COPY.unavailable);});
+    },function(){if(generation!==accessGeneration){sending=false;return;}sending=false;form.fail(COPY.unavailable);});
   });
 }
 function deleteComment(article,trigger){
@@ -1155,7 +1155,7 @@ function submit(){
   el("decide-status").textContent=COPY.sending;
   var generation=accessGeneration;
   call("POST","decision",payload).then(function(answer){
-    if(generation!==accessGeneration)return;
+    if(generation!==accessGeneration){sending=false;return;}
     if(answer.status===200){
       el("decide-status").textContent=COPY.sent;
       var draft=loadDraft(current.anchor);
@@ -1166,7 +1166,7 @@ function submit(){
     }
     sending=false;el("decide-submit").disabled=false;
     fail(said(answer),answer.status===409);
-  },function(){if(generation!==accessGeneration)return;sending=false;el("decide-submit").disabled=false;fail(COPY.unavailable,false);});
+  },function(){if(generation!==accessGeneration){sending=false;return;}sending=false;el("decide-submit").disabled=false;fail(COPY.unavailable,false);});
 }
 
 /* ---------- the page's one poll ---------- */

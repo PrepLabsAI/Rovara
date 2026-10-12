@@ -270,6 +270,55 @@ describe("the deciding and commenting script", () => {
     expect(postCount).toBe(1);
   });
 
+  it("keeps the task and its drafts after the single CSRF retry is refused", async () => {
+    let postCount = 0;
+    const storage = fakeStorage();
+    storage.setItem(`agentx:${taskId}:coding-plan`, JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: { "claim:2": "saved draft" }, excluded: [], note: "saved note" }));
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 1 });
+    const page = boot(html, { storage, respond: (entry) => {
+      if (entry.method === "POST") { postCount += 1; return { status: 403, body: { error: "request_refused" } }; }
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 2 } };
+      return { status: 200, body: {} };
+    } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("unsent text");
+    form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await page.settle();
+    expect(postCount).toBe(2);
+    expect(page.document.querySelector("main")!.hidden).toBe(false);
+    expect(form.querySelector("textarea")!.value).toBe("unsent text");
+    expect(form.querySelector(".comment-error")!.textContent).not.toBe("");
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).toContain("unsent text");
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).toContain("saved note");
+  });
+
+  it("releases an obsolete comment request latch when Ask alone is revoked", async () => {
+    let postCount = 0;
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 1 });
+    const page = boot(html, { respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: false, canManagePeople: true, canTakeOwnership: false, peopleRevision: 2 } };
+      if (entry.method === "POST") { postCount += 1; return postCount === 1 ? undefined : { status: 500, body: {} }; }
+      return { status: 200, body: {} };
+    } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("ordinary comment");
+    const post = form.querySelectorAll("button").find((button) => button.textContent === "Post")!;
+    post.click();
+    await page.advance(20_000);
+    expect(form.querySelector("input[type=checkbox]")!.disabled).toBe(true);
+    page.pending[0]!({ status: 500, body: {} });
+    await page.settle();
+    expect(post.disabled).toBe(false);
+    post.click();
+    await page.settle();
+    expect(postCount).toBe(2);
+    expect(post.disabled).toBe(false);
+    expect(form.querySelector("textarea")!.value).toBe("ordinary comment");
+    expect(page.document.querySelector("main")!.hidden).toBe(false);
+  });
+
   it("does not retry a refused POST when current state is unknown", async () => {
     let postCount = 0;
     const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: false, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 1 });
