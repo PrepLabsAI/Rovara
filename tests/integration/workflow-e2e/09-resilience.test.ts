@@ -4,14 +4,24 @@
 // ways, the item size limit, and DynamoDB's map order on every read [LIVE-BUG B3]. 9.13 (old stored records) is covered by
 // slack-workflow-e2e.test.ts.
 import { describe, expect, it } from "vitest";
-import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, WORKFLOW_PLAN_MAX_BYTES, WorkflowSnapshotSchema } from "@agentx/contracts";
-import { LOST_COMPUTE_ERROR, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
+import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, WORKFLOW_PLAN_MAX_BYTES, WorkerInvocationSchema, WorkflowSnapshotSchema,
+  type TaskPersonProofRequest,
+  type Ec2RuntimeBinding, type WorkerInvocation } from "@agentx/contracts";
+import { createEc2Delivery } from "../../../packages/broker/src/aws/ec2-delivery.js";
+import type { Ec2OutboxRecord } from "../../../packages/broker/src/aws/lambda.js";
+import { LOST_COMPUTE_ERROR, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import type { CheckTaskPerson } from "../../../packages/broker/src/developer/task-people.js";
 import { DYNAMODB_ITEM_MAX_BYTES } from "../../support/fake-dynamodb.js";
 import { planAnswer, planDocument } from "../../support/plan-documents.js";
 import { visibleSlackText } from "../../support/strict-slack.js";
 import { EDITS, MERGED, OPENED_PR, PLAN, PUSHED_FIX, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
 import { loadRollback0212Parser } from "../../support/rollback-0212-parser.js";
+
+/** Feature list exported by the source commit pinned in rollback-0.2.12/provenance.json. */
+const ROLLBACK_0212_WORKER_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks",
+  "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree",
+  "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate",
+  "task.codeAnchors", "task.workflowReviewFeedback"] as const;
 
 const READY_ONE = /^PR feedback is ready: 1 comment; 1 recommendation\./;
 const STILL_WATCHING = "I'm still watching the pull request and will finish this task when it's merged.";
@@ -680,7 +690,15 @@ describe("Suite 9: resilience", () => {
 
   it("9.24 the pinned 0.2.12 parser accepts a current candidate-bearing final snapshot and broker-only People adds no worker fields", async () => {
     const parser = await loadRollback0212Parser();
-    const { e2e } = await waiting({ taskPeople: { changesEnabled: false, checkTaskPerson: freshOwner() } });
+    const ownerProofRequests: TaskPersonProofRequest[] = [];
+    const { e2e, pullRequest } = await waiting({ taskPeople: { changesEnabled: false, checkTaskPerson: freshOwner(),
+      taskPersonProof: async (request: TaskPersonProofRequest) => {
+        ownerProofRequests.push(request);
+        if (request.slackUserId !== SLACK_MAYA.slackUserId) return { ok: false, error: "ineligible" };
+        const channelId = "C0123456789";
+        return { ok: true, user: { id: SLACK_MAYA.slackUserId, teamId: "T0BSHLLUGBD", name: SLACK_MAYA.name },
+          memberOf: request.channelIds.includes(channelId) ? [channelId] : [] };
+      } } });
     retainOwner(e2e);
     const snapshot = e2e.workflow();
     const candidate = snapshot.candidate!;
@@ -691,12 +709,71 @@ describe("Suite 9: resilience", () => {
     expect(snapshot.reviews).toEqual(expect.arrayContaining([expect.objectContaining({ candidateDigest: snapshot.candidate!.digest })]));
     expect(WorkflowSnapshotSchema.safeParse(snapshot).success).toBe(true);
     expect(parser.WorkflowSnapshotSchema.safeParse(snapshot).success).toBe(true);
-    const taskInvocations = e2e.invocations.filter((invocation) => invocation.kind === "task");
-    expect(taskInvocations.length).toBeGreaterThan(0);
-    for (const invocation of taskInvocations) {
+    const initialTaskInvocations = e2e.invocations.filter((invocation) => invocation.kind === "task");
+    expect(initialTaskInvocations.length).toBeGreaterThan(0);
+    for (const invocation of initialTaskInvocations) {
       expect(Object.prototype.hasOwnProperty.call(invocation.payload, "people")).toBe(false);
       expect(Object.prototype.hasOwnProperty.call(invocation.payload, "taskPeople")).toBe(false);
     }
+
+    const comment = e2e.github.comment(pullRequest.number, "octocat", "Please trim the name.");
+    const webhookResult = await e2e.webhook({ kind: "issue_comment", number: pullRequest.number, comment });
+    if (webhookResult.status !== 200) throw new Error(`feedback webhook failed: ${JSON.stringify(webhookResult)}`);
+    expect(ownerProofRequests.some((request) => request.slackUserId === SLACK_MAYA.slackUserId
+      && request.channelIds.includes("C0123456789"))).toBe(true);
+    await e2e.settle();
+    expect((await e2e.feedbackPage()).status).toBe(200);
+    const feedbackPage = await e2e.feedbackPage(undefined, { api: true });
+    expect(feedbackPage.status).toBe(200);
+    const feedback = JSON.parse(feedbackPage.body) as { revision: number; reviewDigest: string; proposalDigest: string; bundleDigests: string[] };
+    const approval = await e2e.feedbackDecision({ requestId: crypto.randomUUID(), expectedRevision: feedback.revision,
+      reviewDigest: feedback.reviewDigest, proposalDigest: feedback.proposalDigest, bundleDigests: feedback.bundleDigests,
+      decision: "APPROVE", selectedFindingIds: ["finding-1"] });
+    if (approval.status !== 200) throw new Error(`feedback approval failed: ${JSON.stringify(approval)}`);
+    await e2e.settle();
+
+    const approvedInvocation = e2e.invocations.find((invocation): invocation is Extract<WorkerInvocation, { kind: "task" }> =>
+      invocation.kind === "task" && invocation.payload.workflowFeedbackApproval !== undefined);
+    if (approvedInvocation === undefined) throw new Error("a real feedback approval must dispatch its bound implementation invocation");
+    const feedbackBinding = approvedInvocation.payload.workflowFeedbackApproval;
+    if (feedbackBinding === undefined) throw new Error("the implementation invocation must retain its feedback approval binding");
+    expect(feedbackBinding).toMatchObject({ candidateDigest: candidate.digest, reviewDigest: feedback.reviewDigest,
+      proposalDigest: feedback.proposalDigest, bundleDigests: feedback.bundleDigests });
+    expect(feedbackBinding.selectedFindingIds).toEqual(["finding-1"]);
+    expect(approvedInvocation.payload.workflowMode).toBe("IMPLEMENT");
+    expect(approvedInvocation.payload).not.toHaveProperty("model");
+    const outboxRow = e2e.db.find((item) => item.entityType === "OUTBOX" && item.operationId === approvedInvocation.operationId)[0];
+    if (outboxRow === undefined) throw new Error("the actual implementation invocation must retain its durable outbox record");
+    const outbox = outboxRow as unknown as Ec2OutboxRecord;
+    expect(outbox.invocation).toEqual(approvedInvocation);
+    let postedBody: string | undefined;
+    const binding: Ec2RuntimeBinding = { deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0",
+      subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0aaaaaaaaaaaaaaaa" }], volumeSizeGiB: 20, volumeType: "gp3" };
+    const deliver = createEc2Delivery({
+      sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "10.0.0.9" }) },
+      binding: async () => binding,
+      sign: async () => new Uint8Array([1, 2, 3]),
+      post: async (_url, init) => { postedBody = init.body; return { status: 202, body: "" }; },
+      progress: async () => undefined,
+      workerFeatures: async () => ROLLBACK_0212_WORKER_FEATURES,
+    });
+    await expect(deliver(outbox, approvedInvocation)).resolves.toBe("DELIVERED");
+    if (postedBody === undefined) throw new Error("production EC2 delivery must POST the feature-negotiated feedback invocation");
+    const sent: unknown = JSON.parse(postedBody);
+    expect(WorkerInvocationSchema.safeParse(sent).success).toBe(true);
+    expect(parser.WorkerInvocationSchema.safeParse(sent).success).toBe(true);
+    expect(sent).toEqual(approvedInvocation);
+    expect(JSON.stringify(sent)).toBe(postedBody);
+    if (typeof sent !== "object" || sent === null || !("payload" in sent)) throw new Error("the POST body must be a task invocation");
+    const sentPayload = sent.payload as typeof approvedInvocation.payload;
+    expect(sentPayload.model).toEqual(approvedInvocation.payload.model);
+    expect(sentPayload.modelSelectionDiagnostic).toEqual(approvedInvocation.payload.modelSelectionDiagnostic);
+    expect(sentPayload).not.toHaveProperty("model");
+    expect(sentPayload.workflowMode).toBe("IMPLEMENT");
+    expect(sentPayload.workflowFeedbackApproval).toEqual(feedbackBinding);
+    expect(sentPayload.workflowFeedbackApproval?.candidateDigest).toBe(candidate.digest);
+    expect(Object.prototype.hasOwnProperty.call(sentPayload, "people")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(sentPayload, "taskPeople")).toBe(false);
     void logged;
   }, 120_000);
 });
