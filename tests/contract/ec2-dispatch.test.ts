@@ -90,6 +90,23 @@ describe("ec2-ebs delivery", () => {
     }
     const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
 
+    it("keeps a task's ChatGPT plan for a worker that can use it, and drops it for one that cannot, which runs the default (#341)", async () => {
+      const chatgpt = { model: { provider: "openai", modelId: "gpt-6.1-sol" } };
+      const model = { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" };
+      const current = delivery({ workerFeatures: async () => ["model.chatgpt"] });
+      const record = taskRecord({ model, chatgpt });
+      await current.deliver(record, record.invocation);
+      expect(postedPayload(current.post)).toMatchObject({ model, chatgpt });
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const older = delivery({ workerFeatures: async () => ["model.thinkingLevel"] });
+      const again = taskRecord({ model, chatgpt });
+      await older.deliver(again, again.invocation);
+      expect(postedPayload(older.post)).not.toHaveProperty("chatgpt");
+      expect(postedPayload(older.post).model).toEqual(model);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({ event: "dispatch.chatgpt_omitted", reason: "worker-lacks-feature" }));
+      log.mockRestore();
+    });
+
     it("refuses feedback-approved implementation before POST unless the worker advertises approval authorization", async () => {
       const { deliver, post } = delivery({ workerFeatures: async () => ["task.workflowMode"] });
       const approval = {

@@ -1241,18 +1241,44 @@ describe("native developer task workflow", () => {
     }
   });
 
-  it("blocks a review result holding two reports of one kind instead of queuing another review", async () => {
+  const reviewResultCases: Array<[string, string[], "incomplete" | "generic", ("candidate" | "nested" | "operation" | "malformed") | undefined, ("object" | "string" | "null" | "missing") | undefined]> = [
+    ["no reports", [], "incomplete", undefined, undefined],
+    ["one valid report", ["CRITIC"], "incomplete", undefined, undefined],
+    ["three valid reports", ["CRITIC", "SECURITY", "CRITIC"], "incomplete", undefined, undefined],
+    ["duplicate roles", ["CRITIC", "CRITIC"], "incomplete", undefined, undefined],
+    ["stale top-level candidate", ["CRITIC"], "generic", "candidate", undefined],
+    ["stale nested candidate", ["CRITIC"], "generic", "nested", undefined],
+    ["foreign operation", ["CRITIC"], "generic", "operation", undefined],
+    ["unknown role", ["EDITOR"], "generic", undefined, undefined],
+    ["malformed valid-role report", ["CRITIC"], "generic", "malformed", undefined],
+    ["object review collection", [], "generic", undefined, "object"],
+    ["string review collection", [], "generic", undefined, "string"],
+    ["null review collection", [], "generic", undefined, "null"],
+    ["missing review collection", [], "generic", undefined, "missing"],
+  ];
+  it.each(reviewResultCases)("classifies %s only after validating candidate context and report provenance", async (_label, roles, classification, mutation, malformedCollection) => {
     const harness = await createDeveloperTaskBroker();
     const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
     await finishImplementation();
     const review = operations(harness, workspaceId).find((item) => item.workflowMode === "REVIEW")!;
-    await harness.finish(workspaceId, String(review.id), "SUCCEEDED", { result: {
-      workflowCandidateRepositories: candidate.repositories,
-      workflowReviews: ["CRITIC", "CRITIC"].map((role) => ({ operationId: review.id, candidateDigest: candidate.digest, role, provider: "test-model", version: "test-model-v1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-10-05T12:00:00.000Z" })),
-    } });
-    expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "REVIEW", state: "BLOCKED", blockReason: WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE });
+    const report = (role: string) => ({ operationId: mutation === "operation" ? randomUUID() : review.id, candidateDigest: mutation === "nested" ? "f".repeat(64) : candidate.digest,
+      role, provider: "test-model", version: "test-model-v1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-10-05T12:00:00.000Z" });
+    const result: Record<string, unknown> = {
+      workflowCandidateRepositories: mutation === "candidate" ? [{ ...candidate.repositories[0]!, treeSha: "f".repeat(40) }] : candidate.repositories,
+      workflowReviews: roles.map((role) => role === "CRITIC" && mutation === "malformed" ? { role, operationId: review.id, candidateDigest: candidate.digest } : report(role)),
+    };
+    if (malformedCollection !== undefined) {
+      if (malformedCollection === "object") result.workflowReviews = { role: "CRITIC" };
+      else if (malformedCollection === "string") result.workflowReviews = "CRITIC";
+      else if (malformedCollection === "null") result.workflowReviews = null;
+      else delete result.workflowReviews;
+    }
+    await harness.finish(workspaceId, String(review.id), "SUCCEEDED", { result });
+    const expectedReason = classification === "incomplete" ? WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE : "independent candidate review was invalid, incomplete, or stale";
+    expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "REVIEW", state: "BLOCKED", candidate: { digest: candidate.digest }, blockReason: expectedReason });
     expect(dispatchRows(harness)).toEqual([]);
     expect(operations(harness, workspaceId).filter((item) => item.workflowMode === "REVIEW")).toHaveLength(1);
+    expect(taskWorkflow(harness, taskId).reviews ?? []).toEqual([]);
   });
 
   it("refuses an ordinary write-capable turn on a workflow task even after reviews passed", async () => {

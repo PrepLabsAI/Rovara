@@ -20,6 +20,7 @@ import { slackChannelApi } from "../setup/channel-add.js";
 import { vendorApi } from "../setup/connectors/vendors.js";
 import { checkDeveloperSignIn } from "../signin/check.js";
 import type { DoctorServices } from "./checks.js";
+import { readChatGptHealth } from "./chatgpt.js";
 
 /** DescribeStacks for doctor: env adopt's reader (ruling F9), which also carries the last drift result.
  * Only DescribeStacks is sent; drift detection is never started (question 5). */
@@ -27,7 +28,11 @@ export function doctorStackReader(client: { send(command: unknown): Promise<unkn
   return cloudFormationStackReader({ send: async (command: DescribeStacksCommand) => (await client.send(command)) as DescribeStacksCommandOutput });
 }
 
-export function realDoctorServices(input: { settings: EnvironmentSettings; store: ParameterStore; fetch: typeof fetch; home: string; configDir: string; stderr: TextWriter }): DoctorServices {
+export function realDoctorServices(input: {
+  settings: EnvironmentSettings; store: ParameterStore; fetch: typeof fetch; home: string; configDir: string; stderr: TextWriter;
+  /** This computer's unexpired admin sign-in for the environment, for the checks only the control plane can answer. */
+  adminSession?: (env: string) => Promise<{ controlPlaneUrl: string; accessToken: string } | undefined>;
+}): DoctorServices {
   const { settings } = input;
   const region = { region: settings.region };
   const secrets = secretsManagerInitSecrets(new SecretsManagerClient(region));
@@ -46,6 +51,7 @@ export function realDoctorServices(input: { settings: EnvironmentSettings; store
     fetch: input.fetch,
     configDir: input.configDir,
     signIn: (current) => checkDeveloperSignIn({ env: current.env, store: input.store, secrets, settings: current, fetch: input.fetch, slackApi }),
+    chatgpt: async () => readChatGptHealth(input.fetch, await input.adminSession?.(settings.env)),
     now: Date.now,
     sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
   };

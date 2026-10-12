@@ -111,7 +111,8 @@ async function forWorker(
   const carriesCandidateTree = invocation.kind === "publish" && invocation.payload.candidateTreeSha !== undefined;
   const carriesPublishBase = invocation.kind === "publish" && invocation.payload.workflowBaseCommit !== undefined;
   const carriesPullRequestUpdate = invocation.kind === "maintain" && invocation.payload.workflowCandidateTreeSha !== undefined;
-  if (requestedThinkingLevel === undefined && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesReportChecks && !carriesCandidateTree && !carriesPublishBase && !carriesPullRequestUpdate) return invocation;
+  const carriesChatGpt = invocation.kind === "task" && invocation.payload.chatgpt !== undefined;
+  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesReportChecks && !carriesCandidateTree && !carriesPublishBase && !carriesPullRequestUpdate) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -163,7 +164,12 @@ async function forWorker(
       workspaceId: invocation.workspaceId,
     }));
   }
-  const checked = withoutReadiness(leveled, features);
+  // #341: an older worker cannot fetch a ChatGPT token, so its task runs on the default model it also carries.
+  const unsupportedChatGpt = carriesChatGpt && !features.includes("model.chatgpt");
+  if (unsupportedChatGpt) {
+    console.log(JSON.stringify({ component: "dispatcher", event: "dispatch.chatgpt_omitted", reason, operationId: invocation.operationId, workspaceId: invocation.workspaceId }));
+  }
+  const checked = withoutReadiness(unsupportedChatGpt ? withoutChatGpt(leveled) : leveled, features);
   if (checked !== leveled) {
     console.log(JSON.stringify({
       component: "dispatcher",
@@ -292,6 +298,14 @@ function withoutReportChecks(invocation: WorkerInvocation, features: readonly st
   if (invocation.kind !== "publish" || invocation.payload.reportChecks === undefined || features.includes("publish.reportChecks")) return invocation;
   const payload = { ...invocation.payload };
   delete payload.reportChecks;
+  return { ...invocation, payload };
+}
+
+/** A task without its ChatGPT plan, for a worker that cannot use one (#341). */
+function withoutChatGpt(invocation: WorkerInvocation): WorkerInvocation {
+  if (invocation.kind !== "task" || invocation.payload.chatgpt === undefined) return invocation;
+  const payload = { ...invocation.payload };
+  delete payload.chatgpt;
   return { ...invocation, payload };
 }
 

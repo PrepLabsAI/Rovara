@@ -239,7 +239,7 @@ describe("closing a task: repeats, races and audit records (R12, R15)", () => {
 
   it("releases the counters exactly once when two completions race (a lost race is not an error)", async () => {
     const { db, close, taskId, task, active, finish, member, actions, deleteEc2Session } = await finished();
-    const stale = structuredClone(db.get(`DEVTASK#${taskId}`, "META")) as DeveloperTaskRecord;
+    const stale = structuredClone(db.get(`DEVTASK#${taskId}`, "META")) as unknown as DeveloperTaskRecord;
     await close(randomUUID());
     const closeId = active();
     await finish(task.workspaceId, closeId, "SUCCEEDED", { result: { safeToClose: true, repositories: [] } });
@@ -263,7 +263,7 @@ describe("closing a task: repeats, races and audit records (R12, R15)", () => {
     counter.count = 0;
     delete counter.tasks;
     (organization(db) as Record<string, unknown>).count = 0;
-    const record = db.get(`DEVTASK#${taskId}`, "META") as DeveloperTaskRecord;
+    const record = db.get(`DEVTASK#${taskId}`, "META") as unknown as DeveloperTaskRecord;
     const logged = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       await expect(finishTaskClose({ tableName: actions.tableName, actions, documentClient: db }, record, closeId)).resolves.toBeUndefined();
