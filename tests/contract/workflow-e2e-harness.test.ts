@@ -1,10 +1,11 @@
 // Self-tests for the workflow E2E harness's controls: the clock, worker faults and version skew, recovery sweeps, Slack
 // variants, the feedback page, MCP, the webhook builder and secret rotation, wire mode, and the model fixtures.
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { execFileSync } from "node:child_process";
 import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, parsePlanDocument } from "@agentx/contracts";
 import { LOST_COMPUTE_ERROR, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../support/workflow-e2e.js";
 import { OMAR } from "../support/developer-task-broker.js";
-import { feedbackCriticReply } from "../support/faux-scripts.js";
+import { feedbackCriticReply, workflowModel } from "../support/faux-scripts.js";
 import {
   conflictingAsImplement, duplicateFindingIds, feedbackBundles, implementWithLowConfidence, implementWithoutFileChanges, missingComment,
   ownerDecisionEmptyLists, planCitesMissingFile, planMissingWhy, planOverCeiling, planProse, planTiny, planTruncatedJson, planWithDecisions,
@@ -46,6 +47,54 @@ describe("workflow E2E harness", () => {
     expect(Date.now()).toBeGreaterThan(Date.parse("2026-01-01T00:00:00Z"));
     expect(new Date().getUTCFullYear()).toBeLessThan(2030);
   });
+
+  it("initial repository files are confined to repo/demo and included in its base commit", async () => {
+    const content = "export const baseFixture = true;\n";
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: [] }, initialRepositoryFiles: [{ path: "nested/fixture.ts", content }] });
+    expect(execFileSync("git", ["-C", e2e.repoDirectory, "show", `${e2e.baseCommit}:nested/fixture.ts`], { encoding: "utf8" })).toBe(content);
+    await expect(createWorkflowE2E({ initialRepositoryFiles: [{ path: "../outside.txt", content }] })).rejects.toThrow(/stay inside repo\/demo/);
+    await expect(createWorkflowE2E({ initialRepositoryFiles: [{ path: "/tmp/outside.txt", content }] })).rejects.toThrow(/stay inside repo\/demo/);
+  }, 120_000);
+
+  it("resets coder command queues for a fresh session with the same prompt, without resetting within-session tool turns", async () => {
+    const step = workflowModel({ plan: PLAN, edits: EDITS, beforeEditsCommands: ["echo before"], afterEditsCommands: ["echo after"] });
+    const user = (text: string) => ({ role: "user", content: [{ type: "text", text }], timestamp: 0 });
+    const samePrompt = "Implement the approved plan.";
+    const call = (messages: unknown[]) => step({ messages }, undefined, undefined, undefined) as Promise<{ content: Array<{ type: string; name?: string }> }>;
+    const names = async (messages: unknown[]) => (await call(messages)).content.map((part) => part.name ?? part.type);
+    const opening = [user(samePrompt)];
+    expect(await names(opening)).toEqual(["bash"]);
+    expect(await names([...opening, { role: "assistant", content: [] }, { role: "toolResult", content: [] }])).toEqual(["write"]);
+    expect(await names([...opening, { role: "assistant", content: [] }, { role: "toolResult", content: [] },
+      { role: "assistant", content: [] }, { role: "toolResult", content: [] }])).toEqual(["bash"]);
+    expect(await names([...opening, { role: "assistant", content: [] }, { role: "toolResult", content: [] },
+      { role: "assistant", content: [] }, { role: "toolResult", content: [] }, { role: "assistant", content: [] }, { role: "toolResult", content: [] }])).toEqual(["text"]);
+    // A new Pi session starts with the same user text but has no prior assistant or tool-result messages.
+    expect(await names([user(samePrompt)])).toEqual(["bash"]);
+  });
+
+  it("result rewrites are kind-matched, one-shot, and leave defaults inert", async () => {
+    let failing = true;
+    const rewrites: string[] = [];
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS },
+      checkResult: () => failing ? { exitCode: 1, stdout: "", stderr: "expected failure\n" } : undefined });
+    await expect(e2e.repoFile("greeting.test.js")).rejects.toThrow();
+    e2e.worker.rewriteNextResult("task:IMPLEMENT", (result) => { rewrites.push("IMPLEMENT"); return result; });
+    e2e.worker.rewriteNextResult("task:PLAN", (result) => { rewrites.push("PLAN"); return result; });
+    expect(e2e.agentCheckRuns).toEqual([]);
+    expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200);
+    await e2e.settle();
+    expect(rewrites).toEqual(["PLAN"]);
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    expect(rewrites).toEqual(["PLAN", "IMPLEMENT"]);
+    expect(e2e.workflow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    failing = false;
+    await e2e.click("agentx_workflow_send_back");
+    await e2e.settle();
+    expect(rewrites).toEqual(["PLAN", "IMPLEMENT"]);
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+  }, 120_000);
 
   it("worker.failNext fails the next matching run at once, without running it", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
