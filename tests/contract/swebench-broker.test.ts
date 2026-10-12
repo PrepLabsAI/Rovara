@@ -62,7 +62,7 @@ async function evalBroker(options: { installed?: boolean; models?: unknown; star
   return { ...broker, launches, startExecution };
 }
 
-const enable = (handler: Parameters<typeof call>[0], body: unknown = {}, user = administrator) =>
+const enable = (handler: Parameters<typeof call>[0], body: unknown = {}, user: NonNullable<Parameters<typeof call>[1]["user"]> = administrator) =>
   call(handler, { method: "PUT", path: channelPath, user, body });
 
 const start = (handler: Parameters<typeof call>[0], body: Record<string, unknown> = {}, threadValue = thread) =>

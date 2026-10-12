@@ -177,8 +177,9 @@ describe("turn recorder", () => {
     const events: string[] = [];
     const extension = recorder().extension();
     expect(extension).toMatchObject({ name: "agentx-turn-recorder", hidden: true });
-    const factory = extension.factory as (pi: { on: (event: string) => void }) => unknown;
-    void factory({ on: (event: string) => { events.push(event); } });
+    const on = (event: string) => { events.push(event); };
+    if (typeof extension === "function") void extension({ on } as unknown as Parameters<typeof extension>[0]);
+    else if ("factory" in extension) void extension.factory({ on } as unknown as Parameters<typeof extension.factory>[0]);
     expect(events).toEqual(["tool_execution_start", "tool_execution_end", "agent_end"]);
   });
   it("routes arguments through redactArguments and never records request or response text", () => {

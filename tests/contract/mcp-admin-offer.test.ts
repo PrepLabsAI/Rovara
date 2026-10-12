@@ -4,11 +4,20 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { ToolListChangedNotificationSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResultSchema, ToolListChangedNotificationSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { DEVELOPER_TOOLS, FIRST_LIST_WAIT_MS, OFFER_READ_TIMEOUT_MS, ToolError, ToolOffer, createAgentXMcpServer, guardTransport, type AdminOffer, type ToolContext, type ToolDefinition } from "../../packages/mcp/src/index.js";
-import { toolError } from "../support/mcp-tool-error.js";
+import { toolError as parseToolError } from "../support/mcp-tool-error.js";
+
+function toolError(result: Awaited<ReturnType<Client["callTool"]>>) {
+  return parseToolError(CallToolResultSchema.parse(result));
+}
+
+function toolCallResult(message: JSONRPCMessage) {
+  if (!("result" in message)) throw new Error("expected a successful JSON-RPC tool response");
+  return CallToolResultSchema.parse(message.result);
+}
 
 const probe: ToolDefinition = {
   name: "agentx_admin_probe", title: "Probe", description: "A test admin tool.", inputSchema: {}, outputSchema: { ok: z.boolean() },
@@ -407,7 +416,7 @@ describe("the first tools/list and list_changed (issue 203)", () => {
     const { server, listNames, request } = await rawClient({ adminOffer });
     expect(await listNames()).toEqual([...DEVELOPER_TOOLS, ...ADMIN_GROUP, ...AUDIT_GROUP].map((tool) => tool.name));
     const refused = await request("tools/call", { name: "agentx_admin_change_probe", arguments: {} });
-    expect(toolError((refused as unknown as { result: Parameters<typeof toolError>[0] }).result)).toMatchObject({ code: "CONFIRMATION_UNAVAILABLE" });
+    expect(toolError(toolCallResult(refused))).toMatchObject({ code: "CONFIRMATION_UNAVAILABLE" });
     await server.close();
   });
 

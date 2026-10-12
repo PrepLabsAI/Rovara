@@ -208,11 +208,14 @@ export function parseCommentAnswers(answer: string, refs: ReadonlySet<string>): 
     if (typeof comment !== "string" || !refs.has(comment) || seen.has(comment)) continue;
     if (outcome !== "done" && outcome !== "not_changed") continue;
     if (typeof reason !== "string") continue;
-    const text = oneLine(reason, PLANNER_ANSWER_REASON_MAX_CHARS);
-    if (text.length === 0) continue;
-    // An answer is about its own comment: one that says "comment c3" of another shown comment is not taken (a comment cannot
-    // steer it). A bare "C4" (a diagram, a flag) is just a word.
-    if ([...text.matchAll(/\bcomments?\s+(c[1-9][0-9]{0,2})\b/giu)].some((named) => refs.has(named[1]!.toLowerCase()) && named[1]!.toLowerCase() !== comment)) continue;
+    const fullText = oneLine(reason, Number.MAX_SAFE_INTEGER);
+    if (fullText.length === 0) continue;
+    // A named list cannot steer this answer to any other included comment. Inspect the full normalized line before
+    // shortening the reason shown on the page; a reference after the display limit still makes the answer cross-linked.
+    if (namedCommentRefs(fullText).some((named) => refs.has(named) && named !== comment)) continue;
+    const text = fullText.length > PLANNER_ANSWER_REASON_MAX_CHARS
+      ? `${fullText.slice(0, PLANNER_ANSWER_REASON_MAX_CHARS - 1)}…`
+      : fullText;
     seen.add(comment);
     answers.push({ ref: comment, outcome, reason: text });
   }
@@ -231,9 +234,17 @@ export function sameIdSet(a: readonly string[], b: readonly string[]): boolean {
 
 const SHOWN_DECISION_MAX_CHARS = 60;
 const DECISION_LIST = "d[1-9][0-9]?(?:(?:\\s*,\\s*|\\s+and\\s+|\\s*&\\s*|\\s+or\\s+)d[1-9][0-9]?)*";
-const COMMENT_LIST = "c[1-9][0-9]{0,2}(?:(?:\\s*,\\s*|\\s+and\\s+|\\s*&\\s*|\\s+or\\s+)c[1-9][0-9]{0,2})*";
+const COMMENT_LIST = "c[1-9][0-9]{0,2}(?:(?:\\s*,\\s*(?:(?:and|or)\\s+)?|\\s+(?:and|or)\\s+|\\s*&\\s*)c[1-9][0-9]{0,2})*";
 /** Not followed by more of a name or a file extension ("d3.js", "d1-x", "d1/y"). */
 const ENDS_THERE = "(?![\\w/-]|\\.\\w)";
+const commentIdsInList = (list: string): string[] => list.match(/c[1-9][0-9]{0,2}/giu)?.map((id) => id.toLowerCase()) ?? [];
+
+/** Every complete comment list explicitly named in normalized model text. */
+function namedCommentRefs(text: string): string[] {
+  const named: string[] = [];
+  for (const match of text.matchAll(new RegExp(`\\bcomments?\\s+(${COMMENT_LIST})${ENDS_THERE}`, "giu"))) named.push(...commentIdsInList(match[1]!));
+  return named;
+}
 
 /**
  * AgentX-written page text with the plan's own labels made plain, wherever the text names them: "decision d1" (or
@@ -262,5 +273,5 @@ export function plainPageRefs(text: string, input: { decisions: ReadonlyMap<stri
       return `${lead(first, plural ? "the decisions" : "the decision")}${all ? ` ${joined(names)}` : ""}`;
     })
     .replace(new RegExp(`\\b(the\\s+)?(comments?)\\s+(${COMMENT_LIST})${ENDS_THERE}`, "giu"), (match: string, _the: string | undefined, _word: string, list: string) =>
-      lead(match.charAt(0), (list.match(/c[1-9][0-9]{0,2}/giu) ?? []).length > 1 ? "those comments" : "that comment"));
+      lead(match.charAt(0), commentIdsInList(list).length > 1 ? "those comments" : "that comment"));
 }

@@ -90,7 +90,8 @@ describe("the real CommandRunner", () => {
       );
 
     expect(error).toBeInstanceOf(Error);
-    const message = (error as Error).message;
+    if (!(error instanceof Error)) throw new Error("expected the sanitized spawn error");
+    const message = error.message;
     expect(message).not.toContain(secret);
     expect(message).toContain("<redacted>");
     expect(message).toContain("npx cdk deploy AgentXControlPlane --parameters AgentXControlPlane:CallbackSigningKey=<redacted>");
@@ -161,10 +162,12 @@ describe("the real CommandRunner", () => {
       );
 
     expect(error).toBeInstanceOf(Error);
-    const message = (error as Error).message;
+    if (!(error instanceof Error)) throw new Error("expected the sanitized spawn error");
+    const message = error.message;
     expect(message).toContain("safe-display-only could not start");
     expect(message).not.toContain(secret);
-    expect((error as NodeJS.ErrnoException).spawnargs).toBeUndefined();
+    const spawnargs = "spawnargs" in error ? error.spawnargs : undefined;
+    expect(spawnargs).toBeUndefined();
   });
 
   it("caps a single unbroken line's buffer at 64 KiB, still catching a secret whose bytes straddle the cut", async () => {

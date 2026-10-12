@@ -69,7 +69,10 @@ describe("workspace and conversation resumption", () => {
     const second = await replacementProcess.createSessionFile();
     expect(second.conversationId).not.toBe(first.conversationId);
     await expect(readFile(join(repository, "tracked.txt"), "utf8")).resolves.toBe("unfinished edit\n");
-    await expect(verifyWorkspaceResume({ rootPath, projectName: "payments", projectRevision: 1, environmentDigest: digest })).resolves.toMatchObject({ complete: true });
+    const resumeInput: Parameters<typeof verifyWorkspaceResume>[0] & { environmentDigest: string } = {
+      rootPath, projectName: "payments", projectRevision: 1, environmentDigest: digest,
+    };
+    await expect(verifyWorkspaceResume(resumeInput)).resolves.toMatchObject({ complete: true });
   });
 
   it("marks ambiguous running effects interrupted after worker replacement without replay", async () => {

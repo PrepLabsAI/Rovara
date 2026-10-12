@@ -75,13 +75,15 @@ export function parseReleaseArgs(
       throw new Error(`unknown option ${argument}`);
     }
   }
+  const region = valueAfter("--region") ?? environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? DEFAULT_REGION;
+  const repository = valueAfter("--repository") ?? DEFAULT_REPOSITORY;
+  const profile = valueAfter("--profile") ?? environment.AWS_PROFILE;
+  const workerImage = valueAfter("--worker-image");
   return {
-    region: valueAfter("--region") ?? environment.AWS_REGION ?? environment.AWS_DEFAULT_REGION ?? DEFAULT_REGION,
-    repository: valueAfter("--repository") ?? DEFAULT_REPOSITORY,
-    ...(valueAfter("--profile") ?? environment.AWS_PROFILE
-      ? { profile: valueAfter("--profile") ?? environment.AWS_PROFILE }
-      : {}),
-    ...(valueAfter("--worker-image") ? { workerImage: valueAfter("--worker-image") } : {}),
+    region,
+    repository,
+    ...(profile ? { profile } : {}),
+    ...(workerImage ? { workerImage } : {}),
     allowDirty: argv.includes("--allow-dirty"),
     skipChecks: argv.includes("--skip-checks"),
     dryRun: argv.includes("--dry-run"),

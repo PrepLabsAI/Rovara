@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import type { ConnectorCatalog } from "../../packages/contracts/src/index.js";
+import type { ConnectorCallRequest, ConnectorCatalog } from "../../packages/contracts/src/index.js";
 import { createConnectorTools } from "../../packages/orchestrator/src/connector-tools.js";
 import { capabilitiesManifest } from "../../packages/orchestrator/src/manifest.js";
 import { ORCHESTRATION_TOOL_NAMES, assertOrchestrationOnly } from "../../packages/orchestrator/src/orchestration-tools.js";
@@ -18,7 +18,7 @@ const context = { workspaceId: "11111111-1111-4111-8111-111111111111", conversat
 
 describe("connector tool bridge", () => {
   it("calls the single scope without asking the model for a target", async () => {
-    const invoke = vi.fn(async () => ({ status: "SUCCEEDED" }));
+    const invoke = vi.fn<(input: ConnectorCallRequest & { workspaceId: string; connector: string }) => Promise<unknown>>(async () => ({ status: "SUCCEEDED" }));
     const presented = catalog(["demo"]);
     const [tool] = createConnectorTools([presented], invoke, context);
     expect(tool!.description).toBe(presented.tools[0]!.description);
@@ -49,7 +49,7 @@ describe("connector tool bridge", () => {
   });
 
   it("keeps a call's request ID stable on replay and distinct between targets", async () => {
-    const invoke = vi.fn(async () => ({ status: "SUCCEEDED" }));
+    const invoke = vi.fn<(input: ConnectorCallRequest & { workspaceId: string; connector: string }) => Promise<unknown>>(async () => ({ status: "SUCCEEDED" }));
     const ids = ["33333333-3333-4333-8333-333333333333", "44444444-4444-4444-8444-444444444444"];
     const [tool] = createConnectorTools([catalog(["api", "web"])], invoke, context, { requestId: () => ids.shift()! });
     await tool!.execute("call-1", { target: "api" }, undefined, undefined, {} as never);

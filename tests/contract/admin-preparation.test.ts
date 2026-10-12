@@ -168,7 +168,7 @@ describe("workspace preparation coordination", () => {
           { name: "tracker", type: "future-vendor", credentialRef: "future-vendor-key", scopes: ["payments"] },
         ],
       },
-    } as ProjectDefinition;
+    } as unknown as ProjectDefinition;
 
     const registry = new InMemoryRegistry();
     const coordinator = new PreparationCoordinator({

@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { evaluateEc2Preflight, type Ec2PreflightFacts } from "../../scripts/ec2-preflight.js";
 
+type IncompleteWorkerSettingsFacts = Omit<Ec2PreflightFacts, "workerSettings"> & { workerSettings: Partial<Ec2PreflightFacts["workerSettings"]> };
+// This fixture intentionally omits unset parameter names; evaluateEc2Preflight observes that presence through Object.entries.
+const incompleteWorkerSettingsFacts = (facts: IncompleteWorkerSettingsFacts): Ec2PreflightFacts => facts as unknown as Ec2PreflightFacts;
+
 describe("EC2 worker preflight (#87)", () => {
-  const healthy: Ec2PreflightFacts = {
+  const healthy = incompleteWorkerSettingsFacts({
     launchTemplate: { instanceType: "m6g.medium", imageId: "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64", httpTokens: "required", hopLimit: 1 },
     image: { imageId: "ami-0123456789abcdef0", architecture: "arm64", state: "available" },
     subnets: [
@@ -22,7 +26,7 @@ describe("EC2 worker preflight (#87)", () => {
     vcpuQuota: 32,
     runningStandardVcpus: 4,
     lambdaConcurrency: 1000,
-  };
+  });
   const levelOf = (facts: Ec2PreflightFacts, name: string) => evaluateEc2Preflight(facts).find((check) => check.name === name)!.level;
 
   it("passes every check for a ready environment", () => {
