@@ -169,7 +169,7 @@ describe("exportChanges (FR-052)", () => {
 
   it("asks for the window and each next page, and reads a newer record loosely (R1)", async () => {
     const record = { changeId: CHANGE, kind: "rename_everything", traceId: "t", status: "reviewing", admin: { issuer: "i", subject: "admin-subject", team: "x" }, client: { cliVersion: "0.9.0", os: "mac" }, change: { project: "payments" }, effect: "Something new.", methodsOffered: ["passkey"], proposedAt: "2026-10-02T09:00:00.000Z", newField: [1] };
-    const pages = [{ changes: [record], cursor: "c1" }, { changes: [] }];
+    const pages: Array<{ changes: typeof record[]; cursor?: string }> = [{ changes: [record], cursor: "c1" }, { changes: [] }];
     const urls: string[] = [];
     const fetch = vi.fn(async (input: string | URL | Request) => { urls.push(input as string); return Response.json(pages.shift()); }) as unknown as typeof globalThis.fetch;
     const json: string[] = [];

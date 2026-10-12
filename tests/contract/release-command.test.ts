@@ -50,7 +50,13 @@ describe("shared release helpers", () => {
       skipChecks: true,
     });
     expect(() => parseReleaseArgs(["--region"], {})).toThrow(/requires a value/);
+    expect(() => parseReleaseArgs(["--region", "--profile"], {})).toThrow("--region requires a value");
     expect(() => parseReleaseArgs(["--surprise"], {})).toThrow(/unknown option/);
+  });
+
+  it("omits empty optional profile values and still rejects an empty worker image option", () => {
+    expect(parseReleaseArgs([], { AWS_PROFILE: "" })).not.toHaveProperty("profile");
+    expect(() => parseReleaseArgs(["--worker-image", ""], {})).toThrow("--worker-image requires a value");
   });
 
   it("creates immutable release tags and validates digest-scoped images", () => {

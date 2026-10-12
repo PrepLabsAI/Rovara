@@ -8,6 +8,7 @@ import { MAYA } from "../../support/developer-task-broker.js";
 import { CLOSED_REPLY } from "../../../packages/broker/src/developer/share-messages.js";
 import { planTiny, planWithDecisions } from "../../support/model-fixtures.js";
 import { planAnswer, planDocument } from "../../support/plan-documents.js";
+import { openTaskPage } from "../../support/page-browser.js";
 import { createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { EDITS, PLAN, actionIds, atPlanReview, expectNoJargon, journeySuite, markInputs, modelInputs, runs, said } from "../../support/workflow-e2e-journeys.js";
 
@@ -70,6 +71,54 @@ describe("Suite 2: Full planning", () => {
     expect(implement[0]).toContain("**1** Add greet to greeting.ts.");
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     expect(e2e.workflow().decisions.map((decision) => decision.decision)).toEqual(["APPROVE", "APPROVE", "APPROVE"]);
+    expectNoJargon(e2e);
+  }, 120_000);
+
+  it("2.3b stores only planner replies that stay with their approved design comments", async () => {
+    const answers = JSON.stringify([
+      { comment: "c1", outcome: "done", reason: "Done in the coding plan, as comment c1 asked." },
+      { comment: "c2", outcome: "done", reason: "Done in the coding plan, as comments c2 and c1 asked." },
+    ]);
+    const e2e = await createWorkflowE2E({ canvas: "unavailable", model: { edits: EDITS, plan: (latest) => {
+      if (REQUIREMENTS_PROMPT.test(latest)) return plain("Requirements", ["Keep the change small."]);
+      if (DESIGN_PROMPT.test(latest)) return plain("Design", ["Keep the greeting clear."]);
+      return plain("Coding plan", ["Add greet to greeting.ts.", "Run node --version."]) + "\n\n```agentx-comment-answers\n" + answers + "\n```";
+    } } });
+    expect(await e2e.mention("full: Add a greet(name) function")).toBe(200);
+    await e2e.settle();
+    await e2e.click("agentx_workflow_approve");
+    await approveModal(e2e);
+    await e2e.settle();
+
+    const design = await openTaskPage(e2e, MAYA, { search: "?doc=design" });
+    expect(design.status).toBe(200);
+    for (const text of ["Keep the greeting warm.", "Use a short response."]) {
+      const open = design.document.querySelector('#design .comment-open[data-target="document"]');
+      expect(open).not.toBeNull();
+      open!.click();
+      const form = design.document.querySelector('#design [data-comments="document"] .comment-form');
+      expect(form).not.toBeNull();
+      form!.querySelector("textarea")!.type_(text);
+      design.button(form!, "Post").click();
+      await design.settle();
+    }
+    expect(runs(e2e)).not.toContain("IMPLEMENT");
+    await e2e.click("agentx_workflow_approve");
+    await approveModal(e2e);
+    await e2e.settle();
+
+    const replies = e2e.db.find((item) => item.pk === `DEVTASK#${e2e.taskId()}` && item.entityType === "TASK_COMMENT" && (item.author as { kind: string }).kind === "agentx");
+    expect(replies).toHaveLength(1);
+    expect(replies[0]).toMatchObject({ text: "Done in the coding plan, as that comment asked.", author: { kind: "agentx", source: "planner" } });
+    const designPage = await openTaskPage(e2e, MAYA, { search: "?doc=design" });
+    const renderedReplies = designPage.document.querySelectorAll('#design [data-comments="document"] .replies li');
+    expect(renderedReplies).toHaveLength(1);
+    expect(renderedReplies[0]!.textContent).toContain("Done in the coding plan, as that comment asked.");
+    const card = e2e.slack.lastPostWithAction("agentx_workflow_approve");
+    expect(card.text).toContain("AgentX replied to 1 of 2 comments on the design.");
+    expect(card.text).not.toContain("AgentX replied to 2 of 2 comments on the design.");
+    expect(runs(e2e)).not.toContain("IMPLEMENT");
+    expect(e2e.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
     expectNoJargon(e2e);
   }, 120_000);
 

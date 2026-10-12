@@ -152,7 +152,7 @@ describe("access stack", () => {
     expect(hasProfile).toBe(true);
     const profileStatement = (statements: Statement[]) => statements.find((st) => st.Sid === "IamInstanceProfiles");
     const service = profileStatement(roleStatements(template.toJSON().Resources as Record<string, Resource>))!;
-    const boundary = profileStatement(boundaryPolicies[0]![1].Properties.PolicyDocument.Statement as Statement[])!;
+    const boundary = profileStatement((boundaryPolicies[0]![1].Properties.PolicyDocument as { Statement: Statement[] }).Statement)!;
     for (const statement of [service, boundary]) {
       expect(statement.Action).toEqual(expect.arrayContaining(["iam:CreateInstanceProfile", "iam:AddRoleToInstanceProfile", "iam:DeleteInstanceProfile"]));
       expect(JSON.stringify(statement.Resource)).toContain("instance-profile/agentx/staging/*");

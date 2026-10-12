@@ -68,8 +68,8 @@ function redirectCheck(answer: RedirectAnswer, callback: string, base: string): 
   if (answer.state === "registered") return { name, ok: true, detail: `Slack sent a test sign-in request back to ${callback}, so it is a registered redirect URL` };
   if (answer.state === "not registered") return { name, ok: false, detail: `Slack does not list ${callback} as a redirect URL; add it on OAuth & Permissions` };
   return answer.why === undefined
-    ? { name, ok: true, warn: true, detail: `not verified: could not reach slack.com to send a test sign-in request; run agentx login ${base} to confirm that ${callback} is a redirect URL` }
-    : { name, ok: true, warn: true, detail: `not verified: ${answer.why}, so it does not show whether ${callback} is a redirect URL; run agentx login ${base} to confirm` };
+    ? { name, ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL because the test request to slack.com failed. If signing in on the task page works, you can ignore this warning. Otherwise run agentx login ${base} to check sign-in.` }
+    : { name, ok: true, warn: true, detail: `Couldn't confirm the Slack redirect URL: ${answer.why}. If signing in on the task page works, you can ignore this warning. Otherwise run agentx login ${base} to check sign-in.` };
 }
 
 async function controlPlaneCheck(input: { settings: EnvironmentSettings; fetch: typeof fetch }, stored: { slack: boolean; oidcOn: boolean }): Promise<SignInCheck> {

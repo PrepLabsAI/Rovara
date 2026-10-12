@@ -11,6 +11,7 @@ import {
   DEVELOPER_WORKSPACES_PER_PROJECT,
   WORKSPACE_PROJECT_INDEX,
   WorkspaceInstanceSchema,
+  TaskPersonProofResponseSchema,
   agentXError,
   developerTaskPolicy,
   workspaceRecordFields,
@@ -32,8 +33,11 @@ import {
   type SlackChannelBinding,
   type SlackUserByEmailRequest,
   type SlackUserByEmailResponse,
+  type TaskPersonProofRequest,
+  type TaskPersonProofResponse,
 } from "@agentx/contracts";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
+import type { ProjectAccessSubject } from "../developer/task-person-identity.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
 import {
@@ -50,6 +54,8 @@ export interface DeveloperApiConfiguration {
   since?: { slack?: number; oidc?: number };
   signInTableName: string;
   channelMembers(request: ChannelMembersRequest): Promise<ChannelMembersResponse>;
+  /** C0: optional until the compatible identity function is deployed; callers must fail closed when absent. */
+  taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>;
   /** R10: bound channels' names and privacy, read by DeveloperIdentity. Optional: without it channels are listed by ID. */
   channelInfo?: (request: ChannelInfoRequest) => Promise<ChannelInfoResponse>;
   /** How long one request waits for channel names in all; the rest stay unnamed. Default 5 seconds. */
@@ -101,7 +107,7 @@ type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_r
  */
 async function identityInvoke<T>(
   invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>,
-  request: ChannelMembersRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
+  request: ChannelMembersRequest | TaskPersonProofRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
   readReply: (reply: Record<string, unknown>) => T | undefined,
   event: string,
 ): Promise<T | IdentityRefusal> {
@@ -139,6 +145,19 @@ export function channelMembersThroughLambda(invoke: (payload: Uint8Array) => Pro
   return (request) => identityInvoke(invoke, request, (reply) => (reply.ok === true && Array.isArray(reply.memberOf)
     ? { ok: true as const, memberOf: reply.memberOf.filter((entry): entry is string => typeof entry === "string") }
     : undefined), "developer.channel_members");
+}
+
+/** C0: one fresh proof through DeveloperIdentity. Any old or malformed reply fails closed. */
+export function taskPersonProofThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse> {
+  return (request) => identityInvoke(invoke, request, (reply): TaskPersonProofResponse | undefined => {
+    const parsed = TaskPersonProofResponseSchema.safeParse(reply);
+    if (!parsed.success) return undefined;
+    if (!parsed.data.ok) return parsed.data.error === "ineligible" ? parsed.data : undefined;
+    const requested = new Set(request.channelIds);
+    const memberOf = parsed.data.memberOf;
+    if (parsed.data.user.id !== request.slackUserId || new Set(memberOf).size !== memberOf.length || memberOf.some((channelId) => !requested.has(channelId))) return undefined;
+    return parsed.data;
+  }, "developer.task_person_proof");
 }
 
 type ChannelEntry = { channelId: string; name: string; isPrivate: boolean };
@@ -429,7 +448,7 @@ const describeChannel = (channelId: string, names: Map<string, { name: string; i
  * FR-013: only `developer` rows are grants. A developer ID is built like an admin owner key, so an
  * admin's `administrator` rows can sit under the same key when both sign in through one IdP.
  */
-async function grantsOf(deps: DeveloperRouteDependencies, caller: DeveloperCaller): Promise<string[]> {
+async function grantsOf(deps: DeveloperRouteDependencies, caller: ProjectAccessSubject): Promise<string[]> {
   return (await queryAll<{ projectName: string; role?: string }>(deps, `MEMBER#${caller.developerId}`, "PROJECT#"))
     .filter((membership) => membership.role === "developer")
     .map((membership) => membership.projectName);
@@ -477,19 +496,27 @@ async function listProjects(deps: DeveloperRouteDependencies, caller: DeveloperC
  * SLACK_UNAVAILABLE when only a channel could have given access and Slack is down, then
  * PROJECT_TASKS_DISABLED.
  */
-export async function checkProjectAccess(deps: DeveloperRouteDependencies, caller: DeveloperCaller, project: string): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }> {
+export async function checkProjectAccess(
+  deps: DeveloperRouteDependencies,
+  caller: ProjectAccessSubject,
+  project: string,
+  membership?: { freshMemberOf: readonly string[] },
+): Promise<{ revision: number; policy: DeveloperTaskPolicy; access: "granted" | "channel"; channelIds: string[] }> {
   // A name that is not a project name is never echoed back: it could be long or carry markup.
   if (!AgentXNameSchema.safeParse(project).success) throw agentXError("PROJECT_NOT_FOUND", "that is not a valid AgentX project name");
   const known = (await projectsWithPolicy(deps, [project])).get(project);
   if (known === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
   const grants = (await grantsOf(deps, caller)).filter((name) => name === project);
   const bindings = (await bindingsOf(deps)).filter((binding) => binding.projectName === project);
+  const freshMemberOf = membership === undefined ? undefined : new Set(membership.freshMemberOf);
   const access = await resolveDeveloperAccess({
     grants,
     bindings,
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
     channelMembersMayUse: () => known.policy.channelMembersMayUse,
-    channelMembers: safeChannelMembers(deps),
+    channelMembers: freshMemberOf === undefined
+      ? safeChannelMembers(deps)
+      : async (request) => ({ ok: true as const, memberOf: request.channelIds.filter((channelId) => freshMemberOf.has(channelId)) }),
   });
   const entry = access.projects.get(project);
   if (entry === undefined) {

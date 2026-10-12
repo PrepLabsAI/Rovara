@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentXError, type ChannelInfoRequest, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
-import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerSinceFromEnvironment, type DeveloperApiConfiguration, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
+import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerSinceFromEnvironment, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { identityHarness, localSigner } from "../support/developer-fakes.js";
@@ -339,6 +339,45 @@ describe("the channel check through the DeveloperIdentity function", () => {
   });
 });
 
+describe("the fresh task person proof through the DeveloperIdentity function", () => {
+  const request = { kind: "task-person-proof" as const, slackUserId: "U0MAYA001", channelIds: ["C0LEDGER1", "C0PAY0001"] };
+  const reply = (value: unknown) => ({ Payload: new TextEncoder().encode(JSON.stringify(value)) });
+
+  it("sends the exact request and accepts one fully scoped proof", async () => {
+    const invoke = vi.fn(async (payload: Uint8Array) => {
+      void payload;
+      return reply({ ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0PAY0001"] });
+    });
+    await expect(taskPersonProofThroughLambda(invoke)(request)).resolves.toEqual({
+      ok: true,
+      user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" },
+      memberOf: ["C0PAY0001"],
+    });
+    expect(JSON.parse(new TextDecoder().decode(invoke.mock.calls[0]![0]))).toEqual(request);
+  });
+
+  it("refuses old capability and malformed, mismatched, duplicate, or out-of-scope proof", async () => {
+    const badReplies = [
+      { ok: false, error: "invalid_request" },
+      { ok: true, user: { id: "U0OTHER01", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0PAY0001"] },
+      { ok: true, user: { id: "U0MAYA001", teamId: "bad-team", name: "Maya Chen" }, memberOf: ["C0PAY0001"] },
+      { ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0PAY0001", "C0PAY0001"] },
+      { ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0OTHER01"] },
+      { ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "" }, memberOf: [] },
+      { ok: false, error: "unknown" },
+    ];
+    for (const value of badReplies) {
+      const answer = await taskPersonProofThroughLambda(async () => reply(value))(request);
+      expect(answer.ok).toBe(false);
+    }
+  });
+
+  it("passes through a verified ineligible answer without turning it into availability", async () => {
+    await expect(taskPersonProofThroughLambda(async () => reply({ ok: false, error: "ineligible" }))(request))
+      .resolves.toEqual({ ok: false, error: "ineligible" });
+  });
+});
+
 describe("GET /v1/dev/projects with the task policy (FR-014, FR-016)", () => {
   it("adds each project's policy from its latest revision", async () => {
     db.set({ pk: "PROJECT#payments-api", sk: "REV#000000000008", entityType: "PROJECT", definition: { name: "payments-api", revision: 8, developerTasks: { enabled: true, share: "required", shareMode: { default: "view", allowContinue: false }, channelMembersMayUse: true } } });
@@ -416,6 +455,17 @@ describe("checkProjectAccess, FR-018's first three checks (FR-013, FR-014, FR-04
     expect(await checkProjectAccess(deps(), maya, "solo")).toEqual({ revision: 1, policy: { enabled: true, share: "optional", shareMode: { default: "view", allowContinue: true }, channelMembersMayUse: true }, access: "granted", channelIds: [] });
     expect(await checkProjectAccess(deps(), maya, "payments-api")).toMatchObject({ revision: 7, access: "channel" });
     expect(channelMembers).toHaveBeenLastCalledWith({ kind: "channel-members", slackUserId: "U0MAYA001", channelIds: ["C0PAY0001"] });
+  });
+
+  it("uses supplied fresh proof for a target subject without a session or cached Slack lookup", async () => {
+    const subject = { developerId, slackUserId: "U0MAYA001" };
+    channelMembers.mockRejectedValue(new Error("cached path must not run"));
+
+    await expect(checkProjectAccess(deps(), subject, "payments-api", { freshMemberOf: ["C0PAY0001"] }))
+      .resolves.toMatchObject({ access: "channel", channelIds: ["C0PAY0001"] });
+    await expect(checkProjectAccess(deps(), subject, "ledger", { freshMemberOf: ["C0PAY0001"] }))
+      .rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
+    expect(channelMembers).not.toHaveBeenCalled();
   });
 
   it("answers PROJECT_NOT_FOUND for a project with no revision or an invalid name, without asking Slack", async () => {

@@ -292,8 +292,9 @@ function confirmingFakeDeployer(scripted: Record<string, StackOutputs>): StackDe
  * writes `scripted` to whatever file it's asked for (a superset every time; `cdkDeployer.deploy`
  * only ever reads its own stack's key back out), and records the outputs directory it saw so a test
  * can confirm it's removed afterward. */
-function cleanCdkRunner(scripted: Record<string, StackOutputs>, declared: Partial<Record<DeployPart, string[]>> = {}): CommandRunner & { outputsDir?: string; synthDirs: string[] } {
-  const runner: CommandRunner & { outputsDir?: string; synthDirs: string[] } = {
+type CleanCdkRunnerFixture = CommandRunner & { outputsDir?: string | undefined; synthDirs: string[] };
+function cleanCdkRunner(scripted: Record<string, StackOutputs>, declared: Partial<Record<DeployPart, string[]>> = {}): CleanCdkRunnerFixture {
+  const runner: CleanCdkRunnerFixture = {
     outputsDir: undefined,
     synthDirs: [],
     async run(command, args) {

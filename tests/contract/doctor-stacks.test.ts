@@ -87,7 +87,7 @@ describe("doctor: stacks (FR-050)", () => {
   const cdkEnvironment = (change: (stacks: ReturnType<typeof healthyStacks>) => void = () => undefined) => {
     const stacks = healthyStacks();
     for (const stack of Object.values(stacks)) {
-      const parameters = { ...stack.parameters, BootstrapVersion: "/cdk-bootstrap/hnb659fds/version" };
+      const parameters: Record<string, string> = { ...stack.parameters, BootstrapVersion: "/cdk-bootstrap/hnb659fds/version" };
       delete parameters.AssetHash;
       stack.parameters = parameters;
     }

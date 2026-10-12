@@ -182,6 +182,15 @@ export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   slackTeamId?: string;
+  /** C: absent is write-disabled; an existing PEOPLE sidecar remains authoritative either way. */
+  taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
+  /** C: trusted exact-principal eligibility and bound-channel proof; never supplied by a request body. */
+  checkTaskPerson?: (task: DeveloperTaskRecord, developerId: string) => Promise<{
+    subject: { developerId: string; slackUserId?: string };
+    identity: { developerId: string; slackUserId: string; name: string; method: "slack" | "oidc"; issuer: string; subject: string };
+    eligible: boolean;
+    channelMember: boolean;
+  }>;
   actions: DeveloperTaskActions;
   /** Recollects every linked PR from GitHub; required before feedback decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;

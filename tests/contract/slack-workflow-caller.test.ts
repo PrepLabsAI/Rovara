@@ -3,7 +3,7 @@ import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-act
 import { slackWorkflowCaller } from "../../packages/broker/src/aws/slack-workflow-caller.js";
 
 describe("Slack workflow caller", () => {
-  it("uses AgentX's stable hashed developer identity while retaining Slack identity for access checks", () => {
+  it("native_slack_and_slack_signin_page_mcp_share_owner_principal", () => {
     const caller = slackWorkflowCaller("U0BSPTAFNG2");
 
     expect(caller).toEqual({

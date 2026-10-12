@@ -85,7 +85,7 @@ describe("gateway tool approval", () => {
     const list = catalog[0]!.inputSchema;
     expect((list.properties as Record<string, unknown>).siteId).toBeUndefined();
     expect(list.required).toEqual(["state"]);
-    expect((list.properties as Record<string, { enum: string[] }>).state.enum).toEqual(["open", "closed"]);
+    expect((list.properties as Record<string, { enum: string[] } | undefined>).state?.enum).toEqual(["open", "closed"]);
     expect((catalog[1]!.inputSchema.properties as Record<string, unknown>).priority).toBeUndefined();
     expect(catalog[1]!.access).toBe("write");
   });

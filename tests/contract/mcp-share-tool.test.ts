@@ -2,12 +2,16 @@
 // Spec 025 FR-030, FR-049, C20, C21: sharing through the MCP tools, against a fake control plane.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import type { DeveloperTaskView } from "@agentx/contracts";
 import { NEXT_STEPS, UPGRADE_AGENTX_STEP, compatibilityChecker, createAgentXMcpServer, type ControlPlaneClient, type ToolContext } from "../../packages/mcp/src/index.js";
-import { toolError } from "../support/mcp-tool-error.js";
+import { toolError as parseToolError } from "../support/mcp-tool-error.js";
 
 const TASK = "44444444-4444-4444-8444-444444444444";
+function toolError(result: Awaited<ReturnType<Client["callTool"]>>) {
+  return parseToolError(CallToolResultSchema.parse(result));
+}
 const view = (extra: Partial<DeveloperTaskView> = {}): DeveloperTaskView => ({
   taskId: TASK, title: "Fix the flaky retry test", project: "payments", status: "RUNNING", startingRevision: 7, client: "Claude Code", shared: false,
   createdAt: "2026-09-29T10:00:00.000Z", updatedAt: "2026-09-29T10:00:00.000Z", events: [], ...extra,
@@ -28,7 +32,10 @@ async function connect(client: Partial<ControlPlaneClient>, overrides: Partial<T
   await mcp.listTools();
   return mcp;
 }
-const text = (result: { content?: unknown }) => (result.content as Array<{ text: string }>)[0]?.text ?? "";
+const text = (result: Awaited<ReturnType<Client["callTool"]>>) => {
+  const first = CallToolResultSchema.parse(result).content[0];
+  return first?.type === "text" ? first.text : "";
+};
 
 describe("share fields in task results (FR-030, C21)", () => {
   it("says a start was shared because the project requires it, view only because continue is not allowed", async () => {
@@ -128,7 +135,7 @@ describe("agentx_share_task (FR-030)", () => {
     const mcp = await connect({ shareTask }, { newRequestId: () => `33333333-3333-4333-8333-${String(++next).padStart(12, "0")}` });
     const modes: unknown[] = [];
     for (const shareMode of ["view", "continue", "view"]) {
-      modes.push((await mcp.callTool({ name: "agentx_share_task", arguments: { task_id: TASK, share_mode: shareMode } })).structuredContent?.share_mode);
+      modes.push(CallToolResultSchema.parse(await mcp.callTool({ name: "agentx_share_task", arguments: { task_id: TASK, share_mode: shareMode } })).structuredContent?.share_mode);
     }
     const ids = shareTask.mock.calls.map(([, request]) => request.requestId);
     expect(new Set(ids).size).toBe(3);
@@ -172,7 +179,7 @@ describe("agentx_share_task (FR-030)", () => {
       { share_mode: "view", channel: "#payments-dev" },
     ];
     const modes: unknown[] = [];
-    for (const args of calls) modes.push((await mcp.callTool({ name: "agentx_share_task", arguments: { task_id: TASK, ...args } })).structuredContent?.share_mode);
+    for (const args of calls) modes.push(CallToolResultSchema.parse(await mcp.callTool({ name: "agentx_share_task", arguments: { task_id: TASK, ...args } })).structuredContent?.share_mode);
     expect(new Set(shareTask.mock.calls.map(([, request]) => request.requestId)).size).toBe(5);
     expect(modes).toEqual(["view", "continue", "view", "continue", "view"]);
     expect(mode).toBe("view");
