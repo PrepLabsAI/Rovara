@@ -18,19 +18,22 @@ afterEach(() => {
 
 describe("the control-plane client (FR-027)", () => {
   it("uses strict People routes and never sends confirmation or actor authority", async () => {
-    const people = { revision: 1, orphaned: false, people: [], canManage: true, canTakeOwnership: false, addPeopleUrl: "/add" };
+    const people = { revision: 1, orphaned: false, people: [], canManage: true, canTakeOwnership: false, addPeopleUrl: "https://slack.com/archives/C0123456789/p1695500000000001" };
     const fetch = vi.fn()
       .mockResolvedValueOnce(reply(200, people))
       .mockResolvedValueOnce(reply(200, { status: "PENDING", requestId: start.requestId, confirmationUrl: "https://agentx.example.test/confirm", expiresAt: "2026-10-11T10:10:00.000Z" }))
+      .mockResolvedValueOnce(reply(200, { status: "COMMITTED", view: people }))
       .mockResolvedValueOnce(reply(200, { status: "COMMITTED", view: people }));
     const api = client(fetch);
     await expect(api.getTaskPeople(view.taskId)).resolves.toEqual(people);
     await api.setTaskPerson(view.taskId, { requestId: start.requestId, expectedPeopleRevision: 1, personId: "22222222-2222-4222-8222-222222222222", role: "viewer" });
     await api.takeTaskOwnership(view.taskId, { requestId: start.requestId, expectedPeopleRevision: 1 });
+    await expect(api.getTaskPeopleRequest(view.taskId, start.requestId)).resolves.toMatchObject({ status: "COMMITTED" });
     expect(fetch.mock.calls.map((call) => String(call[0]))).toEqual([
       `https://agentx.example.test/v1/dev/tasks/${view.taskId}/people`,
       `https://agentx.example.test/v1/dev/tasks/${view.taskId}/people/role`,
       `https://agentx.example.test/v1/dev/tasks/${view.taskId}/people/take-ownership`,
+      `https://agentx.example.test/v1/dev/tasks/${view.taskId}/people/requests/${start.requestId}`,
     ]);
     expect(JSON.stringify(fetch.mock.calls)).not.toContain("confirmed");
     expect(JSON.stringify(fetch.mock.calls)).not.toContain("authority");

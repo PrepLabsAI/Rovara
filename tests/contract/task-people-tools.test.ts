@@ -13,6 +13,7 @@ describe("task People MCP tools", () => {
     const tools = DEVELOPER_TOOLS;
     expect(tools.map((tool) => tool.name)).toEqual(expect.arrayContaining([
       "agentx_get_task_people", "agentx_set_task_person", "agentx_take_task_ownership",
+      "agentx_get_task_people_request",
     ]));
     const role = tools.find((tool) => tool.name === "agentx_set_task_person")!;
     expect(Object.keys(role.inputSchema).sort()).toEqual(["expected_people_revision", "person_id", "request_id", "role", "task_id"]);
@@ -21,10 +22,14 @@ describe("task People MCP tools", () => {
       getTaskPeople: vi.fn(async () => view),
       setTaskPerson: vi.fn(async () => ({ status: "PENDING" as const, requestId: "44444444-4444-4444-8444-444444444444", confirmationUrl: "https://agentx.test/confirm", expiresAt: "2026-10-11T10:10:00.000Z" })),
       takeTaskOwnership: vi.fn(async () => ({ status: "COMMITTED" as const, view })),
+      getTaskPeopleRequest: vi.fn(async () => ({ status: "COMMITTED" as const, view })),
     };
     const context = { client, newRequestId: () => "44444444-4444-4444-8444-444444444444", now: () => 0 } as never;
     const call = {} as never;
     await role.handler(context, { task_id: "11111111-1111-4111-8111-111111111111", person_id: view.people[0]!.personId, role: "owner", expected_people_revision: 3 }, call);
     expect(client.setTaskPerson).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", expect.objectContaining({ personId: view.people[0]!.personId, role: "owner", expectedPeopleRevision: 3 }));
+    const poll = tools.find((tool) => tool.name === "agentx_get_task_people_request")!;
+    await poll.handler(context, { task_id: "11111111-1111-4111-8111-111111111111", request_id: "44444444-4444-4444-8444-444444444444" }, call);
+    expect(client.getTaskPeopleRequest).toHaveBeenCalledWith("11111111-1111-4111-8111-111111111111", "44444444-4444-4444-8444-444444444444");
   });
 });

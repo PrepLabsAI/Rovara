@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
-import { SlackUserIdSchema, agentXError, cleanDisplayName, redactAndCap } from "@agentx/contracts";
+import { SlackThreadSchema, SlackUserIdSchema, agentXError, cleanDisplayName, redactAndCap, slackThreadUrl } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { ProjectAccessSubject, TaskPersonIdentity } from "./task-person-identity.js";
 import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
@@ -33,7 +33,8 @@ export interface TaskPeopleDependencies {
   now(): number;
   taskPeopleConfiguration?: TaskPeopleConfiguration;
   checkTaskPerson?: CheckTaskPerson;
-  listTaskPeople?: (task: DeveloperTaskRecord) => Promise<readonly TaskPersonIdentity[]>;
+  /** Complete directory checks for display only. Never used by authorization, reconciliation, or mutation. */
+  listTaskPeople?: (task: DeveloperTaskRecord) => Promise<readonly TaskPersonCheck[]>;
 }
 
 export interface TaskPeopleView {
@@ -42,7 +43,7 @@ export interface TaskPeopleView {
   people: Array<{ personId: string; name: string; role: StoredTaskRole; you: boolean; effectiveRole: TaskRole | null }>;
   canManage: boolean;
   canTakeOwnership: boolean;
-  addPeopleUrl: string;
+  addPeopleUrl?: string;
 }
 
 export interface ChangeTaskPeopleInput {
@@ -307,17 +308,21 @@ async function currentPeopleForCaller(
   return reconcile(deps, task, await initialize(deps, task));
 }
 
-async function effectiveRole(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, developerId: string): Promise<TaskRole | null> {
-  const explicit = people.people.find((person) => person.developerId === developerId);
-  if (explicit?.role === "denied") return null;
-  const proof = await checked(deps, task, developerId);
-  if (!proof.eligible) return null;
+function effectiveRoleFromProof(explicit: PersonEntry | undefined, proof: TaskPersonCheck): TaskRole | null {
+  if (explicit?.role === "denied" || !proof.eligible) return null;
   if (explicit?.role === "owner") return proof.channelMember ? "owner" : null;
   if (explicit?.role === "commenter" || explicit?.role === "viewer") return explicit.role;
   return proof.channelMember ? "commenter" : null;
 }
 
-async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, caller: DeveloperCaller): Promise<TaskPeopleView> {
+async function effectiveRole(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, developerId: string): Promise<TaskRole | null> {
+  const explicit = people.people.find((person) => person.developerId === developerId);
+  const proof = await checked(deps, task, developerId);
+  return effectiveRoleFromProof(explicit, proof);
+}
+
+async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, caller: DeveloperCaller,
+  displayChecks: readonly TaskPersonCheck[] = []): Promise<TaskPeopleView> {
   const mappings = await allPeople(deps, task.taskId);
   const byDeveloper = new Map(mappings.map((mapping) => [mapping.identity.developerId, mapping]));
   for (const person of people.people) if (!byDeveloper.has(person.developerId)) return denied();
@@ -329,9 +334,13 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
   const sameSlack = new Map<string, number>();
   for (const candidate of candidates.values()) sameSlack.set(candidate.identity.slackUserId, (sameSlack.get(candidate.identity.slackUserId) ?? 0) + 1);
   const rendered: TaskPeopleView["people"] = [];
+  const displayByDeveloper = new Map(displayChecks.map((proof) => [proof.identity.developerId, proof]));
   for (const candidate of candidates.values()) {
     const role = candidate.explicit?.role ?? "commenter";
-    const effective = await effectiveRole(deps, task, people, candidate.identity.developerId);
+    const display = displayByDeveloper.get(candidate.identity.developerId);
+    const effective = display !== undefined && samePrincipal(display.identity, candidate.identity)
+      ? effectiveRoleFromProof(candidate.explicit, display)
+      : await effectiveRole(deps, task, people, candidate.identity.developerId);
     if (candidate.explicit === undefined && effective !== "commenter") continue;
     const suffix = (sameSlack.get(candidate.identity.slackUserId) ?? 0) > 1 ? (candidate.identity.method === "slack" ? " (Slack identity)" : " (OIDC identity)") : "";
     const baseName = candidate.explicit?.name ?? candidate.identity.name;
@@ -348,18 +357,25 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
     ? await checked(deps, task, caller.developerId)
     : undefined;
   const canTakeOwnership = takeoverProof?.eligible === true && takeoverProof.channelMember;
+  const thread = task.share === undefined ? undefined : SlackThreadSchema.safeParse({
+    teamId: task.share.teamId, channelId: task.share.channelId, threadTs: task.share.threadTs,
+  });
   return {
     revision: people.revision, orphaned: people.orphaned, people: rendered,
     canManage: enabled(deps) && open(task) && callerRole === "owner",
     canTakeOwnership,
-    addPeopleUrl: `/v1/tasks/${task.taskId}/people/add`,
+    ...(thread?.success === true ? { addPeopleUrl: slackThreadUrl(thread.data) } : {}),
   };
 }
 
 function parseView(value: unknown): TaskPeopleView | undefined {
-  if (!isRecord(value) || !exactKeys(value, ["revision", "orphaned", "people", "canManage", "canTakeOwnership", "addPeopleUrl"])
+  const keys = value !== null && typeof value === "object" && Object.hasOwn(value, "addPeopleUrl")
+    ? ["revision", "orphaned", "people", "canManage", "canTakeOwnership", "addPeopleUrl"]
+    : ["revision", "orphaned", "people", "canManage", "canTakeOwnership"];
+  if (!isRecord(value) || !exactKeys(value, keys)
     || !Number.isSafeInteger(value.revision) || Number(value.revision) < 1 || typeof value.orphaned !== "boolean"
-    || typeof value.canManage !== "boolean" || typeof value.canTakeOwnership !== "boolean" || typeof value.addPeopleUrl !== "string"
+    || typeof value.canManage !== "boolean" || typeof value.canTakeOwnership !== "boolean"
+    || (value.addPeopleUrl !== undefined && typeof value.addPeopleUrl !== "string")
     || !Array.isArray(value.people)) return undefined;
   for (const person of value.people) {
     if (!isRecord(person) || !exactKeys(person, ["personId", "name", "role", "you", "effectiveRole"])
@@ -404,6 +420,18 @@ async function readablePriorOutcome(
   const current = await currentPeople(deps, currentTask);
   await authorizedRead(deps, currentTask, current, caller);
   return outcome;
+}
+
+/** Reads an exact historical People mutation only after reauthorizing the current caller. */
+export async function getTaskPeopleRequestOutcome(
+  deps: TaskPeopleDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+  requestId: string,
+  kind: "change" | "takeOwnership",
+  payload: Record<string, unknown>,
+): Promise<TaskPeopleView | undefined> {
+  return readablePriorOutcome(deps, taskId, caller, requestId, kind, payload);
 }
 
 function mutationInput(input: ChangeTaskPeopleInput): void {
@@ -521,8 +549,8 @@ export async function getTaskPeople(deps: TaskPeopleDependencies, caller: Develo
   const task = await loadTask(deps, taskId);
   const people = await currentPeopleForCaller(deps, task, caller, false);
   await authorizedRead(deps, task, people, caller);
-  if (deps.listTaskPeople !== undefined) await deps.listTaskPeople(task);
-  return viewOf(deps, task, people, caller);
+  const displayChecks = deps.listTaskPeople === undefined ? [] : await deps.listTaskPeople(task);
+  return viewOf(deps, task, people, caller, displayChecks);
 }
 
 /** A polling-safe capability read: it checks only META, PEOPLE and the caller's current proof. */
@@ -547,6 +575,20 @@ export async function getTaskPeopleCapabilities(
     canManagePeople: enabled(deps) && open(task) && role === "owner",
     canTakeOwnership,
   };
+}
+
+/** Snapshot used only to condition an external People effect claim against current authority and lifecycle. */
+export async function getTaskPeopleEffectAdmission(
+  deps: TaskPeopleDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+): Promise<{ peopleRevision: number; taskRevision: number; taskStage: string }> {
+  const task = await loadTask(deps, taskId);
+  const people = await loadPeople(deps, taskId);
+  if (people === undefined || !enabled(deps) || !open(task) || !Number.isSafeInteger(task.workflow?.revision) || typeof task.workflow?.stage !== "string") return denied();
+  const current = await reconcile(deps, task, people);
+  if (await effectiveRole(deps, task, current, caller.developerId) !== "owner") return denied();
+  return { peopleRevision: current.revision, taskRevision: task.workflow.revision, taskStage: task.workflow.stage };
 }
 
 /** Resolves an opaque public person ID to a freshly-qualified internal target. */

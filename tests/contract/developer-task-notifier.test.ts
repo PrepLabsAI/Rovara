@@ -21,25 +21,75 @@ const BOT_TOKEN = "xoxb-1111-2222-plantedbottoken";
 describe("Task People direct-message receipts", () => {
   it("claims and sends a current grant once, then records the Slack receipt", async () => {
     const db = new FakeDynamoDb();
+    const stream = recordStream(db);
     const taskId = "11111111-1111-4111-8111-111111111111";
     const requestId = "40000000-0000-4000-8000-000000000001";
     const developerId = "b".repeat(64);
-    db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 2, orphaned: false, people: [{ developerId, slackUserId: "U0MEMBER01", name: "Bailey", role: "viewer" }] });
+    const people = { pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 2, orphaned: false,
+      people: [{ developerId, slackUserId: "U0MEMBER01", name: "Bailey", role: "viewer" }] };
     const receipt = { pk: `DEVTASK#${taskId}`, sk: `PEOPLE_NOTIFY#${requestId}`, entityType: "TASK_PEOPLE_NOTIFICATION", schemaVersion: 1,
       taskId, requestId, targetDeveloperId: developerId, slackUserId: "U0MEMBER01", role: "viewer", peopleRevision: 2, status: "PENDING", attempts: 0, createdAt: new Date().toISOString() };
-    db.set(receipt);
+    await db.send(new TransactWriteCommand({ TransactItems: [
+      { Put: { TableName: "state", Item: people, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: "state", Item: receipt, ConditionExpression: "attribute_not_exists(pk)" } },
+    ] }));
     const post = vi.fn(async (input: { channel: string; threadTs?: string; text: string; blocks?: unknown[] }) => {
       void input;
       return { ts: "123.456", channel: "D0PEOPLE1" };
     });
-    const handler = createNotifierHandler({ documentClient: db, tableName: "state", enqueue: async () => undefined, retryLater: async () => undefined,
+    const queued: Notice[] = [];
+    const handler = createNotifierHandler({ documentClient: db, tableName: "state", enqueue: async (notices) => { queued.push(...notices); }, retryLater: async () => undefined,
       post, now: () => Date.now(), log: () => undefined, deliveryFailed: () => undefined, peopleChangesEnabled: true, reviewUrlBase: "https://agentx.example.test" });
     const notice: Notice = { id: `${taskId}:people:${requestId}`, kind: "people_dm", taskId, peopleRequestId: requestId, at: new Date().toISOString() };
     expect(noticesOf(undefined, receipt, notice.at, "stream-1")).toEqual([notice]);
-    await handler({ Records: [{ eventSource: "aws:sqs", messageId: "m1", receiptHandle: "r1", body: JSON.stringify(notice), attributes: { ApproximateReceiveCount: "1" } }] });
+    await handler({ Records: stream.take().map((record) => ({ ...record, eventSource: "aws:dynamodb" })) });
+    expect(queued).toEqual([expect.objectContaining({ id: notice.id, kind: "people_dm" })]);
+    const message = { eventSource: "aws:sqs", messageId: "m1", receiptHandle: "r1", body: JSON.stringify(queued[0]), attributes: { ApproximateReceiveCount: "1" } };
+    await handler({ Records: [message] });
+    await handler({ Records: [{ ...message, messageId: "m2" }] });
     expect(post).toHaveBeenCalledOnce();
     expect(post.mock.calls[0]![0]).toMatchObject({ channel: "U0MEMBER01" });
     expect(db.get(`DEVTASK#${taskId}`, `PEOPLE_NOTIFY#${requestId}`)).toMatchObject({ status: "SENT", attempts: 1, postedTs: "123.456", postedChannel: "D0PEOPLE1" });
+  });
+
+  it("parks expired claims and post-marker ambiguity, and cancels disabled or revoked grants", async () => {
+    const taskId = "11111111-1111-4111-8111-111111111111";
+    const developerId = "b".repeat(64);
+    const run = async (suffix: string, status: "PENDING" | "SENDING", enabled: boolean, granted: boolean, failSent = false) => {
+      const requestId = `40000000-0000-4000-8000-0000000000${suffix}`;
+      const db = new FakeDynamoDb();
+      db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 2, orphaned: false,
+        people: granted ? [{ developerId, slackUserId: "U0MEMBER01", name: "Bailey", role: "viewer" }] : [] });
+      db.set({ pk: `DEVTASK#${taskId}`, sk: `PEOPLE_NOTIFY#${requestId}`, entityType: "TASK_PEOPLE_NOTIFICATION", schemaVersion: 1,
+        taskId, requestId, targetDeveloperId: developerId, slackUserId: "U0MEMBER01", role: "viewer", peopleRevision: 2,
+        status, attempts: status === "SENDING" ? 1 : 0, ...(status === "SENDING" ? { claimUntil: 0 } : {}), createdAt: new Date().toISOString() });
+      let fail = failSent;
+      const documentClient = { send: async (command: unknown) => {
+        const candidate = command as { constructor?: { name?: string }; input?: { ExpressionAttributeValues?: Record<string, unknown> } };
+        if (fail && candidate.constructor?.name === "UpdateCommand" && candidate.input?.ExpressionAttributeValues?.[":sent"] === "SENT") {
+          fail = false; throw new Error("local marker write failed");
+        }
+        return db.send(command as never);
+      } };
+      const post = vi.fn(async () => ({ ts: "123.456", channel: "D0PEOPLE1" }));
+      const handler = createNotifierHandler({ documentClient, tableName: "state", enqueue: async () => undefined, retryLater: async () => undefined,
+        post, now: () => 1_000, log: () => undefined, deliveryFailed: () => undefined, peopleChangesEnabled: enabled });
+      const notice: Notice = { id: `${taskId}:people:${requestId}`, kind: "people_dm", taskId, peopleRequestId: requestId, at: new Date().toISOString() };
+      await handler({ Records: [{ eventSource: "aws:sqs", messageId: suffix, receiptHandle: suffix, body: JSON.stringify(notice), attributes: { ApproximateReceiveCount: "1" } }] });
+      return { db, post, key: `PEOPLE_NOTIFY#${requestId}` };
+    };
+    const expired = await run("11", "SENDING", true, true);
+    expect(expired.post).not.toHaveBeenCalled();
+    expect(expired.db.get(`DEVTASK#${taskId}`, expired.key)).toMatchObject({ status: "UNKNOWN" });
+    const marker = await run("12", "PENDING", true, true, true);
+    expect(marker.post).toHaveBeenCalledOnce();
+    expect(marker.db.get(`DEVTASK#${taskId}`, marker.key)).toMatchObject({ status: "UNKNOWN" });
+    const disabled = await run("13", "PENDING", false, true);
+    expect(disabled.post).not.toHaveBeenCalled();
+    expect(disabled.db.get(`DEVTASK#${taskId}`, disabled.key)).toMatchObject({ status: "CANCELLED" });
+    const revoked = await run("14", "PENDING", true, false);
+    expect(revoked.post).not.toHaveBeenCalled();
+    expect(revoked.db.get(`DEVTASK#${taskId}`, revoked.key)).toMatchObject({ status: "CANCELLED" });
   });
 
   it("retries definite failures only at 30/60 seconds and never retries an ambiguous post", async () => {

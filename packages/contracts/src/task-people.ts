@@ -15,7 +15,7 @@ export const TaskPeopleViewSchema = z.object({
   }).strict()).max(100),
   canManage: z.boolean(),
   canTakeOwnership: z.boolean(),
-  addPeopleUrl: z.string().min(1),
+  addPeopleUrl: z.string().url().optional(),
 }).strict();
 export type TaskPeopleView = z.infer<typeof TaskPeopleViewSchema>;
 

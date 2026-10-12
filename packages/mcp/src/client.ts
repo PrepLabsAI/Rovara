@@ -77,6 +77,7 @@ export interface ControlPlaneClient {
   /** Spec 025 FR-030: shares the task, or changes a shared task's mode (API 1.2). */
   shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskView>;
   getTaskPeople(taskId: string): Promise<TaskPeopleView>;
+  getTaskPeopleRequest(taskId: string, requestId: string): Promise<TaskPeopleChangeResult>;
   setTaskPerson(taskId: string, request: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult>;
   takeTaskOwnership(taskId: string, request: TaskPeopleTakeOwnershipRequest): Promise<TaskPeopleChangeResult>;
 }
@@ -264,6 +265,7 @@ export function httpControlPlaneClient(options: {
     openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
     shareTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/share"), request, true, { busyStep: SHARE_BUSY_STEP })),
     getTaskPeople: (taskId) => call(TaskPeopleViewSchema, "GET", path(taskId, "/people")),
+    getTaskPeopleRequest: (taskId, requestId) => call(TaskPeopleChangeResultSchema, "GET", path(taskId, `/people/requests/${encodeURIComponent(requestId)}`)),
     setTaskPerson: (taskId, request) => call(TaskPeopleChangeResultSchema, "POST", path(taskId, "/people/role"), request),
     takeTaskOwnership: (taskId, request) => call(TaskPeopleChangeResultSchema, "POST", path(taskId, "/people/take-ownership"), request),
   };

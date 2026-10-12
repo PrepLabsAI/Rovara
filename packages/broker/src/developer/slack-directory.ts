@@ -276,6 +276,7 @@ export function slackDirectory(input: {
         budget.left -= 1;
         const reply = await get("users.info", { user: userId }, deadlineAt - Date.now());
         if (reply === undefined) return { ok: false, error: "slack_unavailable" };
+        if (Date.now() >= deadlineAt) return { ok: false, error: "slack_unavailable" };
         if (reply.body.ok !== true) {
           if (reply.body.error === "user_not_found") continue;
           refused("users.info", reply);

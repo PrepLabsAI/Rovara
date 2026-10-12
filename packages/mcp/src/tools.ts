@@ -895,11 +895,24 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     title: "Show who can use an AgentX task",
     description: "Shows the current People revision and the people who can use this task. Names are display data; use person_id for changes.",
     inputSchema: { task_id: taskIdInput },
-    outputSchema: { revision: z.number(), orphaned: z.boolean(), people: z.array(z.object({ person_id: z.string(), name: z.string(), role: TaskPeopleRoleSchema, you: z.boolean(), effective_role: z.enum(["owner", "commenter", "viewer"]).nullable() })), can_manage: z.boolean(), can_take_ownership: z.boolean(), add_people_url: z.string() },
+    outputSchema: { revision: z.number(), orphaned: z.boolean(), people: z.array(z.object({ person_id: z.string(), name: z.string(), role: TaskPeopleRoleSchema, you: z.boolean(), effective_role: z.enum(["owner", "commenter", "viewer"]).nullable() })), can_manage: z.boolean(), can_take_ownership: z.boolean(), add_people_url: z.string().optional() },
     async handler(context, input) {
       const view = await context.client.getTaskPeople(input.task_id as string);
       const structured = { revision: view.revision, orphaned: view.orphaned, people: view.people.map((person) => ({ person_id: person.personId, name: plainText(person.name, "Slack user"), role: person.role, you: person.you, effective_role: person.effectiveRole })), can_manage: view.canManage, can_take_ownership: view.canTakeOwnership, add_people_url: view.addPeopleUrl };
       return { structured, text: view.people.map((person) => `${plainText(person.name, "Slack user")}: ${person.role}`).join("\n") || "No task people are available." };
+    },
+  },
+  {
+    name: "agentx_get_task_people_request",
+    title: "Check a task People request",
+    description: "Checks the server-bound receipt for a People request. The server reauthorizes the signed-in caller and never confirms a pending request.",
+    inputSchema: { task_id: taskIdInput, request_id: requestIdInput },
+    outputSchema: { status: z.enum(["PENDING", "COMMITTED"]), request_id: z.string().optional(), confirmation_url: z.string().optional(), expires_at: z.string().optional(), revision: z.number().optional() },
+    async handler(context, input) {
+      const answer = await context.client.getTaskPeopleRequest(input.task_id as string, input.request_id as string);
+      return answer.status === "PENDING"
+        ? { structured: { status: answer.status, request_id: answer.requestId, confirmation_url: answer.confirmationUrl, expires_at: answer.expiresAt }, text: "This People request still requires human confirmation." }
+        : { structured: { status: answer.status, revision: answer.view.revision }, text: `People revision ${answer.view.revision} committed.` };
     },
   },
   {

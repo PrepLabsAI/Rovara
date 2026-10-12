@@ -3544,7 +3544,8 @@ function truncateText(text: string, max: number): string {
  */
 export async function recordWorkflowThreadNote(
   deps: Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName" | "actions" | "now">,
-  input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string },
+  input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string;
+    peopleAccess?: { peopleRevision?: number; isOwner: boolean } },
 ): Promise<{ outcome: "captured" | "duplicate" | "refused" }> {
   const thread = SlackThreadSchema.parse(input.thread);
   const task = await get<DeveloperTaskRecord>(deps, taskKey(input.taskId));
@@ -3560,7 +3561,7 @@ export async function recordWorkflowThreadNote(
   let receivedAt = iso(deps);
   for (let attempt = 1; ; attempt += 1) {
     const note: WorkflowThreadNote = WorkflowThreadNoteSchema.parse({
-      schemaVersion: 1, taskId: task.taskId, slackUserId, isOwner: task.slackUserId === input.userId,
+      schemaVersion: 1, taskId: task.taskId, slackUserId, isOwner: input.peopleAccess?.isOwner ?? task.slackUserId === input.userId,
       teamId: thread.teamId, channelId: thread.channelId, threadTs: thread.threadTs, messageTs,
       eventId: input.eventId, text, truncated: text.length < trimmed.length, receivedAt, workflowRevision,
     });
@@ -3576,6 +3577,7 @@ export async function recordWorkflowThreadNote(
           + " AND (attribute_not_exists(threadNotesFedThrough) OR threadNotesFedThrough < :receivedAt)",
         ExpressionAttributeValues: { ":one": 1, ":max": WORKFLOW_THREAD_NOTES_MAX, ":receivedAt": note.receivedAt },
       } },
+      ...(input.peopleAccess === undefined ? [] : [taskAccessFence(deps.tableName, task.taskId, input.peopleAccess.peopleRevision)]),
     ];
     let failure: unknown;
     try {

@@ -672,10 +672,17 @@ export function developerTaskRouteDependencies(
       return { teamId: share.teamId, channelId: share.channelId };
     },
     ...(deps.developer.taskChannelPeople === undefined ? {} : { listTaskPeople: async (task: DeveloperTaskRecord) => {
-      const channels = await projectChannelIds(task.project);
+      const channels = [...new Set([...(await projectChannelIds(task.project)), ...(task.share === undefined ? [] : [task.share.channelId])])].sort();
       const answer = await deps.developer.taskChannelPeople!({ kind: "task-channel-people", channelIds: channels });
       if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
-      return registerTaskChannelPeople(identityDependencies(), task, answer.users);
+      const identities = await registerTaskChannelPeople(identityDependencies(), task, answer.users);
+      const bySlack = new Map(answer.users.map((user) => [user.id, user]));
+      return identities.map((identity) => {
+        const user = bySlack.get(identity.slackUserId);
+        if (user === undefined) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
+        return { subject: { developerId: identity.developerId, slackUserId: identity.slackUserId }, identity, eligible: true,
+          channelMember: task.share === undefined || user.memberOf.includes(task.share.channelId) };
+      });
     } }),
     ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback.bind(deps) }),
     ...(initialSlackThread === undefined ? {} : { initialSlackThread }),
