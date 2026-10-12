@@ -88,7 +88,13 @@ export class DeveloperTaskNotifier extends Construct {
     this.function.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem", "dynamodb:Query"],
       resources: [props.state.tableArn],
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVTASK#*", "WORKSPACE#*", "OPERATION#*"] } },
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVTASK#*", "WORKSPACE#*", "OPERATION#*", "CHATGPT_NOTICE#*"] } },
+    }));
+    // #342: a ChatGPT fallback's notice is marked told, once per operation, by its own key.
+    this.function.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:PutItem"],
+      resources: [props.state.tableArn],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHATGPT_NOTICE#*"] } },
     }));
     this.function.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:PutItem", "dynamodb:UpdateItem"],
@@ -122,9 +128,10 @@ export class DeveloperTaskNotifier extends Construct {
       filters: [
         lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: equals("DEVELOPER_TASK") } } } }),
         lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: equals("DEVELOPER_TASK_POINTER") } } } }),
+        // Every operation that ended: a developer's own get their notices, and (#342) any that left its owner's
+        // ChatGPT plan says so in its thread. The code drops the rest (notifications.ts).
         lambda.FilterCriteria.filter({ dynamodb: { NewImage: {
           entityType: { S: equals("OPERATION") },
-          requestedBy: { M: { kind: { S: equals("developer") } } },
           status: { S: oneOf(TERMINAL) },
         } } }),
         // Spec 025 E13: admin changes whose Slack step started, and changes with a message that ended.
