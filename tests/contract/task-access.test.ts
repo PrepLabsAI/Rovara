@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { TASK_ACTION_ROLES, can, resolveTaskAccess } from "../../packages/broker/src/developer/task-access.js";
 import { getTaskDocumentView } from "../../packages/broker/src/aws/developer-tasks.js";
+import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { OMAR, PRIYA, SAM, pagePlan, pageTask } from "../support/page-tasks.js";
 
 const refusal = async (promise: Promise<unknown>) => {
@@ -46,6 +47,8 @@ describe("resolveTaskAccess", () => {
     expect(commenter.suggestions).toEqual([]);
     fixture.close();
     expect((await getTaskDocumentView(fixture.deps, SAM, fixture.taskId)).access).toEqual({ role: "commenter", canComment: false, canSuggest: false, canDecide: false, canAsk: false });
+    await expect(resolveTaskAccess(fixture.deps, SAM, fixture.taskId, "read")).resolves.toMatchObject({ role: "commenter" });
+    expect((await refusal(resolveTaskAccess(fixture.deps, SAM, fixture.taskId, "comment"))).code).toBe("TASK_NOT_FOUND");
   });
 
   it("a reader outside the channel on this Slack workspace is told whom to ask", async () => {
@@ -59,6 +62,7 @@ describe("resolveTaskAccess", () => {
     // A task that is not shared into any channel is the owner's alone.
     const unshared = pageTask({ shared: false });
     expect((await refusal(resolveTaskAccess(unshared.deps, SAM, unshared.taskId))).code).toBe("TASK_NOT_FOUND");
+    expect((await refusal(resolveTaskAccess(unshared.deps, PRIYA, unshared.taskId, "peopleManage"))).code).toBe("TASK_NOT_FOUND");
   });
 
   it("a membership lookup failure reads as no access", async () => {
@@ -70,11 +74,60 @@ describe("resolveTaskAccess", () => {
     expect(logged).toContainEqual(expect.objectContaining({ event: "developer.task_page_membership_unavailable", taskId: fixture.taskId }));
   });
 
-  it("the action table: commenters comment and suggest, only owners decide", () => {
-    expect(TASK_ACTION_ROLES).toEqual({ read: ["owner", "commenter"], comment: ["owner", "commenter"], suggest: ["commenter"], decide: ["owner"], ask: ["owner", "commenter"] });
+  it("the action table includes every C role and retained human action", () => {
+    expect(TASK_ACTION_ROLES).toEqual({
+      read: ["owner", "commenter", "viewer"], peopleRead: ["owner", "commenter", "viewer"],
+      comment: ["owner", "commenter"], ask: ["owner", "commenter"], suggest: ["commenter"],
+      decide: ["owner"], retry: ["owner"], publish: ["owner"], feedback: ["owner"], close: ["owner"], control: ["owner"], peopleManage: ["owner"],
+      takeOwnership: ["owner", "commenter", "viewer"],
+    });
     expect(["read", "comment", "suggest", "ask"].every((action) => can("commenter", action as never))).toBe(true);
     expect(can("commenter", "decide")).toBe(false);
     expect(can("owner", "decide")).toBe(true);
     expect(can("owner", "suggest")).toBe(false);
+    expect(can("viewer", "read")).toBe(true);
+    expect(can("viewer", "peopleRead")).toBe(true);
+    expect(can("viewer", "comment")).toBe(false);
+  });
+
+  it("enforces a readable sidecar, denied tombstones, owner actor IDs, and terminal write refusal", async () => {
+    const fixture = pageTask();
+    fixture.db.set({
+      pk: `DEVTASK#${fixture.taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 4, orphaned: false,
+      people: [
+        { developerId: PRIYA.developerId, slackUserId: PRIYA.slackUserId, name: PRIYA.name, role: "owner" },
+        { developerId: SAM.developerId, slackUserId: SAM.slackUserId, name: SAM.name, role: "viewer" },
+        { developerId: OMAR.developerId, slackUserId: OMAR.slackUserId, name: OMAR.name, role: "denied" },
+      ],
+    });
+    fixture.deps.taskPeopleConfiguration = { peopleChangesEnabled: true };
+    fixture.deps.checkTaskPerson = async (_task, developerId) => {
+      const caller = [PRIYA, SAM, OMAR].find((candidate) => candidate.developerId === developerId);
+      if (caller === undefined || caller.slackUserId === undefined) throw new Error("unknown");
+      return {
+        subject: { developerId, slackUserId: caller.slackUserId },
+        identity: { developerId, slackUserId: caller.slackUserId, name: caller.name, method: "slack", issuer: "https://slack.com", subject: caller.slackUserId },
+        eligible: true, channelMember: true,
+      };
+    };
+
+    await expect(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId, "peopleManage")).resolves.toMatchObject({
+      role: "owner", peopleRevision: 4, ownerActorIds: [taskOwnerKey(PRIYA.developerId, fixture.taskId)],
+    });
+    await expect(resolveTaskAccess(fixture.deps, SAM, fixture.taskId)).resolves.toMatchObject({ role: "viewer", peopleRevision: 4 });
+    expect((await refusal(resolveTaskAccess(fixture.deps, OMAR, fixture.taskId))).code).toBe("TASK_NOT_FOUND");
+    fixture.deps.taskPeopleConfiguration = { peopleChangesEnabled: false };
+    await expect(resolveTaskAccess(fixture.deps, SAM, fixture.taskId)).resolves.toMatchObject({ role: "viewer", peopleRevision: 4 });
+    expect((await refusal(resolveTaskAccess(fixture.deps, OMAR, fixture.taskId))).code).toBe("TASK_NOT_FOUND");
+
+    fixture.close();
+    await expect(resolveTaskAccess(fixture.deps, SAM, fixture.taskId, "read")).resolves.toMatchObject({ role: "viewer" });
+    expect((await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId, "comment"))).code).toBe("TASK_NOT_FOUND");
+  });
+
+  it("never falls back to creator authority for a corrupt sidecar", async () => {
+    const fixture = pageTask();
+    fixture.db.set({ pk: `DEVTASK#${fixture.taskId}`, sk: "PEOPLE", schemaVersion: 2, revision: 1, orphaned: false, people: [] });
+    expect((await refusal(resolveTaskAccess(fixture.deps, PRIYA, fixture.taskId))).code).toBe("TASK_NOT_FOUND");
   });
 });
