@@ -82,6 +82,11 @@ describe("task People page presentation", () => {
   });
 
   it("omits absent, placeholder, malformed, non-Slack, and noncanonical Slack links", () => {
+    const absentView = view({ canManage: true });
+    delete absentView.addPeopleUrl;
+    const absent = renderTaskPeoplePanel(TASK_ID, absentView);
+    expect(absent).not.toContain("Add people in Slack");
+    expect(absent).not.toContain('class="task-people-add"');
     for (const addPeopleUrl of [
       "",
       `/v1/tasks/${TASK_ID}/people/add`,

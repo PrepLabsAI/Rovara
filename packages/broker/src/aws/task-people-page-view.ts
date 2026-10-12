@@ -29,7 +29,8 @@ function boundedName(value: string): string {
   return Array.from(safe).slice(0, 80).join("") || "Task member";
 }
 
-function addPeopleLink(value: string): string | undefined {
+function addPeopleLink(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
   if (!SLACK_THREAD_URL.test(value)) return undefined;
   try {
     const url = new URL(value);

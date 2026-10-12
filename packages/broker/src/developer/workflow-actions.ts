@@ -7,6 +7,7 @@ export { WORKFLOW_PATH_ANSWER_ACTION, WORKFLOW_PATH_FULL_ACTION, WORKFLOW_PATH_Q
 
 /** Every button `workflowSlackHandlers` answers. */
 export const WORKFLOW_ACTION_IDS: ReadonlySet<string> = new Set([
+  "agentx_task_people", "agentx_task_people_submission", "agentx_task_take_ownership",
   "agentx_workflow_approve", "agentx_workflow_changes", "agentx_feedback_review_recommended", "agentx_feedback_review_changes", "agentx_feedback_review_dismiss",
   "agentx_workflow_retry_checks", "agentx_workflow_retry_reviews", "agentx_workflow_retry_publish", "agentx_feedback_review_retry",
   // Task 16: an exit from every blocked state.

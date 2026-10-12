@@ -117,6 +117,8 @@ import {
   WORKFLOW_REGRESSION_INSTRUCTION,
   type WorkflowSendBackProblem,
   WorkflowResolveFindingsInputSchema,
+  TaskPeopleRoleRequestSchema,
+  TaskPeopleTakeOwnershipRequestSchema,
   blockingFindings,
   openReviewFindings,
   resolveWorkflowReviewFindings,
@@ -171,6 +173,9 @@ import { pageCommentViews, type CommentViewContext, type PageCommentView } from 
 import type { PlanAnchor } from "./plan-page/render-plan.js";
 import { can, pageAccess, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
+import { getTaskPeople as readTaskPeople, getTaskPeopleCapabilities as readTaskPeopleCapabilities, type TaskPersonCheck } from "../developer/task-people.js";
+import { confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeopleProposal as readPeopleProposal, getTaskPeopleProposalMetadata as readPeopleProposalMetadata, proposeTaskOwnership, proposeTaskPeopleRole,
+  submitSlackTaskOwnership as commitSlackTaskOwnership, submitSlackTaskPeopleRole as commitSlackTaskPeopleRole } from "../developer/task-people-effects.js";
 import { inertReplyText } from "../developer/prompt-text.js";
 import {
   commentCounterKey, commentKey, counterTouch, createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor,
@@ -180,6 +185,7 @@ import {
   APPROVED_COMMENT_ANSWERS_INSTRUCTION, COMMENT_ANSWERS_INSTRUCTION, COMMENT_CHANGED_MESSAGE, REQUEST_CHANGES_NEEDS_INPUT, decisionDetailKey, ownerAnswersFor, ownerAnswersSentence, pageCommentsPromptSection,
   planOwnerAnswers, promptComments, readDecisionDetail, refusalMessage,
 } from "../developer/owner-answers.js";
+import type { TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -188,12 +194,14 @@ export interface DeveloperTaskRouteDependencies {
   /** C: absent is write-disabled; an existing PEOPLE sidecar remains authoritative either way. */
   taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
   /** C: trusted exact-principal eligibility and bound-channel proof; never supplied by a request body. */
-  checkTaskPerson?: (task: DeveloperTaskRecord, developerId: string) => Promise<{
+  checkTaskPerson?: (task: DeveloperTaskRecord, developerId: string, admission?: TaskPeopleDisplayAdmission) => Promise<{
     subject: { developerId: string; slackUserId?: string };
     identity: { developerId: string; slackUserId: string; name: string; method: "slack" | "oidc"; issuer: string; subject: string };
     eligible: boolean;
     channelMember: boolean;
   }>;
+  listTaskPeople?: (task: DeveloperTaskRecord, admission: TaskPeopleDisplayAdmission) => Promise<readonly TaskPersonCheck[]>;
+  createTaskPeopleDisplayAdmission?: () => TaskPeopleDisplayAdmission;
   actions: DeveloperTaskActions;
   /** Recollects every linked PR from GitHub; required before feedback decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
@@ -215,7 +223,31 @@ export interface DeveloperTaskRouteDependencies {
   slackRequestQueue?: SlackRequestQueue;
   now(): number;
   log?(entry: Record<string, unknown>): void;
+  resolveTaskPickerPerson?(taskId: string, slackUserId: string): Promise<{ personId: string; developerId: string; slackUserId: string; channelMember: boolean }>;
+  taskPeopleChannel?(taskId: string): Promise<{ teamId: string; channelId: string; threadTs: string }>;
+  inviteTaskPerson?(input: { teamId: string; channelId: string; slackUserId: string }): Promise<"accepted" | "unknown">;
 }
+
+function taskPeopleEffectsDependencies(deps: DeveloperTaskRouteDependencies) {
+  if (deps.issuer === undefined || deps.issuer === "") throw agentXError("RUNTIME_UNAVAILABLE", "Task People confirmation is unavailable in this deployment");
+  return { ...deps, issuer: deps.issuer };
+}
+
+export const getTaskPeople = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string) =>
+  readTaskPeople(deps, caller, taskId);
+export const getTaskPeopleCapabilities = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string) =>
+  readTaskPeopleCapabilities(deps, caller, taskId);
+export const getTaskPeopleProposal = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, requestId: string) =>
+  readPeopleProposal(taskPeopleEffectsDependencies(deps), caller, taskId, requestId);
+export const getTaskPeopleProposalMetadata = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, requestId: string) =>
+  readPeopleProposalMetadata(taskPeopleEffectsDependencies(deps), caller, taskId, requestId);
+export const confirmTaskPeopleProposal = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, requestId: string) =>
+  confirmPeopleProposal(taskPeopleEffectsDependencies(deps), caller, taskId, requestId);
+export const submitSlackTaskPeopleRole = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string,
+  input: { requestId: string; expectedPeopleRevision: number; slackUserId: string; role: "owner" | "commenter" | "viewer" | "denied"; teamId: string; channelId: string }) =>
+  commitSlackTaskPeopleRole(taskPeopleEffectsDependencies(deps), caller, taskId, input);
+export const submitSlackTaskOwnership = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string,
+  input: { requestId: string; expectedPeopleRevision: number }) => commitSlackTaskOwnership(taskPeopleEffectsDependencies(deps), caller, taskId, input);
 
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const iso = (deps: Pick<DeveloperTaskRouteDependencies, "now">) => new Date(deps.now()).toISOString();
@@ -3517,7 +3549,8 @@ function truncateText(text: string, max: number): string {
  */
 export async function recordWorkflowThreadNote(
   deps: Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName" | "actions" | "now">,
-  input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string },
+  input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string;
+    peopleAccess?: { peopleRevision?: number; isOwner: boolean } },
 ): Promise<{ outcome: "captured" | "duplicate" | "refused" }> {
   const thread = SlackThreadSchema.parse(input.thread);
   const task = await get<DeveloperTaskRecord>(deps, taskKey(input.taskId));
@@ -3533,7 +3566,7 @@ export async function recordWorkflowThreadNote(
   let receivedAt = iso(deps);
   for (let attempt = 1; ; attempt += 1) {
     const note: WorkflowThreadNote = WorkflowThreadNoteSchema.parse({
-      schemaVersion: 1, taskId: task.taskId, slackUserId, isOwner: task.slackUserId === input.userId,
+      schemaVersion: 1, taskId: task.taskId, slackUserId, isOwner: input.peopleAccess?.isOwner ?? task.slackUserId === input.userId,
       teamId: thread.teamId, channelId: thread.channelId, threadTs: thread.threadTs, messageTs,
       eventId: input.eventId, text, truncated: text.length < trimmed.length, receivedAt, workflowRevision,
     });
@@ -3549,6 +3582,7 @@ export async function recordWorkflowThreadNote(
           + " AND (attribute_not_exists(threadNotesFedThrough) OR threadNotesFedThrough < :receivedAt)",
         ExpressionAttributeValues: { ":one": 1, ":max": WORKFLOW_THREAD_NOTES_MAX, ":receivedAt": note.receivedAt },
       } },
+      ...(input.peopleAccess === undefined ? [] : [taskAccessFence(deps.tableName, task.taskId, input.peopleAccess.peopleRevision)]),
     ];
     let failure: unknown;
     try {
@@ -4752,10 +4786,25 @@ async function retryTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, c
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry))?$/.exec(url.pathname);
+  const proposalRoute = /^\/v1\/dev\/tasks\/([^/]+)\/people\/requests\/([^/]+)$/.exec(url.pathname);
+  if (proposalRoute !== null && request.method === "GET") {
+    const taskId = safeDecode(proposalRoute[1]!);
+    const requestId = safeDecode(proposalRoute[2]!);
+    return getTaskPeopleProposal(deps, caller, taskId, requestId);
+  }
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "people") return getTaskPeople(deps, caller, taskId);
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/role") {
+    const input = parse(TaskPeopleRoleRequestSchema, body(request), deps, "people/role");
+    return proposeTaskPeopleRole(taskPeopleEffectsDependencies(deps), caller, taskId, input);
+  }
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/take-ownership") {
+    const input = parse(TaskPeopleTakeOwnershipRequestSchema, body(request), deps, "people/take-ownership");
+    return proposeTaskOwnership(taskPeopleEffectsDependencies(deps), caller, taskId, input);
+  }
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "continue") return continueTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/decision") return decideTaskWorkflow(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/retry") return retryTaskWorkflow(deps, caller, taskId, body(request));
