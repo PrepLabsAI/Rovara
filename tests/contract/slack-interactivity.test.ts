@@ -108,18 +108,21 @@ describe("signed Task People form", () => {
     expect(takeovers).toEqual([expect.objectContaining({ taskId, userId: requester, thread, expectedPeopleRevision: 4 })]);
   });
 
-  const assertCompletePeopleList = async (takeover: boolean) => {
+  const assertCompletePeopleList = async (mode: "manager" | "takeover" | "reader") => {
+    const takeover = mode === "takeover";
+    const manager = mode === "manager";
     const roles = ["owner", "commenter", "viewer", "denied"] as const;
     const people = Array.from({ length: 100 }, (_, index) => {
       const prefix = `Person ${String(index + 1).padStart(3, "0")} `;
       const suffix = index % 2 === 0 ? "éé" : "😀";
       const role = roles[index % roles.length]!;
-      return { personId: randomUUID(), name: `${prefix}${"&".repeat(80 - prefix.length - suffix.length)}${suffix}`, role,
-        effectiveRole: role === "denied" ? null : role, you: false };
+      const name = index === 1 ? `${prefix}(Slack identity)` : index === 2 ? `${prefix}(OIDC identity)`
+        : `${prefix}${"&".repeat(80 - prefix.length - suffix.length)}${suffix}`;
+      return { personId: randomUUID(), name, role, effectiveRole: role === "denied" ? null : role, you: index === 0 };
     });
     const strict = new StrictSlackWeb();
     const handlers = workflowSlackHandlers({ loadTask: async () => undefined,
-      getPeople: async () => ({ revision: 12, orphaned: takeover, people, canManage: !takeover, canTakeOwnership: takeover }),
+      getPeople: async () => ({ revision: 12, orphaned: takeover, people, canManage: manager, canTakeOwnership: takeover }),
       openView: async (trigger, view) => { await strict.openView(trigger, view); }, submit: async () => undefined });
 
     await handlers.handleAction(action);
@@ -127,7 +130,8 @@ describe("signed Task People form", () => {
     expect(strict.views).toHaveLength(1);
     const view = strict.views[0]!.view;
     expect(view.callback_id).toBe(takeover ? "agentx_task_take_ownership" : "agentx_task_people_submission");
-    expect(view.submit).toEqual({ type: "plain_text", text: takeover ? "Take ownership" : "Save role" });
+    expect(view.submit).toEqual(takeover ? { type: "plain_text", text: "Take ownership" }
+      : manager ? { type: "plain_text", text: "Save role" } : undefined);
     const blocks = view.blocks as Array<Record<string, unknown>>;
     expect(blocks.length).toBeLessThanOrEqual(100);
     const sections = blocks.filter((block) => block.type === "section");
@@ -135,24 +139,35 @@ describe("signed Task People form", () => {
     const listTexts = listSections.map((block) => (block.text as { text: string }).text);
     expect(listTexts.length).toBeGreaterThan(1);
     expect(listTexts.every((text) => text.length <= 3_000)).toBe(true);
-    expect(listTexts.flatMap((text) => text.split("\n"))).toEqual(people.map((person) => `${cleanLine(person.name, 80)} — ${person.role}`));
+    const expectedRows = people.map((person) => `${person.you ? "You" : cleanLine(person.name, 80)} — ${person.role}`);
+    expect(listTexts.flatMap((text) => text.split("\n"))).toEqual(expectedRows);
+    expect(expectedRows[0]).toBe("You — owner");
+    expect(expectedRows[1]).toBe("Person 002 (Slack identity) — commenter");
+    expect(expectedRows[2]).toBe("Person 003 (OIDC identity) — viewer");
     if (takeover) {
       expect((sections.at(-1)?.text as { text: string }).text).toBe("This task has no current owner. Taking ownership does not restart it.");
       expect(blocks.filter((block) => block.type === "input")).toEqual([]);
-    } else {
+    } else if (manager) {
       expect(blocks.filter((block) => block.type === "input").map((block) => block.block_id)).toEqual(["task_person", "task_role"]);
       const roleBlock = blocks.find((block) => block.block_id === "task_role")!;
       const roleSelect = (roleBlock.element as { options: Array<{ value: string }> });
       expect(roleSelect.options.map((option) => option.value)).toEqual(["owner", "commenter", "viewer", "denied"]);
+    } else {
+      expect(blocks.filter((block) => block.type === "input")).toEqual([]);
+      expect(view.submit).toBeUndefined();
     }
   };
 
   it("opens all 100 escaped Unicode names in bounded sections and retains the manager role controls", async () => {
-    await assertCompletePeopleList(false);
+    await assertCompletePeopleList("manager");
   });
 
   it("opens all 100 escaped Unicode names in bounded sections and retains ownerless takeover", async () => {
-    await assertCompletePeopleList(true);
+    await assertCompletePeopleList("takeover");
+  });
+
+  it("opens all 100 escaped Unicode names for a reader without submit or picker controls", async () => {
+    await assertCompletePeopleList("reader");
   });
 
   it("refuses a valid People change when the signed form is replayed from another task thread", async () => {

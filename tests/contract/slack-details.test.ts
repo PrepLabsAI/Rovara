@@ -512,15 +512,23 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
     const invocations: Array<Record<string, unknown>> = [];
     // Lambda queues the event (202) without waiting for the broker; the second time it refuses the invoke.
     let accepted = true;
-    let authorizationAccepted = true;
+    let authorizationReply: "allow" | "deny" | "invalid-json" = "allow";
     vi.spyOn(LambdaClient.prototype, "send").mockImplementation((async (command: { input: Record<string, unknown> }) => {
       invocations.push(command.input);
+      expect(command.input.FunctionName).toBe("broker");
+      const payload = JSON.parse(Buffer.from(command.input.Payload as Uint8Array).toString("utf8")) as Record<string, unknown>;
       if (command.input.InvocationType === "RequestResponse") {
-        const reply = authorizationAccepted
+        expect(payload).toEqual({ source: "agentx.slack-ingress", action: "task-people-authorize", taskId,
+          userId: requester, thread, taskAction: "decide" });
+        if (authorizationReply === "invalid-json") return { StatusCode: 200, Payload: Buffer.from("{") };
+        const reply = authorizationReply === "allow"
           ? { statusCode: 200, body: JSON.stringify({ authorized: true }) }
           : { statusCode: 403, body: JSON.stringify({ error: { message: "Only the task owner can approve this step." } }) };
         return { StatusCode: 200, Payload: Buffer.from(JSON.stringify(reply)) };
       }
+      expect(command.input.InvocationType).toBe("Event");
+      expect(payload).toMatchObject({ source: "agentx.slack-ingress", action: "workflow-decision", taskId,
+        userId: requester, thread, selectedOptionalCheckIds: ["diff-check"] });
       return { StatusCode: accepted ? 202 : 429 };
     }) as never);
 
@@ -547,10 +555,16 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
     expect(invocations).toHaveLength(4);
     expect(invocations.slice(2).map((invocation) => invocation.InvocationType)).toEqual(["RequestResponse", "Event"]);
 
-    authorizationAccepted = false;
+    authorizationReply = "deny";
     expect(JSON.parse((await submit()).body)).toMatchObject({ response_action: "errors" });
     expect(invocations).toHaveLength(5);
     expect(invocations[4]).toMatchObject({ InvocationType: "RequestResponse", FunctionName: "broker" });
+
+    authorizationReply = "invalid-json";
+    const beforeMalformedAuthorization = invocations.length;
+    expect(JSON.parse((await submit()).body)).toMatchObject({ response_action: "errors" });
+    expect(invocations).toHaveLength(beforeMalformedAuthorization + 1);
+    expect(invocations.slice(beforeMalformedAuthorization).map((invocation) => invocation.InvocationType)).toEqual(["RequestResponse"]);
   });
 
   it("queues Approve and Cancel with the queuedBehind attribute the message ingress sends, so a click with nothing ahead gets no extra notice", async () => {
