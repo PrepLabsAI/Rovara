@@ -81,6 +81,8 @@ describe("signed Task People form", () => {
       openView: async (_trigger, view) => { modal = view; }, submit: async () => undefined });
     await handlers.handleAction(action);
     expect(modal).toMatchObject({ callback_id: "agentx_task_people_submission", submit: { text: "Save role" } });
+    expect(JSON.stringify(modal?.blocks)).toContain("Invite them to this task channel in Slack, then return and choose their task role.");
+    expect(JSON.stringify(modal?.blocks)).not.toContain("Add to channel and make owner");
     await handlers.handleSubmission({ team: { id: thread.teamId }, user: { id: requester, team_id: thread.teamId }, view: {
       callback_id: "agentx_task_people_submission", private_metadata: modal?.private_metadata, state: { values: {
         task_person: { person: { selected_user: other } }, task_role: { role: { selected_option: { value: "owner" } } },
@@ -88,6 +90,21 @@ describe("signed Task People form", () => {
     } });
     expect(changes).toEqual([expect.objectContaining({ taskId, userId: requester, thread, expectedPeopleRevision: 3, slackUserId: other, role: "owner" })]);
     expect(changes[0]?.requestId).toEqual(expect.any(String));
+  });
+
+  it("gives the task owner the manual Slack next step when saving a role is refused", async () => {
+    const { handler } = harness({ workflow: {
+      handleAction: async () => undefined,
+      handleSubmission: async () => { throw new Error("hidden service detail"); },
+    } });
+    const response = await handler(signed({ type: "view_submission", user: { id: requester, team_id: thread.teamId }, team: { id: thread.teamId },
+      view: { callback_id: "agentx_task_people_submission", private_metadata: "{}", state: { values: {} } } }));
+    const body = JSON.parse(response.body) as { errors: Record<string, string> };
+    expect(response.statusCode).toBe(200);
+    expect(body.errors.task_person).toContain("invite them to the task channel in Slack");
+    expect(body.errors.task_person).toContain("return and choose their task role");
+    expect(body.errors.task_person).not.toContain("hidden service detail");
+    expect(body.errors.task_person).not.toContain(other);
   });
 
   it("binds the actual submitter/workspace and offers ownerless takeover without a role body", async () => {

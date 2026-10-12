@@ -65,8 +65,16 @@ describe("task People page presentation", () => {
     expect(html).toContain('disabled');
     expect(html).toContain('href="https://slack.com/archives/C0PEOPLE1/p1791720000123456"');
     expect(html).toContain("Add people in Slack");
+    expect(html).toContain("Invite them to this task channel in Slack, then return and choose their task role.");
     expect(html).not.toMatch(/<input\b/i);
     expect(html).not.toMatch(/\b(?:action|method|onclick)=/i);
+  });
+
+  it("gives managers the manual Slack next step without revealing it to readers", () => {
+    const manager = renderTaskPeoplePanel(TASK_ID, view({ canManage: true }));
+    const reader = renderTaskPeoplePanel(TASK_ID, view({ canManage: false }));
+    expect(manager).toContain("Invite them to this task channel in Slack, then return and choose their task role.");
+    expect(reader).not.toContain("Invite them to this task channel in Slack");
   });
 
   it("shows a distinct takeover hint and no restart promise", () => {
