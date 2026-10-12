@@ -73,6 +73,8 @@ export interface DeveloperApiConfiguration {
   taskPeopleDisplayRead?: (request: TaskPeopleDisplayReadRequest) => Promise<TaskPeopleDisplayReadResponse>;
   /** D: exact opt-in for role changes; an existing PEOPLE sidecar remains enforced while false. */
   taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
+  /** E: optional effect port for a confirmed Slack People form; production leaves it absent until separately configured. */
+  inviteTaskPerson?: DeveloperTaskRouteDependencies["inviteTaskPerson"];
   /** R10: bound channels' names and privacy, read by DeveloperIdentity. Optional: without it channels are listed by ID. */
   channelInfo?: (request: ChannelInfoRequest) => Promise<ChannelInfoResponse>;
   /** How long one request waits for channel names in all; the rest stay unnamed. Default 5 seconds. */
@@ -716,6 +718,7 @@ export function developerTaskRouteDependencies(
       }
       return { teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs };
     },
+    ...(deps.developer.inviteTaskPerson === undefined ? {} : { inviteTaskPerson: deps.developer.inviteTaskPerson }),
     ...(deps.developer.taskPeopleDisplayRead === undefined ? {} : {
       createTaskPeopleDisplayAdmission: () => taskPeopleDisplayAdmission({ now: deps.now, read: deps.developer.taskPeopleDisplayRead! }),
       listTaskPeople: async (task: DeveloperTaskRecord, admission: TaskPeopleDisplayAdmission) => {
