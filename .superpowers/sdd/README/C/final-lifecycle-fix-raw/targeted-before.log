@@ -1,0 +1,148 @@
+
+ RUN  v5.0.1 /Users/abhishekgarg/web/AgentX-page-access-20261011
+
+stdout | tests/contract/developer-task-share-route.test.ts > POST /v1/dev/tasks/{taskId}/share (C5) > refuses a closed task, and a close marks its thread's record closed (C24)
+{"component":"broker","event":"workspace.preparation_failed_released","workspaceId":"72d1f02d-e065-4188-af60-c46ce58b45ea","owner":"developer_task"}
+
+stdout | tests/contract/developer-task-share-route.test.ts > POST /v1/dev/tasks/{taskId}/share (C5) > refuses a closed task, and a close marks its thread's record closed (C24)
+{"component":"broker","event":"developer.task_release_already_released","taskId":"49ab8344-c507-45ad-b0d8-370942733110"}
+
+ ❯ tests/contract/developer-task-share-route.test.ts (10 tests | 1 failed) 812ms
+   ❯ POST /v1/dev/tasks/{taskId}/share (C5) (10)
+     × refuses a closed task, and a close marks its thread's record closed (C24) 12ms
+ ❯ tests/contract/developer-task-actions-routes.test.ts (36 tests | 3 failed) 926ms
+   ❯ continue (US1 scenario 5, FR-019) (11)
+     × refuses to cancel a closed task, as continue does, and writes no audit record (final review M2) 9ms
+     × refuses a closed task 4ms
+   ❯ pull requests (US1 scenario 4, FR-023) (8)
+     × answers a repeated requestId after the task closed with the closed-task error 4ms
+ ❯ tests/integration/workflow-e2e/08-merge-close.test.ts (30 tests | 2 failed) 44373ms
+   ❯ Suite 8: merge and close (30)
+     × 8.3 a merge while a proposal waits completes the task, retires the card, and an old press is refused 1420ms
+     × 8.10 a teammate's Close is refused, and nothing moves 1473ms
+
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 6 ⎯⎯⎯⎯⎯⎯⎯
+
+ FAIL  tests/contract/developer-task-actions-routes.test.ts > continue (US1 scenario 5, FR-019) > refuses to cancel a closed task, as continue does, and writes no audit record (final review M2)
+AssertionError: expected { code: 'TASK_NOT_FOUND', …(1) } to deeply equal { code: 'CONFIG_INVALID', …(1) }
+
+- Expected
++ Received
+
+  {
+-   "code": "CONFIG_INVALID",
+-   "message": "this task is closed; start a new one with agentx_start_task",
++   "code": "TASK_NOT_FOUND",
++   "message": "no task here that you can see",
+  }
+
+ ❯ tests/contract/developer-task-actions-routes.test.ts:117:76
+    115|     (db.get(`DEVTASK#${taskId}`, "META") as { closedAt?: string }).clo…
+    116|     const before = turns().length;
+    117|     expect((await post("cancel", { requestId: randomUUID() })).body.er…
+       |                                                                            ^
+    118|     expect(turns()).toHaveLength(before);
+    119|     expect(turns().filter((item) => item.action === "cancel")).toHaveL…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/6]⎯
+
+ FAIL  tests/contract/developer-task-actions-routes.test.ts > continue (US1 scenario 5, FR-019) > refuses a closed task
+AssertionError: expected { code: 'TASK_NOT_FOUND', …(1) } to deeply equal { code: 'CONFIG_INVALID', …(1) }
+
+- Expected
++ Received
+
+  {
+-   "code": "CONFIG_INVALID",
+-   "message": "this task is closed; start a new one with agentx_start_task",
++   "code": "TASK_NOT_FOUND",
++   "message": "no task here that you can see",
+  }
+
+ ❯ tests/contract/developer-task-actions-routes.test.ts:132:100
+
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/6]⎯
+
+ FAIL  tests/contract/developer-task-actions-routes.test.ts > pull requests (US1 scenario 4, FR-023) > answers a repeated requestId after the task closed with the closed-task error
+AssertionError: expected { code: 'TASK_NOT_FOUND', …(1) } to deeply equal { code: 'CONFIG_INVALID', …(1) }
+
+- Expected
++ Received
+
+  {
+-   "code": "CONFIG_INVALID",
+-   "message": "this task is closed; start a new one with agentx_start_task",
++   "code": "TASK_NOT_FOUND",
++   "message": "no task here that you can see",
+  }
+
+ ❯ tests/contract/developer-task-actions-routes.test.ts:346:81
+    344|     await post("pull-requests", { requestId, title: "x" });
+    345|     (db.get(`DEVTASK#${taskId}`, "META") as { closedAt?: string }).clo…
+    346|     expect((await post("pull-requests", { requestId, title: "x" })).bo…
+       |                                                                                 ^
+    347|   });
+    348|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/6]⎯
+
+ FAIL  tests/contract/developer-task-share-route.test.ts > POST /v1/dev/tasks/{taskId}/share (C5) > refuses a closed task, and a close marks its thread's record closed (C24)
+AssertionError: expected { code: 'TASK_NOT_FOUND', …(1) } to match object { code: 'CONFIG_INVALID' }
+(1 matching property omitted from actual)
+
+- Expected
++ Received
+
+  {
+-   "code": "CONFIG_INVALID",
++   "code": "TASK_NOT_FOUND",
+  }
+
+ ❯ tests/contract/developer-task-share-route.test.ts:113:65
+    111|     expect((await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, {…
+    112|     expect(db.get(THREAD, "META")).toMatchObject({ closedAt: expect.an…
+    113|     expect((await share({ shareMode: "continue" })).body.error).toMatc…
+       |                                                                 ^
+    114|   });
+    115|
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/6]⎯
+
+ FAIL  tests/integration/workflow-e2e/08-merge-close.test.ts > Suite 8: merge and close > 8.3 a merge while a proposal waits completes the task, retires the card, and an old press is refused
+AssertionError: expected 'Only the task owner can decide this P…' to be 'That button is out of date. Use the l…' // Object.is equality
+
+Expected: "That button is out of date. Use the latest message in this thread."
+Received: "Only the task owner can decide this PR feedback."
+
+ ❯ tests/integration/workflow-e2e/08-merge-close.test.ts:77:134
+     75|     await e2e.click("agentx_feedback_review_recommended", { messageTs:…
+     76|     await e2e.settle();
+     77|     expect([...e2e.slack.responses.map((response) => response.text), .…
+       |                                                                                                                                      ^
+     78|     expect(e2e.workflow().revision).toBe(revision);
+     79|     expect(runs(e2e).filter((run) => run === "IMPLEMENT")).toHaveLengt…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[5/6]⎯
+
+ FAIL  tests/integration/workflow-e2e/08-merge-close.test.ts > Suite 8: merge and close > 8.10 a teammate's Close is refused, and nothing moves
+AssertionError: expected 'Only the task owner can close this ta…' to be 'Only <@U0MAYA001> can close this task.' // Object.is equality
+
+Expected: "Only <@U0MAYA001> can close this task."
+Received: "Only the task owner can close this task."
+
+ ❯ tests/integration/workflow-e2e/08-merge-close.test.ts:315:46
+    313|     if (e2e.slack.views.length > 0) await e2e.submitView({}, { user: T…
+    314|     await e2e.settle();
+    315|     expect(e2e.slack.responses.at(-1)?.text).toBe(`Only <@${OWNER}> ca…
+       |                                              ^
+    316|     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", st…
+    317|     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.closedAt).to…
+
+⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[6/6]⎯
+
+
+ Test Files  3 failed (3)
+      Tests  6 failed | 70 passed (76)
+   Start at  03:12:54
+   Duration  46.09s (tests 95%, import 3%, transform 2%)
