@@ -4,8 +4,8 @@
 // git repository. GitHub is a fake that only accepts a push made with a push-scoped token.
 import { createHmac, generateKeyPairSync, randomUUID } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
 import { onTestFinished, vi } from "vitest";
@@ -245,6 +245,8 @@ export const WORKER_CALLBACK_ROUTE = /^\/v1\/internal\/workspaces\/[^/]+\/operat
 
 export async function createWorkflowE2E(options: {
   model?: Parameters<typeof workflowModel>[0];
+  /** Files placed under repo/demo before the fixture's base commit. */
+  initialRepositoryFiles?: readonly { path: string; content: string }[];
   /** The thread brief limit; null turns it off. */
   briefLimit?: number | null;
   /** "unavailable": this Slack workspace cannot create a Canvas, so approval cards link the task page. */
@@ -262,6 +264,10 @@ export async function createWorkflowE2E(options: {
    * it; throwing is the check runner itself failing.
    */
   checkResult?: (command: ProjectCommand) => { exitCode: number | null; stdout: string; stderr: string; timedOut?: boolean } | undefined;
+  /** Override a real agent-command replay at the external runner boundary. */
+  agentCheckResult?: (replay: string, tree: string) => { exitCode: number | null; timedOut: boolean; output: string } | undefined;
+  /** The worker check-round budget; absent, the production 30-minute default applies. */
+  checkBudgetMs?: () => number;
   /** Runs in the worker just before it publishes, with the repository's directory (to change the workspace, say). */
   beforePublish?: (repositoryDirectory: string) => Promise<void>;
   /**
@@ -360,7 +366,27 @@ export async function createWorkflowE2E(options: {
   await writeFile(join(repoDirectory, "greeting.ts"), "export const placeholder = true;\nexport const greeting = 'Hello';\nexport const punctuation = '!';\n");
   // A file the change never touches: a finding in it can only be an older problem.
   await writeFile(join(repoDirectory, "farewell.ts"), "export const farewell = (name) => 'Bye ' + name;\n");
-  await git(["add", "greeting.ts", "farewell.ts"]);
+  const realRepositoryDirectory = await realpath(repoDirectory);
+  for (const file of options.initialRepositoryFiles ?? []) {
+    const parts = file.path.split("/");
+    if (file.path.length === 0 || isAbsolute(file.path) || file.path.includes("\\") || parts.some((part) => part.length === 0 || part === "." || part === "..")) {
+      throw new Error(`initial repository file path must stay inside repo/demo: ${file.path}`);
+    }
+    let parent = realRepositoryDirectory;
+    for (const segment of parts.slice(0, -1)) {
+      parent = join(parent, segment);
+      await mkdir(parent).catch((error: unknown) => {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      });
+      const realParent = await realpath(parent);
+      const parentPath = relative(realRepositoryDirectory, realParent);
+      if (parentPath === ".." || parentPath.startsWith(`..${sep}`) || isAbsolute(parentPath)) {
+        throw new Error(`initial repository file path resolves outside repo/demo: ${file.path}`);
+      }
+    }
+    await writeFile(join(parent, parts.at(-1)!), file.content, { flag: "wx" });
+  }
+  await git(["add", "--all"]);
   await git(["commit", "--quiet", "-m", "base"]);
   const baseCommit = await git(["rev-parse", "HEAD"]);
   github.commits.set(baseCommit, await git(["rev-parse", "HEAD^{tree}"]));
@@ -396,8 +422,22 @@ export async function createWorkflowE2E(options: {
 
   /** Every project command a check round ran, with the workspace tree it ran on; each passes unless `checkResult` says otherwise. */
   const checkRuns: Array<{ command: ProjectCommand; tree: string }> = [];
+  const agentCheckRuns: Array<{ replay: string; tree: string }> = [];
   const checkRunners: CheckRunners = {
-    runAgentCommand: async () => ({ exitCode: 0, timedOut: false, output: "ok\n" }),
+    runAgentCommand: async (replay, timeoutMs, signal) => {
+      const tree = await workspaceTree("agent-check");
+      agentCheckRuns.push({ replay, tree });
+      const scripted = options.agentCheckResult?.(replay, tree);
+      if (scripted !== undefined) return scripted;
+      try {
+        const { stdout, stderr } = await execFile("bash", ["-lc", replay], { cwd: root, timeout: timeoutMs, signal });
+        return { exitCode: 0, timedOut: false, output: `${stdout}${stderr}` };
+      } catch (error) {
+        const failure = error as Error & { code?: string | number; killed?: boolean; stdout?: string; stderr?: string };
+        return { exitCode: typeof failure.code === "number" ? failure.code : null, timedOut: failure.killed === true,
+          output: `${failure.stdout ?? ""}${failure.stderr ?? ""}` };
+      }
+    },
     runProjectCommand: async (command) => {
       checkRuns.push({ command, tree: await workspaceTree("check") });
       const scripted = options.checkResult?.(command);
@@ -572,6 +612,7 @@ export async function createWorkflowE2E(options: {
 
   /** Every invocation the worker was given, as the broker queued it (after any delivery downgrade). */
   const invocations: WorkerInvocation[] = [];
+  const resultRewrites: Array<{ kind: E2EInvocationKind; rewrite: (result: unknown) => unknown }> = [];
   /** Per run, in order: its kind and mode, and how many owner decisions and feedback approvals the task held when it started. */
   const ledger: JourneyLedgerEntry[] = [];
   /** The workspace tree each review run was given. */
@@ -642,6 +683,7 @@ export async function createWorkflowE2E(options: {
           const read = await callbacks.feedbackBundleReader(binding);
           return { ...read, taskRequirements: rewrite(read.taskRequirements) };
         }, authorizeFeedbackApproval: callbacks.authorizeFeedbackApproval, checkRunners,
+        ...(options.checkBudgetMs === undefined ? {} : { checkBudgetMs: options.checkBudgetMs }),
         ...(options.workerTimeouts === undefined ? {} : { timeouts: options.workerTimeouts }),
       });
     } catch (error) {
@@ -650,6 +692,8 @@ export async function createWorkflowE2E(options: {
     } finally {
       github.during = undefined;
     }
+    const rewriteIndex = resultRewrites.findIndex((entry) => invocationMatches(invocation, entry.kind));
+    if (rewriteIndex !== -1) result = resultRewrites.splice(rewriteIndex, 1)[0]!.rewrite(result);
     await callbacks.terminalSink({ operationId, status: "SUCCEEDED", result });
     if (options.legacyPlanMarkdown !== undefined && legacyPlan === undefined && invocation.kind === "task" && invocation.payload.workflowMode === "PLAN") {
       legacyPlan = turnPlanIntoMarkdown({ db, s3 }, invocation.workspaceId, operationId, options.legacyPlanMarkdown);
@@ -957,7 +1001,7 @@ export async function createWorkflowE2E(options: {
         });
       }
     },
-    db, s3, handler, slack, github, mergeObservationRequests, repoDirectory, baseCommit, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs,
+    db, s3, handler, slack, github, mergeObservationRequests, repoDirectory, baseCommit, baseTree: github.commits.get(baseCommit)!, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, agentCheckRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs,
     ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE, canvasesDeleted,
     /** The broker's EC2 session deleter: each call removes one workspace's compute. */
     deleteEc2Session,
@@ -1191,6 +1235,8 @@ export async function createWorkflowE2E(options: {
       failNext: (kind: E2EInvocationKind, message: string): void => { failures.push({ kind, message }); },
       /** An old broker: these payload fields are left out of every later invocation. */
       stripInvocationFields: (fields: string[]): void => { strippedFields.push(...fields); },
+      /** One-shot mutation of a real successful worker result before its signed callback. */
+      rewriteNextResult: (kind: E2EInvocationKind, rewrite: (result: unknown) => unknown): void => { resultRewrites.push({ kind, rewrite }); },
       /**
        * An old (or new) worker: from now on every invocation goes through the production dispatcher and EC2 delivery, whose
        * /ping answers `list`; undefined goes back to running each outbox invocation as queued.

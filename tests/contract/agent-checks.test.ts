@@ -79,6 +79,19 @@ describe("matchTestCommand (FR-003, P-6)", () => {
   it.each(NOT_SIMPLE)("does not treat %j as a check", (command) => {
     expect(matchTestCommand(command)).toBeUndefined();
   });
+
+  it("recognizes only Node's built-in test runner and refuses watch and snapshot updates", () => {
+    const command = "node --test repo/demo/greeting.test.js";
+    expect(matchTestCommand(command)).toBe(command);
+    expect(scanTestCommands(command)).toEqual({ tests: [{ replay: command, ownRunIsBefore: true }], othersMayChange: false });
+    expect(scanTestCommands(`${command} && ${command}`)).toEqual({ tests: [{ replay: command, ownRunIsBefore: false }], othersMayChange: false });
+    expect(matchTestCommand("echo prepare && node --test repo/demo/greeting.test.js")).toBeUndefined();
+    for (const refused of ["node script.js", "node --watch repo/demo/greeting.test.js", "node --test --watch repo/demo/greeting.test.js",
+      "node --test --test-update-snapshots repo/demo/greeting.test.js", "node --test --test-update-snapshots=true repo/demo/greeting.test.js"]) {
+      expect(matchTestCommand(refused), refused).toBeUndefined();
+      expect(scanTestCommands(refused).tests, refused).toEqual([]);
+    }
+  });
 });
 
 describe("withoutOutputTail and isPipedTestCommand (pipefail for a piped test command)", () => {

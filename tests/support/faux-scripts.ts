@@ -111,6 +111,8 @@ export function workflowModel(script: {
   plan: string | ((latestUserText: string) => string);
   /** The coder's file writes, or a function of the latest user message (a PR feedback fix reaches the coder as a later turn). */
   edits: Array<{ path: string; content: string }> | ((latestUserText: string) => Array<{ path: string; content: string }>);
+  /** Real worker bash commands to run one at a time before the first file write. */
+  beforeEditsCommands?: readonly string[];
   /**
    * The PR feedback critic's answer to its prompt (or a response step, such as `reviewerHangs`); absent, it recommends fixing
    * every comment in repo/demo's greeting.ts.
@@ -123,6 +125,8 @@ export function workflowModel(script: {
 }): FauxResponseStep {
   // Copied so that shifting never changes the caller's arrays.
   let lastPlan: string | undefined;
+  const beforeEdits = [...(script.beforeEditsCommands ?? [])];
+  let editsStarted = false;
   const queues: Record<ReviewRole, FauxResponseStep[]> = { CODE: [...(script.reviews?.CODE ?? [])], SECURITY: [...(script.reviews?.SECURITY ?? [])] };
   return async (context, options, state, model) => {
     const prompt = firstUserText(context);
@@ -161,9 +165,14 @@ export function workflowModel(script: {
       return typeof step === "function" ? step(context, options, state, model) : step;
     }
     script.turns?.push({ role: "CODER", userText: latestUserText });
+    if (beforeEdits.length > 0) {
+      const command = beforeEdits.shift()!;
+      return fauxAssistantMessage([fauxToolCall("bash", { command }, { id: `before-edit-${beforeEdits.length}` })], { stopReason: "toolUse" });
+    }
     const edits = typeof script.edits === "function" ? script.edits(latestUserText) : script.edits;
     // With no edits there is nothing to call a tool for, so the coder reports done straight away.
-    if (lastIsToolResult(context) || edits.length === 0) return fauxAssistantMessage(`Done.\n\n${DONE}`);
+    if ((lastIsToolResult(context) && editsStarted) || edits.length === 0) return fauxAssistantMessage(`Done.\n\n${DONE}`);
+    editsStarted = true;
     return fauxAssistantMessage(
       edits.map((edit, index) => fauxToolCall("write", { path: edit.path, content: edit.content }, { id: `edit-${index}` })),
       { stopReason: "toolUse" },

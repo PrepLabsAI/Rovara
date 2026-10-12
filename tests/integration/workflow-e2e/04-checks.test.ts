@@ -113,11 +113,38 @@ describe("Suite 4: checks", () => {
     expect(e2e.workflow().verification?.results[0]).not.toHaveProperty("broken");
   }, 120_000);
 
-  // A review-only task stops when AgentX's rerun of the agent's own tests finds one that passed before and fails now
-  // ("This test passed before this change and fails now: <test>..."). Driving it needs the faux coder to run a test
-  // through its bash tool and the harness's runAgentCommand to answer that rerun per tree; neither exists yet. Contract
-  // coverage: "records which tests regressed and tells the coder about them".
-  it.todo("4.7 a regression found by rerunning the agent's own tests stops a review-only task");
+  it("4.7 a real agent test regression blocks review until the owner sends it back and it is fixed", async () => {
+    const e2e = await createWorkflowE2E({ readiness: [],
+      initialRepositoryFiles: [{ path: "greeting.test.js", content: `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { readFileSync } from "node:fs";\ntest("greet trims names", () => {\n  const code = readFileSync(new URL("./greeting.ts", import.meta.url), "utf8");\n  if (!code.includes("function greet(")) return;\n  assert.match(code, /name\\.trim\\(\\)/);\n});\n` }],
+      model: { plan: PLAN, beforeEditsCommands: ["node --test repo/demo/greeting.test.js"],
+        edits: (latest) => latest.includes("These tests passed before this change and fail now.") ? FIXED : EDITS } });
+    await atPlanReview(e2e);
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    expect(e2e.agentCheckRuns.map(({ replay }) => replay)).toEqual(["node --test repo/demo/greeting.test.js", "node --test repo/demo/greeting.test.js"]);
+    expect(e2e.agentCheckRuns[0]?.tree).not.toBe(e2e.baseTree);
+    expect(e2e.agentCheckRuns[1]?.tree).toBe(e2e.agentCheckRuns[0]?.tree);
+    expect(e2e.workflow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.regressionFound });
+    expect(e2e.workflow().regressedChecks).toEqual(["node --test repo/demo/greeting.test.js"]);
+    const blocked = e2e.slack.lastPostWithAction("agentx_workflow_send_back");
+    expect(blocked.text).toBe("This test passed before this change and fails now: node --test repo/demo/greeting.test.js. Send it back to coding, or close the task. Nothing was sent to GitHub.");
+    expect(actionIds(blocked)).toEqual(["agentx_workflow_send_back", "agentx_workflow_close"]);
+    expect(runs(e2e)).not.toContain("REVIEW");
+    expect(e2e.github.pushes.size).toBe(0);
+    expect(e2e.github.pullRequests).toEqual([]);
+    const mark = markInputs(e2e);
+    const blockedTree = e2e.agentCheckRuns.at(-1)!.tree;
+    await e2e.click("agentx_workflow_send_back");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(modelInputs(e2e, mark).join("\n")).toContain("These tests passed before this change and fail now.");
+    expect(e2e.workflow().candidate!.repositories[0]!.treeSha).not.toBe(blockedTree);
+    expect(e2e.github.pullRequests).toHaveLength(1);
+    expect(e2e.github.pullRequests[0]!.tree).toBe(e2e.workflow().candidate!.repositories[0]!.treeSha);
+    const pullRequestBody = (e2e.github.pullRequests[0]!.body ?? "").split("\n");
+    expect(pullRequestBody[0]).toBe("Not verified by automated checks (review only).");
+    expect(pullRequestBody.some((line) => line.startsWith("Checks:"))).toBe(false);
+  }, 120_000);
 
   it("4.9 a check the runner couldn't start is not the code failing: no Send back, and Choose checks and retry runs it again", async () => {
     // Found by this scenario: a check whose process never started (its spawn failed, "spawn node EAGAIN") read as "1 of 1
@@ -144,11 +171,33 @@ describe("Suite 4: checks", () => {
     expect(runs(e2e).filter((run) => run === "IMPLEMENT")).toHaveLength(1);
   }, 120_000);
 
-  // WORKFLOW_BLOCK_REASONS.checkRunnerFailed ("The code is written, but I couldn't run the checks. AgentX couldn't run the
-  // selected checks...") is said when the worker's check round itself stopped or errored (its time budget ran out, or the
-  // coder's session ended in an error after writing code). The harness cannot shorten the worker's check budget (no seam;
-  // the plan allows only the review timeout seam), so this copy is left to the contract tests for now.
-  it.todo("4.9 (check round stopped) says the check runner couldn't run the checks, with Choose checks and retry");
+  it("4.9 a stopped check round retries checks and reviews without recoding", async () => {
+    let budget = 0;
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, checkBudgetMs: () => budget });
+    await atPlanReview(e2e);
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.checkRunnerFailed });
+    const implementation = e2e.invocations.find((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "IMPLEMENT")!;
+    expect(e2e.db.get(`WORKSPACE#${implementation.workspaceId}`, `OPERATION#${implementation.operationId}`)?.result)
+      .toMatchObject({ checks: { status: "not_verified", notVerifiedReason: "stopped" } });
+    const blocked = e2e.slack.posts.at(-1)!;
+    expect(blocked.text).toBe("The code is written, but I couldn't run the checks. AgentX couldn't run the selected checks. Retry once the check runner is working.");
+    expect(actionIds(blocked)).toEqual(["agentx_workflow_retry_checks", "agentx_workflow_close"]);
+    expect(runs(e2e).filter((run) => run === "IMPLEMENT")).toHaveLength(1);
+    expect(runs(e2e)).not.toContain("REVIEW");
+    expect(e2e.github.pushes.size).toBe(0);
+    await e2e.click("agentx_workflow_retry_checks");
+    expect(JSON.stringify(e2e.slack.views.at(-1)?.view ?? {})).not.toContain(`"value":"${e2e.workflow().checkPolicy!.required[0]!.id}"`);
+    await e2e.submitView({});
+    budget = 30 * 60_000;
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(runs(e2e).filter((run) => run === "IMPLEMENT")).toHaveLength(1);
+    expect(runs(e2e).filter((run) => run === "REVIEW")).toHaveLength(1);
+    expect(e2e.turns.filter((turn) => turn.role === "CODE" || turn.role === "SECURITY").map((turn) => turn.role).sort()).toEqual(["CODE", "SECURITY"]);
+    expect(e2e.github.pullRequests).toHaveLength(1);
+  }, 120_000);
 
   it("4.10 says, word for word, that none of the task's checks ran when an old broker sends the coder no checks", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });

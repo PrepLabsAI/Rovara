@@ -1,6 +1,7 @@
 // Self-tests for the workflow E2E harness's controls: the clock, worker faults and version skew, recovery sweeps, Slack
 // variants, the feedback page, MCP, the webhook builder and secret rotation, wire mode, and the model fixtures.
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { execFileSync } from "node:child_process";
 import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, parsePlanDocument } from "@agentx/contracts";
 import { LOST_COMPUTE_ERROR, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../support/workflow-e2e.js";
 import { OMAR } from "../support/developer-task-broker.js";
@@ -46,6 +47,37 @@ describe("workflow E2E harness", () => {
     expect(Date.now()).toBeGreaterThan(Date.parse("2026-01-01T00:00:00Z"));
     expect(new Date().getUTCFullYear()).toBeLessThan(2030);
   });
+
+  it("initial repository files are confined to repo/demo and included in its base commit", async () => {
+    const content = "export const baseFixture = true;\n";
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: [] }, initialRepositoryFiles: [{ path: "nested/fixture.ts", content }] });
+    expect(execFileSync("git", ["-C", e2e.repoDirectory, "show", `${e2e.baseCommit}:nested/fixture.ts`], { encoding: "utf8" })).toBe(content);
+    await expect(createWorkflowE2E({ initialRepositoryFiles: [{ path: "../outside.txt", content }] })).rejects.toThrow(/stay inside repo\/demo/);
+    await expect(createWorkflowE2E({ initialRepositoryFiles: [{ path: "/tmp/outside.txt", content }] })).rejects.toThrow(/stay inside repo\/demo/);
+  }, 120_000);
+
+  it("result rewrites are kind-matched, one-shot, and leave defaults inert", async () => {
+    let failing = true;
+    const rewrites: string[] = [];
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS },
+      checkResult: () => failing ? { exitCode: 1, stdout: "", stderr: "expected failure\n" } : undefined });
+    await expect(e2e.repoFile("greeting.test.js")).rejects.toThrow();
+    e2e.worker.rewriteNextResult("task:IMPLEMENT", (result) => { rewrites.push("IMPLEMENT"); return result; });
+    e2e.worker.rewriteNextResult("task:PLAN", (result) => { rewrites.push("PLAN"); return result; });
+    expect(e2e.agentCheckRuns).toEqual([]);
+    expect(await e2e.mention("quick: Add a greet(name) function")).toBe(200);
+    await e2e.settle();
+    expect(rewrites).toEqual(["PLAN"]);
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    expect(rewrites).toEqual(["PLAN", "IMPLEMENT"]);
+    expect(e2e.workflow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    failing = false;
+    await e2e.click("agentx_workflow_send_back");
+    await e2e.settle();
+    expect(rewrites).toEqual(["PLAN", "IMPLEMENT"]);
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+  }, 120_000);
 
   it("worker.failNext fails the next matching run at once, without running it", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
