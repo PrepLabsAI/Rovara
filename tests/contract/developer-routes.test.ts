@@ -618,6 +618,23 @@ describe("D2 task-person route dependencies", () => {
     expect(db.find((item) => String(item.sk).startsWith("PERSON#") || String(item.pk).startsWith("SESSION#") && item.sessionId !== "s-1")).toEqual([]);
   });
 
+  it("does not decorate a system project denial with channel names", async () => {
+    db.set(task as unknown as Record<string, unknown>);
+    config.taskPersonProof = vi.fn(async () => ({
+      ok: true as const,
+      user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" },
+      memberOf: [],
+    }));
+    const channelInfo = vi.fn(async () => ({ ok: true as const, channels: [{ channelId: "C0PAY0001", name: "payments", isPrivate: false }] }));
+    config.channelInfo = channelInfo;
+    const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, maya);
+    const check = Reflect.get(route, "checkTaskPerson") as ((value: DeveloperTaskRecord, id: string) => Promise<Record<string, unknown>>) | undefined;
+
+    await expect(check?.(task, nativeDeveloperId)).resolves.toMatchObject({ eligible: false, channelMember: false });
+
+    expect(channelInfo).not.toHaveBeenCalled();
+  });
+
   it("fails closed when the trusted fresh-proof port is absent", async () => {
     db.set(task as unknown as Record<string, unknown>);
     delete config.taskPersonProof;
