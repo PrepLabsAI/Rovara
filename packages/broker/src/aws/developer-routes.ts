@@ -14,6 +14,7 @@ import {
   WorkspaceInstanceSchema,
   TaskPersonProofResponseSchema,
   TaskChannelPeopleResponseSchema,
+  TaskPeopleDisplayReadResponseSchema,
   agentXError,
   developerTaskPolicy,
   workspaceRecordFields,
@@ -39,9 +40,12 @@ import {
   type TaskPersonProofResponse,
   type TaskChannelPeopleRequest,
   type TaskChannelPeopleResponse,
+  type TaskPeopleDisplayReadRequest,
+  type TaskPeopleDisplayReadResponse,
 } from "@agentx/contracts";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
+import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
@@ -63,6 +67,8 @@ export interface DeveloperApiConfiguration {
   /** C0: optional until the compatible identity function is deployed; callers must fail closed when absent. */
   taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>;
   taskChannelPeople?: (request: TaskChannelPeopleRequest) => Promise<TaskChannelPeopleResponse>;
+  /** E: one request-scoped, metered proof/list transport. Absence makes the complete People view unavailable. */
+  taskPeopleDisplayRead?: (request: TaskPeopleDisplayReadRequest) => Promise<TaskPeopleDisplayReadResponse>;
   /** D: exact opt-in for role changes; an existing PEOPLE sidecar remains enforced while false. */
   taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
   /** R10: bound channels' names and privacy, read by DeveloperIdentity. Optional: without it channels are listed by ID. */
@@ -182,6 +188,43 @@ export function taskChannelPeopleThroughLambda(invoke: (payload: Uint8Array) => 
       || parsed.data.users.some((user) => new Set(user.memberOf).size !== user.memberOf.length || user.memberOf.some((channelId) => !requested.has(channelId)))) return undefined;
     return parsed.data;
   }, "developer.task_channel_people");
+}
+
+/** E: strict metered display transport. Any missing or malformed usage seals the caller's admission. */
+export function taskPeopleDisplayReadThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: TaskPeopleDisplayReadRequest) => Promise<TaskPeopleDisplayReadResponse> {
+  return async (request) => {
+    const failed = (reason: string): never => {
+      logDeveloperEvent({ event: "developer.task_people_display_read_failed", reason });
+      throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
+    };
+    let response: ChannelMembersInvokeResult;
+    try { response = await invoke(Buffer.from(JSON.stringify(request))); }
+    catch (error) { return failed(`invoke_${errorName(error)}`); }
+    if (response.FunctionError !== undefined) return failed("function_error");
+    if (response.Payload === undefined) return failed("empty_reply");
+    let decoded: unknown;
+    try { decoded = JSON.parse(Buffer.from(response.Payload).toString("utf8")); }
+    catch { return failed("unreadable_reply"); }
+    const parsed = TaskPeopleDisplayReadResponseSchema.safeParse(decoded);
+    if (!parsed.success || parsed.data.operation !== request.operation
+      || parsed.data.admission.slackCallsUsed > request.admission.slackCallsLimit) return failed("malformed_reply");
+    if (parsed.data.operation === "proof") {
+      const result = parsed.data.result;
+      if (result.ok) {
+        const requested = new Set(request.operation === "proof" ? request.request.channelIds : []);
+        if (request.operation !== "proof" || result.user.id !== request.request.slackUserId
+          || new Set(result.memberOf).size !== result.memberOf.length || result.memberOf.some((id) => !requested.has(id))) return failed("malformed_reply");
+      }
+    } else {
+      const result = parsed.data.result;
+      if (result.ok) {
+        const requested = new Set(request.operation === "directory" ? request.request.channelIds : []);
+        if (request.operation !== "directory" || new Set(result.users.map((user) => user.id)).size !== result.users.length
+          || result.users.some((user) => new Set(user.memberOf).size !== user.memberOf.length || user.memberOf.some((id) => !requested.has(id)))) return failed("malformed_reply");
+      }
+    }
+    return parsed.data;
+  };
 }
 
 type ChannelEntry = { channelId: string; name: string; isPrivate: boolean };
@@ -626,9 +669,9 @@ export function developerTaskRouteDependencies(
     .filter((binding) => binding.projectName === project)
     .map((binding) => binding.channelId)
     .sort();
-  const identityDependencies = (): TaskPersonIdentityDependencies => {
+  const identityDependencies = (admission?: TaskPeopleDisplayAdmission): TaskPersonIdentityDependencies => {
     const slackTeamId = deps.developer.slackTeamId;
-    const taskPersonProof = deps.developer.taskPersonProof;
+    const taskPersonProof = admission?.proof.bind(admission) ?? deps.developer.taskPersonProof;
     if (slackTeamId === undefined || taskPersonProof === undefined) throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
     return {
       documentClient: deps.documentClient, tableName: deps.tableName, slackTeamId, now: deps.now, uuid: randomUUID, taskPersonProof,
@@ -648,8 +691,8 @@ export function developerTaskRouteDependencies(
     issuer: deps.developer.issuer,
     actions: deps.tasks!,
     ...(deps.developer.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: deps.developer.taskPeopleConfiguration }),
-    checkTaskPerson: async (task, developerId) => {
-      return checkTaskPersonIdentity(identityDependencies(), task, developerId);
+    checkTaskPerson: async (task, developerId, admission) => {
+      return checkTaskPersonIdentity(identityDependencies(admission), task, developerId);
     },
     resolveTaskPickerPerson: async (taskId, slackUserId) => {
       const dependencies = identityDependencies();
@@ -666,16 +709,21 @@ export function developerTaskRouteDependencies(
     taskPeopleChannel: async (taskId) => {
       const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
       const share = response.Item?.share;
-      if (share === undefined || typeof share.teamId !== "string" || typeof share.channelId !== "string") {
+      if (share === undefined || typeof share.teamId !== "string" || typeof share.channelId !== "string" || typeof share.threadTs !== "string") {
         throw agentXError("PROJECT_ACCESS_DENIED", "task channel could not be verified");
       }
-      return { teamId: share.teamId, channelId: share.channelId };
+      return { teamId: share.teamId, channelId: share.channelId, threadTs: share.threadTs };
     },
-    ...(deps.developer.taskChannelPeople === undefined ? {} : { listTaskPeople: async (task: DeveloperTaskRecord) => {
+    ...(deps.developer.taskPeopleDisplayRead === undefined ? {} : {
+      createTaskPeopleDisplayAdmission: () => taskPeopleDisplayAdmission({ now: deps.now, read: deps.developer.taskPeopleDisplayRead! }),
+      listTaskPeople: async (task: DeveloperTaskRecord, admission: TaskPeopleDisplayAdmission) => {
       const channels = [...new Set([...(await projectChannelIds(task.project)), ...(task.share === undefined ? [] : [task.share.channelId])])].sort();
-      const answer = await deps.developer.taskChannelPeople!({ kind: "task-channel-people", channelIds: channels });
+      admission.assertOpen();
+      const answer = await admission.directory({ kind: "task-channel-people", channelIds: channels });
       if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "the complete task People directory is unavailable");
-      const identities = await registerTaskChannelPeople(identityDependencies(), task, answer.users);
+      admission.assertOpen();
+      const identities = await registerTaskChannelPeople(identityDependencies(admission), task, answer.users);
+      admission.assertOpen();
       const bySlack = new Map(answer.users.map((user) => [user.id, user]));
       return identities.map((identity) => {
         const user = bySlack.get(identity.slackUserId);
@@ -683,7 +731,8 @@ export function developerTaskRouteDependencies(
         return { subject: { developerId: identity.developerId, slackUserId: identity.slackUserId }, identity, eligible: true,
           channelMember: task.share === undefined || user.memberOf.includes(task.share.channelId) };
       });
-    } }),
+      },
+    }),
     ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback.bind(deps) }),
     ...(initialSlackThread === undefined ? {} : { initialSlackThread }),
     checkAccess: (project) => checkProjectAccess(deps, caller, project),

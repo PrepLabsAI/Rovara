@@ -173,8 +173,8 @@ import { pageCommentViews, type CommentViewContext, type PageCommentView } from 
 import type { PlanAnchor } from "./plan-page/render-plan.js";
 import { can, pageAccess, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
-import { getTaskPeople as readTaskPeople, getTaskPeopleCapabilities as readTaskPeopleCapabilities } from "../developer/task-people.js";
-import { confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeopleProposal as readPeopleProposal, proposeTaskOwnership, proposeTaskPeopleRole,
+import { getTaskPeople as readTaskPeople, getTaskPeopleCapabilities as readTaskPeopleCapabilities, type TaskPersonCheck } from "../developer/task-people.js";
+import { confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeopleProposal as readPeopleProposal, getTaskPeopleProposalMetadata as readPeopleProposalMetadata, proposeTaskOwnership, proposeTaskPeopleRole,
   submitSlackTaskOwnership as commitSlackTaskOwnership, submitSlackTaskPeopleRole as commitSlackTaskPeopleRole } from "../developer/task-people-effects.js";
 import { inertReplyText } from "../developer/prompt-text.js";
 import {
@@ -185,6 +185,7 @@ import {
   APPROVED_COMMENT_ANSWERS_INSTRUCTION, COMMENT_ANSWERS_INSTRUCTION, COMMENT_CHANGED_MESSAGE, REQUEST_CHANGES_NEEDS_INPUT, decisionDetailKey, ownerAnswersFor, ownerAnswersSentence, pageCommentsPromptSection,
   planOwnerAnswers, promptComments, readDecisionDetail, refusalMessage,
 } from "../developer/owner-answers.js";
+import type { TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -193,12 +194,14 @@ export interface DeveloperTaskRouteDependencies {
   /** C: absent is write-disabled; an existing PEOPLE sidecar remains authoritative either way. */
   taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
   /** C: trusted exact-principal eligibility and bound-channel proof; never supplied by a request body. */
-  checkTaskPerson?: (task: DeveloperTaskRecord, developerId: string) => Promise<{
+  checkTaskPerson?: (task: DeveloperTaskRecord, developerId: string, admission?: TaskPeopleDisplayAdmission) => Promise<{
     subject: { developerId: string; slackUserId?: string };
     identity: { developerId: string; slackUserId: string; name: string; method: "slack" | "oidc"; issuer: string; subject: string };
     eligible: boolean;
     channelMember: boolean;
   }>;
+  listTaskPeople?: (task: DeveloperTaskRecord, admission: TaskPeopleDisplayAdmission) => Promise<readonly TaskPersonCheck[]>;
+  createTaskPeopleDisplayAdmission?: () => TaskPeopleDisplayAdmission;
   actions: DeveloperTaskActions;
   /** Recollects every linked PR from GitHub; required before feedback decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
@@ -221,7 +224,7 @@ export interface DeveloperTaskRouteDependencies {
   now(): number;
   log?(entry: Record<string, unknown>): void;
   resolveTaskPickerPerson?(taskId: string, slackUserId: string): Promise<{ personId: string; developerId: string; slackUserId: string; channelMember: boolean }>;
-  taskPeopleChannel?(taskId: string): Promise<{ teamId: string; channelId: string }>;
+  taskPeopleChannel?(taskId: string): Promise<{ teamId: string; channelId: string; threadTs: string }>;
   inviteTaskPerson?(input: { teamId: string; channelId: string; slackUserId: string }): Promise<"accepted" | "unknown">;
 }
 
@@ -236,6 +239,8 @@ export const getTaskPeopleCapabilities = (deps: DeveloperTaskRouteDependencies, 
   readTaskPeopleCapabilities(deps, caller, taskId);
 export const getTaskPeopleProposal = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, requestId: string) =>
   readPeopleProposal(taskPeopleEffectsDependencies(deps), caller, taskId, requestId);
+export const getTaskPeopleProposalMetadata = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, requestId: string) =>
+  readPeopleProposalMetadata(taskPeopleEffectsDependencies(deps), caller, taskId, requestId);
 export const confirmTaskPeopleProposal = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, requestId: string) =>
   confirmPeopleProposal(taskPeopleEffectsDependencies(deps), caller, taskId, requestId);
 export const submitSlackTaskPeopleRole = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string,

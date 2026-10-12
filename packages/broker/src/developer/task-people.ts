@@ -4,6 +4,7 @@ import { GetCommand, QueryCommand, TransactWriteCommand, type TransactWriteComma
 import { SlackThreadSchema, SlackUserIdSchema, agentXError, cleanDisplayName, redactAndCap, slackThreadUrl } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { ProjectAccessSubject, TaskPersonIdentity } from "./task-person-identity.js";
+import type { TaskPeopleDisplayAdmission } from "./task-people-display-budget.js";
 import { taskKey, taskOwnerKey, type DeveloperTaskRecord } from "./task-records.js";
 
 export type TaskRole = "owner" | "commenter" | "viewer";
@@ -25,7 +26,7 @@ export interface TaskPersonCheck {
   channelMember: boolean;
 }
 
-export type CheckTaskPerson = (task: DeveloperTaskRecord, developerId: string) => Promise<TaskPersonCheck>;
+export type CheckTaskPerson = (task: DeveloperTaskRecord, developerId: string, admission?: TaskPeopleDisplayAdmission) => Promise<TaskPersonCheck>;
 
 export interface TaskPeopleDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -34,7 +35,9 @@ export interface TaskPeopleDependencies {
   taskPeopleConfiguration?: TaskPeopleConfiguration;
   checkTaskPerson?: CheckTaskPerson;
   /** Complete directory checks for display only. Never used by authorization, reconciliation, or mutation. */
-  listTaskPeople?: (task: DeveloperTaskRecord) => Promise<readonly TaskPersonCheck[]>;
+  listTaskPeople?: (task: DeveloperTaskRecord, admission: TaskPeopleDisplayAdmission) => Promise<readonly TaskPersonCheck[]>;
+  /** Starts the whole-view 20 second / 100 Slack call / 100 identity admission. */
+  createTaskPeopleDisplayAdmission?: () => TaskPeopleDisplayAdmission;
 }
 
 export interface TaskPeopleView {
@@ -178,18 +181,27 @@ async function allPeople(deps: TaskPeopleDependencies, taskId: string): Promise<
   return found;
 }
 
-async function checkedFresh(deps: Pick<TaskPeopleDependencies, "checkTaskPerson">, task: DeveloperTaskRecord, developerId: string): Promise<TaskPersonCheck> {
+async function checkedFresh(deps: Pick<TaskPeopleDependencies, "checkTaskPerson">, task: DeveloperTaskRecord, developerId: string,
+  admission?: TaskPeopleDisplayAdmission): Promise<TaskPersonCheck> {
   if (deps.checkTaskPerson === undefined) return denied();
-  const result = await deps.checkTaskPerson(task, developerId);
+  admission?.admitIdentity(developerId);
+  admission?.assertOpen();
+  const result = await deps.checkTaskPerson(task, developerId, admission);
+  admission?.assertOpen();
   const identity = result.identity;
   if (result.subject.developerId !== developerId || result.subject.slackUserId !== identity.slackUserId
     || identity.developerId !== developerId || !SlackUserIdSchema.safeParse(identity.slackUserId).success
     || typeof identity.name !== "string" || safeName(identity.name, identity.slackUserId) !== identity.name
     || typeof result.eligible !== "boolean" || typeof result.channelMember !== "boolean") return denied();
+  admission?.noteNativeIdentity(identity.developerId, identity.slackUserId);
   return result;
 }
 
-async function checked(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, developerId: string): Promise<TaskPersonCheck> {
+async function checked(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, developerId: string,
+  admission?: TaskPeopleDisplayAdmission): Promise<TaskPersonCheck> {
+  if (admission !== undefined) {
+    try { return await checkedFresh(deps, task, developerId, admission); } catch { return unavailable(); }
+  }
   try { return await checkedFresh(deps, task, developerId); } catch { return denied(); }
 }
 
@@ -205,9 +217,9 @@ async function transact(deps: TaskPeopleDependencies, items: readonly TransactIt
   await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [...items] }));
 }
 
-async function initialize(deps: TaskPeopleDependencies, task: DeveloperTaskRecord): Promise<TaskPeople> {
+async function initialize(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, admission?: TaskPeopleDisplayAdmission): Promise<TaskPeople> {
   if (!enabled(deps) || !open(task) || task.share === undefined || !Number.isSafeInteger(task.workflow?.revision)) return denied();
-  const proof = await checked(deps, task, task.developerId);
+  const proof = await checked(deps, task, task.developerId, admission);
   if (!proof.eligible || !proof.channelMember || proof.identity.developerId !== task.developerId) return denied();
   const existing = await personByDeveloper(deps, task.taskId, task.developerId);
   if (existing !== undefined && !samePrincipal(existing.identity, proof.identity)) return denied();
@@ -236,6 +248,7 @@ async function initialize(deps: TaskPeopleDependencies, task: DeveloperTaskRecor
     );
   }
   try {
+    admission?.assertOpen();
     await transact(deps, items);
     return people;
   } catch (error) {
@@ -245,13 +258,14 @@ async function initialize(deps: TaskPeopleDependencies, task: DeveloperTaskRecor
   }
 }
 
-async function reconcile(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, original: TaskPeople): Promise<TaskPeople> {
+async function reconcile(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, original: TaskPeople,
+  admission?: TaskPeopleDisplayAdmission): Promise<TaskPeople> {
   let current = original;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const nextEntries: PersonEntry[] = [];
     for (const person of current.people) {
       if (person.role !== "owner") { nextEntries.push(person); continue; }
-      const proof = await checked(deps, task, person.developerId);
+      const proof = await checked(deps, task, person.developerId, admission);
       nextEntries.push(proof.eligible && proof.channelMember ? person : { ...person, role: proof.eligible ? "commenter" : "denied" });
     }
     const orphaned = !nextEntries.some((person) => person.role === "owner");
@@ -260,6 +274,7 @@ async function reconcile(deps: TaskPeopleDependencies, task: DeveloperTaskRecord
     const item = { ...peopleKey(task.taskId), ...next };
     preflight([{ Put: { TableName: deps.tableName, Item: item } }]);
     try {
+      admission?.assertOpen();
       await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [{ Update: {
         TableName: deps.tableName, Key: peopleKey(task.taskId),
         UpdateExpression: "SET #revision = :nextRevision, #orphaned = :orphaned, #people = :people",
@@ -278,10 +293,10 @@ async function reconcile(deps: TaskPeopleDependencies, task: DeveloperTaskRecord
   return stale();
 }
 
-async function currentPeople(deps: TaskPeopleDependencies, task: DeveloperTaskRecord): Promise<TaskPeople> {
+async function currentPeople(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, admission?: TaskPeopleDisplayAdmission): Promise<TaskPeople> {
   const stored = await loadPeople(deps, task.taskId);
   if (stored === undefined) return denied();
-  return reconcile(deps, task, stored);
+  return reconcile(deps, task, stored, admission);
 }
 
 async function authorizeColdInitialization(
@@ -289,9 +304,10 @@ async function authorizeColdInitialization(
   task: DeveloperTaskRecord,
   caller: DeveloperCaller,
   ownerOnly: boolean,
+  admission?: TaskPeopleDisplayAdmission,
 ): Promise<void> {
   if (ownerOnly && caller.developerId !== task.developerId) return denied();
-  const proof = await checked(deps, task, caller.developerId);
+  const proof = await checked(deps, task, caller.developerId, admission);
   if (!proof.eligible || !proof.channelMember) return denied();
 }
 
@@ -300,12 +316,13 @@ async function currentPeopleForCaller(
   task: DeveloperTaskRecord,
   caller: DeveloperCaller,
   ownerOnly: boolean,
+  admission?: TaskPeopleDisplayAdmission,
 ): Promise<TaskPeople> {
   const stored = await loadPeople(deps, task.taskId);
-  if (stored !== undefined) return reconcile(deps, task, stored);
+  if (stored !== undefined) return reconcile(deps, task, stored, admission);
   if (!enabled(deps)) return unavailable();
-  await authorizeColdInitialization(deps, task, caller, ownerOnly);
-  return reconcile(deps, task, await initialize(deps, task));
+  await authorizeColdInitialization(deps, task, caller, ownerOnly, admission);
+  return reconcile(deps, task, await initialize(deps, task, admission), admission);
 }
 
 function effectiveRoleFromProof(explicit: PersonEntry | undefined, proof: TaskPersonCheck): TaskRole | null {
@@ -315,14 +332,15 @@ function effectiveRoleFromProof(explicit: PersonEntry | undefined, proof: TaskPe
   return proof.channelMember ? "commenter" : null;
 }
 
-async function effectiveRole(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, developerId: string): Promise<TaskRole | null> {
+async function effectiveRole(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, developerId: string,
+  admission?: TaskPeopleDisplayAdmission): Promise<TaskRole | null> {
   const explicit = people.people.find((person) => person.developerId === developerId);
-  const proof = await checked(deps, task, developerId);
+  const proof = await checked(deps, task, developerId, admission);
   return effectiveRoleFromProof(explicit, proof);
 }
 
 async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, caller: DeveloperCaller,
-  displayChecks: readonly TaskPersonCheck[] = []): Promise<TaskPeopleView> {
+  displayChecks: readonly TaskPersonCheck[] = [], admission?: TaskPeopleDisplayAdmission): Promise<TaskPeopleView> {
   const mappings = await allPeople(deps, task.taskId);
   const byDeveloper = new Map(mappings.map((mapping) => [mapping.identity.developerId, mapping]));
   for (const person of people.people) if (!byDeveloper.has(person.developerId)) return denied();
@@ -340,7 +358,7 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
     const display = displayByDeveloper.get(candidate.identity.developerId);
     const effective = display !== undefined && samePrincipal(display.identity, candidate.identity)
       ? effectiveRoleFromProof(candidate.explicit, display)
-      : await effectiveRole(deps, task, people, candidate.identity.developerId);
+      : await effectiveRole(deps, task, people, candidate.identity.developerId, admission);
     if (candidate.explicit === undefined && effective !== "commenter") continue;
     const suffix = (sameSlack.get(candidate.identity.slackUserId) ?? 0) > 1 ? (candidate.identity.method === "slack" ? " (Slack identity)" : " (OIDC identity)") : "";
     const baseName = candidate.explicit?.name ?? candidate.identity.name;
@@ -352,9 +370,9 @@ async function viewOf(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, p
     });
   }
   rendered.sort((left, right) => left.name.localeCompare(right.name) || left.personId.localeCompare(right.personId));
-  const callerRole = await effectiveRole(deps, task, people, caller.developerId);
+  const callerRole = await effectiveRole(deps, task, people, caller.developerId, admission);
   const takeoverProof = enabled(deps) && open(task) && people.orphaned && callerRole !== null
-    ? await checked(deps, task, caller.developerId)
+    ? await checked(deps, task, caller.developerId, admission)
     : undefined;
   const canTakeOwnership = takeoverProof?.eligible === true && takeoverProof.channelMember;
   const thread = task.share === undefined ? undefined : SlackThreadSchema.safeParse({
@@ -386,8 +404,9 @@ function parseView(value: unknown): TaskPeopleView | undefined {
   return value as unknown as TaskPeopleView;
 }
 
-async function authorizedRead(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, caller: DeveloperCaller): Promise<TaskRole> {
-  const role = await effectiveRole(deps, task, people, caller.developerId);
+async function authorizedRead(deps: TaskPeopleDependencies, task: DeveloperTaskRecord, people: TaskPeople, caller: DeveloperCaller,
+  admission?: TaskPeopleDisplayAdmission): Promise<TaskRole> {
+  const role = await effectiveRole(deps, task, people, caller.developerId, admission);
   return role ?? denied();
 }
 
@@ -546,11 +565,22 @@ export async function resolveTaskDispatchPeople(
 }
 
 export async function getTaskPeople(deps: TaskPeopleDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView> {
-  const task = await loadTask(deps, taskId);
-  const people = await currentPeopleForCaller(deps, task, caller, false);
-  await authorizedRead(deps, task, people, caller);
-  const displayChecks = deps.listTaskPeople === undefined ? [] : await deps.listTaskPeople(task);
-  return viewOf(deps, task, people, caller, displayChecks);
+  const admission = deps.createTaskPeopleDisplayAdmission?.() ?? unavailable();
+  try {
+    admission.assertOpen();
+    const task = await loadTask(deps, taskId);
+    admission.assertOpen();
+    const people = await currentPeopleForCaller(deps, task, caller, false, admission);
+    await authorizedRead(deps, task, people, caller, admission);
+    if (deps.listTaskPeople === undefined) return unavailable();
+    const displayChecks = await deps.listTaskPeople(task, admission);
+    admission.assertOpen();
+    const view = await viewOf(deps, task, people, caller, displayChecks, admission);
+    admission.assertOpen();
+    return view;
+  } finally {
+    admission.close();
+  }
 }
 
 /** A polling-safe capability read: it checks only META, PEOPLE and the caller's current proof. */
@@ -582,13 +612,17 @@ export async function getTaskPeopleEffectAdmission(
   deps: TaskPeopleDependencies,
   caller: DeveloperCaller,
   taskId: string,
-): Promise<{ peopleRevision: number; taskRevision: number; taskStage: string }> {
+): Promise<{ peopleRevision: number; taskRevision: number; taskStage: string; taskShare: { teamId: string; channelId: string; threadTs: string } }> {
   const task = await loadTask(deps, taskId);
   const people = await loadPeople(deps, taskId);
-  if (people === undefined || !enabled(deps) || !open(task) || !Number.isSafeInteger(task.workflow?.revision) || typeof task.workflow?.stage !== "string") return denied();
+  const taskShare = SlackThreadSchema.safeParse(task.share === undefined ? undefined : {
+    teamId: task.share.teamId, channelId: task.share.channelId, threadTs: task.share.threadTs,
+  });
+  if (people === undefined || !enabled(deps) || !open(task) || !Number.isSafeInteger(task.workflow?.revision) || typeof task.workflow?.stage !== "string"
+    || !taskShare.success) return denied();
   const current = await reconcile(deps, task, people);
   if (await effectiveRole(deps, task, current, caller.developerId) !== "owner") return denied();
-  return { peopleRevision: current.revision, taskRevision: task.workflow.revision, taskStage: task.workflow.stage };
+  return { peopleRevision: current.revision, taskRevision: task.workflow.revision, taskStage: task.workflow.stage, taskShare: taskShare.data };
 }
 
 /** Resolves an opaque public person ID to a freshly-qualified internal target. */

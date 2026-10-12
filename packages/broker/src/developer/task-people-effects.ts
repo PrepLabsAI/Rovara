@@ -23,7 +23,7 @@ type StoredProposal = TaskPeopleProposal & {
 export interface TaskPeopleEffectsDependencies extends TaskPeopleDependencies {
   issuer: string;
   resolveTaskPickerPerson?(taskId: string, slackUserId: string): Promise<{ personId: string; developerId: string; slackUserId: string; channelMember: boolean }>;
-  taskPeopleChannel?(taskId: string): Promise<{ teamId: string; channelId: string }>;
+  taskPeopleChannel?(taskId: string): Promise<{ teamId: string; channelId: string; threadTs: string }>;
   inviteTaskPerson?(input: { teamId: string; channelId: string; slackUserId: string }): Promise<"accepted" | "unknown">;
 }
 
@@ -47,7 +47,7 @@ async function claimInvitation(
   deps: TaskPeopleEffectsDependencies,
   proposal: StoredProposal,
   binding: { teamId: string; channelId: string; slackUserId: string },
-  admission: { peopleRevision: number; taskRevision: number; taskStage: string },
+  admission: { peopleRevision: number; taskRevision: number; taskStage: string; taskShare: { teamId: string; channelId: string; threadTs: string } },
 ): Promise<void> {
   await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
     { Update: {
@@ -61,9 +61,10 @@ async function claimInvitation(
     taskAccessFence(deps.tableName, proposal.taskId, admission.peopleRevision),
     { ConditionCheck: {
       TableName: deps.tableName, Key: { pk: taskPk(proposal.taskId), sk: "META" },
-      ConditionExpression: "workflow.#revision = :taskRevision AND workflow.#stage = :taskStage AND attribute_not_exists(closedAt)",
-      ExpressionAttributeNames: { "#revision": "revision", "#stage": "stage" },
-      ExpressionAttributeValues: { ":taskRevision": admission.taskRevision, ":taskStage": admission.taskStage },
+      ConditionExpression: "workflow.#revision = :taskRevision AND workflow.#stage = :taskStage AND #share.#teamId = :teamId AND #share.#channelId = :channelId AND #share.#threadTs = :threadTs AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#revision": "revision", "#stage": "stage", "#share": "share", "#teamId": "teamId", "#channelId": "channelId", "#threadTs": "threadTs" },
+      ExpressionAttributeValues: { ":taskRevision": admission.taskRevision, ":taskStage": admission.taskStage,
+        ":teamId": admission.taskShare.teamId, ":channelId": admission.taskShare.channelId, ":threadTs": admission.taskShare.threadTs },
     } },
   ] }));
 }
@@ -102,14 +103,13 @@ async function propose(
     const outcome = await getTaskPeopleRequestOutcome(deps, caller, taskId, existing.requestId,
       existing.kind === "role" ? "change" : "takeOwnership", payload);
     if (outcome !== undefined) return { status: "COMMITTED", view: outcome };
+    await pendingMetadata(deps, caller, taskId, existing);
+    return { status: "PENDING", requestId: existing.requestId, confirmationUrl: `${deps.issuer}/review/${taskId}/task/people/confirm/${existing.requestId}`, expiresAt: existing.expiresAt };
   }
   const capabilities = await getTaskPeopleCapabilities(deps, caller, taskId);
   if (proposal.kind === "role" ? !capabilities.canManagePeople : !capabilities.canTakeOwnership) return denied();
   if (capabilities.peopleRevision !== proposal.expectedPeopleRevision) return conflict();
   const targetDeveloperId = proposal.kind === "role" ? (await resolveTaskPeopleTarget(deps, taskId, proposal.personId!)).developerId : undefined;
-  if (existing !== undefined) {
-    return { status: "PENDING", requestId: existing.requestId, confirmationUrl: `${deps.issuer}/review/${taskId}/task/people/confirm/${existing.requestId}`, expiresAt: existing.expiresAt };
-  }
   const createdAt = new Date(deps.now()).toISOString();
   const expiresAt = new Date(deps.now() + TTL_MS).toISOString();
   const item: StoredProposal = { ...proposalKey(taskId, proposal.requestId), ...proposal, expiresAt, entityType: "TASK_PEOPLE_PROPOSAL", schemaVersion: 1,
@@ -119,6 +119,7 @@ async function propose(
   } catch (error) {
     const raced = await read(deps, taskId, proposal.requestId);
     if (raced === undefined || raced.callerDeveloperId !== caller.developerId || raced.payloadDigest !== payloadDigest) throw error;
+    await pendingMetadata(deps, caller, taskId, raced);
     return { status: "PENDING", requestId: raced.requestId, confirmationUrl: `${deps.issuer}/review/${taskId}/task/people/confirm/${raced.requestId}`, expiresAt: raced.expiresAt };
   }
   return { status: "PENDING", requestId: proposal.requestId, confirmationUrl: `${deps.issuer}/review/${taskId}/task/people/confirm/${proposal.requestId}`, expiresAt };
@@ -132,6 +133,25 @@ export async function proposeTaskOwnership(deps: TaskPeopleEffectsDependencies, 
   return propose(deps, caller, taskId, { kind: "takeOwnership", taskId, requestId: input.requestId, expectedPeopleRevision: input.expectedPeopleRevision });
 }
 
+function publicMetadata(proposal: StoredProposal): TaskPeopleProposal {
+  return TaskPeopleProposalSchema.parse({ requestId: proposal.requestId, taskId: proposal.taskId, expectedPeopleRevision: proposal.expectedPeopleRevision,
+    kind: proposal.kind, expiresAt: proposal.expiresAt, ...(proposal.personId === undefined ? {} : { personId: proposal.personId }),
+    ...(proposal.role === undefined ? {} : { role: proposal.role }) });
+}
+
+async function pendingMetadata(
+  deps: TaskPeopleEffectsDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+  proposal: StoredProposal,
+): Promise<TaskPeopleProposal> {
+  if (proposal.callerDeveloperId !== caller.developerId || deps.now() >= Date.parse(proposal.expiresAt)) return denied();
+  const capabilities = await getTaskPeopleCapabilities(deps, caller, taskId);
+  if (capabilities.peopleRevision !== proposal.expectedPeopleRevision
+    || (proposal.kind === "role" ? !capabilities.canManagePeople : !capabilities.canTakeOwnership)) return denied();
+  return publicMetadata(proposal);
+}
+
 export async function getTaskPeopleProposal(deps: TaskPeopleEffectsDependencies, caller: DeveloperCaller, taskId: string, requestId: string): Promise<TaskPeopleChangeResult> {
   const proposal = await read(deps, taskId, requestId);
   if (proposal === undefined || proposal.callerDeveloperId !== caller.developerId) return denied();
@@ -141,12 +161,25 @@ export async function getTaskPeopleProposal(deps: TaskPeopleEffectsDependencies,
   const outcome = await getTaskPeopleRequestOutcome(deps, caller, taskId, proposal.requestId,
     proposal.kind === "role" ? "change" : "takeOwnership", payload);
   if (outcome !== undefined) return { status: "COMMITTED", view: outcome };
-  if (deps.now() >= Date.parse(proposal.expiresAt)) return denied();
-  const capabilities = await getTaskPeopleCapabilities(deps, caller, taskId);
-  if (capabilities.peopleRevision !== proposal.expectedPeopleRevision
-    || (proposal.kind === "role" ? !capabilities.canManagePeople : !capabilities.canTakeOwnership)) return denied();
-  TaskPeopleProposalSchema.parse({ requestId: proposal.requestId, taskId: proposal.taskId, expectedPeopleRevision: proposal.expectedPeopleRevision, kind: proposal.kind, expiresAt: proposal.expiresAt, ...(proposal.personId === undefined ? {} : { personId: proposal.personId }), ...(proposal.role === undefined ? {} : { role: proposal.role }) });
+  await pendingMetadata(deps, caller, taskId, proposal);
   return { status: "PENDING", requestId: proposal.requestId, confirmationUrl: `${deps.issuer}/review/${taskId}/task/people/confirm/${proposal.requestId}`, expiresAt: proposal.expiresAt };
+}
+
+/** Server-stored confirmation metadata for an exact still-pending request. */
+export async function getTaskPeopleProposalMetadata(
+  deps: TaskPeopleEffectsDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+  requestId: string,
+): Promise<TaskPeopleProposal> {
+  const proposal = await read(deps, taskId, requestId);
+  if (proposal === undefined) return denied();
+  const payload = proposal.kind === "role"
+    ? { expectedPeopleRevision: proposal.expectedPeopleRevision, targetDeveloperId: proposal.targetDeveloperId!, role: proposal.role! }
+    : { expectedPeopleRevision: proposal.expectedPeopleRevision };
+  if (await getTaskPeopleRequestOutcome(deps, caller, taskId, proposal.requestId,
+    proposal.kind === "role" ? "change" : "takeOwnership", payload) !== undefined) return denied();
+  return pendingMetadata(deps, caller, taskId, proposal);
 }
 
 export async function confirmTaskPeopleProposal(deps: TaskPeopleEffectsDependencies, caller: DeveloperCaller, taskId: string, requestId: string): Promise<TaskPeopleChangeResult> {
@@ -192,7 +225,8 @@ export async function submitSlackTaskPeopleRole(
       const channel = await deps.taskPeopleChannel(taskId);
       if (channel.teamId !== input.teamId || channel.channelId !== input.channelId) return denied();
       const atInvite = await getTaskPeopleEffectAdmission(deps, caller, taskId);
-      if (atInvite.peopleRevision !== input.expectedPeopleRevision) return denied();
+      if (atInvite.peopleRevision !== input.expectedPeopleRevision || atInvite.taskShare.teamId !== channel.teamId
+        || atInvite.taskShare.channelId !== channel.channelId || atInvite.taskShare.threadTs !== channel.threadTs) return denied();
       try { await claimInvitation(deps, stored, { teamId: input.teamId, channelId: input.channelId, slackUserId: input.slackUserId }, atInvite); }
       catch (error) {
         if (!conditional(error)) throw error;

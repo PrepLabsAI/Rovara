@@ -13,13 +13,15 @@ import {
 } from "../../packages/broker/src/developer/task-people.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
-import { confirmTaskPeopleProposal, getTaskPeopleProposal, proposeTaskPeopleRole, submitSlackTaskPeopleRole } from "../../packages/broker/src/developer/task-people-effects.js";
+import { confirmTaskPeopleProposal, getTaskPeopleProposal, getTaskPeopleProposalMetadata, proposeTaskPeopleRole, submitSlackTaskPeopleRole } from "../../packages/broker/src/developer/task-people-effects.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
+import type { TaskPeopleDisplayAdmission } from "../../packages/broker/src/developer/task-people-display-budget.js";
+import type { TaskPeopleDisplayReadRequest } from "../../packages/contracts/src/developer.js";
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";
 const TEAM = "T0PEOPLE1";
@@ -44,6 +46,11 @@ async function peopleBroker() {
     developerExtra: {
       taskPeopleConfiguration: { peopleChangesEnabled: true },
       taskPersonProof: async (request) => ({ ok: true, user: { id: request.slackUserId, teamId: SLACK_TEAM, name: request.slackUserId }, memberOf: request.channelIds }),
+      taskPeopleDisplayRead: async (request: TaskPeopleDisplayReadRequest) => request.operation === "proof"
+        ? { operation: "proof" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const,
+          user: { id: request.request.slackUserId, teamId: SLACK_TEAM, name: request.request.slackUserId }, memberOf: request.request.channelIds } }
+        : { operation: "directory" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const,
+          users: [creator, other].map((id) => ({ id, teamId: SLACK_TEAM, name: id, memberOf: request.request.channelIds })) } },
     },
   });
   const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000081" };
@@ -74,7 +81,9 @@ describe("People adapter correction acceptance", () => {
     await expect(getTaskPeople(h.deps, OWNER, TASK_ID)).resolves.toMatchObject({
       addPeopleUrl: `https://slack.com/archives/${CHANNEL}/p1695500000000081`,
     });
-    const withoutThread = harness({ enabled: true });
+    const unthreaded = task();
+    delete unthreaded.share!.threadTs;
+    const withoutThread = harness({ enabled: true, record: unthreaded });
     const view = await getTaskPeople(withoutThread.deps, OWNER, TASK_ID);
     expect(view).not.toHaveProperty("addPeopleUrl");
   });
@@ -90,6 +99,7 @@ describe("People adapter correction acceptance", () => {
     const events = h.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT").length;
     await expect(getTaskPeopleProposal(deps, OWNER, TASK_ID, input.requestId)).resolves.toEqual(committed);
     await expect(proposeTaskPeopleRole(deps, OWNER, TASK_ID, input)).resolves.toEqual(committed);
+    expect((await errorOf(getTaskPeopleProposalMetadata(deps, OWNER, TASK_ID, input.requestId))).code).toBe("TASK_ACCESS_DENIED");
     expect(h.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(events);
   });
 
@@ -104,7 +114,7 @@ describe("People adapter correction acceptance", () => {
         h.db.set({ pk: `DEVTASK#${TASK_ID}`, sk: "PEOPLE", schemaVersion: 1, revision: 2, orphaned: false, people: [
           { developerId: A, slackUserId: SA, name: SA, role: "viewer" }, { developerId: C, slackUserId: SC, name: SC, role: "owner" },
         ] });
-        return { teamId: TEAM, channelId: CHANNEL };
+        return { teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081" };
       },
       inviteTaskPerson: async () => { invited += 1; return "accepted" as const; },
     };
@@ -135,8 +145,12 @@ describe("People adapter correction acceptance", () => {
     const current = { ...stored, share: { ...(stored.share as object), channelId: CHANNEL } };
     h.db.set(current);
     let channels: readonly string[] = [];
-    const developer = { ...h.brokerInput.developer, taskChannelPeople: async (request: { channelIds: readonly string[] }) => {
-      channels = request.channelIds; return { ok: true as const, users: [] };
+    const developer = { ...h.brokerInput.developer, taskPeopleDisplayRead: async (request: TaskPeopleDisplayReadRequest) => {
+      if (request.operation === "proof") return { operation: "proof" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: {
+        ok: true as const, user: { id: request.request.slackUserId, teamId: SLACK_TEAM, name: request.request.slackUserId }, memberOf: request.request.channelIds,
+      } };
+      channels = request.request.channelIds;
+      return { operation: "directory" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const, users: [] } };
     } };
     const caller = actor(developerIdForSlackUser(other), other, other);
     const deps = developerTaskRouteDependencies({ documentClient: h.db, tableName: "state", developer, now: Date.now, tasks: h.actions } as never, caller);
@@ -145,18 +159,30 @@ describe("People adapter correction acceptance", () => {
     expect(channels).toContain(SLACK_CHANNEL);
   });
 
-  it("renders a 99-person complete directory without point-proof reads outside the admitted budget", async () => {
+  it("refuses a 99-person directory once independent authority proofs consume the shared call budget", async () => {
     const { h, creator, other, taskId } = await peopleBroker();
     const users = [creator, other, ...Array.from({ length: 97 }, (_, index) => `U0LIST${String(index).padStart(3, "0")}`)];
     const point = vi.fn(async (request: { slackUserId: string; channelIds: string[] }) => ({ ok: true as const,
       user: { id: request.slackUserId, teamId: SLACK_TEAM, name: request.slackUserId }, memberOf: request.channelIds }));
+    let used = 0;
     const developer = { ...h.brokerInput.developer, taskPersonProof: point,
-      taskChannelPeople: async () => ({ ok: true as const, users: users.map((id) => ({ id, teamId: SLACK_TEAM, name: id, memberOf: [SLACK_CHANNEL] })) }) };
+      taskPeopleDisplayRead: async (request: TaskPeopleDisplayReadRequest) => {
+        if (request.operation === "proof") {
+          used += 1;
+          return { operation: "proof" as const, admission: { version: 1 as const, slackCallsUsed: 1 }, result: { ok: true as const,
+            user: { id: request.request.slackUserId, teamId: SLACK_TEAM, name: request.request.slackUserId }, memberOf: request.request.channelIds } };
+        }
+        const calls = 1 + users.length;
+        used += Math.min(calls, request.admission.slackCallsLimit);
+        return { operation: "directory" as const, admission: { version: 1 as const, slackCallsUsed: Math.min(calls, request.admission.slackCallsLimit) },
+          result: calls > request.admission.slackCallsLimit ? { ok: false as const, error: "capacity_exceeded" as const }
+            : { ok: true as const, users: users.map((id) => ({ id, teamId: SLACK_TEAM, name: id, memberOf: [SLACK_CHANNEL] })) } };
+      } };
     const caller = actor(developerIdForSlackUser(other), other, other);
     const deps = developerTaskRouteDependencies({ documentClient: h.db, tableName: "state", developer, now: Date.now, tasks: h.actions } as never, caller);
-    const view = await getTaskPeople(deps, caller, taskId);
-    expect(view.people).toHaveLength(99);
-    expect(point.mock.calls.length).toBeLessThanOrEqual(100);
+    await expect(getTaskPeople(deps, caller, taskId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+    expect(used).toBeLessThanOrEqual(100);
+    expect(point).not.toHaveBeenCalled();
   });
 
   it("uses the authorized actual co-owner for feedback note and retry execution", async () => {
@@ -209,7 +235,7 @@ const task = (overrides: Partial<DeveloperTaskRecord> = {}): DeveloperTaskRecord
   client: "slack", project: "payments", title: "Payments", workspaceId: "workspace",
   ownerKey: "f".repeat(64), conversationId: "conversation", startingRevision: 1,
   charge: { member: { pk: "member", sk: "counter" }, organization: { pk: "organization", sk: "counter" } },
-  shared: true, share: { teamId: TEAM, channelId: CHANNEL, mode: "view", sharedReason: "requested", sharedAt: new Date(START).toISOString() },
+  shared: true, share: { teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081", mode: "view", sharedReason: "requested", sharedAt: new Date(START).toISOString() },
   createdAt: new Date(START).toISOString(), updatedAt: new Date(START).toISOString(),
   workflow: { revision: 7, stage: "PLAN_REVIEW", state: "WAITING" } as never,
   ...overrides,
@@ -241,6 +267,12 @@ function harness(options: { enabled?: boolean; creator?: ReturnType<typeof ident
     now: () => START,
     ...(options.enabled === undefined ? {} : { taskPeopleConfiguration: { peopleChangesEnabled: options.enabled } }),
     checkTaskPerson,
+    createTaskPeopleDisplayAdmission: () => ({
+      assertOpen() {}, admitIdentity() {}, noteNativeIdentity() {}, close() {},
+      async proof() { throw new Error("unit admission proof is not routed directly"); },
+      async directory() { throw new Error("unit admission directory is not routed directly"); },
+    } satisfies TaskPeopleDisplayAdmission),
+    listTaskPeople: async () => [...checks.values()].map((value) => structuredClone(value)),
   };
   const seedPerson = (developerId: string, personId: string, personIdentity = checks.get(developerId)!.identity) => {
     const createdAt = new Date(START).toISOString();
@@ -293,6 +325,43 @@ describe("task people", () => {
     await expect(confirmTaskPeopleProposal(deps, OWNER, TASK_ID, input.requestId)).resolves.toEqual(committed);
   });
 
+  it("denies an expired pending POST replay while retaining committed replay semantics", async () => {
+    const h = harness({ enabled: true });
+    await getTaskPeople(h.deps, OWNER, TASK_ID);
+    h.seedPerson(B, "22222222-2222-4222-8222-222222222222");
+    let clock = START;
+    const deps = { ...h.deps, now: () => clock, issuer: "https://agentx.example.test" };
+    const input = { requestId: randomUUID(), expectedPeopleRevision: 1, personId: "22222222-2222-4222-8222-222222222222", role: "viewer" as const };
+    await expect(proposeTaskPeopleRole(deps, OWNER, TASK_ID, input)).resolves.toMatchObject({ status: "PENDING" });
+    clock += 11 * 60 * 1000;
+    expect((await errorOf(proposeTaskPeopleRole(deps, OWNER, TASK_ID, input))).code).toBe("TASK_ACCESS_DENIED");
+    expect(h.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(0);
+  });
+
+  it("returns effect-free pending metadata only to the exact current native or external initiator", async () => {
+    for (const method of ["slack", "oidc"] as const) {
+      const creator = identity(A, SA, OWNER.name, method);
+      const h = harness({ enabled: true, creator, record: task({ provider: method }) });
+      const caller: DeveloperCaller = { ...OWNER, amr: method };
+      await getTaskPeople(h.deps, caller, TASK_ID);
+      h.seedPerson(B, "22222222-2222-4222-8222-222222222222");
+      let clock = START;
+      const deps = { ...h.deps, now: () => clock, issuer: "https://agentx.example.test" };
+      const input = { requestId: randomUUID(), expectedPeopleRevision: 1, personId: "22222222-2222-4222-8222-222222222222", role: "viewer" as const };
+      await proposeTaskPeopleRole(deps, caller, TASK_ID, input);
+      const before = structuredClone(h.db.items);
+      await expect(getTaskPeopleProposalMetadata(deps, caller, TASK_ID, input.requestId)).resolves.toEqual({
+        kind: "role", taskId: TASK_ID, requestId: input.requestId, expectedPeopleRevision: 1,
+        personId: input.personId, role: input.role, expiresAt: new Date(START + 10 * 60 * 1000).toISOString(),
+      });
+      expect(h.db.items).toEqual(before);
+      expect((await errorOf(getTaskPeopleProposalMetadata(deps, MEMBER, TASK_ID, input.requestId))).code).toBe("TASK_ACCESS_DENIED");
+      clock += 11 * 60 * 1000;
+      expect((await errorOf(getTaskPeopleProposalMetadata(deps, caller, TASK_ID, input.requestId))).code).toBe("TASK_ACCESS_DENIED");
+      expect(h.db.items).toEqual(before);
+    }
+  });
+
   it("invites an eligible outside-channel owner, then freshly rechecks both target and initiator before commit", async () => {
     const h = harness({ enabled: true });
     await getTaskPeople(h.deps, OWNER, TASK_ID);
@@ -300,7 +369,7 @@ describe("task people", () => {
     let channelMember = false;
     const invite = vi.fn(async () => { channelMember = true; return "accepted" as const; });
     const deps = { ...h.deps, issuer: "https://agentx.example.test", inviteTaskPerson: invite,
-      taskPeopleChannel: async () => ({ teamId: TEAM, channelId: CHANNEL }),
+      taskPeopleChannel: async () => ({ teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081" }),
       resolveTaskPickerPerson: async () => ({ personId: "22222222-2222-4222-8222-222222222222", developerId: B, slackUserId: SB, channelMember }) };
     h.checks.set(B, { ...h.checks.get(B)!, channelMember: true });
 
@@ -312,6 +381,25 @@ describe("task people", () => {
     if (result.status !== "COMMITTED") throw new Error("accepted invitation did not commit the role");
     expect(result.view.revision).toBe(2);
     expect(result.view.people.some((person) => person.role === "owner")).toBe(true);
+  });
+
+  it("does not invite through a resolved channel after the task share moves", async () => {
+    const h = harness({ enabled: true });
+    await getTaskPeople(h.deps, OWNER, TASK_ID);
+    h.seedPerson(B, "22222222-2222-4222-8222-222222222222");
+    const invite = vi.fn(async () => "accepted" as const);
+    const deps = { ...h.deps, issuer: "https://agentx.example.test", inviteTaskPerson: invite,
+      taskPeopleChannel: async () => {
+        const current = h.db.get(`DEVTASK#${TASK_ID}`, "META") as unknown as DeveloperTaskRecord;
+        h.db.set({ ...current, share: { ...current.share!, channelId: "C0MOVED01" } });
+        return { teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081" };
+      },
+      resolveTaskPickerPerson: async () => ({ personId: "22222222-2222-4222-8222-222222222222", developerId: B, slackUserId: SB, channelMember: false }) };
+    const result = submitSlackTaskPeopleRole(deps, OWNER, TASK_ID, { requestId: randomUUID(), expectedPeopleRevision: 1,
+      slackUserId: SB, role: "owner", teamId: TEAM, channelId: CHANNEL });
+    expect((await errorOf(result)).code).toBe("TASK_ACCESS_DENIED");
+    expect(invite).not.toHaveBeenCalled();
+    expect(h.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(0);
   });
 
   it("never grants on unknown invite or when the initiating owner is revoked during an accepted invite", async () => {
@@ -329,7 +417,7 @@ describe("task people", () => {
         return "accepted" as const;
       });
       const deps = { ...h.deps, issuer: "https://agentx.example.test",
-        taskPeopleChannel: async () => ({ teamId: TEAM, channelId: CHANNEL }),
+        taskPeopleChannel: async () => ({ teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081" }),
         resolveTaskPickerPerson: async () => ({ personId: "22222222-2222-4222-8222-222222222222", developerId: B, slackUserId: SB, channelMember }),
         inviteTaskPerson: invite };
       const input = { requestId: `40000000-0000-4000-8000-00000000003${outcome === "unknown" ? "2" : "3"}`,
@@ -420,7 +508,7 @@ describe("task people", () => {
     await changeTaskPeople(h.deps, OWNER, TASK_ID, { requestId: "40000000-0000-4000-8000-000000000019", expectedPeopleRevision: 1, targetDeveloperId: B, role: "commenter" });
     h.checks.delete(A);
 
-    expect((await errorOf(getTaskPeople(h.deps, MEMBER, TASK_ID))).code).toBe("TASK_ACCESS_DENIED");
+    expect((await errorOf(getTaskPeople(h.deps, MEMBER, TASK_ID))).code).toBe("RUNTIME_UNAVAILABLE");
     expect(h.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")).toMatchObject({ revision: 2, orphaned: false });
     expect((h.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE") as { people: unknown[] }).people).toContainEqual(expect.objectContaining({ developerId: A, role: "owner" }));
   });

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentXError, type ChannelInfoRequest, type ChannelMembersRequest, type ChannelMembersResponse, type TaskPersonProofRequest } from "@agentx/contracts";
-import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
+import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
@@ -377,6 +377,26 @@ describe("the fresh task person proof through the DeveloperIdentity function", (
   it("passes through a verified ineligible answer without turning it into availability", async () => {
     await expect(taskPersonProofThroughLambda(async () => reply({ ok: false, error: "ineligible" }))(request))
       .resolves.toEqual({ ok: false, error: "ineligible" });
+  });
+});
+
+describe("the metered Task People display read through DeveloperIdentity", () => {
+  const request = { kind: "task-people-display-read" as const, operation: "proof" as const,
+    admission: { version: 1 as const, deadlineAt: 2_000_000_000_000, slackCallsLimit: 2 },
+    request: { kind: "task-person-proof" as const, slackUserId: "U0MAYA001", channelIds: ["C0PAY0001"] } };
+  const reply = (value: unknown) => ({ Payload: new TextEncoder().encode(JSON.stringify(value)) });
+
+  it("accepts the operation-matched receipt and refuses lost, skewed, or mismatched usage", async () => {
+    const good = { operation: "proof", admission: { version: 1, slackCallsUsed: 2 }, result: {
+      ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0PAY0001"],
+    } };
+    await expect(taskPeopleDisplayReadThroughLambda(async () => reply(good))(request)).resolves.toEqual(good);
+    for (const invoke of [
+      async () => ({}),
+      async () => reply({ ok: false, error: "invalid_request" }),
+      async () => reply({ ...good, admission: { version: 1, slackCallsUsed: 3 } }),
+      async () => reply({ operation: "directory", admission: { version: 1, slackCallsUsed: 1 }, result: { ok: true, users: [] } }),
+    ]) await expect(taskPeopleDisplayReadThroughLambda(invoke)(request)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
   });
 });
 
