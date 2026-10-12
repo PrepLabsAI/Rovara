@@ -6546,9 +6546,10 @@ async function completedWorkflowItems(
     } else {
       const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
       const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
-      const reviews = Array.isArray(reported.workflowReviews) ? reported.workflowReviews : [];
+      const reviews = reported.workflowReviews;
       let reviewFailure = "independent candidate review was invalid, incomplete, or stale";
       try {
+        if (!Array.isArray(reviews)) throw new Error("review result has an invalid report collection");
         const candidate = createCandidateManifest(repositories as CandidateRepository[]);
         if (task.workflow.stage !== "REVIEW" || task.workflow.candidate?.digest !== candidate.digest) {
           throw new Error("review result is stale, incomplete, or came from another operation");

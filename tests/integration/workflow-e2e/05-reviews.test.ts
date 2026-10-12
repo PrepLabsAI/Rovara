@@ -104,8 +104,10 @@ describe("Suite 5: reviews", () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
     await atPlanReview(e2e);
     let actualCritic: { operationId: string; candidateDigest: string } | undefined;
+    let actualRoles: string[] = [];
     e2e.worker.rewriteNextResult("task:REVIEW", (result) => {
       const reported = result as { workflowCandidateRepositories: unknown[]; workflowReviews: Array<{ operationId: string; candidateDigest: string; role: string }> };
+      actualRoles = reported.workflowReviews.map((review) => review.role).sort();
       actualCritic = reported.workflowReviews.find((review) => review.role === "CRITIC");
       return { ...reported, workflowReviews: reported.workflowReviews.filter((review) => review.role === "CRITIC") };
     });
@@ -123,6 +125,7 @@ describe("Suite 5: reviews", () => {
     expect(e2e.github.pullRequests).toEqual([]);
 
     const firstReviewId = reviewRuns()[0]!.operationId;
+    expect(actualRoles).toEqual(["CRITIC", "SECURITY"]);
     expect(actualCritic).toMatchObject({ operationId: firstReviewId, candidateDigest: candidate.digest });
     await e2e.click("agentx_workflow_retry_reviews");
     await e2e.settle();
