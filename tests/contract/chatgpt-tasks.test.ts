@@ -93,7 +93,7 @@ describe("a task whose owner connected ChatGPT (#341)", () => {
     expect(h.invocation.payload.chatgpt).toEqual({ model: { provider: "openai", modelId: "gpt-6.1-sol" } });
     expect(h.invocation.payload.model).toEqual({ provider: "amazon-bedrock", modelId: "default-model" });
     expect(h.actions).toContain("chatgpt-token");
-    expect(h.operation).toMatchObject({ chatgptDeveloperId: owner });
+    expect(h.operation).toMatchObject({ chatgptDeveloperId: owner, chatgptThread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000001" } });
     const token = await h.askToken();
     expect(token).toMatchObject({ status: 200, body: { accessToken: `access-for-${owner.slice(0, 6)}`, expiresAt: "2026-10-11T13:00:00.000Z" } });
     expect(h.accessToken).toHaveBeenCalledWith(owner);

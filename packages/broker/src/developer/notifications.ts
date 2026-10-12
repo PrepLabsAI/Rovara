@@ -9,7 +9,7 @@ export interface StreamRecord {
   eventName?: string;
   dynamodb?: { ApproximateCreationDateTime?: number; NewImage?: Record<string, AttributeValue>; OldImage?: Record<string, AttributeValue> };
 }
-export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "workflow" | "github_feedback" | "canvas_closeout" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry" | "workflow_refusal" | "comment_nudge" | "people_dm";
+export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "workflow" | "github_feedback" | "canvas_closeout" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry" | "workflow_refusal" | "comment_nudge" | "people_dm" | "chatgpt_fallback";
 export interface Notice {
   /** Fixed per change, so a repeated delivery posts once (C9). */
   id: string;
@@ -114,18 +114,13 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
         ? [{ id: `${text(next.taskId)}:cancelled`, kind: "cancelled", taskId: text(next.taskId), at }]
         : [];
     case "OPERATION": {
-      // Only the developer's own operations: the Slack service answers a teammate's (C8).
-      if (record(next.requestedBy)?.kind !== "developer") return [];
       if (!TERMINAL.has(text(next.status)) || TERMINAL.has(text(previous?.status))) return [];
       const base = { workspaceId: text(next.workspaceId), operationId: text(next.id), at };
-      if (next.kind === "prepare") {
-        // A cancelled setup has no notice of its own: the cancel notice covers it.
-        const kind = next.status === "SUCCEEDED" ? "ready" : next.status === "FAILED" || next.status === "INTERRUPTED" ? "setup_failed" : undefined;
-        return kind === undefined ? [] : [{ ...base, id: `${base.operationId}:${kind}`, kind }];
-      }
-      if (next.kind === "publish" && next.status === "SUCCEEDED") return [{ ...base, id: `${base.operationId}:pull_request`, kind: "pull_request" }];
-      if (next.kind === "task" || next.kind === "publish") return [{ ...base, id: `${base.operationId}:ended`, kind: "ended" }];
-      return [];
+      // #342: a task that left its owner's ChatGPT plan says so in its thread when it ends, whoever asked for it.
+      const fallback = typeof next.chatgptFallback === "string" ? [{ ...base, id: `${base.operationId}:chatgpt_fallback`, kind: "chatgpt_fallback" as const }] : [];
+      // Only the developer's own operations: the Slack service answers a teammate's (C8).
+      if (record(next.requestedBy)?.kind !== "developer") return fallback;
+      return [...fallback, ...developerOperationNotices(next, base)];
     }
     // Task 19: a Slack press the broker refused, told privately to whoever pressed. Once, when it is written.
     case "WORKFLOW_ACTION_REFUSAL": {
@@ -186,6 +181,18 @@ function changedAt(next: Record<string, unknown>, approximate: number | undefine
 export interface SkippedRecord { eventID?: string; eventName?: string }
 
 /** The notices of a batch. A malformed record is skipped and named, so one bad record never loses the batch. */
+/** A developer's own operation that ended: its setup, pull request or task notice. */
+function developerOperationNotices(next: Record<string, unknown>, base: { workspaceId: string; operationId: string; at: string }): Notice[] {
+  if (next.kind === "prepare") {
+    // A cancelled setup has no notice of its own: the cancel notice covers it.
+    const kind = next.status === "SUCCEEDED" ? "ready" : next.status === "FAILED" || next.status === "INTERRUPTED" ? "setup_failed" : undefined;
+    return kind === undefined ? [] : [{ ...base, id: `${base.operationId}:${kind}`, kind }];
+  }
+  if (next.kind === "publish" && next.status === "SUCCEEDED") return [{ ...base, id: `${base.operationId}:pull_request`, kind: "pull_request" }];
+  if (next.kind === "task" || next.kind === "publish") return [{ ...base, id: `${base.operationId}:ended`, kind: "ended" }];
+  return [];
+}
+
 export function readStream(records: readonly StreamRecord[]): { notices: Notice[]; skipped: SkippedRecord[] } {
   const notices: Notice[] = [];
   const skipped: SkippedRecord[] = [];

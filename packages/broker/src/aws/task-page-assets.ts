@@ -303,7 +303,33 @@ var csrf=TOKEN.test(String(data.csrf))?String(data.csrf):"";
 var revision=Number(data.revision)||0;
 var commentSeq=Number(data.commentSeq)||0;
 var canComment=data.canComment===true,canDecide=data.canDecide===true,canSuggest=data.canSuggest===true,canAsk=data.canAsk===true&&data.askAvailable!==false;
+var canRead=data.canRead===undefined?true:data.canRead===true,canManagePeople=data.canManagePeople===true,canTakeOwnership=data.canTakeOwnership===true;
+var hasProjection=false,peopleRevision=null,accessGeneration=0;
+function validProjection(state){
+  var keys=["canRead","canComment","canSuggest","canDecide","canAsk","canManagePeople","canTakeOwnership"];
+  for(var i=0;i<keys.length;i++)if(typeof state[keys[i]]!=="boolean")return false;
+  return state.peopleRevision===undefined||Number.isSafeInteger(state.peopleRevision);
+}
+function applyProjection(state){
+  if(!validProjection(state)){
+    if(state&&state.canRead===false){hasProjection=true;canRead=false;canComment=false;canSuggest=false;canDecide=false;canAsk=false;canManagePeople=false;canTakeOwnership=false;accessGeneration+=1;applyCurrentAccess();}
+    return false;
+  }
+  if(peopleRevision!==null&&state.peopleRevision!==undefined&&state.peopleRevision<peopleRevision)return false;
+  if(peopleRevision!==null&&state.peopleRevision===undefined)return false;
+  var prior={canRead:canRead,canComment:canComment,canSuggest:canSuggest,canDecide:canDecide,canAsk:canAsk,canManagePeople:canManagePeople,canTakeOwnership:canTakeOwnership};
+  var permissionKeys=["canRead","canComment","canSuggest","canDecide","canAsk","canManagePeople","canTakeOwnership"];
+  if(hasProjection)for(var p=0;p<permissionKeys.length;p++)if(prior[permissionKeys[p]]===false&&state[permissionKeys[p]]===true&&(peopleRevision===null||state.peopleRevision===undefined||state.peopleRevision<=peopleRevision))return false;
+  var changed=canRead!==state.canRead||canComment!==state.canComment||canSuggest!==state.canSuggest||canDecide!==state.canDecide||canAsk!==state.canAsk||canManagePeople!==state.canManagePeople||canTakeOwnership!==state.canTakeOwnership;
+  hasProjection=true;
+  if(state.peopleRevision!==undefined)peopleRevision=state.peopleRevision;
+  canRead=state.canRead;canComment=canRead&&state.canComment;canSuggest=canRead&&state.canSuggest;canDecide=canRead&&state.canDecide;canAsk=canRead&&state.canAsk;canManagePeople=canRead&&state.canManagePeople;canTakeOwnership=canRead&&state.canTakeOwnership;
+  if(changed)accessGeneration+=1;
+  applyCurrentAccess();
+  return true;
+}
 var current=data.current&&typeof data.current==="object"?data.current:null;
+applyProjection(data);
 var DOCS={"requirements":"requirements","design":"design","coding-plan":"plan"};
 var LABELS={"requirements":"Requirements","design":"Design","coding-plan":"Coding plan"};
 var DRAFT_DAYS=7*24*3600*1000;
@@ -326,19 +352,69 @@ function uuid(){
   return hex;
 }
 function openAround(node){for(var up=node;up;up=up.parentElement){if(up.tagName==="DETAILS")up.open=true;}}
+function applyCurrentAccess(){
+  var controls=document.querySelectorAll(".comment-open,.reply-open,.comment-edit,.comment-delete,.suggest,#decide-next,#decide-approve,#decide-request-changes,#decide-submit");
+  var radios=document.querySelectorAll("input");
+  for(var i=0;i<controls.length;i++){
+    var node=controls[i],nodeId=node.getAttribute("id")||"",nodeName=node.getAttribute("name")||"",allowed=node.classList&&node.classList.contains("suggest")?canSuggest:(nodeId.indexOf("decide-")===0||nodeName.indexOf("answer-")===0)?canDecide:canComment;
+    node.disabled=!allowed;
+    if(!allowed)node.hidden=true;
+  }
+  for(i=0;i<radios.length;i++)if((radios[i].getAttribute("name")||"").indexOf("answer-")===0){radios[i].disabled=!canDecide;if(!canDecide)radios[i].hidden=true;}
+  var textareas=document.querySelectorAll("textarea");
+  for(i=0;i<textareas.length;i++)textareas[i].disabled=textareas[i].getAttribute("id")==="decide-note"?!canDecide:!canComment;
+  var forms=document.querySelectorAll(".comment-form");
+  for(i=0;i<forms.length;i++){
+    var formButtons=forms[i].querySelectorAll("button");
+    for(var b=0;b<formButtons.length;b++)if(formButtons[b].textContent!==COPY.cancel)formButtons[b].disabled=!canComment;
+  }
+  var askInputs=document.querySelectorAll(".comment-ask input");
+  for(i=0;i<askInputs.length;i++)askInputs[i].disabled=!canAsk;
+  var confirmations=document.querySelectorAll(".comment-confirm button");
+  for(i=0;i<confirmations.length;i++)confirmations[i].disabled=!canComment;
+  var dialog=document.getElementById("decide-dialog");
+  if(dialog){
+    var dialogInputs=dialog.querySelectorAll("input"),dialogButtons=dialog.querySelectorAll("button");
+    for(i=0;i<dialogInputs.length;i++)dialogInputs[i].disabled=!canDecide;
+    for(i=0;i<dialogButtons.length;i++)dialogButtons[i].disabled=!canDecide&&dialogButtons[i].textContent!==COPY.cancel;
+    if(!canDecide&&dialog.open&&typeof dialog.close==="function")dialog.close();
+  }
+}
+function hideRemovedTask(){
+  var root=document.querySelector("main")||document.body;
+  if(root){root.hidden=true;}
+  var dialog=document.getElementById("decide-dialog");if(dialog&&dialog.open&&typeof dialog.close==="function")dialog.close();
+}
+function stopAccess(clearAllDrafts){
+  if(!stopped){stopped=true;accessGeneration+=1;}
+  canRead=false;canComment=false;canSuggest=false;canDecide=false;canAsk=false;canManagePeople=false;canTakeOwnership=false;
+  if(timer!==null){clearTimeout(timer);timer=null;}
+  applyCurrentAccess();hideRemovedTask();
+  if(clearAllDrafts)clearDrafts();else clearTaskDrafts();
+}
+function canPost(path,body){
+  if(stopped||!canRead)return false;
+  if(path==="decision")return canDecide;
+  if(path==="suggestions")return canSuggest;
+  if(path==="comments"||path.indexOf("comments/")===0)return canComment&&!(body&&body.ask===true&&!canAsk);
+  return false;
+}
 
 /* ---------- talking to the API ---------- */
 function call(method,path,body,retried){
+  var requestGeneration=accessGeneration;
+  if(method==="POST"&&!canPost(path,body))return Promise.resolve({status:403,body:{error:"request_refused"}});
   var init={method:method,credentials:"same-origin",cache:"no-store",headers:{accept:"application/json"}};
   if(body!==undefined){init.headers["content-type"]="application/json";init.headers["x-agentx-csrf"]=csrf;init.body=JSON.stringify(body);}
   return fetch(API+path,init).then(function(reply){
     return reply.json().then(function(json){return json;},function(){return {};}).then(function(json){
       var answer={status:reply.status,body:json&&typeof json==="object"?json:{}};
       /* The sign-in ended: what this tab kept is dropped, as on a shared device it should be. */
-      if(answer.status===401)clearDrafts();
+      if(answer.status===401)stopAccess(true);
       if(method==="POST"&&answer.status===403&&answer.body.error==="request_refused"&&!retried){
-        return readState().then(function(){return call(method,path,body,true);});
+        return readState().then(function(state){return state&&requestGeneration===accessGeneration&&canPost(path,body)?call(method,path,body,true):{status:403,body:{error:"request_refused"}};});
       }
+      if((answer.status===403&&answer.body.error!=="request_refused")||answer.status===404)stopAccess(false);
       return answer;
     });
   });
@@ -363,6 +439,10 @@ function clearDrafts(){
     for(i=0;i<mine.length;i++)store.removeItem(mine[i]);
   }catch(e){}
 }
+function clearTaskDrafts(){
+  drafts={};
+  try{if(!store)return;var mine=[];for(var i=0;i<store.length;i++){var k=store.key(i);if(k&&k.indexOf("agentx:"+taskId+":")===0)mine.push(k);}for(i=0;i<mine.length;i++)store.removeItem(mine[i]);}catch(e){}
+}
 var drafts={};
 function draftKey(anchor){return "agentx:"+taskId+":"+anchor;}
 function emptyDraft(){return {v:1,at:Date.now(),answers:{},opened:[],drafts:{},excluded:[],note:""};}
@@ -385,6 +465,7 @@ function loadDraft(anchor){
   return draft;
 }
 function saveDraft(anchor){
+  if(stopped)return;
   var draft=loadDraft(anchor);
   draft.at=Date.now();
   try{
@@ -616,7 +697,9 @@ function setSuggest(button,on){
   button.textContent=on?COPY.youSuggest:COPY.suggest;
 }
 function refreshComments(){
+  var generation=accessGeneration;
   return call("GET","comments").then(function(answer){
+    if(generation!==accessGeneration||stopped||!canRead)return;
     if(answer.status!==200)return;
     known=arr(answer.body.comments).filter(validComment);
     renderAll();
@@ -687,6 +770,7 @@ function openCommentForm(place,key,trigger,parentId,text){
   if(trigger)trigger.hidden=true;
   var requestId=null,sentText=null,sending=false;
   form.area.addEventListener("input",function(){
+    if(stopped||!canRead||!canComment)return;
     var draft=loadDraft(place.anchor);
     if(form.area.value==="")delete draft.drafts[draftName];else draft.drafts[draftName]=form.area.value;
     saveDraft(place.anchor);
@@ -701,6 +785,7 @@ function openCommentForm(place,key,trigger,parentId,text){
   }
   form.cancel.addEventListener("click",function(){close();if(trigger)trigger.focus();});
   form.submit.addEventListener("click",function(){
+    if(stopped||!canRead||!canComment)return;
     if(sending)return;
     var value=form.area.value.replace(/^\s+|\s+$/g,"");
     if(value===""){form.area.focus();return;}
@@ -708,10 +793,13 @@ function openCommentForm(place,key,trigger,parentId,text){
     var target=targetOf(key);
     if(!target){form.fail(COPY.changed);return;}
     if(value!==sentText||requestId===null){requestId=uuid();sentText=value;}
-    var body={requestId:requestId,document:place.document,version:place.version,target:target,text:value,ask:form.ask?form.ask.checked===true:false};
+    var body={requestId:requestId,document:place.document,version:place.version,target:target,text:value,ask:form.ask?form.ask.checked===true&&canAsk:false};
     if(parentId)body.parentId=parentId;
     sending=true;form.submit.disabled=true;form.error.hidden=true;
+    var generation=accessGeneration;
     call("POST","comments",body).then(function(answer){
+      if(answer.status===401){sending=false;form.fail(said(answer));return;}
+      if(generation!==accessGeneration){sending=false;return;}
       sending=false;form.submit.disabled=false;
       if((answer.status===201||answer.status===200)&&validComment(answer.body.comment)){
         close();
@@ -734,7 +822,7 @@ function openCommentForm(place,key,trigger,parentId,text){
         return;
       }
       form.fail(said(answer));
-    },function(){sending=false;form.submit.disabled=false;form.fail(COPY.unavailable);});
+    },function(){if(generation!==accessGeneration){sending=false;return;}sending=false;form.submit.disabled=false;form.fail(COPY.unavailable);});
   });
   if(!text)form.area.focus();
   return form.box;
@@ -758,16 +846,19 @@ function editComment(article){
   var sending=false;
   form.cancel.addEventListener("click",function(){form.box.remove();if(textNode)textNode.hidden=false;if(actions)actions.hidden=false;});
   form.submit.addEventListener("click",function(){
+    if(stopped||!canRead||!canComment)return;
     if(sending)return;
     var value=form.area.value.replace(/^\s+|\s+$/g,"");
     if(value===""){form.area.focus();return;}
     if(tooLong(value)){form.fail(COPY.tooLong);return;}
     sending=true;
+    var generation=accessGeneration;
     call("POST","comments/"+id+"/edit",{rev:Number(article.getAttribute("data-rev"))||1,text:value}).then(function(answer){
+      if(generation!==accessGeneration){sending=false;return;}
       sending=false;
       if(answer.status===200&&validComment(answer.body.comment)){replaceComment(article,answer.body.comment);return;}
       form.fail(said(answer));
-    },function(){sending=false;form.fail(COPY.unavailable);});
+    },function(){if(generation!==accessGeneration){sending=false;return;}sending=false;form.fail(COPY.unavailable);});
   });
 }
 function deleteComment(article,trigger){
@@ -783,14 +874,18 @@ function deleteComment(article,trigger){
   no.focus();
   no.addEventListener("click",function(){box.remove();error.remove();if(trigger)trigger.focus();});
   yes.addEventListener("click",function(){
+    if(stopped||!canRead||!canComment)return;
     yes.disabled=true;
+    var generation=accessGeneration;
     call("POST","comments/"+id+"/delete",{rev:Number(article.getAttribute("data-rev"))||1}).then(function(answer){
+      if(generation!==accessGeneration)return;
       if(answer.status===200&&validComment(answer.body.comment)){replaceComment(article,answer.body.comment);return;}
       yes.disabled=false;error.textContent=said(answer);error.hidden=false;
-    },function(){yes.disabled=false;error.textContent=COPY.unavailable;error.hidden=false;});
+    },function(){if(generation!==accessGeneration)return;yes.disabled=false;error.textContent=COPY.unavailable;error.hidden=false;});
   });
 }
 function suggestOption(button){
+  if(stopped||!canRead||!canSuggest)return;
   var place=placeOf(button);
   var box=button.closest(".decision");
   if(!place||!box)return;
@@ -798,7 +893,9 @@ function suggestOption(button){
   var decisionId=box.getAttribute("data-decision");
   var optionId=button.getAttribute("data-option");
   button.disabled=true;
+  var generation=accessGeneration;
   call("POST","suggestions",{document:place.document,decisionId:decisionId,optionId:mine?null:optionId}).then(function(answer){
+    if(generation!==accessGeneration)return;
     button.disabled=false;
     var error=box.querySelector(".suggest-error");
     if(answer.status!==200){
@@ -809,7 +906,7 @@ function suggestOption(button){
     var buttons=box.querySelectorAll(".suggest");
     for(var i=0;i<buttons.length;i++)setSuggest(buttons[i],!mine&&buttons[i]===button);
     return refreshComments();
-  },function(){button.disabled=false;});
+  },function(){if(generation!==accessGeneration)return;button.disabled=false;});
 }
 
 /* ---------- turning controls on ---------- */
@@ -822,6 +919,7 @@ if(canSuggest&&current){
   for(var g=0;g<suggests.length;g++)suggests[g].hidden=false;
 }
 document.addEventListener("click",function(event){
+  if(stopped||!canRead)return;
   var node=event.target;
   if(!node||!node.closest)return;
   var button=node.closest("button");
@@ -900,6 +998,7 @@ if(canDecide&&current&&DOCS[current.anchor]&&docSection&&dialog&&bar.next&&bar.a
       for(var r3=0;r3<d.radios.length;r3++)d.radios[r3].checked=d.radios[r3].value===answers[d.id];
     }
     function pick(event){
+      if(stopped||!canRead||!canDecide)return;
       var input=event.target;
       if(!input||!input.checked)return;
       answers[d.id]=input.value;opened[d.id]=true;
@@ -943,7 +1042,7 @@ function tickedIds(){return openIds.filter(function(id){return ticked[id]===true
 function setUpDialog(){
   el("decide-cancel").addEventListener("click",function(){dialog.close();});
   dialog.addEventListener("close",function(){if(returnTo)returnTo.focus();});
-  el("decide-note").addEventListener("input",function(){var saved=loadDraft(current.anchor);saved.note=el("decide-note").value;saveDraft(current.anchor);});
+  el("decide-note").addEventListener("input",function(){if(stopped||!canRead||!canDecide)return;var saved=loadDraft(current.anchor);saved.note=el("decide-note").value;saveDraft(current.anchor);});
   el("decide-submit").addEventListener("click",submit);
   showIt=make("button",{type:"button"},COPY.showIt);
   showIt.hidden=true;
@@ -986,6 +1085,7 @@ function openDialog(kind,button){
     item.appendChild(labelNode);
     list.appendChild(item);
     (function(box,id){box.addEventListener("change",function(){
+      if(stopped||!canRead||!canDecide)return;
       if(box.checked&&tickedIds().length>=25){box.checked=false;el("decide-cap").hidden=false;return;}
       ticked[id]=box.checked;
       /* Only what the owner unticked is remembered; a comment left out by the cap of 25 is not. */
@@ -1027,6 +1127,7 @@ function fail(text,newer){
   if(newer)showIt.hidden=false;
 }
 function submit(){
+  if(!canDecide)return;
   if(sending)return;
   var approve=dialogKind==="APPROVE";
   var note=el("decide-note").value.replace(/^\s+|\s+$/g,"");
@@ -1052,7 +1153,9 @@ function submit(){
   el("decide-submit").disabled=true;
   el("decide-error").hidden=true;
   el("decide-status").textContent=COPY.sending;
+  var generation=accessGeneration;
   call("POST","decision",payload).then(function(answer){
+    if(generation!==accessGeneration){sending=false;return;}
     if(answer.status===200){
       el("decide-status").textContent=COPY.sent;
       var draft=loadDraft(current.anchor);
@@ -1063,7 +1166,7 @@ function submit(){
     }
     sending=false;el("decide-submit").disabled=false;
     fail(said(answer),answer.status===409);
-  },function(){sending=false;el("decide-submit").disabled=false;fail(COPY.unavailable,false);});
+  },function(){if(generation!==accessGeneration){sending=false;return;}sending=false;el("decide-submit").disabled=false;fail(COPY.unavailable,false);});
 }
 
 /* ---------- the page's one poll ---------- */
@@ -1072,9 +1175,15 @@ var EVERY=20000,QUIET_EVERY=60000,QUIET_AFTER=600000,IDLE_STOP=7200000;
 var lastInput=Date.now(),timer=null,asking=false,stopped=false;
 function readState(){
   return call("GET","state").then(function(answer){
-    if(answer.status===401||answer.status===403||answer.status===404){stopped=true;return null;}
+    if(stopped)return null;
+    if(answer.status===401){stopAccess(true);return null;}
+    if(answer.status===403||answer.status===404){stopAccess(false);return null;}
     if(answer.status!==200)return null;
     var state=answer.body;
+    var acceptedProjection=state&&typeof state==="object"?applyProjection(state):false;
+    if(stopped)return null;
+    if(hasProjection&&!acceptedProjection){if(!canRead)stopAccess(false);return null;}
+    if(hasProjection&&!canRead){stopAccess(false);return null;}
     if(TOKEN.test(str(state.csrf)))csrf=state.csrf;
     return state;
   });
@@ -1095,8 +1204,9 @@ function poll(){
   if(timer!==null){clearTimeout(timer);timer=null;}
   if(asking||stopped||document.visibilityState==="hidden"||Date.now()-lastInput>=IDLE_STOP)return;
   asking=true;
+  var generation=accessGeneration;
   readState().then(function(state){
-    if(!state)return;
+    if(!state||generation!==accessGeneration||stopped||!canRead)return;
     var stage=banner?banner.getAttribute("data-stage"):null;
     if(Number(state.revision)!==revision||(stage!==null&&typeof state.stage==="string"&&state.stage!==stage))showBanner(state);
     if(typeof state.commentSeq==="number"&&state.commentSeq!==commentSeq){commentSeq=state.commentSeq;return refreshComments();}
@@ -1123,5 +1233,6 @@ document.addEventListener("visibilitychange",function(){
 });
 var refresh=document.getElementById("moved-on-refresh");
 if(refresh)refresh.addEventListener("click",function(){location.reload();});
+if(hasProjection&&!canRead)stopAccess(false);
 schedule();
 })();`;

@@ -3,6 +3,8 @@
 // notifier's own queue; the queue brings each notice back, and it is posted once. Logs carry event
 // names, IDs, notice kinds and Slack error codes only: never a token, a post's text or a task's text.
 // Spec 025 E13: it also posts an admin change's Slack Confirm message, and edits it when the change ends.
+import { chatGptFallbackText } from "../chatgpt/fallback-notice.js";
+import { developerIdForSlackUser } from "./admin-actions.js";
 import { createHash } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
@@ -68,7 +70,7 @@ class CanvasCloseoutPending extends Error {
 /** 30, 60, 120, 240, 480, then 900 seconds, by the delivery attempt that failed. */
 export const retryDelaySeconds = (attempt: number): number => Math.min(900, 30 * 2 ** Math.max(0, Math.min(attempt - 1, 5)));
 
-const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "canvas_closeout", "admin_change_dm", "admin_change_outcome", "admin_change_expiry", "workflow_refusal", "comment_nudge", "people_dm"]);
+const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "canvas_closeout", "admin_change_dm", "admin_change_outcome", "admin_change_expiry", "workflow_refusal", "comment_nudge", "people_dm", "chatgpt_fallback"]);
 
 class PeopleDeliveryRetry extends Error {
   constructor(readonly attempt: number) { super("People notification delivery should retry"); this.name = "PeopleDeliveryRetry"; }
@@ -930,7 +932,7 @@ export function feedbackCardCheckChanges(
   }));
 }
 
-type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale" | "scheduled";
+type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale" | "scheduled" | "skipped";
 
 /** Another delivery of an admin change's message holds the claim: this one is retried (C9). */
 class DmPending extends Error {
@@ -1248,9 +1250,40 @@ async function deliverNudge(deps: NotifierDependencies, task: DeveloperTaskRecor
   return "posted";
 }
 
+/** #342: told once per operation; put after the post, so a failed post is tried again (as a task's notices are). */
+const chatGptNoticeMarker = (operationId: string) => ({ pk: `CHATGPT_NOTICE#${operationId}`, sk: "META" });
+
+/**
+ * #342: a task that left its owner's ChatGPT plan says so in its thread: the Slack thread it was asked from, else its
+ * developer task's shared thread. A task with neither (a private task from an AI tool) has nowhere to say it.
+ */
+async function deliverChatGptFallback(deps: NotifierDependencies, notice: Notice, task: DeveloperTaskRecord | undefined): Promise<Outcome> {
+  if (notice.workspaceId === undefined || notice.operationId === undefined) return "skipped";
+  const operation = await getItem<{ chatgptFallback?: unknown; chatgptDeveloperId?: unknown; chatgptThread?: { channelId?: unknown; threadTs?: unknown }; requestedBy?: { userId?: unknown } }>(
+    deps, { pk: `WORKSPACE#${notice.workspaceId}`, sk: `OPERATION#${notice.operationId}` });
+  const reason = operation?.chatgptFallback;
+  if (reason !== "limit" && reason !== "revoked" && reason !== "model") return "skipped";
+  const marker = chatGptNoticeMarker(notice.operationId);
+  if (await getItem(deps, marker) !== undefined) return "delivered";
+  const ownThread = operation?.chatgptThread;
+  const thread = typeof ownThread?.channelId === "string" && typeof ownThread.threadTs === "string"
+    ? { channel: ownThread.channelId, threadTs: ownThread.threadTs }
+    : task?.share?.threadTs === undefined ? undefined : { channel: task.share.channelId, threadTs: task.share.threadTs };
+  if (thread === undefined) return "not_shared";
+  // The plan's owner: the developer task's owner, or the Slack member who asked from the thread.
+  const owner = operation?.chatgptDeveloperId;
+  const asker = typeof operation?.requestedBy?.userId === "string" ? operation.requestedBy.userId : undefined;
+  const slackUserId = task !== undefined && task.developerId === owner ? task.slackUserId
+    : asker !== undefined && developerIdForSlackUser(asker) === owner ? asker : undefined;
+  await deps.post({ ...thread, text: chatGptFallbackText(reason, slackUserId) });
+  await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: new Date(deps.now()).toISOString(), ...noticeExpiry(deps) } }));
+  return "posted";
+}
+
 async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outcome> {
   if (notice.kind === "workflow_refusal") return deliverRefusal(deps, notice);
   const task = await noticeTask(deps, notice);
+  if (notice.kind === "chatgpt_fallback") return deliverChatGptFallback(deps, notice, task);
   if (notice.kind === "canvas_closeout") {
     if (task === undefined || deps.closeTaskCanvases === undefined) throw new Error("Canvas closeout service is unavailable");
     const result = await deps.closeTaskCanvases(task.taskId, notice.manifestDigest, notice.expectedWorkflowRevision);

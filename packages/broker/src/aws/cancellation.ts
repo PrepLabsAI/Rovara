@@ -42,6 +42,8 @@ export interface OperationRecord extends Operation {
   chatgptDeveloperId?: string;
   /** #342: why this task stopped using its owner's ChatGPT plan, as its worker said; set once. */
   chatgptFallback?: "limit" | "revoked" | "model";
+  /** #342: the Slack thread a ChatGPT task was asked from, where a fallback is told; absent for a developer task (its own thread). */
+  chatgptThread?: { teamId: string; channelId: string; threadTs: string };
   workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | undefined;
   workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } | undefined;
   /** A PR feedback review started by a broker that gives the critic only the owner's notes for its round (absent: an earlier release's run). */
