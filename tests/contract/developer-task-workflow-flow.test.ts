@@ -10,7 +10,7 @@ import { developerTaskIdentity } from "../../packages/broker/src/developer/task-
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
-import { decideTaskWorkflow, getTaskDocumentView, inertTaskTitle, promptTagId, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowReviewFromSystem, threadNotesPromptSection, workflowPullRequestBody } from "../../packages/broker/src/aws/developer-tasks.js";
+import { captureWorkflowFeedbackNote, decideTaskWorkflow, getTaskDocumentView, inertTaskTitle, promptTagId, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowReviewFromSystem, threadNotesPromptSection, workflowPullRequestBody } from "../../packages/broker/src/aws/developer-tasks.js";
 import { GATED_TASK_TURN_REFUSAL, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
 import { failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
 import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
@@ -234,7 +234,15 @@ describe("native developer task workflow", () => {
   });
 
   it("keeps a queued system successor parked without spending its recovery attempts after last-owner loss", async () => {
-    const harness = await createDeveloperTaskBroker();
+    const retrySlackUserId = "U0RETRY02";
+    const retryOwner: Developer = { developerId: developerIdForSlackUser(retrySlackUserId), name: "Retry Owner", provider: "slack", sessionId: "s-retry-owner", slackUserId: retrySlackUserId };
+    const harness = await createDeveloperTaskBroker({
+      channelMembers: async (request) => ({ ok: true, memberOf: [...request.channelIds] }),
+      developerExtra: {
+        taskPeopleConfiguration: { peopleChangesEnabled: true },
+        taskPersonProof: async (request) => ({ ok: true, user: { id: request.slackUserId, teamId: SLACK_TEAM, name: retryOwner.name }, memberOf: [...request.channelIds] }),
+      },
+    });
     const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
     busyReviewStart(harness);
     await finishImplementation();
@@ -262,6 +270,65 @@ describe("native developer task workflow", () => {
     expect(operations(harness, workspaceId).filter((operation) => operation.workflowMode === "REVIEW")).toEqual([]);
     expect(dispatchRows(harness)).toEqual([expect.objectContaining({ taskId, workflowRevision: waiting.revision })]);
     expect(dispatchRows(harness)[0]?.attempts).toBe(attemptsBeforeOwnerLoss);
+    expect(dispatchRows(harness)[0]?.taskAccessPausedAt).toEqual(expect.any(String));
+
+    const denied = harness.db.get(`DEVTASK#${taskId}`, "PEOPLE")!;
+    harness.db.set({ pk: `SESSION#${retryOwner.sessionId}`, sk: "META", sessionId: retryOwner.sessionId, developerId: retryOwner.developerId,
+      amr: retryOwner.provider, startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
+    harness.db.set({ pk: `DEVELOPER#${retryOwner.developerId}`, sk: "META", developerId: retryOwner.developerId, provider: retryOwner.provider,
+      displayName: retryOwner.name, slackUserId: retrySlackUserId, firstSignInAt: "x", lastSignInAt: "x", revoked: false });
+    harness.db.set({ ...denied, revision: Number(denied.revision) + 1, orphaned: false,
+      people: [{ developerId: retryOwner.developerId, slackUserId: retrySlackUserId, name: retryOwner.name, role: "owner" }] });
+    makeDue(harness, dispatchRows(harness)[0]!);
+    await sweep(harness);
+    expect(operations(harness, workspaceId).filter((operation) => operation.workflowMode === "REVIEW")).toEqual([]);
+
+    const retried = await harness.dev(retryOwner, "POST", `/v1/dev/tasks/${taskId}/workflow/review`, {
+      requestId: randomUUID(), instructions: "Run the parked review", expectedRevision: waiting.revision, candidateDigest: candidate.digest,
+    });
+    expect(retried.status).toBe(200);
+    expect(operations(harness, workspaceId).filter((operation) => operation.workflowMode === "REVIEW")).toHaveLength(1);
+    expect(dispatchRows(harness)).toEqual([]);
+  });
+
+  it("returns a successful terminal response when the owner rejects a plan", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
+      requestId: randomUUID(), project: "payments", instructions: "Prepare a rejectable plan", client: "test-client", workflow: true, workflowPath: "QUICK",
+    });
+    const taskId = String((started.body.task as { taskId: string }).taskId);
+    const workspaceId = String(harness.db.get(`DEVTASK#${taskId}`, "META")?.workspaceId);
+    await harness.finish(workspaceId, String(operations(harness, workspaceId).find((operation) => operation.kind === "prepare")!.id), "SUCCEEDED", PREPARED);
+    const plan = "# Plan\n\n1. Exercise the terminal response.\n";
+    await finishPlanningWithMarkdown(harness, workspaceId, String(operations(harness, workspaceId).find((operation) => operation.workflowMode === "PLAN")!.id), plan);
+    const current = taskWorkflow(harness, taskId);
+    const response = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, {
+      requestId: randomUUID(), expectedRevision: current.revision, decision: "REJECT", reason: "Do not proceed", artifactDigest: createHash("sha256").update(plan).digest("hex"),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.task).toMatchObject({ taskId });
+    expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "CLOSED", state: "COMPLETE", outcome: "REJECTED" });
+  });
+
+  it("refuses webhook feedback critic acceptance after all effective owners are lost", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const { taskId, workspaceId, candidate } = await workflowAtVerification(harness);
+    const task = harness.db.get(`DEVTASK#${taskId}`, "META")!;
+    const workflow = { ...task.workflow as WorkflowSnapshot, stage: "WAIT_FOR_MERGE" as const, state: "WAITING" as const,
+      candidate, feedbackReview: { status: "COLLECTING" as const } };
+    harness.db.set({ ...task, workflow });
+    harness.db.set({ ...harness.db.get(`WORKSPACE#${workspaceId}`, "META")!, status: "READY", activeOperationId: null });
+    harness.db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 2, orphaned: true,
+      people: [{ developerId: MAYA.developerId, slackUserId: MAYA.slackUserId!, name: MAYA.name, role: "denied" }] });
+    let accepted = 0;
+    const deps = { documentClient: harness.db, tableName: "state", now: Date.now,
+      actions: { workspace: async () => ({ ...harness.db.get(`WORKSPACE#${workspaceId}`, "META")!, status: "READY", ownerKey: task.ownerKey }), acceptTask: async () => { accepted += 1; } },
+      checkTaskPerson: async () => { throw new Error("proof must not authorize an orphaned sidecar"); } };
+
+    await expect(startTaskWorkflowFeedbackReviewFromWebhook(deps as never, taskId)).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });
+    expect(accepted).toBe(0);
+    expect(operations(harness, workspaceId).filter((operation) => operation.workflowMode === "FEEDBACK_REVIEW")).toEqual([]);
   });
 
   it("lets a freshly qualified second owner decide as their own actor while retaining runtime identity", async () => {
@@ -313,6 +380,8 @@ describe("native developer task workflow", () => {
     expect(stored.ownerKey).toBe(task.ownerKey);
     expect(stored.workflow.ownerId).toBe(task.ownerKey);
     expect(stored.workflow.decisions.at(-1)?.actorId).toBe(taskOwnerKey(second.developerId, taskId));
+    const acceptedTurn = harness.db.find((item) => item.origin === "ai_tool" && item.phase === "accepted" && item.operationId === operations(harness, task.workspaceId).find((operation) => operation.workflowMode === "IMPLEMENT")?.id).at(-1);
+    expect(acceptedTurn?.developer).toMatchObject({ developerId: second.developerId, slackUserId: secondSlack, displayName: second.name });
 
     const racedStart = await harness.dev(creator, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Race retries", client: "test-client", workflow: true, workflowPath: "QUICK" });
     const racedTaskId = String((racedStart.body.task as { taskId: string }).taskId);
@@ -350,6 +419,31 @@ describe("native developer task workflow", () => {
     expect(refused.status).toBe(404);
     expect(taskWorkflow(harness, racedTaskId)).toEqual(racedBefore);
     expect(operations(harness, racedTask.workspaceId).filter((operation) => operation.workflowMode === "IMPLEMENT")).toEqual([]);
+  });
+
+  it("binds a feedback note to a freshly authorized second owner in the task thread", async () => {
+    const second: Developer = { developerId: developerIdForSlackUser("U0NOTEOWN2"), name: "Note Owner", provider: "slack", sessionId: "s-note-owner", slackUserId: "U0NOTEOWN2" };
+    const { harness, taskId, task } = await collectingFeedbackTask();
+    const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000001" };
+    const stored = harness.db.get(`DEVTASK#${taskId}`, "META")!;
+    harness.db.set({ ...stored, share: { teamId: thread.teamId, channelId: thread.channelId, threadTs: thread.threadTs, mode: "view", sharedReason: "requested", sharedAt: new Date().toISOString() },
+      workflow: { ...stored.workflow as WorkflowSnapshot, stage: "WAIT_FOR_MERGE", state: "WAITING", feedbackReview: { status: "PENDING" } } });
+    harness.db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false, people: [
+      { developerId: task.developerId, slackUserId: MAYA.slackUserId!, name: MAYA.name, role: "owner" },
+      { developerId: second.developerId, slackUserId: second.slackUserId!, name: second.name, role: "owner" },
+    ] });
+    const deps = { documentClient: harness.db, tableName: "state", actions: harness.actions, now: Date.now,
+      checkTaskPerson: async (_current: unknown, developerId: string) => ({
+        subject: { developerId, slackUserId: second.slackUserId! },
+        identity: { developerId, slackUserId: second.slackUserId!, name: second.name, method: "slack" as const, issuer: "https://slack.com", subject: second.slackUserId! },
+        eligible: true, channelMember: true,
+      }) };
+
+    await expect(captureWorkflowFeedbackNote(deps as never, second as never, taskId, {
+      thread, userId: second.slackUserId!, eventId: "EvSecondOwnerNote", messageTs: "1695500001.000001", text: "Please preserve the current candidate.",
+    })).resolves.toEqual({ captured: true });
+    expect((harness.db.get(`DEVTASK#${taskId}`, "META")!.workflow as WorkflowSnapshot).feedbackNotes?.at(-1)?.actorId)
+      .toBe(taskOwnerKey(second.developerId, taskId));
   });
 
   it("launches one feedback critic from current collection, limits its reads, and stores only an advisory report", async () => {

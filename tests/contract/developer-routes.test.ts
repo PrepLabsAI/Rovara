@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentXError, type ChannelInfoRequest, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
+import { AgentXError, type ChannelInfoRequest, type ChannelMembersRequest, type ChannelMembersResponse, type TaskPersonProofRequest } from "@agentx/contracts";
 import { channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
@@ -576,6 +576,24 @@ describe("D2 task-person route dependencies", () => {
     });
     expect(proof).toHaveBeenCalledWith({ kind: "task-person-proof", slackUserId: "U0MAYA001", channelIds: ["C0PAY0001"] });
     expect(db.find((item) => String(item.sk).startsWith("PERSON#") || String(item.sk).startsWith("PERSON_SUBJECT#"))).toEqual([]);
+  });
+
+  it("propagates the exact authenticated native caller for fresh qualification", async () => {
+    const nativeMaya: DeveloperCaller = { ...maya, developerId: nativeDeveloperId };
+    const otherCreator = { ...task, developerId: developerIdForSlackUser("U0OTHER001"), slackUserId: "U0OTHER001", developerName: "Other Creator" };
+    db.set(otherCreator);
+    config.taskPersonProof = vi.fn(async (request: TaskPersonProofRequest) => ({
+      ok: true as const, user: { id: request.slackUserId, teamId: "T0TEAM1", name: nativeMaya.name }, memberOf: ["C0PAY0001"],
+    }));
+    const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, nativeMaya);
+    const check = Reflect.get(route, "checkTaskPerson") as (value: DeveloperTaskRecord, id: string) => Promise<Record<string, unknown>>;
+
+    await expect(check(otherCreator, nativeDeveloperId)).resolves.toMatchObject({
+      subject: { developerId: nativeDeveloperId, slackUserId: nativeMaya.slackUserId },
+      identity: { developerId: nativeDeveloperId, method: "slack", subject: nativeMaya.slackUserId },
+      eligible: true,
+    });
+    expect(db.find((item) => String(item.sk).startsWith("PERSON#") || String(item.pk).startsWith("SESSION#") && item.sessionId !== "s-1")).toEqual([]);
   });
 
   it("fails closed when the trusted fresh-proof port is absent", async () => {

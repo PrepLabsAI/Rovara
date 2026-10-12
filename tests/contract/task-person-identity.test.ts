@@ -212,6 +212,22 @@ describe("task person identity registry", () => {
     expect(h.db.find((item) => String(item.pk).startsWith("SESSION#") || String(item.pk).startsWith("DEVELOPER#"))).toEqual([]);
   });
 
+  it("qualifies the exact trusted native current actor without persisting an identity", async () => {
+    const actorSlack = "U0ACTOR001";
+    const actorDeveloperId = developerIdForSlackUser(actorSlack);
+    const h = harness({ proof: async (request) => ({
+      ok: true, user: { id: request.slackUserId, teamId: TEAM, name: "Current Actor" }, memberOf: ["C0PAY0001"],
+    }) });
+    Reflect.set(h.deps, "trustedCaller", { developerId: actorDeveloperId, sessionId: "s-current", amr: "slack", name: "Current Actor", slackUserId: actorSlack });
+
+    await expect(checkTaskPersonIdentity(h.deps, task, actorDeveloperId)).resolves.toMatchObject({
+      subject: { developerId: actorDeveloperId, slackUserId: actorSlack },
+      identity: { developerId: actorDeveloperId, method: "slack", issuer: SLACK_OIDC_ISSUER, subject: actorSlack },
+      eligible: true,
+    });
+    expect(h.db.find((item) => String(item.sk).startsWith("PERSON") || String(item.pk).startsWith("SESSION#"))).toEqual([]);
+  });
+
   it("uses the immutable external identity and separates definite loss from unavailable proof", async () => {
     const lost = harness({ developer: externalDeveloper(), proof: async () => ({ ok: false, error: "ineligible" }) });
     await expect(checkTaskPersonIdentity(lost.deps, task, MAYA_EXTERNAL)).resolves.toMatchObject({

@@ -154,7 +154,7 @@ import {
   type TurnParty,
   type WorkspaceCharge,
 } from "../developer/task-records.js";
-import { GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, WORKFLOW_DISPATCH_PK, hashJson, isConditional, planDocumentKindName, previousPlanDocumentBlock, workflowDispatchItem } from "./broker-shared.js";
+import { GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, WORKFLOW_DISPATCH_PK, hashJson, isConditional, planDocumentKindName, previousPlanDocumentBlock, workflowDispatchItem, type WorkflowDispatchRecord } from "./broker-shared.js";
 import { planEvidencePointerKey, type PlanEvidencePointer } from "../developer/plan-evidence-jobs.js";
 import { loadPlanEvidence, loadWorkflowDocument, shortenMarkdown, type LoadedDocument } from "../developer/plan-artifacts.js";
 import type { DeveloperTaskActions, TransactItems } from "./developer-task-actions.js";
@@ -277,6 +277,15 @@ function partyOf(caller: DeveloperCaller, taskId: string, client: string): TurnP
   return {
     taskId, developerId: caller.developerId, provider: caller.amr, developerName: caller.name, client,
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
+  };
+}
+
+/** A human action is attributed to its authenticated caller while retaining the task's runtime fields. */
+function partyOfTaskActor(task: DeveloperTaskRecord, caller: DeveloperCaller): TurnParty {
+  return {
+    ...partyOf(caller, task.taskId, task.client),
+    workspaceId: task.workspaceId,
+    settingsRevision: task.startingRevision,
   };
 }
 
@@ -416,16 +425,105 @@ const accessFence = (deps: Pick<DeveloperTaskRouteDependencies, "tableName">, ac
 
 async function resumeParkedTaskDispatch(
   deps: DeveloperTaskRouteDependencies,
+  caller: DeveloperCaller,
   access: AuthorizedTask,
-  request: { requestId: string },
+  request: { requestId: string; expectedRevision?: number | undefined; candidateDigest?: string | undefined },
 ): Promise<{ task: DeveloperTaskView } | undefined> {
-  if (access.peopleRevision === undefined) return undefined;
-  const resumed = await resumeTaskDispatch(deps, {
-    task: access.task, peopleRevision: access.peopleRevision, actorId: access.actorId,
-    requestId: request.requestId, payloadHash: hashJson(request),
-  });
-  if (!resumed) return undefined;
-  return { task: await taskView(deps, access.task, { events: 0, details: false }) };
+  if (access.peopleRevision !== undefined) {
+    const resumed = await resumeTaskDispatch(deps, {
+      task: access.task, peopleRevision: access.peopleRevision, actorId: access.actorId,
+      requestId: request.requestId, payloadHash: hashJson(request),
+      reauthorize: async () => { await authorizeTaskAction(deps, caller, access.task.taskId, "retry"); },
+    });
+    if (resumed) return { task: await taskView(deps, access.task, { events: 0, details: false }) };
+  }
+  return resumeAccessPausedWorkflowDispatch(deps, caller, access, request);
+}
+
+interface WorkflowAccessRetryAudit {
+  pk: string;
+  sk: string;
+  entityType: "WORKFLOW_ACCESS_RETRY";
+  actorId: string;
+  payloadHash: string;
+  workflowRevision: number;
+  kind: WorkflowDispatchRecord["kind"];
+  candidateDigest: string;
+  at: string;
+}
+
+/** An explicit current-owner action is the only transition out of a workflow dispatch access pause. */
+async function resumeAccessPausedWorkflowDispatch(
+  deps: DeveloperTaskRouteDependencies,
+  caller: DeveloperCaller,
+  access: AuthorizedTask,
+  request: { requestId: string; expectedRevision?: number | undefined; candidateDigest?: string | undefined },
+): Promise<{ task: DeveloperTaskView } | undefined> {
+  if (request.expectedRevision === undefined || request.candidateDigest === undefined) return undefined;
+  const auditKey = { pk: `DEVTASK#${access.task.taskId}`, sk: `WORKFLOW_ACCESS_RETRY#${request.requestId}` };
+  const payloadHash = hashJson(request);
+  let audit = await get<WorkflowAccessRetryAudit>(deps, auditKey);
+  if (audit !== undefined) {
+    if (audit.actorId !== access.actorId || audit.payloadHash !== payloadHash) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another retry");
+    }
+    await authorizeTaskAction(deps, caller, access.task.taskId, "retry");
+  } else {
+    const rowKey = { pk: WORKFLOW_DISPATCH_PK, sk: `${access.task.taskId}#${request.expectedRevision}` };
+    const row = await get<WorkflowDispatchRecord & { taskAccessPausedAt?: string }>(deps, rowKey);
+    if (row?.taskAccessPausedAt === undefined || row.candidateDigest !== request.candidateDigest) return undefined;
+    const at = iso(deps);
+    audit = { ...auditKey, entityType: "WORKFLOW_ACCESS_RETRY", actorId: access.actorId, payloadHash,
+      workflowRevision: row.workflowRevision, kind: row.kind, candidateDigest: row.candidateDigest, at };
+    try {
+      await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { Update: {
+          TableName: deps.tableName, Key: rowKey,
+          UpdateExpression: "SET nextAttemptAt = :now, dispatchDuePk = :duePk, dispatchDueSk = :dueSk REMOVE taskAccessPausedAt",
+          ConditionExpression: "workflowRevision = :revision AND #kind = :kind AND candidateDigest = :candidate AND attribute_exists(taskAccessPausedAt)",
+          ExpressionAttributeNames: { "#kind": "kind" },
+          ExpressionAttributeValues: { ":now": at, ":duePk": WORKFLOW_DISPATCH_PK, ":dueSk": `${at}#${row.sk}`,
+            ":revision": row.workflowRevision, ":kind": row.kind, ":candidate": row.candidateDigest },
+        } },
+        { ConditionCheck: {
+          TableName: deps.tableName, Key: taskKey(access.task.taskId),
+          ConditionExpression: "workflow.revision = :revision AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
+          ExpressionAttributeValues: { ":revision": row.workflowRevision, ":candidate": row.candidateDigest },
+        } },
+        accessFence(deps, access),
+        { Put: { TableName: deps.tableName, Item: audit, ConditionExpression: "attribute_not_exists(pk)" } },
+      ] }));
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      await authorizeTaskAction(deps, caller, access.task.taskId, "retry");
+      const historical = await get<WorkflowAccessRetryAudit>(deps, auditKey);
+      if (historical === undefined || historical.actorId !== access.actorId || historical.payloadHash !== payloadHash) {
+        throw agentXError("IDEMPOTENCY_CONFLICT", "this retry is out of date; refresh the task and try again");
+      }
+      audit = historical;
+    }
+  }
+  const expected = { workflowRevision: audit.workflowRevision, candidateDigest: audit.candidateDigest };
+  if (audit.kind === "REVIEW") {
+    await startTaskWorkflowReviewFromSystem(deps, access.task.taskId, expected, caller);
+  } else {
+    await startTaskWorkflowPublicationFromSystem(deps, access.task.taskId, expected, {
+      ownerRetry: true, ownerAccess: access, ownerActor: caller,
+      ...(deps.issuer === undefined ? {} : { taskPageUrl: taskPageUrl(deps.issuer, access.task.taskId) }),
+    });
+  }
+  try {
+    await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName,
+      Key: { pk: WORKFLOW_DISPATCH_PK, sk: `${access.task.taskId}#${audit.workflowRevision}` },
+      ConditionExpression: "workflowRevision = :revision AND #kind = :kind AND candidateDigest = :candidate",
+      ExpressionAttributeNames: { "#kind": "kind" },
+      ExpressionAttributeValues: { ":revision": audit.workflowRevision, ":kind": audit.kind, ":candidate": audit.candidateDigest },
+    }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+  }
+  const fresh = (await authorizeTaskAction(deps, caller, access.task.taskId, "retry")).task;
+  return { task: await taskView(deps, fresh, { events: 0, details: false }) };
 }
 
 const FEEDBACK_REPORT_MAX_BYTES = 1_000_000;
@@ -1364,7 +1462,7 @@ async function continueTask(deps: DeveloperTaskRouteDependencies, caller: Develo
     await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, { requestId: request.requestId, conversationId: task.conversationId, prompt: request.instructions }, (operation) => [
       // R12: the accepted record commits with the operation or not at all.
       putNew(turns, aiToolTurn({
-        party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+        party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: request.instructions, response: `Continuing task ${taskId} as operation ${operation.id}.`, operationId: operation.id,
       })),
       accessFence(deps, access),
@@ -1498,7 +1596,7 @@ export async function decideTaskWorkflow(
     } }, accessFence(deps, access)]);
     // A rejected plan ends the task: it gives back its slot and its workspace now.
     await releaseFinishedTaskQuietly(deps, taskId);
-    const fresh = (await authorizeTaskAction(deps, caller, taskId, "decide")).task;
+    const fresh = (await authorizeTaskActor(deps, caller, taskId, "decide")).task;
     return { task: await taskView(deps, fresh, { events: 0, details: false }) };
   }
   await actionableWorkspace(deps, task);
@@ -1569,7 +1667,7 @@ export async function decideTaskWorkflow(
         ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":waiting": "WAITING", ...fed.values },
       } },
       putNew(turnTable(deps), aiToolTurn({
-        party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+        party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: request.reason, response: `Workflow ${request.decision.toLowerCase().replaceAll("_", " ")} accepted as operation ${operation.id}.`, operationId: operation.id,
       })),
       ...detailItems,
@@ -1669,7 +1767,7 @@ function keptProposedIds(policy: WorkflowCheckPolicy | undefined): string[] {
 async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-retry");
   const access = await authorizeTaskAction(deps, caller, taskId, "retry");
-  const resumed = await resumeParkedTaskDispatch(deps, access, request);
+  const resumed = await resumeParkedTaskDispatch(deps, caller, access, request);
   if (resumed !== undefined) return resumed;
   const { task } = access;
   const priorVerificationRetry = task.workflow?.verificationRetries?.find((retry) => retry.requestId === request.requestId);
@@ -1735,7 +1833,7 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
           ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":state": workflow.state, ":stage": workflow.stage },
         } },
         putNew(turnTable(deps), aiToolTurn({
-          party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
+          party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
           receivedAt, finishedAt: iso(deps), request: request.instructions,
           response: `AgentX is rerunning the selected checks without code-editing tools as operation ${operation.id}.`, operationId: operation.id,
         })),
@@ -1785,7 +1883,7 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
           ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": task.workflow!.revision, ":blocked": "BLOCKED", ":plan": "PLAN", ...fed.values },
         } },
         putNew(turnTable(deps), aiToolTurn({
-          party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+          party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
           request: request.instructions, response: `Restarting the planning stage as operation ${operation.id}.`, operationId: operation.id,
         })),
         accessFence(deps, access),
@@ -1843,7 +1941,7 @@ async function queueWorkflowCoding(
           ExpressionAttributeValues: { ":workflow": input.next, ":now": receivedAt, ":revision": workflow.revision, ":stage": workflow.stage, ":state": workflow.state, ...fed.values },
         } },
         putNew(turnTable(deps), aiToolTurn({
-          party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+          party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
           request: input.request, response: `${input.response} as operation ${operation.id}.`, operationId: operation.id,
         })),
         accessFence(deps, access),
@@ -2054,7 +2152,7 @@ async function retryTaskCanvasCloseout(deps: DeveloperTaskRouteDependencies, cal
 async function startTaskWorkflowReview(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-review");
   const access = await authorizeTaskAction(deps, caller, taskId, "retry");
-  const resumed = await resumeParkedTaskDispatch(deps, access, request);
+  const resumed = await resumeParkedTaskDispatch(deps, caller, access, request);
   if (resumed !== undefined) return resumed;
   const { task } = access;
   const workflow = task.workflow;
@@ -2073,7 +2171,7 @@ async function startTaskWorkflowReview(deps: DeveloperTaskRouteDependencies, cal
   }
   await actionableWorkspace(deps, task);
   try {
-    await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, request.requestId, request.instructions, access);
+    await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, request.requestId, request.instructions, access, caller);
   } catch (error) {
     if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "retry");
     return busyOrClosing(deps, task, error);
@@ -2181,6 +2279,7 @@ async function queueWorkflowReview(
   requestId: string,
   note: string,
   access?: TaskAccess,
+  actor?: DeveloperCaller,
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   const receivedAt = iso(deps);
   const candidateDigest = workflow.candidate.digest;
@@ -2199,7 +2298,7 @@ async function queueWorkflowReview(
       ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":review": "REVIEW", ":state": workflow.state, ":candidate": candidateDigest },
     } },
     putNew(turnTable(deps), aiToolTurn({
-      party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+      party: actor === undefined ? partyOfTask(task) : partyOfTaskActor(task, actor), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
       request: "Run independent candidate reviews", response: `Independent code and security reviews started as operation ${operation.id}.`, operationId: operation.id,
     })),
     ...(access === undefined ? [] : [accessFence(deps, access)]),
@@ -2217,6 +2316,7 @@ export async function startTaskWorkflowReviewFromSystem(
   deps: DeveloperTaskRouteDependencies,
   taskId: string,
   expected: { workflowRevision: number; candidateDigest: string },
+  actor?: DeveloperCaller,
 ): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
   const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
   const workflow = task?.workflow;
@@ -2231,7 +2331,7 @@ export async function startTaskWorkflowReviewFromSystem(
   if (workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
   const requestId = workflowRequestId("agentx-auto-review", taskId, expected.workflowRevision, expected.candidateDigest);
   const note = workflow.verification.reviewOnly === true ? AUTOMATIC_REVIEW_ONLY_NOTE : AUTOMATIC_REVIEW_NOTE;
-  const accepted = await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, requestId, note, dispatchAccess);
+  const accepted = await queueWorkflowReview(deps, task, { ...workflow, candidate: workflow.candidate }, requestId, note, dispatchAccess, actor);
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
 
@@ -2953,7 +3053,7 @@ export async function startTaskWorkflowPublicationFromSystem(
   deps: DeveloperTaskRouteDependencies,
   taskId: string,
   expected: { workflowRevision: number; candidateDigest: string },
-  origin: { taskPageUrl?: string; ownerRetry?: boolean; ownerAccess?: Pick<TaskAccess, "peopleRevision"> },
+  origin: { taskPageUrl?: string; ownerRetry?: boolean; ownerAccess?: Pick<TaskAccess, "peopleRevision">; ownerActor?: DeveloperCaller },
 ): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
   const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
   const workflow = task?.workflow;
@@ -2969,7 +3069,7 @@ export async function startTaskWorkflowPublicationFromSystem(
   // Every repository has its pull request: an approved fix whose checks and reviews passed is pushed to them instead.
   if (repository === undefined) {
     return workflow.state === "READY" && workflowPullRequestUpdateDue(workflow)
-      ? startTaskWorkflowPullRequestUpdate(deps, task, { ...workflow, candidate: workflow.candidate }, expected, dispatchAccess)
+      ? startTaskWorkflowPullRequestUpdate(deps, task, { ...workflow, candidate: workflow.candidate }, expected, dispatchAccess, origin.ownerActor)
       : "STALE";
   }
   const attempt = 1 + await deps.actions.failedPublications(task.workspaceId, { repositoryId: repository.repositoryId, candidateDigest: expected.candidateDigest, treeSha: repository.treeSha });
@@ -3003,7 +3103,7 @@ export async function startTaskWorkflowPublicationFromSystem(
     }, (operation) => [
       taskItem,
       putNew(turnTable(deps), aiToolTurn({
-        party: partyOfTask(task), turnId: randomUUID(), action: "pull_request", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+        party: origin.ownerActor === undefined ? partyOfTask(task) : partyOfTaskActor(task, origin.ownerActor), turnId: randomUUID(), action: "pull_request", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: ownerRetry ? "Retry opening the pull request" : "Open the draft pull request",
         response: `AgentX is opening a draft pull request on ${repository.repositoryId} as operation ${operation.id}.`, operationId: operation.id,
       })),
@@ -3047,6 +3147,7 @@ async function startTaskWorkflowPullRequestUpdate(
   workflow: WorkflowSnapshot & { candidate: NonNullable<WorkflowSnapshot["candidate"]> },
   expected: { workflowRevision: number; candidateDigest: string },
   ownerAccess?: Pick<TaskAccess, "peopleRevision">,
+  ownerActor?: DeveloperCaller,
 ): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
   const pullRequest = nextWorkflowPullRequestUpdate(workflow);
   const repository = workflow.candidate.repositories.find((entry) => entry.repositoryId === pullRequest?.repositoryId);
@@ -3080,7 +3181,7 @@ async function startTaskWorkflowPullRequestUpdate(
       { Update: { TableName: deps.tableName, Key: taskKey(task.taskId), UpdateExpression: "SET workflow = :workflow, updatedAt = :now", ...unchanged,
         ExpressionAttributeValues: { ":workflow": startWorkflowPullRequestUpdate(workflow, receivedAt), ":now": receivedAt, ...at } } },
       putNew(turnTable(deps), aiToolTurn({
-        party: partyOfTask(task), turnId: randomUUID(), action: "pull_request", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+        party: ownerActor === undefined ? partyOfTask(task) : partyOfTaskActor(task, ownerActor), turnId: randomUUID(), action: "pull_request", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: "Push the approved fix to the pull request",
         response: `AgentX is pushing the approved fix to pull request #${pullRequest.number} on ${repository.repositoryId} as operation ${operation.id}.`, operationId: operation.id,
       })),
@@ -3113,7 +3214,7 @@ async function startTaskWorkflowPullRequestUpdate(
 async function retryTaskWorkflowPublication(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(WorkflowPublishRetryRequestSchema, value, deps, "workflow-publish-retry");
   const access = await authorizeTaskAction(deps, caller, taskId, "publish");
-  const resumed = await resumeParkedTaskDispatch(deps, access, request);
+  const resumed = await resumeParkedTaskDispatch(deps, caller, access, request);
   if (resumed !== undefined) return resumed;
   const { task } = access;
   const workflow = task.workflow;
@@ -3127,7 +3228,7 @@ async function retryTaskWorkflowPublication(deps: DeveloperTaskRouteDependencies
   let outcome: Awaited<ReturnType<typeof startTaskWorkflowPublicationFromSystem>>;
   try {
     outcome = await startTaskWorkflowPublicationFromSystem(deps, taskId, { workflowRevision: workflow.revision, candidateDigest: workflow.candidate.digest },
-      { ownerRetry: true, ownerAccess: access, ...(deps.issuer === undefined ? {} : { taskPageUrl: taskPageUrl(deps.issuer, taskId) }) });
+      { ownerRetry: true, ownerAccess: access, ownerActor: caller, ...(deps.issuer === undefined ? {} : { taskPageUrl: taskPageUrl(deps.issuer, taskId) }) });
   } catch (error) {
     if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "publish");
     return busyOrClosing(deps, task, error);
@@ -3203,7 +3304,8 @@ export async function startTaskWorkflowFeedbackReviewFromWebhook(
   const workflow = task?.workflow;
   if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.stage !== "WAIT_FOR_MERGE"
     || workflow.state !== "WAITING" || workflow.candidate === undefined || workflow.feedbackReview?.status !== "COLLECTING") return false;
-  return acceptFeedbackReview(deps, task, workflow, workflow);
+  const access = await systemTaskAccess(deps, task);
+  return acceptFeedbackReview(deps, task, workflow, workflow, access);
 }
 
 /**
@@ -3211,7 +3313,14 @@ export async function startTaskWorkflowFeedbackReviewFromWebhook(
  * write, conditioned on the task still being exactly `stored`: either the review started and the task is RUNNING, or
  * nothing changed. False when the workspace cannot take it now.
  */
-async function acceptFeedbackReview(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, stored: WorkflowSnapshot, collecting: WorkflowSnapshot, access?: AuthorizedTask): Promise<boolean> {
+async function acceptFeedbackReview(
+  deps: DeveloperTaskRouteDependencies,
+  task: DeveloperTaskRecord,
+  stored: WorkflowSnapshot,
+  collecting: WorkflowSnapshot,
+  access?: TaskAccess,
+  actor?: DeveloperCaller,
+): Promise<boolean> {
   if (task.closedAt !== undefined || collecting.candidate === undefined || collecting.feedbackReview?.status !== "COLLECTING") return false;
   const workspace = await deps.actions.workspace(task.workspaceId);
   if (!feedbackReviewWorkspaceReady(task, workspace)) return false;
@@ -3234,7 +3343,7 @@ async function acceptFeedbackReview(deps: DeveloperTaskRouteDependencies, task: 
           ":status": stored.feedbackReview?.status ?? "COLLECTING", ":candidate": binding.candidateDigest },
       } },
       { Put: { TableName: turnTable(deps), Item: aiToolTurn({
-        party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt: now, finishedAt: iso(deps),
+        party: actor === undefined ? partyOfTask(task) : partyOfTaskActor(task, actor), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt: now, finishedAt: iso(deps),
         request: "Review linked PR feedback", response: "Read-only PR feedback review started as operation " + operation.id + ".", operationId: operation.id,
       }), ConditionExpression: "attribute_not_exists(pk)" } },
       ...(access === undefined ? [] : [accessFence(deps, access)]),
@@ -3284,7 +3393,7 @@ export async function retryTaskWorkflowFeedbackReview(
     // Already retried: a review still collecting (never started) is started now; one running or done is left alone.
     if (review?.status !== "COLLECTING" || current.state !== "WAITING") return { started: false };
     if (!feedbackReviewWorkspaceReady(task, workspace)) throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_BUSY);
-    if (!await acceptFeedbackReview(deps, task, current, current, access)) {
+    if (!await acceptFeedbackReview(deps, task, current, current, access, caller)) {
       await authorizeTaskActor(deps, caller, taskId, "feedback");
       throw await feedbackRetryRefusal(deps, task, current);
     }
@@ -3298,7 +3407,7 @@ export async function retryTaskWorkflowFeedbackReview(
     throw error;
   }
   if (!feedbackReviewWorkspaceReady(task, workspace)) throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_BUSY);
-  if (!await acceptFeedbackReview(deps, task, current, collecting, access)) {
+  if (!await acceptFeedbackReview(deps, task, current, collecting, access, caller)) {
     await authorizeTaskActor(deps, caller, taskId, "feedback");
     throw await feedbackRetryRefusal(deps, task, current);
   }
@@ -3338,7 +3447,7 @@ export async function captureWorkflowFeedbackNote(
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const access = await authorizeTaskActor(deps, caller, taskId, "feedback");
     const { task } = access;
-    if (task.slackUserId !== userId || caller.slackUserId !== userId
+    if (caller.slackUserId !== userId
       || task.share?.teamId !== thread.teamId || task.share.channelId !== thread.channelId || task.share.threadTs !== thread.threadTs) {
       throw agentXError("FORBIDDEN", "only the task owner may add a note in this task thread");
     }
@@ -3782,7 +3891,7 @@ async function cancelTask(deps: DeveloperTaskRouteDependencies, caller: Develope
   if (await repeated()) return current();
   const marker = putNew(deps.tableName, { ...idempotencyKey, entityType: "IDEMPOTENCY", action: "cancel", payloadHash: CANCEL_PAYLOAD_HASH });
   const record = (response: string, operationId?: string) => putNew(turns, aiToolTurn({
-    party: partyOfTask(task), turnId: randomUUID(), action: "cancel", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+    party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "cancel", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
     request: "cancel", response, ...(operationId === undefined ? {} : { operationId }),
   }));
   let handled = false;
@@ -3879,7 +3988,7 @@ async function openPullRequest(deps: DeveloperTaskRouteDependencies, caller: Dev
       ...(request.body === undefined ? {} : { body: request.body }),
     }, (operation) => [
       putNew(turns, aiToolTurn({
-        party: partyOfTask(task), turnId: randomUUID(), action: "pull_request", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+        party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "pull_request", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: `${request.title}\n\n${request.body ?? ""}`, response: `Opening a pull request on ${repository} as operation ${operation.id}.`, operationId: operation.id,
       })),
       accessFence(deps, access),
@@ -4358,7 +4467,7 @@ async function closeTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   const turns = turnTable(deps);
   const receivedAt = iso(deps);
   const record = (response: string, operationId?: string) => putNew(turns, aiToolTurn({
-    party: partyOfTask(task), turnId: randomUUID(), action: "close", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+    party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "close", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
     request: "close", response, ...(operationId === undefined ? {} : { operationId }),
   }));
   let unpublished: DeveloperCloseResponse["unpublished"];
@@ -4472,7 +4581,7 @@ function shareItems(
   turns: string,
   task: DeveloperTaskRecord,
   share: TaskShare,
-  audit: { idempotencyKey: { pk: string; sk: string }; payloadHash: string; receivedAt: string; request: string; admin?: ShareAdmin },
+  audit: { idempotencyKey: { pk: string; sk: string }; payloadHash: string; receivedAt: string; request: string; admin?: ShareAdmin; actor?: DeveloperCaller },
 ): TransactItems {
   const version = task.shareVersion ?? 0;
   return [
@@ -4498,7 +4607,7 @@ function shareItems(
     putNew(deps.tableName, { ...audit.idempotencyKey, entityType: "IDEMPOTENCY", action: "share", payloadHash: audit.payloadHash }),
     // Q9: a share or mode change is audited like the task's other actions.
     putNew(turns, aiToolTurn({
-      party: partyOfTask(task), turnId: randomUUID(), action: "share", phase: "accepted", outcome: "accepted", receivedAt: audit.receivedAt, finishedAt: iso(deps),
+      party: audit.actor === undefined ? partyOfTask(task) : partyOfTaskActor(task, audit.actor), turnId: randomUUID(), action: "share", phase: "accepted", outcome: "accepted", receivedAt: audit.receivedAt, finishedAt: iso(deps),
       request: audit.request, response: `Shared in ${shareLabel(share)}, ${share.mode === "view" ? "view only" : "open to the channel"}.`,
       ...(audit.admin === undefined ? {} : { admin: audit.admin }),
     })),
@@ -4539,6 +4648,7 @@ async function shareTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     const items = [...shareItems(deps, turns, task, share, {
       idempotencyKey, payloadHash, receivedAt,
       request: `share ${request.shareMode ?? "default mode"}${request.channel === undefined ? "" : ` in ${request.channel}`}`,
+      actor: caller,
     }), accessFence(deps, access)];
     try {
       await deps.actions.transact(items);

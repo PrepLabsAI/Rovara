@@ -599,6 +599,7 @@ export function developerTaskRouteDependencies(
   deps: DeveloperRouteDependencies,
   caller: DeveloperCaller,
   initialSlackThread?: { teamId: string; channelId: string; threadTs: string },
+  trustedCaller: DeveloperCaller | null = caller,
 ): DeveloperTaskRouteDependencies {
   const projectChannelIds = async (project: string) => (await bindingsOf(deps))
     .filter((binding) => binding.projectName === project)
@@ -636,6 +637,7 @@ export function developerTaskRouteDependencies(
         targetProjectAccess: async (subject, project, freshMemberOf) => {
           await checkProjectAccess(deps, subject, project, { freshMemberOf });
         },
+        ...(trustedCaller === null ? {} : { trustedCaller }),
       }, task, developerId);
     },
     ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback.bind(deps) }),

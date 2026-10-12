@@ -87,6 +87,41 @@ async function park(
   void pointer;
 }
 
+async function allowedStillCurrent(
+  deps: TaskDispatchAccessDependencies,
+  record: DurableOutboxRecord,
+  pointer: DeveloperTaskPointerRecord,
+  task: DeveloperTaskRecord,
+  peopleRevision: number | undefined,
+): Promise<boolean> {
+  const workflow = task.workflow;
+  const taskCondition = workflow === undefined
+    ? { ConditionExpression: "workspaceId = :workspaceId AND attribute_not_exists(closedAt) AND attribute_not_exists(workflow)",
+      ExpressionAttributeValues: { ":workspaceId": record.workspaceId } }
+    : { ConditionExpression: "workspaceId = :workspaceId AND attribute_not_exists(closedAt) AND workflow.#revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state",
+      ExpressionAttributeNames: { "#revision": "revision", "#stage": "stage", "#state": "state" },
+      ExpressionAttributeValues: { ":workspaceId": record.workspaceId, ":revision": workflow.revision, ":stage": workflow.stage, ":state": workflow.state } };
+  const peopleCondition = peopleRevision === undefined
+    ? { ConditionExpression: "attribute_not_exists(pk)" }
+    : { ConditionExpression: "#revision = :revision", ExpressionAttributeNames: { "#revision": "revision" }, ExpressionAttributeValues: { ":revision": peopleRevision } };
+  try {
+    await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { ConditionCheck: { TableName: deps.tableName, Key: taskPointerKey(record.workspaceId), ConditionExpression: "taskId = :taskId", ExpressionAttributeValues: { ":taskId": pointer.taskId } } },
+      { ConditionCheck: { TableName: deps.tableName, Key: taskKey(task.taskId), ...taskCondition } },
+      { ConditionCheck: { TableName: deps.tableName, Key: { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE" }, ...peopleCondition } },
+      { ConditionCheck: { TableName: deps.tableName, Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}` },
+        ConditionExpression: "fence = :fence AND (#status = :accepted OR #status = :dispatching)", ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":fence": record.invocation.fence, ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING" } } },
+      { ConditionCheck: { TableName: deps.tableName, Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: "META" },
+        ConditionExpression: "fence = :fence AND activeOperationId = :operationId", ExpressionAttributeValues: { ":fence": record.invocation.fence, ":operationId": record.operationId } } },
+    ] }));
+    return true;
+  } catch (error) {
+    if (conditional(error)) return false;
+    throw error;
+  }
+}
+
 /**
  * Strongly resolves workspace→task→PEOPLE. Legacy work with no pointer or PEOPLE remains allowed.
  * PEOPLE work is allowed only with a freshly qualified effective owner; every other result is
@@ -98,19 +133,24 @@ export async function guardTaskDispatch(deps: TaskDispatchAccessDependencies, re
   if (record.invocation.kind === "close" || record.invocation.kind === "cancel") return "ALLOWED";
   const stored = await get<{ status?: string }>(deps, outboxKey(record.id));
   if (stored?.status === "WAITING_FOR_TASK_ACCESS") return "PARKED";
-  const pointer = await get<DeveloperTaskPointerRecord>(deps, taskPointerKey(record.workspaceId));
-  if (pointer === undefined) return "ALLOWED";
-  const task = await get<DeveloperTaskRecord>(deps, taskKey(pointer.taskId));
-  // A PARKED answer acknowledges the SQS message, so it is returned only after a durable pause
-  // exists. Broken task state is retried instead of silently dropping the invocation.
-  if (task === undefined || task.workspaceId !== record.workspaceId) {
-    throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch state could not be verified");
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const pointer = await get<DeveloperTaskPointerRecord>(deps, taskPointerKey(record.workspaceId));
+    if (pointer === undefined) return "ALLOWED";
+    const task = await get<DeveloperTaskRecord>(deps, taskKey(pointer.taskId));
+    // A PARKED answer acknowledges the SQS message, so it is returned only after a durable pause
+    // exists. Broken task state is retried instead of silently dropping the invocation.
+    if (task === undefined || task.workspaceId !== record.workspaceId) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch state could not be verified");
+    }
+    const access = await resolveTaskDispatchPeople(deps, task);
+    if (access === undefined || access.status === "ALLOWED") {
+      if (await allowedStillCurrent(deps, record, pointer, task, access?.peopleRevision)) return "ALLOWED";
+      continue;
+    }
+    await park(deps, record, pointer, task, access.peopleRevision, access.status === "OWNERLESS" ? "OWNERLESS" : "PROOF_UNAVAILABLE");
+    return "PARKED";
   }
-  const access = await resolveTaskDispatchPeople(deps, task);
-  if (access === undefined) return "ALLOWED";
-  if (access.status === "ALLOWED") return "ALLOWED";
-  await park(deps, record, pointer, task, access.peopleRevision, access.status === "OWNERLESS" ? "OWNERLESS" : "PROOF_UNAVAILABLE");
-  return "PARKED";
+  throw agentXError("RUNTIME_UNAVAILABLE", "task dispatch access changed while it was being verified");
 }
 
 interface PausedTaskDispatch {
@@ -131,7 +171,7 @@ interface PausedTaskDispatch {
  */
 export async function resumeTaskDispatch(
   deps: TaskDispatchAccessDependencies & { now(): number },
-  input: { task: DeveloperTaskRecord; peopleRevision: number; actorId: string; requestId: string; payloadHash: string },
+  input: { task: DeveloperTaskRecord; peopleRevision: number; actorId: string; requestId: string; payloadHash: string; reauthorize?(): Promise<void> },
 ): Promise<boolean> {
   const auditKey = { pk: `DEVTASK#${input.task.taskId}`, sk: `TASK_ACCESS_RETRY#${input.requestId}` };
   const priorAudit = await get<{ actorId?: string; operationId?: string; payloadHash?: string }>(deps, auditKey);
@@ -139,6 +179,7 @@ export async function resumeTaskDispatch(
     if (priorAudit.actorId !== input.actorId || priorAudit.payloadHash !== input.payloadHash) {
       throw agentXError("IDEMPOTENCY_CONFLICT", "this retry request ID was already used");
     }
+    await input.reauthorize?.();
     return true;
   }
   const response = await deps.documentClient.send(new QueryCommand({
@@ -197,7 +238,10 @@ export async function resumeTaskDispatch(
     if (!conditional(error)) throw error;
     const audit = await get<{ actorId?: string; operationId?: string; payloadHash?: string }>(deps, auditKey);
     const current = await get<{ status?: string; operationId?: string }>(deps, outboxKey(pause.outboxId));
-    if (audit?.actorId === input.actorId && audit.operationId === pause.operationId && audit.payloadHash === input.payloadHash && current?.status === "PENDING") return true;
+    if (audit?.actorId === input.actorId && audit.operationId === pause.operationId && audit.payloadHash === input.payloadHash && current?.status === "PENDING") {
+      await input.reauthorize?.();
+      return true;
+    }
     throw error;
   }
 }

@@ -42,6 +42,8 @@ export interface TaskPersonIdentityDependencies {
   projectChannelIds(project: string): Promise<readonly string[]>;
   /** Existing project policy and grants, evaluated against only the supplied fresh membership. */
   targetProjectAccess(subject: ProjectAccessSubject, project: string, freshMemberOf: readonly string[]): Promise<void>;
+  /** Exact caller already authenticated by the enclosing route. Never supplied by system-created callers. */
+  trustedCaller?: Pick<DeveloperCaller, "developerId" | "amr" | "name" | "slackUserId">;
 }
 
 interface TaskPersonRecord extends TaskPersonIdentity {
@@ -275,8 +277,13 @@ export async function checkTaskPersonIdentity(
   if (stored.project !== task.project || stored.developerId !== task.developerId || stored.provider !== task.provider || stored.slackUserId !== task.slackUserId) return refuse();
   let identity = await registryBySubject(deps, stored.taskId, developerId);
   if (identity === undefined) {
-    if (developerId !== stored.developerId || !SlackUserIdSchema.safeParse(stored.slackUserId).success) return refuse();
-    if (stored.provider === "slack") {
+    const caller = deps.trustedCaller;
+    if (caller?.developerId === developerId && caller.amr === "slack" && SlackUserIdSchema.safeParse(caller.slackUserId).success
+      && developerIdForSlackUser(caller.slackUserId!) === developerId) {
+      identity = nativeIdentity(caller.slackUserId!, safeName(caller.name, caller.slackUserId!));
+    } else if (developerId !== stored.developerId || !SlackUserIdSchema.safeParse(stored.slackUserId).success) {
+      return refuse();
+    } else if (stored.provider === "slack") {
       if (developerId !== developerIdForSlackUser(stored.slackUserId!)) return refuse();
       identity = nativeIdentity(stored.slackUserId!, safeName(stored.developerName, stored.slackUserId!));
     } else {

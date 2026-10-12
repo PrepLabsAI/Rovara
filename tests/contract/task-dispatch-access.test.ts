@@ -80,6 +80,22 @@ describe("task dispatch access", () => {
     expect(h.db.find((item) => String(item.sk).includes("TASK_ACCESS"))).toEqual([]);
   });
 
+  it("refuses a positive proof whose PEOPLE revision changes before acceptance", async () => {
+    const h = harness();
+    h.checkTaskPerson.mockImplementation(async () => {
+      h.db.set({ pk: `DEVTASK#${TASK_ID}`, sk: "PEOPLE", schemaVersion: 1, revision: 4, orphaned: true,
+        people: [{ developerId: OWNER, slackUserId: OWNER_SLACK, name: "Avery", role: "denied" }] });
+      return {
+        subject: { developerId: OWNER, slackUserId: OWNER_SLACK },
+        identity: { developerId: OWNER, slackUserId: OWNER_SLACK, name: "Avery", method: "slack" as const, issuer: "https://slack.com", subject: OWNER_SLACK },
+        eligible: true, channelMember: true,
+      };
+    });
+
+    await expect(guardTaskDispatch({ documentClient: h.db, tableName: "state", checkTaskPerson: h.checkTaskPerson }, h.outbox)).resolves.toBe("PARKED");
+    expect(h.db.get(`OUTBOX#${h.outbox.id}`, "OUTBOX")?.status).toBe("WAITING_FOR_TASK_ACCESS");
+  });
+
   it("durably parks PEOPLE work when proof is unconfigured and preserves operation identity", async () => {
     const h = harness();
     await expect(guardTaskDispatch({ documentClient: h.db, tableName: "state" }, h.outbox)).resolves.toBe("PARKED");
@@ -139,5 +155,40 @@ describe("task dispatch access", () => {
     await expect(resumeTaskDispatch({ documentClient: h.db, tableName: "state", now: () => Date.parse("2026-10-11T10:05:00.000Z") }, {
       task: h.current, peopleRevision: 4, actorId: taskOwnerKey(newOwner, TASK_ID), requestId, payloadHash: "e".repeat(64),
     })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+  });
+
+  it("reauthorizes the caller before a conditional historical redrive answer", async () => {
+    const h = harness();
+    await guardTaskDispatch({ documentClient: h.db, tableName: "state" }, h.outbox);
+    const requestId = randomUUID();
+    const send = h.db.send.bind(h.db);
+    let current = true;
+    h.db.send = async (command) => {
+      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("TASK_ACCESS_RETRY")) {
+        await send(command);
+        current = false;
+        throw Object.assign(new Error("concurrent retry won"), { name: "TransactionCanceledException" });
+      }
+      return send(command);
+    };
+
+    await expect(resumeTaskDispatch({ documentClient: h.db, tableName: "state", now: () => Date.parse("2026-10-11T10:05:00.000Z") }, {
+      task: h.current, peopleRevision: 3, actorId: taskOwnerKey(OWNER, TASK_ID), requestId, payloadHash: "d".repeat(64),
+      reauthorize: async () => { if (!current) throw new Error("caller revoked"); },
+    })).rejects.toThrow("caller revoked");
+  });
+
+  it("reauthorizes the caller before returning a prior redrive audit", async () => {
+    const h = harness();
+    await guardTaskDispatch({ documentClient: h.db, tableName: "state" }, h.outbox);
+    const requestId = randomUUID();
+    let current = true;
+    const input = {
+      task: h.current, peopleRevision: 3, actorId: taskOwnerKey(OWNER, TASK_ID), requestId, payloadHash: "d".repeat(64),
+      reauthorize: async () => { if (!current) throw new Error("caller revoked"); },
+    };
+    await expect(resumeTaskDispatch({ documentClient: h.db, tableName: "state", now: () => Date.parse("2026-10-11T10:05:00.000Z") }, input as never)).resolves.toBe(true);
+    current = false;
+    await expect(resumeTaskDispatch({ documentClient: h.db, tableName: "state", now: () => Date.parse("2026-10-11T10:05:00.000Z") }, input as never)).rejects.toThrow("caller revoked");
   });
 });
