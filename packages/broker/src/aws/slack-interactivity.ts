@@ -1076,6 +1076,30 @@ function slackActionRequestId(action: SlackBlockAction): string {
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
 }
 
+const SLACK_SECTION_TEXT_LIMIT = 3000;
+const SLACK_MODAL_BLOCK_LIMIT = 100;
+
+function taskPeopleListSections(people: TaskPeopleView["people"]): string[] {
+  if (people.length === 0) return ["No people are available."];
+  const sections: string[] = [];
+  let lines: string[] = [];
+  let length = 0;
+  for (const person of people) {
+    const line = `${person.you ? "You" : cleanLine(person.name, 80)} — ${person.role}`;
+    if (line.length > SLACK_SECTION_TEXT_LIMIT) throw new WorkflowInteractionRefusal("A task People entry cannot fit in a Slack section.");
+    const separatorLength = lines.length === 0 ? 0 : 1;
+    if (length + separatorLength + line.length > SLACK_SECTION_TEXT_LIMIT) {
+      sections.push(lines.join("\n"));
+      lines = [];
+      length = 0;
+    }
+    length += (lines.length === 0 ? 0 : 1) + line.length;
+    lines.push(line);
+  }
+  if (lines.length > 0) sections.push(lines.join("\n"));
+  return sections;
+}
+
 export function workflowSlackHandlers(deps: {
   loadTask(taskId: string): Promise<Record<string, unknown> | undefined>;
   openView(triggerId: string, view: Record<string, unknown>): Promise<void>;
@@ -1289,14 +1313,16 @@ export function workflowSlackHandlers(deps: {
         try { people = await deps.getPeople({ taskId: value.taskId, userId: action.userId, thread: action.thread }); }
         catch { throw new WorkflowInteractionRefusal("Task People is unavailable."); }
         const metadata = JSON.stringify({ taskId: value.taskId, expectedPeopleRevision: people.revision, requestId: slackActionRequestId(action), thread: action.thread });
-        const list = people.people.length === 0 ? "No people are available." : people.people.map((person) => `${person.you ? "You" : cleanLine(person.name, 80)} — ${person.role}`).join("\n");
+        const listBlocks = taskPeopleListSections(people.people).map((text) => ({ type: "section", text: { type: "mrkdwn", text } }));
         if (people.canTakeOwnership && !people.canManage) {
+          const blocks = [...listBlocks, { type: "section", text: { type: "mrkdwn", text: "This task has no current owner. Taking ownership does not restart it." } }];
+          if (blocks.length > SLACK_MODAL_BLOCK_LIMIT) throw new WorkflowInteractionRefusal("The complete task People list is too large to open in Slack.");
           await deps.openView(action.triggerId, { type: "modal", callback_id: "agentx_task_take_ownership", private_metadata: metadata,
             title: { type: "plain_text", text: "Task people" }, submit: { type: "plain_text", text: "Take ownership" }, close: { type: "plain_text", text: "Cancel" },
-            blocks: [{ type: "section", text: { type: "mrkdwn", text: list } }, { type: "section", text: { type: "mrkdwn", text: "This task has no current owner. Taking ownership does not restart it." } }] });
+            blocks });
           return;
         }
-        const blocks: Array<Record<string, unknown>> = [{ type: "section", text: { type: "mrkdwn", text: list } }];
+        const blocks: Array<Record<string, unknown>> = [...listBlocks];
         if (people.canManage) blocks.push(
           { type: "input", block_id: "task_person", label: { type: "plain_text", text: "Person" }, element: { type: "users_select", action_id: "person", placeholder: { type: "plain_text", text: "Choose a person" } } },
           { type: "input", block_id: "task_role", label: { type: "plain_text", text: "Role" }, element: { type: "static_select", action_id: "role", options: [
@@ -1306,6 +1332,7 @@ export function workflowSlackHandlers(deps: {
             { text: { type: "plain_text", text: "Remove access" }, value: "denied" },
           ] } },
         );
+        if (blocks.length > SLACK_MODAL_BLOCK_LIMIT) throw new WorkflowInteractionRefusal("The complete task People list is too large to open in Slack.");
         await deps.openView(action.triggerId, { type: "modal", callback_id: "agentx_task_people_submission", private_metadata: metadata,
           title: { type: "plain_text", text: "Task people" }, ...(people.canManage ? { submit: { type: "plain_text", text: "Save role" } } : {}),
           close: { type: "plain_text", text: "Close" }, blocks });
