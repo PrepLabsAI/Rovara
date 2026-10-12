@@ -8438,7 +8438,7 @@ const repositoryGrants = new RepositoryGrantService(
 
 const lambdaClient = new LambdaClient(awsClientConfiguration);
 /** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */
-function developerConfiguration(): DeveloperApiConfiguration | undefined {
+function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["inviteTaskPerson"]): DeveloperApiConfiguration | undefined {
   const issuer = process.env.DEVELOPER_TOKEN_ISSUER;
   if (!issuer) return undefined;
   const functionName = requiredEnvironment("DEVELOPER_IDENTITY_FUNCTION_ARN");
@@ -8453,6 +8453,8 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
     since: developerSinceFromEnvironment(process.env),
     signInTableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"),
     taskPeopleConfiguration: { peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true" },
+    // Invitation remains unconfigured in the production composition until its dedicated endpoint is separately accepted.
+    ...(inviteTaskPerson === undefined ? {} : { inviteTaskPerson }),
     channelMembers: channelMembersThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     taskPersonProof: taskPersonProofThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     taskChannelPeople: taskChannelPeopleThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),

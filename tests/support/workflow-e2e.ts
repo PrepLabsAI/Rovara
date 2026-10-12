@@ -30,6 +30,8 @@ import {
   type TaskPeopleDisplayReadResponse,
   type TaskPersonProofRequest,
   type TaskPersonProofResponse,
+  type TaskPersonInviteClaimRequest,
+  type TaskPersonInviteOutcome,
   type WorkerInvocation,
   type WorkflowOptionalCheck,
   type WorkflowSnapshot,
@@ -315,7 +317,7 @@ export async function createWorkflowE2E(options: {
     checkTaskPerson?: CheckTaskPerson;
     taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>;
     taskPeopleDisplayRead?: (request: TaskPeopleDisplayReadRequest) => Promise<TaskPeopleDisplayReadResponse>;
-    inviteTaskPerson?: (input: { teamId: string; channelId: string; slackUserId: string }) => Promise<"accepted" | "unknown">;
+    inviteTaskPerson?: (input: TaskPersonInviteClaimRequest) => Promise<TaskPersonInviteOutcome>;
     boundChannels?: readonly string[];
     developers?: readonly Developer[];
   };

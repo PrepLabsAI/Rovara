@@ -4,11 +4,12 @@
 // button, PR feedback decided through MCP [R4, decision D4], and agentx_get_task's next step at every stage.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { SLACK_OIDC_ISSUER, openReviewFindings, type TaskPeopleDisplayReadRequest, type TaskPersonProofRequest } from "@agentx/contracts";
+import { SLACK_OIDC_ISSUER, openReviewFindings, type TaskPeopleDisplayReadRequest, type TaskPersonProofRequest, type TaskPersonInviteClaimRequest } from "@agentx/contracts";
 import { developerIdForSlackUser } from "../../../packages/broker/src/aws/admin-actions.js";
 import type { CheckTaskPerson } from "../../../packages/broker/src/developer/task-people.js";
 import { taskOwnerKey } from "../../../packages/broker/src/developer/task-records.js";
 import { ownerKeyForSubject } from "../../../packages/broker/src/aws/lambda.js";
+import { taskPersonInviteClaimDigest } from "../../../packages/broker/src/developer/task-people-effects.js";
 import { reviewerFindings, reviewerHangs } from "../../support/model-fixtures.js";
 import { feedbackCriticReply } from "../../support/faux-scripts.js";
 import { OMAR, grantProject } from "../../support/developer-task-broker.js";
@@ -54,6 +55,23 @@ function taskPeopleDirectory(baileyInTaskChannel = true) {
     };
   };
   return { members, names, proof, display, check };
+}
+
+function assertClaimMatchesPersistedProposal(e2e: WorkflowE2E, input: TaskPersonInviteClaimRequest): Record<string, unknown> {
+  const proposal = e2e.db.get(`DEVTASK#${input.taskId}`, `PEOPLE_PROPOSAL#${input.requestId}`);
+  if (proposal === undefined || proposal.invitationStatus !== "CLAIMED" || proposal.kind !== "role" || proposal.role !== "owner"
+    || proposal.taskId !== input.taskId || proposal.requestId !== input.requestId || proposal.invitationTeamId !== "T0BSHLLUGBD"
+    || proposal.invitationChannelId !== "C0123456789" || proposal.invitationSlackUserId !== BAILEY.slackUserId
+    || typeof proposal.callerDeveloperId !== "string" || typeof proposal.targetDeveloperId !== "string" || typeof proposal.personId !== "string"
+    || typeof proposal.expectedPeopleRevision !== "number" || typeof proposal.payloadDigest !== "string" || typeof proposal.expiresAt !== "string"
+    || typeof proposal.invitationUpdatedAt !== "string") throw new Error("invitation claim is missing or unbound in the retained proposal");
+  const digest = taskPersonInviteClaimDigest({ taskId: proposal.taskId, requestId: proposal.requestId,
+    callerDeveloperId: proposal.callerDeveloperId, targetDeveloperId: proposal.targetDeveloperId, personId: proposal.personId, role: "owner",
+    expectedPeopleRevision: proposal.expectedPeopleRevision, payloadDigest: proposal.payloadDigest, expiresAt: proposal.expiresAt,
+    invitationTeamId: proposal.invitationTeamId, invitationChannelId: proposal.invitationChannelId,
+    invitationSlackUserId: proposal.invitationSlackUserId, invitationUpdatedAt: proposal.invitationUpdatedAt });
+  if (digest !== input.claimDigest) throw new Error("invitation claim digest does not match the retained proposal");
+  return proposal;
 }
 
 /** The MCP answer's text, which an AI tool reads; fails the test on a tool error. */
@@ -494,17 +512,34 @@ describe("Suite 11: MCP parity", () => {
     };
 
     const unknownDirectory = taskPeopleDirectory(false);
-    const unknownInvitations: Array<{ teamId: string; channelId: string; slackUserId: string }> = [];
+    const unknownInvitations: Array<{ taskId: string; requestId: string; claimDigest: string; admissionId: string }> = [];
+    const unknownReceipts = new Map<string, { executionReceiptId: string; claimDigest: string; status: "UNKNOWN" }>();
+    const unknownHolder: { value?: WorkflowE2E } = {};
     const unknown = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
       changesEnabled: true, checkTaskPerson: unknownDirectory.check, taskPersonProof: unknownDirectory.proof,
       taskPeopleDisplayRead: unknownDirectory.display, boundChannels: [SECOND_CHANNEL],
-      inviteTaskPerson: async (input) => { unknownInvitations.push(input); return "unknown"; },
+      inviteTaskPerson: async (input: TaskPersonInviteClaimRequest) => {
+        const current = unknownHolder.value;
+        if (current === undefined) throw new Error("workflow harness was not initialized before invite");
+        assertClaimMatchesPersistedProposal(current, input);
+        if (input.kind !== "task-person-invite-claimed" || input.admission.remainingMs > 12_000) throw new Error("invalid invitation claim envelope");
+        unknownInvitations.push({ taskId: input.taskId, requestId: input.requestId, claimDigest: input.claimDigest, admissionId: input.admission.id });
+        const key = `${input.taskId}/${input.requestId}`;
+        const receipt = unknownReceipts.get(key) ?? { executionReceiptId: randomUUID(), claimDigest: input.claimDigest, status: "UNKNOWN" as const };
+        unknownReceipts.set(key, receipt);
+        return { taskId: input.taskId, requestId: input.requestId, claimDigest: input.claimDigest, admissionId: input.admission.id,
+          status: "unknown", executionReceiptId: receipt.executionReceiptId, reason: "transport_unknown" };
+      },
     } });
+    unknownHolder.value = unknown;
     await atPlanReview(unknown);
     await unknown.click("agentx_task_people");
     const beforeUnknown = structuredClone(unknown.db.get(`DEVTASK#${unknown.taskId()}`, "PEOPLE"));
     await expect(unknown.submitView(roleSubmission)).rejects.toThrow("the modal refused the submission");
-    expect(unknownInvitations).toEqual([{ teamId: "T0BSHLLUGBD", channelId: "C0123456789", slackUserId: BAILEY.slackUserId }]);
+    expect(unknownInvitations).toHaveLength(1);
+    expect(unknownInvitations[0]?.taskId).toBe(unknown.taskId());
+    expect(unknownInvitations[0]?.claimDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(unknownInvitations[0]?.admissionId).toMatch(/^[0-9a-f-]{36}$/);
     expect(unknown.db.get(`DEVTASK#${unknown.taskId()}`, "PEOPLE")).toEqual(beforeUnknown);
     expect(unknown.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toEqual([]);
     expect(unknown.db.find((item) => item.entityType === "TASK_PEOPLE_NOTIFICATION")).toEqual([]);
@@ -515,11 +550,36 @@ describe("Suite 11: MCP parity", () => {
     await unknown.settle();
 
     const directory = taskPeopleDirectory(false);
-    const invitations: Array<{ teamId: string; channelId: string; slackUserId: string }> = [];
+    const invitations: Array<{ taskId: string; requestId: string; claimDigest: string; admissionId: string }> = [];
+    const inviteReceipts = new Map<string, { executionReceiptId: string; claimDigest: string; status: "STARTED" | "ACCEPTED" }>();
+    const e2eHolder: { value?: WorkflowE2E } = {};
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS }, taskPeople: {
       changesEnabled: true, checkTaskPerson: directory.check, taskPersonProof: directory.proof, taskPeopleDisplayRead: directory.display, boundChannels: [SECOND_CHANNEL],
-      inviteTaskPerson: async (input) => { invitations.push(input); directory.members.get(input.slackUserId)?.add(input.channelId); return "accepted"; },
+      inviteTaskPerson: async (input: TaskPersonInviteClaimRequest) => {
+        const current = e2eHolder.value;
+        if (current === undefined) throw new Error("workflow harness was not initialized before invite");
+        assertClaimMatchesPersistedProposal(current, input);
+        if (input.kind !== "task-person-invite-claimed" || input.taskId !== current.taskId()) throw new Error("invitation claim does not match the active task");
+        invitations.push({ taskId: input.taskId, requestId: input.requestId, claimDigest: input.claimDigest, admissionId: input.admission.id });
+        const key = `${input.taskId}/${input.requestId}`;
+        const existing = inviteReceipts.get(key);
+        if (existing !== undefined) {
+          if (existing.claimDigest !== input.claimDigest || existing.status !== "ACCEPTED") {
+            return { taskId: input.taskId, requestId: input.requestId, claimDigest: input.claimDigest, admissionId: input.admission.id,
+              status: "unknown", executionReceiptId: existing.executionReceiptId, reason: "effect_unknown" };
+          }
+          return { taskId: input.taskId, requestId: input.requestId, claimDigest: input.claimDigest, admissionId: input.admission.id,
+            status: "accepted", executionReceiptId: existing.executionReceiptId };
+        }
+        const receipt = { executionReceiptId: randomUUID(), claimDigest: input.claimDigest, status: "STARTED" as const };
+        inviteReceipts.set(key, receipt);
+        directory.members.get(BAILEY.slackUserId)?.add("C0123456789");
+        inviteReceipts.set(key, { ...receipt, status: "ACCEPTED" });
+        return { taskId: input.taskId, requestId: input.requestId, claimDigest: input.claimDigest, admissionId: input.admission.id,
+          status: "accepted", executionReceiptId: receipt.executionReceiptId };
+      },
     } });
+    e2eHolder.value = e2e;
     await atPlanReview(e2e);
     await e2e.click("agentx_task_people");
     e2e.stream.duplicateNext();
@@ -530,7 +590,10 @@ describe("Suite 11: MCP parity", () => {
     ]);
     await e2e.click("agentx_task_people");
     await e2e.submitView(roleSubmission);
-    expect(invitations).toEqual([{ teamId: "T0BSHLLUGBD", channelId: "C0123456789", slackUserId: BAILEY.slackUserId }]);
+    expect(invitations).toHaveLength(1);
+    expect(invitations[0]?.taskId).toBe(e2e.taskId());
+    expect(invitations[0]?.claimDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(invitations[0]?.admissionId).toMatch(/^[0-9a-f-]{36}$/);
     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "PEOPLE")).toMatchObject({ revision: 3, orphaned: false,
       people: [expect.objectContaining({ role: "owner" }), expect.objectContaining({ slackUserId: BAILEY.slackUserId, role: "owner" })] });
     expect(e2e.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toHaveLength(2);

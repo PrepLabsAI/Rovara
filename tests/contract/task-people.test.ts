@@ -24,7 +24,7 @@ import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/de
 import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
 import { checkTaskPersonIdentity } from "../../packages/broker/src/developer/task-person-identity.js";
 import type { TaskPeopleDisplayAdmission } from "../../packages/broker/src/developer/task-people-display-budget.js";
-import type { TaskPeopleDisplayReadRequest } from "../../packages/contracts/src/developer.js";
+import type { TaskPeopleDisplayReadRequest, TaskPersonInviteClaimRequest, TaskPersonInviteOutcome } from "../../packages/contracts/src/developer.js";
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";
 const TEAM = "T0PEOPLE1";
@@ -36,6 +36,10 @@ const C = "c".repeat(64);
 const SA = "U0OWNER001";
 const SB = "U0MEMBER01";
 const SC = "U0MEMBER02";
+const inviteOutcome = (request: TaskPersonInviteClaimRequest, status: "accepted" | "failed" | "unknown" = "accepted"): TaskPersonInviteOutcome => ({
+  taskId: request.taskId, requestId: request.requestId, claimDigest: request.claimDigest, admissionId: request.admission.id,
+  status, ...(status === "accepted" ? { executionReceiptId: randomUUID() } : { reason: status === "failed" ? "effect_rejected" : "transport_unknown" }),
+});
 
 const actor = (developerId: string, slackUserId: string, name: string): DeveloperCaller => ({
   developerId, slackUserId, name, sessionId: `session-${name}`, amr: "slack",
@@ -119,7 +123,7 @@ describe("People adapter correction acceptance", () => {
         ] });
         return { teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081" };
       },
-      inviteTaskPerson: async () => { invited += 1; return "accepted" as const; },
+      inviteTaskPerson: async (request: TaskPersonInviteClaimRequest) => { invited += 1; return inviteOutcome(request); },
     };
     await expect(submitSlackTaskPeopleRole(deps, OWNER, TASK_ID, { requestId: randomUUID(), expectedPeopleRevision: 1,
       slackUserId: SB, role: "owner", teamId: TEAM, channelId: CHANNEL })).rejects.toBeDefined();
@@ -523,7 +527,7 @@ describe("task people", () => {
     await getTaskPeople(h.deps, OWNER, TASK_ID);
     h.seedPerson(B, "22222222-2222-4222-8222-222222222222");
     let channelMember = false;
-    const invite = vi.fn(async () => { channelMember = true; return "accepted" as const; });
+    const invite = vi.fn(async (request: TaskPersonInviteClaimRequest) => { channelMember = true; return inviteOutcome(request); });
     const deps = { ...h.deps, issuer: "https://agentx.example.test", inviteTaskPerson: invite,
       taskPeopleChannel: async () => ({ teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081" }),
       resolveTaskPickerPerson: async () => ({ personId: "22222222-2222-4222-8222-222222222222", developerId: B, slackUserId: SB, channelMember }) };
@@ -532,7 +536,14 @@ describe("task people", () => {
     const result = await submitSlackTaskPeopleRole(deps, OWNER, TASK_ID, { requestId: "40000000-0000-4000-8000-000000000031",
       expectedPeopleRevision: 1, slackUserId: SB, role: "owner", teamId: TEAM, channelId: CHANNEL });
 
-    expect(invite).toHaveBeenCalledWith({ teamId: TEAM, channelId: CHANNEL, slackUserId: SB });
+    expect(invite).toHaveBeenCalledOnce();
+    const claimed = invite.mock.calls[0]?.[0];
+    expect(claimed?.kind).toBe("task-person-invite-claimed");
+    expect(claimed?.taskId).toBe(TASK_ID);
+    expect(claimed?.requestId).toBe("40000000-0000-4000-8000-000000000031");
+    expect(claimed?.claimDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(claimed?.admission).toMatchObject({ version: 1, remainingMs: 12_000, authorityRemainingMs: 6_000,
+      slackCallsLimit: 100, stateReadsLimit: 128 });
     expect(result.status).toBe("COMMITTED");
     if (result.status !== "COMMITTED") throw new Error("accepted invitation did not commit the role");
     expect(result.view.revision).toBe(2);
@@ -543,7 +554,7 @@ describe("task people", () => {
     const h = harness({ enabled: true });
     await getTaskPeople(h.deps, OWNER, TASK_ID);
     h.seedPerson(B, "22222222-2222-4222-8222-222222222222");
-    const invite = vi.fn(async () => "accepted" as const);
+    const invite = vi.fn(async (request: TaskPersonInviteClaimRequest) => inviteOutcome(request));
     const deps = { ...h.deps, issuer: "https://agentx.example.test", inviteTaskPerson: invite,
       taskPeopleChannel: async () => {
         const current = h.db.get(`DEVTASK#${TASK_ID}`, "META") as unknown as DeveloperTaskRecord;
@@ -564,13 +575,13 @@ describe("task people", () => {
       await getTaskPeople(h.deps, OWNER, TASK_ID);
       h.seedPerson(B, "22222222-2222-4222-8222-222222222222");
       let channelMember = false;
-      const invite = vi.fn(async () => {
-        if (outcome === "unknown") return "unknown" as const;
+      const invite = vi.fn(async (request: TaskPersonInviteClaimRequest) => {
+        if (outcome === "unknown") return inviteOutcome(request, "unknown");
         channelMember = true;
         h.checks.set(B, { ...h.checks.get(B)!, channelMember: true });
         h.db.set({ ...(h.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE") as Record<string, unknown>), revision: 2,
           people: [{ developerId: A, slackUserId: SA, name: OWNER.name, role: "viewer" }, { developerId: C, slackUserId: SC, name: OTHER.name, role: "owner" }], orphaned: false });
-        return "accepted" as const;
+        return inviteOutcome(request);
       });
       const deps = { ...h.deps, issuer: "https://agentx.example.test",
         taskPeopleChannel: async () => ({ teamId: TEAM, channelId: CHANNEL, threadTs: "1695500000.000081" }),

@@ -195,6 +195,98 @@ export const TaskDispatchProofResponseSchema = z.object({
 }).strict();
 export type TaskDispatchProofResponse = z.infer<typeof TaskDispatchProofResponseSchema>;
 
+const TaskPersonInviteAdmissionSchema = z.object({
+  version: z.literal(1),
+  id: z.string().uuid(),
+  deadlineAt: z.number().int().nonnegative(),
+  remainingMs: z.number().int().min(1).max(12_000),
+  authorityRemainingMs: z.number().int().min(1).max(6_000),
+  slackCallsLimit: z.number().int().min(1).max(100),
+  stateReadsLimit: z.number().int().min(1).max(128),
+}).strict();
+
+/** Claim-only internal request for the separately deployed invitation endpoint. */
+export const TaskPersonInviteClaimRequestSchema = z.object({
+  kind: z.literal("task-person-invite-claimed"),
+  taskId: z.string().uuid(),
+  requestId: z.string().uuid(),
+  claimDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  admission: TaskPersonInviteAdmissionSchema,
+}).strict().superRefine((value, context) => {
+  if (value.admission.authorityRemainingMs > value.admission.remainingMs) {
+    context.addIssue({ code: "custom", path: ["admission", "authorityRemainingMs"], message: "authority budget cannot exceed request budget" });
+  }
+});
+export type TaskPersonInviteClaimRequest = z.infer<typeof TaskPersonInviteClaimRequestSchema>;
+
+export const TaskPersonInviteReasonSchema = z.enum([
+  "disabled", "scope_unavailable", "claim_refused", "authorization_refused", "capability_refused",
+  "effect_rejected", "effect_unknown", "transport_unknown", "receipt_conflict",
+]);
+
+/** Internal result binds any effect outcome to the claim and the endpoint's durable receipt. */
+export const TaskPersonInviteOutcomeSchema = z.object({
+  taskId: z.string().uuid(),
+  requestId: z.string().uuid(),
+  claimDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  admissionId: z.string().uuid(),
+  status: z.enum(["accepted", "failed", "unknown"]),
+  executionReceiptId: z.string().uuid().optional(),
+  reason: TaskPersonInviteReasonSchema.optional(),
+}).strict().superRefine((value, context) => {
+  if (value.status === "accepted" && (value.executionReceiptId === undefined || value.reason !== undefined)) {
+    context.addIssue({ code: "custom", message: "accepted outcomes require a receipt and cannot include a failure reason" });
+  }
+  if (value.status === "failed" && value.reason === undefined) {
+    context.addIssue({ code: "custom", path: ["reason"], message: "failed outcomes require a definite no-effect reason" });
+  }
+  if (value.status === "failed" && value.reason !== undefined
+    && !["disabled", "scope_unavailable", "claim_refused", "authorization_refused", "capability_refused", "effect_rejected", "receipt_conflict"].includes(value.reason)) {
+    context.addIssue({ code: "custom", path: ["reason"], message: "uncertain effects cannot be reported as definite failures" });
+  }
+  if (value.status === "unknown" && value.reason === undefined) {
+    context.addIssue({ code: "custom", path: ["reason"], message: "unknown outcomes require an uncertainty reason" });
+  }
+});
+export type TaskPersonInviteOutcome = z.infer<typeof TaskPersonInviteOutcomeSchema>;
+
+/** Storage-neutral retained execution receipt shape. No Slack credentials or tokens are permitted. */
+export const TaskPersonInviteExecutionReceiptSchema = z.object({
+  pk: z.string().min(1),
+  sk: z.literal("META"),
+  entityType: z.literal("TASK_PERSON_INVITE_EXECUTION"),
+  executionReceiptId: z.string().uuid(),
+  taskId: z.string().uuid(),
+  requestId: z.string().uuid(),
+  claimDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  actorDeveloperId: z.string().regex(/^[a-f0-9]{64}$/),
+  targetDeveloperId: z.string().regex(/^[a-f0-9]{64}$/),
+  teamId: SlackTeamIdSchema,
+  channelId: SlackChannelIdSchema,
+  slackUserId: SlackUserIdSchema,
+  admissionId: z.string().uuid(),
+  attempt: z.literal(1),
+  status: z.enum(["STARTED", "ACCEPTED", "FAILED", "UNKNOWN"]),
+  startedAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  reason: TaskPersonInviteReasonSchema.optional(),
+}).strict().superRefine((value, context) => {
+  if (value.status === "STARTED" && value.reason !== undefined) {
+    context.addIssue({ code: "custom", path: ["reason"], message: "started receipts cannot have a result reason" });
+  }
+  if (value.status === "ACCEPTED" && value.reason !== undefined) {
+    context.addIssue({ code: "custom", path: ["reason"], message: "accepted receipts cannot have a failure reason" });
+  }
+  if (value.status === "FAILED" && (value.reason === undefined
+    || ["effect_unknown", "transport_unknown"].includes(value.reason))) {
+    context.addIssue({ code: "custom", path: ["reason"], message: "failed receipts require a definite no-effect reason" });
+  }
+  if (value.status === "UNKNOWN" && value.reason === undefined) {
+    context.addIssue({ code: "custom", path: ["reason"], message: "unknown receipts require an uncertainty reason" });
+  }
+});
+export type TaskPersonInviteExecutionReceipt = z.infer<typeof TaskPersonInviteExecutionReceiptSchema>;
+
 /** Internal complete fresh channel directory for Task People. It is never an HTTP route. */
 export const TaskChannelPeopleRequestSchema = z.object({
   kind: z.literal("task-channel-people"),
