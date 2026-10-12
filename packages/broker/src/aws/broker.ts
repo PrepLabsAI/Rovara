@@ -259,7 +259,7 @@ import { batchResults, parseStartBody, requireBatchProject, showBatch, startBatc
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 import { slackWorkflowCaller } from "./slack-workflow-caller.js";
 import { resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
-import { taskAccessFence } from "../developer/task-people.js";
+import { resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
 
 const MAX_ARTIFACT_BYTES = 5_000_000;
 const EVENT_TRANSACTION_CHUNK = 80;
@@ -1736,6 +1736,77 @@ async function sharedThread(dependencies: AwsBrokerDependencies, thread: SlackTh
  */
 function sharedThreadOpen(shared: SharedTaskRecord, binding: SlackChannelBinding): boolean {
   return shared.mode === "continue" && shared.closedAt === undefined && shared.workflowThread !== true && binding.projectName === shared.project;
+}
+
+function sharedStopForbidden(): never {
+  throw agentXError("FORBIDDEN", "this shared thread is not bound to the task's workspace");
+}
+
+async function verifiedSharedStopBinding(
+  dependencies: AwsBrokerDependencies,
+  thread: SlackThread,
+  binding: SlackChannelBinding,
+  shared: SharedTaskRecord,
+): Promise<{ task: DeveloperTaskRecord; workspace: WorkspaceInstance }> {
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(shared.taskId));
+  if (task === undefined || task.pk !== `DEVTASK#${shared.taskId}` || task.sk !== "META" || task.entityType !== "DEVELOPER_TASK"
+    || task.taskId !== shared.taskId || task.developerId !== shared.developerId || task.ownerKey !== shared.ownerKey
+    || task.ownerKey !== taskOwnerKey(task.developerId, task.taskId) || task.project !== shared.project
+    || task.workspaceId !== shared.workspaceId || task.closedAt !== undefined || binding.projectName !== task.project
+    || task.share?.teamId !== thread.teamId || task.share.channelId !== thread.channelId || task.share.threadTs !== thread.threadTs
+    || task.share.mode !== shared.mode || !Number.isSafeInteger(task.shareVersion)) sharedStopForbidden();
+
+  const workspaceItem = await getItem<Record<string, unknown>>(dependencies, workspaceKey(shared.workspaceId));
+  const parsedWorkspace = workspaceItem === undefined
+    ? undefined
+    : WorkspaceInstanceSchema.safeParse(workspaceRecordFields(workspaceItem));
+  if (parsedWorkspace === undefined || !parsedWorkspace.success || parsedWorkspace.data.id !== shared.workspaceId
+    || parsedWorkspace.data.ownerKey !== task.ownerKey || parsedWorkspace.data.projectName !== task.project) sharedStopForbidden();
+  return { task, workspace: parsedWorkspace.data };
+}
+
+function sharedStopFences(
+  dependencies: AwsBrokerDependencies,
+  thread: SlackThread,
+  shared: SharedTaskRecord,
+  task: DeveloperTaskRecord,
+  workspace: WorkspaceInstance,
+  peopleRevision: number | undefined,
+): ExtraItems {
+  const taskShare = task.share!;
+  return () => [
+    { ConditionCheck: {
+      TableName: dependencies.tableName,
+      Key: taskKey(task.taskId),
+      ConditionExpression: "taskId = :taskId AND developerId = :developerId AND ownerKey = :ownerKey AND #project = :project AND workspaceId = :workspaceId AND shareVersion = :shareVersion AND #share.#team = :team AND #share.#channel = :channel AND #share.#thread = :thread AND #share.#mode = :mode AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#project": "project", "#share": "share", "#team": "teamId", "#channel": "channelId", "#thread": "threadTs", "#mode": "mode" },
+      ExpressionAttributeValues: {
+        ":taskId": task.taskId, ":developerId": task.developerId, ":ownerKey": task.ownerKey, ":project": task.project,
+        ":workspaceId": workspace.id, ":shareVersion": task.shareVersion, ":team": taskShare.teamId, ":channel": taskShare.channelId,
+        ":thread": thread.threadTs, ":mode": "continue",
+      },
+    } },
+    { ConditionCheck: {
+      TableName: dependencies.tableName,
+      Key: sharedTaskKey(thread),
+      ConditionExpression: "taskId = :taskId AND developerId = :developerId AND ownerKey = :ownerKey AND #project = :project AND workspaceId = :workspaceId AND #mode = :mode AND attribute_not_exists(closedAt) AND attribute_not_exists(workflowThread)",
+      ExpressionAttributeNames: { "#project": "project", "#mode": "mode" },
+      ExpressionAttributeValues: {
+        ":taskId": shared.taskId, ":developerId": shared.developerId, ":ownerKey": shared.ownerKey, ":project": shared.project,
+        ":workspaceId": workspace.id, ":mode": "continue",
+      },
+    } },
+    { ConditionCheck: {
+      TableName: dependencies.tableName,
+      Key: workspaceKey(workspace.id),
+      ConditionExpression: "ownerKey = :ownerKey AND projectName = :project AND activeOperationId = :operationId AND fence = :fence",
+      ExpressionAttributeValues: {
+        ":ownerKey": workspace.ownerKey, ":project": workspace.projectName,
+        ":operationId": workspace.activeOperationId, ":fence": workspace.fence,
+      },
+    } },
+    taskAccessFence(dependencies.tableName, task.taskId, peopleRevision),
+  ];
 }
 
 function parseSlackHeaders(headers: Record<string, string | undefined>): Omit<NonNullable<AuthenticatedIdentity["slack"]>, "binding"> {
@@ -4655,14 +4726,23 @@ async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: S
   }
   if (shared !== undefined) {
     if (!sharedThreadOpen(shared, binding)) return { outcome: "NOTHING_RUNNING" };
+    const { task, workspace } = await verifiedSharedStopBinding(dependencies, thread, binding, shared);
+    // A strongly read absence preserves FR-054's verified legacy teammate stop. Any present or
+    // unreadable sidecar stays under current People authorization; only the transaction fence below
+    // can turn the observed absence into a cancellation.
+    const people = await getItem<Record<string, unknown>>(dependencies, { pk: `DEVTASK#${task.taskId}`, sk: "PEOPLE" });
+    if (people === undefined) {
+      return cancelRunningTask(dependencies, workspace, { requestedBy: requester },
+        sharedStopFences(dependencies, thread, shared, task, workspace, undefined));
+    }
     if (dependencies.developer === undefined) return { outcome: "NOT_OWNER" };
     let access: TaskAccess;
-    try { ({ access } = await slackTaskAccess(dependencies, developerTaskActions(dependencies), shared.taskId, requester.userId, "control", true)); }
+    try { ({ access } = await slackTaskAccess(dependencies, developerTaskActions(dependencies), task.taskId, requester.userId, "control", true)); }
     catch { return { outcome: "NOT_OWNER" }; }
-    if (access.task.share?.teamId !== thread.teamId || access.task.share.channelId !== thread.channelId || access.task.share.threadTs !== thread.threadTs) return { outcome: "NOT_OWNER" };
-    const workspace = await requireWorkspace(dependencies, shared.workspaceId);
-    if (workspace.ownerKey !== shared.ownerKey) throw agentXError("FORBIDDEN", "workspace does not belong to this task");
-    return cancelRunningTask(dependencies, workspace, { requestedBy: requester }, () => [taskAccessFence(dependencies.tableName, shared.taskId, access.peopleRevision)]);
+    if (access.peopleRevision === undefined || access.task.share?.teamId !== thread.teamId
+      || access.task.share.channelId !== thread.channelId || access.task.share.threadTs !== thread.threadTs) return { outcome: "NOT_OWNER" };
+    return cancelRunningTask(dependencies, workspace, { requestedBy: requester },
+      sharedStopFences(dependencies, thread, shared, task, workspace, access.peopleRevision));
   }
   const ownerKey = ownerKeyForSubject(SLACK_THREAD_OWNER_ISSUER, slackThreadSubject(thread));
   const record = await getItem<{ workspaceId?: string; closedAt?: string }>(dependencies, slackThreadKey(ownerKey));
@@ -4774,11 +4854,77 @@ async function authorizeWorkflowFeedbackApproval(dependencies: AwsBrokerDependen
   const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
   if (pointer?.taskId !== input.taskId) throw agentXError("CALLBACK_FORBIDDEN", "feedback approval task does not own this workspace");
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(input.taskId));
+  const decision = currentWorkflowFeedbackApproval(task, operation, input);
+  if (task === undefined || decision === undefined) {
+    throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
+  }
+  const accessDependencies = dependencies.developer === undefined ? undefined : developerTaskRouteDependencies({
+    documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
+    now: Date.now, tasks: developerTaskActions(dependencies),
+  }, {
+    developerId: task.developerId, sessionId: "workflow-feedback-approval", amr: task.provider, name: task.developerName,
+    ...(task.slackUserId === undefined ? {} : { slackUserId: task.slackUserId }),
+  }, undefined, null);
+  const access = await resolveTaskDispatchPeople({
+    documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+    ...(accessDependencies?.checkTaskPerson === undefined ? {} : { checkTaskPerson: accessDependencies.checkTaskPerson }),
+  }, task);
+  const authorizedActor = access === undefined ? decision.actorId === task.ownerKey
+    : access.status === "ALLOWED" && access.ownerActorIds.includes(decision.actorId);
+  if (!authorizedActor) throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
+
+  const finalPointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
+  const finalTask = await getItem<DeveloperTaskRecord>(dependencies, taskKey(input.taskId));
+  const finalOperation = await getItem<OperationRecord>(dependencies, operationKey(operation.workspaceId, operation.id));
+  if (finalPointer?.taskId !== input.taskId || currentWorkflowFeedbackApproval(finalTask, finalOperation, input) === undefined) {
+    throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
+  }
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      taskAccessFence(dependencies.tableName, input.taskId, access?.peopleRevision),
+      { ConditionCheck: {
+        TableName: dependencies.tableName, Key: taskKey(input.taskId),
+        ConditionExpression: "workspaceId = :workspaceId AND #ownerKey = :ownerKey AND attribute_not_exists(closedAt) AND workflow.#revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.feedbackDispatchApproval.requestId = :requestId AND workflow.feedbackDispatchApproval.reviewDigest = :reviewDigest AND workflow.feedbackDispatchApproval.proposalDigest = :proposalDigest AND workflow.feedbackDispatchApproval.candidateDigest = :candidateDigest",
+        ExpressionAttributeNames: { "#ownerKey": "ownerKey", "#revision": "revision", "#stage": "stage", "#state": "state" },
+        ExpressionAttributeValues: { ":workspaceId": operation.workspaceId, ":ownerKey": input.ownerId, ":revision": input.activeWorkflowRevision,
+          ":stage": "IMPLEMENT", ":state": "RUNNING", ":requestId": input.requestId, ":reviewDigest": input.reviewDigest,
+          ":proposalDigest": input.proposalDigest, ":candidateDigest": input.candidateDigest },
+      } },
+      { ConditionCheck: {
+        TableName: dependencies.tableName, Key: taskPointerKey(operation.workspaceId),
+        ConditionExpression: "taskId = :taskId", ExpressionAttributeValues: { ":taskId": input.taskId },
+      } },
+      { ConditionCheck: {
+        TableName: dependencies.tableName, Key: operationKey(operation.workspaceId, operation.id),
+        ConditionExpression: "fence = :fence AND #kind = :kind AND workflowMode = :mode AND workflowFeedbackApproval.taskId = :taskId AND workflowFeedbackApproval.requestId = :requestId AND workflowFeedbackApproval.ownerId = :ownerKey AND workflowFeedbackApproval.decisionWorkflowRevision = :decisionRevision AND workflowFeedbackApproval.activeWorkflowRevision = :activeRevision AND workflowFeedbackApproval.reviewDigest = :reviewDigest AND workflowFeedbackApproval.proposalDigest = :proposalDigest AND workflowFeedbackApproval.candidateDigest = :candidateDigest AND (#status = :accepted OR #status = :dispatching OR #status = :running)",
+        ExpressionAttributeNames: { "#kind": "kind", "#status": "status" },
+        ExpressionAttributeValues: { ":fence": operation.fence, ":kind": "task", ":mode": "IMPLEMENT", ":taskId": input.taskId,
+          ":requestId": input.requestId, ":ownerKey": input.ownerId, ":decisionRevision": input.decisionWorkflowRevision,
+          ":activeRevision": input.activeWorkflowRevision, ":reviewDigest": input.reviewDigest, ":proposalDigest": input.proposalDigest,
+          ":candidateDigest": input.candidateDigest, ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":running": "RUNNING" },
+      } },
+      { ConditionCheck: {
+        TableName: dependencies.tableName, Key: workspaceKey(operation.workspaceId),
+        ConditionExpression: "#ownerKey = :ownerKey AND fence = :fence AND activeOperationId = :operationId",
+        ExpressionAttributeNames: { "#ownerKey": "ownerKey" },
+        ExpressionAttributeValues: { ":ownerKey": input.ownerId, ":fence": operation.fence, ":operationId": operation.id },
+      } },
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
+  }
+}
+
+function currentWorkflowFeedbackApproval(task: DeveloperTaskRecord | undefined, operation: OperationRecord | undefined,
+  input: WorkflowFeedbackApprovalBinding): NonNullable<NonNullable<DeveloperTaskRecord["workflow"]>["feedbackDecisions"]>[number] | undefined {
   const workflow = task?.workflow;
+  const binding = operation?.workflowFeedbackApproval;
   const review = workflow?.feedbackReview;
   const decision = workflow?.feedbackDecisions?.find(item => item.requestId === input.requestId);
   const activePullRequests = workflow?.pullRequests?.filter(pr => pr.state === "OPEN" || pr.state === "UNKNOWN") ?? [];
-  if (task?.workspaceId !== operation.workspaceId || task.ownerKey !== input.ownerId || task.closedAt !== undefined
+  if (operation?.kind !== "task" || operation.workflowMode !== "IMPLEMENT" || binding === undefined || !sameFeedbackApproval(binding, input)
+    || task?.workspaceId !== operation.workspaceId || task.ownerKey !== input.ownerId || task.closedAt !== undefined
     || workflow === undefined || workflow.revision !== input.activeWorkflowRevision || workflow.stage !== "IMPLEMENT" || workflow.state !== "RUNNING"
     || workflow.candidate?.digest !== input.candidateDigest || workflow.feedbackDispatchApproval === undefined
     || !sameFeedbackApproval(workflow.feedbackDispatchApproval, input)
@@ -4790,13 +4936,12 @@ async function authorizeWorkflowFeedbackApproval(dependencies: AwsBrokerDependen
     || review.bundleRefs.some(ref => !activePullRequests.some(pr => pr.repositoryId === ref.repositoryId && pr.number === ref.number
       && pr.headSha === ref.headSha && pr.candidateDigest === ref.candidateDigest
       && workflow.candidate?.repositories.some(repo => repo.repositoryId === ref.repositoryId && repo.treeSha === ref.headTreeSha)))
-    || decision?.decision !== "APPROVE" || decision.actorRole !== "TASK_OWNER" || decision.actorId !== task.ownerKey
+    || decision?.decision !== "APPROVE" || decision.actorRole !== "TASK_OWNER"
     || decision.workflowRevision !== input.decisionWorkflowRevision || decision.reviewDigest !== input.reviewDigest
     || decision.proposalDigest !== input.proposalDigest || JSON.stringify(decision.bundleDigests) !== JSON.stringify(input.bundleDigests)
     || JSON.stringify(decision.selectedFindingIds) !== JSON.stringify(input.selectedFindingIds)
-    || JSON.stringify(decision.selectedCommentIds) !== JSON.stringify(input.selectedCommentIds)) {
-    throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
-  }
+    || JSON.stringify(decision.selectedCommentIds) !== JSON.stringify(input.selectedCommentIds)) return undefined;
+  return decision;
 }
 
 /**

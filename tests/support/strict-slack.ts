@@ -67,6 +67,10 @@ function validateElement(method: string, element: unknown): void {
     }
     case "static_select":
     case "multi_static_select": return validateOptions(method, record, SLACK_LIMITS.selectOptions);
+    case "users_select": {
+      if (record.options !== undefined || record.value !== undefined) refuse(method, "invalid_blocks");
+      return;
+    }
     case "plain_text_input": {
       if (record.max_length !== undefined && (typeof record.max_length !== "number" || record.max_length > SLACK_LIMITS.plainTextInputMax)) refuse(method, "invalid_blocks");
       return;

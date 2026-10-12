@@ -192,6 +192,10 @@ describe("workflow E2E harness", () => {
     await e2e.click("agentx_workflow_approve", { messageTs: card.ts, deliver: "twice" });
     await e2e.settle();
     expect(e2e.workflow().decisions.filter((decision) => decision.decision === "APPROVE")).toHaveLength(1);
+    expect(e2e.slackActionTimestamps).toHaveLength(2);
+    expect(e2e.slackActionTimestamps[0]).toBe(e2e.slackActionTimestamps[1]);
+    await e2e.click("agentx_workflow_close");
+    expect(e2e.slackActionTimestamps[2]).not.toBe(e2e.slackActionTimestamps[1]);
     expect(await e2e.concurrently(async () => 1, async () => 2)).toEqual([1, 2]);
   }, 120_000);
 

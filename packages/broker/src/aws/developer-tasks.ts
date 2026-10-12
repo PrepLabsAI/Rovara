@@ -574,7 +574,7 @@ const FEEDBACK_BUNDLE_TOTAL_MAX_BYTES = 8_000_000;
 
 /** Return a private review only after current task ownership and every stored digest are verified. */
 export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<Record<string, unknown>> {
-  const task = (await authorizeTaskAction(deps, caller, taskId, "feedback")).task;
+  const task = (await authorizeTaskActor(deps, caller, taskId, "feedback")).task;
   const workflow = task.workflow;
   const review = workflow?.feedbackReview;
   const decision = workflow?.feedbackDecisions?.find(item => item.reviewDigest === review?.reviewRef?.sha256);
@@ -4845,20 +4845,20 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (proposalRoute !== null && request.method === "GET") {
     const taskId = safeDecode(proposalRoute[1]!);
     const requestId = safeDecode(proposalRoute[2]!);
-    return getTaskPeopleProposal(deps, caller, taskId, requestId);
+    return { change: await getTaskPeopleProposal(deps, caller, taskId, requestId) };
   }
   const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
-  if (taskId !== undefined && request.method === "GET" && route?.[2] === "people") return getTaskPeople(deps, caller, taskId);
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "people") return { view: await getTaskPeople(deps, caller, taskId) };
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/role") {
     const input = parse(TaskPeopleRoleRequestSchema, body(request), deps, "people/role");
-    return proposeTaskPeopleRole(taskPeopleEffectsDependencies(deps), caller, taskId, input);
+    return { change: await proposeTaskPeopleRole(taskPeopleEffectsDependencies(deps), caller, taskId, input) };
   }
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/take-ownership") {
     const input = parse(TaskPeopleTakeOwnershipRequestSchema, body(request), deps, "people/take-ownership");
-    return proposeTaskOwnership(taskPeopleEffectsDependencies(deps), caller, taskId, input);
+    return { change: await proposeTaskOwnership(taskPeopleEffectsDependencies(deps), caller, taskId, input) };
   }
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "continue") return continueTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/decision") return decideTaskWorkflow(deps, caller, taskId, body(request));

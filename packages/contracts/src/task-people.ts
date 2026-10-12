@@ -39,6 +39,20 @@ export const TaskPeopleChangeResultSchema = z.discriminatedUnion("status", [
 ]);
 export type TaskPeopleChangeResult = z.infer<typeof TaskPeopleChangeResultSchema>;
 
+/** Strict REST transport envelope. The outer requestId is HTTP trace metadata, never proposal identity. */
+export const TaskPeopleViewResponseSchema = z.object({
+  view: TaskPeopleViewSchema,
+  requestId: z.string(),
+}).strict();
+export type TaskPeopleViewResponse = z.infer<typeof TaskPeopleViewResponseSchema>;
+
+/** Strict REST transport envelope that preserves the change's own proposal requestId. */
+export const TaskPeopleChangeResponseSchema = z.object({
+  change: TaskPeopleChangeResultSchema,
+  requestId: z.string(),
+}).strict();
+export type TaskPeopleChangeResponse = z.infer<typeof TaskPeopleChangeResponseSchema>;
+
 export const TaskPeopleProposalSchema = z.object({
   requestId: z.string().uuid(),
   taskId: z.string().uuid(),
