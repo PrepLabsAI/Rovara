@@ -126,6 +126,25 @@ describe("task person runtime factory", () => {
     await expect(checker.stateAuthorityWitnessForOwnerActor(nativeTask(), taskOwnerKey("b".repeat(64), taskId))).resolves.toBeUndefined();
   });
 
+  it("keeps target eligibility separate from the in-channel Owner witness", async () => {
+    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
+    const injected = ports({ memberOf: [] });
+    injected.projectAuthorityReader.memberships.mockResolvedValue({
+      items: [{ pk: `MEMBER#${nativeDeveloperId}`, sk: "PROJECT#payments-api", projectName: "payments-api", role: "developer" }] as never,
+      complete: true,
+    });
+    const checker = runtime(admission, injected);
+    const eligibility = await checker.checkTaskPerson(nativeTask(), nativeDeveloperId);
+    expect(eligibility).toMatchObject({ eligible: true, channelMember: false });
+    await expect(checker.stateAuthorityWitnessForOwnerActor(nativeTask(), taskOwnerKey(nativeDeveloperId, taskId))).resolves.toBeUndefined();
+
+    await expect(checker.stateAuthorityWitnessForEligiblePerson(nativeTask(), nativeDeveloperId)).resolves.toMatchObject({
+      taskId, developerId: nativeDeveloperId, project: "payments-api", access: "granted",
+      membership: { pk: `MEMBER#${nativeDeveloperId}`, sk: "PROJECT#payments-api", projectName: "payments-api", role: "developer" },
+      projectRevision: { pk: "PROJECT#payments-api", sk: "REV#000000000007", revision: 7, developerTasksPresent: false },
+    });
+  });
+
   it.each(["project revision", "developer grant", "channel binding"] as const)("refuses a positive authority read with missing %s State keys", async (missing) => {
     const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
     const injected = ports();

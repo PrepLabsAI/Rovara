@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { describe, expect, it, vi } from "vitest";
 import type { TaskPersonInviteExecutionReceipt } from "../../packages/contracts/src/developer.js";
 import { createTaskPersonInviteHandler, type TaskPersonInviteHandlerPorts } from "../../packages/broker/src/aws/task-person-invite-handler.js";
+import { taskPersonInviteStateConditions, type TaskPersonProjectAuthorityWitness } from "../../packages/broker/src/aws/task-person-invite-authority-fence.js";
 import { taskPersonInviteClaimDigest } from "../../packages/broker/src/developer/task-people-effects.js";
 import type { TaskPersonCheck } from "../../packages/broker/src/developer/task-people.js";
 
@@ -53,6 +55,35 @@ function fixture(overrides: Partial<TaskPersonInviteHandlerPorts> = {}) {
   let clock = now;
   const receipts = new Map<string, TaskPersonInviteExecutionReceipt>();
   const send = vi.fn(async () => ({ kind: "accepted" as const }));
+  const projectRevision = { pk: "PROJECT#project-alpha", sk: "REV#000000000007", revision: 7, developerTasksPresent: false };
+  const actorAuthority: TaskPersonProjectAuthorityWitness = {
+    taskId, developerId: actorId, project: "project-alpha", access: "granted", projectRevision,
+    membership: { pk: `MEMBER#${actorId}`, sk: "PROJECT#project-alpha", projectName: "project-alpha", role: "developer" },
+  };
+  const targetAuthority: TaskPersonProjectAuthorityWitness = {
+    taskId, developerId: targetId, project: "project-alpha", access: "channel", projectRevision,
+    binding: { pk: `SLACK_BINDING#${teamId}`, sk: "CHANNEL#C0OTHER001", teamId, channelId: "C0OTHER001", projectName: "project-alpha", updatedAt: "2026-10-12T11:59:00.000Z" },
+  };
+  const authorityConditions = taskPersonInviteStateConditions({ taskId, project: "project-alpha", teamId, actor: actorAuthority, target: targetAuthority })!;
+  const authorityRows = new Map<string, Record<string, unknown>>([
+    ["PROJECT#project-alpha/REV#000000000007", { pk: "PROJECT#project-alpha", sk: "REV#000000000007", definition: { revision: 7 } }],
+    [`MEMBER#${actorId}/PROJECT#project-alpha`, { pk: `MEMBER#${actorId}`, sk: "PROJECT#project-alpha", projectName: "project-alpha", role: "developer" }],
+    [`SLACK_BINDING#${teamId}/CHANNEL#C0OTHER001`, targetAuthority.binding!],
+  ]);
+  const conditionMatches = (condition: typeof authorityConditions[number]): boolean => {
+    const row = authorityRows.get(`${condition.pk}/${condition.sk}`);
+    if (row === undefined) return false;
+    if (condition.kind === "project-revision") {
+      const definition = row.definition as Record<string, unknown> | undefined;
+      return row.pk === condition.pk && row.sk === condition.sk && definition?.revision === condition.revision
+        && (Object.hasOwn(definition ?? {}, "developerTasks") === condition.developerTasksPresent)
+        && (!condition.developerTasksPresent || isDeepStrictEqual(definition?.developerTasks, condition.developerTasks));
+    }
+    if (condition.kind === "developer-grant") return row.pk === condition.pk && row.sk === condition.sk
+      && row.projectName === condition.projectName && row.role === "developer";
+    return row.pk === condition.pk && row.sk === condition.sk && row.teamId === condition.teamId
+      && row.channelId === condition.channelId && row.projectName === condition.projectName && row.updatedAt === condition.updatedAt;
+  };
   const check = (developerId: string): TaskPersonCheck => ({
     subject: { developerId, slackUserId: developerId === actorId ? actorSlackId : targetSlackId },
     identity: { developerId, slackUserId: developerId === actorId ? actorSlackId : targetSlackId, name: "Person", method: "slack", issuer: "https://slack.example", subject: developerId === actorId ? actorSlackId : targetSlackId },
@@ -64,17 +95,25 @@ function fixture(overrides: Partial<TaskPersonInviteHandlerPorts> = {}) {
     expectedTeamId: teamId,
     stateTableName: "state",
     async readState({ sortKey }) { return rows.get(sortKey); },
-    createPersonChecker: () => async (_task, developerId) => check(developerId),
+    createPersonChecker: () => ({
+      checkTaskPerson: async (_task, developerId) => check(developerId),
+      stateAuthorityWitnessForOwnerActor: async () => actorAuthority,
+      stateAuthorityWitnessForEligiblePerson: async () => targetAuthority,
+    }),
     async readChannelInfo() { return { isPrivate: false, botIsMember: true, slackCallsUsed: 1 }; },
     async beginReceipt({ receipt, stateFence }) {
       if (JSON.stringify(stateFence.task) !== JSON.stringify(rows.get("META"))
         || JSON.stringify(stateFence.people) !== JSON.stringify(rows.get("PEOPLE"))
-        || JSON.stringify(stateFence.proposal) !== JSON.stringify(rows.get(`PEOPLE_PROPOSAL#${requestId}`))) return { kind: "conflict" };
+        || JSON.stringify(stateFence.proposal) !== JSON.stringify(rows.get(`PEOPLE_PROPOSAL#${requestId}`))
+        || !isDeepStrictEqual(stateFence.actorAuthority, actorAuthority)
+        || !isDeepStrictEqual(stateFence.targetAuthority, targetAuthority)
+        || !isDeepStrictEqual(stateFence.authorityConditions, authorityConditions)
+        || !stateFence.authorityConditions.every(conditionMatches)) return { kind: "conflict" };
       const key = `${receipt.pk}/${receipt.sk}`;
       const existing = receipts.get(key);
-      if (existing !== undefined) return { kind: "existing", receipt: existing };
+      if (existing !== undefined) return { kind: "existing", receipt: existing, stateFenceVerified: true };
       receipts.set(key, receipt);
-      return { kind: "created" };
+      return { kind: "created", stateFenceVerified: true };
     },
     async finishReceipt({ executionReceiptId, claimDigest, status, reason }) {
       const receipt = [...receipts.values()].find((candidate) => candidate.executionReceiptId === executionReceiptId);
@@ -88,7 +127,7 @@ function fixture(overrides: Partial<TaskPersonInviteHandlerPorts> = {}) {
       publicInviteCapability: true, privateInviteCapability: false },
     ...overrides,
   };
-  return { request, rows, receipts, ports, send, setNow(value: number) { clock = value; } };
+  return { request, rows, receipts, authorityRows, actorAuthority, targetAuthority, ports, send, setNow(value: number) { clock = value; } };
 }
 
 describe("Task Person invite handler", () => {
@@ -108,6 +147,94 @@ describe("Task Person invite handler", () => {
     expect(first.status).toBe("accepted");
     expect(second).toMatchObject({ status: "accepted", executionReceiptId: first.executionReceiptId });
     expect(f.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes the exact actor and eligible target authority predicates into the receipt CAS", async () => {
+    const f = fixture();
+    let receivedFence: unknown;
+    const beginReceipt = f.ports.beginReceipt.bind(f.ports);
+    f.ports.beginReceipt = async (input) => {
+      receivedFence = input.stateFence;
+      return beginReceipt(input);
+    };
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result.status).toBe("accepted");
+    expect(receivedFence).toMatchObject({
+      actorAuthority: { developerId: actorId, access: "granted", membership: { role: "developer" } },
+      targetAuthority: { developerId: targetId, access: "channel", binding: { channelId: "C0OTHER001" } },
+      authorityConditions: [
+        { kind: "project-revision", pk: "PROJECT#project-alpha", sk: "REV#000000000007", developerTasksPresent: false },
+        { kind: "developer-grant", pk: `MEMBER#${actorId}`, sk: "PROJECT#project-alpha" },
+        { kind: "channel-binding", pk: `SLACK_BINDING#${teamId}`, sk: "CHANNEL#C0OTHER001" },
+      ],
+    });
+  });
+
+  it("refuses a stale or conflicting project revision between actor and target witnesses", () => {
+    const f = fixture();
+    const staleTarget = { ...f.targetAuthority, projectRevision: { ...f.targetAuthority.projectRevision, revision: 8, sk: "REV#000000000008" } };
+    expect(taskPersonInviteStateConditions({ taskId, project: "project-alpha", teamId, actor: f.actorAuthority, target: staleTarget })).toBeUndefined();
+    const malformedTarget = { ...f.targetAuthority, binding: { ...f.targetAuthority.binding!, pk: "MEMBER#wrong" } };
+    expect(taskPersonInviteStateConditions({ taskId, project: "project-alpha", teamId, actor: f.actorAuthority, target: malformedTarget })).toBeUndefined();
+  });
+
+  it("refuses the effect when a captured target binding is deleted before receipt CAS", async () => {
+    const f = fixture();
+    f.ports.readChannelInfo = async () => {
+      f.authorityRows.delete(`SLACK_BINDING#${teamId}/CHANNEL#C0OTHER001`);
+      return { isPrivate: false, botIsMember: true, slackCallsUsed: 1 };
+    };
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result).toMatchObject({ status: "failed", reason: "receipt_conflict" });
+    expect(f.send).not.toHaveBeenCalled();
+    expect(f.receipts.size).toBe(0);
+  });
+
+  it("does not replay ACCEPTED when the current admission cannot condition-check its actor grant", async () => {
+    const f = fixture();
+    const handler = createTaskPersonInviteHandler(f.ports);
+    const first = await handler(f.request);
+    expect(first.status).toBe("accepted");
+    f.authorityRows.delete(`MEMBER#${actorId}/PROJECT#project-alpha`);
+    const second = await handler({ ...f.request, admission: { ...f.request.admission, id: randomUUID() } });
+    expect(second.status).not.toBe("accepted");
+    expect(f.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves the original accepted receipt while correlating a valid replay to its new admission", async () => {
+    const f = fixture();
+    const handler = createTaskPersonInviteHandler(f.ports);
+    const first = await handler(f.request);
+    expect(first.status).toBe("accepted");
+    const storedBeforeReplay = [...f.receipts.values()][0];
+    expect(storedBeforeReplay).toBeDefined();
+
+    const replayAdmissionId = randomUUID();
+    const replay = await handler({ ...f.request, admission: { ...f.request.admission, id: replayAdmissionId } });
+
+    expect(replay).toMatchObject({ status: "accepted", executionReceiptId: first.executionReceiptId, admissionId: replayAdmissionId });
+    expect([...f.receipts.values()][0]).toEqual(storedBeforeReplay);
+    expect(storedBeforeReplay).toMatchObject({
+      pk: `TASK_INVITE#${taskId}#${requestId}`, sk: "META", taskId, requestId, claimDigest: f.request.claimDigest,
+      actorDeveloperId: actorId, targetDeveloperId: targetId, teamId, channelId, slackUserId: targetSlackId,
+      admissionId: f.request.admission.id, executionReceiptId: first.executionReceiptId,
+    });
+    expect(f.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses before receipt creation when the target has no current positive project witness", async () => {
+    const f = fixture();
+    const original = f.ports.createPersonChecker.bind(f.ports);
+    f.ports.createPersonChecker = (admission) => ({
+      ...original(admission),
+      stateAuthorityWitnessForEligiblePerson: async () => undefined,
+    });
+    const beginReceipt = vi.fn(f.ports.beginReceipt.bind(f.ports));
+    f.ports.beginReceipt = beginReceipt;
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result).toMatchObject({ status: "failed", reason: "authorization_refused" });
+    expect(beginReceipt).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -197,7 +324,7 @@ describe("Task Person invite handler", () => {
     ["Slack user", { slackUserId: "U0OTHER001" }],
   ])("does not trust an accepted receipt with a different %s", async (_label, changed) => {
     const f = fixture({
-      async beginReceipt({ receipt }) { return { kind: "existing", receipt: { ...receipt, status: "ACCEPTED", ...changed } }; },
+      async beginReceipt({ receipt }) { return { kind: "existing", receipt: { ...receipt, status: "ACCEPTED", ...changed }, stateFenceVerified: true }; },
     });
     const result = await createTaskPersonInviteHandler(f.ports)(f.request);
     expect(result.status).not.toBe("accepted");
@@ -226,7 +353,7 @@ describe("Task Person invite handler", () => {
     };
     f.ports.beginReceipt = async ({ receipt }) => {
       f.setNow(now + lookupCompletedAt);
-      return { kind: "existing", receipt: { ...receipt, executionReceiptId: receiptId, status: "ACCEPTED", admissionId: randomUUID() } };
+      return { kind: "existing", receipt: { ...receipt, executionReceiptId: receiptId, status: "ACCEPTED", admissionId: randomUUID() }, stateFenceVerified: true };
     };
     const result = await createTaskPersonInviteHandler(f.ports)(f.request);
     expect(result).toMatchObject({ status: "unknown", reason: "authorization_refused", executionReceiptId: receiptId,
@@ -240,13 +367,13 @@ describe("Task Person invite handler", () => {
     const checker = f.ports.createPersonChecker.bind(f.ports);
     const readChannelInfo = vi.fn(f.ports.readChannelInfo.bind(f.ports));
     f.ports.createPersonChecker = (admission) => {
-      const check = checker(admission);
+      const runtime = checker(admission);
       let charged = false;
-      return async (task, developerId) => {
-        const result = await check(task, developerId);
+      return { ...runtime, checkTaskPerson: async (task, developerId) => {
+        const result = await runtime.checkTaskPerson(task, developerId);
         if (!charged) { admission.recordSlackUsage(100); charged = true; }
         return result;
-      };
+      } };
     };
     f.ports.readChannelInfo = readChannelInfo;
     const result = await createTaskPersonInviteHandler(f.ports)(f.request);
@@ -259,12 +386,12 @@ describe("Task Person invite handler", () => {
     const f = fixture();
     const checker = f.ports.createPersonChecker.bind(f.ports);
     f.ports.createPersonChecker = (admission) => {
-      const check = checker(admission);
+      const runtime = checker(admission);
       let charged = false;
-      return async (task, developerId) => {
+      return { ...runtime, checkTaskPerson: async (task, developerId) => {
         if (!charged) { admission.recordSlackUsage(97); charged = true; }
-        return check(task, developerId);
-      };
+        return runtime.checkTaskPerson(task, developerId);
+      } };
     };
     f.ports.invite = async () => ({ kind: "already_in_channel" });
     let memberInput: unknown;
@@ -296,7 +423,7 @@ describe("Task Person invite handler", () => {
   ] as const)("does not resend a matching existing %s receipt", async (status, reason) => {
     const f = fixture({
       async beginReceipt({ receipt }) {
-        return { kind: "existing", receipt: { ...receipt, status, ...(reason === undefined ? {} : { reason }), admissionId: randomUUID() } };
+        return { kind: "existing", receipt: { ...receipt, status, ...(reason === undefined ? {} : { reason }), admissionId: randomUUID() }, stateFenceVerified: true };
       },
     });
     const result = await createTaskPersonInviteHandler(f.ports)(f.request);

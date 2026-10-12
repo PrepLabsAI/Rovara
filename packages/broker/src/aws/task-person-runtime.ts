@@ -167,9 +167,11 @@ function identityDependencies(input: {
 }
 
 export type CheckTaskPerson = (task: DeveloperTaskRecord, developerId: string) => ReturnType<typeof checkTaskPersonIdentity>;
+export type TaskPersonStateAuthorityWitness = ProjectAuthorityWitness & { taskId: string; developerId: string; project: string };
 export interface TaskPersonRuntime {
   checkTaskPerson: CheckTaskPerson;
-  stateAuthorityWitnessForOwnerActor(task: DeveloperTaskRecord, ownerActorId: string): Promise<(ProjectAuthorityWitness & { taskId: string; developerId: string; project: string }) | undefined>;
+  stateAuthorityWitnessForOwnerActor(task: DeveloperTaskRecord, ownerActorId: string): Promise<TaskPersonStateAuthorityWitness | undefined>;
+  stateAuthorityWitnessForEligiblePerson(task: DeveloperTaskRecord, developerId: string): Promise<TaskPersonStateAuthorityWitness | undefined>;
 }
 
 /** Creates a guard-local checker. Its injected ports expose only the bounded People read set. */
@@ -184,8 +186,23 @@ export function createTaskPersonRuntime(input: {
   checkIdentity?: typeof checkTaskPersonIdentity;
 }): TaskPersonRuntime {
   const checkIdentity = input.checkIdentity ?? checkTaskPersonIdentity;
-  const witnesses = new Map<string, ProjectAuthorityWitness & { taskId: string; developerId: string; project: string }>();
+  const witnesses = new Map<string, TaskPersonStateAuthorityWitness & { eligible: true; channelMember: boolean }>();
   const witnessKey = (taskId: string, developerId: string) => `${taskId}\0${developerId}`;
+  const currentWitness = async (task: DeveloperTaskRecord, developerId: string, witness: TaskPersonStateAuthorityWitness | undefined): Promise<TaskPersonStateAuthorityWitness | undefined> => {
+    if (witness === undefined || witness.taskId !== task.taskId || witness.developerId !== developerId || witness.project !== task.project) return undefined;
+    input.admission.assertOpen();
+    const latest = await input.ports.projectAuthorityReader.latestRevision(task.project, input.admission, input.admission.admitStateRead());
+    input.admission.assertOpen();
+    const revision = latest.revision;
+    const validRevision = revision !== undefined && Number.isSafeInteger(revision.revision) && revision.revision >= 0
+      && typeof revision.definition === "object" && revision.definition !== null && !Array.isArray(revision.definition);
+    const samePolicy = latest.complete && validRevision && revision !== undefined
+      && revision.pk === witness.projectRevision.pk && revision.sk === witness.projectRevision.sk
+      && revision.revision === witness.projectRevision.revision
+      && Object.hasOwn(revision.definition, "developerTasks") === witness.projectRevision.developerTasksPresent
+      && (!witness.projectRevision.developerTasksPresent || isDeepStrictEqual(revision.definition.developerTasks, witness.projectRevision.developerTasks));
+    return samePolicy ? witness : undefined;
+  };
   return {
     async checkTaskPerson(task, developerId) {
       witnesses.delete(witnessKey(task.taskId, developerId));
@@ -203,28 +220,21 @@ export function createTaskPersonRuntime(input: {
       });
       const result = await checkIdentity(dependencies, task, developerId);
       input.admission.assertOpen();
-      if (result.eligible && result.channelMember && projectWitness !== undefined) witnesses.set(witnessKey(task.taskId, developerId), {
-        ...projectWitness, taskId: task.taskId, developerId, project: task.project,
+      if (result.eligible && result.identity.developerId === developerId && projectWitness !== undefined) witnesses.set(witnessKey(task.taskId, developerId), {
+        ...projectWitness, taskId: task.taskId, developerId, project: task.project, eligible: true, channelMember: result.channelMember,
       });
       return result;
     },
     async stateAuthorityWitnessForOwnerActor(task, ownerActorId) {
       const witness = [...witnesses.values()].find((candidate) => candidate.taskId === task.taskId
-        && candidate.project === task.project && taskOwnerKey(candidate.developerId, task.taskId) === ownerActorId);
-      if (witness === undefined) return undefined;
-      input.admission.assertOpen();
-      const latest = await input.ports.projectAuthorityReader.latestRevision(task.project, input.admission, input.admission.admitStateRead());
-      input.admission.assertOpen();
-      const revision = latest.revision;
-      const validRevision = revision !== undefined && Number.isSafeInteger(revision.revision) && revision.revision >= 0
-        && typeof revision.definition === "object" && revision.definition !== null && !Array.isArray(revision.definition);
-      const samePolicy = latest.complete && validRevision && revision !== undefined
-        && revision.pk === witness.projectRevision.pk && revision.sk === witness.projectRevision.sk
-        && revision.revision === witness.projectRevision.revision
-        && Object.hasOwn(revision.definition, "developerTasks") === witness.projectRevision.developerTasksPresent
-        && (!witness.projectRevision.developerTasksPresent || isDeepStrictEqual(revision.definition.developerTasks, witness.projectRevision.developerTasks));
-      if (!samePolicy) return undefined;
-      return witness;
+        && candidate.project === task.project && candidate.channelMember
+        && taskOwnerKey(candidate.developerId, task.taskId) === ownerActorId);
+      return currentWitness(task, witness?.developerId ?? "", witness);
+    },
+    async stateAuthorityWitnessForEligiblePerson(task, developerId) {
+      const witness = witnesses.get(witnessKey(task.taskId, developerId));
+      if (witness?.eligible !== true) return undefined;
+      return currentWitness(task, developerId, witness);
     },
   };
 }

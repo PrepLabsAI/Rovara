@@ -15,8 +15,11 @@ import {
 } from "@agentx/contracts";
 import type { TaskAuthorityAdmission } from "./task-authority-admission.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
+import { taskOwnerKey } from "../developer/task-records.js";
 import type { TaskPersonCheck } from "../developer/task-people.js";
 import { taskPersonInviteClaimDigest, type TaskPersonInviteClaimFields } from "../developer/task-people-effects.js";
+import type { TaskPersonRuntime } from "./task-person-runtime.js";
+import { taskPersonInviteStateConditions, type TaskPersonInviteStateCondition, type TaskPersonProjectAuthorityWitness } from "./task-person-invite-authority-fence.js";
 
 const unavailable = () => agentXError("SLACK_UNAVAILABLE", "task channel invitation is unavailable");
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -31,15 +34,24 @@ export interface TaskPersonInviteHandlerPorts {
   /** Exact strongly consistent task-partition read; sort keys are chosen and bounded by the handler. */
   readState(input: { taskId: string; sortKey: string; consistentRead: true; abortSignal: AbortSignal }): Promise<Record<string, unknown> | undefined>;
   /** Builds the normal fresh Task Person identity/project checker on this admission; no legacy fallback. */
-  createPersonChecker(admission: TaskAuthorityAdmission): (task: DeveloperTaskRecord, developerId: string) => Promise<TaskPersonCheck>;
+  createPersonChecker(admission: TaskAuthorityAdmission): TaskPersonRuntime;
   /** Fresh Slack channel type/member read. Usage counts against the same admission as identity proof. */
   readChannelInfo(input: { teamId: string; channelId: string; slackCallsLimit: number; deadlineAt: number; abortSignal: AbortSignal }): Promise<{ isPrivate: boolean; botIsMember: boolean; slackCallsUsed: number }>;
   /** Storage-neutral conditional create in a separately retained attempts store. It must condition on the supplied State snapshot; it cannot write State. */
   beginReceipt(input: {
     receipt: TaskPersonInviteExecutionReceipt;
-    stateFence: { task: DeveloperTaskRecord; people: People; proposal: Proposal };
+    stateFence: {
+      task: DeveloperTaskRecord;
+      people: People;
+      proposal: Proposal;
+      actorAuthority: TaskPersonProjectAuthorityWitness;
+      targetAuthority: TaskPersonProjectAuthorityWitness;
+      authorityConditions: readonly TaskPersonInviteStateCondition[];
+    };
     abortSignal: AbortSignal;
-  }): Promise<{ kind: "created" } | { kind: "existing"; receipt: unknown } | { kind: "conflict" }>;
+  }): Promise<{ kind: "created"; stateFenceVerified: true }
+    | { kind: "existing"; receipt: unknown; stateFenceVerified: true }
+    | { kind: "conflict" }>;
   /** Conditional update of the same attempts-store receipt from STARTED only. */
   finishReceipt(input: {
     executionReceiptId: string;
@@ -192,8 +204,12 @@ export function createTaskPersonInviteHandler(ports: TaskPersonInviteHandlerPort
     let targetRegistry: Record<string, unknown>;
     let actorSubject: Record<string, unknown>;
     let targetSubject: Record<string, unknown>;
-    let targetCheck: TaskPersonCheck;
     let channelIsPrivate: boolean;
+    let authorityFence: {
+      actorAuthority: TaskPersonProjectAuthorityWitness;
+      targetAuthority: TaskPersonProjectAuthorityWitness;
+      authorityConditions: readonly TaskPersonInviteStateCondition[];
+    } | undefined;
     try {
       const rawTask = await read("META");
       const rawProposal = await read(`PEOPLE_PROPOSAL#${request.requestId}`);
@@ -232,12 +248,12 @@ export function createTaskPersonInviteHandler(ports: TaskPersonInviteHandlerPort
         return resultFor(request, "failed", { reason: "authorization_refused" });
       }
       const checker = ports.createPersonChecker(authority);
-      const actorCheck = await checker(task, proposal.callerDeveloperId);
+      const actorCheck = await checker.checkTaskPerson(task, proposal.callerDeveloperId);
       authority.assertOpen();
       if (!actorCheck.eligible || !actorCheck.channelMember || !samePrincipal(actorCheck, actorRegistry, proposal.callerDeveloperId)) {
         return resultFor(request, "failed", { reason: "authorization_refused" });
       }
-      targetCheck = await checker(task, proposal.targetDeveloperId);
+      const targetCheck = await checker.checkTaskPerson(task, proposal.targetDeveloperId);
       authority.assertOpen();
       if (!targetCheck.eligible || !samePrincipal(targetCheck, targetRegistry, proposal.targetDeveloperId)) {
         return resultFor(request, "failed", { reason: "authorization_refused" });
@@ -261,6 +277,18 @@ export function createTaskPersonInviteHandler(ports: TaskPersonInviteHandlerPort
       if (ports.configuration.peopleChangesEnabled !== true || (!publicAllowed && !privateAllowed)) {
         return resultFor(request, "failed", { reason: "capability_refused" });
       }
+      const actorAuthority = await checker.stateAuthorityWitnessForOwnerActor(task, taskOwnerKey(proposal.callerDeveloperId, task.taskId));
+      const targetAuthority = await checker.stateAuthorityWitnessForEligiblePerson(task, proposal.targetDeveloperId);
+      authority.assertOpen();
+      if (actorAuthority === undefined || targetAuthority === undefined) {
+        return resultFor(request, "failed", { reason: "authorization_refused" });
+      }
+      const authorityConditions = taskPersonInviteStateConditions({
+        taskId: task.taskId, project: task.project, teamId: proposal.invitationTeamId,
+        actor: actorAuthority, target: targetAuthority,
+      });
+      if (authorityConditions === undefined) return resultFor(request, "failed", { reason: "authorization_refused" });
+      authorityFence = { actorAuthority, targetAuthority, authorityConditions };
     } catch {
       authority.close();
       return resultFor(request, "failed", { reason: "authorization_refused" });
@@ -268,6 +296,7 @@ export function createTaskPersonInviteHandler(ports: TaskPersonInviteHandlerPort
 
     authority.close();
     const effectDeadline = Math.min(totalDeadline - 1_000, ports.now() + 5_000);
+    if (authorityFence === undefined) return resultFor(request, "failed", { reason: "authorization_refused" });
     if (effectDeadline - ports.now() < 1_000 || ports.configuration.peopleChangesEnabled !== true || slackCalls <= 0) {
       return resultFor(request, "failed", { reason: "capability_refused" });
     }
@@ -283,13 +312,14 @@ export function createTaskPersonInviteHandler(ports: TaskPersonInviteHandlerPort
     const effectSignal = () => AbortSignal.timeout(Math.max(1, effectDeadline - ports.now()));
     let begin: Awaited<ReturnType<TaskPersonInviteHandlerPorts["beginReceipt"]>>;
     try {
-      begin = await ports.beginReceipt({ receipt: proposedReceipt, stateFence: { task, people, proposal }, abortSignal: effectSignal() });
+      begin = await ports.beginReceipt({ receipt: proposedReceipt, stateFence: { task, people, proposal, ...authorityFence }, abortSignal: effectSignal() });
     } catch {
       return resultFor(request, "unknown", { reason: "receipt_conflict" });
     }
     if (!isRecord(begin) || !(begin.kind === "created" || begin.kind === "existing" || begin.kind === "conflict")) {
       return resultFor(request, "unknown", { reason: "receipt_conflict" });
     }
+    if (begin.kind !== "conflict" && begin.stateFenceVerified !== true) return resultFor(request, "unknown", { reason: "receipt_conflict" });
     const persistenceSignal = () => AbortSignal.timeout(Math.max(1, totalDeadline - ports.now()));
     const finish = async (status: "ACCEPTED" | "FAILED" | "UNKNOWN", reason?: TaskPersonInviteOutcome["reason"]): Promise<boolean> => {
       if (ports.now() >= totalDeadline) return false;
