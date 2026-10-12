@@ -53,6 +53,11 @@ describe("shared release helpers", () => {
     expect(() => parseReleaseArgs(["--surprise"], {})).toThrow(/unknown option/);
   });
 
+  it("omits empty optional profile values and still rejects an empty worker image option", () => {
+    expect(parseReleaseArgs([], { AWS_PROFILE: "" })).not.toHaveProperty("profile");
+    expect(() => parseReleaseArgs(["--worker-image", ""], {})).toThrow("--worker-image requires a value");
+  });
+
   it("creates immutable release tags and validates digest-scoped images", () => {
     expect(releaseTag(new Date("2026-09-23T17:50:35.123Z"), "4f885bb4a8eaffff"))
       .toBe("release-20260923T175035Z-4f885bb4a8ea");

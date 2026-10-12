@@ -3,6 +3,7 @@ import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ENVIRONMENT_PLACEHOLDER, STACK_PARTS, environmentStackName } from "@agentx/contracts";
+import type { AssetMetadataEntry } from "@aws-cdk/cloud-assembly-schema";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { SUPPORTED_REGIONS } from "../../infra/lib/production-foundation.js";
@@ -148,7 +149,12 @@ export interface ReleaseAssetLike {
  * alone, so the same asset id must produce the same parameter names in every stack that uses it;
  * that is checked here rather than assumed.
  */
-export function accumulateAsset(packagesById: Map<string, PackageAccumulator>, asset: ReleaseAssetLike, part: string, directory: string): void {
+export function accumulateAsset(
+  packagesById: Map<string, PackageAccumulator>,
+  asset: ReleaseAssetLike | AssetMetadataEntry,
+  part: string,
+  directory: string,
+): void {
   if (asset.packaging !== "zip") {
     throw new Error(
       `unsupported asset packaging ${JSON.stringify(asset.packaging)} for asset ${asset.id} in the ${part} template; only zip-packaged Lambda code assets are supported here, images are published separately`,
