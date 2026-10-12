@@ -299,10 +299,10 @@ export function slackDirectory(input: {
       }
       const user = userOf(reply.body);
       const parsedId = SlackUserIdSchema.safeParse(user.id);
-      const readableEligibilityFlags = (user.deleted === undefined || typeof user.deleted === "boolean")
-        && (user.is_stranger === undefined || typeof user.is_stranger === "boolean");
-      if (!parsedId.success || parsedId.data !== userId || !readableEligibilityFlags) return { ok: false, error: "slack_unavailable" };
-      if (!inTeam(user) || user.is_stranger === true) continue;
+      if (!parsedId.success || parsedId.data !== userId) return { ok: false, error: "slack_unavailable" };
+      const eligibility = taskPersonEligibility(user);
+      if (eligibility === "unknown") return { ok: false, error: "slack_unavailable" };
+      if (eligibility === "ineligible") continue;
       users.push({ id: parsedId.data, teamId: input.teamId, name: proofName(user, parsedId.data), memberOf: membership.get(userId)! });
     }
     return { ok: true, users };
