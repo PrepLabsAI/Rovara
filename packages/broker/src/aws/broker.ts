@@ -218,9 +218,9 @@ import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
+import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
@@ -257,6 +257,7 @@ import { dropWatchedBatch, listWatchedBatches, recordWatchedBatchThread, startSl
 import { batchResults, parseStartBody, requireBatchProject, showBatch, startBatch, stopBatchById } from "./eval-batch-admin.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 import { slackWorkflowCaller } from "./slack-workflow-caller.js";
+import { resolveTaskAccess } from "../developer/task-access.js";
 
 const MAX_ARTIFACT_BYTES = 5_000_000;
 const EVENT_TRANSACTION_CHUNK = 80;
@@ -660,7 +661,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackTaskAuthorizationEvent | SlackTaskPeopleConfirmEvent | SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | SlackWorkflowSendBackEvent | SlackWorkflowResolveFindingsEvent | SlackWorkflowCloseEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" } | { source: "agentx.workflow-dispatch-recovery" } | { source: "agentx.workflow-merge-recovery" }, context?: { awsRequestId?: string }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -735,6 +736,27 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (error instanceof AgentXError) {
           return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         }
+        return unexpectedErrorAnswer(error, "slack-ingress");
+      }
+    }
+    if (isSlackTaskAuthorizationEvent(event)) {
+      try { return json(await authorizeSlackTaskAction(dependencies, tasks, event), "slack-ingress"); }
+      catch (error) {
+        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        return unexpectedErrorAnswer(error, "slack-ingress");
+      }
+    }
+    if (isSlackTaskPeopleConfirmEvent(event)) {
+      try { return json(await confirmSlackTaskPeople(dependencies, tasks, event), "slack-ingress"); }
+      catch (error) {
+        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        return unexpectedErrorAnswer(error, "slack-ingress");
+      }
+    }
+    if (isSlackTaskPeopleReadEvent(event) || isSlackTaskPeopleChangeEvent(event) || isSlackTaskPeopleTakeOwnershipEvent(event)) {
+      try { return json(await handleSlackTaskPeople(dependencies, tasks, event), "slack-ingress"); }
+      catch (error) {
+        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
@@ -4042,6 +4064,103 @@ export interface SlackWorkflowFeedbackNoteEvent {
   eventId: string; messageTs: string; text: string;
 }
 
+export interface SlackTaskAuthorizationEvent {
+  source: "agentx.slack-ingress"; action: "task-people-authorize"; taskId: string; userId: string; thread: SlackThread;
+  taskAction: "decide" | "retry" | "publish" | "feedback" | "close" | "control";
+}
+
+export interface SlackTaskPeopleConfirmEvent {
+  source: "agentx.slack-ingress"; action: "task-people-confirm"; taskId: string; requestId: string; userId: string; thread: SlackThread;
+}
+
+export interface SlackTaskPeopleReadEvent {
+  source: "agentx.slack-ingress"; action: "task-people-read"; taskId: string; userId: string; thread: SlackThread;
+}
+export interface SlackTaskPeopleChangeEvent {
+  source: "agentx.slack-ingress"; action: "task-people-change"; taskId: string; requestId: string; expectedPeopleRevision: number;
+  slackUserId: string; role: "owner" | "commenter" | "viewer" | "denied"; userId: string; thread: SlackThread;
+}
+export interface SlackTaskPeopleTakeOwnershipEvent {
+  source: "agentx.slack-ingress"; action: "task-people-take-ownership"; taskId: string; requestId: string; expectedPeopleRevision: number;
+  userId: string; thread: SlackThread;
+}
+
+function slackTaskPeopleBase(event: unknown, action: SlackTaskPeopleReadEvent["action"] | SlackTaskPeopleChangeEvent["action"] | SlackTaskPeopleTakeOwnershipEvent["action"]): event is Record<string, unknown> {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === action && value.requestContext === undefined
+    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.thread === "object" && value.thread !== null;
+}
+export const isSlackTaskPeopleReadEvent = (event: unknown): event is SlackTaskPeopleReadEvent => slackTaskPeopleBase(event, "task-people-read");
+export const isSlackTaskPeopleChangeEvent = (event: unknown): event is SlackTaskPeopleChangeEvent => {
+  if (!slackTaskPeopleBase(event, "task-people-change")) return false;
+  return typeof event.requestId === "string" && Number.isSafeInteger(event.expectedPeopleRevision) && typeof event.slackUserId === "string"
+    && (event.role === "owner" || event.role === "commenter" || event.role === "viewer" || event.role === "denied");
+};
+export const isSlackTaskPeopleTakeOwnershipEvent = (event: unknown): event is SlackTaskPeopleTakeOwnershipEvent => {
+  if (!slackTaskPeopleBase(event, "task-people-take-ownership")) return false;
+  return typeof event.requestId === "string" && Number.isSafeInteger(event.expectedPeopleRevision);
+};
+
+async function handleSlackTaskPeople(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions,
+  event: SlackTaskPeopleReadEvent | SlackTaskPeopleChangeEvent | SlackTaskPeopleTakeOwnershipEvent) {
+  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+  const thread = SlackThreadSchema.parse(event.thread);
+  const caller = slackWorkflowCaller(SlackRequesterSchema.shape.userId.parse(event.userId));
+  const taskId = randomUUIDSchema.parse(event.taskId);
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
+  const access = await resolveTaskAccess(routeDeps, caller, taskId, event.action === "task-people-read" ? "read" : event.action === "task-people-change" ? "peopleManage" : "takeOwnership");
+  if (access.task.share?.teamId !== thread.teamId || access.task.share.channelId !== thread.channelId || access.task.share.threadTs !== thread.threadTs) {
+    throw agentXError("FORBIDDEN", "this task belongs to another Slack thread");
+  }
+  if (event.action === "task-people-read") return getTaskPeople(routeDeps, caller, taskId);
+  const requestId = randomUUIDSchema.parse(event.requestId);
+  if (!Number.isSafeInteger(event.expectedPeopleRevision) || event.expectedPeopleRevision < 1) throw agentXError("CONFIG_INVALID", "People revision is invalid");
+  if (event.action === "task-people-take-ownership") return submitSlackTaskOwnership(routeDeps, caller, taskId, { requestId, expectedPeopleRevision: event.expectedPeopleRevision });
+  return submitSlackTaskPeopleRole(routeDeps, caller, taskId, { requestId, expectedPeopleRevision: event.expectedPeopleRevision,
+    slackUserId: SlackRequesterSchema.shape.userId.parse(event.slackUserId), role: event.role, teamId: thread.teamId, channelId: thread.channelId });
+}
+
+export function isSlackTaskPeopleConfirmEvent(event: unknown): event is SlackTaskPeopleConfirmEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "task-people-confirm" && value.requestContext === undefined
+    && typeof value.taskId === "string" && typeof value.requestId === "string" && typeof value.userId === "string" && typeof value.thread === "object" && value.thread !== null;
+}
+
+async function confirmSlackTaskPeople(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackTaskPeopleConfirmEvent) {
+  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+  const thread = SlackThreadSchema.parse(event.thread);
+  const caller = slackWorkflowCaller(SlackRequesterSchema.shape.userId.parse(event.userId));
+  const taskId = randomUUIDSchema.parse(event.taskId);
+  const requestId = randomUUIDSchema.parse(event.requestId);
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
+  const access = await resolveTaskAccess(routeDeps, caller, taskId, "read");
+  if (access.task.share?.teamId !== thread.teamId || access.task.share.channelId !== thread.channelId || access.task.share.threadTs !== thread.threadTs) throw agentXError("FORBIDDEN", "this task belongs to another Slack thread");
+  return confirmTaskPeopleProposal(routeDeps, caller, taskId, requestId);
+}
+
+export function isSlackTaskAuthorizationEvent(event: unknown): event is SlackTaskAuthorizationEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "task-people-authorize" && value.requestContext === undefined
+    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.thread === "object" && value.thread !== null
+    && ["decide", "retry", "publish", "feedback", "close", "control"].includes(String(value.taskAction));
+}
+
+async function authorizeSlackTaskAction(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackTaskAuthorizationEvent) {
+  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+  const thread = SlackThreadSchema.parse(event.thread);
+  const caller = slackWorkflowCaller(SlackRequesterSchema.shape.userId.parse(event.userId));
+  const taskId = randomUUIDSchema.parse(event.taskId);
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
+  const access = await resolveTaskAccess(routeDeps, caller, taskId, event.taskAction);
+  if (access.task.share?.teamId !== thread.teamId || access.task.share.channelId !== thread.channelId || access.task.share.threadTs !== thread.threadTs) {
+    throw agentXError("FORBIDDEN", "this task belongs to another Slack thread");
+  }
+  return { authorized: true };
+}
+
 export function isSlackWorkflowStartEvent(event: unknown): event is SlackWorkflowStartEvent {
   if (!event || typeof event !== "object") return false;
   const value = event as Record<string, unknown>;
@@ -4147,12 +4266,20 @@ async function ownedSlackWorkflowTask(dependencies: AwsBrokerDependencies, event
   const taskId = randomUUIDSchema.parse(event.taskId);
   const requestId = randomUUIDSchema.parse(event.requestId);
   if (dependencies.developer.slackTeamId !== thread.teamId) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
-  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
-  if (task === undefined || task.slackUserId !== userId) throw agentXError("FORBIDDEN", `only the task owner can ${what}`);
+  const caller = slackWorkflowCaller(userId);
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks: developerTaskActions(dependencies) }, caller);
+  let task: DeveloperTaskRecord;
+  try {
+    const access = await resolveTaskAccess(routeDeps, caller, taskId, "read");
+    if (access.role !== "owner") throw agentXError("FORBIDDEN", `only a current task owner can ${what}`);
+    task = access.task;
+  } catch {
+    throw agentXError("FORBIDDEN", `only a current task owner can ${what}`);
+  }
   if (task.share?.teamId !== thread.teamId || task.share.channelId !== thread.channelId || task.share.threadTs !== thread.threadTs) {
     throw agentXError("FORBIDDEN", "this task belongs to another Slack thread");
   }
-  return { task, taskId, requestId, caller: slackWorkflowCaller(userId), developer: dependencies.developer };
+  return { task, taskId, requestId, caller, developer: dependencies.developer };
 }
 
 /** Task 16: Send back to coding, through the same route an AI tool uses. */
@@ -8111,6 +8238,7 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
     taskPeopleConfiguration: { peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true" },
     channelMembers: channelMembersThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     taskPersonProof: taskPersonProofThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    taskChannelPeople: taskChannelPeopleThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     channelInfo: channelInfoThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     slackUserByEmail: slackUserByEmailThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     slackAuthCheck: slackAuthCheckThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),

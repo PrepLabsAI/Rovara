@@ -33,6 +33,7 @@ export interface TaskPeopleDependencies {
   now(): number;
   taskPeopleConfiguration?: TaskPeopleConfiguration;
   checkTaskPerson?: CheckTaskPerson;
+  listTaskPeople?: (task: DeveloperTaskRecord) => Promise<readonly TaskPersonIdentity[]>;
 }
 
 export interface TaskPeopleView {
@@ -67,6 +68,7 @@ const TRANSACTION_LIMIT = 100;
 const PEOPLE_SK = "PEOPLE";
 
 const denied = (): never => { throw agentXError("TASK_ACCESS_DENIED", "task access could not be verified"); };
+const unavailable = (): never => { throw agentXError("RUNTIME_UNAVAILABLE", "Task People is unavailable in this deployment"); };
 const stale = (): never => { throw agentXError("IDEMPOTENCY_CONFLICT", "People changed; refresh the task and try again"); };
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
 const exactKeys = (value: Record<string, unknown>, keys: readonly string[]) =>
@@ -300,6 +302,7 @@ async function currentPeopleForCaller(
 ): Promise<TaskPeople> {
   const stored = await loadPeople(deps, task.taskId);
   if (stored !== undefined) return reconcile(deps, task, stored);
+  if (!enabled(deps)) return unavailable();
   await authorizeColdInitialization(deps, task, caller, ownerOnly);
   return reconcile(deps, task, await initialize(deps, task));
 }
@@ -422,6 +425,7 @@ async function commitMutation(
   beforeRole: StoredTaskRole | null,
   afterRole: StoredTaskRole,
   targetDeveloperId: string,
+  notification?: { slackUserId: string; role: StoredTaskRole },
 ): Promise<TaskPeopleView> {
   const outcome = await viewOf(deps, task, next, caller);
   const createdAt = new Date(deps.now()).toISOString();
@@ -444,6 +448,11 @@ async function commitMutation(
     } },
     { Put: { TableName: deps.tableName, Item: event, ConditionExpression: "attribute_not_exists(pk)" } },
     { Put: { TableName: deps.tableName, Item: request, ConditionExpression: "attribute_not_exists(pk)" } },
+    ...(notification === undefined ? [] : [{ Put: { TableName: deps.tableName, Item: {
+      pk: taskPk(task.taskId), sk: `PEOPLE_NOTIFY#${requestId}`, entityType: "TASK_PEOPLE_NOTIFICATION", schemaVersion: 1,
+      taskId: task.taskId, requestId, targetDeveloperId, slackUserId: notification.slackUserId, role: notification.role,
+      peopleRevision: next.revision, status: "PENDING", attempts: 0, createdAt,
+    }, ConditionExpression: "attribute_not_exists(pk)" } }]),
   ];
   try {
     await transact(deps, items);
@@ -512,7 +521,49 @@ export async function getTaskPeople(deps: TaskPeopleDependencies, caller: Develo
   const task = await loadTask(deps, taskId);
   const people = await currentPeopleForCaller(deps, task, caller, false);
   await authorizedRead(deps, task, people, caller);
+  if (deps.listTaskPeople !== undefined) await deps.listTaskPeople(task);
   return viewOf(deps, task, people, caller);
+}
+
+/** A polling-safe capability read: it checks only META, PEOPLE and the caller's current proof. */
+export async function getTaskPeopleCapabilities(
+  deps: TaskPeopleDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+): Promise<{ peopleRevision?: number; canManagePeople: boolean; canTakeOwnership: boolean }> {
+  const task = await loadTask(deps, taskId);
+  const people = await loadPeople(deps, taskId);
+  if (people === undefined) return { canManagePeople: false, canTakeOwnership: false };
+  const current = await reconcile(deps, task, people);
+  const role = await effectiveRole(deps, task, current, caller.developerId);
+  if (role === null) return denied();
+  let canTakeOwnership = false;
+  if (enabled(deps) && open(task) && current.orphaned) {
+    const proof = await checked(deps, task, caller.developerId);
+    canTakeOwnership = proof.eligible && proof.channelMember;
+  }
+  return {
+    peopleRevision: current.revision,
+    canManagePeople: enabled(deps) && open(task) && role === "owner",
+    canTakeOwnership,
+  };
+}
+
+/** Resolves an opaque public person ID to a freshly-qualified internal target. */
+export async function resolveTaskPeopleTarget(
+  deps: TaskPeopleDependencies,
+  taskId: string,
+  personId: string,
+): Promise<{ developerId: string }> {
+  if (!UUID.test(personId)) return denied();
+  const task = await loadTask(deps, taskId);
+  const person = await get(deps, personKey(taskId, personId));
+  if (person === undefined || person.pk !== taskPk(taskId) || person.sk !== personKey(taskId, personId).sk || person.personId !== personId) return denied();
+  const identity = parseIdentity(person);
+  if (identity === undefined) return denied();
+  const proof = await checked(deps, task, identity.developerId);
+  if (!proof.eligible || !samePrincipal(identity, proof.identity)) return denied();
+  return { developerId: identity.developerId };
 }
 
 export async function changeTaskPeople(
@@ -547,7 +598,8 @@ export async function changeTaskPeople(
   const nextEntries = existing === undefined ? [...people.people, entry] : people.people.map((person) => person.developerId === input.targetDeveloperId ? entry : person);
   const next: TaskPeople = { schemaVersion: 1, revision: people.revision + 1, orphaned: !nextEntries.some((person) => person.role === "owner"), people: nextEntries };
   preflight([{ Put: { TableName: deps.tableName, Item: { ...peopleKey(taskId), ...next } } }]);
-  return commitMutation(deps, task, caller, people, next, input.requestId, "change", payload, beforeRole, input.role, input.targetDeveloperId);
+  return commitMutation(deps, task, caller, people, next, input.requestId, "change", payload, beforeRole, input.role, input.targetDeveloperId,
+    !proof.channelMember && input.role !== "denied" ? { slackUserId: proof.identity.slackUserId, role: input.role } : undefined);
 }
 
 export async function takeTaskOwnership(

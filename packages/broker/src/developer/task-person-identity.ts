@@ -234,6 +234,42 @@ export async function resolveTaskPickerPerson(
   return persistIdentity(deps, stored.taskId, nativeIdentity(slackUserId, proof.name));
 }
 
+/** E: resolves a signed Slack picker selection to its immutable opaque task person. */
+export async function resolveTaskPickerPersonWithId(
+  deps: TaskPersonIdentityDependencies,
+  task: DeveloperTaskRecord,
+  slackUserId: string,
+): Promise<{ personId: string; identity: TaskPersonIdentity }> {
+  const identity = await resolveTaskPickerPerson(deps, task, slackUserId);
+  const reverse = await getItem(deps, taskPk(task.taskId), subjectSk(identity.developerId));
+  if (reverse === undefined || reverse.pk !== taskPk(task.taskId) || reverse.sk !== subjectSk(identity.developerId)
+    || reverse.schemaVersion !== 1 || reverse.developerId !== identity.developerId || typeof reverse.personId !== "string" || !UUID.test(reverse.personId)) return refuse();
+  return { personId: reverse.personId, identity };
+}
+
+/** Registers a complete fresh Slack directory result without re-reading Slack or creating sessions. */
+export async function registerTaskChannelPeople(
+  deps: TaskPersonIdentityDependencies,
+  task: DeveloperTaskRecord,
+  users: readonly { id: string; teamId: string; name: string; memberOf: readonly string[] }[],
+): Promise<readonly TaskPersonIdentity[]> {
+  const stored = await currentTask(deps, task.taskId);
+  if (stored.project !== task.project || stored.developerId !== task.developerId || stored.provider !== task.provider || stored.slackUserId !== task.slackUserId) return refuse();
+  const identities: TaskPersonIdentity[] = [];
+  for (const user of users) {
+    if (user.teamId !== deps.slackTeamId || !SlackUserIdSchema.safeParse(user.id).success) return unavailable();
+    const identity = nativeIdentity(user.id, safeName(user.name, user.id));
+    try {
+      await deps.targetProjectAccess({ developerId: identity.developerId, slackUserId: user.id }, stored.project, user.memberOf);
+    } catch (error) {
+      if (error instanceof Error && (error as Error & { code?: string }).code === "PROJECT_ACCESS_DENIED") continue;
+      return unavailable();
+    }
+    identities.push(await persistIdentity(deps, stored.taskId, identity));
+  }
+  return identities;
+}
+
 async function storedIdentityStatus(deps: TaskPersonIdentityDependencies, identity: TaskPersonIdentity): Promise<"current" | "ineligible"> {
   if (identity.method === "slack") {
     if (identity.issuer !== SLACK_OIDC_ISSUER || identity.subject !== identity.slackUserId || identity.developerId !== developerIdForSlackUser(identity.slackUserId)) return refuse();

@@ -8,15 +8,71 @@ import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSA
 import { developerTaskIdentity, plannerRepliesKey } from "../../packages/broker/src/developer/task-records.js";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
 import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import type { Notice } from "../../packages/broker/src/developer/notifications.js";
+import { noticesOf, type Notice } from "../../packages/broker/src/developer/notifications.js";
 import { MAYA, createDeveloperTaskBroker, recordStream } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
-import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 const SECRET = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
 const BOT_TOKEN = "xoxb-1111-2222-plantedbottoken";
+
+describe("Task People direct-message receipts", () => {
+  it("claims and sends a current grant once, then records the Slack receipt", async () => {
+    const db = new FakeDynamoDb();
+    const taskId = "11111111-1111-4111-8111-111111111111";
+    const requestId = "40000000-0000-4000-8000-000000000001";
+    const developerId = "b".repeat(64);
+    db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 2, orphaned: false, people: [{ developerId, slackUserId: "U0MEMBER01", name: "Bailey", role: "viewer" }] });
+    const receipt = { pk: `DEVTASK#${taskId}`, sk: `PEOPLE_NOTIFY#${requestId}`, entityType: "TASK_PEOPLE_NOTIFICATION", schemaVersion: 1,
+      taskId, requestId, targetDeveloperId: developerId, slackUserId: "U0MEMBER01", role: "viewer", peopleRevision: 2, status: "PENDING", attempts: 0, createdAt: new Date().toISOString() };
+    db.set(receipt);
+    const post = vi.fn(async (input: { channel: string; threadTs?: string; text: string; blocks?: unknown[] }) => {
+      void input;
+      return { ts: "123.456", channel: "D0PEOPLE1" };
+    });
+    const handler = createNotifierHandler({ documentClient: db, tableName: "state", enqueue: async () => undefined, retryLater: async () => undefined,
+      post, now: () => Date.now(), log: () => undefined, deliveryFailed: () => undefined, peopleChangesEnabled: true, reviewUrlBase: "https://agentx.example.test" });
+    const notice: Notice = { id: `${taskId}:people:${requestId}`, kind: "people_dm", taskId, peopleRequestId: requestId, at: new Date().toISOString() };
+    expect(noticesOf(undefined, receipt, notice.at, "stream-1")).toEqual([notice]);
+    await handler({ Records: [{ eventSource: "aws:sqs", messageId: "m1", receiptHandle: "r1", body: JSON.stringify(notice), attributes: { ApproximateReceiveCount: "1" } }] });
+    expect(post).toHaveBeenCalledOnce();
+    expect(post.mock.calls[0]![0]).toMatchObject({ channel: "U0MEMBER01" });
+    expect(db.get(`DEVTASK#${taskId}`, `PEOPLE_NOTIFY#${requestId}`)).toMatchObject({ status: "SENT", attempts: 1, postedTs: "123.456", postedChannel: "D0PEOPLE1" });
+  });
+
+  it("retries definite failures only at 30/60 seconds and never retries an ambiguous post", async () => {
+    const taskId = "11111111-1111-4111-8111-111111111111";
+    const developerId = "b".repeat(64);
+    const exercise = async (requestId: string, error: SlackPostError) => {
+      const db = new FakeDynamoDb();
+      db.set({ pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 2, orphaned: false, people: [{ developerId, slackUserId: "U0MEMBER01", name: "Bailey", role: "viewer" }] });
+      db.set({ pk: `DEVTASK#${taskId}`, sk: `PEOPLE_NOTIFY#${requestId}`, entityType: "TASK_PEOPLE_NOTIFICATION", schemaVersion: 1,
+        taskId, requestId, targetDeveloperId: developerId, slackUserId: "U0MEMBER01", role: "viewer", peopleRevision: 2, status: "PENDING", attempts: 0, createdAt: new Date().toISOString() });
+      const retryLater = vi.fn(async (receiptHandle: string, seconds: number) => {
+        void receiptHandle;
+        void seconds;
+      });
+      const handler = createNotifierHandler({ documentClient: db, tableName: "state", enqueue: async () => undefined, retryLater,
+        post: async () => { throw error; }, now: () => Date.now(), log: () => undefined, deliveryFailed: () => undefined, peopleChangesEnabled: true });
+      const notice: Notice = { id: `${taskId}:people:${requestId}`, kind: "people_dm", taskId, peopleRequestId: requestId, at: new Date().toISOString() };
+      const deliver = (attempt: number) => handler({ Records: [{ eventSource: "aws:sqs", messageId: `m${attempt}`, receiptHandle: `r${attempt}`, body: JSON.stringify(notice), attributes: { ApproximateReceiveCount: String(attempt) } }] });
+      return { db, retryLater, deliver, key: `PEOPLE_NOTIFY#${requestId}` };
+    };
+    const definite = await exercise("40000000-0000-4000-8000-000000000002", new SlackPostError("channel_not_found"));
+    expect((await definite.deliver(1)).batchItemFailures).toHaveLength(1);
+    expect((await definite.deliver(2)).batchItemFailures).toHaveLength(1);
+    expect((await definite.deliver(3)).batchItemFailures).toEqual([]);
+    expect(definite.retryLater.mock.calls.map((call) => call[1])).toEqual([30, 60]);
+    expect(definite.db.get(`DEVTASK#${taskId}`, definite.key)).toMatchObject({ status: "FAILED", attempts: 3 });
+
+    const ambiguous = await exercise("40000000-0000-4000-8000-000000000003", new SlackPostError("http_500"));
+    expect((await ambiguous.deliver(1)).batchItemFailures).toEqual([]);
+    expect(ambiguous.retryLater).not.toHaveBeenCalled();
+    expect(ambiguous.db.get(`DEVTASK#${taskId}`, ambiguous.key)).toMatchObject({ status: "UNKNOWN", attempts: 1 });
+  });
+});
 const say = (text: string) => ({ type: "progress", payload: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } } });
 function parseAction(value: string): Record<string, unknown> {
   const parsed: unknown = JSON.parse(value);

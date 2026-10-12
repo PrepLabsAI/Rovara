@@ -11,6 +11,7 @@ import {
   ChannelByNameRequestSchema,
   ChannelMembersRequestSchema,
   TaskPersonProofRequestSchema,
+  TaskChannelPeopleRequestSchema,
   ADMIN_API_VERSION,
   DEVELOPER_API_VERSION,
   EndDeveloperSessionsRequestSchema,
@@ -26,6 +27,8 @@ import {
   type ChannelMembersResponse,
   type TaskPersonProofRequest,
   type TaskPersonProofResponse,
+  type TaskChannelPeopleRequest,
+  type TaskChannelPeopleResponse,
   type DeveloperSignInMethod,
   type EndDeveloperSessionsRequest,
   type EndDeveloperSessionsResponse,
@@ -476,8 +479,8 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname === "/v1/auth/browser/authorize" || pathname.startsWith("/v1/auth/callback/");
 
   return async (
-    event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
-  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse> => {
+    event: HttpApiV2Event | ChannelMembersRequest | TaskPersonProofRequest | TaskChannelPeopleRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
+  ): Promise<HttpResult | ChannelMembersResult | TaskPersonProofResponse | TaskChannelPeopleResponse | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse> => {
     if ("kind" in event) {
       if (event.kind === "end-developer-sessions") {
         const parsed = EndDeveloperSessionsRequestSchema.safeParse(event);
@@ -511,6 +514,11 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
         const parsed = TaskPersonProofRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
         return deps.directory.taskPersonProof(parsed.data.slackUserId, parsed.data.channelIds);
+      }
+      if (event.kind === "task-channel-people") {
+        const parsed = TaskChannelPeopleRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        return deps.directory.taskChannelPeople(parsed.data.channelIds);
       }
       const parsed = ChannelMembersRequestSchema.safeParse(event);
       if (!parsed.success) return { ok: false, error: "invalid_request" };

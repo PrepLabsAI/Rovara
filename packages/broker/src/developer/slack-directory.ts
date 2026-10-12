@@ -10,6 +10,7 @@ import {
   type ChannelMembersResponse,
   type SlackAuthCheckResponse,
   type TaskPersonProofResponse,
+  type TaskChannelPeopleResponse,
 } from "@agentx/contracts";
 
 export type SlackUserStatus = "active" | "gone" | "unavailable";
@@ -19,6 +20,8 @@ export interface SlackDirectory {
   channelMembers(userId: string, channelIds: readonly string[]): Promise<ChannelMembersResponse>;
   /** A fresh users.info and complete membership read that never reuses display caches or reads. */
   taskPersonProof(userId: string, channelIds: readonly string[]): Promise<TaskPersonProofResponse>;
+  /** Complete, fresh and bounded identities from the named channels; no display cache or in-flight read is reused. */
+  taskChannelPeople(channelIds: readonly string[]): Promise<TaskChannelPeopleResponse>;
   /**
    * R10: each channel's name and privacy, cached like members (so a channel made private shows as
    * public for up to 10 minutes). A channel Slack does not know is left out; so are channels past
@@ -89,7 +92,7 @@ export function slackDirectory(input: {
   };
 
   /** Slack's reply, or undefined (already reported) when Slack could not answer. */
-  const get = async (method: string, query: Record<string, string>): Promise<Reply | undefined> => {
+  const get = async (method: string, query: Record<string, string>, timeoutMs = TIMEOUT_MS): Promise<Reply | undefined> => {
     let token: string;
     try {
       token = await input.botToken();
@@ -100,7 +103,7 @@ export function slackDirectory(input: {
     try {
       const url = new URL(`https://slack.com/api/${method}`);
       for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
-      response = await input.fetch(url, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(TIMEOUT_MS) });
+      response = await input.fetch(url, { headers: { authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(Math.max(1, Math.min(TIMEOUT_MS, timeoutMs))) });
     } catch {
       return problem(method, undefined, "unreachable");
     }
@@ -132,14 +135,15 @@ export function slackDirectory(input: {
     return cleanDisplayName(redactAndCap(raw, 80).text) ?? fallback;
   };
 
-  const freshChannelUsers = async (channelId: string, budget: Budget): Promise<Set<string> | undefined> => {
+  const freshChannelUsers = async (channelId: string, budget: Budget, deadlineAt?: number): Promise<Set<string> | undefined> => {
     const users = new Set<string>();
     let cursor = "";
     for (let page = 0; ; page += 1) {
       if (page >= maxPages) return problem("conversations.members", undefined, "too_many_pages");
       if (budget.left <= 0) return problem("conversations.members", undefined, "call_cap_reached");
+      if (deadlineAt !== undefined && Date.now() >= deadlineAt) return problem("conversations.members", undefined, "deadline_reached");
       budget.left -= 1;
-      const reply = await get("conversations.members", { channel: channelId, limit: "1000", ...(cursor === "" ? {} : { cursor }) });
+      const reply = await get("conversations.members", { channel: channelId, limit: "1000", ...(cursor === "" ? {} : { cursor }) }, deadlineAt === undefined ? TIMEOUT_MS : deadlineAt - Date.now());
       if (reply === undefined) return undefined;
       if (reply.body.ok !== true || !Array.isArray(reply.body.members)) return refused("conversations.members", reply);
       for (const member of reply.body.members) {
@@ -249,6 +253,43 @@ export function slackDirectory(input: {
         if (users.has(userId)) memberOf.push(channelId);
       }
       return { ok: true, user: { id: parsedId.data, teamId: input.teamId, name: proofName(user, parsedId.data) }, memberOf };
+    },
+    async taskChannelPeople(channelIds) {
+      if (input.teamId === undefined) return { ok: false, error: "slack_unavailable" };
+      const budget: Budget = { left: 100 };
+      const deadlineAt = Date.now() + 20_000;
+      const membership = new Map<string, string[]>();
+      for (const channelId of [...new Set(channelIds)].sort()) {
+        const users = await freshChannelUsers(channelId, budget, deadlineAt);
+        if (users === undefined) return { ok: false, error: "slack_unavailable" };
+        for (const userId of users) {
+          const channels = membership.get(userId) ?? [];
+          channels.push(channelId);
+          membership.set(userId, channels);
+          if (membership.size > 100) return { ok: false, error: "capacity_exceeded" };
+        }
+      }
+      const users: Array<{ id: string; teamId: string; name: string; memberOf: string[] }> = [];
+      for (const userId of [...membership.keys()].sort()) {
+        if (budget.left <= 0) return { ok: false, error: "capacity_exceeded" };
+        if (Date.now() >= deadlineAt) return { ok: false, error: "slack_unavailable" };
+        budget.left -= 1;
+        const reply = await get("users.info", { user: userId }, deadlineAt - Date.now());
+        if (reply === undefined) return { ok: false, error: "slack_unavailable" };
+        if (reply.body.ok !== true) {
+          if (reply.body.error === "user_not_found") continue;
+          refused("users.info", reply);
+          return { ok: false, error: "slack_unavailable" };
+        }
+        const user = userOf(reply.body);
+        const parsedId = SlackUserIdSchema.safeParse(user.id);
+        const readableEligibilityFlags = (user.deleted === undefined || typeof user.deleted === "boolean")
+          && (user.is_stranger === undefined || typeof user.is_stranger === "boolean");
+        if (!parsedId.success || parsedId.data !== userId || !readableEligibilityFlags) return { ok: false, error: "slack_unavailable" };
+        if (!inTeam(user) || user.is_stranger === true) continue;
+        users.push({ id: parsedId.data, teamId: input.teamId, name: proofName(user, parsedId.data), memberOf: membership.get(userId)! });
+      }
+      return { ok: true, users };
     },
     async channelInfo(channelIds) {
       if (input.teamId === undefined) return { ok: false, error: "slack_unavailable" };

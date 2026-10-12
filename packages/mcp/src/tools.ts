@@ -5,6 +5,7 @@ import {
   DEFAULT_DEVELOPER_TASK_POLICY, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
   DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, WORKFLOW_BLOCK_REASONS, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, WORKFLOW_REVIEW_FAILURE_REASONS,
   inertName, openReviewFindings, workflowIsReviewOnly, workflowKeepPullRequestsOffered, type DeveloperTaskView,
+  TaskPeopleRoleSchema,
 } from "@agentx/contracts";
 import { z } from "zod";
 import type { AdminControlPlaneClient } from "./admin-client.js";
@@ -887,6 +888,48 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
           ? `The pull request for task ${taskId} is ${answer.pullRequest.url} (${answer.pullRequest.state}).`
           : `Opening a pull request for task ${taskId} (operation ${answer.operationId}, ${answer.operationStatus}). Check with agentx_get_task; its URL appears there once it is published.`,
       };
+    },
+  },
+  {
+    name: "agentx_get_task_people",
+    title: "Show who can use an AgentX task",
+    description: "Shows the current People revision and the people who can use this task. Names are display data; use person_id for changes.",
+    inputSchema: { task_id: taskIdInput },
+    outputSchema: { revision: z.number(), orphaned: z.boolean(), people: z.array(z.object({ person_id: z.string(), name: z.string(), role: TaskPeopleRoleSchema, you: z.boolean(), effective_role: z.enum(["owner", "commenter", "viewer"]).nullable() })), can_manage: z.boolean(), can_take_ownership: z.boolean(), add_people_url: z.string() },
+    async handler(context, input) {
+      const view = await context.client.getTaskPeople(input.task_id as string);
+      const structured = { revision: view.revision, orphaned: view.orphaned, people: view.people.map((person) => ({ person_id: person.personId, name: plainText(person.name, "Slack user"), role: person.role, you: person.you, effective_role: person.effectiveRole })), can_manage: view.canManage, can_take_ownership: view.canTakeOwnership, add_people_url: view.addPeopleUrl };
+      return { structured, text: view.people.map((person) => `${plainText(person.name, "Slack user")}: ${person.role}`).join("\n") || "No task people are available." };
+    },
+  },
+  {
+    name: "agentx_set_task_person",
+    title: "Propose a task role change",
+    description: "Proposes a role change for a person shown by agentx_get_task_people. A human must confirm the server-bound proposal before it commits.",
+    inputSchema: { task_id: taskIdInput, person_id: z.string().uuid(), role: TaskPeopleRoleSchema, expected_people_revision: z.number().int().positive(), request_id: requestIdInput },
+    outputSchema: { status: z.enum(["PENDING", "COMMITTED"]), request_id: z.string().optional(), confirmation_url: z.string().optional(), expires_at: z.string().optional(), revision: z.number().optional() },
+    async handler(context, input, call) {
+      const taskId = input.task_id as string;
+      const id = requestIdFor(context, call, input, ["agentx_set_task_person", taskId, input.person_id, input.role, input.expected_people_revision]);
+      const answer = await context.client.setTaskPerson(taskId, { requestId: id, expectedPeopleRevision: input.expected_people_revision as number, personId: input.person_id as string, role: input.role as "owner" | "commenter" | "viewer" | "denied" });
+      return answer.status === "PENDING"
+        ? { structured: { status: answer.status, request_id: answer.requestId, confirmation_url: answer.confirmationUrl, expires_at: answer.expiresAt }, text: `A human confirmation is required: ${answer.confirmationUrl}` }
+        : { structured: { status: answer.status, revision: answer.view.revision }, text: `People revision ${answer.view.revision} committed.` };
+    },
+  },
+  {
+    name: "agentx_take_task_ownership",
+    title: "Propose taking ownership of an orphaned task",
+    description: "Proposes that the signed-in person take ownership of an orphaned task. A human must confirm before it commits.",
+    inputSchema: { task_id: taskIdInput, expected_people_revision: z.number().int().positive(), request_id: requestIdInput },
+    outputSchema: { status: z.enum(["PENDING", "COMMITTED"]), request_id: z.string().optional(), confirmation_url: z.string().optional(), expires_at: z.string().optional(), revision: z.number().optional() },
+    async handler(context, input, call) {
+      const taskId = input.task_id as string;
+      const id = requestIdFor(context, call, input, ["agentx_take_task_ownership", taskId, input.expected_people_revision]);
+      const answer = await context.client.takeTaskOwnership(taskId, { requestId: id, expectedPeopleRevision: input.expected_people_revision as number });
+      return answer.status === "PENDING"
+        ? { structured: { status: answer.status, request_id: answer.requestId, confirmation_url: answer.confirmationUrl, expires_at: answer.expiresAt }, text: `A human confirmation is required: ${answer.confirmationUrl}` }
+        : { structured: { status: answer.status, revision: answer.view.revision }, text: `People revision ${answer.view.revision} committed.` };
     },
   },
 ];

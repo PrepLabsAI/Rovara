@@ -6,12 +6,14 @@ import {
   changeTaskPeople,
   getTaskPeople,
   takeTaskOwnership,
+  getTaskPeopleCapabilities,
   taskAccessFence,
   type TaskPeopleDependencies,
   type TaskPersonCheck,
 } from "../../packages/broker/src/developer/task-people.js";
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
+import { confirmTaskPeopleProposal, getTaskPeopleProposal, proposeTaskPeopleRole, submitSlackTaskPeopleRole } from "../../packages/broker/src/developer/task-people-effects.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const TASK_ID = "11111111-1111-4111-8111-111111111111";
@@ -91,6 +93,85 @@ const isPeopleMutation = (command: unknown) => {
 };
 
 describe("task people", () => {
+  it("keeps a cold People read visibly unavailable while changes are disabled and writes nothing", async () => {
+    const h = harness({ enabled: false });
+    const before = structuredClone(h.db.items);
+    expect((await errorOf(getTaskPeople(h.deps, OWNER, TASK_ID))).code).toBe("RUNTIME_UNAVAILABLE");
+    expect(h.db.items).toEqual(before);
+  });
+
+  it("reads current People capabilities without enumerating the registry", async () => {
+    const h = harness({ enabled: true });
+    await getTaskPeople(h.deps, OWNER, TASK_ID);
+    const send = vi.spyOn(h.db, "send");
+    await expect(getTaskPeopleCapabilities(h.deps, OWNER, TASK_ID)).resolves.toEqual({ peopleRevision: 1, canManagePeople: true, canTakeOwnership: false });
+    expect(send.mock.calls.some(([command]) => (command as { constructor: { name: string } }).constructor.name === "QueryCommand")).toBe(false);
+  });
+
+  it("binds a pending role proposal to the authenticated actor and commits only on confirmation", async () => {
+    const h = harness({ enabled: true });
+    await getTaskPeople(h.deps, OWNER, TASK_ID);
+    h.seedPerson(B, "22222222-2222-4222-8222-222222222222");
+    const deps = { ...h.deps, issuer: "https://agentx.example.test" };
+    const input = { requestId: "40000000-0000-4000-8000-000000000021", expectedPeopleRevision: 1, personId: "22222222-2222-4222-8222-222222222222", role: "owner" as const };
+
+    await expect(proposeTaskPeopleRole(deps, OWNER, TASK_ID, input)).resolves.toMatchObject({ status: "PENDING", requestId: input.requestId });
+    expect((h.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE") as { revision: number }).revision).toBe(1);
+    expect((await errorOf(getTaskPeopleProposal(deps, MEMBER, TASK_ID, input.requestId))).code).toBe("TASK_ACCESS_DENIED");
+    const committed = await confirmTaskPeopleProposal(deps, OWNER, TASK_ID, input.requestId);
+    expect(committed).toMatchObject({ status: "COMMITTED", view: { revision: 2 } });
+    expect((await errorOf(getTaskPeopleProposal(deps, OWNER, TASK_ID, input.requestId))).code).toBe("TASK_ACCESS_DENIED");
+    await expect(confirmTaskPeopleProposal(deps, OWNER, TASK_ID, input.requestId)).resolves.toEqual(committed);
+  });
+
+  it("invites an eligible outside-channel owner, then freshly rechecks both target and initiator before commit", async () => {
+    const h = harness({ enabled: true });
+    await getTaskPeople(h.deps, OWNER, TASK_ID);
+    h.seedPerson(B, "22222222-2222-4222-8222-222222222222");
+    let channelMember = false;
+    const invite = vi.fn(async () => { channelMember = true; return "accepted" as const; });
+    const deps = { ...h.deps, issuer: "https://agentx.example.test", inviteTaskPerson: invite,
+      taskPeopleChannel: async () => ({ teamId: TEAM, channelId: CHANNEL }),
+      resolveTaskPickerPerson: async () => ({ personId: "22222222-2222-4222-8222-222222222222", developerId: B, slackUserId: SB, channelMember }) };
+    h.checks.set(B, { ...h.checks.get(B)!, channelMember: true });
+
+    const result = await submitSlackTaskPeopleRole(deps, OWNER, TASK_ID, { requestId: "40000000-0000-4000-8000-000000000031",
+      expectedPeopleRevision: 1, slackUserId: SB, role: "owner", teamId: TEAM, channelId: CHANNEL });
+
+    expect(invite).toHaveBeenCalledWith({ teamId: TEAM, channelId: CHANNEL, slackUserId: SB });
+    expect(result.status).toBe("COMMITTED");
+    if (result.status !== "COMMITTED") throw new Error("accepted invitation did not commit the role");
+    expect(result.view.revision).toBe(2);
+    expect(result.view.people.some((person) => person.role === "owner")).toBe(true);
+  });
+
+  it("never grants on unknown invite or when the initiating owner is revoked during an accepted invite", async () => {
+    for (const outcome of ["unknown", "stale"] as const) {
+      const h = harness({ enabled: true });
+      await getTaskPeople(h.deps, OWNER, TASK_ID);
+      h.seedPerson(B, "22222222-2222-4222-8222-222222222222");
+      let channelMember = false;
+      const invite = vi.fn(async () => {
+        if (outcome === "unknown") return "unknown" as const;
+        channelMember = true;
+        h.checks.set(B, { ...h.checks.get(B)!, channelMember: true });
+        h.db.set({ ...(h.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE") as Record<string, unknown>), revision: 2,
+          people: [{ developerId: A, slackUserId: SA, name: OWNER.name, role: "viewer" }, { developerId: C, slackUserId: SC, name: OTHER.name, role: "owner" }], orphaned: false });
+        return "accepted" as const;
+      });
+      const deps = { ...h.deps, issuer: "https://agentx.example.test",
+        taskPeopleChannel: async () => ({ teamId: TEAM, channelId: CHANNEL }),
+        resolveTaskPickerPerson: async () => ({ personId: "22222222-2222-4222-8222-222222222222", developerId: B, slackUserId: SB, channelMember }),
+        inviteTaskPerson: invite };
+      const input = { requestId: `40000000-0000-4000-8000-00000000003${outcome === "unknown" ? "2" : "3"}`,
+        expectedPeopleRevision: 1, slackUserId: SB, role: "owner" as const, teamId: TEAM, channelId: CHANNEL };
+      const error = await errorOf(submitSlackTaskPeopleRole(deps, OWNER, TASK_ID, input));
+      expect(error.code).toBe(outcome === "unknown" ? "RUNTIME_UNAVAILABLE" : "CHANGE_STALE");
+      await expect(submitSlackTaskPeopleRole(deps, OWNER, TASK_ID, input)).rejects.toBeDefined();
+      expect(invite).toHaveBeenCalledOnce();
+      expect(h.db.find((item) => item.entityType === "TASK_PEOPLE_EVENT")).toEqual([]);
+    }
+  });
   it("initializes the exact creator and immutable opaque registry without changing runtime identity", async () => {
     const h = harness({ enabled: true });
     const before = structuredClone(h.db.get(`DEVTASK#${TASK_ID}`, "META"));
@@ -121,6 +202,9 @@ describe("task people", () => {
     h.seedPerson(C, "33333333-3333-4333-8333-333333333333", external);
 
     await changeTaskPeople(h.deps, OWNER, TASK_ID, { requestId: "40000000-0000-4000-8000-000000000001", expectedPeopleRevision: 1, targetDeveloperId: B, role: "viewer" });
+    expect(h.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE_NOTIFY#40000000-0000-4000-8000-000000000001")).toMatchObject({
+      entityType: "TASK_PEOPLE_NOTIFICATION", targetDeveloperId: B, slackUserId: SB, role: "viewer", peopleRevision: 2, status: "PENDING", attempts: 0,
+    });
     const view = await changeTaskPeople(h.deps, OWNER, TASK_ID, { requestId: "40000000-0000-4000-8000-000000000002", expectedPeopleRevision: 2, targetDeveloperId: C, role: "commenter" });
 
     expect(view.people.filter((person) => person.name.includes(MEMBER.name))).toHaveLength(2);
@@ -199,7 +283,7 @@ describe("task people", () => {
   it("requires explicit enablement for initialization and preserves unshared legacy tasks", async () => {
     for (const enabled of [undefined, false]) {
       const h = harness({ ...(enabled === undefined ? {} : { enabled }) });
-      expect((await errorOf(getTaskPeople(h.deps, OWNER, TASK_ID))).code).toBe("TASK_ACCESS_DENIED");
+      expect((await errorOf(getTaskPeople(h.deps, OWNER, TASK_ID))).code).toBe("RUNTIME_UNAVAILABLE");
       expect(h.db.get(`DEVTASK#${TASK_ID}`, "PEOPLE")).toBeUndefined();
     }
     const unsharedRecord = task({ shared: false, provider: "oidc" });

@@ -9,7 +9,7 @@ export interface StreamRecord {
   eventName?: string;
   dynamodb?: { ApproximateCreationDateTime?: number; NewImage?: Record<string, AttributeValue>; OldImage?: Record<string, AttributeValue> };
 }
-export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "workflow" | "github_feedback" | "canvas_closeout" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry" | "workflow_refusal" | "comment_nudge";
+export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "workflow" | "github_feedback" | "canvas_closeout" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry" | "workflow_refusal" | "comment_nudge" | "people_dm";
 export interface Notice {
   /** Fixed per change, so a repeated delivery posts once (C9). */
   id: string;
@@ -30,6 +30,7 @@ export interface Notice {
   manifestDigest?: string;
   /** Workflow snapshot revision to resume when verification failed before a manifest existed. */
   expectedWorkflowRevision?: number;
+  peopleRequestId?: string;
   /** A workflow notice's revision: delivered only while the task is still at it, so a stale step is never said. */
   workflowRevision?: number;
   /** A workflow notice for the step a closed required pull request's reopening started: AgentX follows it again. */
@@ -142,6 +143,12 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       // Stamped with the window's own start, to the millisecond, so it compares exactly with the share's time.
       const windowStart = text(next.windowStart);
       return [{ id: `${taskId}:nudge:${nudgeId}`, kind: "comment_nudge", taskId, at: Number.isNaN(Date.parse(windowStart)) ? at : windowStart, notBefore: dueAt }];
+    }
+    case "TASK_PEOPLE_NOTIFICATION": {
+      const taskId = text(next.taskId);
+      const requestId = text(next.requestId);
+      if (previous !== undefined || taskId === "" || requestId === "" || next.status !== "PENDING") return [];
+      return [{ id: `${taskId}:people:${requestId}`, kind: "people_dm", taskId, peopleRequestId: requestId, at }];
     }
     case "ADMIN_CHANGE": {
       // Spec 025 E13: the Slack step started, or a change with a message ended. Only stored

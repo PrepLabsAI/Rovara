@@ -117,6 +117,8 @@ import {
   WORKFLOW_REGRESSION_INSTRUCTION,
   type WorkflowSendBackProblem,
   WorkflowResolveFindingsInputSchema,
+  TaskPeopleRoleRequestSchema,
+  TaskPeopleTakeOwnershipRequestSchema,
   blockingFindings,
   openReviewFindings,
   resolveWorkflowReviewFindings,
@@ -171,6 +173,9 @@ import { pageCommentViews, type CommentViewContext, type PageCommentView } from 
 import type { PlanAnchor } from "./plan-page/render-plan.js";
 import { can, pageAccess, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
 import { resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
+import { getTaskPeople as readTaskPeople, getTaskPeopleCapabilities as readTaskPeopleCapabilities } from "../developer/task-people.js";
+import { confirmTaskPeopleProposal as confirmPeopleProposal, getTaskPeopleProposal as readPeopleProposal, proposeTaskOwnership, proposeTaskPeopleRole,
+  submitSlackTaskOwnership as commitSlackTaskOwnership, submitSlackTaskPeopleRole as commitSlackTaskPeopleRole } from "../developer/task-people-effects.js";
 import { inertReplyText } from "../developer/prompt-text.js";
 import {
   commentCounterKey, commentKey, counterTouch, createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor,
@@ -215,7 +220,29 @@ export interface DeveloperTaskRouteDependencies {
   slackRequestQueue?: SlackRequestQueue;
   now(): number;
   log?(entry: Record<string, unknown>): void;
+  resolveTaskPickerPerson?(taskId: string, slackUserId: string): Promise<{ personId: string; developerId: string; slackUserId: string; channelMember: boolean }>;
+  taskPeopleChannel?(taskId: string): Promise<{ teamId: string; channelId: string }>;
+  inviteTaskPerson?(input: { teamId: string; channelId: string; slackUserId: string }): Promise<"accepted" | "unknown">;
 }
+
+function taskPeopleEffectsDependencies(deps: DeveloperTaskRouteDependencies) {
+  if (deps.issuer === undefined || deps.issuer === "") throw agentXError("RUNTIME_UNAVAILABLE", "Task People confirmation is unavailable in this deployment");
+  return { ...deps, issuer: deps.issuer };
+}
+
+export const getTaskPeople = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string) =>
+  readTaskPeople(deps, caller, taskId);
+export const getTaskPeopleCapabilities = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string) =>
+  readTaskPeopleCapabilities(deps, caller, taskId);
+export const getTaskPeopleProposal = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, requestId: string) =>
+  readPeopleProposal(taskPeopleEffectsDependencies(deps), caller, taskId, requestId);
+export const confirmTaskPeopleProposal = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, requestId: string) =>
+  confirmPeopleProposal(taskPeopleEffectsDependencies(deps), caller, taskId, requestId);
+export const submitSlackTaskPeopleRole = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string,
+  input: { requestId: string; expectedPeopleRevision: number; slackUserId: string; role: "owner" | "commenter" | "viewer" | "denied"; teamId: string; channelId: string }) =>
+  commitSlackTaskPeopleRole(taskPeopleEffectsDependencies(deps), caller, taskId, input);
+export const submitSlackTaskOwnership = (deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string,
+  input: { requestId: string; expectedPeopleRevision: number }) => commitSlackTaskOwnership(taskPeopleEffectsDependencies(deps), caller, taskId, input);
 
 const TASK_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const iso = (deps: Pick<DeveloperTaskRouteDependencies, "now">) => new Date(deps.now()).toISOString();
@@ -4752,10 +4779,25 @@ async function retryTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, c
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry))?$/.exec(url.pathname);
+  const proposalRoute = /^\/v1\/dev\/tasks\/([^/]+)\/people\/requests\/([^/]+)$/.exec(url.pathname);
+  if (proposalRoute !== null && request.method === "GET") {
+    const taskId = safeDecode(proposalRoute[1]!);
+    const requestId = safeDecode(proposalRoute[2]!);
+    return getTaskPeopleProposal(deps, caller, taskId, requestId);
+  }
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|people|people\/role|people\/take-ownership|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|workflow\/feedback|workflow\/feedback-decision|workflow\/feedback-retry|canvas-closeout\/retry))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
+  if (taskId !== undefined && request.method === "GET" && route?.[2] === "people") return getTaskPeople(deps, caller, taskId);
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/role") {
+    const input = parse(TaskPeopleRoleRequestSchema, body(request), deps, "people/role");
+    return proposeTaskPeopleRole(taskPeopleEffectsDependencies(deps), caller, taskId, input);
+  }
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "people/take-ownership") {
+    const input = parse(TaskPeopleTakeOwnershipRequestSchema, body(request), deps, "people/take-ownership");
+    return proposeTaskOwnership(taskPeopleEffectsDependencies(deps), caller, taskId, input);
+  }
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "continue") return continueTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/decision") return decideTaskWorkflow(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/retry") return retryTaskWorkflow(deps, caller, taskId, body(request));

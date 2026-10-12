@@ -1,0 +1,191 @@
+import { createHash } from "node:crypto";
+import { GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { TaskPeopleProposalSchema, agentXError, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskPeopleRoleRequest, type TaskPeopleTakeOwnershipRequest } from "@agentx/contracts";
+import type { DeveloperCaller } from "../aws/developer-routes.js";
+import { changeTaskPeople, getTaskPeopleCapabilities, resolveTaskPeopleTarget, takeTaskOwnership, type TaskPeopleDependencies } from "./task-people.js";
+
+const TTL_MS = 10 * 60 * 1000;
+const taskPk = (taskId: string) => `DEVTASK#${taskId}`;
+const proposalKey = (taskId: string, requestId: string) => ({ pk: taskPk(taskId), sk: `PEOPLE_PROPOSAL#${requestId}` });
+const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+const denied = (): never => { throw agentXError("TASK_ACCESS_DENIED", "People confirmation could not be verified"); };
+const conflict = (): never => { throw agentXError("IDEMPOTENCY_CONFLICT", "this People request ID was already used"); };
+
+type StoredProposal = TaskPeopleProposal & {
+  pk: string; sk: string; entityType: "TASK_PEOPLE_PROPOSAL"; schemaVersion: 1;
+  callerDeveloperId: string; payloadDigest: string; createdAt: string;
+  invitationStatus?: "CLAIMED" | "ACCEPTED" | "FAILED" | "UNKNOWN";
+  invitationTeamId?: string; invitationChannelId?: string; invitationSlackUserId?: string;
+  invitationUpdatedAt?: string;
+};
+
+export interface TaskPeopleEffectsDependencies extends TaskPeopleDependencies {
+  issuer: string;
+  resolveTaskPickerPerson?(taskId: string, slackUserId: string): Promise<{ personId: string; developerId: string; slackUserId: string; channelMember: boolean }>;
+  taskPeopleChannel?(taskId: string): Promise<{ teamId: string; channelId: string }>;
+  inviteTaskPerson?(input: { teamId: string; channelId: string; slackUserId: string }): Promise<"accepted" | "unknown">;
+}
+
+async function read(deps: TaskPeopleEffectsDependencies, taskId: string, requestId: string): Promise<StoredProposal | undefined> {
+  const result = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: proposalKey(taskId, requestId), ConsistentRead: true })) as { Item?: unknown };
+  const item = result.Item as Partial<StoredProposal> | undefined;
+  if (item === undefined) return undefined;
+  const parsed = TaskPeopleProposalSchema.safeParse({ requestId: item.requestId, taskId: item.taskId, expectedPeopleRevision: item.expectedPeopleRevision, kind: item.kind, expiresAt: item.expiresAt, ...(item.personId === undefined ? {} : { personId: item.personId }), ...(item.role === undefined ? {} : { role: item.role }) });
+  if (!parsed.success || item.pk !== taskPk(taskId) || item.sk !== proposalKey(taskId, requestId).sk || item.entityType !== "TASK_PEOPLE_PROPOSAL" || item.schemaVersion !== 1
+    || typeof item.callerDeveloperId !== "string" || typeof item.payloadDigest !== "string" || typeof item.createdAt !== "string"
+    || (item.invitationStatus !== undefined && (item.invitationStatus !== "CLAIMED" && item.invitationStatus !== "ACCEPTED" && item.invitationStatus !== "FAILED" && item.invitationStatus !== "UNKNOWN"))
+    || (item.invitationStatus !== undefined && (typeof item.invitationTeamId !== "string" || typeof item.invitationChannelId !== "string"
+      || typeof item.invitationSlackUserId !== "string" || typeof item.invitationUpdatedAt !== "string"))) return denied();
+  return item as StoredProposal;
+}
+
+const conditional = (error: unknown) => error instanceof Error && error.name === "ConditionalCheckFailedException";
+
+async function invitationState(
+  deps: TaskPeopleEffectsDependencies,
+  proposal: StoredProposal,
+  status: "CLAIMED" | "ACCEPTED" | "FAILED" | "UNKNOWN",
+  expected?: "CLAIMED",
+  binding?: { teamId: string; channelId: string; slackUserId: string },
+): Promise<void> {
+  const currentBinding = binding ?? { teamId: proposal.invitationTeamId!, channelId: proposal.invitationChannelId!, slackUserId: proposal.invitationSlackUserId! };
+  await deps.documentClient.send(new UpdateCommand({
+    TableName: deps.tableName, Key: proposalKey(proposal.taskId, proposal.requestId),
+    UpdateExpression: "SET invitationStatus = :status, invitationTeamId = :teamId, invitationChannelId = :channelId, invitationSlackUserId = :slackUserId, invitationUpdatedAt = :updatedAt",
+    ConditionExpression: `callerDeveloperId = :callerDeveloperId AND payloadDigest = :payloadDigest AND expiresAt = :expiresAt AND ${expected === undefined ? "attribute_not_exists(invitationStatus)" : "invitationStatus = :expected"}`,
+    ExpressionAttributeValues: { ":status": status, ":teamId": currentBinding.teamId, ":channelId": currentBinding.channelId,
+      ":slackUserId": currentBinding.slackUserId, ":updatedAt": new Date(deps.now()).toISOString(), ":callerDeveloperId": proposal.callerDeveloperId,
+      ":payloadDigest": proposal.payloadDigest, ":expiresAt": proposal.expiresAt, ...(expected === undefined ? {} : { ":expected": expected }) },
+  }));
+}
+
+async function propose(
+  deps: TaskPeopleEffectsDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+  proposal: Omit<TaskPeopleProposal, "expiresAt">,
+): Promise<TaskPeopleChangeResult> {
+  const capabilities = await getTaskPeopleCapabilities(deps, caller, taskId);
+  if (proposal.kind === "role" ? !capabilities.canManagePeople : !capabilities.canTakeOwnership) return denied();
+  if (capabilities.peopleRevision !== proposal.expectedPeopleRevision) return conflict();
+  if (proposal.kind === "role") await resolveTaskPeopleTarget(deps, taskId, proposal.personId!);
+  const payloadDigest = digest(proposal);
+  const existing = await read(deps, taskId, proposal.requestId);
+  if (existing !== undefined) {
+    if (existing.callerDeveloperId !== caller.developerId || existing.payloadDigest !== payloadDigest) return conflict();
+    return { status: "PENDING", requestId: existing.requestId, confirmationUrl: `${deps.issuer}/review/${taskId}/task/people/confirm/${existing.requestId}`, expiresAt: existing.expiresAt };
+  }
+  const createdAt = new Date(deps.now()).toISOString();
+  const expiresAt = new Date(deps.now() + TTL_MS).toISOString();
+  const item: StoredProposal = { ...proposalKey(taskId, proposal.requestId), ...proposal, expiresAt, entityType: "TASK_PEOPLE_PROPOSAL", schemaVersion: 1, callerDeveloperId: caller.developerId, payloadDigest, createdAt };
+  try {
+    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: item, ConditionExpression: "attribute_not_exists(pk)" }));
+  } catch (error) {
+    const raced = await read(deps, taskId, proposal.requestId);
+    if (raced === undefined || raced.callerDeveloperId !== caller.developerId || raced.payloadDigest !== payloadDigest) throw error;
+    return { status: "PENDING", requestId: raced.requestId, confirmationUrl: `${deps.issuer}/review/${taskId}/task/people/confirm/${raced.requestId}`, expiresAt: raced.expiresAt };
+  }
+  return { status: "PENDING", requestId: proposal.requestId, confirmationUrl: `${deps.issuer}/review/${taskId}/task/people/confirm/${proposal.requestId}`, expiresAt };
+}
+
+export async function proposeTaskPeopleRole(deps: TaskPeopleEffectsDependencies, caller: DeveloperCaller, taskId: string, input: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult> {
+  return propose(deps, caller, taskId, { kind: "role", taskId, requestId: input.requestId, expectedPeopleRevision: input.expectedPeopleRevision, personId: input.personId, role: input.role });
+}
+
+export async function proposeTaskOwnership(deps: TaskPeopleEffectsDependencies, caller: DeveloperCaller, taskId: string, input: TaskPeopleTakeOwnershipRequest): Promise<TaskPeopleChangeResult> {
+  return propose(deps, caller, taskId, { kind: "takeOwnership", taskId, requestId: input.requestId, expectedPeopleRevision: input.expectedPeopleRevision });
+}
+
+export async function getTaskPeopleProposal(deps: TaskPeopleEffectsDependencies, caller: DeveloperCaller, taskId: string, requestId: string): Promise<TaskPeopleProposal> {
+  const proposal = await read(deps, taskId, requestId);
+  if (proposal === undefined || proposal.callerDeveloperId !== caller.developerId || deps.now() >= Date.parse(proposal.expiresAt)) return denied();
+  const capabilities = await getTaskPeopleCapabilities(deps, caller, taskId);
+  if (capabilities.peopleRevision !== proposal.expectedPeopleRevision
+    || (proposal.kind === "role" ? !capabilities.canManagePeople : !capabilities.canTakeOwnership)) return denied();
+  return TaskPeopleProposalSchema.parse({ requestId: proposal.requestId, taskId: proposal.taskId, expectedPeopleRevision: proposal.expectedPeopleRevision, kind: proposal.kind, expiresAt: proposal.expiresAt, ...(proposal.personId === undefined ? {} : { personId: proposal.personId }), ...(proposal.role === undefined ? {} : { role: proposal.role }) });
+}
+
+export async function confirmTaskPeopleProposal(deps: TaskPeopleEffectsDependencies, caller: DeveloperCaller, taskId: string, requestId: string): Promise<TaskPeopleChangeResult> {
+  const proposal = await read(deps, taskId, requestId);
+  if (proposal === undefined || proposal.callerDeveloperId !== caller.developerId || deps.now() >= Date.parse(proposal.expiresAt)) return denied();
+  const capabilities = await getTaskPeopleCapabilities(deps, caller, taskId);
+  if (proposal.kind === "takeOwnership") {
+    if (!capabilities.canTakeOwnership && !capabilities.canManagePeople) return denied();
+    return { status: "COMMITTED", view: await takeTaskOwnership(deps, caller, taskId, { requestId, expectedPeopleRevision: proposal.expectedPeopleRevision }) };
+  }
+  if (!capabilities.canManagePeople || proposal.personId === undefined || proposal.role === undefined) return denied();
+  const target = await resolveTaskPeopleTarget(deps, taskId, proposal.personId);
+  return { status: "COMMITTED", view: await changeTaskPeople(deps, caller, taskId, { requestId, expectedPeopleRevision: proposal.expectedPeopleRevision, targetDeveloperId: target.developerId, role: proposal.role }) };
+}
+
+/** A signed Slack form is the explicit human confirmation; picker identity and any invite are resolved server-side. */
+export async function submitSlackTaskPeopleRole(
+  deps: TaskPeopleEffectsDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+  input: { requestId: string; expectedPeopleRevision: number; slackUserId: string; role: "owner" | "commenter" | "viewer" | "denied"; teamId: string; channelId: string },
+): Promise<TaskPeopleChangeResult> {
+  if (deps.resolveTaskPickerPerson === undefined) return denied();
+  const before = await getTaskPeopleCapabilities(deps, caller, taskId);
+  if (!before.canManagePeople || before.peopleRevision !== input.expectedPeopleRevision) return denied();
+  let target = await deps.resolveTaskPickerPerson(taskId, input.slackUserId);
+  if (target.slackUserId !== input.slackUserId) return denied();
+  const proposed = await proposeTaskPeopleRole(deps, caller, taskId, {
+    requestId: input.requestId, expectedPeopleRevision: input.expectedPeopleRevision, personId: target.personId, role: input.role,
+  });
+  if (proposed.status !== "PENDING") return proposed;
+  if (input.role === "owner" && !target.channelMember) {
+    if (deps.inviteTaskPerson === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "Slack channel invitation is not configured");
+    let stored = await read(deps, taskId, input.requestId);
+    if (stored === undefined || stored.callerDeveloperId !== caller.developerId || deps.now() >= Date.parse(stored.expiresAt)) return denied();
+    const sameBinding = stored.invitationTeamId === input.teamId && stored.invitationChannelId === input.channelId && stored.invitationSlackUserId === input.slackUserId;
+    if (stored.invitationStatus !== undefined && !sameBinding) return conflict();
+    if (stored.invitationStatus === "CLAIMED" || stored.invitationStatus === "FAILED" || stored.invitationStatus === "UNKNOWN") {
+      throw agentXError("RUNTIME_UNAVAILABLE", "Slack channel invitation has no safe retry");
+    }
+    if (stored.invitationStatus === undefined) {
+      try { await invitationState(deps, stored, "CLAIMED", undefined, { teamId: input.teamId, channelId: input.channelId, slackUserId: input.slackUserId }); }
+      catch (error) {
+        if (!conditional(error)) throw error;
+        stored = (await read(deps, taskId, input.requestId)) ?? stored;
+        if (stored.invitationStatus !== "ACCEPTED" || stored.invitationTeamId !== input.teamId || stored.invitationChannelId !== input.channelId
+          || stored.invitationSlackUserId !== input.slackUserId) throw agentXError("RUNTIME_UNAVAILABLE", "Slack channel invitation has no safe retry");
+      }
+      if (stored.invitationStatus !== "ACCEPTED") {
+        const atInvite = await getTaskPeopleCapabilities(deps, caller, taskId);
+        if (!atInvite.canManagePeople || atInvite.peopleRevision !== input.expectedPeopleRevision || deps.taskPeopleChannel === undefined) return denied();
+        const channel = await deps.taskPeopleChannel(taskId);
+        if (channel.teamId !== input.teamId || channel.channelId !== input.channelId) return denied();
+        let outcome: "accepted" | "unknown";
+        try { outcome = await deps.inviteTaskPerson({ teamId: input.teamId, channelId: input.channelId, slackUserId: input.slackUserId }); }
+        catch {
+          try { await invitationState(deps, { ...stored, invitationTeamId: input.teamId, invitationChannelId: input.channelId, invitationSlackUserId: input.slackUserId }, "FAILED", "CLAIMED"); } catch { /* CLAIMED still prevents a blind resend. */ }
+          return denied();
+        }
+        const status = outcome === "accepted" ? "ACCEPTED" : "UNKNOWN";
+        try { await invitationState(deps, { ...stored, invitationTeamId: input.teamId, invitationChannelId: input.channelId, invitationSlackUserId: input.slackUserId }, status, "CLAIMED"); }
+        catch { throw agentXError("RUNTIME_UNAVAILABLE", "Slack channel invitation outcome could not be recorded safely"); }
+        if (status === "UNKNOWN") throw agentXError("RUNTIME_UNAVAILABLE", "Slack could not confirm whether the channel invitation succeeded");
+      }
+    }
+    target = await deps.resolveTaskPickerPerson(taskId, input.slackUserId);
+    if (!target.channelMember) throw agentXError("CHANGE_STALE", "Slack accepted the invitation, but task access changed before the role could be saved");
+  }
+  const current = await getTaskPeopleCapabilities(deps, caller, taskId);
+  if (!current.canManagePeople || current.peopleRevision !== input.expectedPeopleRevision) {
+    throw agentXError("CHANGE_STALE", "Task access changed before the role could be saved");
+  }
+  return confirmTaskPeopleProposal(deps, caller, taskId, input.requestId);
+}
+
+/** A signed Slack takeover submit creates and confirms the same bound proposal used by page/MCP. */
+export async function submitSlackTaskOwnership(
+  deps: TaskPeopleEffectsDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+  input: TaskPeopleTakeOwnershipRequest,
+): Promise<TaskPeopleChangeResult> {
+  const proposed = await proposeTaskOwnership(deps, caller, taskId, input);
+  if (proposed.status !== "PENDING") return proposed;
+  return confirmTaskPeopleProposal(deps, caller, taskId, input.requestId);
+}

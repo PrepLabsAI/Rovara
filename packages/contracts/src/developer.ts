@@ -166,6 +166,18 @@ export const TaskPersonProofResponseSchema = z.discriminatedUnion("ok", [
 ]);
 export type TaskPersonProofResponse = z.infer<typeof TaskPersonProofResponseSchema>;
 
+/** Internal complete fresh channel directory for Task People. It is never an HTTP route. */
+export const TaskChannelPeopleRequestSchema = z.object({
+  kind: z.literal("task-channel-people"),
+  channelIds: z.array(SlackChannelIdSchema).min(1).max(CHANNEL_MEMBERS_MAX_CHANNELS),
+}).strict();
+export type TaskChannelPeopleRequest = z.infer<typeof TaskChannelPeopleRequestSchema>;
+export const TaskChannelPeopleResponseSchema = z.discriminatedUnion("ok", [
+  z.object({ ok: z.literal(true), users: z.array(z.object({ id: SlackUserIdSchema, teamId: SlackTeamIdSchema, name: z.string().min(1).max(80), memberOf: z.array(SlackChannelIdSchema).max(CHANNEL_MEMBERS_MAX_CHANNELS) }).strict()).max(100) }).strict(),
+  z.object({ ok: z.literal(false), error: z.enum(["invalid_request", "slack_unavailable", "capacity_exceeded"]) }).strict(),
+]);
+export type TaskChannelPeopleResponse = z.infer<typeof TaskChannelPeopleResponseSchema>;
+
 /** R10: the names and privacy of bound channels, read by DeveloperIdentity with the bot token. */
 export const ChannelInfoRequestSchema = z
   .object({
