@@ -122,6 +122,10 @@ describe("Suite 4: checks", () => {
     await e2e.click("agentx_workflow_approve");
     await e2e.settle();
     expect(e2e.agentCheckRuns.map(({ replay }) => replay)).toEqual(["node --test repo/demo/greeting.test.js", "node --test repo/demo/greeting.test.js"]);
+    expect(e2e.agentCheckRuns.map(({ exitCode }) => exitCode)).toEqual([1, 1]);
+    const firstImplementation = e2e.invocations.find((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "IMPLEMENT")!;
+    const firstResult = e2e.db.get(`WORKSPACE#${firstImplementation.workspaceId}`, `OPERATION#${firstImplementation.operationId}`)?.result;
+    expect(firstResult).toMatchObject({ checks: { status: "regression", checks: [{ before: "passed", after: "failed", class: "regression" }] } });
     expect(e2e.agentCheckRuns[0]?.tree).not.toBe(e2e.baseTree);
     expect(e2e.agentCheckRuns[1]?.tree).toBe(e2e.agentCheckRuns[0]?.tree);
     expect(e2e.workflow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.regressionFound });
@@ -137,13 +141,36 @@ describe("Suite 4: checks", () => {
     await e2e.click("agentx_workflow_send_back");
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(e2e.agentCheckRuns).toHaveLength(3);
     expect(modelInputs(e2e, mark).join("\n")).toContain("These tests passed before this change and fail now.");
-    expect(e2e.workflow().candidate!.repositories[0]!.treeSha).not.toBe(blockedTree);
+    const fixedTree = e2e.workflow().candidate!.repositories[0]!.treeSha;
+    expect(fixedTree).not.toBe(blockedTree);
+    expect(e2e.agentCheckRuns.at(-1)).toMatchObject({ replay: "node --test repo/demo/greeting.test.js", tree: fixedTree, exitCode: 0, timedOut: false });
+    const retry = e2e.invocations.filter((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "IMPLEMENT").at(-1)!;
+    const retryResult = e2e.db.get(`WORKSPACE#${retry.workspaceId}`, `OPERATION#${retry.operationId}`)?.result;
+    expect(retryResult).toMatchObject({ checks: { status: "verified", checks: [{ before: "failed", after: "passed", class: "fixed" }] } });
     expect(e2e.github.pullRequests).toHaveLength(1);
     expect(e2e.github.pullRequests[0]!.tree).toBe(e2e.workflow().candidate!.repositories[0]!.treeSha);
     const pullRequestBody = (e2e.github.pullRequests[0]!.body ?? "").split("\n");
     expect(pullRequestBody[0]).toBe("Not verified by automated checks (review only).");
     expect(pullRequestBody.some((line) => line.startsWith("Checks:"))).toBe(false);
+  }, 120_000);
+
+  it("4.7 a test first run after edits is measured on original code before the worker calls it a regression", async () => {
+    const e2e = await createWorkflowE2E({ readiness: [],
+      initialRepositoryFiles: [{ path: "greeting.test.js", content: `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { readFileSync } from "node:fs";\ntest("greet trims names", () => {\n  const code = readFileSync(new URL("./greeting.ts", import.meta.url), "utf8");\n  if (!code.includes("function greet(")) return;\n  assert.match(code, /name\\.trim\\(\\)/);\n});\n` }],
+      model: { plan: PLAN, edits: EDITS, afterEditsCommands: ["node --test repo/demo/greeting.test.js"] } });
+    await atPlanReview(e2e);
+    await e2e.click("agentx_workflow_approve");
+    await e2e.settle();
+    const implementation = e2e.invocations.find((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "IMPLEMENT")!;
+    const result = e2e.db.get(`WORKSPACE#${implementation.workspaceId}`, `OPERATION#${implementation.operationId}`)?.result;
+    expect(result).toMatchObject({ checks: { source: "agent_commands", status: "regression", checks: [{ before: "passed", after: "failed", class: "regression" }] } });
+    expect(e2e.agentCheckRuns.some((run) => run.tree === e2e.baseTree && run.exitCode === 0)).toBe(true);
+    expect(e2e.agentCheckRuns.some((run) => run.tree !== e2e.baseTree && run.exitCode === 1)).toBe(true);
+    expect(e2e.workflow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.regressionFound });
+    expect(e2e.github.pushes.size).toBe(0);
+    expect(e2e.github.pullRequests).toEqual([]);
   }, 120_000);
 
   it("4.9 a check the runner couldn't start is not the code failing: no Send back, and Choose checks and retry runs it again", async () => {

@@ -422,20 +422,26 @@ export async function createWorkflowE2E(options: {
 
   /** Every project command a check round ran, with the workspace tree it ran on; each passes unless `checkResult` says otherwise. */
   const checkRuns: Array<{ command: ProjectCommand; tree: string }> = [];
-  const agentCheckRuns: Array<{ replay: string; tree: string }> = [];
+  const agentCheckRuns: Array<{ replay: string; tree: string; exitCode: number | null; timedOut: boolean; output: string }> = [];
   const checkRunners: CheckRunners = {
     runAgentCommand: async (replay, timeoutMs, signal) => {
       const tree = await workspaceTree("agent-check");
-      agentCheckRuns.push({ replay, tree });
       const scripted = options.agentCheckResult?.(replay, tree);
-      if (scripted !== undefined) return scripted;
+      if (scripted !== undefined) {
+        agentCheckRuns.push({ replay, tree, ...scripted });
+        return scripted;
+      }
       try {
         const { stdout, stderr } = await execFile("bash", ["-lc", replay], { cwd: root, timeout: timeoutMs, signal });
-        return { exitCode: 0, timedOut: false, output: `${stdout}${stderr}` };
+        const result = { exitCode: 0, timedOut: false, output: `${stdout}${stderr}` };
+        agentCheckRuns.push({ replay, tree, ...result });
+        return result;
       } catch (error) {
         const failure = error as Error & { code?: string | number; killed?: boolean; stdout?: string; stderr?: string };
-        return { exitCode: typeof failure.code === "number" ? failure.code : null, timedOut: failure.killed === true,
+        const result = { exitCode: typeof failure.code === "number" ? failure.code : null, timedOut: failure.killed === true,
           output: `${failure.stdout ?? ""}${failure.stderr ?? ""}` };
+        agentCheckRuns.push({ replay, tree, ...result });
+        return result;
       }
     },
     runProjectCommand: async (command) => {
