@@ -224,8 +224,12 @@ export function slackDirectory(input: {
     const user = userOf(userReply.body);
     const parsedId = SlackUserIdSchema.safeParse(user.id);
     const readableEligibilityFlags = (user.deleted === undefined || typeof user.deleted === "boolean")
+      && (user.is_bot === undefined || typeof user.is_bot === "boolean")
       && (user.is_stranger === undefined || typeof user.is_stranger === "boolean");
-    if (!parsedId.success || parsedId.data !== userId || !readableEligibilityFlags || !inTeam(user) || user.is_stranger === true) {
+    if (!parsedId.success || parsedId.data !== userId || !readableEligibilityFlags) {
+      return { ok: false, error: "slack_unavailable" };
+    }
+    if (!inTeam(user) || user.is_stranger === true) {
       return { ok: false, error: "ineligible" };
     }
     const memberOf: string[] = [];
