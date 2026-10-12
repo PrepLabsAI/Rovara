@@ -215,6 +215,26 @@ describe("Task Person invite handler", () => {
     expect(f.send).toHaveBeenCalledTimes(1);
   });
 
+  it.each([6_000, 6_500])("refuses a positive accepted-receipt replay when current authorization expires at +%i ms", async (lookupCompletedAt) => {
+    const f = fixture();
+    const receiptId = randomUUID();
+    const finishReceipt = vi.fn(f.ports.finishReceipt.bind(f.ports));
+    f.ports.finishReceipt = finishReceipt;
+    f.ports.readChannelInfo = async () => {
+      f.setNow(now + 4_000);
+      return { isPrivate: false, botIsMember: true, slackCallsUsed: 1 };
+    };
+    f.ports.beginReceipt = async ({ receipt }) => {
+      f.setNow(now + lookupCompletedAt);
+      return { kind: "existing", receipt: { ...receipt, executionReceiptId: receiptId, status: "ACCEPTED", admissionId: randomUUID() } };
+    };
+    const result = await createTaskPersonInviteHandler(f.ports)(f.request);
+    expect(result).toMatchObject({ status: "unknown", reason: "authorization_refused", executionReceiptId: receiptId,
+      admissionId: f.request.admission.id });
+    expect(f.send).not.toHaveBeenCalled();
+    expect(finishReceipt).not.toHaveBeenCalled();
+  });
+
   it("does not issue fresh channel info after proof exhausts the shared Slack allowance", async () => {
     const f = fixture();
     const checker = f.ports.createPersonChecker.bind(f.ports);

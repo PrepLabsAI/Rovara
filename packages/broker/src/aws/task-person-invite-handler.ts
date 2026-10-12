@@ -309,7 +309,12 @@ export function createTaskPersonInviteHandler(ports: TaskPersonInviteHandlerPort
         || existing.data.channelId !== proposal.invitationChannelId || existing.data.slackUserId !== proposal.invitationSlackUserId) {
         return resultFor(request, "failed", { reason: "receipt_conflict" });
       }
-      if (existing.data.status === "ACCEPTED") return resultFor(request, "accepted", { receiptId: existing.data.executionReceiptId });
+      if (existing.data.status === "ACCEPTED") {
+        if (ports.now() >= authorityDeadline || ports.now() >= totalDeadline) {
+          return resultFor(request, "unknown", { receiptId: existing.data.executionReceiptId, reason: "authorization_refused" });
+        }
+        return resultFor(request, "accepted", { receiptId: existing.data.executionReceiptId });
+      }
       if (existing.data.status === "FAILED") return resultFor(request, "failed", { receiptId: existing.data.executionReceiptId, reason: existing.data.reason ?? "effect_rejected" });
       return resultFor(request, "unknown", { receiptId: existing.data.executionReceiptId, reason: "effect_unknown" });
     }
