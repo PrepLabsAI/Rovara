@@ -3,7 +3,7 @@
 // SSM value; the workspace limits are the control plane's setting (spec 025 FR-053). list and get
 // never print the alert address, which can be a webhook secret: only whether it is set.
 import { randomUUID } from "node:crypto";
-import { AgentXError, SECRET_CONFIG_ERROR_MESSAGE, SECRET_CONFIG_KEYS, agentXError, environmentStackName, type ConfigChangeOutcomeRequest } from "@agentx/contracts";
+import { AgentXError, SECRET_CONFIG_ERROR_MESSAGE, SECRET_CONFIG_KEYS, agentXError, environmentStackName, type AdminChangeInput, type ConfigChangeOutcomeRequest } from "@agentx/contracts";
 import { recordConfigChange, recordConfigOutcome, runCliChange } from "../admin/changes.js";
 import type { CallerIdentity, StackReader } from "../environments/adopt.js";
 import { withEnvironmentLock } from "../environments/lock.js";
@@ -74,6 +74,8 @@ async function currentValue(services: ConfigServices, env: string, settings: Env
     if (address === undefined) return "none";
     return looksLikeWebhook(address) ? "set (webhook)" : "set (email address)";
   }
+  // The control plane alone holds it; rovara doctor reads it there.
+  if (target.kind === "chatgpt-setting") return `${entry.defaultValue ?? "unknown"} unless an admin changed it (the control plane holds the setting)`;
   const part = target.kind === "stack-parameter" ? target.part : target.installDefault.part;
   const name = target.kind === "stack-parameter" ? target.parameter : target.installDefault.parameter;
   const stack = await services.stacks.describe(environmentStackName(env, part));
@@ -255,7 +257,17 @@ async function finishRecording(services: ConfigServices, entry: ConfigKey, recor
 export async function runConfigSet(services: ConfigServices, env: string, input: { key: string; value?: string; valueSource?: SecretSource; yes: boolean }): Promise<{ changed: boolean }> {
   const entry = configKey(input.key);
   const { target } = entry;
-  if (target.kind === "control-plane-setting") return setLimitsThroughChange(services, env, entry, target, input);
+  if (target.kind === "control-plane-setting") {
+    if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
+    return setThroughChange(services, env, entry, { kind: "set_workspace_limits", [target.field]: Number(entry.parse(input.value)) },
+      `To change it there, update the AgentXControlPlane stack parameter ${target.installDefault.parameter}`, input);
+  }
+  if (target.kind === "chatgpt-setting") {
+    if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
+    const value = entry.parse(input.value);
+    return setThroughChange(services, env, entry, target.field === "enabled" ? { kind: "set_chatgpt", enabled: value === "true" } : { kind: "set_chatgpt", preferredModel: value },
+      "Sign in with ChatGPT needs an environment installed with agentx init", input);
+  }
   if (target.kind === "settings") return setAlertAddress(services, env, input);
   if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
   const value = entry.parse(input.value);
@@ -330,21 +342,18 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
 }
 
 /**
- * Spec 025 FR-053, E17: the workspace limits change through the admin change path, with its audit.
- * The control plane plans the change (keeping the other limit as it is) and says who is at or over
- * the new one; the person typing the command confirms it (the cli method), or --yes does.
+ * Spec 025 FR-053, E17: the workspace limits (and, #343, Sign in with ChatGPT's settings) change through the admin
+ * change path, with its audit. The control plane plans the change (keeping what was not given as it is) and says
+ * what it will do; the person typing the command confirms it (the cli method), or --yes does.
  */
-async function setLimitsThroughChange(
-  services: ConfigServices, env: string, entry: ConfigKey,
-  target: Extract<ConfigKey["target"], { kind: "control-plane-setting" }>, input: { value?: string; yes: boolean },
+async function setThroughChange(
+  services: ConfigServices, env: string, entry: ConfigKey, change: AdminChangeInput, legacyHint: string, input: { yes: boolean },
 ): Promise<{ changed: boolean }> {
-  if (input.value === undefined) throw agentXError("CONFIG_INVALID", `give the new value: agentx config set ${entry.key} <value>`);
-  const value = Number(entry.parse(input.value));
   const settings = await readEnvironmentSettings(services.store, env);
   // D14: the legacy deployment has no admin change routes: adopted (settings naming legacy), or not
   // yet adopted (production with no settings record).
   if (settings === undefined ? env === LEGACY_ENV : settings.naming !== "environment") {
-    throw agentXError("CONFIG_INVALID", `${entry.key} changes through AgentX's admin change path, which only environments installed with agentx init have, not the legacy deployment; nothing changed. To change it there, update the AgentXControlPlane stack parameter ${target.installDefault.parameter}`);
+    throw agentXError("CONFIG_INVALID", `${entry.key} changes through AgentX's admin change path, which only environments installed with agentx init have, not the legacy deployment; nothing changed. ${legacyHint}`);
   }
   if (settings === undefined) throw notInstalled(env);
   const session = await services.adminSession?.(env);
@@ -361,7 +370,7 @@ async function setLimitsThroughChange(
   try {
     result = await runCliChange({
       controlPlaneUrl: session.controlPlaneUrl, accessToken: session.accessToken, cliVersion: CLI_VERSION,
-      change: { kind: "set_workspace_limits", [target.field]: value },
+      change,
       confirm: async (effect) => {
         if (input.yes) return true;
         if (held !== effect) flush();

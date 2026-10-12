@@ -15,16 +15,39 @@ export async function developerGet<T>(
   path: string,
   schema: { safeParse: (value: unknown) => { success: true; data: T } | { success: false } },
 ): Promise<{ env: string; url: string; body: T }> {
+  return developerRequest(deps, env, path, schema);
+}
+
+/**
+ * developerGet for any method. `explain` shows the server's reason for a refusal (400, 403, 404)
+ * instead of only its status: for routes whose refusals are the developer's to act on.
+ */
+export async function developerRequest<T>(
+  deps: DeveloperSessionDeps,
+  env: string | undefined,
+  path: string,
+  schema: { safeParse: (value: unknown) => { success: true; data: T } | { success: false } },
+  options: { method?: "GET" | "POST" | "DELETE"; body?: unknown; explain?: boolean } = {},
+): Promise<{ env: string; url: string; body: T }> {
   const session = await developerAccessToken(deps, env);
   let response: Response;
   try {
-    response = await deps.fetch(`${session.entry.url}${path}`, { headers: { authorization: `Bearer ${session.accessToken}` }, signal: AbortSignal.timeout(20_000) });
+    response = await deps.fetch(`${session.entry.url}${path}`, {
+      method: options.method ?? "GET",
+      headers: { authorization: `Bearer ${session.accessToken}`, ...(options.body === undefined ? {} : { "content-type": "application/json" }) },
+      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
+      signal: AbortSignal.timeout(20_000),
+    });
   } catch {
     throw agentXError("RUNTIME_UNAVAILABLE", `could not reach AgentX at ${session.entry.url}; check your connection and try again`);
   }
   if (response.status === 401) {
     const reason = refusalReason(await response.json().catch(() => undefined));
     throw agentXError("AUTH_REQUIRED", `your AgentX sign-in for ${session.env} has ended${reason === undefined ? "" : ` (${reason})`}; run npx ${CLI_PACKAGE_NAME} login ${session.entry.url}`);
+  }
+  if (options.explain === true && (response.status === 400 || response.status === 403 || response.status === 404)) {
+    const reason = refusalMessage(await response.json().catch(() => undefined));
+    if (reason !== undefined) throw agentXError(response.status === 400 ? "CONFIG_INVALID" : response.status === 403 ? "FORBIDDEN" : "NOT_FOUND", reason);
   }
   if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered HTTP ${response.status}; try again`);
   const parsed = schema.safeParse(await response.json().catch(() => undefined));
@@ -43,10 +66,18 @@ export async function fetchDeveloperProjects(deps: DeveloperSessionDeps, env: st
  * so it tells a caller only about their own sign-in.
  */
 function refusalReason(body: unknown): string | undefined {
+  const message = refusalMessage(body);
+  if (message === undefined) return undefined;
+  const reason = (message.split("; ")[0] ?? "").trim();
+  return reason === "" ? undefined : reason;
+}
+
+/** The broker's whole message for a refusal, hint included, made safe to show. */
+function refusalMessage(body: unknown): string | undefined {
   const message = typeof body === "object" && body !== null ? (body as { error?: { message?: unknown } }).error?.message : undefined;
   if (typeof message !== "string") return undefined;
-  const reason = sanitizeServerText(message.split("; ")[0] ?? "").trim();
-  return reason === "" ? undefined : reason;
+  const text = sanitizeServerText(message).trim();
+  return text === "" ? undefined : text;
 }
 
 export function whoamiText(result: { env: string; url: string; projects: DeveloperProjectsResponse }): string {

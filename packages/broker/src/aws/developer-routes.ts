@@ -39,6 +39,7 @@ import {
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import type { ProjectAccessSubject } from "../developer/task-person-identity.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
+import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
 import {
   createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, setPageSuggestion,
@@ -82,6 +83,8 @@ export interface DeveloperRouteDependencies {
   tasks?: DeveloperTaskActions;
   /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
   refreshTaskFeedback?(taskId: string): Promise<void>;
+  /** Sign in with ChatGPT (#338): each developer's connection; without it /v1/dev/chatgpt/* answers NOT_FOUND. */
+  chatgpt?: ChatGptConnections;
 }
 export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string }
 
@@ -671,5 +674,30 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
     if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
     return routeDeveloperTaskRequest(developerTaskRouteDependencies(deps, caller), caller, request, url);
   }
+  if (url.pathname === CHATGPT_CONNECTION_PATH || url.pathname === `${CHATGPT_CONNECTION_PATH}/finish`) {
+    return routeChatGptConnection(deps, caller, request, url);
+  }
   throw agentXError("NOT_FOUND", "route not found");
+}
+
+/** Sign in with ChatGPT (#338): the caller's own connection, and only theirs. No route answers a token. */
+export const CHATGPT_CONNECTION_PATH = "/v1/dev/chatgpt/connection";
+
+async function routeChatGptConnection(deps: DeveloperRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (deps.chatgpt === undefined) throw agentXError("NOT_FOUND", "Sign in with ChatGPT is not set up in this deployment");
+  const finish = url.pathname.endsWith("/finish");
+  if (finish && request.method === "POST") return deps.chatgpt.finish(caller.developerId, jsonBody(request));
+  if (!finish && request.method === "GET") return deps.chatgpt.view(caller.developerId);
+  if (!finish && request.method === "POST") return deps.chatgpt.start(caller.developerId);
+  if (!finish && request.method === "DELETE") return deps.chatgpt.disconnect(caller.developerId);
+  throw agentXError("NOT_FOUND", "route not found");
+}
+
+function jsonBody(request: AdaptedHttpRequest): unknown {
+  if (request.body === undefined || request.body === "") return {};
+  try {
+    return JSON.parse(request.body) as unknown;
+  } catch {
+    throw agentXError("CONFIG_INVALID", "the request body is not JSON");
+  }
 }

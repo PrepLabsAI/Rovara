@@ -38,6 +38,10 @@ export interface OperationRecord extends Operation {
   targetOperationId?: string;
   /** The project revision whose non-disk settings applied, which may be newer than the workspace's. */
   settingsRevision?: number;
+  /** #341: the developer whose ChatGPT plan this task runs on; its chatgpt-token callback answers only their token. */
+  chatgptDeveloperId?: string;
+  /** #342: why this task stopped using its owner's ChatGPT plan, as its worker said; set once. */
+  chatgptFallback?: "limit" | "revoked" | "model";
   workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | undefined;
   workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } | undefined;
   /** A PR feedback review started by a broker that gives the critic only the owner's notes for its round (absent: an earlier release's run). */
@@ -85,7 +89,7 @@ export interface CallbackClaims {
   workspaceId: string;
   operationId: string;
   fence: number;
-  actions: Array<"events" | "artifacts" | "result" | "feedback-bundles" | "feedback-approval" | "pull-request" | "pull-request-update" | "codebuild">;
+  actions: Array<"events" | "artifacts" | "result" | "feedback-bundles" | "feedback-approval" | "pull-request" | "pull-request-update" | "codebuild" | "chatgpt-token" | "chatgpt-status">;
   expiresAt: number;
 }
 
@@ -185,6 +189,7 @@ export function issueCapability(
   allowPullRequest = false,
   allowFeedbackBundles = false,
   allowFeedbackApproval = false,
+  allowChatGptToken = false,
 ): string {
   const claims: CallbackClaims = {
     workspaceId,
@@ -196,6 +201,9 @@ export function issueCapability(
       "result",
       ...(allowFeedbackBundles ? ["feedback-bundles" as const] : []),
       ...(allowFeedbackApproval ? ["feedback-approval" as const] : []),
+      // #341: only a task that runs on its owner's ChatGPT plan may ask for the owner's access token.
+      // #342: and tell the control plane why it stopped using that plan.
+      ...(allowChatGptToken ? ["chatgpt-token" as const, "chatgpt-status" as const] : []),
       ...(allowPullRequest
         ? ["pull-request" as const, "pull-request-update" as const, "codebuild" as const]
         : []),

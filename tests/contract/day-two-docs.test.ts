@@ -12,7 +12,8 @@ describe("the guides (FR-054)", () => {
     for (const entry of CONFIG_KEYS) {
       const row = rows.find((line) => line.startsWith(`| \`${entry.key}\` |`));
       expect(row, entry.key).toBeDefined();
-      const place = entry.target.kind === "stack-parameter" ? entry.target.parameter : entry.target.kind === "settings" ? "alertAddress" : `WORKSPACE_LIMITS.${entry.target.field}`;
+      const place = entry.target.kind === "stack-parameter" ? entry.target.parameter : entry.target.kind === "settings" ? "alertAddress"
+        : entry.target.kind === "chatgpt-setting" ? `CHATGPT.${entry.target.field}` : `WORKSPACE_LIMITS.${entry.target.field}`;
       expect(row, entry.key).toContain(place);
     }
   });
