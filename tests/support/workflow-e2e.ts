@@ -166,14 +166,27 @@ function wireFeedbackReader(github: FakeGitHub): (repositoryUrl: string, number:
 }
 
 /** The recovery worker's bounded merge-only read, either through the real provider or the fake's stable API view. */
-function mergeObservationReader(github: FakeGitHub, wire: boolean, requestLedger: string[]): GitHubAppCredentialProvider["getPullRequestMergeObservation"] {
+function mergeObservationReader(
+  github: FakeGitHub,
+  wire: boolean,
+  requestLedger: string[],
+  controls: { httpFault?: (attempt: number) => Response | undefined; afterRead?: () => void | Promise<void> } = {},
+): GitHubAppCredentialProvider["getPullRequestMergeObservation"] {
   if (wire) {
     wireAppKey ??= generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } }).privateKey;
-    const provider = new GitHubAppCredentialProvider({ credentialRef: "github-app", appId: "123", getPrivateKey: async () => wireAppKey!, fetchImplementation: github.fetch });
-    return (repositoryUrl, number, budget) => provider.getPullRequestMergeObservation(repositoryUrl, number, {
-      ...budget,
-      beforeRequest: () => { requestLedger.push("github"); budget.beforeRequest(); },
-    });
+    let attempt = 0;
+    const provider = new GitHubAppCredentialProvider({ credentialRef: "github-app", appId: "123", getPrivateKey: async () => wireAppKey!, fetchImplementation: async (input, init) => {
+      const fault = controls.httpFault?.(++attempt);
+      return fault ?? github.fetch(input, init);
+    } });
+    return async (repositoryUrl, number, budget) => {
+      const observed = await provider.getPullRequestMergeObservation(repositoryUrl, number, {
+        ...budget,
+        beforeRequest: () => { requestLedger.push("github"); budget.beforeRequest(); },
+      });
+      await controls.afterRead?.();
+      return observed;
+    };
   }
   return async (repositoryUrl, number, budget) => github.atOneMoment(async () => {
     requestLedger.push("pull-request");
@@ -188,6 +201,7 @@ function mergeObservationReader(github: FakeGitHub, wire: boolean, requestLedger
     if (before.number !== after.number || before.url !== after.url || before.headCommit !== after.headCommit || before.state !== after.state) {
       throw agentXError("RUNTIME_UNAVAILABLE", "GitHub merge observation changed during the read");
     }
+    await controls.afterRead?.();
     return { ...after, headTreeSha };
   });
 }
@@ -271,6 +285,8 @@ export async function createWorkflowE2E(options: {
   github?: FakeGitHubOptions & { wire?: boolean };
   /** The App secret's webhook secret: absent for the default; null when the secret holds none (the broker answers 503). */
   webhookSecret?: string | null;
+  /** Merge-recovery-only external seams: real-provider HTTP faults and a race immediately after its stable PR read. */
+  mergeObservation?: { httpFault?: (attempt: number) => Response | undefined; afterRead?: () => void | Promise<void> };
   /** The worker's review timeouts (the run-task seam); absent, the reviews' own 5 minutes. */
   workerTimeouts?: { reviewMs?: number; feedbackReviewMs?: number };
   /** How long the broker's PR description update (D2) may take; absent, the broker's own 5 seconds. */
@@ -292,8 +308,8 @@ export async function createWorkflowE2E(options: {
     return cachedSecret === null ? webhookSecretFromSecret("{}") : cachedSecret;
   };
   const githubPullRequests = options.github?.wire === true
-    ? { ...github.gateway, getPullRequestFeedback: wireFeedbackReader(github), getPullRequestMergeObservation: mergeObservationReader(github, true, mergeObservationRequests) }
-    : { ...github.gateway, getPullRequestMergeObservation: mergeObservationReader(github, false, mergeObservationRequests) };
+    ? { ...github.gateway, getPullRequestFeedback: wireFeedbackReader(github), getPullRequestMergeObservation: mergeObservationReader(github, true, mergeObservationRequests, options.mergeObservation) }
+    : { ...github.gateway, getPullRequestMergeObservation: mergeObservationReader(github, false, mergeObservationRequests, options.mergeObservation) };
   // The plan evidence jobs the broker started: the background Lambda is run by the test, with `runPlanEvidenceJobs`.
   const planEvidenceJobs: PlanEvidenceEvent[] = [];
   const harness = await createDeveloperTaskBroker({
