@@ -55,6 +55,9 @@ async function pageHtml(options: PageOptions = {}): Promise<string> {
   expect(answer.statusCode).toBe(200);
   return answer.body;
 }
+function withCapabilities(html: string, values: Record<string, unknown>): string {
+  return html.replace(/(<script type="application\/json" id="agentx-page-data">)([\s\S]*?)(<\/script>)/, (_all, start: string, raw: string, end: string) => `${start}${JSON.stringify({ ...JSON.parse(raw), ...values })}${end}`);
+}
 
 interface Reply { status: number; body?: unknown }
 interface Sent { url: string; method: string; headers: Record<string, string>; body: Record<string, string> }
@@ -126,6 +129,88 @@ const posts = (page: Page, path: string) => page.sent.filter((entry) => entry.me
 const commentBoxes = (page: Page) => page.byId("decide-comments-list").querySelectorAll("input[type=checkbox]");
 
 describe("the deciding and commenting script", () => {
+  it("applies a current owner-to-viewer projection while keeping this task's unsent drafts", async () => {
+    const storage = fakeStorage();
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 4 });
+    const page = boot(html, { storage, respond: (entry) => entry.url.endsWith("/api/state") ? { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 5 } } : { status: 200, body: {} } });
+    radio(page, "d1", "above").click();
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const commentForm = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    commentForm.querySelector("textarea")!.type_("unfinished comment");
+    page.byId("decide-approve").click();
+    page.byId("decide-note").type_("unfinished note");
+    await page.advance(20_000);
+    expect(page.sent.filter((entry) => entry.url.endsWith("/api/state"))).toHaveLength(1);
+    expect(page.byId("decide-approve").disabled).toBe(true);
+    expect(page.byId("decide-approve").hidden).toBe(true);
+    expect(page.byId("decide-dialog").open).toBe(false);
+    expect(radio(page, "d1", "above").checked).toBe(true);
+    expect(page.byId("decide-note").value).toBe("unfinished note");
+    expect(commentForm.querySelector("textarea")!.value).toBe("unfinished comment");
+    expect((JSON.parse(storage.getItem(`agentx:${taskId}:coding-plan`)!) as { note: string }).note).toBe("unfinished note");
+  });
+
+  it("clears only this task's drafts and ignores stale permission snapshots after reader removal", async () => {
+    const storage = fakeStorage();
+    storage.setItem(`agentx:${taskId}:coding-plan`, JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "private" }));
+    storage.setItem("agentx:other-task:coding-plan", JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "other" }));
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 4 });
+    const page = boot(html, { storage, respond: (entry) => entry.url.endsWith("/api/state") ? { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [], commentSeq: 3, csrf: "n".repeat(43), canRead: false, peopleRevision: 5 } } : { status: 200, body: {} } });
+    await page.advance(20_000);
+    expect(page.sent.filter((entry) => entry.url.endsWith("/api/state"))).toHaveLength(1);
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).toBeNull();
+    expect(storage.getItem("agentx:other-task:coding-plan")).not.toBeNull();
+    expect(page.document.querySelector("main")!.hidden).toBe(true);
+  });
+
+  it("clears this task immediately when a write response says its reader was removed", async () => {
+    const storage = fakeStorage();
+    storage.setItem(`agentx:${taskId}:coding-plan`, JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "private" }));
+    storage.setItem("agentx:other-task:coding-plan", JSON.stringify({ v: 1, at: 1_000_000, answers: {}, opened: [], drafts: {}, excluded: [], note: "other" }));
+    const page = boot(await pageHtml(), { storage, respond: (entry) => entry.method === "POST" ? { status: 404, body: { error: "not_found" } } : { status: 200, body: {} } });
+    page.document.querySelector('.comment-open[data-target="claim:2"]')!.click();
+    const form = page.document.querySelector('[data-comments="claim:2"] .comment-form')!;
+    form.querySelector("textarea")!.type_("private comment");
+    form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();
+    await page.settle();
+    expect(page.document.querySelector("main")!.hidden).toBe(true);
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).toBeNull();
+    expect(storage.getItem("agentx:other-task:coding-plan")).not.toBeNull();
+  });
+
+  it("does not restore revoked write rights from an older or incomplete projection", async () => {
+    let tick = 0;
+    const html = withCapabilities(await pageHtml(), { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 5 });
+    const page = boot(html, { respond: (entry) => {
+      if (!entry.url.endsWith("/api/state")) return { status: 200, body: {} };
+      tick += 1;
+      const rights = tick === 1
+        ? { canRead: true, canComment: false, canSuggest: false, canDecide: false, canAsk: false, canManagePeople: false, canTakeOwnership: false, peopleRevision: 6 }
+        : tick === 2
+          ? { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false, peopleRevision: 5 }
+          : { canRead: true, canComment: true, canSuggest: true, canDecide: true, canAsk: true, canManagePeople: true, canTakeOwnership: false };
+      return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43), ...rights } };
+    } });
+    await page.advance(20_000);
+    expect(page.byId("decide-approve").disabled).toBe(true);
+    await page.advance(20_000);
+    expect(page.byId("decide-approve").disabled).toBe(true);
+    await page.advance(20_000);
+    expect(page.byId("decide-approve").disabled).toBe(true);
+  });
+
+  it("keeps legacy permission snapshots and their draft behavior until a complete projection arrives", async () => {
+    const storage = fakeStorage();
+    storage.setItem(`agentx:${taskId}:coding-plan`, JSON.stringify({ v: 1, at: 1_000_000, answers: { d1: "above" }, opened: ["d1"], drafts: {}, excluded: [], note: "legacy draft" }));
+    const page = boot(await pageHtml(), { storage, respond: (entry) => entry.url.endsWith("/api/state")
+      ? { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: 3, csrf: "n".repeat(43) } }
+      : { status: 200, body: {} } });
+    await page.advance(20_000);
+    expect(page.byId("decide-approve").disabled).toBe(false);
+    expect(storage.getItem(`agentx:${taskId}:coding-plan`)).not.toBeNull();
+    expect(page.document.querySelector("main")!.hidden).toBe(false);
+  });
+
   it("preserves contextual comment labels and target keys when comments refresh", async () => {
     let seq = 3;
     const page = boot(await pageHtml({ comments: [comment(1, { target: { kind: "claim", id: "2" } }), comment(3, { target: { kind: "decision", id: "d1" } }), comment(4, { target: { kind: "document" } })] }), { respond: (entry) => {

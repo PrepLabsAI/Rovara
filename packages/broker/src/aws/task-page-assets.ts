@@ -303,7 +303,33 @@ var csrf=TOKEN.test(String(data.csrf))?String(data.csrf):"";
 var revision=Number(data.revision)||0;
 var commentSeq=Number(data.commentSeq)||0;
 var canComment=data.canComment===true,canDecide=data.canDecide===true,canSuggest=data.canSuggest===true,canAsk=data.canAsk===true&&data.askAvailable!==false;
+var canRead=data.canRead===undefined?true:data.canRead===true,canManagePeople=data.canManagePeople===true,canTakeOwnership=data.canTakeOwnership===true;
+var hasProjection=false,peopleRevision=null,accessGeneration=0;
+function validProjection(state){
+  var keys=["canRead","canComment","canSuggest","canDecide","canAsk","canManagePeople","canTakeOwnership"];
+  for(var i=0;i<keys.length;i++)if(typeof state[keys[i]]!=="boolean")return false;
+  return state.peopleRevision===undefined||Number.isSafeInteger(state.peopleRevision);
+}
+function applyProjection(state){
+  if(!validProjection(state)){
+    if(state&&state.canRead===false){hasProjection=true;canRead=false;canComment=false;canSuggest=false;canDecide=false;canAsk=false;canManagePeople=false;canTakeOwnership=false;accessGeneration+=1;applyCurrentAccess();}
+    return false;
+  }
+  if(peopleRevision!==null&&state.peopleRevision!==undefined&&state.peopleRevision<peopleRevision)return false;
+  if(peopleRevision!==null&&state.peopleRevision===undefined)return false;
+  var prior={canRead:canRead,canComment:canComment,canSuggest:canSuggest,canDecide:canDecide,canAsk:canAsk,canManagePeople:canManagePeople,canTakeOwnership:canTakeOwnership};
+  var permissionKeys=["canRead","canComment","canSuggest","canDecide","canAsk","canManagePeople","canTakeOwnership"];
+  if(hasProjection)for(var p=0;p<permissionKeys.length;p++)if(prior[permissionKeys[p]]===false&&state[permissionKeys[p]]===true&&(peopleRevision===null||state.peopleRevision===undefined||state.peopleRevision<=peopleRevision))return false;
+  var wasReadable=canRead,changed=hasProjection&&((canRead&&!state.canRead)||(canComment&&!state.canComment)||(canSuggest&&!state.canSuggest)||(canDecide&&!state.canDecide)||(canAsk&&!state.canAsk));
+  hasProjection=true;
+  if(state.peopleRevision!==undefined)peopleRevision=state.peopleRevision;
+  canRead=state.canRead;canComment=canRead&&state.canComment;canSuggest=canRead&&state.canSuggest;canDecide=canRead&&state.canDecide;canAsk=canRead&&state.canAsk;canManagePeople=canRead&&state.canManagePeople;canTakeOwnership=canRead&&state.canTakeOwnership;
+  if(changed||(!wasReadable&& !canRead))accessGeneration+=1;
+  applyCurrentAccess();
+  return true;
+}
 var current=data.current&&typeof data.current==="object"?data.current:null;
+applyProjection(data);
 var DOCS={"requirements":"requirements","design":"design","coding-plan":"plan"};
 var LABELS={"requirements":"Requirements","design":"Design","coding-plan":"Coding plan"};
 var DRAFT_DAYS=7*24*3600*1000;
@@ -326,9 +352,27 @@ function uuid(){
   return hex;
 }
 function openAround(node){for(var up=node;up;up=up.parentElement){if(up.tagName==="DETAILS")up.open=true;}}
+function applyCurrentAccess(){
+  var controls=document.querySelectorAll(".comment-open,.reply-open,.comment-edit,.comment-delete,.suggest,#decide-next,#decide-approve,#decide-request-changes,#decide-submit");
+  var radios=document.querySelectorAll("input");
+  for(var i=0;i<controls.length;i++){
+    var node=controls[i],nodeId=node.getAttribute("id")||"",nodeName=node.getAttribute("name")||"",allowed=node.classList&&node.classList.contains("suggest")?canSuggest:(nodeId.indexOf("decide-")===0||nodeName.indexOf("answer-")===0)?canDecide:canComment;
+    node.disabled=!allowed;
+    if(!allowed)node.hidden=true;
+  }
+  for(i=0;i<radios.length;i++)if((radios[i].getAttribute("name")||"").indexOf("answer-")===0){radios[i].disabled=!canDecide;if(!canDecide)radios[i].hidden=true;}
+  var dialog=document.getElementById("decide-dialog");
+  if(!canDecide&&dialog&&dialog.open&&typeof dialog.close==="function")dialog.close();
+}
+function hideRemovedTask(){
+  var root=document.querySelector("main")||document.body;
+  if(root){root.hidden=true;}
+  var dialog=document.getElementById("decide-dialog");if(dialog&&dialog.open&&typeof dialog.close==="function")dialog.close();
+}
 
 /* ---------- talking to the API ---------- */
 function call(method,path,body,retried){
+  if(method==="POST"&&(path==="decision"?!canDecide:path==="suggestions"?!canSuggest:!canComment))return Promise.resolve({status:403,body:{error:"request_refused"}});
   var init={method:method,credentials:"same-origin",cache:"no-store",headers:{accept:"application/json"}};
   if(body!==undefined){init.headers["content-type"]="application/json";init.headers["x-agentx-csrf"]=csrf;init.body=JSON.stringify(body);}
   return fetch(API+path,init).then(function(reply){
@@ -336,8 +380,12 @@ function call(method,path,body,retried){
       var answer={status:reply.status,body:json&&typeof json==="object"?json:{}};
       /* The sign-in ended: what this tab kept is dropped, as on a shared device it should be. */
       if(answer.status===401)clearDrafts();
+      if((answer.status===403||answer.status===404)&&answer.body.error!=="request_refused"){
+        stopped=true;accessGeneration+=1;clearTaskDrafts();hideRemovedTask();
+      }
       if(method==="POST"&&answer.status===403&&answer.body.error==="request_refused"&&!retried){
-        return readState().then(function(){return call(method,path,body,true);});
+        var generation=accessGeneration;
+        return readState().then(function(){return generation===accessGeneration&&!stopped&&canRead?call(method,path,body,true):{status:403,body:{error:"request_refused"}};});
       }
       return answer;
     });
@@ -362,6 +410,10 @@ function clearDrafts(){
     for(var i=0;i<store.length;i++){var k=store.key(i);if(k&&k.indexOf("agentx:")===0)mine.push(k);}
     for(i=0;i<mine.length;i++)store.removeItem(mine[i]);
   }catch(e){}
+}
+function clearTaskDrafts(){
+  drafts={};
+  try{if(!store)return;var mine=[];for(var i=0;i<store.length;i++){var k=store.key(i);if(k&&k.indexOf("agentx:"+taskId+":")===0)mine.push(k);}for(i=0;i<mine.length;i++)store.removeItem(mine[i]);}catch(e){}
 }
 var drafts={};
 function draftKey(anchor){return "agentx:"+taskId+":"+anchor;}
@@ -616,7 +668,9 @@ function setSuggest(button,on){
   button.textContent=on?COPY.youSuggest:COPY.suggest;
 }
 function refreshComments(){
+  var generation=accessGeneration;
   return call("GET","comments").then(function(answer){
+    if(generation!==accessGeneration||stopped||!canRead)return;
     if(answer.status!==200)return;
     known=arr(answer.body.comments).filter(validComment);
     renderAll();
@@ -701,6 +755,7 @@ function openCommentForm(place,key,trigger,parentId,text){
   }
   form.cancel.addEventListener("click",function(){close();if(trigger)trigger.focus();});
   form.submit.addEventListener("click",function(){
+    if(!canComment)return;
     if(sending)return;
     var value=form.area.value.replace(/^\s+|\s+$/g,"");
     if(value===""){form.area.focus();return;}
@@ -711,7 +766,9 @@ function openCommentForm(place,key,trigger,parentId,text){
     var body={requestId:requestId,document:place.document,version:place.version,target:target,text:value,ask:form.ask?form.ask.checked===true:false};
     if(parentId)body.parentId=parentId;
     sending=true;form.submit.disabled=true;form.error.hidden=true;
+    var generation=accessGeneration;
     call("POST","comments",body).then(function(answer){
+      if(generation!==accessGeneration&&!canComment)return;
       sending=false;form.submit.disabled=false;
       if((answer.status===201||answer.status===200)&&validComment(answer.body.comment)){
         close();
@@ -734,7 +791,7 @@ function openCommentForm(place,key,trigger,parentId,text){
         return;
       }
       form.fail(said(answer));
-    },function(){sending=false;form.submit.disabled=false;form.fail(COPY.unavailable);});
+    },function(){if(generation!==accessGeneration&&!canComment)return;sending=false;form.submit.disabled=false;form.fail(COPY.unavailable);});
   });
   if(!text)form.area.focus();
   return form.box;
@@ -1027,6 +1084,7 @@ function fail(text,newer){
   if(newer)showIt.hidden=false;
 }
 function submit(){
+  if(!canDecide)return;
   if(sending)return;
   var approve=dialogKind==="APPROVE";
   var note=el("decide-note").value.replace(/^\s+|\s+$/g,"");
@@ -1052,7 +1110,9 @@ function submit(){
   el("decide-submit").disabled=true;
   el("decide-error").hidden=true;
   el("decide-status").textContent=COPY.sending;
+  var generation=accessGeneration;
   call("POST","decision",payload).then(function(answer){
+    if(generation!==accessGeneration&&!canDecide)return;
     if(answer.status===200){
       el("decide-status").textContent=COPY.sent;
       var draft=loadDraft(current.anchor);
@@ -1063,7 +1123,7 @@ function submit(){
     }
     sending=false;el("decide-submit").disabled=false;
     fail(said(answer),answer.status===409);
-  },function(){sending=false;el("decide-submit").disabled=false;fail(COPY.unavailable,false);});
+  },function(){if(generation!==accessGeneration&&!canDecide)return;sending=false;el("decide-submit").disabled=false;fail(COPY.unavailable,false);});
 }
 
 /* ---------- the page's one poll ---------- */
@@ -1072,9 +1132,11 @@ var EVERY=20000,QUIET_EVERY=60000,QUIET_AFTER=600000,IDLE_STOP=7200000;
 var lastInput=Date.now(),timer=null,asking=false,stopped=false;
 function readState(){
   return call("GET","state").then(function(answer){
-    if(answer.status===401||answer.status===403||answer.status===404){stopped=true;return null;}
+    if(answer.status===401||answer.status===403||answer.status===404){stopped=true;if(answer.status!==401){clearTaskDrafts();hideRemovedTask();}return null;}
     if(answer.status!==200)return null;
     var state=answer.body;
+    if(state&&typeof state==="object")applyProjection(state);
+    if(stopped||(hasProjection&&!canRead)){stopped=true;clearTaskDrafts();hideRemovedTask();return null;}
     if(TOKEN.test(str(state.csrf)))csrf=state.csrf;
     return state;
   });
@@ -1095,8 +1157,9 @@ function poll(){
   if(timer!==null){clearTimeout(timer);timer=null;}
   if(asking||stopped||document.visibilityState==="hidden"||Date.now()-lastInput>=IDLE_STOP)return;
   asking=true;
+  var generation=accessGeneration;
   readState().then(function(state){
-    if(!state)return;
+    if(!state||generation!==accessGeneration||stopped||!canRead)return;
     var stage=banner?banner.getAttribute("data-stage"):null;
     if(Number(state.revision)!==revision||(stage!==null&&typeof state.stage==="string"&&state.stage!==stage))showBanner(state);
     if(typeof state.commentSeq==="number"&&state.commentSeq!==commentSeq){commentSeq=state.commentSeq;return refreshComments();}
@@ -1123,5 +1186,6 @@ document.addEventListener("visibilitychange",function(){
 });
 var refresh=document.getElementById("moved-on-refresh");
 if(refresh)refresh.addEventListener("click",function(){location.reload();});
+if(hasProjection&&!canRead){stopped=true;clearTaskDrafts();hideRemovedTask();}
 schedule();
 })();`;
