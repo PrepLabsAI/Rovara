@@ -134,8 +134,9 @@ export function workflowModel(script: {
   const queues: Record<ReviewRole, FauxResponseStep[]> = { CODE: [...(script.reviews?.CODE ?? [])], SECURITY: [...(script.reviews?.SECURITY ?? [])] };
   return async (context, options, state, model) => {
     const prompt = firstUserText(context);
+    const openingCall = !context.messages.some((message) => ["assistant", "toolResult"].includes((message as { role?: string }).role ?? ""));
     // Only a session's opening call is recorded; later calls in the session (tool results, a format retry) repeat the same first message.
-    if (!context.messages.some((message) => ["assistant", "toolResult"].includes((message as { role?: string }).role ?? ""))) script.prompts?.push(prompt);
+    if (openingCall) script.prompts?.push(prompt);
     const latestUserText = textOf([...context.messages].reverse().find((message) => (message as { role?: string }).role === "user"));
     // The implementation turn reopens the planning conversation, so the planner is chosen by the latest user turn.
     if (latestUserText.includes("Planning phase only")) {
@@ -169,9 +170,9 @@ export function workflowModel(script: {
       return typeof step === "function" ? step(context, options, state, model) : step;
     }
     script.turns?.push({ role: "CODER", userText: latestUserText });
-    // A new user turn may be a later implementation run (for example, owner Send back). Keep commands
-    // in that turn separate from the preceding turn so the worker records them against the new candidate.
-    if (latestUserText !== lastCoderUserText) {
+    // Reopened implementation turns may retain planning/history messages; a genuinely fresh transcript is also a
+    // boundary even when its first user message matches the prior coder turn.
+    if (openingCall || latestUserText !== lastCoderUserText) {
       beforeEdits = [...(script.beforeEditsCommands ?? [])];
       afterEdits = [...(script.afterEditsCommands ?? [])];
       editsStarted = false;

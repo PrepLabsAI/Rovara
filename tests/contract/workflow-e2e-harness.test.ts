@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 import { PLAN_CLAIMS_MAX, WORKER_INVOCATION_FEATURES, parsePlanDocument } from "@agentx/contracts";
 import { LOST_COMPUTE_ERROR, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../support/workflow-e2e.js";
 import { OMAR } from "../support/developer-task-broker.js";
-import { feedbackCriticReply } from "../support/faux-scripts.js";
+import { feedbackCriticReply, workflowModel } from "../support/faux-scripts.js";
 import {
   conflictingAsImplement, duplicateFindingIds, feedbackBundles, implementWithLowConfidence, implementWithoutFileChanges, missingComment,
   ownerDecisionEmptyLists, planCitesMissingFile, planMissingWhy, planOverCeiling, planProse, planTiny, planTruncatedJson, planWithDecisions,
@@ -55,6 +55,23 @@ describe("workflow E2E harness", () => {
     await expect(createWorkflowE2E({ initialRepositoryFiles: [{ path: "../outside.txt", content }] })).rejects.toThrow(/stay inside repo\/demo/);
     await expect(createWorkflowE2E({ initialRepositoryFiles: [{ path: "/tmp/outside.txt", content }] })).rejects.toThrow(/stay inside repo\/demo/);
   }, 120_000);
+
+  it("resets coder command queues for a fresh session with the same prompt, without resetting within-session tool turns", async () => {
+    const step = workflowModel({ plan: PLAN, edits: EDITS, beforeEditsCommands: ["echo before"], afterEditsCommands: ["echo after"] });
+    const user = (text: string) => ({ role: "user", content: [{ type: "text", text }], timestamp: 0 });
+    const samePrompt = "Implement the approved plan.";
+    const call = (messages: unknown[]) => step({ messages }, undefined, undefined, undefined) as Promise<{ content: Array<{ type: string; name?: string }> }>;
+    const names = async (messages: unknown[]) => (await call(messages)).content.map((part) => part.name ?? part.type);
+    const opening = [user(samePrompt)];
+    expect(await names(opening)).toEqual(["bash"]);
+    expect(await names([...opening, { role: "assistant", content: [] }, { role: "toolResult", content: [] }])).toEqual(["write"]);
+    expect(await names([...opening, { role: "assistant", content: [] }, { role: "toolResult", content: [] },
+      { role: "assistant", content: [] }, { role: "toolResult", content: [] }])).toEqual(["bash"]);
+    expect(await names([...opening, { role: "assistant", content: [] }, { role: "toolResult", content: [] },
+      { role: "assistant", content: [] }, { role: "toolResult", content: [] }, { role: "assistant", content: [] }, { role: "toolResult", content: [] }])).toEqual(["text"]);
+    // A new Pi session starts with the same user text but has no prior assistant or tool-result messages.
+    expect(await names([user(samePrompt)])).toEqual(["bash"]);
+  });
 
   it("result rewrites are kind-matched, one-shot, and leave defaults inert", async () => {
     let failing = true;
