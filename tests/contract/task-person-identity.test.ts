@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SLACK_OIDC_ISSUER, type TaskPersonProofRequest, type TaskPersonProofResponse } from "@agentx/contracts";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
+import * as taskPersonIdentity from "../../packages/broker/src/developer/task-person-identity.js";
 import {
   resolveTaskPersonId,
   resolveTaskPickerPerson,
@@ -20,6 +21,11 @@ const MAYA_SLACK = "U0MAYA001";
 const MAYA_NATIVE = developerIdForSlackUser(MAYA_SLACK);
 const EXTERNAL_ISSUER = "https://id.example.test";
 const MAYA_EXTERNAL = ownerKeyForSubject(EXTERNAL_ISSUER, "maya-employee");
+const checkTaskPersonIdentity = Reflect.get(taskPersonIdentity, "checkTaskPersonIdentity") as (
+  deps: TaskPersonIdentityDependencies,
+  task: DeveloperTaskRecord,
+  developerId: string,
+) => Promise<Record<string, unknown>>;
 
 const task = {
   pk: `DEVTASK#${TASK_ID}`,
@@ -188,5 +194,67 @@ describe("task person identity registry", () => {
       await expect(resolveTaskPickerPerson(h.deps, task, MAYA_SLACK)).rejects.toMatchObject({ code: "PROJECT_ACCESS_DENIED" });
       expect(h.access).not.toHaveBeenCalled();
     }
+  });
+
+  it("qualifies a native creator by developer ID without creating registry or sign-in rows", async () => {
+    const nativeTask = { ...task, developerId: MAYA_NATIVE, provider: "slack" as const };
+    const h = harness();
+    h.db.set(nativeTask);
+
+    await expect(checkTaskPersonIdentity(h.deps, nativeTask, MAYA_NATIVE)).resolves.toMatchObject({
+      subject: { developerId: MAYA_NATIVE, slackUserId: MAYA_SLACK },
+      identity: { developerId: MAYA_NATIVE, method: "slack", issuer: SLACK_OIDC_ISSUER, subject: MAYA_SLACK },
+      eligible: true,
+      channelMember: true,
+    });
+
+    expect(h.db.find((item) => String(item.sk).startsWith("PERSON"))).toEqual([]);
+    expect(h.db.find((item) => String(item.pk).startsWith("SESSION#") || String(item.pk).startsWith("DEVELOPER#"))).toEqual([]);
+  });
+
+  it("qualifies the exact trusted native current actor without persisting an identity", async () => {
+    const actorSlack = "U0ACTOR001";
+    const actorDeveloperId = developerIdForSlackUser(actorSlack);
+    const h = harness({ proof: async (request) => ({
+      ok: true, user: { id: request.slackUserId, teamId: TEAM, name: "Current Actor" }, memberOf: ["C0PAY0001"],
+    }) });
+    Reflect.set(h.deps, "trustedCaller", { developerId: actorDeveloperId, sessionId: "s-current", amr: "slack", name: "Current Actor", slackUserId: actorSlack });
+
+    await expect(checkTaskPersonIdentity(h.deps, task, actorDeveloperId)).resolves.toMatchObject({
+      subject: { developerId: actorDeveloperId, slackUserId: actorSlack },
+      identity: { developerId: actorDeveloperId, method: "slack", issuer: SLACK_OIDC_ISSUER, subject: actorSlack },
+      eligible: true,
+    });
+    expect(h.db.find((item) => String(item.sk).startsWith("PERSON") || String(item.pk).startsWith("SESSION#"))).toEqual([]);
+  });
+
+  it("uses the immutable external identity and separates definite loss from unavailable proof", async () => {
+    const lost = harness({ developer: externalDeveloper(), proof: async () => ({ ok: false, error: "ineligible" }) });
+    await expect(checkTaskPersonIdentity(lost.deps, task, MAYA_EXTERNAL)).resolves.toMatchObject({
+      subject: { developerId: MAYA_EXTERNAL, slackUserId: MAYA_SLACK },
+      identity: { developerId: MAYA_EXTERNAL, method: "oidc", issuer: EXTERNAL_ISSUER, subject: "maya-employee" },
+      eligible: false,
+      channelMember: false,
+    });
+    expect(lost.db.find((item) => String(item.sk).startsWith("PERSON"))).toEqual([]);
+
+    const unavailable = harness({ developer: externalDeveloper(), proof: async () => ({ ok: false, error: "slack_unavailable" }) });
+    await expect(checkTaskPersonIdentity(unavailable.deps, task, MAYA_EXTERNAL)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+    expect(unavailable.db.find((item) => String(item.sk).startsWith("PERSON"))).toEqual([]);
+  });
+
+  it("requests fresh proof for project bindings and the task share channel", async () => {
+    const shareChannel = "C0SHARE01";
+    const sharedTask = { ...task, share: { ...task.share!, channelId: shareChannel } };
+    const h = harness({ developer: externalDeveloper(), proof: async (request) => ({
+      ok: true,
+      user: { id: request.slackUserId, teamId: TEAM, name: "Maya Chen" },
+      memberOf: ["C0PAY0001", shareChannel],
+    }) });
+    h.db.set(sharedTask);
+
+    await expect(checkTaskPersonIdentity(h.deps, sharedTask, MAYA_EXTERNAL)).resolves.toMatchObject({ eligible: true, channelMember: true });
+    expect(h.proof).toHaveBeenCalledWith({ kind: "task-person-proof", slackUserId: MAYA_SLACK, channelIds: ["C0PAY0001", shareChannel].sort() });
+    expect(h.access).toHaveBeenCalledWith({ developerId: MAYA_EXTERNAL, slackUserId: MAYA_SLACK }, task.project, ["C0PAY0001", shareChannel]);
   });
 });
