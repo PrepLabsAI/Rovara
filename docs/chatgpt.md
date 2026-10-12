@@ -33,6 +33,13 @@ admin change. It needs the admin sign-in (`npx @preplabsai/rovara-code --env <en
 
 Both keys are listed in the [day-2 guide](day-two.md).
 
+`npx @preplabsai/rovara-code --env <env> doctor` shows:
+- whether it's on;
+- how many people have connected a plan;
+- whether the control plane reaches `auth.openai.com` and `api.openai.com`.
+
+It needs this computer's admin sign-in.
+
 ## Connect your plan
 
 OpenAI sends the end of the sign-in back to your own computer (`http://127.0.0.1:1455`), the only place

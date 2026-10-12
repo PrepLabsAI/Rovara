@@ -48,3 +48,16 @@ export const ChatGptConnectionViewSchema = z.object({
   statusAt: z.string().optional(),
 }).loose();
 export type ChatGptConnectionView = z.infer<typeof ChatGptConnectionViewSchema>;
+
+/** GET /v1/admin/chatgpt (#343): what `rovara doctor` shows about Sign in with ChatGPT, read by the control plane. */
+export const ChatGptHealthSchema = z.object({
+  enabled: z.boolean(),
+  preferredModel: z.string(),
+  /** People whose connection works or waits out a limit; a revoked one is not counted. */
+  connected: z.number().int().min(0),
+  /** False when there were more connections than one read counts; `connected` is then a lower bound. */
+  connectedComplete: z.boolean(),
+  /** Whether the control plane reached OpenAI's sign-in and API hosts (any HTTP answer counts). */
+  reachable: z.object({ auth: z.boolean(), api: z.boolean() }).strict(),
+}).loose();
+export type ChatGptHealth = z.infer<typeof ChatGptHealthSchema>;

@@ -16,6 +16,8 @@ export interface DoctorCommandContext {
   services?: (settings: EnvironmentSettings) => DoctorServices;
   parameterStore: (region?: string) => ParameterStore;
   fetch: typeof fetch;
+  /** This computer's unexpired admin sign-in for an environment (#343). */
+  adminSession?: (env: string) => Promise<{ controlPlaneUrl: string; accessToken: string } | undefined>;
   home: string;
   stdout: TextWriter;
   stderr: TextWriter;
@@ -31,7 +33,7 @@ export function registerDoctorCommand(program: Command, context: DoctorCommandCo
       const store = context.store ?? context.parameterStore(options.region);
       const report = await runDoctor({
         env: globals.env, store,
-        services: context.services ?? ((settings) => realDoctorServices({ settings, store, fetch: context.fetch, home: context.home, configDir: globals.configDir, stderr: context.stderr })),
+        services: context.services ?? ((settings) => realDoctorServices({ settings, store, fetch: context.fetch, home: context.home, configDir: globals.configDir, stderr: context.stderr, ...(context.adminSession === undefined ? {} : { adminSession: context.adminSession }) })),
       });
       // With --json, stdout holds one document whose ok is false when any check failed; the error
       // document on stderr (and exit code 2) says the same, as every agentx error does.

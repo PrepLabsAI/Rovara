@@ -55,6 +55,11 @@ checks, in order:
 - **capacity**: the region's EC2 vCPU quota, and free EC2-VPC Elastic IPs. Fewer than two free is
   a warning: this environment keeps working, but another one in this region would not fit.
 - **sign-in**: every check of `agentx signin check`.
+- **chatgpt**: [Sign in with ChatGPT](chatgpt.md): whether it's on and which model tasks prefer, how
+  many people have connected a plan, and whether the control plane reaches `auth.openai.com` and
+  `api.openai.com`. An unreachable host fails while it's on, and only warns while it's off. The
+  control plane alone knows these, so doctor reads them through this computer's admin sign-in
+  (`agentx --env <env> login --admin`); without one, the group is skipped.
 
 `--json` prints the whole report as one JSON document on stdout. The exit code is 0 when no check
 failed (warnings and skips are fine), and 2 when any check failed or doctor could not start.
