@@ -120,9 +120,12 @@ function identityDependencies(input: {
     uuid: () => input.uuid(),
     taskPersonProof: async (request) => {
       admission.assertOpen();
+      if (admission.remainingSlackCalls() <= 0) throw unavailable();
       const measured = await ports.taskPersonProof(request, admission);
       admission.recordSlackUsage(measured.slackCallsUsed);
       admission.assertOpen();
+      if (measured.slackCallsUsed === 0
+        && (measured.result.ok || (!measured.result.ok && measured.result.error === "ineligible"))) throw unavailable();
       return measured.result;
     },
     developerRecord: async (targetDeveloperId) => {
@@ -147,7 +150,9 @@ function identityDependencies(input: {
         admission,
       });
       if (result.kind === "allowed") return;
-      if (result.kind === "denied" || result.kind === "not-found") throw refused();
+      if (result.kind === "denied" && result.reason === "project-access") throw refused();
+      if (result.kind === "not-found") throw agentXError("PROJECT_NOT_FOUND", "task person project was not found");
+      if (result.kind === "denied" && result.reason === "tasks-disabled") throw agentXError("PROJECT_TASKS_DISABLED", "task person project tasks are disabled");
       throw unavailable();
     },
     ...(input.trustedCaller === undefined ? {} : { trustedCaller: input.trustedCaller }),

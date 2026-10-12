@@ -76,6 +76,40 @@ describe("task person runtime factory", () => {
     expect(admission.remainingSlackCalls()).toBe(99);
   });
 
+  it.each(["tasks-disabled", "not-found"] as const)("does not qualify %s project authority as definite identity loss", async (mode) => {
+    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
+    const injected = ports();
+    if (mode === "not-found") {
+      injected.projectAuthorityReader.latestRevision.mockResolvedValue({ revision: undefined, complete: true } as never);
+    } else {
+      injected.projectAuthorityReader.latestRevision.mockResolvedValue({
+        revision: { revision: 7, definition: { developerTasks: { enabled: false, channelMembersMayUse: true } } }, complete: true,
+      });
+    }
+
+    await expect(runtime(admission, injected).checkTaskPerson(nativeTask(), nativeDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+  });
+
+  it("does not call the injected proof when Slack allowance is exhausted", async () => {
+    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
+    admission.recordSlackUsage(100);
+    const injected = ports();
+
+    await expect(runtime(admission, injected).checkTaskPerson(nativeTask(), nativeDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+    expect(injected.taskPersonProof.mock.calls).toHaveLength(0);
+  });
+
+  it.each([
+    ["eligible", { ok: true, user: { id: slackUserId, teamId: slackTeamId, name: "Maya" }, memberOf: [channelId] }],
+    ["definitely ineligible", { ok: false, error: "ineligible" }],
+  ] as const)("rejects a %s proof with impossible zero measured Slack calls", async (_name, result) => {
+    const admission = createTaskAuthorityAdmission({ now: () => 1_000, lambdaRemainingMs: 20_000 });
+    const injected = ports();
+    injected.taskPersonProof.mockImplementation(async () => ({ result, slackCallsUsed: 0 }) as never);
+
+    await expect(runtime(admission, injected).checkTaskPerson(nativeTask(), nativeDeveloperId)).rejects.toMatchObject({ code: "SLACK_UNAVAILABLE" });
+  });
+
   it("reads a person row only after its reverse subject row links that person", async () => {
     const personId = "22222222-2222-4222-8222-222222222222";
     const createdAt = "2026-01-01T00:00:00.000Z";

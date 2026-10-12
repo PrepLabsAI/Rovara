@@ -699,7 +699,7 @@ export function developerTaskRouteDependencies(
       projectChannelIds,
       targetProjectAccess: async (subject, project, freshMemberOf) => {
         const revision = await latestDefinition(deps, project);
-        if (revision === undefined) throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified");
+        if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
         const [memberships, allBindings] = await Promise.all([
           queryAll<{ projectName: string; role?: string }>(deps, `MEMBER#${subject.developerId}`, "PROJECT#"),
           bindingsOf(deps),
@@ -715,6 +715,10 @@ export function developerTaskRouteDependencies(
         if (result.kind === "allowed") return;
         if (result.kind === "unavailable" || result.kind === "needs-membership") {
           throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+        }
+        if (result.kind === "not-found") throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
+        if (result.kind === "denied" && result.reason === "tasks-disabled") {
+          throw agentXError("PROJECT_TASKS_DISABLED", `tasks from AI tools are turned off for \`${project}\`; use the project's Slack channel, or ask an admin`);
         }
         // System qualification has no channel-name lookup or human-facing error decoration.
         throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified");
