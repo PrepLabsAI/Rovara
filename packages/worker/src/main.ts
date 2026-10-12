@@ -10,7 +10,8 @@ import { WorkerCancellationController } from "./cancel.js";
 import { inspectWorkspaceForClose } from "./close-workspace.js";
 import { createWorkerServerState, startWorkerServer } from "./server.js";
 import { invokeAuthenticationFromEnvironment } from "./invoke-auth.js";
-import { resolveTaskModel } from "./task-model.js";
+import { resolveTaskSessionModel } from "./task-model.js";
+import { chatGptTokenSource } from "./chatgpt-token.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
@@ -43,10 +44,14 @@ const state = createWorkerServerState(
       }
       if (invocation.kind === "task") {
         const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
-        const callbacks = createWorkerCallbackSinks({ controlPlaneUrl, invocation });
+        const { chatGptToken, ...callbacks } = createWorkerCallbackSinks({ controlPlaneUrl, invocation });
+        // #341: a task on its owner's ChatGPT plan; the token never leaves this process's memory.
+        const session = await resolveTaskSessionModel(invocation.payload,
+          invocation.payload.chatgpt === undefined ? undefined : chatGptTokenSource(chatGptToken));
         return runTaskInvocation(invocation, {
           rootPath,
-          model: resolveTaskModel(invocation.payload.model),
+          model: session.model,
+          ...(session.piAdapter === undefined ? {} : { piAdapter: session.piAdapter }),
           ...callbacks,
           cancellationController,
         });

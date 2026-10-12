@@ -198,10 +198,16 @@ export function createDefaultPiSessionAdapter(options: { modelRuntime?: PiModelR
 
 export const defaultPiSessionAdapter: PiSessionAdapter = createDefaultPiSessionAdapter();
 
+/** #341: the adapter for a task on its owner's ChatGPT plan: every session asks `apiKey` for the plan's current token. */
+export function createChatGptPiSessionAdapter(apiKey: () => Promise<string>): PiSessionAdapter {
+  return createDefaultPiSessionAdapter({ modelRuntime: (model) => workerModelRuntime(model, apiKey) });
+}
+
 async function workerModelRuntime(
   configured: WorkspaceModelConfiguration,
+  apiKey?: () => Promise<string>,
 ): Promise<{ runtime: ModelRuntime; model: WorkspaceModelConfiguration }> {
-  const resolved = await createModelRuntimeWithFallback(configured, "worker");
+  const resolved = await createModelRuntimeWithFallback(configured, "worker", apiKey === undefined ? {} : { apiKey });
   const modelRuntime = resolved.runtime;
   if (resolved.model.provider === "amazon-bedrock") {
     modelRuntime.registerNativeProvider(executionRoleBedrockProvider());

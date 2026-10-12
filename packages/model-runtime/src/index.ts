@@ -13,6 +13,11 @@ export interface ModelRuntimeOptions {
   readSecret?: (arn: string) => Promise<string | undefined>;
   fetch?: typeof fetch;
   onUsage?: (record: Record<string, unknown>) => void;
+  /**
+   * Sign in with ChatGPT (#341): the OpenAI credential is the task owner's ChatGPT access token, asked for before every
+   * request (it lasts an hour, and a task can run longer) instead of read from the OpenAI secret. OpenAI models only.
+   */
+  apiKey?: () => Promise<string>;
 }
 
 /** Resolve missing-credential fallback before creating a session, so its model and usage agree. */
@@ -48,12 +53,13 @@ export async function createConfiguredModelRuntime(selected: ModelIdentifier & {
   const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null, credentials: new InMemoryCredentialStore() });
   const model = requireKeyedModel(provider, selected.modelId);
   if (!model.reasoning && selected.thinkingLevel && selected.thinkingLevel !== "off") throw agentXError("CONFIG_INVALID", "the selected model does not support reasoning; set thinkingLevel to off");
-  const key = await readProviderKey(provider, environment[secretArnVariable] ?? "", options.readSecret);
+  if (options.apiKey !== undefined && provider !== "openai") throw agentXError("CONFIG_INVALID", "a ChatGPT plan can run only OpenAI models");
+  const key = options.apiKey === undefined ? await readProviderKey(provider, environment[secretArnVariable] ?? "", options.readSecret) : await options.apiKey();
   const { api, baseUrl } = TRANSPORTS[provider];
   runtime.registerProvider(provider, {
     baseUrl, api,
     models: runtime.getModels(provider).map((entry) => ({ ...entry, api, baseUrl, compat: requestCompat(provider, entry.compat) })),
-    streamSimple: (entry, context, streamOptions) => safeProviderStream(provider, entry, context, streamOptions, routing, options.fetch, options.onUsage),
+    streamSimple: (entry, context, streamOptions) => safeProviderStream(provider, entry, context, streamOptions, routing, options.fetch, options.onUsage, options.apiKey),
   });
   try { await runtime.setRuntimeApiKey(provider, key); }
   catch { throw agentXError("RUNTIME_UNAVAILABLE", `${label} credentials could not be initialized`); }
@@ -99,7 +105,7 @@ function eventModel(data: { model?: unknown; message?: { model?: unknown }; resp
   return data.model ?? data.message?.model ?? data.response?.model;
 }
 
-function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions | undefined, routing: Record<string, unknown> | undefined, transport: typeof fetch = fetch, onUsage = (record: Record<string, unknown>) => console.info(JSON.stringify(record))) {
+function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions | undefined, routing: Record<string, unknown> | undefined, transport: typeof fetch = fetch, onUsage = (record: Record<string, unknown>) => console.info(JSON.stringify(record)), apiKey?: () => Promise<string>) {
   const output = createAssistantMessageEventStream();
   let failureStatus: number | undefined;
   let returnedModel: string | undefined;
@@ -133,9 +139,11 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
   };
   void (async () => {
     try {
-      const upstream = upstreamStream(provider, model, context, { ...options, fetch: observedFetch }, routing);
+      // A ChatGPT task's token is asked for each time, so a refreshed one replaces an expiring one.
+      const key = apiKey === undefined ? {} : { apiKey: await apiKey() };
+      const upstream = upstreamStream(provider, model, context, { ...options, ...key, fetch: observedFetch }, routing);
       for await (const event of upstream) {
-        if (event.type === "error") event.error.errorMessage = safeError(provider, event.reason === "aborted", failureStatus);
+        if (event.type === "error") event.error.errorMessage = safeError(provider, event.reason === "aborted", failureStatus, apiKey !== undefined);
         if (event.type === "done" || event.type === "error") {
           const message = event.type === "done" ? event.message : event.error;
           // Pi retains the response in the transcript. This record also identifies the serving model
@@ -154,7 +162,7 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
     } catch {
       const aborted = options?.signal?.aborted === true;
       const message: AssistantMessage = { role: "assistant", api: model.api, provider, model: model.id,
-        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: safeError(provider, aborted, failureStatus),
+        content: [], timestamp: Date.now(), stopReason: aborted ? "aborted" : "error", errorMessage: safeError(provider, aborted, failureStatus, apiKey !== undefined),
         usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
       };
       output.push({ type: "error", reason: aborted ? "aborted" : "error", error: message });
@@ -165,9 +173,13 @@ function safeProviderStream(provider: KeyedModelProvider, model: Model<Api>, con
 }
 
 /** A diagnostic chosen from the HTTP status alone, so provider error bodies (which can echo prompts) never surface. */
-function safeError(provider: KeyedModelProvider, aborted: boolean, status?: number): string {
+function safeError(provider: KeyedModelProvider, aborted: boolean, status?: number, chatgpt = false): string {
   const { label } = KEYED_MODEL_PROVIDERS[provider];
   if (aborted) return `${label} request cancelled`;
+  // A ChatGPT plan has no API key or credit balance: its refusals are the plan's.
+  if (chatgpt && (status === 401 || status === 403)) return "ChatGPT request failed; the ChatGPT connection was refused, so connect ChatGPT again";
+  if (chatgpt && status === 429) return "ChatGPT request failed; your ChatGPT plan's usage limit may be reached, see https://chatgpt.com/settings/usage";
+  if (chatgpt && (status === 400 || status === 404)) return "ChatGPT request failed; your ChatGPT plan may not allow this model";
   const detail = status === 401 || status === 403 ? "check the API key and its permissions"
     : status === 402 ? "check the key's credit balance and spending limit"
     : status === 404 ? (provider === "openrouter" ? "check model availability and the provider allowlist" : "check the model ID and that the key's organization can use it")
