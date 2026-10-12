@@ -6,6 +6,9 @@ classifier and the coding worker. Projects can also approve these models for Sla
 key belongs to the installation: only an administrator sets it, through `agentx init`. It is never entered
 in Slack. See [spec 054](../specs/054-direct-provider-keys/spec.md).
 
+To let each developer use their **own ChatGPT Plus or Pro plan** for their tasks instead, see
+[Sign in with ChatGPT](chatgpt.md).
+
 Use this when you already have an Anthropic or OpenAI organization (its rate limits, invoices, spending
 caps or zero-data-retention terms), when a model is not offered on Bedrock in your account, or to run
 OpenAI models without a router in between.

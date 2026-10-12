@@ -39,6 +39,7 @@ import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
 import { createSlackMemberCheck, type SlackMemberCheck } from "./slack-members.js";
 import { createAwsSlackInteractivityHandler } from "./slack-interactivity.js";
 import { chatPostEphemeral, chatUpdate } from "./slack-web.js";
+import { chatGptCommandReply, chatGptSlackCommand, isHandedOffChatGptFinish, readBrokerAnswer, type BrokerAnswer, type ChatGptSlackCommand, type HandedOffChatGptFinish } from "./slack-chatgpt.js";
 import {
   SlackWorkflowStartError,
   WORKFLOW_CHOICE_WAITING_NOTICE,
@@ -132,7 +133,12 @@ export interface SlackIngressDependencies {
    */
   recordThreadNote?: (input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string }) => Promise<{ outcome: "captured" | "duplicate" | "refused" }>;
   /** A message only `user` sees in the thread (chat.postEphemeral). Absent: such acknowledgements are skipped. */
-  postEphemeral?: (input: { channel: string; threadTs: string; user: string; text: string }) => Promise<void>;
+  postEphemeral?: (input: { channel: string; threadTs: string; user: string; text: string; blocks?: Array<Record<string, unknown>> }) => Promise<void>;
+  /**
+   * #340: `connect chatgpt`, `chatgpt status` and `disconnect chatgpt`, answered by the broker for the Slack user.
+   * Handled here, like stop, so they never wait behind a running task. Absent: they are ordinary requests.
+   */
+  chatgpt?: (input: { command: ChatGptSlackCommand; teamId: string; userId: string }) => Promise<BrokerAnswer>;
   now?: () => number;
   log?: SlackIngressLog;
   /**
@@ -317,6 +323,12 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       return ignore(log, "duplicate_event", { eventId: mention.eventId });
     }
     const subject = slackThreadSubject(thread);
+    // #340: only a person's own mention connects their ChatGPT plan, and only they see the answer.
+    const chatGptCommand = dependencies.chatgpt !== undefined && mention.kind === "mention" && !mention.appPosted
+      ? chatGptSlackCommand(slackRequestText(mention.text, mention.botUserId)) : undefined;
+    if (chatGptCommand !== undefined && dependencies.chatgpt !== undefined) {
+      return chatGptCommandFromMention(dependencies, dependencies.chatgpt, log, mention, chatGptCommand);
+    }
     // FR-035, C10: a view-only or closed shared thread gets one fixed notice an hour. Nothing is
     // queued or counted, so no thread workspace is ever made for it. A continue thread goes on as
     // any thread does. A record that cannot be read fails closed: Slack retries the event.
@@ -757,11 +769,32 @@ function startFailureNotice(error: unknown, eventId: string): string {
   return workflowStartFailureNotice(error instanceof SlackWorkflowStartError ? error.code : "UNKNOWN", eventId);
 }
 
+/** #340: a ChatGPT command, answered privately. Its claim stays whatever happens: the person asks again. */
+async function chatGptCommandFromMention(
+  dependencies: SlackIngressDependencies,
+  ask: NonNullable<SlackIngressDependencies["chatgpt"]>,
+  log: SlackIngressLog,
+  mention: Mention,
+  command: ChatGptSlackCommand,
+): Promise<HttpResponse> {
+  let answer: ReturnType<typeof readBrokerAnswer>;
+  try {
+    answer = readBrokerAnswer(await ask({ command, teamId: mention.thread.teamId, userId: mention.userId }));
+  } catch (error) {
+    log("chatgpt.command_failed", { eventId: mention.eventId, command, errorName: errorName(error) });
+    answer = { ok: false, message: "I couldn't reach Rovara's ChatGPT connections just now. Try again in a moment." };
+  }
+  log("chatgpt.command", { eventId: mention.eventId, command, ok: answer.ok });
+  const reply = chatGptCommandReply(command, answer, mention.thread.threadTs);
+  await ephemeral(dependencies, log, mention.thread, mention.userId, reply.text, reply.blocks);
+  return respond(200, { ok: true });
+}
+
 /** A best-effort private message: a failure is logged and never makes Slack retry the event. */
-async function ephemeral(dependencies: SlackIngressDependencies, log: SlackIngressLog, thread: SlackThread, user: string, text: string): Promise<void> {
+async function ephemeral(dependencies: SlackIngressDependencies, log: SlackIngressLog, thread: SlackThread, user: string, text: string, blocks?: Array<Record<string, unknown>>): Promise<void> {
   if (dependencies.postEphemeral === undefined) return;
   try {
-    await dependencies.postEphemeral({ channel: thread.channelId, threadTs: thread.threadTs, user, text });
+    await dependencies.postEphemeral({ channel: thread.channelId, threadTs: thread.threadTs, user, text, ...(blocks === undefined ? {} : { blocks }) });
   } catch (error) {
     log("ephemeral.failed", { errorName: errorName(error) });
   }
@@ -1130,6 +1163,9 @@ function createAwsSlackIngressHandler() {
       async recordThreadNote(input: { taskId: string; thread: SlackThread; userId: string; messageTs: string; eventId: string; text: string }) {
         return recordThreadNoteThroughBroker(invokeBroker, input);
       },
+      async chatgpt(input: { command: ChatGptSlackCommand; teamId: string; userId: string }) {
+        return invokeBroker({ source: "agentx.slack-ingress", action: "chatgpt-command", ...input });
+      },
     }),
     async postEphemeral(input) {
       await chatPostEphemeral((await secrets()).botToken, input);
@@ -1150,8 +1186,8 @@ let awsInteractivityHandler: ReturnType<typeof createAwsSlackInteractivityHandle
  * The Events API and, since spec 014, Slack's interactivity request URL share this Lambda. Task 19: so does the
  * asynchronous start of a Quick or Full choice, which the interactivity handler hands to this same Lambda.
  */
-export const handler = (event: HttpApiV2Event | HandedOffWorkflowStart): Promise<HttpResponse> => {
-  if (isHandedOffWorkflowStart(event) || event.rawPath === SLACK_INTERACTIONS_PATH) {
+export const handler = (event: HttpApiV2Event | HandedOffWorkflowStart | HandedOffChatGptFinish): Promise<HttpResponse> => {
+  if (isHandedOffWorkflowStart(event) || isHandedOffChatGptFinish(event) || event.rawPath === SLACK_INTERACTIONS_PATH) {
     awsInteractivityHandler ??= createAwsSlackInteractivityHandler();
     return awsInteractivityHandler(event);
   }
