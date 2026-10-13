@@ -34,7 +34,8 @@ export interface Ec2DeliveryDependencies {
    */
   workerFeatures?: (url: string) => Promise<readonly string[]>;
   /** Rechecks fresh PEOPLE authority after compute is ready, immediately before signing and POST. */
-  guardTaskDispatch?: (record: Ec2OutboxRecord) => Promise<"ALLOWED" | "PARKED">;
+  guardTaskDispatch?: (record: Ec2OutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
+  remainingTimeMs?: () => number;
   now?: () => number;
 }
 
@@ -44,7 +45,8 @@ export interface Ec2DeliveryDependencies {
  * caller acknowledges the message without using a retry attempt, and markReady re-queues it.
  */
 export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
-  return async (record: Ec2OutboxRecord, invocation: WorkerInvocation): Promise<Ec2Delivery> => {
+  return async (record: Ec2OutboxRecord, invocation: WorkerInvocation, context?: { remainingTimeMs: () => number }): Promise<Ec2Delivery> => {
+    const remainingTimeMs = context?.remainingTimeMs ?? dependencies.remainingTimeMs;
     const binding = await dependencies.binding(record.workspaceId);
     if (binding === undefined) throw agentXError("CONFIG_INVALID", `workspace ${record.workspaceId} has no ec2-ebs runtime binding`);
     const session = await dependencies.sessions.ensureSession({ workspaceId: record.workspaceId, binding, waitingOutboxId: record.id });
@@ -52,9 +54,9 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
       await dependencies.progress(record, STARTING_COMPUTE_MESSAGE);
       return "WAITING_FOR_SESSION";
     }
-    if (await dependencies.guardTaskDispatch?.(record) === "PARKED") return "WAITING_FOR_TASK_ACCESS";
+    if (await dependencies.guardTaskDispatch?.(record, remainingTimeMs === undefined ? undefined : { remainingTimeMs }) === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures);
-    if (await dependencies.guardTaskDispatch?.(record) === "PARKED") return "WAITING_FOR_TASK_ACCESS";
+    if (await dependencies.guardTaskDispatch?.(record, remainingTimeMs === undefined ? undefined : { remainingTimeMs }) === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const payload = workerInvokeTokenPayload({
       workspaceId: record.workspaceId,
       generation: session.generation,

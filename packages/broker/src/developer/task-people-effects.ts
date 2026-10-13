@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { GetCommand, PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { TaskPeopleProposalSchema, agentXError, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskPeopleRoleRequest, type TaskPeopleTakeOwnershipRequest } from "@agentx/contracts";
+import { TaskPeopleProposalSchema, TaskPersonInviteClaimRequestSchema, TaskPersonInviteOutcomeSchema, agentXError, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskPeopleRoleRequest, type TaskPeopleTakeOwnershipRequest, type TaskPersonInviteClaimRequest, type TaskPersonInviteOutcome } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import { changeTaskPeople, getTaskPeopleCapabilities, getTaskPeopleEffectAdmission, getTaskPeopleRequestOutcome, resolveTaskPeopleTarget, taskAccessFence, takeTaskOwnership, type TaskPeopleDependencies } from "./task-people.js";
 
@@ -18,13 +18,39 @@ type StoredProposal = TaskPeopleProposal & {
   invitationStatus?: "CLAIMED" | "ACCEPTED" | "FAILED" | "UNKNOWN";
   invitationTeamId?: string; invitationChannelId?: string; invitationSlackUserId?: string;
   invitationUpdatedAt?: string;
+  invitationExecutionReceiptId?: string;
 };
 
 export interface TaskPeopleEffectsDependencies extends TaskPeopleDependencies {
   issuer: string;
   resolveTaskPickerPerson?(taskId: string, slackUserId: string): Promise<{ personId: string; developerId: string; slackUserId: string; channelMember: boolean }>;
   taskPeopleChannel?(taskId: string): Promise<{ teamId: string; channelId: string; threadTs: string }>;
-  inviteTaskPerson?(input: { teamId: string; channelId: string; slackUserId: string }): Promise<"accepted" | "unknown">;
+  inviteTaskPerson?(input: TaskPersonInviteClaimRequest): Promise<TaskPersonInviteOutcome>;
+}
+
+export interface TaskPersonInviteClaimFields {
+  taskId: string;
+  requestId: string;
+  callerDeveloperId: string;
+  targetDeveloperId: string;
+  personId: string;
+  role: "owner";
+  expectedPeopleRevision: number;
+  payloadDigest: string;
+  expiresAt: string;
+  invitationTeamId: string;
+  invitationChannelId: string;
+  invitationSlackUserId: string;
+  invitationUpdatedAt: string;
+}
+
+/** Hashes only the persisted, ordered claim tuple; it binds a claim but grants no authority. */
+export function taskPersonInviteClaimDigest(fields: TaskPersonInviteClaimFields): string {
+  return digest({ taskId: fields.taskId, requestId: fields.requestId, callerDeveloperId: fields.callerDeveloperId,
+    targetDeveloperId: fields.targetDeveloperId, personId: fields.personId, role: fields.role,
+    expectedPeopleRevision: fields.expectedPeopleRevision, payloadDigest: fields.payloadDigest, expiresAt: fields.expiresAt,
+    invitationTeamId: fields.invitationTeamId, invitationChannelId: fields.invitationChannelId,
+    invitationSlackUserId: fields.invitationSlackUserId, invitationUpdatedAt: fields.invitationUpdatedAt });
 }
 
 async function read(deps: TaskPeopleEffectsDependencies, taskId: string, requestId: string): Promise<StoredProposal | undefined> {
@@ -75,15 +101,18 @@ async function invitationState(
   status: "CLAIMED" | "ACCEPTED" | "FAILED" | "UNKNOWN",
   expected?: "CLAIMED",
   binding?: { teamId: string; channelId: string; slackUserId: string },
+  executionReceiptId?: string,
 ): Promise<void> {
   const currentBinding = binding ?? { teamId: proposal.invitationTeamId!, channelId: proposal.invitationChannelId!, slackUserId: proposal.invitationSlackUserId! };
+  const receiptUpdate = executionReceiptId === undefined ? "" : ", invitationExecutionReceiptId = :executionReceiptId";
   await deps.documentClient.send(new UpdateCommand({
     TableName: deps.tableName, Key: proposalKey(proposal.taskId, proposal.requestId),
-    UpdateExpression: "SET invitationStatus = :status, invitationTeamId = :teamId, invitationChannelId = :channelId, invitationSlackUserId = :slackUserId, invitationUpdatedAt = :updatedAt",
+    UpdateExpression: `SET invitationStatus = :status, invitationTeamId = :teamId, invitationChannelId = :channelId, invitationSlackUserId = :slackUserId, invitationUpdatedAt = :updatedAt${receiptUpdate}`,
     ConditionExpression: `callerDeveloperId = :callerDeveloperId AND payloadDigest = :payloadDigest AND expiresAt = :expiresAt AND ${expected === undefined ? "attribute_not_exists(invitationStatus)" : "invitationStatus = :expected"}`,
     ExpressionAttributeValues: { ":status": status, ":teamId": currentBinding.teamId, ":channelId": currentBinding.channelId,
       ":slackUserId": currentBinding.slackUserId, ":updatedAt": new Date(deps.now()).toISOString(), ":callerDeveloperId": proposal.callerDeveloperId,
-      ":payloadDigest": proposal.payloadDigest, ":expiresAt": proposal.expiresAt, ...(expected === undefined ? {} : { ":expected": expected }) },
+      ":payloadDigest": proposal.payloadDigest, ":expiresAt": proposal.expiresAt, ...(expected === undefined ? {} : { ":expected": expected }),
+      ...(executionReceiptId === undefined ? {} : { ":executionReceiptId": executionReceiptId }) },
   }));
 }
 
@@ -235,16 +264,43 @@ export async function submitSlackTaskPeopleRole(
           || stored.invitationSlackUserId !== input.slackUserId) throw agentXError("RUNTIME_UNAVAILABLE", "Slack channel invitation has no safe retry");
       }
       if (stored.invitationStatus !== "ACCEPTED") {
-        let outcome: "accepted" | "unknown";
-        try { outcome = await deps.inviteTaskPerson({ teamId: input.teamId, channelId: input.channelId, slackUserId: input.slackUserId }); }
-        catch {
-          try { await invitationState(deps, { ...stored, invitationTeamId: input.teamId, invitationChannelId: input.channelId, invitationSlackUserId: input.slackUserId }, "FAILED", "CLAIMED"); } catch { /* CLAIMED still prevents a blind resend. */ }
-          return denied();
+        stored = (await read(deps, taskId, input.requestId)) ?? stored;
+        if (stored.invitationStatus !== "CLAIMED" || stored.invitationTeamId !== input.teamId
+          || stored.invitationChannelId !== input.channelId || stored.invitationSlackUserId !== input.slackUserId
+          || stored.invitationUpdatedAt === undefined || stored.targetDeveloperId === undefined || stored.personId === undefined || stored.role !== "owner") {
+          throw agentXError("RUNTIME_UNAVAILABLE", "Slack channel invitation claim could not be verified");
         }
-        const status = outcome === "accepted" ? "ACCEPTED" : "UNKNOWN";
-        try { await invitationState(deps, { ...stored, invitationTeamId: input.teamId, invitationChannelId: input.channelId, invitationSlackUserId: input.slackUserId }, status, "CLAIMED"); }
+        const claimFields: TaskPersonInviteClaimFields = {
+          taskId: stored.taskId, requestId: stored.requestId, callerDeveloperId: stored.callerDeveloperId,
+          targetDeveloperId: stored.targetDeveloperId, personId: stored.personId, role: "owner",
+          expectedPeopleRevision: stored.expectedPeopleRevision, payloadDigest: stored.payloadDigest, expiresAt: stored.expiresAt,
+          invitationTeamId: stored.invitationTeamId, invitationChannelId: stored.invitationChannelId,
+          invitationSlackUserId: stored.invitationSlackUserId, invitationUpdatedAt: stored.invitationUpdatedAt,
+        };
+        const claimDigest = taskPersonInviteClaimDigest(claimFields);
+        const startedAt = deps.now();
+        const inviteRequest = TaskPersonInviteClaimRequestSchema.parse({
+          kind: "task-person-invite-claimed", taskId, requestId: input.requestId, claimDigest,
+          admission: { version: 1, id: randomUUID(), deadlineAt: startedAt + 12_000, remainingMs: 12_000,
+            authorityRemainingMs: 6_000, slackCallsLimit: 100, stateReadsLimit: 128 },
+        });
+        let rawOutcome: TaskPersonInviteOutcome;
+        try { rawOutcome = await deps.inviteTaskPerson(inviteRequest); }
+        catch {
+          rawOutcome = { taskId, requestId: input.requestId, claimDigest, admissionId: inviteRequest.admission.id,
+            status: "unknown", reason: "transport_unknown" };
+        }
+        const parsedOutcome = TaskPersonInviteOutcomeSchema.safeParse(rawOutcome);
+        const outcome = parsedOutcome.success && parsedOutcome.data.taskId === taskId && parsedOutcome.data.requestId === input.requestId
+          && parsedOutcome.data.claimDigest === claimDigest && parsedOutcome.data.admissionId === inviteRequest.admission.id
+          ? parsedOutcome.data
+          : { taskId, requestId: input.requestId, claimDigest, admissionId: inviteRequest.admission.id,
+            status: "unknown" as const, reason: "effect_unknown" as const };
+        const status = outcome.status === "accepted" ? "ACCEPTED" : outcome.status === "failed" ? "FAILED" : "UNKNOWN";
+        try { await invitationState(deps, stored, status, "CLAIMED", undefined, outcome.executionReceiptId); }
         catch { throw agentXError("RUNTIME_UNAVAILABLE", "Slack channel invitation outcome could not be recorded safely"); }
-        if (status === "UNKNOWN") throw agentXError("RUNTIME_UNAVAILABLE", "Slack could not confirm whether the channel invitation succeeded");
+        if (outcome.status === "unknown") throw agentXError("RUNTIME_UNAVAILABLE", "Slack could not confirm whether the channel invitation succeeded");
+        if (outcome.status === "failed") throw agentXError("RUNTIME_UNAVAILABLE", "Slack channel invitation was refused before it began");
       }
     }
     target = await deps.resolveTaskPickerPerson(taskId, input.slackUserId);

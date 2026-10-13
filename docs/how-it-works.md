@@ -105,6 +105,12 @@ What is built today:
 
 Not built yet:
 
+- Task people role changes and automatic invitations are being prepared behind independent
+  named-environment settings: `TaskPeopleChangesEnabled`,
+  `TaskPeoplePublicInvitationsEnabled`, and `TaskPeoplePrivateInvitationsEnabled`. All default to
+  `false`, and upgrades preserve explicitly set values. Slack's default app manifest remains
+  unchanged; the optional scope helper accepts separate choices for a future approved install or
+  reinstall flow. This preparation adds no installer prompt or automatic scope widening.
 - Admin tools for AI tools: reading Rovara's state (spec 025 phase 25d) and making confirmed
   changes (phase 25e).
 

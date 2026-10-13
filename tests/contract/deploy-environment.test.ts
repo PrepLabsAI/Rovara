@@ -656,7 +656,7 @@ describe("deployEnvironment with lockHeld", () => {
 });
 
 describe("an upgrade keeps what the operator set (OPERATOR_PARAMETERS)", () => {
-  const declared = ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit"];
+  const declared = ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "TaskPersonProofEnabled"];
 
   async function installed(): Promise<{ store: MemoryParameterStore; secrets: ReturnType<typeof memorySecrets> }> {
     const store = new MemoryParameterStore();
@@ -695,6 +695,69 @@ describe("an upgrade keeps what the operator set (OPERATOR_PARAMETERS)", () => {
     const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
     expect(controlPlane.parameters.BudgetMonthlyUsd).toBe("40");
     expect(controlPlane.parameters.BudgetScope).toBe("tag");
+  });
+
+  it("preserves independent People switches when upgrading and keeps absent invitation switches at template defaults", async () => {
+    const { store, secrets } = await installed();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters(declared),
+      deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      deployedParameters: async (name) => name === stackName("control-plane")
+        ? { TaskPeopleChangesEnabled: "true", TaskPeoplePublicInvitationsEnabled: "true", TaskPeoplePrivateInvitationsEnabled: "false" }
+        : undefined,
+    });
+    const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters).toMatchObject({
+      TaskPeopleChangesEnabled: "true",
+      TaskPeoplePublicInvitationsEnabled: "true",
+      TaskPeoplePrivateInvitationsEnabled: "false",
+    });
+  });
+
+  it("does not turn on invitations when an older install has role edits enabled but no invitation parameters", async () => {
+    const { store, secrets } = await installed();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters(declared),
+      deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      deployedParameters: async (name) => name === stackName("control-plane") ? { TaskPeopleChangesEnabled: "true" } : undefined,
+    });
+    const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters.TaskPeopleChangesEnabled).toBe("true");
+    expect(controlPlane.parameters).not.toHaveProperty("TaskPeoplePublicInvitationsEnabled");
+    expect(controlPlane.parameters).not.toHaveProperty("TaskPeoplePrivateInvitationsEnabled");
+  });
+
+  it("preserves an explicitly installed proof endpoint without changing People mutation switches", async () => {
+    const { store, secrets } = await installed();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters(declared),
+      deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      deployedParameters: async (name) => name === stackName("control-plane")
+        ? { TaskPersonProofEnabled: "true", TaskPeopleChangesEnabled: "false", TaskPeoplePublicInvitationsEnabled: "false", TaskPeoplePrivateInvitationsEnabled: "false" }
+        : undefined,
+    });
+    const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters).toMatchObject({
+      TaskPersonProofEnabled: "true",
+      TaskPeopleChangesEnabled: "false",
+      TaskPeoplePublicInvitationsEnabled: "false",
+      TaskPeoplePrivateInvitationsEnabled: "false",
+    });
+  });
+
+  it("leaves a missing legacy proof parameter to the template's OFF default", async () => {
+    const { store, secrets } = await installed();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters(declared),
+      deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      deployedParameters: async (name) => name === stackName("control-plane") ? { TaskPeopleChangesEnabled: "false" } : undefined,
+    });
+    const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters).not.toHaveProperty("TaskPersonProofEnabled");
   });
 
   it("does not send a parameter the new template no longer declares, and reports it as dropped", async () => {

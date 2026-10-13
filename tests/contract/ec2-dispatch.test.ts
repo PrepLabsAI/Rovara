@@ -1,10 +1,11 @@
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkerInvocationSchema, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
+import { WorkerInvocationSchema, agentXError, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { createDispatcherHandler, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
+import { guardTaskDispatch as coreGuardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
 import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
-import type { Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
+import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import { appendOperationEvent } from "../../packages/broker/src/aws/operation-events.js";
 import { SessionManager, workspaceBinding } from "../../packages/broker/src/aws/sessions.js";
 import { verifyInvokeAuthorization, invocationMatchesClaims } from "../../packages/worker/src/invoke-auth.js";
@@ -57,6 +58,18 @@ describe("ec2-ebs delivery", () => {
     await expect(deliver(record, record.invocation)).resolves.toBe("WAITING_FOR_TASK_ACCESS");
     expect(signInvocation).not.toHaveBeenCalled();
     expect(post).not.toHaveBeenCalled();
+  });
+
+  it("creates a fresh task guard after readiness and after ping with current Lambda time", async () => {
+    const guardTaskDispatch = vi.fn<NonNullable<Ec2DeliveryDependencies["guardTaskDispatch"]>>(async () => "ALLOWED");
+    const { deliver } = delivery({ guardTaskDispatch });
+    const record = recordFor();
+    let remaining = 15_000;
+
+    await expect(deliver(record, record.invocation, { remainingTimeMs: () => remaining-- })).resolves.toBe("DELIVERED");
+    expect(guardTaskDispatch).toHaveBeenCalledTimes(2);
+    expect(typeof guardTaskDispatch.mock.calls[0]?.[1]?.remainingTimeMs).toBe("function");
+    expect(typeof guardTaskDispatch.mock.calls[1]?.[1]?.remainingTimeMs).toBe("function");
   });
 
   it("posts the invocation to the worker with a token the worker's own verifier accepts", async () => {
@@ -646,6 +659,23 @@ describe("the dispatcher with ec2-ebs records", () => {
     expect(markFailed).not.toHaveBeenCalled();
   });
 
+  it("passes invocation remaining time into the initial pre-compute guard", async () => {
+    const record = recordFor();
+    const guardTaskDispatch = vi.fn<(record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">>(async () => "PARKED");
+    const markDispatching = vi.fn(async () => true);
+    const handler = createDispatcherHandler({
+      markDispatching, markDelivered: async () => undefined, markFailed: async () => undefined,
+      guardTaskDispatch, deliverEc2: async () => "DELIVERED", log: () => undefined,
+    });
+
+    await expect(handler({ Records: [{ messageId: "initial", body: JSON.stringify(record) }] }, {
+      getRemainingTimeInMillis: () => 8_000,
+    })).resolves.toEqual({ batchItemFailures: [] });
+    expect(guardTaskDispatch).toHaveBeenCalledTimes(1);
+    expect(typeof guardTaskDispatch.mock.calls[0]?.[1]?.remainingTimeMs).toBe("function");
+    expect(markDispatching).not.toHaveBeenCalled();
+  });
+
   it("acknowledges a parked record without marking it delivered or using a retry", async () => {
     const { handler, markDelivered } = dispatcher(async () => "WAITING_FOR_SESSION");
     const record = recordFor();
@@ -663,6 +693,50 @@ describe("the dispatcher with ec2-ebs records", () => {
     expect(await failing.handler({ Records: [{ messageId: "m2", body: JSON.stringify(record), attributes: { ApproximateReceiveCount: "1" } }] }))
       .toEqual({ batchItemFailures: [{ itemIdentifier: "m2" }] });
     expect(failing.markFailed).not.toHaveBeenCalled();
+  });
+
+  it("keeps an incomplete authority guard retryable at max attempts but preserves identical ordinary worker errors", async () => {
+    const record = recordFor();
+    const original = agentXError("RUNTIME_UNAVAILABLE", "task access pause reserve is unavailable");
+    const guardTaskDispatch = async (candidate: DurableOutboxRecord) => coreGuardTaskDispatch({
+      documentClient: { async send() { throw original; } }, tableName: "state",
+    }, candidate);
+    const markFailed = vi.fn(async () => undefined);
+    const logs: Array<{ terminal: boolean; errorCode?: string }> = [];
+    const guarded = createDispatcherHandler({
+      guardTaskDispatch, markDispatching: async () => true, markDelivered: async () => undefined, markFailed,
+      maxAttempts: 5, deliverEc2: async () => "DELIVERED", log: (entry) => { logs.push(entry); },
+    });
+    await expect(guarded({ Records: [{ messageId: "guard-terminal", body: JSON.stringify(record), attributes: { ApproximateReceiveCount: "5" } }] }))
+      .resolves.toEqual({ batchItemFailures: [{ itemIdentifier: "guard-terminal" }] });
+    expect(markFailed).not.toHaveBeenCalled();
+    expect(logs.at(-1)).toMatchObject({ terminal: false, errorCode: original.code });
+
+    const ordinaryMarkFailed = vi.fn(async () => undefined);
+    const ordinary = createDispatcherHandler({ markDispatching: async () => true, markDelivered: async () => undefined,
+      markFailed: ordinaryMarkFailed, maxAttempts: 5,
+      deliverEc2: async () => { throw agentXError("RUNTIME_UNAVAILABLE", original.message.slice("RUNTIME_UNAVAILABLE: ".length)); },
+      log: () => undefined });
+    await expect(ordinary({ Records: [{ messageId: "worker-terminal", body: JSON.stringify(record), attributes: { ApproximateReceiveCount: "5" } }] }))
+      .resolves.toEqual({ batchItemFailures: [] });
+    expect(ordinaryMarkFailed).toHaveBeenCalledTimes(1);
+  });
+
+  it("fails the current and remaining batch items before starting another guard inside the pause reserve", async () => {
+    const first = recordFor();
+    const second = recordFor();
+    const guardTaskDispatch = vi.fn(async () => "ALLOWED" as const);
+    const markDispatching = vi.fn(async () => true);
+    const handler = createDispatcherHandler({
+      guardTaskDispatch, markDispatching, markDelivered: async () => undefined, markFailed: async () => undefined,
+      deliverEc2: async () => "DELIVERED", log: () => undefined,
+    });
+
+    await expect(handler({ Records: [first, second].map((record, index) => ({ messageId: `m${index + 1}`, body: JSON.stringify(record) })) }, {
+      getRemainingTimeInMillis: () => 2_000,
+    })).resolves.toEqual({ batchItemFailures: [{ itemIdentifier: "m1" }, { itemIdentifier: "m2" }] });
+    expect(guardTaskDispatch).not.toHaveBeenCalled();
+    expect(markDispatching).not.toHaveBeenCalled();
   });
 });
 

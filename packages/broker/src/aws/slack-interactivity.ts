@@ -422,8 +422,12 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
           : callbackId === "agentx_task_people_submission" ? "task_person"
           : callbackId === "agentx_workflow_checks_retry_submission" || error instanceof WorkflowCheckSelectionRequired ? checksErrorBlock(asRecord(payload.view)) : "workflow_feedback";
         // A refusal the form can tell (not the owner, another workspace, a step that moved on) reads as itself.
-        return respond(200, { response_action: "errors", errors: { [field]: error instanceof WorkflowCheckSelectionRequired || error instanceof WorkflowInteractionRefusal
-          ? error.message : "I couldn't save this decision. Close this form and try again." } });
+        const message = error instanceof WorkflowCheckSelectionRequired || error instanceof WorkflowInteractionRefusal
+          ? error.message
+          : callbackId === "agentx_task_people_submission"
+            ? "I couldn't save this role. If they are not in the task channel yet, invite them to the task channel in Slack, then return and choose their task role."
+            : "I couldn't save this decision. Close this form and try again.";
+        return respond(200, { response_action: "errors", errors: { [field]: message } });
       }
     }
     if (payload.type !== "block_actions") {
@@ -1324,9 +1328,10 @@ export function workflowSlackHandlers(deps: {
         }
         const blocks: Array<Record<string, unknown>> = [...listBlocks];
         if (people.canManage) blocks.push(
+          { type: "context", elements: [{ type: "mrkdwn", text: "Invite them to this task channel in Slack, then return and choose their task role." }] },
           { type: "input", block_id: "task_person", label: { type: "plain_text", text: "Person" }, element: { type: "users_select", action_id: "person", placeholder: { type: "plain_text", text: "Choose a person" } } },
           { type: "input", block_id: "task_role", label: { type: "plain_text", text: "Role" }, element: { type: "static_select", action_id: "role", options: [
-            { text: { type: "plain_text", text: "Add to channel and make owner" }, value: "owner" },
+            { text: { type: "plain_text", text: "Owner" }, value: "owner" },
             { text: { type: "plain_text", text: "Commenter" }, value: "commenter" },
             { text: { type: "plain_text", text: "Viewer" }, value: "viewer" },
             { text: { type: "plain_text", text: "Remove access" }, value: "denied" },

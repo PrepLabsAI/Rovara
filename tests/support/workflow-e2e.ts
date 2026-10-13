@@ -30,6 +30,8 @@ import {
   type TaskPeopleDisplayReadResponse,
   type TaskPersonProofRequest,
   type TaskPersonProofResponse,
+  type TaskPersonInviteClaimRequest,
+  type TaskPersonInviteOutcome,
   type WorkerInvocation,
   type WorkflowOptionalCheck,
   type WorkflowSnapshot,
@@ -315,7 +317,7 @@ export async function createWorkflowE2E(options: {
     checkTaskPerson?: CheckTaskPerson;
     taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>;
     taskPeopleDisplayRead?: (request: TaskPeopleDisplayReadRequest) => Promise<TaskPeopleDisplayReadResponse>;
-    inviteTaskPerson?: (input: { teamId: string; channelId: string; slackUserId: string }) => Promise<"accepted" | "unknown">;
+    inviteTaskPerson?: (input: TaskPersonInviteClaimRequest) => Promise<TaskPersonInviteOutcome>;
     boundChannels?: readonly string[];
     developers?: readonly Developer[];
   };
@@ -662,6 +664,7 @@ export async function createWorkflowE2E(options: {
   /** Every invocation the worker was given, as the broker queued it (after any delivery downgrade). */
   const invocations: WorkerInvocation[] = [];
   let checkTaskPerson = options.taskPeople?.checkTaskPerson;
+  let productionDispatcherDelivery: ((record: DurableOutboxRecord, receiveCount: number) => Promise<WorkerInvocation | undefined>) | undefined;
   let beforeNextFeatureProbe: (() => void | Promise<void>) | undefined;
   const dispatchReceipts: Array<{ operationId: string; phase: "DISPATCH_GUARD" | "EC2_GUARD" | "FEATURE_PROBE" | "POST"; outcome?: "ALLOWED" | "PARKED" }> = [];
   const resultRewrites: Array<{ kind: E2EInvocationKind; rewrite: (result: unknown) => unknown }> = [];
@@ -772,6 +775,9 @@ export async function createWorkflowE2E(options: {
   const deliverThroughDispatcher = async (invocation: WorkerInvocation, receiveCount = 1): Promise<WorkerInvocation | undefined> => {
     const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === invocation.operationId)[0];
     if (outbox === undefined) throw new Error(`no outbox record for operation ${invocation.operationId}`);
+    if (productionDispatcherDelivery !== undefined) {
+      return productionDispatcherDelivery({ ...outbox, invocation } as unknown as DurableOutboxRecord, receiveCount);
+    }
     let sent: WorkerInvocation | undefined;
     const features = workerFeatureList ?? WORKER_INVOCATION_FEATURES;
     const guarded = (phase: "DISPATCH_GUARD" | "EC2_GUARD"): TaskDispatchGuard => async (record) => {
@@ -1330,6 +1336,10 @@ export async function createWorkflowE2E(options: {
 
     /** Worker faults and version skew, each for the next matching invocation (`kind`, or `task:<mode>`). */
     worker: {
+      /** Routes subsequent deliveries through an exported production handler in a causal integration journey. */
+      useProductionHandler(deliver: (record: DurableOutboxRecord, receiveCount: number) => Promise<WorkerInvocation | undefined>): void {
+        productionDispatcherDelivery = deliver;
+      },
       /** The next matching run's compute is lost: no terminal callback. With `afterPush` (publish, maintain) it pushes first. */
       crashNext: (kind: E2EInvocationKind, crashOptions: { afterPush?: boolean } = {}): void => { crashes.push({ kind, afterPush: crashOptions.afterPush === true }); },
       /** The next matching run fails at once with `message`, without running. */

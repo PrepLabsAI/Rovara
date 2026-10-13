@@ -1,15 +1,20 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
-import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
+import { GetCommand, QueryCommand, DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { randomUUID } from "node:crypto";
+import { SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, type SlackChannelBinding, type WorkerInvocation } from "@agentx/contracts";
 import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } from "./lambda.js";
 import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
 import { createEc2Delivery } from "./ec2-delivery.js";
 import { appendOperationEvent } from "./operation-events.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
-import { guardTaskDispatch } from "./task-dispatch-access.js";
+import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatch-access.js";
+import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
+import { createTaskPersonRuntime, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
+import { taskPersonProofThroughLambda } from "./task-person-proof-transport.js";
 
 const DEFAULT_MAX_DISPATCH_ATTEMPTS = 5;
 
@@ -22,6 +27,8 @@ interface SqsRecord {
 export interface SqsEvent {
   Records?: SqsRecord[];
 }
+
+export interface DispatcherLambdaContext { getRemainingTimeInMillis(): number }
 
 export interface DispatchLogEntry {
   level: "warn" | "error";
@@ -41,18 +48,25 @@ export interface DispatchLogEntry {
 
 export function createDispatcherHandler(dependencies: {
   /** Strongly checks and durably parks PEOPLE-backed work before any dispatch state or worker side effect. */
-  guardTaskDispatch?: (record: DurableOutboxRecord) => Promise<"ALLOWED" | "PARKED">;
+  guardTaskDispatch?: (record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
   markDispatching: (record: DurableOutboxRecord) => Promise<boolean | void>;
   markDelivered: (id: string) => Promise<void>;
   markFailed: (record: DurableOutboxRecord, error: string) => Promise<void>;
   /** Delivers an ec2-ebs record; without it such records fail like any undeliverable one. */
-  deliverEc2?: (record: Ec2OutboxRecord, invocation: WorkerInvocation) => Promise<Ec2Delivery>;
+  deliverEc2?: (record: Ec2OutboxRecord, invocation: WorkerInvocation, context?: { remainingTimeMs: () => number }) => Promise<Ec2Delivery>;
   maxAttempts?: number;
   log?: (entry: DispatchLogEntry) => void;
 }) {
-  return async (event: SqsEvent): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
+  return async (event: SqsEvent, context?: DispatcherLambdaContext): Promise<{ batchItemFailures: Array<{ itemIdentifier: string }> }> => {
     const batchItemFailures: Array<{ itemIdentifier: string }> = [];
-    for (const message of event.Records ?? []) {
+    const records = event.Records ?? [];
+    const remainingTimeMs = () => context?.getRemainingTimeInMillis() ?? 60_000;
+    for (let index = 0; index < records.length; index += 1) {
+      const message = records[index]!;
+      if (remainingTimeMs() <= 2_000) {
+        for (const unstarted of records.slice(index)) batchItemFailures.push({ itemIdentifier: unstarted.messageId });
+        break;
+      }
       let record: DurableOutboxRecord | undefined;
       const attempt = receiveCount(message);
       const maxAttempts = dependencies.maxAttempts ?? DEFAULT_MAX_DISPATCH_ATTEMPTS;
@@ -60,7 +74,7 @@ export function createDispatcherHandler(dependencies: {
         const parsed = JSON.parse(message.body) as DurableOutboxRecord;
         const invocation = WorkerInvocationSchema.parse(parsed.invocation);
         record = { ...parsed, invocation };
-        if (await dependencies.guardTaskDispatch?.(record) === "PARKED") continue;
+        if (await dependencies.guardTaskDispatch?.(record, { remainingTimeMs }) === "PARKED") continue;
         const shouldInvoke = await dependencies.markDispatching(record);
         if (shouldInvoke === false) {
           await dependencies.markDelivered(record.id);
@@ -69,12 +83,12 @@ export function createDispatcherHandler(dependencies: {
         if (record.deploymentMode === "ec2-ebs") {
           if (dependencies.deliverEc2 === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "this dispatcher cannot reach ec2-ebs workers");
           // A record parked until its session is ready is acknowledged without using an attempt.
-          if (await dependencies.deliverEc2(record, invocation) === "DELIVERED") await dependencies.markDelivered(record.id);
+          if (await dependencies.deliverEc2(record, invocation, { remainingTimeMs }) === "DELIVERED") await dependencies.markDelivered(record.id);
           continue;
         }
         throw agentXError("RUNTIME_UNAVAILABLE", "retired deployment mode cannot execute work; register an ec2-ebs project");
       } catch (error) {
-        const terminal = record !== undefined && attempt >= maxAttempts;
+        const terminal = record !== undefined && attempt >= maxAttempts && !isTaskDispatchGuardRetryError(error);
         logDispatchFailure(dependencies.log, {
           ...errorLogFields(error),
           level: "warn",
@@ -118,11 +132,157 @@ export function createDispatcherHandler(dependencies: {
 const tableName = process.env.STATE_TABLE_NAME;
 const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
 const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration));
+/** Authority-only reads/fences do not silently consume retry time from the shared SDK client. */
+const taskAuthorityDocumentClient = DynamoDBDocumentClient.from(new DynamoDBClient({ ...awsClientConfiguration, maxAttempts: 1 }));
 const kms = new KMSClient(awsClientConfiguration);
 const sfn = new SFNClient(awsClientConfiguration);
-const taskDispatchGuard = (record: DurableOutboxRecord) => guardTaskDispatch({
-  documentClient, tableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"),
-}, record);
+export const taskPersonProofLambdaClient = new LambdaClient({ ...awsClientConfiguration, maxAttempts: 1 });
+
+export function taskPersonProofInvokeCommand(functionName: string, payload: Uint8Array): InvokeCommand {
+  return new InvokeCommand({ FunctionName: functionName, Payload: payload, InvocationType: "RequestResponse" });
+}
+
+function taskPersonRuntimePorts(input: {
+  admission: ReturnType<typeof createTaskAuthorityAdmission>;
+  stateTableName: string;
+  signInTableName: string | undefined;
+  proofArn: string;
+  slackTeamId: string;
+}): TaskPersonRuntimePorts {
+  const projection = (attributes: readonly string[]) => ({
+    ProjectionExpression: attributes.map((_, index) => `#p${index}`).join(", "),
+    ExpressionAttributeNames: Object.fromEntries(attributes.map((attribute, index) => [`#p${index}`, attribute])),
+  });
+  const queryPages = async <T>(inputQuery: {
+    pk: string; prefix: string; projection: readonly string[]; abortSignal: AbortSignal;
+  }): Promise<{ items: T[]; complete: boolean }> => {
+    const items: T[] = [];
+    let exclusiveStartKey: Record<string, unknown> | undefined;
+    let page = 0;
+    do {
+      if (page >= 128 || items.length >= 10_000) return { items, complete: false };
+      const abortSignal = page === 0 ? inputQuery.abortSignal : input.admission.admitStateRead();
+      const queryProjection = projection(inputQuery.projection);
+      const response = await taskAuthorityDocumentClient.send(new QueryCommand({
+        TableName: input.stateTableName,
+        KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+        ExpressionAttributeValues: { ":pk": inputQuery.pk, ":prefix": inputQuery.prefix },
+        ...queryProjection,
+        ConsistentRead: true,
+        Limit: 100,
+        ScanIndexForward: false,
+        ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
+      }), { abortSignal });
+      input.admission.assertOpen();
+      const result = response as { Items?: T[]; LastEvaluatedKey?: Record<string, unknown> };
+      items.push(...(result.Items ?? []));
+      exclusiveStartKey = result.LastEvaluatedKey;
+      page += 1;
+    } while (exclusiveStartKey !== undefined);
+    return { items, complete: true };
+  };
+  const taskProjection = (sortKey: string): readonly string[] => sortKey === "META"
+    ? ["pk", "sk", "entityType", "taskId", "project", "developerId", "provider", "slackUserId", "developerName", "share"]
+    : sortKey.startsWith("PERSON_SUBJECT#")
+      ? ["pk", "sk", "schemaVersion", "personId", "developerId", "createdAt"]
+      : ["pk", "sk", "schemaVersion", "personId", "developerId", "slackUserId", "name", "method", "issuer", "subject", "createdAt"];
+  return {
+    async readTaskRecord({ taskId, sortKey, abortSignal }) {
+      const fields = taskProjection(sortKey);
+      const response = await taskAuthorityDocumentClient.send(new GetCommand({
+        TableName: input.stateTableName,
+        Key: { pk: `DEVTASK#${taskId}`, sk: sortKey },
+        ConsistentRead: true,
+        ...projection(fields),
+      }), { abortSignal });
+      input.admission.assertOpen();
+      return (response as { Item?: Record<string, unknown> }).Item;
+    },
+    async readDeveloperRecord({ developerId, projection: fields, abortSignal }) {
+      if (input.signInTableName === undefined) throw new Error("developer sign-in table is unavailable");
+      const response = await taskAuthorityDocumentClient.send(new GetCommand({
+        TableName: input.signInTableName,
+        Key: { pk: `DEVELOPER#${developerId}`, sk: "META" },
+        ConsistentRead: true,
+        ...projection(fields),
+      }), { abortSignal });
+      input.admission.assertOpen();
+      return (response as unknown as { Item?: TaskPersonDeveloperRecordProjection }).Item;
+    },
+    projectAuthorityReader: {
+      async latestRevision(project, admission, abortSignal) {
+        const response = await taskAuthorityDocumentClient.send(new QueryCommand({
+          TableName: input.stateTableName,
+          KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+          ExpressionAttributeValues: { ":pk": `PROJECT#${project}`, ":prefix": "REV#" },
+          ProjectionExpression: "#pk, #sk, #definition.#revision, #definition.#developerTasks",
+          ExpressionAttributeNames: { "#pk": "pk", "#sk": "sk", "#definition": "definition", "#revision": "revision", "#developerTasks": "developerTasks" },
+          ConsistentRead: true,
+          Limit: 1,
+          ScanIndexForward: false,
+        }), { abortSignal });
+        admission.assertOpen();
+        const item = (response as { Items?: Array<{ pk?: string; sk?: string; definition?: { revision?: number; developerTasks?: unknown } }> }).Items?.[0];
+        if (item?.definition === undefined) return { complete: true };
+        return { revision: { ...(item.pk === undefined ? {} : { pk: item.pk }), ...(item.sk === undefined ? {} : { sk: item.sk }), revision: item.definition.revision as number,
+          definition: Object.hasOwn(item.definition, "developerTasks") ? { developerTasks: item.definition.developerTasks } : {} }, complete: true };
+      },
+      async memberships(developerId, admission, abortSignal) {
+        const result = await queryPages<{ pk: string; sk: string; projectName: string; role?: string }>({
+          pk: `MEMBER#${developerId}`, prefix: "PROJECT#", projection: ["pk", "sk", "projectName", "role"], abortSignal,
+        });
+        admission.assertOpen();
+        return result;
+      },
+      async bindings(teamId, admission, abortSignal) {
+        const result = await queryPages<SlackChannelBinding & { pk: string; sk: string }>({
+          pk: `SLACK_BINDING#${teamId}`, prefix: "CHANNEL#", projection: ["pk", "sk", "teamId", "channelId", "projectName", "updatedAt"], abortSignal,
+        });
+        admission.assertOpen();
+        return result;
+      },
+    },
+    taskPersonProof: (request, admission) => taskPersonProofThroughLambda({
+      admission,
+      now: () => Date.now(),
+      expectedTeamId: input.slackTeamId,
+      async invoke(payload, options) {
+        const response = await taskPersonProofLambdaClient.send(taskPersonProofInvokeCommand(input.proofArn, payload), { abortSignal: options.abortSignal });
+        return { ...(response.FunctionError === undefined ? {} : { FunctionError: response.FunctionError }), ...(response.Payload === undefined ? {} : { Payload: response.Payload }) };
+      },
+    })(request),
+  };
+}
+
+const taskDispatchGuard = (record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => {
+  const stateTableName = tableName ?? requiredEnvironment("STATE_TABLE_NAME");
+  const admission = createTaskAuthorityAdmission({ now: () => Date.now(), lambdaRemainingMs: context?.remainingTimeMs() ?? 60_000 });
+  const proofArn = process.env.TASK_PERSON_PROOF_FUNCTION_ARN;
+  const slackTeamId = process.env.SLACK_TEAM_ID ?? "";
+  const personRuntime = proofArn === undefined || proofArn.trim() === "" || !SlackTeamIdSchema.safeParse(slackTeamId).success ? undefined : createTaskPersonRuntime({
+    admission,
+    ports: taskPersonRuntimePorts({
+      admission,
+      stateTableName,
+      signInTableName: process.env.DEVELOPER_SIGNIN_TABLE_NAME,
+      proofArn,
+      slackTeamId,
+    }),
+    stateTableName,
+    slackTeamId,
+    now: () => Date.now(),
+    uuid: randomUUID,
+  });
+  const checkTaskPerson = personRuntime?.checkTaskPerson;
+  return guardTaskDispatch({
+    documentClient: taskAuthorityDocumentClient,
+    tableName: stateTableName,
+    admission,
+    ...(context === undefined ? {} : { remainingTimeMs: context.remainingTimeMs }),
+    ...(checkTaskPerson === undefined ? {} : { checkTaskPerson }),
+    ...(personRuntime === undefined ? {} : { stateAuthorityWitnessForOwnerActor: (task, ownerActorId) => personRuntime.stateAuthorityWitnessForOwnerActor(task, ownerActorId) }),
+  }, record);
+};
 /** A worker answers /invocations as soon as it has journaled the operation. */
 const WORKER_POST_TIMEOUT_MS = 10_000;
 /** Asking a worker what it parses (spec 053); one that does not answer gets no optional field. */

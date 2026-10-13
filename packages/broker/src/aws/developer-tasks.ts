@@ -119,6 +119,8 @@ import {
   WorkflowResolveFindingsInputSchema,
   TaskPeopleRoleRequestSchema,
   TaskPeopleTakeOwnershipRequestSchema,
+  type TaskPersonInviteClaimRequest,
+  type TaskPersonInviteOutcome,
   blockingFindings,
   openReviewFindings,
   resolveWorkflowReviewFindings,
@@ -225,7 +227,7 @@ export interface DeveloperTaskRouteDependencies {
   log?(entry: Record<string, unknown>): void;
   resolveTaskPickerPerson?(taskId: string, slackUserId: string): Promise<{ personId: string; developerId: string; slackUserId: string; channelMember: boolean }>;
   taskPeopleChannel?(taskId: string): Promise<{ teamId: string; channelId: string; threadTs: string }>;
-  inviteTaskPerson?(input: { teamId: string; channelId: string; slackUserId: string }): Promise<"accepted" | "unknown">;
+  inviteTaskPerson?(input: TaskPersonInviteClaimRequest): Promise<TaskPersonInviteOutcome>;
 }
 
 function taskPeopleEffectsDependencies(deps: DeveloperTaskRouteDependencies) {

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createSlackIngressHandler } from "../../packages/broker/src/aws/slack-ingress.js";
 import { createSlackInteractivityHandler } from "../../packages/broker/src/aws/slack-interactivity.js";
 import {
-  botNameOf, missingScopes, probeSlackUrls, readSlackTeamIdFromSecret, SIGN_IN_BOT_SCOPES, signSlackRequest, slackAppManifest, slackAppStep, slackBotDisplayName, slackCreateAppUrl,
+  botNameOf, missingScopes, probeSlackUrls, readSlackTeamIdFromSecret, SIGN_IN_BOT_SCOPES, SLACK_BOT_SCOPES, signSlackRequest, slackAppManifest, slackAppStep, slackBotDisplayName, slackBotScopes, slackCreateAppUrl,
   slackSecretName, slackSecretWithBot, SlackTeamIdError, slackSecretWithSignIn, slackSignInCallbackUrl, slackValuesFields, SLACK_VALUES_TITLE, slackWebApi, verifySlackUrls,
 } from "../../packages/cli/src/init/slack-app.js";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
@@ -73,6 +73,15 @@ describe("Slack app manifest", () => {
         token_rotation_enabled: false,
       },
     });
+  });
+
+  it("adds only explicitly selected invitation scopes while preserving the default installation scopes", () => {
+    expect(slackBotScopes()).toEqual(SLACK_BOT_SCOPES);
+    expect(slackBotScopes({ publicInvitations: true })).toEqual([...SLACK_BOT_SCOPES, "channels:write.invites"]);
+    expect(slackBotScopes({ privateInvitations: true })).toEqual([...SLACK_BOT_SCOPES, "groups:write.invites"]);
+    expect(slackBotScopes({ publicInvitations: true, privateInvitations: true })).toEqual([...SLACK_BOT_SCOPES, "channels:write.invites", "groups:write.invites"]);
+    expect(slackAppManifest({ appName: "AgentX", eventsUrl: EVENTS, interactivityUrl: INTERACTIONS, signInCallbackUrl: SIGNIN }).oauth_config.scopes.bot).toEqual(SLACK_BOT_SCOPES);
+    expect(SIGN_IN_BOT_SCOPES).toEqual(["channels:read", "groups:read", "im:write", "users:read", "users:read.email"]);
   });
 
   it("derives a valid bot display name from any app name", () => {

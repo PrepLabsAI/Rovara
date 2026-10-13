@@ -44,6 +44,7 @@ import {
   type TaskPeopleDisplayReadResponse,
 } from "@agentx/contracts";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
+import { evaluateProjectAuthority } from "../developer/task-project-access.js";
 import { checkTaskPersonIdentity, registerTaskChannelPeople, resolveTaskPickerPersonWithId, type ProjectAccessSubject, type TaskPersonIdentityDependencies } from "../developer/task-person-identity.js";
 import { taskPeopleDisplayAdmission, type TaskPeopleDisplayAdmission } from "../developer/task-people-display-budget.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
@@ -73,7 +74,7 @@ export interface DeveloperApiConfiguration {
   taskPeopleDisplayRead?: (request: TaskPeopleDisplayReadRequest) => Promise<TaskPeopleDisplayReadResponse>;
   /** D: exact opt-in for role changes; an existing PEOPLE sidecar remains enforced while false. */
   taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
-  /** E: optional effect port for a confirmed Slack People form; production leaves it absent until separately configured. */
+  /** C: optional distinct claim-bound invitation endpoint; production leaves it absent until separately configured. */
   inviteTaskPerson?: DeveloperTaskRouteDependencies["inviteTaskPerson"];
   /** R10: bound channels' names and privacy, read by DeveloperIdentity. Optional: without it channels are listed by ID. */
   channelInfo?: (request: ChannelInfoRequest) => Promise<ChannelInfoResponse>;
@@ -579,27 +580,39 @@ export async function checkProjectAccess(
   if (known === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
   const grants = (await grantsOf(deps, caller)).filter((name) => name === project);
   const bindings = (await bindingsOf(deps)).filter((binding) => binding.projectName === project);
-  const freshMemberOf = membership === undefined ? undefined : new Set(membership.freshMemberOf);
-  const access = await resolveDeveloperAccess({
-    grants,
+  const projectMemberships = grants.map((projectName) => ({ projectName, role: "developer" }));
+  const evaluate = (freshMemberOf?: readonly string[]) => evaluateProjectAuthority({
+    project,
+    revision: { revision: known.revision, definition: { developerTasks: known.policy } },
+    memberships: projectMemberships,
     bindings,
+    ...(freshMemberOf === undefined ? {} : { freshMemberOf }),
     ...(caller.slackUserId === undefined ? {} : { slackUserId: caller.slackUserId }),
-    channelMembersMayUse: () => known.policy.channelMembersMayUse,
-    channelMembers: freshMemberOf === undefined
-      ? safeChannelMembers(deps)
-      : async (request) => ({ ok: true as const, memberOf: request.channelIds.filter((channelId) => freshMemberOf.has(channelId)) }),
   });
-  const entry = access.projects.get(project);
-  if (entry === undefined) {
-    if (access.slackUnavailable) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
+  let result = evaluate(membership?.freshMemberOf);
+  if (result.kind === "needs-membership") {
+    const memberOf = new Set<string>();
+    for (let start = 0; start < result.channelIds.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
+      const response = await safeChannelMembers(deps)({
+        kind: "channel-members", slackUserId: caller.slackUserId!, channelIds: result.channelIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS),
+      });
+      if (!response.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
+      for (const channelId of response.memberOf) memberOf.add(channelId);
+    }
+    result = evaluate([...memberOf]);
+  }
+  if (result.kind === "unavailable") throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
+  if (result.kind === "not-found") throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
+  if (result.kind === "needs-membership") throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your channel membership; try again, or ask an admin for access");
+  if (result.kind === "denied") {
+    if (result.reason === "tasks-disabled") throw agentXError("PROJECT_TASKS_DISABLED", `tasks from AI tools are turned off for \`${project}\`; use the project's Slack channel, or ask an admin`);
     // Only a channel that would give access is worth naming, and only a public one (R10).
     const visible = caller.slackUserId === undefined || !known.policy.channelMembersMayUse
       ? []
-      : [...(await channelNames(deps, bindings.map((binding) => binding.channelId))).values()].filter((channel) => !channel.isPrivate).map((channel) => channel.name).sort();
+      : [...(await channelNames(deps, result.visibleChannelIds)).values()].filter((channel) => !channel.isPrivate).map((channel) => channel.name).sort();
     throw agentXError("PROJECT_ACCESS_DENIED", accessDeniedMessage(project, visible));
   }
-  if (!known.policy.enabled) throw agentXError("PROJECT_TASKS_DISABLED", `tasks from AI tools are turned off for \`${project}\`; use the project's Slack channel, or ask an admin`);
-  return { revision: known.revision, policy: known.policy, access: entry.access, channelIds: bindings.map((binding) => binding.channelId).sort() };
+  return { revision: result.revision, policy: result.policy, access: result.access, channelIds: result.channelIds };
 }
 
 /**
@@ -684,7 +697,32 @@ export function developerTaskRouteDependencies(
         return response.Item;
       },
       projectChannelIds,
-      targetProjectAccess: async (subject, project, freshMemberOf) => { await checkProjectAccess(deps, subject, project, { freshMemberOf }); },
+      targetProjectAccess: async (subject, project, freshMemberOf) => {
+        const revision = await latestDefinition(deps, project);
+        if (revision === undefined) throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
+        const [memberships, allBindings] = await Promise.all([
+          queryAll<{ projectName: string; role?: string }>(deps, `MEMBER#${subject.developerId}`, "PROJECT#"),
+          bindingsOf(deps),
+        ]);
+        const result = evaluateProjectAuthority({
+          project,
+          revision: { revision: revision.revision, definition: { developerTasks: revision.developerTasks } },
+          memberships,
+          bindings: allBindings,
+          freshMemberOf,
+          ...(subject.slackUserId === undefined ? {} : { slackUserId: subject.slackUserId }),
+        });
+        if (result.kind === "allowed") return;
+        if (result.kind === "unavailable" || result.kind === "needs-membership") {
+          throw agentXError("SLACK_UNAVAILABLE", "task person identity proof is unavailable");
+        }
+        if (result.kind === "not-found") throw agentXError("PROJECT_NOT_FOUND", `project \`${project}\` doesn't exist in this AgentX`);
+        if (result.kind === "denied" && result.reason === "tasks-disabled") {
+          throw agentXError("PROJECT_TASKS_DISABLED", `tasks from AI tools are turned off for \`${project}\`; use the project's Slack channel, or ask an admin`);
+        }
+        // System qualification has no channel-name lookup or human-facing error decoration.
+        throw agentXError("PROJECT_ACCESS_DENIED", "task person identity could not be verified");
+      },
       ...(trustedCaller === null ? {} : { trustedCaller }),
     };
   };

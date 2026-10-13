@@ -5,7 +5,7 @@ import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-act
 import type { DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
 import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
-import { getTaskPeople } from "../../packages/broker/src/developer/task-people.js";
+import { getTaskPeople, getTaskPeopleCapabilities } from "../../packages/broker/src/developer/task-people.js";
 import { adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
 import { identityHarness, localSigner } from "../support/developer-fakes.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -579,6 +579,52 @@ describe("D2 task-person route dependencies", () => {
     expect(Reflect.get(route, "taskPeopleConfiguration")).toEqual({ peopleChangesEnabled: false });
   });
 
+  it.each(["tasks-disabled", "missing-project"] as const)("does not persist an owner demotion on a capability read when project authority is %s", async (mode) => {
+    const ownerId = developerIdForSlackUser("U0MAYA001");
+    const nativeCaller: DeveloperCaller = { ...maya, developerId: ownerId };
+    const storedTask = { ...task, developerId: ownerId };
+    const originalPeople = { pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
+      people: [{ developerId: ownerId, slackUserId: "U0MAYA001", name: "Maya Chen", role: "owner" }] };
+    db.set(storedTask);
+    db.set(originalPeople);
+    db.set({ pk: "SLACK_BINDING#T0TEAM1", sk: "CHANNEL#C0PAY0001", teamId: "T0TEAM1", channelId: "C0PAY0001",
+      projectName: "payments-api", updatedAt: "2026-09-27T00:00:00.000Z" });
+    if (mode === "tasks-disabled") {
+      db.set({ pk: `MEMBER#${ownerId}`, sk: "PROJECT#payments-api", entityType: "MEMBERSHIP", ownerKey: ownerId,
+        projectName: "payments-api", role: "developer" });
+      db.set({ pk: "PROJECT#payments-api", sk: "REV#000000000008", entityType: "PROJECT",
+        definition: { name: "payments-api", revision: 8, developerTasks: { enabled: false } } });
+    } else {
+      db.delete("PROJECT#payments-api", "REV#000000000007");
+    }
+    config.taskPeopleConfiguration = { peopleChangesEnabled: false };
+    config.taskPersonProof = async () => ({ ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0PAY0001"] });
+    const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, nativeCaller);
+
+    await expect(getTaskPeopleCapabilities(route, nativeCaller, taskId)).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });
+
+    expect(db.get(`DEVTASK#${taskId}`, "PEOPLE")).toEqual(originalPeople);
+  });
+
+  it("still reconciles a definite project-access loss on a capability read", async () => {
+    const ownerId = developerIdForSlackUser("U0MAYA001");
+    const nativeCaller: DeveloperCaller = { ...maya, developerId: ownerId };
+    const storedTask = { ...task, developerId: ownerId };
+    const originalPeople = { pk: `DEVTASK#${taskId}`, sk: "PEOPLE", schemaVersion: 1, revision: 1, orphaned: false,
+      people: [{ developerId: ownerId, slackUserId: "U0MAYA001", name: "Maya Chen", role: "owner" }] };
+    db.set(storedTask);
+    db.set(originalPeople);
+    db.set({ pk: "PROJECT#payments-api", sk: "REV#000000000008", entityType: "PROJECT",
+      definition: { name: "payments-api", revision: 8, developerTasks: { enabled: true, channelMembersMayUse: false } } });
+    db.delete(`MEMBER#${ownerId}`, "PROJECT#payments-api");
+    config.taskPeopleConfiguration = { peopleChangesEnabled: false };
+    config.taskPersonProof = async () => ({ ok: true, user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" }, memberOf: ["C0PAY0001"] });
+    const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, nativeCaller);
+
+    await expect(getTaskPeopleCapabilities(route, nativeCaller, taskId)).rejects.toMatchObject({ code: "TASK_ACCESS_DENIED" });
+    expect(db.get(`DEVTASK#${taskId}`, "PEOPLE")).toMatchObject({ revision: 2, orphaned: true, people: [{ role: "denied" }] });
+  });
+
   it("checks an exact task principal through fresh proof without writing identity state", async () => {
     db.set(task as unknown as Record<string, unknown>);
     const proof = vi.fn(async () => ({
@@ -616,6 +662,23 @@ describe("D2 task-person route dependencies", () => {
       eligible: true,
     });
     expect(db.find((item) => String(item.sk).startsWith("PERSON#") || String(item.pk).startsWith("SESSION#") && item.sessionId !== "s-1")).toEqual([]);
+  });
+
+  it("does not decorate a system project denial with channel names", async () => {
+    db.set(task as unknown as Record<string, unknown>);
+    config.taskPersonProof = vi.fn(async () => ({
+      ok: true as const,
+      user: { id: "U0MAYA001", teamId: "T0TEAM1", name: "Maya Chen" },
+      memberOf: [],
+    }));
+    const channelInfo = vi.fn(async () => ({ ok: true as const, channels: [{ channelId: "C0PAY0001", name: "payments", isPrivate: false }] }));
+    config.channelInfo = channelInfo;
+    const route = developerTaskRouteDependencies({ documentClient: db, tableName: "state", developer: config, now: () => T0 }, maya);
+    const check = Reflect.get(route, "checkTaskPerson") as ((value: DeveloperTaskRecord, id: string) => Promise<Record<string, unknown>>) | undefined;
+
+    await expect(check?.(task, nativeDeveloperId)).resolves.toMatchObject({ eligible: false, channelMember: false });
+
+    expect(channelInfo).not.toHaveBeenCalled();
   });
 
   it("fails closed when the trusted fresh-proof port is absent", async () => {

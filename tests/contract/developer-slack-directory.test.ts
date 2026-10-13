@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { CHANNEL_MEMBERS_MAX_CHANNELS } from "@agentx/contracts";
 import { slackDirectory } from "../../packages/broker/src/developer/slack-directory.js";
+import { createTaskPersonProofHandler } from "../../packages/broker/src/aws/task-person-proof-handler.js";
 import { BOT_TOKEN, T0, TEAM, fakeSlack, routeFetch } from "../support/developer-fakes.js";
 
 type Problem = { method: string; status: number | undefined; error: string };
@@ -174,6 +175,44 @@ describe("fresh task person proof", () => {
 
     expect(await dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).toMatchObject({ ok: true, memberOf: ["C0PAY0001"] });
     expect(membersCalls(fetch)).toBe(2);
+  });
+
+  it("exports a fresh dispatch proof with a hard call cap and an abortable credential lookup", async () => {
+    const { dir, fetch } = directory([{ userId: "U0MAYA001", name: "Maya Chen" }], { C0PAY0001: ["U0MAYA001"] });
+    await expect(dir.taskDispatchPersonProof({ kind: "task-person-proof", slackUserId: "U0MAYA001", channelIds: ["C0PAY0001"] }, {
+      deadlineAt: T0 + 5_000, slackCallsLimit: 2,
+    })).resolves.toEqual({
+      result: { ok: true, user: { id: "U0MAYA001", teamId: TEAM, name: "Maya Chen" }, memberOf: ["C0PAY0001"] },
+      slackCallsUsed: 2,
+    });
+    expect(fetch.calls).toHaveLength(2);
+
+    const controller = new AbortController();
+    controller.abort();
+    await expect(dir.taskDispatchPersonProof({ kind: "task-person-proof", slackUserId: "U0MAYA001", channelIds: ["C0PAY0001"] }, {
+      deadlineAt: T0 + 5_000, slackCallsLimit: 10, abortSignal: controller.signal,
+    })).resolves.toEqual({ result: { ok: false, error: "slack_unavailable" }, slackCallsUsed: 0 });
+    expect(fetch.calls).toHaveLength(2);
+  });
+
+  it("composes the strict proof handler directly with the fresh metered Slack reader", async () => {
+    const { dir } = directory([{ userId: "U0MAYA001", name: "Maya Chen" }], { C0PAY0001: ["U0MAYA001"] });
+    const handler = createTaskPersonProofHandler({
+      now: () => T0,
+      remainingTimeMs: () => 10_000,
+      expectedTeamId: TEAM,
+      readProof: (request, options) => dir.taskDispatchPersonProof(request, options),
+    });
+    await expect(handler({
+      kind: "task-dispatch-person-proof",
+      request: { kind: "task-person-proof", slackUserId: "U0MAYA001", channelIds: ["C0PAY0001"] },
+      admission: { version: 1, id: "123e4567-e89b-42d3-a456-426614174000", deadlineAt: T0 + 5_000, remainingMs: 5_000, slackCallsLimit: 10 },
+    })).resolves.toMatchObject({
+      kind: "task-dispatch-person-proof-result",
+      admissionId: "123e4567-e89b-42d3-a456-426614174000",
+      usage: { slackCallsUsed: 2 },
+      result: { ok: true, user: { id: "U0MAYA001", teamId: TEAM }, memberOf: ["C0PAY0001"] },
+    });
   });
 
   it("does not join a previously in-flight display read", async () => {

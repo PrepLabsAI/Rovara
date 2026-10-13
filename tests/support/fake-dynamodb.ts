@@ -486,6 +486,25 @@ function tokenize(expression: string): string[] {
   return tokens;
 }
 
+function plainMap(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value) || value instanceof Set || ArrayBuffer.isView(value)) return false;
+  const prototype = Object.getPrototypeOf(value) as object | null;
+  return prototype === Object.prototype || prototype === null;
+}
+
+/** DynamoDB map equality ignores key order; list equality preserves position and nested value type. */
+function dynamoEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((value, index) => dynamoEqual(value, right[index]));
+  }
+  if (!plainMap(left) || !plainMap(right)) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length && leftKeys.every((key) => Object.hasOwn(right, key) && dynamoEqual(left[key], right[key]));
+}
+
 class Parser {
   private position = 0;
   constructor(private readonly tokens: string[], private readonly names: Names, private readonly values: Values) {}
@@ -622,8 +641,8 @@ class Parser {
     const comparator = this.next();
     const right = this.operand(item ?? {});
     switch (comparator) {
-      case "=": return left === right;
-      case "<>": return left !== right;
+      case "=": return dynamoEqual(left, right);
+      case "<>": return !dynamoEqual(left, right);
       case "<": return (left as number) < (right as number);
       case "<=": return (left as number) <= (right as number);
       case ">": return (left as number) > (right as number);

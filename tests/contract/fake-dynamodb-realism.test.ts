@@ -114,6 +114,48 @@ describe("FakeDynamoDb realism defaults", () => {
     expect(Object.keys(left.reorder(item) as object)).not.toEqual(Object.keys(right.reorder(item) as object));
   });
 
+  it("compares cloned nested map values without depending on map key order and preserves list order and types", async () => {
+    const db = new FakeDynamoDb();
+    const storedPolicy = { enabled: true, nested: { mode: "strict", channels: ["one", "two"] } };
+    await db.send(new PutCommand({ TableName: TABLE, Item: { pk: "PROJECT#one", sk: "REV#1", policy: storedPolicy } }));
+    const check = (policy: unknown) => db.send(new TransactWriteCommand({ TransactItems: [
+      { ConditionCheck: { TableName: TABLE, Key: { pk: "PROJECT#one", sk: "REV#1" }, ConditionExpression: "#policy = :policy",
+        ExpressionAttributeNames: { "#policy": "policy" }, ExpressionAttributeValues: { ":policy": policy } } },
+    ] }));
+
+    await expect(check({ nested: { channels: ["one", "two"], mode: "strict" }, enabled: true })).resolves.toEqual({});
+    for (const different of [
+      { enabled: true, nested: { mode: "strict", channels: ["two", "one"] } },
+      { enabled: true, nested: { mode: "strict", channels: ["one", "two", "three"] } },
+      { enabled: 1, nested: { mode: "strict", channels: ["one", "two"] } },
+      { enabled: true, nested: { mode: "strict", channels: ["one", "two"] }, extra: false },
+      { nested: { mode: "strict", channels: ["one", "two"] } },
+      { enabled: true, nested: { mode: "strict", channels: ["one", "two"], extra: false } },
+    ]) {
+      const error = await check(different).then(() => undefined, (caught: unknown) => caught as Error);
+      expect(error?.name).toBe("TransactionCanceledException");
+    }
+  });
+
+  it("commits matching map fences and atomically refuses a changed nested policy", async () => {
+    const db = new FakeDynamoDb();
+    const storedPolicy = { enabled: true, nested: { channelMembersMayUse: true, revision: 4 } };
+    await db.send(new PutCommand({ TableName: TABLE, Item: { pk: "PROJECT#one", sk: "REV#4", policy: storedPolicy } }));
+    const write = (policy: unknown, target: string) => db.send(new TransactWriteCommand({ TransactItems: [
+      { ConditionCheck: { TableName: TABLE, Key: { pk: "PROJECT#one", sk: "REV#4" }, ConditionExpression: "#policy = :policy",
+        ExpressionAttributeNames: { "#policy": "policy" }, ExpressionAttributeValues: { ":policy": policy } } },
+      { Put: { TableName: TABLE, Item: { pk: target, sk: "META", value: "committed" } } },
+    ] }));
+
+    await expect(write({ nested: { revision: 4, channelMembersMayUse: true }, enabled: true }, "WRITE#matching")).resolves.toEqual({});
+    expect(db.get("WRITE#matching", "META")).toEqual({ pk: "WRITE#matching", sk: "META", value: "committed" });
+
+    const error = await write({ enabled: true, nested: { channelMembersMayUse: false, revision: 4 } }, "WRITE#changed")
+      .then(() => undefined, (caught: unknown) => caught as Error);
+    expect(error?.name).toBe("TransactionCanceledException");
+    expect(db.get("WRITE#changed", "META")).toBeUndefined();
+  });
+
   it("an opt-out keeps insertion order and accepts what DynamoDB would refuse, only when asked for", async () => {
     const db = new FakeDynamoDb({ realism: { mapOrder: false, validateExpressions: false } });
     const item = written();

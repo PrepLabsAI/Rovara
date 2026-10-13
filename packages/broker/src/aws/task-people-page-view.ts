@@ -68,10 +68,13 @@ export function renderTaskPeoplePanel(taskId: string, view: TaskPeopleView): str
   }).join("");
   const addUrl = view.canManage ? addPeopleLink(view.addPeopleUrl) : undefined;
   const add = addUrl === undefined ? "" : `<p><a class="task-people-add" href="${escapeHtml(addUrl)}">Add people in Slack</a></p>`;
+  const manualNextStep = view.canManage
+    ? '<p class="task-people-manual-step">Invite them to this task channel in Slack, then return and choose their task role.</p>'
+    : "";
   const takeover = view.canTakeOwnership
     ? `<form class="task-people-takeover" data-people-take-ownership-form data-people-revision="${view.revision}"><p>Taking ownership does not restart work.</p><button type="button" disabled>Take ownership</button><span class="task-people-status" role="status" aria-live="polite"></span></form>`
     : "";
-  return `<section class="task-people" id="task-people" aria-labelledby="task-people-heading"><h2 id="task-people-heading">People</h2><ul class="task-people-list">${people}</ul>${add}${takeover}</section>`;
+  return `<section class="task-people" id="task-people" aria-labelledby="task-people-heading"><h2 id="task-people-heading">People</h2><ul class="task-people-list">${people}</ul>${add}${manualNextStep}${takeover}</section>`;
 }
 
 export function renderTaskPeopleUnavailable(): string {
