@@ -57,6 +57,7 @@ import {
   WorkItemProgressV1Schema,
   WorkflowSnapshotSchema,
   taskGraphOrder,
+  workflowDependencyAttemptTerminalProgress,
   validateTaskGraph,
   completeWorkflowFeedbackReview,
   createCandidateManifest,
@@ -134,7 +135,6 @@ import {
   type ProjectCommand,
   type WorkflowFeedbackApprovalBinding,
   type WorkflowDependencyInvocation,
-  type WorkItemProgressV1,
   type WorkflowReviewBase,
   type WorkflowReviewChecks,
   type WorkflowReviewPlan,
@@ -565,6 +565,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     operations: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
       .filter((item) => item.entityType === "OPERATION")
       .map((item) => publicOperation(item as unknown as OperationRecord)),
+    workflowBinding: async (workspaceId, operationId) => (await requireOperation(dependencies, workspaceId, operationId)).workflowDependencies,
     eventsNewestFirst: (operationId, limit) => operationEventsNewestFirst(dependencies, operationId, limit),
     artifacts: async (workspaceId, operationId) => (await query(`WORKSPACE#${workspaceId}`, "ARTIFACT#"))
       .filter((item) => item.operationId === operationId)
@@ -5887,10 +5888,10 @@ async function validateWorkflowProgressChunk(
     const operationHistory = [...history, ...((nextWorkflow.workflowDependenciesProgress ?? []).slice(history.length))]
       .filter((entry) => entry.operationId === operation.id);
     const active = operationHistory.at(-1)?.state === "STARTED" ? operationHistory.at(-1) : undefined;
-    const retained = [...(invocation.resumeProgress ?? [])];
-    const completedPrefix = new Set(retained.filter((entry) => entry.state === "IMPLEMENTED").map((entry) => entry.itemId));
-    const currentOperationTerminals = operationHistory.filter((entry) => entry.state !== "STARTED" && entry.state === "IMPLEMENTED").map((entry) => entry.itemId);
-    const completed = new Set([...completedPrefix, ...currentOperationTerminals]);
+    const attemptTerminals = workflowDependencyAttemptTerminalProgress({ graph: invocation.graph, approval: invocation.approval, operationId: operation.id,
+      sequenceStart: invocation.sequenceStart, resumeProgress: invocation.resumeProgress, history: nextWorkflow.workflowDependenciesProgress ?? [] });
+    if (attemptTerminals === undefined) throw agentXError("CALLBACK_FORBIDDEN", "work breakdown checkpoints do not match this operation attempt");
+    const completed = new Set(attemptTerminals.filter((entry) => entry.state === "IMPLEMENTED").map((entry) => entry.itemId));
     const expectedItemId = order.find((itemId) => !completed.has(itemId));
     const previous = (nextWorkflow.workflowDependenciesProgress ?? []).at(-1);
     const expectedBase = active?.baseTreeSha ?? (previous?.state === "IMPLEMENTED" ? previous.candidateTreeSha : firstBaseTree);
@@ -7002,9 +7003,11 @@ async function completedWorkflowItems(
     const dependencyBinding = operation.workflowDependencies;
     const dependencyResult = dependencyBinding === undefined ? undefined : WorkflowDependencyResultSchema.safeParse(reported.workflowDependenciesResult);
     const dependencyOrder = dependencyBinding === undefined ? [] : taskGraphOrder(dependencyBinding.graph);
-    const latestProgressByItem = new Map<string, WorkItemProgressV1>();
-    for (const item of task.workflow.workflowDependenciesProgress ?? []) if (item.state !== "STARTED") latestProgressByItem.set(item.itemId, item);
-    const acknowledgedTerminal = dependencyOrder.map((itemId) => latestProgressByItem.get(itemId)).filter((item): item is WorkItemProgressV1 => item !== undefined);
+    const acknowledgedTerminal = dependencyBinding === undefined ? undefined : workflowDependencyAttemptTerminalProgress({
+      graph: dependencyBinding.graph, approval: dependencyBinding.approval, operationId: operation.id,
+      sequenceStart: dependencyBinding.sequenceStart, resumeProgress: dependencyBinding.resumeProgress,
+      history: task.workflow.workflowDependenciesProgress ?? [],
+    });
     const dependencyResultValid = dependencyBinding !== undefined && dependencyResult?.success === true
       && dependencyResult.data.taskId === dependencyBinding.graph.taskId
       && dependencyResult.data.graphDigest === dependencyBinding.approval.graphDigest
@@ -7016,6 +7019,7 @@ async function completedWorkflowItems(
       && task.workflow.workflowDependenciesApproval.workflowRevision === dependencyBinding.approval.workflowRevision
       && task.workflow.workflowDependenciesApproval.actorId === dependencyBinding.approval.actorId
       && task.workflow.workflowDependenciesApproval.runId === dependencyBinding.approval.runId
+      && acknowledgedTerminal !== undefined
       && dependencyResult.data.items.length === acknowledgedTerminal.length
       && dependencyResult.data.items.every((item, index) => canonicalJson(item) === canonicalJson(acknowledgedTerminal[index]))
       && dependencyResult.data.items.every((item, index) => item.itemId === dependencyOrder[index]

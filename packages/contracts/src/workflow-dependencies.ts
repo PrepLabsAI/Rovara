@@ -203,3 +203,61 @@ export function taskGraphOrder(input: unknown): string[] {
   }
   return result;
 }
+
+/**
+ * Project terminal checkpoints for one immutable operation attempt. Global progress remains an
+ * audit log; only the binding's explicit retained prefix and acknowledgements after its cursor
+ * can qualify this attempt.
+ */
+export function workflowDependencyAttemptTerminalProgress(input: {
+  graph: TaskGraphV1;
+  approval: WorkflowDependencyApproval;
+  operationId: string | undefined;
+  sequenceStart: number | undefined;
+  resumeProgress: readonly WorkItemProgressV1[] | undefined;
+  history: readonly WorkItemProgressV1[];
+}): WorkItemProgressV1[] | undefined {
+  const { graph, approval, operationId } = input;
+  if (operationId === undefined || !/^[0-9a-f-]{36}$/.test(operationId)) return undefined;
+  const sequenceStart = input.sequenceStart ?? 0;
+  if (!Number.isSafeInteger(sequenceStart) || sequenceStart < 0 || taskGraphDigest(graph) !== approval.graphDigest) return undefined;
+  const order = taskGraphOrder(graph);
+  const retained = input.resumeProgress ?? [];
+  if (retained.length > order.length) return undefined;
+  const terminals = new Map<string, WorkItemProgressV1>();
+  let previousRetained: WorkItemProgressV1 | undefined;
+  for (const [index, entry] of retained.entries()) {
+    if (entry.itemId !== order[index] || entry.state === "STARTED" || entry.graphDigest !== approval.graphDigest || entry.runId !== approval.runId
+      || entry.sequence > sequenceStart || (previousRetained !== undefined && (entry.sequence <= previousRetained.sequence
+        || previousRetained.state !== "IMPLEMENTED" || previousRetained.candidateTreeSha !== entry.baseTreeSha))
+      || !input.history.some((historical) => historical.sequence === entry.sequence && canonicalJson(historical) === canonicalJson(entry))) return undefined;
+    terminals.set(entry.itemId, entry);
+    previousRetained = entry;
+  }
+
+  if (input.history.some((entry) => entry.operationId === operationId && entry.sequence <= sequenceStart)) return undefined;
+  const later = input.history.filter((entry) => entry.sequence > sequenceStart);
+  if (later.some((entry) => entry.operationId !== operationId)) return undefined;
+  later.sort((left, right) => left.sequence - right.sequence);
+  let expectedSequence = sequenceStart + 1;
+  let active: WorkItemProgressV1 | undefined;
+  let halted = false;
+  const firstUnimplemented = (): string | undefined => order.find((itemId) => terminals.get(itemId)?.state !== "IMPLEMENTED");
+  for (const entry of later) {
+    if (entry.sequence !== expectedSequence++ || entry.operationId !== operationId || entry.graphDigest !== approval.graphDigest || entry.runId !== approval.runId
+      || halted) return undefined;
+    if (entry.state === "STARTED") {
+      if (active !== undefined || entry.itemId !== firstUnimplemented()) return undefined;
+      active = entry;
+      continue;
+    }
+    if (active === undefined || active.itemId !== entry.itemId || active.baseTreeSha !== entry.baseTreeSha) return undefined;
+    active = undefined;
+    terminals.set(entry.itemId, entry);
+    if (entry.state !== "IMPLEMENTED") halted = true;
+  }
+  return order.flatMap((itemId) => {
+    const entry = terminals.get(itemId);
+    return entry === undefined ? [] : [entry];
+  });
+}

@@ -34,6 +34,8 @@ export interface DeveloperTaskActions {
   workspace(workspaceId: string): Promise<WorkspaceInstance>;
   /** Every operation of the workspace, across all pages. Unchecked: callers must load the owned task and check project access first. */
   operations(workspaceId: string): Promise<Operation[]>;
+  /** The exact worker binding for one stored operation; routes use it to partition graph checkpoints by attempt. */
+  workflowBinding(workspaceId: string, operationId: string): Promise<WorkflowDependencyInvocation | undefined>;
   /** At most `limit` events, newest first. Unchecked: callers must load the owned task and check project access first. */
   eventsNewestFirst(operationId: string, limit: number): Promise<StoredEvent[]>;
   /** The operation's artifacts, across all pages. Unchecked: callers must load the owned task and check project access first. */
