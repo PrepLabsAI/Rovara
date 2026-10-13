@@ -138,17 +138,19 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
       context.stderr.write(`${new Date().toISOString()} rovara loop daemon stopped\n`);
     });
 
-  loop.command("do").description("start a Do loop on an issue: posts `/rovara do <instruction>` there as you")
-    .requiredOption("--issue <number>", "the issue (or pull request) number")
-    .option("--repo <path>", "the repository's checkout; this directory by default")
-    .argument("<instruction...>", "what the agent should do")
-    .action(async (words: string[], options: { issue: string; repo?: string }) => {
-      const found = await repoAt(options.repo);
-      const issue = Number(options.issue);
-      if (!Number.isInteger(issue) || issue <= 0) throw new Error("--issue must be an issue number");
-      await run(exec, "gh", ["api", "-X", "POST", `repos/${found.repo}/issues/${issue}/comments`, "--input", "-"], { input: JSON.stringify({ body: `/rovara do ${words.join(" ")}` }) });
-      say(`Asked for a Do loop on ${found.repo}#${issue}. The daemon picks it up on its next read${await daemonPid() === undefined ? "; it is not running: rovara loop start" : ""}.`);
-    });
+  for (const [keyword, name, what] of [["do", "Do", "no gates; it never publishes"], ["quick", "Quick", "plan, your approval, code, checks, then a pull request"]] as const) {
+    loop.command(keyword).description(`start a ${name} loop on an issue (${what}): posts \`/rovara ${keyword} <instruction>\` there as you`)
+      .requiredOption("--issue <number>", "the issue (or pull request) number")
+      .option("--repo <path>", "the repository's checkout; this directory by default")
+      .argument("<instruction...>", "what the agent should do")
+      .action(async (words: string[], options: { issue: string; repo?: string }) => {
+        const found = await repoAt(options.repo);
+        const issue = Number(options.issue);
+        if (!Number.isInteger(issue) || issue <= 0) throw new Error("--issue must be an issue number");
+        await run(exec, "gh", ["api", "-X", "POST", `repos/${found.repo}/issues/${issue}/comments`, "--input", "-"], { input: JSON.stringify({ body: `/rovara ${keyword} ${words.join(" ")}` }) });
+        say(`Asked for a ${name} loop on ${found.repo}#${issue}. The daemon picks it up on its next read${await daemonPid() === undefined ? "; it is not running: rovara loop start" : ""}.`);
+      });
+  }
 
   loop.command("check").description("evaluate an issue's loop without running anything: its loop, step and state")
     .argument("<issue>", "the issue number")

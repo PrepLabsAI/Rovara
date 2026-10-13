@@ -39,6 +39,15 @@ export class ClaudeCodeHarness {
     await run(this.exec, "tmux", ["send-keys", "-t", `=${tmux}:`, "Enter"]);
   }
 
+  /**
+   * Whether Claude Code is showing a permission prompt (it asks before commands and, in its default mode, edits).
+   * Read from the screen, so a person who only watches the issue can be told the agent is waiting for them.
+   */
+  async waitingForApproval(tmux: string): Promise<boolean> {
+    const screen = await this.exec("tmux", ["capture-pane", "-p", "-t", `=${tmux}:`]);
+    return screen.code === 0 && /Do you want to (?:proceed|make this edit|create)|This command requires approval/u.test(screen.stdout);
+  }
+
   async stop(tmux: string): Promise<void> {
     // Already gone is stopped.
     await this.exec("tmux", ["kill-session", "-t", `=${tmux}`]);

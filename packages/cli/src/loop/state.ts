@@ -22,6 +22,13 @@ export const WorkItemStateSchema = z.object({
   worktree: z.object({ path: z.string(), branch: z.string() }).strict().optional(),
   /** What the agent said it did, at its last accepted claim. */
   summary: z.string().optional(),
+  /** Quick (#356): the plan's digest when it was approved, which locks it, and who approved it. */
+  planDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  approvedBy: z.string().optional(),
+  /** Quick (#356): the last checks report, for the pull request's description. */
+  checks: z.string().max(20_000).optional(),
+  /** Quick (#356): the pull request the loop opened. */
+  pullRequest: z.object({ number: z.number().int().positive(), url: z.string().url() }).strict().optional(),
 }).strict();
 export type WorkItemState = z.infer<typeof WorkItemStateSchema>;
 

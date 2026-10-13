@@ -26,6 +26,8 @@ export const realExec: Exec = (command, args, options = {}) => new Promise((reso
 export async function run(exec: Exec, command: string, args: readonly string[], options?: ExecOptions): Promise<string> {
   const result = await exec(command, args, options);
   if (result.code === 127) throw new Error(`${command} is not installed or not on PATH`);
-  if (result.code !== 0) throw new Error(`${command} ${args[0] ?? ""} failed: ${(result.stderr.trim().split("\n")[0] ?? "").slice(0, 300) || `exit ${result.code}`}`);
+  // Named by its subcommand (git push, gh pr), not by an option before it such as git's -C <dir>.
+  const subcommand = args.find((arg, index) => !arg.startsWith("-") && args[index - 1] !== "-C") ?? "";
+  if (result.code !== 0) throw new Error(`${command} ${subcommand} failed: ${(result.stderr.trim().split("\n")[0] ?? "").slice(0, 300) || `exit ${result.code}`}`);
   return result.stdout;
 }

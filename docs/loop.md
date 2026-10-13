@@ -4,8 +4,8 @@
 **Claude Code**, and drives that work through a loop. It needs no Rovara install and no AWS account: only
 the Rovara CLI, the GitHub CLI (`gh`, signed in), `tmux`, `git` and Claude Code.
 
-> **Status:** the first loop, **Do**, is here. Quick and Full (with approval gates), reviews before a
-> human is asked, and per-PR loops follow ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
+> **Status:** **Do** and **Quick** are here. Full (more approval gates), reviews before a human is asked, and
+> per-PR loops follow ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
 
 The idea is inspired by [the-loop](https://github.com/MadaraUchiha-314/the-loop) by Rohith Ramakrishnan:
 an agent's work driven through a declared process, from your issue tracker. Rovara loop is Rovara's own
@@ -32,6 +32,10 @@ collaborators:      # the only GitHub logins whose comments start, steer or stop
 harness:
   name: claude-code
   args: []          # extra Claude Code arguments, such as a permission mode
+checks:             # what the Quick loop runs before it opens a pull request, in order, as CI would
+  - name: tests
+    run: npm test
+    timeoutSeconds: 600   # optional; 600 by default
 ```
 
 Comments from anyone else are never read as instructions. Comments the loop posts carry a hidden marker,
@@ -57,12 +61,35 @@ You can also start one from the terminal: `rovara loop do --issue 42 "Fix the fl
 The Do loop has no gates, and it **never pushes or opens a pull request**: it commits on its branch, and
 you take it from there.
 
+## The Quick loop
+
+```text
+/rovara quick Retry the payment call when the server answers 503
+```
+
+or `rovara loop quick --issue 42 "…"` from the terminal.
+
+| Step | What happens | The issue shows |
+|---|---|---|
+| **Plan** | The agent writes `docs/rovara/<issue>/plan.md` with `## Summary`, `## Changes` and `## Testing`, and changes no code. A plan missing a section is refused, and the agent is told which | `rovara:planning` |
+| **Plan review** | The plan is posted on the issue. A collaborator comments `/rovara approve`, or replies with what to change (`/rovara changes: …` works too). A change request is added to the plan under "Review feedback", and the plan goes back to the agent | `rovara:plan-review` |
+| **Code** | The approval locks the plan. The agent codes it and commits; a claim with a changed plan is refused | `rovara:coding` |
+| **Checks** | The loop runs the repository's `checks` in the agent's worktree. A failure goes back to the agent with the end of its output (secrets redacted), and the issue says so | `rovara:checking` |
+| **Publish** | The loop itself, never the agent, pushes `rovara/<issue>` and opens a pull request that closes the issue, with the plan and the checks in its description | `rovara:publishing` |
+| **Pull request open** | A reply on the issue goes back to the agent; the loop runs the checks again and pushes to the same pull request. Merging closes the issue, which ends the loop | `rovara:pr-open` |
+
+**Nothing is pushed before the plan is approved and the checks pass.** A push git refuses (someone else pushed
+to the branch) is said on the issue, and a reply tries again.
+
 ## Watching and answering the agent
 
 Claude Code runs interactively, in its **default permission mode**, so it asks before it edits files or
 runs commands. `tmux attach -t =rovara-<owner>_<repo>-<issue>` shows it, and you answer it there. Detach
 with `Ctrl-b d`; it keeps working. To let it work without asking, give it a permission mode in
 `harness.args`, for example `[--permission-mode, acceptEdits]`. That's your decision, per repository.
+
+When the agent has been waiting on a permission prompt for a minute, the loop says so on the issue, with the
+`tmux attach` command, so someone who only watches GitHub knows it needs them.
 
 If its session ends while it's working, the loop resumes it, up to three times in a row; then it says so
 on the issue and waits for your next reply.
@@ -74,7 +101,7 @@ on the issue and waits for your next reply.
 | `rovara loop init [path]` | writes `.rovara/loop.yaml` |
 | `rovara loop add [path]` · `remove <owner/name>` | starts or stops reading a repository's issues. A repository is read from the moment it's added; older comments are never replayed |
 | `rovara loop start` · `stop` · `status` | the background daemon. Its log is `~/.rovara/loop/daemon.log`; `run` is the same daemon in the foreground |
-| `rovara loop do --issue <n> <instruction>` | posts `/rovara do <instruction>` on the issue, as you |
+| `rovara loop do` · `quick` `--issue <n> <instruction>` | posts `/rovara do <instruction>` (or `quick`) on the issue, as you |
 | `rovara loop check <issue> [--repo owner/name]` | where an issue's loop stands, without running anything |
 
 ## What's kept where
