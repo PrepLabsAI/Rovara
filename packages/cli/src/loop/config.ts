@@ -7,6 +7,8 @@ import { z } from "zod";
 
 export const LOOP_CONFIG_PATH = ".rovara/loop.yaml";
 
+const HarnessSchema = z.enum(["claude-code", "codex"]);
+
 /** A GitHub login, as GitHub allows them. */
 const LoginSchema = z.string().regex(/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/, "a GitHub login such as octocat");
 
@@ -15,8 +17,12 @@ export const LoopRepoConfigSchema = z.object({
   /** The only people whose comments start, steer or stop a loop. Everyone else's are never read as instructions. */
   collaborators: z.array(LoginSchema).min(1).max(100),
   harness: z.object({
-    name: z.literal("claude-code"),
-    /** Extra arguments for the agent, such as a permission mode. Claude Code starts in its default mode otherwise. */
+    /** #359: the agent that does the work: Claude Code, or Codex (in its workspace-write sandbox). */
+    name: HarnessSchema.default("claude-code"),
+    /**
+     * Extra arguments for the agent, such as a permission mode or a model. Claude Code starts in its default mode, and
+     * Codex in its workspace-write sandbox, otherwise.
+     */
     args: z.array(z.string().max(200)).max(20).default([]),
   }).strict().default({ name: "claude-code", args: [] }),
   /**
@@ -36,11 +42,13 @@ export const LoopRepoConfigSchema = z.object({
    */
   reviews: z.object({
     enabled: z.boolean().default(true),
+    /** #359: the agent the reviews run on, headless and read-only: Claude Code or Codex. The other one makes a real critic. */
+    harness: HarnessSchema.default("claude-code"),
     model: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/u).optional(),
     security: z.boolean().default(true),
     maxRounds: z.number().int().min(1).max(10).default(3),
     timeoutSeconds: z.number().int().min(60).max(3_600).default(900),
-  }).strict().default({ enabled: true, security: true, maxRounds: 3, timeoutSeconds: 900 }),
+  }).strict().default({ enabled: true, harness: "claude-code", security: true, maxRounds: 3, timeoutSeconds: 900 }),
 }).strict();
 export type LoopRepoConfig = z.infer<typeof LoopRepoConfigSchema>;
 
@@ -75,17 +83,19 @@ export function initialLoopConfig(login: string): string {
     "collaborators:",
     `  - ${login}`,
     "harness:",
-    "  name: claude-code",
-    "  # Claude Code starts in its default permission mode: watch and answer it with tmux attach.",
+    "  name: claude-code  # or codex",
+    "  # Claude Code starts in its default permission mode, and Codex in its workspace-write sandbox:",
+    "  # watch and answer it with tmux attach.",
     "  args: []",
     "# The commands that prove a change (the Quick loop runs them before it opens a pull request), for example:",
     "#   - name: tests",
     "#     run: npm test",
     "checks: []",
-    "# The code and security reviews after the checks (Claude Code, headless and read-only). A different model",
-    "# from the agent's makes a real critic, for example: model: opus",
+    "# The code and security reviews after the checks, headless and read-only. A different agent or model from",
+    "# the one doing the work makes a real critic, for example: harness: codex, or model: opus",
     "reviews:",
     "  enabled: true",
+    "  harness: claude-code",
     "  maxRounds: 3",
     "",
   ].join("\n");

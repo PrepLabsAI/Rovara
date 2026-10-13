@@ -11,7 +11,7 @@ import { LoopDaemon } from "./daemon.js";
 import { LOOPS, loopNamed, stepOf } from "./definitions.js";
 import { realExec, run, type Exec } from "./exec.js";
 import { GitHub } from "./github.js";
-import { ClaudeCodeHarness } from "./harness.js";
+import { AgentHarness } from "./harness.js";
 import { createLoopMcpServer } from "./mcp.js";
 import { ARTIFACT_SECTIONS } from "./instructions.js";
 import { artifactDigest, missingSections, readArtifact } from "./exit-checks.js";
@@ -157,7 +157,7 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
       await mkdir(store.root, { recursive: true, mode: 0o700 });
       await writeFile(store.pidPath(), String(process.pid), { mode: 0o600 });
       const daemon = new LoopDaemon({
-        store, exec, github, harness: new ClaudeCodeHarness(exec), cliCommand, now: () => new Date(),
+        store, exec, github, harness: new AgentHarness(exec), cliCommand, now: () => new Date(),
         log: (line) => { context.stderr.write(`${new Date().toISOString()} ${line}\n`); },
       });
       let stopping = false;

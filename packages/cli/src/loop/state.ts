@@ -25,7 +25,12 @@ export const WorkItemStateSchema = z.object({
   startedAt: z.string(),
   stepEnteredAt: z.string(),
   /** The agent session working this item, once one was started. */
-  session: z.object({ harness: z.literal("claude-code"), tmux: z.string(), id: z.string().uuid() }).strict().optional(),
+  session: z.object({
+    harness: z.enum(["claude-code", "codex"]),
+    tmux: z.string(),
+    /** Claude Code's session ID, chosen by the loop. Codex chooses its own; its session is the latest in the worktree. */
+    id: z.string().uuid().optional(),
+  }).strict().optional(),
   /** The item's own git worktree and branch, once made. */
   worktree: z.object({ path: z.string(), branch: z.string() }).strict().optional(),
   /** What the agent said it did, at its last accepted claim. */

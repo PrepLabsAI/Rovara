@@ -1,12 +1,12 @@
 # Rovara loop: Rovara's workflow, run locally by your own agent
 
 `rovara loop` runs on your own computer. It turns comments on your GitHub issues into work for your own
-**Claude Code**, and drives that work through a loop. It needs no Rovara install and no AWS account: only
-the Rovara CLI, the GitHub CLI (`gh`, signed in), `tmux`, `git` and Claude Code.
+**Claude Code** or **Codex**, and drives that work through a loop. It needs no Rovara install and no AWS account:
+only the Rovara CLI, the GitHub CLI (`gh`, signed in), `tmux`, `git`, and Claude Code or Codex.
 
 > **Status:** **Do**, **Quick** and **Full** are here, with reviews before anything is published, feedback on the
-> pull request, and one loop per pull request when a change spans repositories. The Review and Contribute loops, and
-> Codex, follow ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
+> pull request, one loop per pull request when a change spans repositories, and Codex as the agent or the critic.
+> The Review and Contribute loops follow ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
 
 The idea is inspired by [the-loop](https://github.com/MadaraUchiha-314/the-loop) by Rohith Ramakrishnan:
 an agent's work driven through a declared process, from your issue tracker. Rovara loop is Rovara's own
@@ -31,15 +31,16 @@ collaborators:      # the only GitHub logins whose comments start, steer or stop
   - maya
   - sam
 harness:
-  name: claude-code
-  args: []          # extra Claude Code arguments, such as a permission mode
+  name: claude-code # or codex
+  args: []          # extra arguments for the agent, such as a permission mode or a model
 checks:             # what the Quick loop runs before it opens a pull request, in order, as CI would
   - name: tests
     run: npm test
     timeoutSeconds: 600   # optional; 600 by default
 reviews:            # the code and security reviews after the checks; see "Reviews" below
   enabled: true
-  model: opus       # optional; the model the reviewers run on, so the critic can differ from the agent
+  harness: codex    # optional; claude-code by default. The other agent from the one doing the work is a real critic
+  model: opus       # optional; the model the reviewers run on
   security: true    # false runs the code review only
   maxRounds: 3      # rounds in a row that still block before a person decides
   timeoutSeconds: 900
@@ -125,11 +126,12 @@ Quick and Full review a change three times before it's published:
 1. **The agent's own review.** Before it says its code is done, the agent reviews the change against the approved
    documents and writes `docs/rovara/<issue>/evidence/self-review.md` with `## Findings` and `## Fixed` ("None" where
    there is nothing). A claim without it is refused.
-2. **A code review and a security review**, after the checks pass. Each is Claude Code run headless (`claude -p`) in
-   the agent's worktree, read-only: plan mode, with only file reading and `git diff`, `git log` and `git show`
-   allowed. Each sees the approved plan and the change from the default branch, and answers with findings in
-   Rovara's own reviewer format, the same as Rovara's hosted reviews. Set `reviews.model` to run them on a different
-   model from the agent's.
+2. **A code review and a security review**, after the checks pass, each run headless and read-only in the agent's
+   worktree: Claude Code (`claude -p`) in plan mode, with only file reading and `git diff`, `git log` and `git show`
+   allowed; or, with `reviews.harness: codex`, Codex (`codex exec`) in its read-only sandbox. Each sees the approved
+   plan and the change from the default branch, and answers with findings in Rovara's own reviewer format, the same
+   as Rovara's hosted reviews. Set `reviews.harness` to the other agent, or `reviews.model` to another model, so the
+   critic isn't the agent marking its own work.
 3. **The blocking rule.** A finding blocks when the change introduced it, and, for the code review, it isn't
    advisory (a remark about something the plan asks for, or about test coverage). A security finding is never
    advisory. What doesn't block is listed in the report as advice, or as already there.
@@ -184,10 +186,19 @@ repository: its own agent, worktree and branch, code → checks → reviews → 
 
 ## Watching and answering the agent
 
-Claude Code runs interactively, in its **default permission mode**, so it asks before it edits files or
-runs commands. `tmux attach -t =rovara-<owner>_<repo>-<issue>` shows it, and you answer it there. Detach
-with `Ctrl-b d`; it keeps working. To let it work without asking, give it a permission mode in
-`harness.args`, for example `[--permission-mode, acceptEdits]`. That's your decision, per repository.
+The agent runs interactively in tmux. `tmux attach -t =rovara-<owner>_<repo>-<issue>` shows it, and you answer it
+there. Detach with `Ctrl-b d`; it keeps working.
+
+- **Claude Code** starts in its **default permission mode**, so it asks before it edits files or runs commands. To
+  let it work without asking, give it a permission mode in `harness.args`, for example
+  `[--permission-mode, acceptEdits]`.
+- **Codex** (`harness.name: codex`) starts in its **workspace-write sandbox**: it edits the worktree and runs commands
+  there without network access, and asks before anything else. The loop also lets it write the checkout's git
+  directory, which a worktree commits to. `harness.args` adds Codex arguments, for example `[--model, gpt-5-codex]`.
+  Codex picks its own session ID, so the loop resumes it as the latest Codex session in the item's worktree, which
+  only that item uses.
+
+How much the agent may do without asking is your decision, per repository.
 
 When the agent has been waiting on a permission prompt for a minute, the loop says so on the issue, with the
 `tmux attach` command, so someone who only watches GitHub knows it needs them.
@@ -208,8 +219,8 @@ on the issue and waits for your next reply.
 ## What's kept where
 
 - **On your computer:** under `~/.rovara/loop/`, each work item's state (a cache), its event log, its
-  worktree, and the agent's MCP configuration. Nothing is written into your Claude Code settings: each
-  session gets the loop's tools through its own `--mcp-config` file.
+  worktree, and the agent's MCP configuration. Nothing is written into your Claude Code or Codex settings: each
+  session gets the loop's tools through its own `--mcp-config` file, or Codex's `-c` overrides.
 - **On GitHub:** the issue holds the truth, its comments and its `rovara:*` label. These are not
   the-loop's `loop:*` labels, so the two never mix.
 - **Credentials:** the loop uses your own `gh` login, and stores no token.

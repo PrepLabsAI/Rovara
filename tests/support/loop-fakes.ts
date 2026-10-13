@@ -6,7 +6,12 @@ import type { Exec, ExecResult } from "../../packages/cli/src/loop/exec.js";
 import { LOOP_COMMENT_MARKER } from "../../packages/cli/src/loop/naming.js";
 
 export interface FakeComment { id: number; issue: number; author: string; body: string; updated_at: string }
-export interface FakeSession { name: string; cwd: string; claude: string[]; received: string[]; /** What its terminal shows. */ screen: string }
+export interface FakeSession {
+  name: string; cwd: string;
+  /** The agent started (#359), and its arguments: `claude` holds them whichever agent it is. */
+  agent: "claude" | "codex"; claude: string[];
+  received: string[]; /** What its terminal shows. */ screen: string;
+}
 export interface FakeReviewComment { id: number; pull: number; author: string; body: string; path: string; line: number; updated_at: string }
 export interface FakeReview { id: number; pull: number; author: string; state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED"; body: string; submitted_at: string }
 export interface FakePullRequest { number: number; url: string; head: string; base: string; title: string; body: string }
@@ -156,6 +161,8 @@ export class LoopWorld {
       return ok();
     }
     if (sub === "symbolic-ref") return fail("origin/HEAD is not asked any more", 1);
+    // A worktree commits to its checkout's git directory (#359: Codex's sandbox is told it may write there).
+    if (sub === "rev-parse" && args.includes("--git-common-dir")) return ok(`/checkouts/${this.repo}/.git\n`);
     // origin has the default branch; no local branch exists yet.
     if (sub === "rev-parse") return args.includes(`refs/remotes/origin/${this.defaultBranch}`) ? ok("abc123\n") : fail("", 1);
     if (sub === "worktree" && args[3] === "add") {
@@ -173,8 +180,8 @@ export class LoopWorld {
       case "new-session": {
         const name = target("-s");
         if (this.sessions.has(name)) return fail("duplicate session", 1);
-        const claudeAt = args.indexOf("claude");
-        const session = { name, cwd: target("-c"), claude: args.slice(claudeAt + 1), received: [], screen: "" };
+        const agentAt = args.findIndex((arg) => arg === "claude" || arg === "codex");
+        const session = { name, cwd: target("-c"), agent: args[agentAt] as FakeSession["agent"], claude: args.slice(agentAt + 1), received: [], screen: "" };
         this.started.push(session);
         if (!this.sessionsDie) this.sessions.set(name, session);
         return ok();

@@ -1,12 +1,16 @@
-// rovara loop (#358): the reviews the loop runs after the checks pass and before it publishes: a code review and a
-// security review, each by Claude Code run headless and read-only in the item's worktree. They use Rovara's own
+// rovara loop (#358, #359): the reviews the loop runs after the checks pass and before it publishes: a code review and
+// a security review, each by Claude Code or Codex run headless and read-only in the item's worktree. They use Rovara's own
 // reviewer rules: the same focus, JSON answer and blocking rule as the hosted reviews (contracts' review-output.ts).
 // A finding blocks when the change introduced it and the code reviewer did not mark it advisory (a security finding
 // is never advisory).
 import { spawn } from "node:child_process";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { parseWorkflowReviewerResponse, redactText, reviewerFocus, reviewJsonShape, type WorkflowReviewFinding } from "@agentx/contracts";
 import type { LoopRepoConfig } from "./config.js";
 import type { Exec } from "./exec.js";
+import type { HarnessName } from "./harness.js";
 
 export type ReviewRole = "CRITIC" | "SECURITY";
 
@@ -15,26 +19,53 @@ const DIFF_MAX = 120_000;
 /** A reviewer's tools: read files and git history, nothing that changes anything. */
 const READ_ONLY_TOOLS = "Read,Grep,Glob,Bash(git diff:*),Bash(git log:*),Bash(git show:*)";
 
-export interface ReviewerInput { cwd: string; prompt: string; model: string | undefined; timeoutMs: number }
+export interface ReviewerInput { harness: HarnessName; cwd: string; prompt: string; model: string | undefined; timeoutMs: number }
+type ReviewerAnswer = { ok: true; text: string } | { ok: false; reason: string };
 /** Runs one reviewer and answers its final text, or why it could not. */
-export type ReviewerRun = (input: ReviewerInput) => Promise<{ ok: true; text: string } | { ok: false; reason: string }>;
+export type ReviewerRun = (input: ReviewerInput) => Promise<ReviewerAnswer>;
 
-/** Claude Code in print mode: the prompt on stdin, plan mode (read-only), and only the read-only tools allowed. */
-export const claudeReviewerRun: ReviewerRun = (input) => new Promise((resolve) => {
-  const args = ["-p", "--permission-mode", "plan", "--allowedTools", READ_ONLY_TOOLS, "--output-format", "text", ...(input.model === undefined ? [] : ["--model", input.model])];
-  const child = spawn("claude", args, { cwd: input.cwd, stdio: ["pipe", "pipe", "pipe"] });
-  let out = "";
-  let err = "";
-  const timer = setTimeout(() => { child.kill("SIGTERM"); resolve({ ok: false, reason: `the reviewer did not answer within ${Math.round(input.timeoutMs / 1_000)}s` }); }, input.timeoutMs);
-  child.stdout.on("data", (chunk: Buffer) => { out += chunk.toString("utf8"); });
-  child.stderr.on("data", (chunk: Buffer) => { err += chunk.toString("utf8"); });
-  child.on("error", (error: NodeJS.ErrnoException) => { clearTimeout(timer); resolve({ ok: false, reason: error.code === "ENOENT" ? "claude is not installed or not on PATH" : error.message }); });
-  child.on("close", (code) => {
-    clearTimeout(timer);
-    resolve(code === 0 ? { ok: true, text: out } : { ok: false, reason: `claude exited ${code ?? "on a signal"}: ${redactText(err.trim().split("\n").pop() ?? "").slice(0, 200)}` });
+/** Runs `command` with the prompt on stdin, within the timeout; its stdout, or the end of its stderr when it failed. */
+function runHeadless(command: string, args: readonly string[], input: ReviewerInput): Promise<ReviewerAnswer> {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { cwd: input.cwd, stdio: ["pipe", "pipe", "pipe"] });
+    let out = "";
+    let err = "";
+    const timer = setTimeout(() => { child.kill("SIGTERM"); resolve({ ok: false, reason: `the reviewer did not answer within ${Math.round(input.timeoutMs / 1_000)}s` }); }, input.timeoutMs);
+    child.stdout.on("data", (chunk: Buffer) => { out += chunk.toString("utf8"); });
+    child.stderr.on("data", (chunk: Buffer) => { err += chunk.toString("utf8"); });
+    child.on("error", (error: NodeJS.ErrnoException) => { clearTimeout(timer); resolve({ ok: false, reason: error.code === "ENOENT" ? `${command} is not installed or not on PATH` : error.message }); });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      resolve(code === 0 ? { ok: true, text: out } : { ok: false, reason: `${command} exited ${code ?? "on a signal"}: ${redactText(err.trim().split("\n").pop() ?? "").slice(0, 200)}` });
+    });
+    child.stdin.end(input.prompt);
   });
-  child.stdin.end(input.prompt);
-});
+}
+
+/** The command line of a headless, read-only reviewer: Claude Code in plan mode with only reading tools, or Codex in its read-only sandbox. */
+export function reviewerCommand(input: Pick<ReviewerInput, "harness" | "cwd" | "model">, lastMessage: string): string[] {
+  const model = input.model === undefined ? [] : ["--model", input.model];
+  if (input.harness === "codex") return ["codex", "exec", "--sandbox", "read-only", "--cd", input.cwd, "--ephemeral", "--output-last-message", lastMessage, ...model, "-"];
+  return ["claude", "-p", "--permission-mode", "plan", "--allowedTools", READ_ONLY_TOOLS, "--output-format", "text", ...model];
+}
+
+/** The reviewer the repository chose: Claude Code answers on stdout; Codex writes its last message to a file. */
+export const agentReviewerRun: ReviewerRun = async (input) => {
+  if (input.harness !== "codex") {
+    const [command = "claude", ...args] = reviewerCommand(input, "");
+    return runHeadless(command, args, input);
+  }
+  const dir = await mkdtemp(join(tmpdir(), "rovara-review-"));
+  try {
+    const lastMessage = join(dir, "answer.txt");
+    const [command = "codex", ...args] = reviewerCommand(input, lastMessage);
+    const ran = await runHeadless(command, args, input);
+    if (!ran.ok) return ran;
+    return { ok: true, text: await readFile(lastMessage, "utf8").catch(() => ran.text) };
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+};
 
 export interface RoleResult {
   role: ReviewRole;
@@ -65,7 +96,7 @@ function reviewPrompt(role: ReviewRole, diff: string, plan: string | undefined, 
 
 /** One reviewer: asked once, and once more for the JSON when its first answer could not be read. */
 async function reviewRole(role: ReviewRole, input: { cwd: string; diff: string; plan: string | undefined; partial: boolean; config: LoopRepoConfig["reviews"]; run: ReviewerRun }): Promise<RoleResult> {
-  const ask = (prompt: string) => input.run({ cwd: input.cwd, prompt, model: input.config.model, timeoutMs: input.config.timeoutSeconds * 1_000 });
+  const ask = (prompt: string) => input.run({ harness: input.config.harness, cwd: input.cwd, prompt, model: input.config.model, timeoutMs: input.config.timeoutSeconds * 1_000 });
   const first = await ask(reviewPrompt(role, input.diff, input.plan, input.partial));
   if (!first.ok) return { role, status: "UNKNOWN", findings: [], reason: first.reason };
   let parsed = parseWorkflowReviewerResponse(first.text, { role });
