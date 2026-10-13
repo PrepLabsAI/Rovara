@@ -107,6 +107,7 @@ async function forWorker(
   const carriesWorkflowMode = invocation.kind === "task" && invocation.payload.workflowMode !== undefined;
   const carriesFeedbackReview = invocation.kind === "task" && invocation.payload.workflowMode === "FEEDBACK_REVIEW";
   const carriesFeedbackApproval = invocation.kind === "task" && invocation.payload.workflowFeedbackApproval !== undefined;
+  const carriesWorkflowDependencies = invocation.kind === "task" && invocation.payload.workflowDependencies !== undefined;
   const carriesWorkflowBase = invocation.kind === "task" && invocation.payload.workflowBase !== undefined;
   const carriesStructuredPlans = invocation.kind === "task" && (invocation.payload.workflowPhase !== undefined || invocation.payload.planFormat !== undefined);
   const carriesCodeAnchors = invocation.kind === "task" && asksForCodeAnchors(invocation.payload.prompt);
@@ -115,7 +116,7 @@ async function forWorker(
   const carriesPublishBase = invocation.kind === "publish" && invocation.payload.workflowBaseCommit !== undefined;
   const carriesPullRequestUpdate = invocation.kind === "maintain" && invocation.payload.workflowCandidateTreeSha !== undefined;
   const carriesChatGpt = invocation.kind === "task" && invocation.payload.chatgpt !== undefined;
-  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesReportChecks && !carriesCandidateTree && !carriesPublishBase && !carriesPullRequestUpdate) return invocation;
+  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesReportChecks && !carriesCandidateTree && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -138,6 +139,9 @@ async function forWorker(
   }
   if (carriesFeedbackApproval && !features.includes("task.workflowFeedbackApproval")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "feedback approval requires a compatible worker");
+  }
+  if (carriesWorkflowDependencies && !features.includes("task.workflowDependencies")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "ordered work requires a compatible worker that advertises task.workflowDependencies");
   }
   // The pinned base decides what reviewers judge and whether a finding blocks, so it is never dropped.
   if (carriesWorkflowBase && !features.includes("task.workflowBase")) {

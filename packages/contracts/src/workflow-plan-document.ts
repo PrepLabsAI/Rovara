@@ -4,6 +4,7 @@ import { canonicalJson, sortKeys } from "./canonical-json.js";
 import { redactText } from "./redaction.js";
 import { WorkflowCheckSchema, WORKFLOW_PROPOSED_CHECKS_MAX, type WorkflowCheck, type WorkflowCheckProposal } from "./task-workflow.js";
 import { extractProposedChecks, hasControlCharacter, isNotChangingReference, lastFencedBlock, notChangingReference, proposedCheckTextIssues } from "./workflow-proposed-checks.js";
+import { TaskGraphV1Schema, taskGraphOrder, type TaskGraphV1 } from "./workflow-dependencies.js";
 
 /** The info string of the fenced block that holds a plan document. */
 export const PLAN_DOCUMENT_INFO_STRING = "agentx-plan";
@@ -36,6 +37,8 @@ export interface PlanDocument {
   notChanging: string[];
   risks: string[];
   decisions: PlanDecision[];
+  /** Optional strict ordered work breakdown for coding plans only. */
+  workBreakdown?: TaskGraphV1 | undefined;
   /** Coding plans only. The validated checks the owner's approval covers, and the claims each proves. */
   checks?: { proposed: WorkflowCheck[]; noneReason?: string | undefined; proposalNote?: string | undefined; proves: Record<string, string[]> };
 }
@@ -154,6 +157,7 @@ const planBodyShape = {
   notChanging: z.array(text(200)).min(1).max(10),
   risks: z.array(text(200)).min(1).max(10),
   decisions: z.array(DecisionSchema).max(PLAN_DECISIONS_MAX),
+  workBreakdown: TaskGraphV1Schema.optional(),
 };
 
 /** The document as the planner writes it: everything but `checks`, which is read separately. */
@@ -391,6 +395,7 @@ export function parsePlanDocument(answer: string, input: {
 
   const { checks: rawChecks, ...body } = json;
   const errors: string[] = [];
+  if (Object.hasOwn(json, "workBreakdown") && input.kind !== "plan") errors.push("the plan: work breakdown belongs only in the coding plan");
   if (Object.hasOwn(json, "checks")) {
     if (input.kind !== "plan") errors.push("the plan: checks belong only in the coding plan");
     else if (input.checks === undefined && !isRecord(rawChecks)) errors.push("the plan: checks should be an object");
@@ -628,6 +633,16 @@ export function planDocumentMarkdown(plan: PlanDocument, input: {
     "## Claims",
     ...plan.claims.flatMap((claim) => claimLines(claim, 0, ownerChoice)),
   ];
+  if (plan.workBreakdown !== undefined) {
+    const byId = new Map(plan.workBreakdown.items.map((item) => [item.id, item] as const));
+    out.push("## Work breakdown");
+    taskGraphOrder(plan.workBreakdown).forEach((id, index) => {
+      const item = byId.get(id);
+      if (item === undefined) return;
+      const prerequisites = item.dependsOn.map((dependency) => byId.get(dependency)?.title).filter((title): title is string => title !== undefined);
+      out.push(`${index + 1}. **${line(item.title)}**: ${line(item.description)}${prerequisites.length === 0 ? "" : ` (after ${prerequisites.map(line).join(", ")})`}`);
+    });
+  }
   if (plan.decisions.length > 0) {
     out.push("## Decisions");
     if (input.answers === "recommended") out.push("The owner approved AgentX's recommended answer to every decision; treat each as decided.");

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PlanClaim, PlanDecision, PlanDocument, PlanEvidenceBundle } from "@agentx/contracts";
+import { taskGraphDigest, type PlanClaim, type PlanDecision, type PlanDocument, type PlanEvidenceBundle } from "@agentx/contracts";
 import { claimAnchor, renderPlanDocument, type RenderPlanInput } from "../../packages/broker/src/aws/plan-page/render-plan.js";
 import type { PageCommentView } from "../../packages/broker/src/aws/plan-page/comments.js";
 import { resolvePlanEvidence } from "../../packages/broker/src/developer/plan-evidence.js";
@@ -35,6 +35,27 @@ describe("the plan page renderer", () => {
     const pending = await renderPlanDocument(input());
     expect(pending).toContain("Design v1");
     expect(pending).toContain("Not approved yet");
+  });
+
+  it("shows an ordered work breakdown and honest item progress without exposing internal IDs", async () => {
+    const graph = { schemaVersion: 1 as const, taskId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", version: 1, items: [
+      { id: "11111111-1111-4111-8111-111111111111", title: "First <step>", description: "Prepare the change", repository: "demo", dependsOn: [] },
+      { id: "22222222-2222-4222-8222-222222222222", title: "Second step", description: "Check the result", repository: "demo", dependsOn: ["11111111-1111-4111-8111-111111111111"] },
+      { id: "55555555-5555-4555-8555-555555555555", title: "Independent step", description: "Wait for the whole run", repository: "demo", dependsOn: [] },
+    ] };
+    const html = await renderPlanDocument(input({ kind: "plan", anchor: "coding-plan", plan: planDocument({ workBreakdown: graph }), workBreakdownProgress: [
+      { schemaVersion: 1, graphDigest: taskGraphDigest(graph), runId: "33333333-3333-4333-8333-333333333333", itemId: graph.items[0]!.id, sequence: 2,
+        state: "IMPLEMENTED", operationId: "44444444-4444-4444-8444-444444444444", baseTreeSha: "b".repeat(40), candidateTreeSha: "c".repeat(40), at: "2026-10-12T00:00:00.000Z", producer: "agentx-worker" },
+      { schemaVersion: 1, graphDigest: taskGraphDigest(graph), runId: "33333333-3333-4333-8333-333333333333", itemId: graph.items[1]!.id, sequence: 4,
+        state: "UNKNOWN", operationId: "44444444-4444-4444-8444-444444444444", baseTreeSha: "c".repeat(40), at: "2026-10-12T00:00:01.000Z", producer: "agentx-worker" },
+    ] }));
+    expect(html).toContain("Work breakdown");
+    expect(html.indexOf("First &lt;step&gt;")).toBeLessThan(html.indexOf("Second step"));
+    expect(html).toContain("Implemented; not independently verified");
+    expect(html).toContain("Stopped; outcome unknown");
+    expect(html).toContain("Paused");
+    expect(html).toContain("Depends on: First &lt;step&gt;");
+    expect(html).not.toContain(graph.items[0]!.id);
   });
 
   it("says which version is current on an older version", async () => {

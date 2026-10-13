@@ -2,7 +2,7 @@
 
 **Feature Branch**: `codex/agentx-native-workflow`
 **Created**: 2026-10-05
-**Status**: Design draft for owner review
+**Status**: Approved serial phase; runtime candidate under qualification
 **Input**: Owner request to begin dependency design alongside PR event work; native AgentX workflow spec 056
 **Objective**: `MSDLC-OBJ-001@0.4` (unchanged)
 
@@ -11,6 +11,37 @@
 A larger request may need several pieces of work completed in a particular order. A flat task plan
 does not make that order visible, so a person cannot tell which work can begin, what is waiting on
 something else, or why a later step is blocked.
+
+## Approved first phase (2026-10-13)
+
+The owner approved implementing ordered work in one repository with one final pull request,
+whole-plan approval and a pause on failure. This section supersedes the original draft's unresolved
+first-phase choices. The later parallel and multi-repository phases remain outside this release.
+
+- The coding-plan review page shows a work breakdown. Slack links to that page; MCP exposes the
+  same canonical plan and actions. A Canvas is not required.
+- The current contract allows 1–8 required work items, at most 12 dependency links and at most
+  16,384 bytes of canonical graph JSON. Items use the task's one registered repository.
+- AgentX runs items one at a time in deterministic dependency order, in one implementation
+  operation. An implemented item permits the next item only after its progress is durably recorded.
+- Approval binds the complete plan, graph, workflow revision, current Owner authority and workspace.
+  Changing the graph requires a new approval; comments and model output cannot authorize work.
+- Failure, an unknown result or cancellation pauses the whole serial run. Retry is an explicit
+  action by a current Owner against the retained code and current revision.
+- Item progress means code was produced. The combined candidate still requires the normal
+  independently executed checks, read-only reviews, one final PR and a human merge.
+- `WorkflowDependenciesEnabled` defaults to `false`. Its named-environment broker value is
+  `AGENTX_WORKFLOW_DEPENDENCIES_ENABLED`. Turning it on supplies eligible coding planners with
+  the canonical task and pinned repository identity. Requirements and design remain unchanged.
+- A compatible worker must advertise `task.workflowDependencies`. Missing support refuses
+  delivery; it never removes ordering constraints or falls back to ordinary implementation.
+- Production activation and older-broker recovery qualification remain separate release gates.
+  Turning the feature off does not erase its stored approval, progress or history.
+
+The original design below is retained as background. The current owner experience uses the linked
+review page, and the approved serial phase pauses the entire run after a failure. Runtime and live
+qualification results must be reported against the exact candidate; this specification is not a
+test or deployment receipt. Operational guidance is in [Ordered work](../../docs/ordered-work.md).
 
 ## Proposed user experience
 
@@ -77,6 +108,10 @@ decision. Phasing is not a product-scope rejection.
 - A graph and its work-item evidence remain traceable through verification and PR creation.
 
 ## Open design questions
+
+The first-phase choices are settled above. Per-item PRs, cross-repository work, parallel execution
+and a generally safe older-broker recovery path remain later work. The following questions are the
+historical 2026-10-05 draft, preserved for context rather than current first-phase blockers.
 
 - Should work items always share one final PR, or can the owner choose a PR per item or dependency
   group?

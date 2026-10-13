@@ -1168,6 +1168,7 @@ function submit(){
     answers:decisions.map(function(d){return {decisionId:d.id,optionId:answers[d.id],opened:opened[d.id]===true};}),
     includedCommentIds:included
   };
+  if(dialogKind==="APPROVE"&&typeof current.workBreakdownDigest==="string")body.workBreakdownDigest=current.workBreakdownDigest;
   if(approve&&current.anchor==="coding-plan"){
     var boxes=el("decide-checks-list").querySelectorAll("input"),chosen=[];
     for(var i=0;i<boxes.length;i++)if(boxes[i].checked)chosen.push(boxes[i].value);

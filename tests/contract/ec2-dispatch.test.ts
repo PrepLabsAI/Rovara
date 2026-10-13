@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkerInvocationSchema, agentXError, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
+import { WorkerInvocationSchema, agentXError, taskGraphDigest, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { createDispatcherHandler, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
 import { guardTaskDispatch as coreGuardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
@@ -281,6 +281,24 @@ describe("ec2-ebs delivery", () => {
       const record = taskRecord({ workflowMode: "PLAN" });
       await expect(deliver(record, record.invocation)).rejects.toThrow(/workflow mode requires a compatible worker/);
       expect(post).not.toHaveBeenCalled();
+    });
+
+    it("refuses a graph-aware invocation when the worker does not advertise the exact feature and never strips the graph", async () => {
+      const graph = { schemaVersion: 1 as const, taskId: "8c330a74-b4c6-4f01-9356-5fe54fc55b19", version: 1, items: [
+        { id: "11111111-1111-4111-8111-111111111111", title: "One", description: "First.", repository: "repo", dependsOn: [] },
+      ] };
+      const workflowDependencies = { graph, approval: {
+        artifactDigest: "a".repeat(64), graphDigest: taskGraphDigest(graph), workflowRevision: 2,
+        actorId: "b".repeat(64), runId: "8c330a74-b4c6-4f01-9356-5fe54fc55b21",
+      } };
+      const record = taskRecord({ workflowMode: "IMPLEMENT", workflowDependencies });
+      const older = delivery({ workerFeatures: async () => ["task.workflowMode"] });
+      await expect(older.deliver(record, record.invocation)).rejects.toThrow(/ordered work requires a compatible worker/);
+      expect(older.post).not.toHaveBeenCalled();
+
+      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowDependencies"] });
+      await expect(capable.deliver(record, record.invocation)).resolves.toBe("DELIVERED");
+      expect(postedPayload(capable.post).workflowDependencies).toEqual(workflowDependencies);
     });
 
     it("keeps the readiness for a worker whose /ping lists it", async () => {

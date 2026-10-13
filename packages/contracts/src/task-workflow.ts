@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ProjectCommandSchema } from "./project.js";
 import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema, feedbackReplacementCheckProblem } from "./workflow-check-input.js";
+import { WorkItemProgressV1Schema, WorkflowDependencyApprovalSchema } from "./workflow-dependencies.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const ActorIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -603,6 +604,8 @@ export const WorkflowDecisionSchema = z.object({
   actorRole: z.enum(["TASK_OWNER", "PROJECT_ADMIN"]),
   reason: z.string().trim().min(1).max(500),
   artifactDigest: DigestSchema.optional(),
+  /** The exact dependency graph covered by this whole-plan approval. */
+  workBreakdownDigest: DigestSchema.optional(),
   selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20).optional(),
   /** Where the decision was made: an approval gate (the default), the owner sending blocked work back to coding, or the owner resolving review findings. */
   source: z.enum(["GATE", "SEND_BACK", "FINDINGS"]).optional(),
@@ -958,10 +961,34 @@ const WorkflowSnapshotShapeSchema = z.object({
   canvasLineageVersion: z.number().int().nonnegative().optional(),
   canvasCloseout: WorkflowCanvasCloseoutSchema.optional(),
   canvasCloseoutAttempt: WorkflowCanvasCloseoutAttemptSchema.optional(),
+  workflowDependenciesApproval: WorkflowDependencyApprovalSchema.optional(),
+  /** Broker-authored pointer to the accepted operation for the current approved graph attempt; never exposed in task views. */
+  workflowDependenciesOperationId: z.string().uuid().optional(),
+  workflowDependenciesProgress: z.array(WorkItemProgressV1Schema).max(32).optional(),
 }).superRefine((workflow, context) => {
-  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, feedbackThreadObservations: workflow.feedbackThreadObservations, verificationRetries: workflow.verificationRetries, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout, canvasCloseoutAttempt: workflow.canvasCloseoutAttempt };
+  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, feedbackThreadObservations: workflow.feedbackThreadObservations, verificationRetries: workflow.verificationRetries, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout, canvasCloseoutAttempt: workflow.canvasCloseoutAttempt, workflowDependenciesApproval: workflow.workflowDependenciesApproval, workflowDependenciesOperationId: workflow.workflowDependenciesOperationId, workflowDependenciesProgress: workflow.workflowDependenciesProgress };
   if (Buffer.byteLength(JSON.stringify(taskMetadata), "utf8") > 262_144) {
     context.addIssue({ code: "custom", message: "workflow metadata exceeds the task snapshot storage budget" });
+  }
+  const dependencyApproval = workflow.workflowDependenciesApproval;
+  if (workflow.workflowDependenciesOperationId !== undefined && dependencyApproval === undefined) {
+    context.addIssue({ code: "custom", path: ["workflowDependenciesOperationId"], message: "the current graph operation must reference a retained graph approval" });
+  }
+  if (dependencyApproval !== undefined) {
+    if (!workflow.artifacts.some((artifact) => artifact.type === "plan" && artifact.sha256 === dependencyApproval.artifactDigest)
+      || !workflow.decisions.some((decision) => decision.workflowRevision === dependencyApproval.workflowRevision
+        && decision.actorId === dependencyApproval.actorId && decision.artifactDigest === dependencyApproval.artifactDigest
+        && decision.workBreakdownDigest === dependencyApproval.graphDigest && decision.decision === "APPROVE")) {
+      context.addIssue({ code: "custom", path: ["workflowDependenciesApproval"], message: "work breakdown approval must match a whole-plan decision and its artifact" });
+    }
+  }
+  if (workflow.workflowDependenciesProgress !== undefined) {
+    if (dependencyApproval === undefined || workflow.workflowDependenciesProgress.some((progress) => progress.graphDigest !== dependencyApproval.graphDigest
+      || progress.runId !== dependencyApproval.runId)) {
+      context.addIssue({ code: "custom", path: ["workflowDependenciesProgress"], message: "work item progress must match the current approved graph run" });
+    }
+    const sequences = workflow.workflowDependenciesProgress.map((progress) => progress.sequence);
+    if (new Set(sequences).size !== sequences.length) context.addIssue({ code: "custom", path: ["workflowDependenciesProgress"], message: "work item progress sequence numbers must be unique" });
   }
   if (new Set((workflow.canvasLineage ?? []).map((canvas) => canvas.key)).size !== (workflow.canvasLineage ?? []).length) {
     context.addIssue({ code: "custom", path: ["canvasLineage"], message: "Canvas lineage keys must be unique" });
@@ -1043,6 +1070,7 @@ export const WorkflowDecisionRequestSchema = z.object({
   decision: z.enum(["APPROVE", "REQUEST_CHANGES", "REJECT", "SKIP"]),
   reason: z.string().trim().min(1).max(500),
   artifactDigest: DigestSchema.optional(),
+  workBreakdownDigest: DigestSchema.optional(),
   selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20).optional(),
   /** The task page: the owner's answer to every decision of the plan, and whether they opened it. */
   answers: z.array(WorkflowAnswerSchema.extend({ opened: z.boolean() }).strict()).max(WORKFLOW_DECISION_ANSWERS_MAX).optional(),
@@ -1600,8 +1628,13 @@ export function submitWorkflowArtifact(
     required: current.checkPolicy.required, optional: current.checkPolicy.optional, selectedOptionalIds: [], proposed: [],
     ...(proposal === undefined ? {} : proposal.data),
   };
+  const { workflowDependenciesApproval: _oldDependencyApproval, workflowDependenciesOperationId: _oldDependencyOperationId,
+    workflowDependenciesProgress: _oldDependencyProgress, ...withoutOldDependencyApproval } = current;
+  void _oldDependencyApproval;
+  void _oldDependencyOperationId;
+  void _oldDependencyProgress;
   const next = WorkflowSnapshotSchema.parse({
-    ...current,
+    ...withoutOldDependencyApproval,
     revision: current.revision + 1,
     stage: "PLAN_REVIEW",
     state: "WAITING",
@@ -2012,6 +2045,8 @@ export function decideWorkflow(
     decisions?: ReadonlyArray<{ id: string; optionIds: readonly string[]; recommended: string }>;
     via?: "PAGE";
     authority?: WorkflowOwnerAuthority;
+    /** Digest of the graph loaded from the current coding-plan artifact, when present. */
+    workBreakdownDigest?: string;
   },
 ): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
@@ -2035,6 +2070,7 @@ export function decideWorkflow(
       && prior.actorId === actor.actorId
       && prior.reason === request.data.reason
       && prior.artifactDigest === request.data.artifactDigest
+      && prior.workBreakdownDigest === request.data.workBreakdownDigest
       && JSON.stringify(prior.selectedOptionalCheckIds ?? []) === JSON.stringify(selectedOptionalCheckIds)
       && sameAnswers(prior.answerOverrides ?? [], answerOverrides)
       && (prior.commentsIncluded ?? 0) === commentsIncluded
@@ -2056,6 +2092,17 @@ export function decideWorkflow(
   if (currentPlan === undefined || request.data.artifactDigest !== currentPlan.sha256) {
     throw new WorkflowTransitionError("decision must name the current plan digest");
   }
+  if (request.data.decision === "APPROVE" && options.workBreakdownDigest !== request.data.workBreakdownDigest) {
+    throw new WorkflowTransitionError(options.workBreakdownDigest === undefined
+      ? "decision cannot bind a work breakdown that is not in the current plan"
+      : "decision must name the current work breakdown digest");
+  }
+  if (request.data.workBreakdownDigest !== undefined && options.workBreakdownDigest !== request.data.workBreakdownDigest) {
+    throw new WorkflowTransitionError("decision must name the current work breakdown digest");
+  }
+  if (request.data.workBreakdownDigest !== undefined && (request.data.decision !== "APPROVE" || currentPlan.type !== "plan")) {
+    throw new WorkflowTransitionError("a work breakdown can be bound only by approving a coding plan");
+  }
   if (request.data.decision === "SKIP" && !options.allowedSkipStages.includes(current.stage)) {
     throw new WorkflowTransitionError("workflow policy does not allow skipping this stage");
   }
@@ -2068,6 +2115,7 @@ export function decideWorkflow(
     actorRole: actor.role,
     reason: request.data.reason,
     ...(request.data.artifactDigest === undefined ? {} : { artifactDigest: request.data.artifactDigest }),
+    ...(request.data.workBreakdownDigest === undefined ? {} : { workBreakdownDigest: request.data.workBreakdownDigest }),
     ...(current.checkPolicy === undefined ? {} : { selectedOptionalCheckIds }),
     ...(answerOverrides.length === 0 ? {} : { answerOverrides }),
     ...(commentsIncluded === 0 ? {} : { commentsIncluded }),
@@ -2096,6 +2144,16 @@ export function decideWorkflow(
     ...(outcome === undefined ? {} : { outcome }),
     updatedAt: options.now,
     decisions: [...current.decisions, decision],
+    ...(request.data.decision === "APPROVE" && request.data.workBreakdownDigest !== undefined ? {
+      workflowDependenciesApproval: {
+        artifactDigest: currentPlan.sha256,
+        graphDigest: request.data.workBreakdownDigest,
+        workflowRevision: current.revision,
+        actorId: actor.actorId,
+        runId: workflowRequestId("workflow-dependencies-run", current.taskId, current.revision, request.data.requestId, request.data.workBreakdownDigest),
+      },
+      workflowDependenciesProgress: [],
+    } : {}),
     ...(current.checkPolicy === undefined ? {} : { checkPolicy: { ...current.checkPolicy, selectedOptionalIds: selectedOptionalCheckIds } }),
   });
 }

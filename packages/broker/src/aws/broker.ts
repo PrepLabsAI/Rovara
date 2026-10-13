@@ -44,6 +44,7 @@ import {
   type WorkflowDecisionDetail,
   retiredClaimIds,
   canonicalPlanJson,
+  canonicalJson,
   type PlanDocument,
   type PlanEvidenceBundle,
   WORKFLOW_REGRESSED_CHECK_MAX,
@@ -52,6 +53,12 @@ import {
   workflowPullRequestTrees,
   workflowSelectedChecks,
   blockWorkflow,
+  WorkflowDependencyResultSchema,
+  WorkItemProgressV1Schema,
+  WorkflowSnapshotSchema,
+  taskGraphOrder,
+  workflowDependencyAttemptTerminalProgress,
+  validateTaskGraph,
   completeWorkflowFeedbackReview,
   createCandidateManifest,
   WORKFLOW_HISTORY_REWRITTEN_MESSAGE,
@@ -127,6 +134,7 @@ import {
   type ProjectDefinition,
   type ProjectCommand,
   type WorkflowFeedbackApprovalBinding,
+  type WorkflowDependencyInvocation,
   type WorkflowReviewBase,
   type WorkflowReviewChecks,
   type WorkflowReviewPlan,
@@ -219,9 +227,10 @@ import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
+import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
@@ -557,6 +566,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     operations: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
       .filter((item) => item.entityType === "OPERATION")
       .map((item) => publicOperation(item as unknown as OperationRecord)),
+    workflowBinding: async (workspaceId, operationId) => (await requireOperation(dependencies, workspaceId, operationId)).workflowDependencies,
     eventsNewestFirst: (operationId, limit) => operationEventsNewestFirst(dependencies, operationId, limit),
     artifacts: async (workspaceId, operationId) => (await query(`WORKSPACE#${workspaceId}`, "ARTIFACT#"))
       .filter((item) => item.operationId === operationId)
@@ -3250,7 +3260,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[]; slackThread?: SlackThread },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[]; slackThread?: SlackThread },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -3268,8 +3278,10 @@ async function taskOperationParts(
     ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
     ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
+    ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
     requestId: input.requestId,
-    payloadHash: hashJson({ conversationId: input.conversationId, prompt: input.prompt }),
+    payloadHash: hashJson({ conversationId: input.conversationId, prompt: input.prompt,
+      ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }) }),
     status: "ACCEPTED",
     fence,
     createdAt: now,
@@ -3287,9 +3299,14 @@ async function taskOperationParts(
   // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
   // Spec 061: every planning step answers with a structured plan document; a Quick plan (no phase) is a whole coding plan.
   const planKind = input.workflowPhase === "REQUIREMENTS" ? "requirements" as const : input.workflowPhase === "DESIGN" ? "design" as const : "plan" as const;
-  const documentInstructions = planDocumentInstructions({ kind: planKind, path: input.workflowPhase === undefined ? "QUICK" : "FULL", anchors: true, ...(input.retiredClaimIds === undefined ? {} : { retired: input.retiredClaimIds }) });
   // Only a coding plan (a Quick plan, or a Full implementation plan) proposes checks; requirements and design do not.
   const codingPlan = input.workflowPhase === undefined || input.workflowPhase === "IMPLEMENTATION_PLAN";
+  const workBreakdownContext = codingPlan && input.workflowMode === "PLAN" && input.legacyTask !== true
+    ? await codingPlanWorkBreakdownContext(dependencies, workspace.id)
+    : undefined;
+  const documentInstructions = planDocumentInstructions({ kind: planKind, path: input.workflowPhase === undefined ? "QUICK" : "FULL", anchors: true,
+    ...(workBreakdownContext === undefined ? {} : { workBreakdownContext }),
+    ...(input.retiredClaimIds === undefined ? {} : { retired: input.retiredClaimIds }) });
   const planChecks = codingPlan && input.workflowMode === "PLAN" ? await codingPlanChecksInstructions(dependencies, workspace.id) : "";
   const checksInstructions = planChecks === "" ? "" : `\n\n${planChecks}`;
   // A task started without the workflow still runs its first turn in IMPLEMENT mode; its prompt is unchanged.
@@ -3326,6 +3343,7 @@ async function taskOperationParts(
       ...(input.workflowMode === "PLAN" ? { planFormat: "structured" as const } : {}),
       ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
       ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
+      ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
       ...(input.workflowBase === undefined ? {} : { workflowBase: input.workflowBase }),
       ...(input.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: input.workflowReviewChecks }),
       ...(input.workflowReviewPlan === undefined ? {} : { workflowReviewPlan: input.workflowReviewPlan }),
@@ -3353,6 +3371,17 @@ async function codingPlanChecksInstructions(dependencies: AwsBrokerDependencies,
   if (task.workflow?.checkPolicy === undefined) return "";
   const project = await requireProject(dependencies, task.project, task.startingRevision);
   return planChecksInstructions(project.definition.repositories.map((repository) => repository.path), task.workflow?.checkPolicy?.required ?? []);
+}
+
+/** Bind planner guidance to the task's starting project revision; never consult the latest project here. */
+async function codingPlanWorkBreakdownContext(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<{ taskId: string; repositoryId: string } | undefined> {
+  if (dependencies.developer?.workflowDependenciesEnabled !== true) return undefined;
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
+  const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  if (task === undefined) throw agentXError("CONFIG_INVALID", "the task for this planning step is missing");
+  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  if (project.definition.repositories.length !== 1) return undefined;
+  return { taskId: task.taskId, repositoryId: project.definition.repositories[0]!.name };
 }
 
 /** Whether the workspace belongs to a developer task with the gated workflow. */
@@ -3420,13 +3449,14 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[] } = {},
+  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[] } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
-  const requestHash = hashJson({ conversationId: request.conversationId, prompt: request.prompt });
+  const requestHash = hashJson({ conversationId: request.conversationId, prompt: request.prompt,
+    ...(options.workflowDependencies === undefined ? {} : { workflowDependencies: options.workflowDependencies }) });
   const idempotencyKey = {
     pk: `IDEMPOTENCY#${identity.ownerKey}#${workspaceId}`,
     sk: `REQUEST#${request.requestId}`,
@@ -3466,6 +3496,7 @@ async function acceptTask(
     ...(options.workflowPhase === undefined ? {} : { workflowPhase: options.workflowPhase }),
     ...(options.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: options.workflowFeedbackReview }),
     ...(options.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: options.workflowFeedbackApproval }),
+    ...(options.workflowDependencies === undefined ? {} : { workflowDependencies: options.workflowDependencies }),
     ...(options.workflowBase === undefined ? {} : { workflowBase: options.workflowBase }),
     ...(options.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: options.workflowReviewChecks }),
     ...(options.workflowReviewPlan === undefined ? {} : { workflowReviewPlan: options.workflowReviewPlan }),
@@ -4067,6 +4098,7 @@ export interface SlackWorkflowDecisionEvent {
   requestId: string;
   expectedRevision: number;
   artifactDigest: string;
+  workBreakdownDigest?: string;
   decision: "APPROVE" | "REQUEST_CHANGES";
   reason: string;
   selectedOptionalCheckIds: string[];
@@ -4290,6 +4322,7 @@ export function isSlackWorkflowDecisionEvent(event: unknown): event is SlackWork
   return value.source === "agentx.slack-ingress" && value.action === "workflow-decision" && value.requestContext === undefined
     && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
     && Number.isInteger(value.expectedRevision) && typeof value.artifactDigest === "string"
+    && (value.workBreakdownDigest === undefined || (typeof value.workBreakdownDigest === "string" && /^[a-f0-9]{64}$/.test(value.workBreakdownDigest)))
     && (value.decision === "APPROVE" || value.decision === "REQUEST_CHANGES") && typeof value.reason === "string"
     && Array.isArray(value.selectedOptionalCheckIds);
 }
@@ -4537,6 +4570,7 @@ async function decideSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: D
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
   const body = JSON.stringify({
     requestId, expectedRevision: event.expectedRevision, artifactDigest: event.artifactDigest,
+    ...(event.decision === "APPROVE" && event.workBreakdownDigest !== undefined ? { workBreakdownDigest: event.workBreakdownDigest } : {}),
     decision: event.decision, reason: event.reason, selectedOptionalCheckIds: event.selectedOptionalCheckIds,
   });
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path: `/v1/dev/tasks/${taskId}/workflow/decision`, headers: {}, requestId, body }, new URL(`/v1/dev/tasks/${taskId}/workflow/decision`, "https://agentx.invalid"));
@@ -5698,7 +5732,8 @@ async function appendEvents(
   });
   for (let offset = 0; offset < events.length; offset += EVENT_TRANSACTION_CHUNK) {
     const chunk = events.slice(offset, offset + EVENT_TRANSACTION_CHUNK);
-    await appendEventChunk(dependencies, operation, chunk, offset, hashJson(value));
+    const workflowProgress = await validateWorkflowProgressChunk(dependencies, operation, chunk);
+    await appendEventChunk(dependencies, operation, chunk, offset, hashJson(value), workflowProgress);
   }
   if (events.some((event) => event.type === "lifecycle" && isStatus(event.payload, "RUNNING"))) {
     await dependencies.documentClient.send(new UpdateCommand({
@@ -5744,6 +5779,7 @@ async function appendEventChunk(
   events: Array<{ type: string; timestamp: string; payload: unknown }>,
   chunkOffset: number,
   batchHash: string,
+  workflowProgress?: { taskId: string; workflow?: NonNullable<DeveloperTaskRecord["workflow"]>; expectedRevision: number; peopleRevision: number; approval: NonNullable<OperationRecord["workflowDependencies"]>["approval"] },
 ): Promise<void> {
   for (let attempt = 0; attempt < 4; attempt += 1) {
     const current = await requireOperation(dependencies, operation.workspaceId, operation.id);
@@ -5770,12 +5806,133 @@ async function appendEventChunk(
         } },
         { Put: { TableName: dependencies.tableName, Item: { ...markerKey, entityType: "EVENT_BATCH" }, ConditionExpression: "attribute_not_exists(pk)" } },
         ...items.map((item) => ({ Put: { TableName: dependencies.tableName, Item: item, ConditionExpression: "attribute_not_exists(pk)" } })),
+        ...(workflowProgress === undefined ? [] : [workflowProgress.workflow === undefined ? { ConditionCheck: {
+          TableName: dependencies.tableName,
+          Key: taskKey(workflowProgress.taskId),
+          ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.workflowDependenciesApproval.graphDigest = :graphDigest AND workflow.workflowDependenciesApproval.runId = :runId AND workflow.workflowDependenciesApproval.artifactDigest = :artifactDigest AND workflow.workflowDependenciesApproval.workflowRevision = :approvalRevision AND workflow.workflowDependenciesApproval.actorId = :actorId AND attribute_not_exists(closedAt)",
+          ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+          ExpressionAttributeValues: { ":revision": workflowProgress.expectedRevision, ":stage": "IMPLEMENT", ":state": "RUNNING", ":graphDigest": workflowProgress.approval.graphDigest,
+            ":runId": workflowProgress.approval.runId, ":artifactDigest": workflowProgress.approval.artifactDigest, ":approvalRevision": workflowProgress.approval.workflowRevision, ":actorId": workflowProgress.approval.actorId },
+        } } : { Update: {
+          TableName: dependencies.tableName,
+          Key: taskKey(workflowProgress.taskId),
+          UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+          ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.workflowDependenciesApproval.graphDigest = :graphDigest AND workflow.workflowDependenciesApproval.runId = :runId AND workflow.workflowDependenciesApproval.artifactDigest = :artifactDigest AND workflow.workflowDependenciesApproval.workflowRevision = :approvalRevision AND workflow.workflowDependenciesApproval.actorId = :actorId AND attribute_not_exists(closedAt)",
+          ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+          ExpressionAttributeValues: { ":workflow": workflowProgress.workflow, ":now": new Date().toISOString(), ":revision": workflowProgress.expectedRevision,
+            ":stage": "IMPLEMENT", ":state": "RUNNING", ":graphDigest": workflowProgress.approval.graphDigest,
+            ":runId": workflowProgress.approval.runId, ":artifactDigest": workflowProgress.approval.artifactDigest,
+            ":approvalRevision": workflowProgress.approval.workflowRevision, ":actorId": workflowProgress.approval.actorId },
+        } },
+        { ConditionCheck: {
+          TableName: dependencies.tableName,
+          Key: workspaceKey(operation.workspaceId),
+          ConditionExpression: "activeOperationId = :operation AND fence = :fence AND #status = :busy",
+          ExpressionAttributeNames: { "#status": "status" },
+          ExpressionAttributeValues: { ":operation": operation.id, ":fence": operation.fence, ":busy": "BUSY" },
+        } },
+        taskAccessFence(dependencies.tableName, workflowProgress.taskId, workflowProgress.peopleRevision === 0 ? undefined : workflowProgress.peopleRevision)]),
       ] }));
       return;
     } catch (error) {
       if (!isConditional(error) || attempt === 3) throw error;
     }
   }
+}
+
+/** Validate each graph checkpoint against the canonical Owner-approved run before acknowledging it to the worker. */
+async function validateWorkflowProgressChunk(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  events: readonly { type: string; timestamp: string; payload: unknown }[],
+): Promise<{ taskId: string; workflow?: NonNullable<DeveloperTaskRecord["workflow"]>; expectedRevision: number; peopleRevision: number; approval: NonNullable<OperationRecord["workflowDependencies"]>["approval"] } | undefined> {
+  const rawProgress = events.flatMap((event) => {
+    if (event.type !== "progress" || event.payload === null || typeof event.payload !== "object" || Array.isArray(event.payload)) return [];
+    const payload = event.payload as Record<string, unknown>;
+    return Object.hasOwn(payload, "workItemProgress") ? [payload.workItemProgress] : [];
+  });
+  if (rawProgress.length === 0) return undefined;
+  const invocation = operation.workflowDependencies;
+  if (invocation === undefined || operation.workflowMode !== "IMPLEMENT" || invocation.peopleRevision === undefined) {
+    throw agentXError("CALLBACK_FORBIDDEN", "work breakdown progress is not bound to an active approved operation and People revision");
+  }
+  const parsed = rawProgress.map((entry) => WorkItemProgressV1Schema.safeParse(entry));
+  if (parsed.some((entry) => !entry.success)) throw agentXError("CALLBACK_FORBIDDEN", "work breakdown progress is invalid");
+  const taskId = invocation.graph.taskId;
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (task === undefined || task.closedAt !== undefined || task.workflow === undefined || task.workflow.stage !== "IMPLEMENT" || task.workflow.state !== "RUNNING"
+    || task.workflow.workflowDependenciesApproval?.graphDigest !== invocation.approval.graphDigest
+    || task.workflow.workflowDependenciesApproval.runId !== invocation.approval.runId
+    || task.workflow.workflowDependenciesApproval.artifactDigest !== invocation.approval.artifactDigest
+    || task.workflow.workflowDependenciesApproval.workflowRevision !== invocation.approval.workflowRevision
+    || task.workflow.workflowDependenciesApproval.actorId !== invocation.approval.actorId) {
+    throw agentXError("CALLBACK_FORBIDDEN", "work breakdown progress no longer matches the current task and Owner approval");
+  }
+  const workspace = await requireWorkspace(dependencies, operation.workspaceId);
+  if (workspace.status !== "BUSY" || workspace.activeOperationId !== operation.id || workspace.fence !== operation.fence) {
+    throw agentXError("CALLBACK_FORBIDDEN", "work breakdown progress belongs to a stale workspace operation");
+  }
+  const history = task.workflow.workflowDependenciesProgress ?? [];
+  const order = taskGraphOrder(invocation.graph);
+  let firstBaseTree = invocation.resumeTreeSha;
+  if (firstBaseTree === undefined) {
+    const baseCommit = (task.workflow.reviewBase ?? task.preparedBase)?.find((entry) => entry.repositoryId === invocation.graph.items[0]?.repository)?.baseCommitSha;
+    if (baseCommit === undefined || dependencies.githubPullRequests.getCommitTree === undefined) {
+      throw agentXError("CALLBACK_FORBIDDEN", "the approved work breakdown base tree cannot be confirmed");
+    }
+    const project = await requireProject(dependencies, task.project, task.startingRevision);
+    const repository = project.definition.repositories.find((entry) => entry.name === invocation.graph.items[0]?.repository);
+    if (repository === undefined) throw agentXError("CALLBACK_FORBIDDEN", "the approved work breakdown repository is no longer registered");
+    firstBaseTree = await dependencies.githubPullRequests.getCommitTree(repository.url, baseCommit);
+  }
+  let latestSequence = history.at(-1)?.sequence ?? 0;
+  if (latestSequence !== (invocation.sequenceStart ?? 0) + history.filter((entry) => entry.operationId === operation.id).length) {
+    throw agentXError("CALLBACK_FORBIDDEN", "work breakdown progress cursor changed before this operation");
+  }
+  let nextWorkflow = task.workflow;
+  let hadExactDuplicate = false;
+  for (const result of parsed) {
+    if (!result.success) throw agentXError("CALLBACK_FORBIDDEN", "work breakdown progress is invalid");
+    const progress = result.data;
+    const existing = history.find((entry) => entry.sequence === progress.sequence);
+    if (existing !== undefined) {
+      if (canonicalJson(existing) !== canonicalJson(progress)) throw agentXError("CALLBACK_FORBIDDEN", "work breakdown progress sequence was reused with different content");
+      if (existing.operationId !== operation.id || existing.graphDigest !== invocation.approval.graphDigest || existing.runId !== invocation.approval.runId) {
+        throw agentXError("CALLBACK_FORBIDDEN", "work breakdown progress replay is not bound to this operation");
+      }
+      hadExactDuplicate = true;
+      continue;
+    }
+    if (progress.sequence !== latestSequence + 1 || progress.graphDigest !== invocation.approval.graphDigest || progress.runId !== invocation.approval.runId
+      || progress.operationId !== operation.id) throw agentXError("CALLBACK_FORBIDDEN", "work breakdown progress is out of sequence or bound to another operation");
+    const operationHistory = [...history, ...((nextWorkflow.workflowDependenciesProgress ?? []).slice(history.length))]
+      .filter((entry) => entry.operationId === operation.id);
+    const active = operationHistory.at(-1)?.state === "STARTED" ? operationHistory.at(-1) : undefined;
+    const attemptTerminals = workflowDependencyAttemptTerminalProgress({ graph: invocation.graph, approval: invocation.approval, operationId: operation.id,
+      sequenceStart: invocation.sequenceStart, resumeProgress: invocation.resumeProgress, history: nextWorkflow.workflowDependenciesProgress ?? [] });
+    if (attemptTerminals === undefined) throw agentXError("CALLBACK_FORBIDDEN", "work breakdown checkpoints do not match this operation attempt");
+    const attemptSequenceStart = invocation.sequenceStart ?? 0;
+    const attemptHalted = operationHistory.some((entry) => entry.operationId === operation.id && entry.sequence > attemptSequenceStart
+      && (entry.state === "FAILED" || entry.state === "UNKNOWN"));
+    const completed = new Set(attemptTerminals.filter((entry) => entry.state === "IMPLEMENTED").map((entry) => entry.itemId));
+    const expectedItemId = order.find((itemId) => !completed.has(itemId));
+    const previous = (nextWorkflow.workflowDependenciesProgress ?? []).at(-1);
+    const expectedBase = active?.baseTreeSha ?? (previous?.state === "IMPLEMENTED" ? previous.candidateTreeSha : firstBaseTree);
+    if (progress.state === "STARTED") {
+      if (attemptHalted || active !== undefined || expectedItemId === undefined || progress.itemId !== expectedItemId || (expectedBase !== undefined && progress.baseTreeSha !== expectedBase)) {
+        throw agentXError("CALLBACK_FORBIDDEN", "work breakdown item start does not continue the retained graph tree and order");
+      }
+    } else if (active === undefined || active.itemId !== progress.itemId || active.baseTreeSha !== progress.baseTreeSha
+      || (progress.state === "IMPLEMENTED" && (expectedItemId === undefined || progress.itemId !== expectedItemId))) {
+      throw agentXError("CALLBACK_FORBIDDEN", "work breakdown item result has no matching acknowledged start");
+    }
+    latestSequence = progress.sequence;
+    nextWorkflow = WorkflowSnapshotSchema.parse({ ...nextWorkflow, revision: nextWorkflow.revision + 1,
+      workflowDependenciesProgress: [...(nextWorkflow.workflowDependenciesProgress ?? []), progress] });
+  }
+  if (nextWorkflow === task.workflow && !hadExactDuplicate) return undefined;
+  return { taskId, ...(nextWorkflow === task.workflow ? {} : { workflow: nextWorkflow }), expectedRevision: task.workflow.revision,
+    peopleRevision: invocation.peopleRevision, approval: invocation.approval };
 }
 
 async function putArtifact(
@@ -6764,6 +6921,8 @@ async function completedWorkflowItems(
   inlineEvidence?: InlineEvidence[],
   /** Collects the planner's answers to the comments its Request changes sent, to write as replies once the plan has committed. */
   plannerReplies?: PlannerReplies[],
+  /** A cancel may terminalize only this exact current graph IMPLEMENT operation. */
+  graphCancelTarget?: OperationRecord,
 ): Promise<TransactItems> {
   if (pointer === undefined) return [];
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
@@ -6865,12 +7024,49 @@ async function completedWorkflowItems(
   /** The record of the comments the planner answered, committed with the plan it answered them in. */
   let recordedReplies: ReturnType<typeof plannerRepliesItem> | undefined;
   if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") {
+    const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
+    const dependencyBinding = operation.workflowDependencies;
+    const dependencyResult = dependencyBinding === undefined ? undefined : WorkflowDependencyResultSchema.safeParse(reported.workflowDependenciesResult);
+    const dependencyOrder = dependencyBinding === undefined ? [] : taskGraphOrder(dependencyBinding.graph);
+    const acknowledgedTerminal = dependencyBinding === undefined ? undefined : workflowDependencyAttemptTerminalProgress({
+      graph: dependencyBinding.graph, approval: dependencyBinding.approval, operationId: operation.id,
+      sequenceStart: dependencyBinding.sequenceStart, resumeProgress: dependencyBinding.resumeProgress,
+      history: task.workflow.workflowDependenciesProgress ?? [],
+    });
+    const dependencyResultValid = dependencyBinding !== undefined && dependencyResult?.success === true
+      && dependencyResult.data.taskId === dependencyBinding.graph.taskId
+      && dependencyResult.data.graphDigest === dependencyBinding.approval.graphDigest
+      && dependencyResult.data.runId === dependencyBinding.approval.runId
+      && dependencyResult.data.operationId === operation.id
+      && dependencyResult.data.workflowRevision === dependencyBinding.approval.workflowRevision
+      && task.workflow.workflowDependenciesApproval?.artifactDigest === dependencyBinding.approval.artifactDigest
+      && task.workflow.workflowDependenciesApproval.graphDigest === dependencyBinding.approval.graphDigest
+      && task.workflow.workflowDependenciesApproval.workflowRevision === dependencyBinding.approval.workflowRevision
+      && task.workflow.workflowDependenciesApproval.actorId === dependencyBinding.approval.actorId
+      && task.workflow.workflowDependenciesApproval.runId === dependencyBinding.approval.runId
+      && acknowledgedTerminal !== undefined
+      && dependencyResult.data.items.length === acknowledgedTerminal.length
+      && dependencyResult.data.items.every((item, index) => canonicalJson(item) === canonicalJson(acknowledgedTerminal[index]))
+      && dependencyResult.data.items.every((item, index) => item.itemId === dependencyOrder[index]
+        && item.sequence > 0
+        && (index === 0 || dependencyResult.data.items[index - 1]?.state === "IMPLEMENTED"
+          && dependencyResult.data.items[index - 1]?.candidateTreeSha === item.baseTreeSha));
+    const graphItemsComplete = dependencyBinding !== undefined && dependencyResult?.success === true
+      && dependencyResult.data.status === "SUCCEEDED"
+      && dependencyResult.data.items.length === dependencyBinding.graph.items.length
+      && dependencyResult.data.items.every((item) => item.state === "IMPLEMENTED");
     if (terminalStatus !== "SUCCEEDED") {
       next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_HISTORY_REWRITTEN_MESSAGE) === true ? WORKFLOW_HISTORY_REWRITTEN_MESSAGE
         : terminalError?.includes(WORKFLOW_NO_CODE_CHANGE_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.noCodeChanged
         : workflowRunEndedReason(operation.workflowMode, terminalStatus), now);
+      const progress = task.workflow.workflowDependenciesProgress ?? [];
+      const unfinished = progress.at(-1);
+      if (dependencyBinding !== undefined && unfinished?.operationId === operation.id && unfinished.state === "STARTED") {
+        const unknown = { ...unfinished, sequence: unfinished.sequence + 1, state: "UNKNOWN" as const, at: now, producer: "agentx-broker-terminal" };
+        delete unknown.candidateTreeSha;
+        next = WorkflowSnapshotSchema.parse({ ...next, workflowDependenciesProgress: [...progress, unknown] });
+      }
     } else {
-      const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
       const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
       const checkedRepositories = Array.isArray(reported.workflowCheckCandidateRepositories) ? reported.workflowCheckCandidateRepositories : [];
       const checks = CheckReportSchema.safeParse(reported.checks);
@@ -6881,6 +7077,15 @@ async function completedWorkflowItems(
       // Review only: the tests the rerun found regressed, for the owner's message and a send-back.
       let regressedChecks: string[] | undefined;
       try {
+        if (dependencyBinding !== undefined && (!dependencyResultValid || !graphItemsComplete)) {
+          verificationFailure = "approved work breakdown result is missing, stale or incomplete";
+          throw new Error(verificationFailure);
+        }
+        if (dependencyBinding === undefined && task.workflow.workflowDependenciesApproval !== undefined && operation.workflowMode === "IMPLEMENT"
+          && task.workflow.stage === "IMPLEMENT") {
+          verificationFailure = "approved work breakdown was not carried into this implementation";
+          throw new Error(verificationFailure);
+        }
         if (operation.workflowMode === "CHECKS" && task.workflow.stage !== "VERIFY") {
           verificationFailure = WORKFLOW_BLOCK_REASONS.checkRetryStale;
           throw new Error("verification retry stage changed");
@@ -6911,6 +7116,18 @@ async function completedWorkflowItems(
         const candidateInput = repositories as CandidateRepository[];
         const candidate = createCandidateManifest(candidateInput);
         const checkedCandidate = createCandidateManifest(checkedRepositories as CandidateRepository[]);
+        if (dependencyBinding !== undefined && dependencyResult?.success === true && dependencyResult.data.candidateDigest !== candidate.digest) {
+          verificationFailure = "work breakdown result does not bind the final combined candidate";
+          throw new Error(verificationFailure);
+        }
+        if (dependencyBinding !== undefined && dependencyResult?.success === true) {
+          const finalProgress = dependencyResult.data.items.at(-1);
+          const actualFinalTree = candidate.repositories.length === 1 ? candidate.repositories[0]?.treeSha : undefined;
+          if (finalProgress?.state !== "IMPLEMENTED" || actualFinalTree === undefined || finalProgress.candidateTreeSha !== actualFinalTree) {
+            verificationFailure = "work breakdown final item does not bind the final combined candidate tree";
+            throw new Error(verificationFailure);
+          }
+        }
         if (candidate.repositories.map((repository) => repository.repositoryId).sort().join("\n") !== expectedRepositoryIds.join("\n")) {
           verificationFailure = WORKFLOW_BLOCK_REASONS.repositoriesIncomplete;
           throw new Error("candidate repositories are incomplete");
@@ -7119,16 +7336,27 @@ async function completedWorkflowItems(
       : [];
   // A saved plan forgets the reasons an earlier answer was unreadable; an unreadable answer keeps its own for Retry planning.
   const forget = planUnreadable === null && task.planUnreadable !== undefined;
+  const graphApproval = graphCancelTarget?.workflowDependencies?.approval;
+  const graphCancelCondition = graphCancelTarget?.workflowDependencies === undefined ? "" :
+    " AND workflow.workflowDependenciesOperationId = :graphOperationId AND workflow.workflowDependenciesApproval.graphDigest = :graphDigest AND workflow.workflowDependenciesApproval.runId = :graphRunId AND workflow.workflowDependenciesApproval.artifactDigest = :graphArtifactDigest AND workflow.workflowDependenciesApproval.workflowRevision = :graphApprovalRevision AND workflow.workflowDependenciesApproval.actorId = :graphActorId";
   return [{ Update: {
     TableName: dependencies.tableName,
     Key: taskKey(task.taskId),
     // A stored plan quoted the replies fed so far; the next plan's window starts after them.
     UpdateExpression: `SET workflow = :workflow, updatedAt = :now${planUnreadable === undefined || planUnreadable === null ? "" : ", planUnreadable = :unreadable"}${planUnreadable === null && task.threadNotesFedThrough !== undefined ? ", threadNotesFedFrom = :fedFrom" : ""}${forget ? " REMOVE planUnreadable" : ""}`,
-    ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running",
+    ConditionExpression: `workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running${graphCancelCondition}`,
     ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
     ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": task.workflow.stage, ":running": "RUNNING",
       ...(planUnreadable === undefined || planUnreadable === null ? {} : { ":unreadable": planUnreadable }),
-      ...(planUnreadable === null && task.threadNotesFedThrough !== undefined ? { ":fedFrom": task.threadNotesFedThrough } : {}) },
+      ...(planUnreadable === null && task.threadNotesFedThrough !== undefined ? { ":fedFrom": task.threadNotesFedThrough } : {}),
+      ...(graphApproval === undefined || graphCancelTarget?.workflowDependencies === undefined ? {} : {
+        ":graphOperationId": graphCancelTarget.id,
+        ":graphDigest": graphApproval.graphDigest,
+        ":graphRunId": graphApproval.runId,
+        ":graphArtifactDigest": graphApproval.artifactDigest,
+        ":graphApprovalRevision": graphApproval.workflowRevision,
+        ":graphActorId": graphApproval.actorId,
+      }) },
   } }, ...dispatch,
   ...(evidenceJob === undefined ? [] : [{ Put: { TableName: dependencies.tableName, Item: planEvidenceJobItem({ taskId: task.taskId, ...evidenceJob, now: Date.parse(now) }), ConditionExpression: "attribute_not_exists(pk)" } }]),
   ...(recordedReplies === undefined ? [] : [{ Put: recordedReplies }])];
@@ -7188,6 +7416,11 @@ async function storePlanAnswer(
     } } : {}),
   });
   if (!parsed.ok) return unreadable(parsed.errors);
+  if (parsed.plan.workBreakdown !== undefined) {
+    if (project.definition.repositories.length !== 1) return unreadable(["ordered work is available only for a task pinned to one registered repository"]);
+    const graphValidation = validateTaskGraph(parsed.plan.workBreakdown, { taskId: task.taskId, repositoryId: project.definition.repositories[0]!.name });
+    if (!graphValidation.ok) return unreadable(graphValidation.errors);
+  }
   // The owner's real request (and the replies this step was given) is what the plan says it is for, not the planner's words.
   const step = await planStepComments(dependencies, task, artifactType);
   const plan: PlanDocument = planWithCommentIds({ ...parsed.plan, why: await planWhyEntries(dependencies, task, parsed.plan.why) }, step, previousVersion);
@@ -7398,6 +7631,45 @@ function regressedCheckLabels(entries: readonly CheckEntry[]): string[] {
 
 const TERMINAL_ERROR_MAX = 16_384;
 
+/** Return a graph IMPLEMENT operation only when it is still the exact running workflow this cancel targets. */
+async function currentGraphCancelTarget(
+  dependencies: AwsBrokerDependencies,
+  cancel: OperationRecord,
+  target?: OperationRecord,
+): Promise<{ target: OperationRecord; pointer: DeveloperTaskPointerRecord } | undefined> {
+  if (cancel.kind !== "cancel" || cancel.targetOperationId === undefined) return undefined;
+  const [currentTarget, pointer] = await Promise.all([
+    target === undefined ? requireOperation(dependencies, cancel.workspaceId, cancel.targetOperationId) : Promise.resolve(target),
+    getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(cancel.workspaceId)),
+  ]);
+  const binding = currentTarget.workflowDependencies;
+  const approval = binding?.approval;
+  if (currentTarget.kind !== "task" || currentTarget.workflowMode !== "IMPLEMENT" || currentTarget.status !== "CANCEL_REQUESTED"
+    || currentTarget.workspaceId !== cancel.workspaceId || currentTarget.fence !== cancel.fence || binding === undefined || approval === undefined
+    || pointer === undefined || pointer.taskId !== binding.graph.taskId) return undefined;
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  const current = task?.workflow;
+  const currentApproval = current?.workflowDependenciesApproval;
+  if (task?.taskId !== binding.graph.taskId || task.workspaceId !== currentTarget.workspaceId || current === undefined
+    || current.stage !== "IMPLEMENT" || current.state !== "RUNNING"
+    || current.workflowDependenciesOperationId !== currentTarget.id || currentApproval === undefined
+    || currentApproval.graphDigest !== approval.graphDigest || currentApproval.runId !== approval.runId
+    || currentApproval.artifactDigest !== approval.artifactDigest || currentApproval.workflowRevision !== approval.workflowRevision
+    || currentApproval.actorId !== approval.actorId) return undefined;
+  return { target: currentTarget, pointer };
+}
+
+/** Apply the ordinary IMPLEMENT terminal transition inside the cancel transaction for the current graph target. */
+async function cancelledGraphWorkflowItems(
+  dependencies: AwsBrokerDependencies,
+  pointer: DeveloperTaskPointerRecord | undefined,
+  target: OperationRecord | undefined,
+  now: string,
+): Promise<TransactItems> {
+  if (target === undefined || pointer === undefined || pointer.taskId !== target.workflowDependencies?.graph.taskId) return [];
+  return completedWorkflowItems(dependencies, target, pointer, "CANCELLED", now, undefined, undefined, undefined, undefined, target);
+}
+
 async function recordTerminalResult(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
@@ -7444,6 +7716,16 @@ async function recordTerminalResult(
   // compute or storage merely because the owner authorized discarding the checked-out changes.
   const closeCanFinish = operation.kind === "close" && closePreflight !== undefined
     && (closePreflight.safeToClose || operation.discardUnpublished === true);
+  const cancelTargetOperation = operation.kind === "cancel" && terminalStatus === "SUCCEEDED" && operation.targetOperationId !== undefined
+    ? await requireOperation(dependencies, operation.workspaceId, operation.targetOperationId)
+    : undefined;
+  const graphCancellation = cancelTargetOperation === undefined ? undefined
+    : await currentGraphCancelTarget(dependencies, operation, cancelTargetOperation);
+  const graphCancelBoundTarget = cancelTargetOperation?.kind === "task" && cancelTargetOperation.workflowMode === "IMPLEMENT"
+    && cancelTargetOperation.workflowDependencies !== undefined ? cancelTargetOperation : undefined;
+  if (graphCancelBoundTarget !== undefined && graphCancelBoundTarget.fence !== operation.fence) {
+    throw agentXError("STALE_FENCE", "cancel and graph target no longer share the current workspace fence");
+  }
   const workspaceStatus =
     operation.kind === "prepare"
       ? terminalStatus === "SUCCEEDED"
@@ -7475,11 +7757,15 @@ async function recordTerminalResult(
       // Issue 195: a cancel that did not succeed (a duplicate the worker no longer knows, say)
       // never turns a target that already ended into INTERRUPTED. A failed condition falls back
       // below to recording the cancel's own result only.
-      ...(terminalStatus === "SUCCEEDED" ? {} : { ConditionExpression: "#status = :cancelRequested" }),
+      ...(graphCancelBoundTarget !== undefined
+        ? { ConditionExpression: "#status = :cancelRequested AND fence = :targetFence" }
+        : terminalStatus === "SUCCEEDED" ? {} : { ConditionExpression: "#status = :cancelRequested" }),
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
         ":status": cancelledTargetStatus(terminalStatus), ":now": now,
-        ...(terminalStatus === "SUCCEEDED" ? {} : { ":cancelRequested": "CANCEL_REQUESTED" }),
+        ...(graphCancelBoundTarget !== undefined
+          ? { ":cancelRequested": "CANCEL_REQUESTED", ":targetFence": graphCancelBoundTarget.fence }
+          : terminalStatus === "SUCCEEDED" ? {} : { ":cancelRequested": "CANCEL_REQUESTED" }),
       },
     } });
   }
@@ -7533,8 +7819,10 @@ async function recordTerminalResult(
       inlineEvidence.length = 0;
       plannerReplies.length = 0;
       const workflow = await completedWorkflowItems(dependencies, operation, pointer, terminalStatus, now, result, error, inlineEvidence, plannerReplies);
-      recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed, ...workflow], workspaceUpdate, send);
-      evidenceJobs = workflow.flatMap((item) => {
+      const cancelledGraph = graphCancellation === undefined ? []
+        : await cancelledGraphWorkflowItems(dependencies, pointer, graphCancellation.target, now);
+      recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed, ...workflow, ...cancelledGraph], workspaceUpdate, send);
+      evidenceJobs = [...workflow, ...cancelledGraph].flatMap((item) => {
         const row = item.Put?.Item as Partial<PlanEvidenceJob> | undefined;
         return row?.pk === PLAN_EVIDENCE_PK && row.taskId !== undefined && row.artifactId !== undefined ? [planEvidenceEvent(row.taskId, row.artifactId)] : [];
       });
@@ -8439,22 +8727,9 @@ const repositoryGrants = new RepositoryGrantService(
 const lambdaClient = new LambdaClient(awsClientConfiguration);
 /** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */
 function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["inviteTaskPerson"]): DeveloperApiConfiguration | undefined {
-  const issuer = process.env.DEVELOPER_TOKEN_ISSUER;
-  if (!issuer) return undefined;
-  const functionName = requiredEnvironment("DEVELOPER_IDENTITY_FUNCTION_ARN");
-  const teamId = process.env.SLACK_TEAM_ID ?? "";
-  return {
+  return createDeveloperApiConfiguration(process.env, (issuer, functionName) => ({
     // Spec 061 slice 2: "Ask AgentX to reply to this comment" queues on the Slack service's request queue; set only where that service runs.
     ...(process.env.SLACK_REQUEST_QUEUE_URL ? { slackRequestQueue: slackRequestQueue(process.env.SLACK_REQUEST_QUEUE_URL) } : {}),
-    issuer,
-    env: requiredEnvironment("AGENTX_ENV"),
-    methods: { slack: process.env.DEVELOPER_SIGNIN_SLACK === "enabled", oidc: (process.env.DEVELOPER_OIDC_ISSUER ?? "") !== "" },
-    ...(teamId === "" ? {} : { slackTeamId: teamId }),
-    since: developerSinceFromEnvironment(process.env),
-    signInTableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"),
-    taskPeopleConfiguration: { peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true" },
-    // Invitation remains unconfigured in the production composition until its dedicated endpoint is separately accepted.
-    ...(inviteTaskPerson === undefined ? {} : { inviteTaskPerson }),
     channelMembers: channelMembersThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     taskPersonProof: taskPersonProofThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     taskChannelPeople: taskChannelPeopleThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
@@ -8470,7 +8745,7 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       keys: developerKeysThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       now: Date.now,
     }),
-  };
+  }), inviteTaskPerson);
 }
 /** The Slack request queue (FIFO) as "Ask AgentX to reply to this comment" sends to it. */
 function slackRequestQueue(queueUrl: string): SlackRequestQueue {

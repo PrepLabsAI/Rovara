@@ -15,6 +15,7 @@ export * from "./task-workflow.js";
 export * from "./workflow-proposed-checks.js";
 export * from "./canonical-json.js";
 export * from "./workflow-plan-document.js";
+export * from "./workflow-dependencies.js";
 export * from "./display-name.js";
 export * from "./environments.js";
 export * from "./github-mcp.js";

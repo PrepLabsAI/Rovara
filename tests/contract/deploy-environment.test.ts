@@ -684,6 +684,19 @@ describe("an upgrade keeps what the operator set (OPERATOR_PARAMETERS)", () => {
     expect(events).toContainEqual({ kind: "kept", stackName: stackName("control-plane"), kept: ["BudgetMonthlyUsd", "BudgetScope", "SlackThreadTurnsPerMinute"], dropped: [] });
   });
 
+  it("preserves an explicitly enabled workflow-dependencies parameter across an upgrade", async () => {
+    const { store, secrets } = await installed();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({
+      mode: "upgrade", engine: "templates", answers: baseAnswers(),
+      release: fakeReleaseWithControlPlaneParameters([...declared, "WorkflowDependenciesEnabled"]),
+      deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      deployedParameters: async (name) => name === stackName("control-plane") ? { WorkflowDependenciesEnabled: "true" } : undefined,
+    });
+    const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters.WorkflowDependenciesEnabled).toBe("true");
+  });
+
   it("lets the answers' own budget win over the deployed one", async () => {
     const { store, secrets } = await installed();
     const upgrade = fakeDeployer(scriptedOutputs());

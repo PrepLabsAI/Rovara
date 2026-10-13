@@ -3,7 +3,7 @@
 // requests and its history. GET only, no forms, and one small script (by nonce) that opens and scrolls to a deep
 // link and, while the page is open, asks this origin's `/task/status` whether the task moved on. Every value is escaped; model and reviewer text is plain text in the page, so a link in it is never a link.
 import { randomBytes } from "node:crypto";
-import { redactText, type PlanDocument, type PlanEvidenceBundle, type TaskComment, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskSuggestion } from "@agentx/contracts";
+import { redactText, taskGraphDigest, type PlanDocument, type PlanEvidenceBundle, type TaskComment, type TaskPeopleChangeResult, type TaskPeopleProposal, type TaskSuggestion, type WorkItemProgressV1 } from "@agentx/contracts";
 import type { TaskRole } from "../developer/task-access.js";
 import type { TaskPeopleView } from "../developer/task-people.js";
 import type { DeveloperCaller } from "./developer-routes.js";
@@ -74,6 +74,8 @@ export interface TaskDocumentView {
   commentSeq?: number;
   /** The coding plan's optional checks, and whether each is chosen now. */
   optionalChecks?: Array<{ id: string; label: string; selected: boolean }>;
+  /** Current approved work-item progress; readers see only the graph's public titles and states. */
+  workflowDependenciesProgress?: WorkItemProgressV1[];
   /** Whether AgentX can answer comments on this task (started in Slack, and the Slack service is set up). */
   askAvailable?: boolean;
   /** One coherent current People access projection for this reader. */
@@ -258,6 +260,7 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
         ...(approvedEarlier === undefined ? {} : { approvedEarlier: approvedEarlier.plan, approvedEarlierDepth: approvedEarlier.depth }),
         ...(approvedPlan === undefined ? {} : { approvedSame: approvedPlan }),
         ...(checks === undefined ? {} : { checks }),
+        ...(entry.kind === "coding plan" && isCurrent && view.workflowDependenciesProgress !== undefined ? { workBreakdownProgress: view.workflowDependenciesProgress } : {}),
         ...(entry.kind === "coding plan" && isCurrent && view.optionalChecks !== undefined ? { knownChecks: view.optionalChecks.map(({ id, label }) => ({ id, label })) } : {}),
         openWhatChanged: document === currentDocument && fromEarlier,
       });
@@ -335,6 +338,7 @@ function pageData(view: TaskDocumentView, csrf: string): Record<string, unknown>
   const planKind = waiting === undefined ? undefined : ANCHORS.find((entry) => entry.kind === waiting.kind)?.planKind;
   const current = waiting === undefined ? undefined : {
     anchor: KIND_ANCHOR[waiting.kind], label: KIND_LABEL[waiting.kind], version: waiting.version, artifactDigest: waiting.artifactDigest,
+    ...(structured?.plan.workBreakdown === undefined ? {} : { workBreakdownDigest: taskGraphDigest(structured.plan.workBreakdown) }),
     decisions: (structured?.plan.decisions ?? []).map((decision) => ({
       id: decision.id, question: redactText(decision.question), recommended: decision.recommended, options: decision.options.map((option) => option.id),
       labels: Object.fromEntries(decision.options.map((option) => [option.id, redactText(option.label)])),

@@ -2,7 +2,7 @@
 // first level, with evidence, decisions, badges and what changed. A pure function of its input apart from the
 // drawing of diagrams. All model text is redacted and escaped here; the markup carries class names only (the page
 // owns the styles) and no inline style or event handler.
-import { commentIdInAuthor, commentRefInAuthor, creditsPageComment, diffPlanDocuments, redactText, type PlanClaim, type PlanDecision, type PlanDocument, type PlanDocumentKind, type PlanEvidenceBundle, type PlanEvidenceInput } from "@agentx/contracts";
+import { commentIdInAuthor, commentRefInAuthor, creditsPageComment, diffPlanDocuments, redactText, taskGraphDigest, taskGraphOrder, type PlanClaim, type PlanDecision, type PlanDocument, type PlanDocumentKind, type PlanEvidenceBundle, type PlanEvidenceInput, type WorkItemProgressV1 } from "@agentx/contracts";
 import { escapeHtml } from "../web-session.js";
 import { renderDiagram } from "./diagrams.js";
 import { commentCountBadge, renderThreads, suggestionLines, targetKey, type PageCommentView, type PageSuggestionView } from "./comments.js";
@@ -15,6 +15,8 @@ export interface RenderPlanInput {
   /** The current version's number, so an older version can say which one is current. */
   currentVersion?: number;
   plan: PlanDocument; evidence?: PlanEvidenceBundle;
+  /** The current approved graph's durable progress; mismatched graph progress is never shown. */
+  workBreakdownProgress?: WorkItemProgressV1[];
   /** When the document was stored and the time now (epoch milliseconds): the current version's code is still being loaded for a short while after it was stored. */
   createdAt?: string; now?: number;
   previous?: { version: number; plan: PlanDocument };
@@ -273,6 +275,31 @@ function decisionListHtml(context: Context, plan: PlanDocument): string {
   return `<nav class="decision-list" aria-label="Decisions"><p class="decision-list-title">Decisions:</p><ul>${items}</ul></nav>`;
 }
 
+function workBreakdownHtml(input: RenderPlanInput): string {
+  const graph = input.kind === "plan" ? input.plan.workBreakdown : undefined;
+  if (graph === undefined) return "";
+  const digest = taskGraphDigest(graph);
+  const progress = (input.workBreakdownProgress ?? []).filter((item) => item.graphDigest === digest).sort((left, right) => left.sequence - right.sequence);
+  const latest = new Map<string, WorkItemProgressV1>();
+  for (const item of progress) latest.set(item.itemId, item);
+  const order = taskGraphOrder(graph);
+  const byId = new Map(graph.items.map((item) => [item.id, item] as const));
+  let stopped = false;
+  const rows = order.map((id) => {
+    const item = byId.get(id)!;
+    const last = latest.get(id);
+    let status = "Not started";
+    if (last?.state === "IMPLEMENTED") status = "Implemented; not independently verified";
+    else if (last?.state === "STARTED") status = "In progress";
+    else if (last?.state === "FAILED") { status = "Stopped; item failed"; stopped = true; }
+    else if (last?.state === "UNKNOWN") { status = "Stopped; outcome unknown"; stopped = true; }
+    else if (stopped) status = "Paused";
+    const prerequisites = item.dependsOn.map((dependency) => byId.get(dependency)?.title).filter((title): title is string => title !== undefined);
+    return `<li><strong>${t(item.title)}</strong> <span class="work-item-status">${status}</span><p>${t(item.description)}</p>${prerequisites.length === 0 ? "" : `<p class="work-item-dependencies">Depends on: ${prerequisites.map(t).join(", ")}</p>`}</li>`;
+  });
+  return `<section class="work-breakdown"><h3>Work breakdown</h3><ol>${rows.join("")}</ol><p>Item implementation is not independent verification; checks and reviews apply to the combined change.</p></section>`;
+}
+
 function whatChangedHtml(context: Context): string {
   const { input } = context;
   const { previous, plan, version } = input;
@@ -431,6 +458,7 @@ export async function renderPlanDocument(input: RenderPlanInput): Promise<string
     `<p class="doc-title">${t(plan.title)}</p>`,
     `<p class="doc-status"><span class="status ${input.approved ? "approved" : "pending"}">${input.approved ? "Approved" : "Not approved yet"}</span>${status} <a class="doc-link" href="#${escapeHtml(docId)}">Link</a></p></header>`,
     decisionListHtml(context, plan),
+    workBreakdownHtml(input),
     whatChangedHtml(context),
     whyHtml(plan),
     `<div class="claims">${await claimList(context, plan.claims, 1)}${decisionsBlock}</div>`,

@@ -26,6 +26,10 @@ function proofEntries(template: TemplateJson) {
   return Object.entries(template.Resources ?? {}).filter(([logicalId]) => logicalId.includes("TaskPersonProof"));
 }
 
+function workflowDependencyEnvironmentEntries(template: TemplateJson) {
+  return Object.entries(template.Resources ?? {}).filter(([id, resource]) => id.startsWith("Broker") && resource.Type === "AWS::Lambda::Function");
+}
+
 function appControlPlane(env: string): TemplateJson {
   const stacks = buildAgentXApp({ agentxEnv: env }).node.children.filter((child): child is Stack => Stack.isStack(child));
   const stack = stacks.find((candidate) => candidate.stackName === `agentx-${env}-control-plane`);
@@ -36,6 +40,9 @@ function appControlPlane(env: string): TemplateJson {
 function parentRemainderDigest(template: TemplateJson): string {
   const remainder = structuredClone(template);
   delete remainder.Parameters?.TaskPersonProofEnabled;
+  // Spec 059's default-OFF runtime graph addition is asserted exactly below; exclude only that
+  // named parameter and its corresponding Broker environment reference from the proof-only hash.
+  delete remainder.Parameters?.WorkflowDependenciesEnabled;
   const conditions = remainder.Conditions ?? {};
   for (const id of Object.keys(conditions)) if (id.includes("InstallTaskPersonProof")) delete conditions[id];
   const resources = remainder.Resources ?? {};
@@ -46,6 +53,10 @@ function parentRemainderDigest(template: TemplateJson): string {
   delete variables.Variables.TASK_PERSON_PROOF_FUNCTION_ARN;
   delete variables.Variables.SLACK_TEAM_ID;
   delete variables.Variables.DEVELOPER_SIGNIN_TABLE_NAME;
+  for (const [id] of workflowDependencyEnvironmentEntries(remainder)) {
+    const brokerVariables = resources[id]!.Properties!.Environment as { Variables: Record<string, unknown> };
+    delete brokerVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED;
+  }
   const establishedAssetHashNormalization = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
   return createHash("sha256").update(establishedAssetHashNormalization).digest("hex");
 }
@@ -103,6 +114,21 @@ describe("the named TEST proof-only installation gate", () => {
         expect(variables.Variables, `${label} has no proof-only ${key}`).not.toHaveProperty(key);
       }
     }
+
+    for (const [label, template] of [["named", named], ["foreign", foreign]] as const) {
+      expect(template.Parameters?.WorkflowDependenciesEnabled, `${label} preserves the default-OFF workflow gate`).toMatchObject({
+        Type: "String", Default: "false", AllowedValues: ["true", "false"],
+      });
+      const broker = workflowDependencyEnvironmentEntries(template);
+      expect(broker, `${label} has exactly one Broker with the workflow flag`).toHaveLength(1);
+      const variables = broker[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
+      expect(variables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, `${label} wires only the parameter reference`).toEqual({ Ref: "WorkflowDependenciesEnabled" });
+    }
+    expect(legacy.Parameters?.WorkflowDependenciesEnabled, "legacy has no workflow gate parameter").toBeUndefined();
+    const legacyBrokers = workflowDependencyEnvironmentEntries(legacy);
+    expect(legacyBrokers, "legacy has its Broker Lambda").toHaveLength(1);
+    const legacyVariables = legacyBrokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
+    expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy has no workflow flag").toBeUndefined();
 
     expect(parentRemainderDigest(named)).toBe("80dc8e7ce5dd33accdf00adf195b66a40c94f534bc9fa5ffbc39b959ce0b18e1");
     expect(parentRemainderDigest(foreign)).toBe("9ea051a264736c3ce74ee99cba71fe580119087a5399344f455b9a7d2b6a8cc4");
