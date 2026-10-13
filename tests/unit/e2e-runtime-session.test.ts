@@ -62,11 +62,42 @@ describe("private E2E worker session", () => {
       expect(replay).toMatchObject({ ok: false });
       expect(badLaunch).toMatchObject({ ok: false });
       expect(calls).toBe(2);
-      expect(session.readback()).toMatchObject({ socket: true, mode: 0o600, requestCount: 2, registeredWorkers: 2 });
+      const readback = session.readback();
+      const aliasIdentity = await lstat(readback.path);
+      const privateSentinel = await lstat(readback.privatePath);
+      expect(session.socketPath).not.toBe(readback.privatePath);
+      expect(aliasIdentity.isSocket()).toBe(true);
+      expect(aliasIdentity.dev).toBe(readback.device);
+      expect(aliasIdentity.ino).toBe(readback.inode);
+      expect(privateSentinel.isFile()).toBe(true);
+      expect(readback).toMatchObject({ socket: true, aliasEntryPresent: true, privateSentinelPresent: true, mode: 0o600, requestCount: 2, registeredWorkers: 2 });
     } finally {
       await session.close();
       await rm(directory, { recursive: true, force: true });
     }
+  });
+
+  it("closes through the private bind after the worker alias is replaced and preserves the foreign alias", async () => {
+    const directory = await mkdtemp("/tmp/e2es-alias-substitute-");
+    await chmod(directory, 0o700);
+    const token = "b".repeat(64);
+    const session = await createE2EWorkerSession({ directory, capability: token, expectedByCase: new Map([["case", { payload: { caseId: "case" } }]]), handle: async (payload) => payload });
+    try {
+      const socket = createConnection(session.socketPath);
+      await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+      const foreignPath = `${session.socketPath}.foreign`;
+      await symlink("/dev/null", foreignPath);
+      await unlink(session.socketPath);
+      await symlink(foreignPath, session.socketPath);
+      const firstClose = session.close();
+      const secondClose = session.close();
+      expect(firstClose).toBe(secondClose);
+      expect(await firstClose).toBe(false);
+      expect(session.readback()).toMatchObject({ closed: true, serverListening: false, cleanupConfirmed: false });
+      expect((await lstat(session.socketPath)).isSymbolicLink()).toBe(true);
+      expect(await readlink(session.socketPath)).toBe(foreignPath);
+      expect((await lstat(foreignPath)).isSymbolicLink()).toBe(true);
+    } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
   it("quarantines a connected request after owned socket path substitution", async () => {
@@ -97,7 +128,7 @@ describe("private E2E worker session", () => {
       expect(await firstClose).toBe(false);
       expect(session.readback().closed).toBe(true);
       expect(session.readback().socket).toBe(false);
-      expect(session.readback()).toMatchObject({ serverListening: true, cleanupConfirmed: false });
+      expect(session.readback()).toMatchObject({ serverListening: false, privateSentinelPresent: false, cleanupConfirmed: false });
       expect((await lstat(session.socketPath)).isSymbolicLink()).toBe(true);
       expect(await readlink(session.socketPath)).toBe("/dev/null");
     } finally { await rm(directory, { recursive: true, force: true }); }

@@ -1,5 +1,5 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { lstat, realpath, chmod, unlink } from "node:fs/promises";
+import { lstat, realpath, chmod, unlink, link, open } from "node:fs/promises";
 import { lstatSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { join, resolve } from "node:path";
@@ -8,7 +8,7 @@ import { copyBoundedE2EJsonData, canonicalJson } from "@agentx/contracts";
 const MAX_FRAME_BYTES = 262_144;
 const MAX_DEPTH = 64;
 const CLEANUP_CAP_MS = 60_000;
-export type E2EWorkerSessionReadback = Readonly<{ socket: boolean; path: string; mode: number; inode: number; device: number; parentDevice: number; parentInode: number; parentUid: number; requestCount: number; registeredWorkers: number; closed: boolean; serverListening: boolean; cleanupConfirmed: boolean }>;
+export type E2EWorkerSessionReadback = Readonly<{ socket: boolean; aliasEntryPresent: boolean; privateSentinelPresent: boolean; path: string; privatePath: string; mode: number; inode: number; device: number; sentinelInode: number; sentinelDevice: number; parentDevice: number; parentInode: number; parentUid: number; requestCount: number; registeredWorkers: number; closed: boolean; serverListening: boolean; cleanupConfirmed: boolean }>;
 export type E2EWorkerSession = Readonly<{ socketPath: string; readback: () => E2EWorkerSessionReadback; close: () => Promise<boolean> }>;
 
 export async function createE2EWorkerSession(input: Readonly<{
@@ -31,8 +31,9 @@ export async function createE2EWorkerSession(input: Readonly<{
     if (typeof caseId !== "string" || caseId.length < 1 || caseId.length > 160) throw new TypeError("worker case ID is invalid");
     expected.set(caseId, canonicalJson(copyBoundedE2EJsonData(item.payload, { maxBytes: MAX_FRAME_BYTES, maxDepth: MAX_DEPTH })));
   }
+  const bindPath = join(directory, `b-${randomBytes(8).toString("hex")}.sock`);
   const socketPath = join(directory, `w-${randomBytes(8).toString("hex")}.sock`);
-  if (Buffer.byteLength(socketPath) > 100) throw new Error("owned worker socket path exceeds the platform limit");
+  if (Buffer.byteLength(bindPath) > 100 || Buffer.byteLength(socketPath) > 100) throw new Error("owned worker socket path exceeds the platform limit");
   const token = Buffer.from(input.capability, "hex");
   const used = new Set<string>();
   const workers = new Map<string, { token: Buffer; expectedSequence: number }>();
@@ -44,6 +45,7 @@ export async function createE2EWorkerSession(input: Readonly<{
   let cleanupConfirmed = false;
   let closePromise: Promise<boolean> | undefined;
   const socketIdentityRef: { value?: { dev: number; ino: number; uid: number } } = {};
+  const sentinelIdentityRef: { value?: { dev: number; ino: number; uid: number } } = {};
   const controller = new AbortController();
   const onAbort = () => controller.abort(input.signal?.reason);
   input.signal?.addEventListener("abort", onAbort, { once: true });
@@ -125,22 +127,61 @@ export async function createE2EWorkerSession(input: Readonly<{
       })().catch(() => reject(socket, "worker session failed"));
     });
   });
+  const ownedDirectory = async () => {
+    const parent = await lstat(directory).catch(() => undefined);
+    return Boolean(parent?.isDirectory() && !parent.isSymbolicLink() && parent.dev === dirStat.dev && parent.ino === dirStat.ino && parent.uid === dirStat.uid && (parent.mode & 0o777) === 0o700 && await realpath(directory).then((path) => path === directory, () => false));
+  };
+  const isOwnedSocket = (current: Awaited<ReturnType<typeof lstat>> | undefined) => {
+    const identity = socketIdentityRef.value;
+    return Boolean(current?.isSocket() && !current.isSymbolicLink() && identity && current.dev === identity.dev && current.ino === identity.ino && current.uid === identity.uid && (Number(current.mode) & 0o777) === 0o600);
+  };
+  const isOwnedSentinel = (current: Awaited<ReturnType<typeof lstat>> | undefined) => {
+    const identity = sentinelIdentityRef.value;
+    return Boolean(current?.isFile() && !current.isSymbolicLink() && identity && current.dev === identity.dev && current.ino === identity.ino && current.uid === identity.uid && (Number(current.mode) & 0o777) === 0o600);
+  };
   await new Promise<void>((resolveListen, rejectListen) => {
     server.once("error", rejectListen);
-    server.listen(socketPath, () => { server.removeListener("error", rejectListen); resolveListen(); });
+    server.listen(bindPath, () => { server.removeListener("error", rejectListen); resolveListen(); });
   });
-  await chmod(socketPath, 0o600);
-  const created = await lstat(socketPath);
-  if (!created.isSocket() || created.isSymbolicLink() || (created.mode & 0o777) !== 0o600 || created.uid !== dirStat.uid) {
-    await new Promise<void>((done) => server.close(() => done()));
-    throw new Error("worker session socket did not retain its owned private identity");
+  try {
+    await chmod(bindPath, 0o600);
+    const created = await lstat(bindPath);
+    if (!created.isSocket() || created.isSymbolicLink() || (created.mode & 0o777) !== 0o600 || created.uid !== dirStat.uid) throw new Error("worker session socket did not retain its owned private identity");
+    socketIdentityRef.value = { dev: created.dev, ino: created.ino, uid: created.uid };
+    if (!await ownedDirectory() || await lstat(socketPath).then(() => true, () => false)) throw new Error("worker alias path is not exclusively available in the owned parent");
+    await link(bindPath, socketPath);
+    const alias = await lstat(socketPath);
+    if (!isOwnedSocket(alias) || alias.nlink !== 2 || !await ownedDirectory()) throw new Error("worker alias did not retain the bound socket identity");
+    const currentBind = await lstat(bindPath).catch(() => undefined);
+    if (!isOwnedSocket(currentBind)) throw new Error("private worker bind entry changed before sentinel creation");
+    await unlink(bindPath);
+    const sentinelHandle = await open(bindPath, "wx", 0o600);
+    try {
+      await sentinelHandle.writeFile(`owned-worker-sentinel:${randomBytes(16).toString("hex")}\n`, "utf8");
+      const sentinelStat = await sentinelHandle.stat();
+      sentinelIdentityRef.value = { dev: sentinelStat.dev, ino: sentinelStat.ino, uid: sentinelStat.uid };
+    } finally { await sentinelHandle.close(); }
+    const sentinel = await lstat(bindPath);
+    if (!isOwnedSentinel(sentinel) || !await ownedDirectory()) throw new Error("private worker sentinel did not retain its exclusive owned identity");
+  } catch (error) {
+    const parentOwned = await ownedDirectory();
+    const privateEntry = await lstat(bindPath).catch(() => undefined);
+    if (server.listening && parentOwned && (!privateEntry || isOwnedSocket(privateEntry) || isOwnedSentinel(privateEntry))) {
+      await new Promise<void>((resolveClose) => { try { server.close(() => resolveClose()); } catch { resolveClose(); } });
+    } else server.unref();
+    const aliasEntry = await lstat(socketPath).catch(() => undefined);
+    if (parentOwned && isOwnedSocket(aliasEntry)) await unlink(socketPath).catch(() => undefined);
+    throw error;
   }
-  socketIdentityRef.value = { dev: created.dev, ino: created.ino, uid: created.uid };
+  const created = await lstat(bindPath);
+  const socketIdentity = socketIdentityRef.value;
+  const sentinelIdentity = sentinelIdentityRef.value;
+  if (!socketIdentity || !sentinelIdentity) throw new Error("worker path ownership identities were not enrolled");
   const readback = (): E2EWorkerSessionReadback => {
-    const current = lstatSync(socketPath, { throwIfNoEntry: false });
-    const socketIdentity = socketIdentityRef.value;
-    const ownedPresent = Boolean(current?.isSocket() && !current.isSymbolicLink() && socketIdentity && current.dev === socketIdentity.dev && current.ino === socketIdentity.ino && current.uid === socketIdentity.uid);
-    return { socket: ownedPresent, path: socketPath, mode: created.mode & 0o777, inode: created.ino, device: created.dev, parentDevice: dirStat.dev, parentInode: dirStat.ino, parentUid: dirStat.uid, requestCount, registeredWorkers: workers.size, closed, serverListening: server.listening, cleanupConfirmed };
+    const alias = lstatSync(socketPath, { throwIfNoEntry: false });
+    const sentinel = lstatSync(bindPath, { throwIfNoEntry: false });
+    const ownedPresent = isOwnedSocket(alias);
+    return { socket: ownedPresent, aliasEntryPresent: Boolean(alias), privateSentinelPresent: isOwnedSentinel(sentinel), path: socketPath, privatePath: bindPath, mode: created.mode & 0o777, inode: socketIdentity.ino, device: socketIdentity.dev, sentinelInode: sentinelIdentity.ino, sentinelDevice: sentinelIdentity.dev, parentDevice: dirStat.dev, parentInode: dirStat.ino, parentUid: dirStat.uid, requestCount, registeredWorkers: workers.size, closed, serverListening: server.listening, cleanupConfirmed };
   };
   const close = (): Promise<boolean> => {
     if (closePromise) return closePromise;
@@ -154,25 +195,23 @@ export async function createE2EWorkerSession(input: Readonly<{
       const timer = setTimeout(() => { if (!settled) { settled = true; resolveClose(false); } }, CLEANUP_CAP_MS);
       const finish = async (serverClosed: boolean) => {
         if (settled) return;
-        const identity = socketIdentityRef.value;
-        const current = await lstat(socketPath).catch(() => undefined);
-        if (current && current.isSocket() && !current.isSymbolicLink() && identity && current.dev === identity.dev && current.ino === identity.ino && current.uid === identity.uid && (current.mode & 0o777) === 0o600) await unlink(socketPath).catch(() => undefined);
-        const remains = await lstat(socketPath).then(() => true, () => false);
+        const parentOwned = await ownedDirectory();
+        const aliasEntry = await lstat(socketPath).catch(() => undefined);
+        if (serverClosed && parentOwned && isOwnedSocket(aliasEntry)) {
+          const parentStillOwned = await ownedDirectory();
+          const aliasBeforeUnlink = await lstat(socketPath).catch(() => undefined);
+          if (parentStillOwned && isOwnedSocket(aliasBeforeUnlink)) await unlink(socketPath).catch(() => undefined);
+        }
+        const parentStillOwned = await ownedDirectory();
+        const privateAfterClose = await lstat(bindPath).catch(() => undefined);
+        const aliasAfterClose = await lstat(socketPath).catch(() => undefined);
         settled = true;
         clearTimeout(timer);
-        cleanupConfirmed = serverClosed && !remains && sockets.size === 0 && queue.length === 0 && !processing;
+        cleanupConfirmed = serverClosed && parentOwned && parentStillOwned && !privateAfterClose && !aliasAfterClose && sockets.size === 0 && queue.length === 0 && !processing;
         if (!cleanupConfirmed) server.unref();
         resolveClose(cleanupConfirmed);
       };
       void (async () => {
-        const ownedDirectory = async () => {
-          const parent = await lstat(directory).catch(() => undefined);
-          return Boolean(parent?.isDirectory() && !parent.isSymbolicLink() && parent.dev === dirStat.dev && parent.ino === dirStat.ino && parent.uid === dirStat.uid && (parent.mode & 0o777) === 0o700 && await realpath(directory).then((path) => path === directory, () => false));
-        };
-        const isOwnedSocket = (current: Awaited<ReturnType<typeof lstat>> | undefined) => {
-          const identity = socketIdentityRef.value;
-          return Boolean(current?.isSocket() && !current.isSymbolicLink() && identity && current.dev === identity.dev && current.ino === identity.ino && current.uid === identity.uid && (Number(current.mode) & 0o777) === 0o600);
-        };
         if (!await ownedDirectory()) {
           settled = true;
           clearTimeout(timer);
@@ -180,8 +219,8 @@ export async function createE2EWorkerSession(input: Readonly<{
           resolveClose(false);
           return;
         }
-        const beforeClose = await lstat(socketPath).catch(() => undefined);
-        if (beforeClose && !isOwnedSocket(beforeClose)) {
+        const beforeClose = await lstat(bindPath).catch(() => undefined);
+        if (beforeClose && !isOwnedSentinel(beforeClose)) {
           settled = true;
           clearTimeout(timer);
           server.unref();
@@ -195,8 +234,8 @@ export async function createE2EWorkerSession(input: Readonly<{
           resolveClose(false);
           return;
         }
-        const immediatelyBeforeClose = await lstat(socketPath).catch(() => undefined);
-        if ((immediatelyBeforeClose && !isOwnedSocket(immediatelyBeforeClose)) || !await ownedDirectory()) {
+        const immediatelyBeforeClose = await lstat(bindPath).catch(() => undefined);
+        if ((immediatelyBeforeClose && !isOwnedSentinel(immediatelyBeforeClose)) || !await ownedDirectory()) {
           settled = true;
           clearTimeout(timer);
           server.unref();
