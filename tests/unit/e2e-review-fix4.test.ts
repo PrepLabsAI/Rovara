@@ -9,7 +9,13 @@ const candidate = createCandidateManifest([{ repositoryId: "fixture/fix4", commi
 const snapshot = (files: ReturnType<typeof file>[]): E2ESourceSnapshot => ({ candidate, commitSha: "d".repeat(40), treeSha: "e".repeat(40), treeComplete: true, treePaths: files.map((item) => item.path), sources: files });
 const rootWeb = () => file("package.json", JSON.stringify({ name: "root-workspace", private: true, workspaces: ["apps/*"], scripts: { start: "vite" } }));
 const mobile = (directory: string) => file(`${directory}/package.json`, JSON.stringify({ name: `@fixture/${directory.replaceAll("/", "-")}`, dependencies: { "react-native": "1" } }));
-const plist = (id: string) => `<plist><dict><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIdentifier</key><string>${id}</string></dict></plist>`;
+const plist = (id: string, platform = "iPhoneOS") => `<plist><dict><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIdentifier</key><string>${id}</string><key>CFBundleSupportedPlatforms</key><array><string>${platform}</string></array></dict></plist>`;
+const pbx = (sdk: "iphoneos" | "macosx", id: string) => `// !$*UTF8*$!\n{ archiveVersion = 1; classes = {}; objectVersion = 56; objects = {
+AAAAAAAAAAAAAAAAAAAAAAAA = { isa = PBXProject; targets = (DDDDDDDDDDDDDDDDDDDDDDDD,); };
+DDDDDDDDDDDDDDDDDDDDDDDD = { isa = PBXNativeTarget; buildConfigurationList = BBBBBBBBBBBBBBBBBBBBBBBB; productType = "com.apple.product-type.application"; };
+BBBBBBBBBBBBBBBBBBBBBBBB = { isa = XCConfigurationList; buildConfigurations = (EEEEEEEEEEEEEEEEEEEEEEEE,); };
+EEEEEEEEEEEEEEEEEEEEEEEE = { isa = XCBuildConfiguration; buildSettings = { SDKROOT = ${sdk}; SUPPORTED_PLATFORMS = "${sdk}"; INFOPLIST_FILE = "App/Info.plist"; PRODUCT_BUNDLE_IDENTIFIER = ${id}; }; };
+}; rootObject = AAAAAAAAAAAAAAAAAAAAAAAA; }`;
 const inspect = (files: ReturnType<typeof file>[]) => inspectE2ERepository(snapshot(files), candidate).inspection;
 
 describe("Task2A review fix4 ownership corrections", () => {
@@ -48,10 +54,11 @@ describe("Task2A review fix4 ownership corrections", () => {
   });
 
   it("retains native desktop project identity and runtime gap beside a root web workspace", () => {
-    const project = file("apps/mac/App.xcodeproj/project.pbxproj", "PBXProject = { rootObject = A; };");
-    const standalone = inspect([project]);
-    const withRootFirst = inspect([rootWeb(), project]);
-    const withRootLast = inspect([project, rootWeb()]);
+    const project = file("apps/mac/App.xcodeproj/project.pbxproj", pbx("macosx", "fixture.mac"));
+    const appPlist = file("apps/mac/App/Info.plist", plist("fixture.mac", "MacOSX"));
+    const standalone = inspect([project, appPlist]);
+    const withRootFirst = inspect([rootWeb(), project, appPlist]);
+    const withRootLast = inspect([project, appPlist, rootWeb()]);
     for (const result of [standalone, withRootFirst, withRootLast]) {
       expect(result.proposedTargets.some((item) => item.kind === "desktop" && item.os === "macos" && item.driver === "native")).toBe(true);
       expect(result.missingInputs.some((item) => item.kind === "runtime" && /native build and launch profile/.test(item.reason))).toBe(true);
@@ -90,7 +97,7 @@ describe("Task2A review fix4 ownership corrections", () => {
     const sources = [
       mobile("apps/rn"),
       file("apps/rn/ios/App/Info.plist", plist("fixture.rn")),
-      file("apps/rn/ios/App.xcodeproj/project.pbxproj", "PBXProject = { rootObject = A; };")
+      file("apps/rn/ios/App.xcodeproj/project.pbxproj", pbx("iphoneos", "fixture.rn"))
     ];
     const result = inspect(sources);
     expect(result.applications.filter((item) => item.kind === "mobile")).toHaveLength(1);

@@ -11,7 +11,7 @@ const snapshot = (sources: ReturnType<typeof file>[]): E2ESourceSnapshot => ({ c
 const packageFiles = (root = "apps/mobile", name = "@fixture/mobile") => [
   file(`${root}/package.json`, JSON.stringify({ name, private: true, workspaces: ["ios/*", "android/*"], dependencies: { "react-native": "1" } })),
 ];
-const plist = (id: string) => `<plist><dict><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIdentifier</key><string>${id}</string></dict></plist>`;
+const plist = (id: string) => `<plist><dict><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIdentifier</key><string>${id}</string><key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array></dict></plist>`;
 const manifest = (id: string) => `<manifest package="${id}"><application /></manifest>`;
 const apiSources = (schema: unknown, extraPathItem: Record<string, unknown> = {}, responses?: Record<string, unknown>) => [
   file("app/package.json", JSON.stringify({ name: "app", exports: { ".": "./src/index.ts" } })),

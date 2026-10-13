@@ -37,12 +37,18 @@ describe("immutable four-platform discovery", () => {
       "apps/api/openapi.yaml": "openapi: 3.0.0",
       "apps/mobile/package.json": JSON.stringify({ name: "mobile-app", dependencies: { "react-native": "1" }, scripts: { start: "metro" }, exports: { ".": "./src/index.js" } }),
       "apps/mobile/src/index.js": "export const run = () => true",
-      "apps/mobile/android/app/src/main/AndroidManifest.xml": '<manifest package="com.example.mobile" />',
-      "apps/mobile/ios/Info.plist": "<key>CFBundleIdentifier</key><string>com.example.mobile</string>",
+      "apps/mobile/android/app/src/main/AndroidManifest.xml": '<manifest package="com.example.mobile"><application /></manifest>',
+      "apps/mobile/ios/Info.plist": "<plist><dict><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIdentifier</key><string>com.example.mobile</string><key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array></dict></plist>",
       "apps/desktop/package.json": JSON.stringify({ name: "desktop-app", dependencies: { electron: "1" }, scripts: { start: "electron ." }, exports: { ".": "./src/main.js" } }),
       "apps/desktop/src/main.js": "export const run = () => true",
       "apps/native/Windows/App.csproj": "<Project />",
-      "apps/native/macOS/App.xcodeproj/project.pbxproj": "// project",
+      "apps/native/macOS/App/Info.plist": "<plist><dict><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIdentifier</key><string>fixture.mac</string><key>CFBundleSupportedPlatforms</key><array><string>MacOSX</string></array></dict></plist>",
+      "apps/native/macOS/App.xcodeproj/project.pbxproj": `// !$*UTF8*$!\n{ archiveVersion = 1; classes = {}; objectVersion = 56; objects = {
+AAAAAAAAAAAAAAAAAAAAAAAA = { isa = PBXProject; targets = (DDDDDDDDDDDDDDDDDDDDDDDD,); };
+DDDDDDDDDDDDDDDDDDDDDDDD = { isa = PBXNativeTarget; buildConfigurationList = BBBBBBBBBBBBBBBBBBBBBBBB; productType = "com.apple.product-type.application"; };
+BBBBBBBBBBBBBBBBBBBBBBBB = { isa = XCConfigurationList; buildConfigurations = (EEEEEEEEEEEEEEEEEEEEEEEE,); };
+EEEEEEEEEEEEEEEEEEEEEEEE = { isa = XCBuildConfiguration; buildSettings = { SDKROOT = macosx; SUPPORTED_PLATFORMS = macosx; INFOPLIST_FILE = "App/Info.plist"; PRODUCT_BUNDLE_IDENTIFIER = fixture.mac; }; };
+}; rootObject = AAAAAAAAAAAAAAAAAAAAAAAA; }`,
       "apps/native/linux/CMakeLists.txt": "project(native)",
     };
     const sources = Object.entries(contents).map(([path, text]) => ({ path, sha256: hash(text), bytes: Buffer.from(text), kind: "blob" as const }));

@@ -44,7 +44,7 @@ describe("Task2A independent review regressions", () => {
     expect(unknown.groups).toHaveLength(0);
     const agent = selectE2EExecutionPlan({ ...noBaseline, scenarios: [{ ...scenario, steps: [{ kind: "agent", goal: "Tap", maxActions: 1 }] }] });
     expect(agent.groups).toHaveLength(0);
-    const nativeSnapshot = snapshot([source("mobile/package.json", JSON.stringify({ name: "mobile", dependencies: { "react-native": "1" } })), source("mobile/android/app/src/main/AndroidManifest.xml", '<manifest package="acme.app"/>')]);
+    const nativeSnapshot = snapshot([source("mobile/package.json", JSON.stringify({ name: "mobile", dependencies: { "react-native": "1" } })), source("mobile/android/app/src/main/AndroidManifest.xml", '<manifest package="acme.app"><application/></manifest>')]);
     const nativeDiscovery = inspectE2ERepository(nativeSnapshot, candidate);
     const native = nativeDiscovery.inspection.proposedTargets[0]!;
     const nativePolicy = { ...policy, baselineScenarioIds: [], targets: [native] };
@@ -75,7 +75,7 @@ describe("Task2A independent review regressions", () => {
   it("supports repository-root cwd, discovers standalone native mobile metadata, and does not guess missing platforms", () => {
     const root = snapshot([source("package.json", JSON.stringify({ name: "app", scripts: { start: "vite" } }))]);
     expect(() => inspectE2ERepository(root, candidate)).not.toThrow();
-    const native = snapshot([source("android/app/src/main/AndroidManifest.xml", '<manifest package="acme.app"/>'), source("android/app/build.gradle", 'plugins { id "com.android.application" }'), source("ios/App/Info.plist", "<key>CFBundleIdentifier</key><string>acme.ios</string>")]);
+    const native = snapshot([source("android/app/src/main/AndroidManifest.xml", '<manifest package="acme.app"><application/></manifest>'), source("android/app/build.gradle", 'plugins { id "com.android.application" }'), source("ios/App/Info.plist", "<plist><dict><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIdentifier</key><string>acme.ios</string><key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array></dict></plist>")]);
     expect(inspectE2ERepository(native, candidate).inspection.proposedTargets.filter((item) => item.kind === "mobile").map((item) => item.os).sort()).toEqual(["android", "ios"]);
     const noPlatform = snapshot([source("package.json", JSON.stringify({ name: "mobile", dependencies: { "react-native": "1" } }))]);
     expect(inspectE2ERepository(noPlatform, candidate).inspection.proposedTargets).toHaveLength(0);

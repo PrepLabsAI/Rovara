@@ -159,8 +159,8 @@ describe("Task2A review fix2 regressions", () => {
 
   it("parses actual iOS identifiers and reports unresolved metadata without duplicate targets", () => {
     const ios = snapshot([
-      file("apps/one/ios/App/Info.plist", "<plist><dict><key>CFBundleIdentifier</key><string>acme.one</string></dict></plist>"),
-      file("apps/two/ios/App/Info.plist", "<plist><dict><key>CFBundleIdentifier</key><string>acme.two</string></dict></plist>"),
+      file("apps/one/ios/App/Info.plist", "<plist><dict><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIdentifier</key><string>acme.one</string><key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array></dict></plist>"),
+      file("apps/two/ios/App/Info.plist", "<plist><dict><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIdentifier</key><string>acme.two</string><key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array></dict></plist>"),
     ]);
     const inspection = inspectE2ERepository(ios, candidate).inspection;
     expect(inspection.proposedTargets.filter((target) => target.kind === "mobile").map((target) => target.appId).sort()).toEqual(["acme.one", "acme.two"]);
