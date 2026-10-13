@@ -1,5 +1,6 @@
-// rovara loop (#355): a fake GitHub, git and tmux behind the loop's one Exec, with real state: comments with
-// times, labels, open and closed issues, worktrees on disk, and tmux sessions with what was typed into them.
+// rovara loop (#355, #358): a fake GitHub, git and tmux behind the loop's one Exec, with real state: comments with
+// times, labels, open and closed issues, worktrees on disk, and tmux sessions with what was typed into them. Several
+// repositories (#358) are several worlds sharing one clock, with GitHub calls routed by repository.
 import { mkdir } from "node:fs/promises";
 import type { Exec, ExecResult } from "../../packages/cli/src/loop/exec.js";
 import { LOOP_COMMENT_MARKER } from "../../packages/cli/src/loop/naming.js";
@@ -24,7 +25,12 @@ export class LoopWorld {
   readonly calls: string[][] = [];
   private nextId = 1_000;
   private buffers = new Map<string, string>();
-  clock = Date.parse("2026-10-12T12:00:00.000Z");
+  private ownClock = Date.parse("2026-10-12T12:00:00.000Z");
+  /** Now, in this world; another repository's world shares the first one's. */
+  get clock(): number { return this.clockOf === undefined ? this.ownClock : this.clockOf.clock; }
+  set clock(value: number) { if (this.clockOf === undefined) this.ownClock = value; else this.clockOf.clock = value; }
+  /** The first pull request opened here is number pullBase + 1. */
+  pullBase = 500;
   /** When set, a started session exits at once (a broken `claude`). */
   sessionsDie = false;
   /** Branches pushed, in order, and the pull requests opened. */
@@ -43,7 +49,7 @@ export class LoopWorld {
   /** #358: what `git diff <default>...HEAD` shows the reviewers. */
   diff = "diff --git a/src/retry.ts b/src/retry.ts\n+export const RETRIES = 3;\n";
 
-  constructor(readonly repo = "acme/payments", readonly developer = "maya") {}
+  constructor(readonly repo = "acme/payments", readonly developer = "maya", private readonly clockOf?: LoopWorld) {}
 
   /** Someone comments on an issue, a second after the last thing that happened. */
   say(issue: number, author: string, body: string): FakeComment {
@@ -95,7 +101,7 @@ export class LoopWorld {
     }
     if (first === "pr" && second === "create") {
       const at = (flag: string) => args[args.indexOf(flag) + 1] ?? "";
-      const number = 500 + this.pullRequests.length + 1;
+      const number = this.pullBase + this.pullRequests.length + 1;
       const url = `https://github.com/${this.repo}/pull/${number}`;
       this.pullRequests.push({ number, url, head: at("--head"), base: at("--base"), title: at("--title"), body: input });
       return ok(`Creating pull request for ${at("--head")} into ${at("--base")}\n\n${url}\n`);
@@ -186,4 +192,18 @@ export class LoopWorld {
       default: return fail(`unexpected tmux ${args.join(" ")}`);
     }
   }
+}
+
+/**
+ * #358: several repositories behind one Exec. A GitHub call goes to the world of the repository it names (`--repo`, or
+ * a `repos/owner/name` path); git and tmux, and anything naming no repository, go to the first world.
+ */
+export function routeWorlds(home: LoopWorld, others: readonly LoopWorld[]): Exec {
+  const worlds = [home, ...others];
+  return async (command, args, options) => {
+    if (command !== "gh") return home.exec(command, args, options);
+    const flag = args.indexOf("--repo");
+    const named = flag >= 0 ? args[flag + 1] : args.map((arg) => /^repos\/([^/]+\/[^/?]+)/u.exec(arg)?.[1]).find((repo) => repo !== undefined);
+    return (worlds.find((world) => world.repo === named) ?? home).exec(command, args, options);
+  };
 }

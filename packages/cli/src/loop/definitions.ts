@@ -13,6 +13,8 @@ export const ExitCheckSchema = z.enum([
   "approved-unchanged",
   /** #358: the agent reviewed its own change and recorded it (evidence/self-review.md: ## Findings, ## Fixed). */
   "self-review",
+  /** #358: every repository the plan's `## Repositories` names is one the loop can work in on this computer. */
+  "repositories",
 ]);
 export type ExitCheck = z.infer<typeof ExitCheckSchema>;
 
@@ -25,7 +27,7 @@ export type Artifact = z.infer<typeof ArtifactSchema>;
  * change request at a gate, the result of a step the loop runs itself (passed, failed, published), a phase declared
  * away (skipped), the issue closing, a stop.
  */
-export const OutcomeSchema = z.enum(["done", "reply", "approved", "changes", "passed", "failed", "blocked", "published", "skipped", "closed", "stopped"]);
+export const OutcomeSchema = z.enum(["done", "reply", "approved", "changes", "passed", "failed", "blocked", "published", "skipped", "split", "closed", "stopped"]);
 export type Outcome = z.infer<typeof OutcomeSchema>;
 
 /** What a step the loop runs itself (actor `code`) does. */
@@ -50,6 +52,8 @@ export const LoopDefinitionSchema = z.object({
     action: ActionSchema.optional(),
     /** For a `human` step that is a gate: `/rovara approve` moves it on `approved`, and locks its artifact. */
     gate: z.boolean().default(false),
+    /** #358: a `human` step that `/rovara approve` moves on without a document (reviews that still block, a pull request). */
+    approvable: z.boolean().default(false),
     /** Steps that share a phase can be declared away together when the loop starts (`--skip <phase>`). */
     phase: z.string().regex(/^[a-z][a-z-]{0,30}$/).optional(),
     terminal: z.boolean().default(false),
@@ -64,6 +68,9 @@ export const LoopDefinitionSchema = z.object({
     if ((step.actor === "code" && !step.terminal) !== (step.action !== undefined)) context.addIssue({ code: "custom", message: `step ${step.id}: a code step, and only a code step, names an action` });
     if (step.gate && step.actor !== "human") context.addIssue({ code: "custom", message: `step ${step.id}: only a person's step can be a gate` });
     if (step.gate && step.artifact === undefined) context.addIssue({ code: "custom", message: `gate ${step.id} must name the artifact it approves` });
+    if (step.approvable && (step.actor !== "human" || step.gate || !loop.edges.some((edge) => edge.from === step.id && edge.on === "approved"))) {
+      context.addIssue({ code: "custom", message: `step ${step.id}: only a person's step that is not a gate, with an approved edge, can be approvable` });
+    }
     if (step.exit.includes("artifact-sections") && step.artifact === undefined) context.addIssue({ code: "custom", message: `step ${step.id} checks an artifact's sections but writes none` });
     // A phase is left by its first step's `skipped` edge, so a declared skip always has somewhere to go.
     if (step.phase !== undefined && loop.steps.find((candidate) => candidate.phase === step.phase) === step
@@ -105,21 +112,17 @@ export const DO_LOOP: LoopDefinition = LoopDefinitionSchema.parse({
 });
 
 /**
- * Code, the loop's checks, its reviews and publishing, and the open pull request: what Quick and Full share after their
- * plan. A review round that still blocks after the configured rounds, or that could not be read, waits for a person.
+ * Code, the loop's checks, its reviews, and publishing: what Quick, Full and each per-PR loop share. A review round
+ * that still blocks after the configured rounds, or that could not be read, waits for a person.
  */
-const DELIVERY_STEPS = [
+const CHANGE_STEPS = [
   { id: "code", actor: "agent", label: "coding", exit: ["require-summary", "approved-unchanged", "self-review"] },
   { id: "checks", actor: "code", label: "checking", action: "checks" },
   { id: "reviews", actor: "code", label: "reviewing", action: "reviews" },
-  { id: "review-blocked", actor: "human", label: "review-blocked" },
+  { id: "review-blocked", actor: "human", label: "review-blocked", approvable: true },
   { id: "publish", actor: "code", label: "publishing", action: "publish" },
-  { id: "pr-open", actor: "human", label: "pr-open" },
-  { id: "ended", actor: "code", terminal: true },
 ] as const;
-const DELIVERY_EDGES = [
-  { from: "plan-review", to: "code", on: "approved" },
-  { from: "plan-review", to: "plan", on: "changes" },
+const CHANGE_EDGES = [
   { from: "code", to: "checks", on: "done" },
   { from: "checks", to: "reviews", on: "passed" },
   { from: "checks", to: "code", on: "failed" },
@@ -129,13 +132,61 @@ const DELIVERY_EDGES = [
   // A person accepts the findings and publishes, or says what to do.
   { from: "review-blocked", to: "publish", on: "approved" },
   { from: "review-blocked", to: "code", on: "reply" },
+] as const;
+
+/**
+ * What Quick and Full do after their plan: one pull request from the issue's repository, or (#358), when the approved
+ * plan names other repositories, one per-PR loop for each, while the issue waits until every pull request is approved.
+ */
+const DELIVERY_STEPS = [
+  ...CHANGE_STEPS,
+  { id: "pr-open", actor: "human", label: "pr-open" },
+  { id: "pulls", actor: "human", label: "pull-requests" },
+  { id: "pulls-approved", actor: "human", label: "pulls-approved" },
+  { id: "ended", actor: "code", terminal: true },
+] as const;
+const DELIVERY_EDGES = [
+  { from: "plan-review", to: "code", on: "approved" },
+  { from: "plan-review", to: "pulls", on: "split" },
+  { from: "plan-review", to: "plan", on: "changes" },
+  ...CHANGE_EDGES,
   { from: "publish", to: "pr-open", on: "published" },
   { from: "publish", to: "pr-open", on: "failed" },
   { from: "pr-open", to: "code", on: "reply" },
+  // The per-PR loops: every pull request approved, or one taken back for more work.
+  { from: "pulls", to: "pulls-approved", on: "approved" },
+  { from: "pulls-approved", to: "pulls", on: "reply" },
   ...ENDINGS,
 ] as const;
+
+/**
+ * #358: a per-PR loop, started by Quick or Full for each repository its approved plan names. The agent codes that
+ * repository's part, the loop runs that repository's checks and reviews and opens its pull request, and a person
+ * approves the pull request (a GitHub approval, or `/rovara approve` on it). Feedback on it is another round.
+ */
+export const PULL_LOOP: LoopDefinition = LoopDefinitionSchema.parse({
+  name: "pull",
+  keyword: "pull",
+  start: "code",
+  steps: [
+    ...CHANGE_STEPS,
+    { id: "pr-review", actor: "human", label: "pr-review", approvable: true },
+    { id: "approved", actor: "human", label: "pr-approved" },
+    { id: "ended", actor: "code", terminal: true },
+  ],
+  edges: [
+    ...CHANGE_EDGES,
+    { from: "publish", to: "pr-review", on: "published" },
+    { from: "publish", to: "pr-review", on: "failed" },
+    { from: "pr-review", to: "approved", on: "approved" },
+    { from: "pr-review", to: "code", on: "reply" },
+    { from: "approved", to: "code", on: "reply" },
+    ...ENDINGS,
+  ],
+});
+
 const PLAN_STEPS = [
-  { id: "plan", actor: "agent", label: "planning", artifact: "plan", exit: ["require-summary", "artifact-sections", "approved-unchanged"] },
+  { id: "plan", actor: "agent", label: "planning", artifact: "plan", exit: ["require-summary", "artifact-sections", "approved-unchanged", "repositories"] },
   { id: "plan-review", actor: "human", label: "plan-review", artifact: "plan", gate: true },
 ] as const;
 
@@ -182,10 +233,11 @@ export const FULL_LOOP: LoopDefinition = LoopDefinitionSchema.parse({
   ],
 });
 
+/** The loops a comment starts. A per-PR loop is started by its Quick or Full loop, never by a comment. */
 export const LOOPS: readonly LoopDefinition[] = [DO_LOOP, QUICK_LOOP, FULL_LOOP];
 
 export function loopNamed(name: string): LoopDefinition {
-  const found = LOOPS.find((loop) => loop.name === name);
+  const found = [...LOOPS, PULL_LOOP].find((loop) => loop.name === name);
   if (found === undefined) throw new Error(`unknown loop ${name}`);
   return found;
 }

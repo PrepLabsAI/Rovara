@@ -1,7 +1,7 @@
-// rovara loop (#355, #356, #357): what the agent is told. Rovara's own words for its own loops; the agent learns the
+// rovara loop (#355, #356, #357, #358): what the agent is told. Rovara's own words for its own loops; the agent learns the
 // loop from its first assignment, and every later message says who it is from.
 import type { Artifact, LoopDefinition } from "./definitions.js";
-import { LOOP_MCP_SERVER, artifactPath, evidencePath as evidencePathOf, itemBranch } from "./naming.js";
+import { LOOP_MCP_SERVER, artifactPath, docsDir, elsewhere, evidencePath as evidencePathOf, itemBranch } from "./naming.js";
 import type { WorkItemState } from "./state.js";
 
 /**
@@ -18,11 +18,14 @@ export const ARTIFACT_SECTIONS: Record<Artifact, readonly string[]> = {
 const WHAT: Record<Artifact, string> = {
   requirements: "the requirements: what someone will be able to do or see when this is done, what does not change, and the risks (write \"None\" where there are none). Do not describe how it works or where in the code.",
   design: "the design: how it works, derived from the approved requirements, and its risks. Keep to what the requirements ask for.",
-  plan: "the plan: Summary says what will change and why; Changes lists the files and what changes in each; Testing says how the change will be proved.",
+  plan: "the plan: Summary says what will change and why; Changes lists the files and what changes in each; Testing says how the change will be proved. If the change needs other repositories too, add a `## Repositories` section listing each repository that changes, this one included if it does, one per line as `- owner/name: what changes there`: each gets its own pull request, made by its own agent.",
 };
 
+/** The most of the approved plan a per-PR loop's agent is given in its first message; the rest it can ask for. */
+const PLAN_GIVEN_MAX = 30_000;
+
 const common = (state: WorkItemState) => [
-  `You are working on GitHub issue ${state.repo}#${state.issue} for rovara loop, in your own git worktree on branch ${itemBranch(state.issue)}.`,
+  `You are working on GitHub issue ${state.repo}#${state.issue} for rovara loop, in your own git worktree on branch ${itemBranch(state.issue, state.repo, state.target)}.`,
   "",
   "How this loop works:",
   "- Commit your work on this branch as you go.",
@@ -75,7 +78,7 @@ export function changesAssignment(artifact: Artifact, author: string, text: stri
 /** #358: what the agent records before it says its code is done, in its own words. */
 export const SELF_REVIEW_SECTIONS = ["Findings", "Fixed"] as const;
 
-const selfReviewLine = (issue: number) => `- Before you call loop_complete, review your own change against the approved documents. Write what you found to ${evidencePathOf(issue, "self-review.md")}, with \`## Findings\` and \`## Fixed\` (write "None" where there is nothing), and commit it. A claim without it is refused. Then the loop runs the checks and a code and a security review before anything is published.`;
+const selfReviewLine = (issue: number, dir?: string) => `- Before you call loop_complete, review your own change against the approved documents. Write what you found to ${evidencePathOf(issue, "self-review.md", dir)}, with \`## Findings\` and \`## Fixed\` (write "None" where there is nothing), and commit it. A claim without it is refused. Then the loop runs the checks and a code and a security review before anything is published.`;
 
 export function codeAssignment(approver: string, approved: Artifact, issue: number): string {
   return [
@@ -86,8 +89,35 @@ export function codeAssignment(approver: string, approved: Artifact, issue: numb
   ].join("\n");
 }
 
-export function reviewsFailedAssignment(detail: string, issue: number): string {
-  return ["The loop's reviews found problems that block the change:", "", detail, "", "Fix the blocking findings (not the reviews' advice), commit, update your self-review, then call loop_complete again. The checks and reviews run again.", selfReviewLine(issue)].join("\n");
+export function reviewsFailedAssignment(detail: string, issue: number, dir?: string): string {
+  return ["The loop's reviews found problems that block the change:", "", detail, "", "Fix the blocking findings (not the reviews' advice), commit, update your self-review, then call loop_complete again. The checks and reviews run again.", selfReviewLine(issue, dir)].join("\n");
+}
+
+/**
+ * #358: the first message of a per-PR loop's agent: the repository it changes, the other repositories' agents, and
+ * the approved plan, which lives in the issue's repository.
+ */
+export function pullAssignment(state: WorkItemState, input: { approver: string; plan: string; targets: readonly string[] }): string {
+  const target = state.target ?? state.repo;
+  const others = input.targets.filter((repo) => repo !== target);
+  const plan = input.plan.length > PLAN_GIVEN_MAX ? `${input.plan.slice(0, PLAN_GIVEN_MAX)}\n\n…(cut; the whole plan is ${artifactPath(state.issue, "plan")} in ${state.repo})` : input.plan;
+  return [
+    ...common(state),
+    "- Replies on your pull request reach you here too, as further rounds, until a person approves it.",
+    "",
+    `This is a per-PR loop. @${input.approver} approved a plan that changes ${input.targets.length} repositories; you make the change in **${target}**${others.length === 0 ? "" : `, and other agents make it in ${others.join(", ")}`}. You code ${target}'s part and review your own change; the loop runs ${target}'s checks and a code and a security review, opens a pull request in ${target}, and a person approves it.`,
+    "",
+    `Your step now: implement ${target}'s part of the plan.`,
+    elsewhere(state) ? `- The plan is approved and locked in ${state.repo}; it is below. Do only what it says for ${target}.` : "- Do not edit the approved plan: it is locked, and a claim with a changed one is refused. Do only what it says for this repository.",
+    "- Commit as you go. Do not push and do not open a pull request: the loop opens it itself.",
+    selfReviewLine(state.issue, docsDir(state)),
+    "",
+    `The approved plan (${artifactPath(state.issue, "plan")} in ${state.repo}):`,
+    plan,
+    "",
+    `Instruction from @${state.startedBy}:`,
+    state.instruction,
+  ].join("\n");
 }
 
 export function checksFailedAssignment(detail: string): string {
