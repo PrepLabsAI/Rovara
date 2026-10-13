@@ -10,6 +10,8 @@ export interface PublishInput {
   branch: string;
   plan: string | undefined;
   checks: string;
+  /** #358: the reviews report, when the loop ran them. */
+  reviews?: string | undefined;
   startedBy: string;
   /** Who approved each document; the description names them. */
   approvals: Partial<Record<"requirements" | "design" | "plan", { by: string }>> | undefined;
@@ -55,6 +57,7 @@ export async function publish(exec: Exec, input: PublishInput): Promise<Publishe
     "## Checks",
     "",
     input.checks,
+    ...(input.reviews === undefined ? [] : ["", "## Reviews", "", input.reviews]),
   ].join("\n");
   const url = (await run(exec, "gh", ["pr", "create", "--repo", input.repo, "--head", input.branch, "--base", base, "--title", title, "--body-file", "-"], { input: body, cwd: input.worktree })).trim().split("\n").pop() ?? "";
   const number = Number(/\/pull\/(\d+)$/u.exec(url)?.[1]);

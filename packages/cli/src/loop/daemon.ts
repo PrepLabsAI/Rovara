@@ -20,6 +20,7 @@ import { LOOP_COMMENT_MARKER, LOOP_MCP_SERVER, artifactPath, evidencePath, itemB
 import { run } from "./exec.js";
 import type { Artifact } from "./definitions.js";
 import { publish } from "./publish.js";
+import { claudeReviewerRun, reviewsReport, runReviews, type ReviewerRun } from "./reviews.js";
 import { decide, type Effect, type LoopEvent } from "./runtime.js";
 import type { LoopStore, RegisteredRepo, WorkItemState } from "./state.js";
 import { ensureWorktree } from "./worktree.js";
@@ -45,6 +46,8 @@ export interface DaemonDeps {
   log: (line: string) => void;
   /** How the repository's checks run; the shell by default. */
   checkRun?: CheckRun;
+  /** How a reviewer runs (#358); Claude Code, headless and read-only, by default. */
+  reviewerRun?: ReviewerRun;
 }
 
 type ActionResult = Extract<LoopEvent, { kind: "action-result" }>;
@@ -96,6 +99,12 @@ export class LoopDaemon {
   private async pollRepo(registered: RegisteredRepo): Promise<void> {
     const config = await readLoopConfig(registered.path);
     const now = this.deps.now().toISOString();
+    const isCollaborator = (login: string) => config.collaborators.some((collaborator) => collaborator.toLowerCase() === login.toLowerCase());
+    // #358: the pull requests the loop opened, by number, so what is said on them reaches the issue that owns them.
+    const owners = new Map<number, number>();
+    for (const item of await this.deps.store.items(registered.repo)) {
+      if (item.pullRequest !== undefined && !stepOf(loopNamed(item.loop), item.step).terminal) owners.set(item.pullRequest.number, item.issue);
+    }
     // A repository seen for the first time starts from now: comments from before it was added are never replayed.
     const cursor = (await this.deps.store.cursor(registered.repo)) ?? { since: now, seen: [] };
     const seen = new Set(cursor.seen);
@@ -106,32 +115,73 @@ export class LoopDaemon {
       seen.add(comment.id);
       if (comment.body.trimStart().startsWith(LOOP_COMMENT_MARKER)) continue;
       // Only collaborators are obeyed; anyone else's words never reach the agent.
-      if (!config.collaborators.some((login) => login.toLowerCase() === comment.author.toLowerCase())) continue;
-      const parsed = parseComment(comment.body);
-      const at = comment.updatedAt;
-      const author = comment.author;
-      switch (parsed.kind) {
-        case "invalid": await this.deps.github.comment(registered.repo, comment.issue, parsed.reason); break;
-        case "start": await this.handle(registered, config, comment.issue, { kind: "start", loop: parsed.loop, instruction: parsed.instruction, author, at, ...(parsed.skip.length === 0 ? {} : { skip: parsed.skip }) }); break;
-        case "stop": await this.handle(registered, config, comment.issue, { kind: "stop", author, at }); break;
-        case "approve": {
-          // The approval locks the artifact the gate shows, as it is now.
-          const item = await this.deps.store.item(registered.repo, comment.issue);
-          const reviewed = item === undefined ? undefined : stepOf(loopNamed(item.loop), item.step).artifact;
-          const text = item === undefined || reviewed === undefined ? undefined : await readArtifact(item.worktree?.path, item.issue, reviewed);
-          await this.handle(registered, config, comment.issue, { kind: "approve", author, at, ...(text === undefined ? {} : { digest: artifactDigest(text) }) });
-          break;
-        }
-        case "changes": await this.handle(registered, config, comment.issue, { kind: "changes", text: parsed.text, author, at }); break;
-        case "reply": await this.handle(registered, config, comment.issue, { kind: "reply", text: parsed.text, author, at }); break;
-      }
+      if (!isCollaborator(comment.author)) continue;
+      const owner = owners.get(comment.issue);
+      if (owner === undefined) await this.dispatch(registered, config, comment.issue, comment.author, comment.body, comment.updatedAt);
+      else await this.dispatch(registered, config, owner, comment.author, comment.body, comment.updatedAt, `Comment on pull request #${comment.issue}`);
     }
     await this.deps.store.saveCursor(registered.repo, { since, seen: [...seen].slice(-SEEN_MAX) });
+    if (owners.size > 0) await this.pollPullRequests(registered, config, owners, isCollaborator, now);
     for (const item of await this.deps.store.items(registered.repo)) {
       if (stepOf(loopNamed(item.loop), item.step).terminal) continue;
       if (await this.deps.github.issueState(registered.repo, item.issue) === "closed") {
         await this.handle(registered, config, item.issue, { kind: "closed", at: now });
       }
+    }
+  }
+
+  /**
+   * #358: inline review comments and submitted reviews on the loop's pull requests. Each from a collaborator goes to the
+   * issue that owns the pull request as a reply; an approving review is acknowledged on the issue. Review IDs are kept
+   * negated beside the comment IDs, so the two never collide.
+   */
+  private async pollPullRequests(registered: RegisteredRepo, config: LoopRepoConfig, owners: Map<number, number>, isCollaborator: (login: string) => boolean, now: string): Promise<void> {
+    const cursor = (await this.deps.store.cursor(registered.repo, "pulls")) ?? { since: now, seen: [] };
+    const seen = new Set(cursor.seen);
+    let since = cursor.since;
+    for (const comment of await this.deps.github.reviewCommentsSince(registered.repo, cursor.since)) {
+      if (comment.updatedAt > since) since = comment.updatedAt;
+      if (seen.has(comment.id)) continue;
+      seen.add(comment.id);
+      const owner = owners.get(comment.issue);
+      if (owner === undefined || !isCollaborator(comment.author)) continue;
+      const where = comment.path === undefined ? "" : ` on \`${comment.path}${comment.line === undefined ? "" : `:${comment.line}`}\``;
+      await this.handle(registered, config, owner, { kind: "reply", text: `Review comment on pull request #${comment.issue}${where}:\n${comment.body}`, author: comment.author, at: comment.updatedAt });
+    }
+    for (const [pull, owner] of owners) {
+      for (const review of await this.deps.github.pullReviews(registered.repo, pull)) {
+        if (seen.has(-review.id) || review.submittedAt < cursor.since) continue;
+        seen.add(-review.id);
+        if (!isCollaborator(review.author)) continue;
+        if (review.state === "APPROVED") {
+          await this.deps.github.comment(registered.repo, owner, `@${review.author} approved pull request #${pull}. Merging it closes this issue, which ends the loop.`);
+        } else if (review.body.trim() !== "") {
+          const verdict = review.state === "CHANGES_REQUESTED" ? " (changes requested)" : "";
+          await this.handle(registered, config, owner, { kind: "reply", text: `Review by @${review.author} on pull request #${pull}${verdict}:\n${review.body.trim()}`, author: review.author, at: review.submittedAt });
+        }
+      }
+    }
+    await this.deps.store.saveCursor(registered.repo, { since, seen: [...seen].slice(-SEEN_MAX) }, "pulls");
+  }
+
+  /** A collaborator's comment, as the command or reply it is. On a pull request (`via`), a start is only a reply. */
+  private async dispatch(registered: RegisteredRepo, config: LoopRepoConfig, issue: number, author: string, body: string, at: string, via?: string): Promise<void> {
+    const parsed = parseComment(body);
+    const reply = (text: string) => this.handle(registered, config, issue, { kind: "reply", text: via === undefined ? text : `${via}:\n${text}`, author, at });
+    switch (parsed.kind) {
+      case "invalid": if (via === undefined) await this.deps.github.comment(registered.repo, issue, parsed.reason); else await reply(body.trim()); return;
+      case "start": if (via === undefined) await this.handle(registered, config, issue, { kind: "start", loop: parsed.loop, instruction: parsed.instruction, author, at, ...(parsed.skip.length === 0 ? {} : { skip: parsed.skip }) }); else await reply(body.trim()); return;
+      case "stop": await this.handle(registered, config, issue, { kind: "stop", author, at }); return;
+      case "approve": {
+        // The approval locks the artifact the gate shows, as it is now.
+        const item = await this.deps.store.item(registered.repo, issue);
+        const reviewed = item === undefined ? undefined : stepOf(loopNamed(item.loop), item.step).artifact;
+        const text = item === undefined || reviewed === undefined ? undefined : await readArtifact(item.worktree?.path, item.issue, reviewed);
+        await this.handle(registered, config, issue, { kind: "approve", author, at, ...(text === undefined ? {} : { digest: artifactDigest(text) }) });
+        return;
+      }
+      case "changes": await this.handle(registered, config, issue, { kind: "changes", text: parsed.text, author, at }); return;
+      case "reply": await reply(parsed.text); return;
     }
   }
 
@@ -179,6 +229,7 @@ export class LoopDaemon {
     const work = (async () => {
       try {
         if (action === "checks") await this.runItemChecks(item, config, done);
+        else if (action === "reviews") await this.reviewItem(item, config, done);
         else await this.publishItem(item, done);
       } catch (error) {
         done("failed", redactText((error as Error).message).slice(0, 1_000));
@@ -198,12 +249,35 @@ export class LoopDaemon {
     done(results.every((result) => result.passed) ? "passed" : "failed", report);
   }
 
+  /**
+   * #358: the code and security reviews of the item's change. What blocks sends the change back to the agent, until
+   * `maxRounds` rounds in a row still blocked; then a person decides. A review that could not be run or read never
+   * passes: a person decides that too.
+   */
+  private async reviewItem(item: WorkItemState, config: LoopRepoConfig, done: (outcome: ActionResult["outcome"], detail: string) => void): Promise<void> {
+    if (item.worktree === undefined) throw new Error("the item has no worktree to review");
+    if (!config.reviews.enabled) {
+      done("passed", "Reviews are turned off in `.rovara/loop.yaml`.");
+      return;
+    }
+    const results = await runReviews({
+      exec: this.deps.exec, worktree: item.worktree.path, defaultBranch: await this.deps.github.defaultBranch(item.repo),
+      plan: await readArtifact(item.worktree.path, item.issue, "plan"), config: config.reviews, run: this.deps.reviewerRun ?? claudeReviewerRun,
+    });
+    const report = reviewsReport(results);
+    const current = await this.deps.store.item(item.repo, item.issue);
+    if (current !== undefined) await this.deps.store.saveItem({ ...current, reviews: report.slice(0, 20_000) });
+    if (results.some((result) => result.status === "UNKNOWN")) done("blocked", report);
+    else if (results.every((result) => result.status === "PASS")) done("passed", report);
+    else done((item.reviewRounds ?? 0) + 1 >= config.reviews.maxRounds ? "blocked" : "failed", report);
+  }
+
   private async publishItem(item: WorkItemState, done: (outcome: ActionResult["outcome"], detail: string, extra?: Partial<ActionResult>) => void): Promise<void> {
     if (item.worktree === undefined) throw new Error("the item has no worktree to publish");
-    await this.commitEvidence(item.worktree.path, item.issue, item.checks ?? "The checks passed.");
+    await this.commitEvidence(item.worktree.path, item.issue, item.checks ?? "The checks passed.", item.reviews);
     const published = await publish(this.deps.exec, {
       repo: item.repo, issue: item.issue, worktree: item.worktree.path, branch: item.worktree.branch,
-      plan: await readArtifact(item.worktree.path, item.issue, "plan"), checks: item.checks ?? "The checks passed.",
+      plan: await readArtifact(item.worktree.path, item.issue, "plan"), checks: item.checks ?? "The checks passed.", reviews: item.reviews,
       startedBy: item.startedBy, approvals: item.approvals, skipped: item.skipped, pullRequest: item.pullRequest, defaultBranch: await this.deps.github.defaultBranch(item.repo),
     });
     const { number, url } = published.pullRequest;
@@ -290,16 +364,21 @@ export class LoopDaemon {
   }
 
   /**
-   * The checks report, committed by the loop at docs/rovara/<issue>/evidence/checks.md before it publishes, so the
-   * branch carries what proved it. Added with -f: a repository may ignore docs/. Nothing is committed when unchanged.
+   * The checks report and (#358) the reviews report, committed by the loop at docs/rovara/<issue>/evidence/ before it
+   * publishes, so the branch carries what proved it. Added with -f: a repository may ignore docs/. Nothing is
+   * committed when unchanged.
    */
-  private async commitEvidence(worktree: string, issue: number, report: string): Promise<void> {
-    const relative = evidencePath(issue, "checks.md");
-    await mkdir(join(worktree, relative, ".."), { recursive: true });
-    await writeFile(join(worktree, relative), `# Checks\n\nRun by rovara loop before it published this branch.\n\n${report}\n`);
-    await run(this.deps.exec, "git", ["-C", worktree, "add", "-f", relative]);
+  private async commitEvidence(worktree: string, issue: number, checks: string, reviews: string | undefined): Promise<void> {
+    const files: Array<[string, string]> = [[evidencePath(issue, "checks.md"), `# Checks\n\nRun by rovara loop before it published this branch.\n\n${checks}\n`]];
+    if (reviews !== undefined) files.push([evidencePath(issue, "reviews.md"), `# Reviews\n\nRun by rovara loop before it published this branch.\n\n${reviews}\n`]);
+    const relatives = files.map(([relative]) => relative);
+    for (const [relative, text] of files) {
+      await mkdir(join(worktree, relative, ".."), { recursive: true });
+      await writeFile(join(worktree, relative), text);
+    }
+    await run(this.deps.exec, "git", ["-C", worktree, "add", "-f", ...relatives]);
     if ((await this.deps.exec("git", ["-C", worktree, "diff", "--cached", "--quiet"])).code === 0) return;
-    await run(this.deps.exec, "git", ["-C", worktree, "commit", "--quiet", "-m", `chore(rovara): checks evidence for #${issue}`, "--", relative]);
+    await run(this.deps.exec, "git", ["-C", worktree, "commit", "--quiet", "-m", `chore(rovara): evidence for #${issue}`, "--", ...relatives]);
   }
 
   /** A change request, added to its artifact under "Review feedback", so the document carries its own history. */

@@ -3,7 +3,7 @@
 // failed exit checks, an artifact's text and digest, a check run's output) and carries the effects out
 // (daemon.ts), so every decision here is tested without GitHub, git, tmux or an agent.
 import { landingStep, nextStep, stepOf, type Artifact, type LoopAction, type LoopDefinition, type Outcome } from "./definitions.js";
-import { artifactAssignment, changesAssignment, checksFailedAssignment, codeAssignment, firstAssignment, replyAssignment } from "./instructions.js";
+import { artifactAssignment, changesAssignment, checksFailedAssignment, codeAssignment, firstAssignment, replyAssignment, reviewsFailedAssignment } from "./instructions.js";
 import { artifactPath, tmuxSessionName } from "./naming.js";
 import type { WorkItemState } from "./state.js";
 
@@ -20,7 +20,7 @@ export type LoopEvent =
   /** The agent says its step is done. `failures`: the step's exit checks that failed. `artifact`: the step's artifact's text. */
   | { kind: "claim"; claimId: string; summary: string; failures: string[]; artifact?: string; at: string }
   /** A step the loop ran itself finished. `detail`: what to say about it. */
-  | { kind: "action-result"; action: LoopAction; outcome: "passed" | "failed" | "published"; detail: string; pullRequest?: { number: number; url: string }; at: string }
+  | { kind: "action-result"; action: LoopAction; outcome: "passed" | "failed" | "blocked" | "published"; detail: string; pullRequest?: { number: number; url: string }; at: string }
   | { kind: "closed"; at: string }
   | { kind: "stop"; author: string; at: string };
 
@@ -62,7 +62,7 @@ function transition(loop: LoopDefinition, state: WorkItemState, outcome: Outcome
 function arrivalAssignment(loop: LoopDefinition, state: WorkItemState, approver: string, approved: Artifact): string {
   const step = stepOf(loop, state.step);
   if (step.artifact !== undefined) return artifactAssignment(state, step.artifact, { approver, approved });
-  return codeAssignment(approver, approved);
+  return codeAssignment(approver, approved, state.issue);
 }
 
 /** What a finished agent step says on the issue, by the step it moved to. */
@@ -120,6 +120,12 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
     }
     case "approve": {
       const step = running ? stepOf(loop, state.step) : undefined;
+      // #358: a step a person can wave on without a document (reviews that still block): the approval publishes.
+      if (running && step !== undefined && !step.gate && nextStep(loop, state.step, "approved") !== undefined) {
+        const waved = transition(loop, state, "approved", event.at);
+        if (waved === undefined) return { state, effects: [] };
+        return { state: { ...waved.state, reviewRounds: 0 }, effects: [{ kind: "comment", body: `@${event.author} accepted the review findings, so the change is published as it is.` }, ...waved.effects] };
+      }
       if (!running || step?.gate !== true || step.artifact === undefined) return { state, effects: running ? [{ kind: "comment", body: "Nothing is waiting for approval right now." }] : [] };
       const artifact = step.artifact;
       const moved = transition(loop, state, "approved", event.at);
@@ -128,7 +134,7 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
       const next = { ...moved.state, approvals };
       const name = ARTIFACT_NAMES[artifact];
       const after = stepOf(loop, next.step).artifact;
-      const what = after === undefined ? "Coding starts; when it's done, the loop runs the checks and opens a pull request." : `The ${ARTIFACT_NAMES[after]} comes next, from it.`;
+      const what = after === undefined ? "Coding starts; when it's done, the loop runs the checks and the reviews, then opens a pull request." : `The ${ARTIFACT_NAMES[after]} comes next, from it.`;
       return {
         state: next,
         effects: [
@@ -167,6 +173,14 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
         return { state: next, effects: [...moved.effects, { kind: "comment", body: `The checks failed, so the change went back to the agent.\n\n${event.detail}` }, { kind: "assign", text: checksFailedAssignment(event.detail) }] };
       }
       if (event.action === "checks") return { state: next, effects: [{ kind: "comment", body: `The checks passed.\n\n${event.detail}` }, ...moved.effects] };
+      if (event.action === "reviews") {
+        if (event.outcome === "passed") return { state: { ...next, reviewRounds: 0 }, effects: [{ kind: "comment", body: `The reviews passed.\n\n${event.detail}` }, ...moved.effects] };
+        const rounds = (state.reviewRounds ?? 0) + 1;
+        if (event.outcome === "failed") {
+          return { state: { ...next, reviewRounds: rounds }, effects: [...moved.effects, { kind: "comment", body: `The reviews found problems that block the change, so it went back to the agent (round ${rounds}).\n\n${event.detail}` }, { kind: "assign", text: reviewsFailedAssignment(event.detail, state.issue) }] };
+        }
+        return { state: { ...next, reviewRounds: 0 }, effects: [...moved.effects, { kind: "comment", body: `The reviews still block the change, so a person decides.\n\n${event.detail}\n\n---\nPublish it as it is with \`/rovara approve\`, or reply with what the agent should do.` }] };
+      }
       if (event.outcome === "failed") return { state: next, effects: [...moved.effects, { kind: "comment", body: `I couldn't publish the change: ${event.detail}\n\nReply here to try again.` }] };
       return { state: next, effects: [...moved.effects, { kind: "comment", body: event.detail }] };
     }

@@ -47,6 +47,31 @@ export class GitHub {
     });
   }
 
+  /** #358: every inline review comment on the repository's pull requests updated since `since`, oldest first. */
+  async reviewCommentsSince(repo: string, since: string): Promise<Array<IssueComment & { path?: string; line?: number }>> {
+    const out = await run(this.exec, "gh", [
+      "api", "--paginate", `repos/${repo}/pulls/comments?since=${encodeURIComponent(since)}&sort=updated&direction=asc&per_page=100`,
+      "--jq", ".[] | {id, pull_request_url, author: .user.login, body, path, line, updated_at}",
+    ]);
+    return out.split("\n").filter((line) => line.trim() !== "").flatMap((line) => {
+      const value = JSON.parse(line) as { id?: unknown; pull_request_url?: unknown; author?: unknown; body?: unknown; path?: unknown; line?: unknown; updated_at?: unknown };
+      const pull = typeof value.pull_request_url === "string" ? Number(/\/pulls\/(\d+)$/u.exec(value.pull_request_url)?.[1]) : Number.NaN;
+      if (typeof value.id !== "number" || !Number.isInteger(pull) || typeof value.author !== "string" || typeof value.body !== "string" || typeof value.updated_at !== "string") return [];
+      return [{ id: value.id, issue: pull, author: value.author, body: value.body, updatedAt: value.updated_at,
+        ...(typeof value.path === "string" ? { path: value.path } : {}), ...(typeof value.line === "number" ? { line: value.line } : {}) }];
+    });
+  }
+
+  /** #358: a pull request's submitted reviews: who, their verdict, and what they wrote. */
+  async pullReviews(repo: string, pull: number): Promise<Array<{ id: number; author: string; state: string; body: string; submittedAt: string }>> {
+    const out = await run(this.exec, "gh", ["api", "--paginate", `repos/${repo}/pulls/${pull}/reviews?per_page=100`, "--jq", ".[] | {id, author: .user.login, state, body, submitted_at}"]);
+    return out.split("\n").filter((line) => line.trim() !== "").flatMap((line) => {
+      const value = JSON.parse(line) as { id?: unknown; author?: unknown; state?: unknown; body?: unknown; submitted_at?: unknown };
+      if (typeof value.id !== "number" || typeof value.author !== "string" || typeof value.state !== "string" || typeof value.submitted_at !== "string") return [];
+      return [{ id: value.id, author: value.author, state: value.state, body: typeof value.body === "string" ? value.body : "", submittedAt: value.submitted_at }];
+    });
+  }
+
   async issueState(repo: string, issue: number): Promise<"open" | "closed"> {
     return (await run(this.exec, "gh", ["api", `repos/${repo}/issues/${issue}`, "--jq", ".state"])).trim() === "closed" ? "closed" : "open";
   }

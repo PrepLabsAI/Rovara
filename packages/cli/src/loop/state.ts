@@ -27,6 +27,10 @@ export const WorkItemStateSchema = z.object({
   approvals: z.partialRecord(ArtifactSchema, z.object({ digest: z.string().regex(/^[a-f0-9]{64}$/), by: z.string(), at: z.string() }).strict()).optional(),
   /** Full (#357): the phases declared away when the loop started, and by whom (the starter). */
   skipped: z.array(z.string()).max(10).optional(),
+  /** #358: review rounds in a row that still blocked; reset when the reviews pass or a person decides. */
+  reviewRounds: z.number().int().min(0).optional(),
+  /** #358: the last reviews report, for the pull request's description and the evidence. */
+  reviews: z.string().max(20_000).optional(),
   /** Quick (#356): the last checks report, for the pull request's description. */
   checks: z.string().max(20_000).optional(),
   /** Quick (#356): the pull request the loop opened. */
@@ -104,11 +108,12 @@ export class LoopStore {
     await writeJson(join(this.root, "repos.json"), repos);
   }
 
-  async cursor(repo: string): Promise<PollCursor | undefined> {
-    return readJson(join(this.root, "poll", `${slugDir(repo)}.json`), PollCursorSchema);
+  /** Where the poller is up to on a repository's issue comments, or (#358) its pull requests' review comments and reviews. */
+  async cursor(repo: string, kind: "issues" | "pulls" = "issues"): Promise<PollCursor | undefined> {
+    return readJson(join(this.root, "poll", `${slugDir(repo)}${kind === "issues" ? "" : "__pulls"}.json`), PollCursorSchema);
   }
 
-  async saveCursor(repo: string, cursor: PollCursor): Promise<void> {
-    await writeJson(join(this.root, "poll", `${slugDir(repo)}.json`), cursor);
+  async saveCursor(repo: string, cursor: PollCursor, kind: "issues" | "pulls" = "issues"): Promise<void> {
+    await writeJson(join(this.root, "poll", `${slugDir(repo)}${kind === "issues" ? "" : "__pulls"}.json`), cursor);
   }
 }

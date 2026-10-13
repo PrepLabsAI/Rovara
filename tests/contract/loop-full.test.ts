@@ -110,12 +110,13 @@ describe("the Full loop end to end (#357)", () => {
     await h.write("design", `${design}\nchanged\n`);
     expect(await h.complete("Coded it.")).toContain("the approved design at docs/rovara/42/design.md was changed");
     await h.write("design", design);
+    await h.selfReview();
     expect(await h.complete("Coded it.")).toContain("Accepted");
     await h.runOwnSteps();
     expect(await h.step()).toBe("pr-open");
     expect(h.world.pullRequests).toHaveLength(1);
     expect(h.world.pullRequests[0]!.body).toContain("Approved: the requirements by @maya, the design by @sam, the plan by @maya.");
-    expect(h.world.loopCommits).toEqual(["docs/rovara/42/evidence/checks.md: chore(rovara): checks evidence for #42"]);
+    expect(h.world.loopCommits).toEqual(["docs/rovara/42/evidence/checks.md, docs/rovara/42/evidence/reviews.md: chore(rovara): evidence for #42"]);
   });
 
   it("starts past a phase declared away, says who declared it, and the pull request says so", async () => {
@@ -135,6 +136,7 @@ describe("the Full loop end to end (#357)", () => {
     await h.write("plan", PLAN);
     await h.complete("Planned.");
     await h.comment("maya", "/rovara approve");
+    await h.selfReview();
     await h.complete("Coded.");
     await h.runOwnSteps();
     expect(h.world.pullRequests[0]!.body).toContain("Approved: the requirements by @maya, the plan by @maya. Declared away: design.");

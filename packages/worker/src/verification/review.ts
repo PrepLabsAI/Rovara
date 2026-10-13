@@ -28,7 +28,7 @@ import {
 import type { ArtifactSink } from "../artifacts.js";
 import { assistantText } from "./extension.js";
 import { readCandidateRepositories } from "./candidate.js";
-import { parseWorkflowReviewerResponse, unfence } from "./review-output.js";
+import { parseWorkflowReviewerResponse, reviewerFocus, reviewJsonShape, unfence } from "@agentx/contracts";
 import { candidateChanges, candidateDiff, type CandidateChange } from "./diff.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
 import { gitHardenedEnvironment } from "../git.js";
@@ -512,23 +512,6 @@ function sha256(value: Buffer): string { return createHash("sha256").update(valu
 
 export { parseWorkflowReviewerResponse };
 
-const REVIEW_JSON_BASE = 'Return only JSON: {"findings":[{"text":"one short sentence","origin":"INTRODUCED"|"PRE_EXISTING","severity":"HIGH"|"MEDIUM"|"LOW","file":"path","line":12%FIELD%}]}. Use {"findings":[]} when you found nothing.';
-
-/**
- * What a code reviewer may mark advisory: only a remark about something the approved plan explicitly asks for, or about
- * check coverage. The gate trusts the flag, so the prompt is what keeps it narrow.
- */
-const ADVISORY_RULE = 'Set "advisory": true only for (1) a remark about something the approved plan explicitly asks for, or (2) a remark about check coverage. A mistake in carrying out the plan, a bug, and every other finding must not be advisory: leave "advisory" out.';
-
-/**
- * The JSON answer each reviewer is asked for. The security reviewer has no "advisory" field: a security finding is never
- * advisory (only the owner's accept waives one), and the gate ignores the flag on it.
- */
-function reviewJsonShape(role: "CRITIC" | "SECURITY"): string {
-  return role === "CRITIC"
-    ? `${REVIEW_JSON_BASE.replace("%FIELD%", ',"advisory":boolean')} ${ADVISORY_RULE}`
-    : REVIEW_JSON_BASE.replace("%FIELD%", "");
-}
 
 /** Total bytes of base-to-candidate diff shown to each reviewer, split evenly across repositories. */
 const REVIEW_DIFF_MAX_BYTES = 120_000;
@@ -701,9 +684,7 @@ export async function runWorkflowReviews(input: {
         const record = event as { type?: unknown; payload?: { type?: unknown }; message?: unknown };
         if (record.type === "message_end" || record.payload?.type === "message_end") response = assistantText(record.message ?? (event as { message?: unknown }).message);
       });
-      const focus = role === "CRITIC"
-        ? "Review logic, correctness, edge cases, compatibility, and whether tests cover the change."
-        : "Review security boundaries, authorization, input validation, secret exposure, unsafe operations, and data handling. Report only security issues; omit anything else.";
+      const focus = reviewerFocus(role);
       const stopped = new Promise<"TIMEOUT" | "INTERRUPTED">((resolve) => {
         timeout = setTimeout(() => resolve("TIMEOUT"), timeoutMs);
         if (input.signal !== undefined) {

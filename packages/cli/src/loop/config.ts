@@ -28,6 +28,19 @@ export const LoopRepoConfigSchema = z.object({
     run: z.string().min(1).max(2_000),
     timeoutSeconds: z.number().int().min(10).max(3_600).default(600),
   }).strict()).max(20).default([]),
+  /**
+   * #358: the reviews the loop runs after the checks pass and before it publishes: a code review and a security review,
+   * each by Claude Code run headless and read-only. `model` sets the model they run on, so the critic can be a different
+   * model from the agent's. Blocking findings go back to the agent; after `maxRounds` rounds that still block, a
+   * person decides.
+   */
+  reviews: z.object({
+    enabled: z.boolean().default(true),
+    model: z.string().regex(/^[A-Za-z0-9._:-]{1,100}$/u).optional(),
+    security: z.boolean().default(true),
+    maxRounds: z.number().int().min(1).max(10).default(3),
+    timeoutSeconds: z.number().int().min(60).max(3_600).default(900),
+  }).strict().default({ enabled: true, security: true, maxRounds: 3, timeoutSeconds: 900 }),
 }).strict();
 export type LoopRepoConfig = z.infer<typeof LoopRepoConfigSchema>;
 
@@ -69,6 +82,11 @@ export function initialLoopConfig(login: string): string {
     "#   - name: tests",
     "#     run: npm test",
     "checks: []",
+    "# The code and security reviews after the checks (Claude Code, headless and read-only). A different model",
+    "# from the agent's makes a real critic, for example: model: opus",
+    "reviews:",
+    "  enabled: true",
+    "  maxRounds: 3",
     "",
   ].join("\n");
 }

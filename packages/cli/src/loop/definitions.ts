@@ -11,6 +11,8 @@ export const ExitCheckSchema = z.enum([
   "artifact-sections",
   /** Every artifact a gate approved is still as it was approved. */
   "approved-unchanged",
+  /** #358: the agent reviewed its own change and recorded it (evidence/self-review.md: ## Findings, ## Fixed). */
+  "self-review",
 ]);
 export type ExitCheck = z.infer<typeof ExitCheckSchema>;
 
@@ -23,11 +25,11 @@ export type Artifact = z.infer<typeof ArtifactSchema>;
  * change request at a gate, the result of a step the loop runs itself (passed, failed, published), a phase declared
  * away (skipped), the issue closing, a stop.
  */
-export const OutcomeSchema = z.enum(["done", "reply", "approved", "changes", "passed", "failed", "published", "skipped", "closed", "stopped"]);
+export const OutcomeSchema = z.enum(["done", "reply", "approved", "changes", "passed", "failed", "blocked", "published", "skipped", "closed", "stopped"]);
 export type Outcome = z.infer<typeof OutcomeSchema>;
 
 /** What a step the loop runs itself (actor `code`) does. */
-export const ActionSchema = z.enum(["checks", "publish"]);
+export const ActionSchema = z.enum(["checks", "reviews", "publish"]);
 export type LoopAction = z.infer<typeof ActionSchema>;
 
 export const LoopDefinitionSchema = z.object({
@@ -102,10 +104,15 @@ export const DO_LOOP: LoopDefinition = LoopDefinitionSchema.parse({
   ],
 });
 
-/** Code, the loop's checks and publishing, and the open pull request: what Quick and Full share after their plan. */
+/**
+ * Code, the loop's checks, its reviews and publishing, and the open pull request: what Quick and Full share after their
+ * plan. A review round that still blocks after the configured rounds, or that could not be read, waits for a person.
+ */
 const DELIVERY_STEPS = [
-  { id: "code", actor: "agent", label: "coding", exit: ["require-summary", "approved-unchanged"] },
+  { id: "code", actor: "agent", label: "coding", exit: ["require-summary", "approved-unchanged", "self-review"] },
   { id: "checks", actor: "code", label: "checking", action: "checks" },
+  { id: "reviews", actor: "code", label: "reviewing", action: "reviews" },
+  { id: "review-blocked", actor: "human", label: "review-blocked" },
   { id: "publish", actor: "code", label: "publishing", action: "publish" },
   { id: "pr-open", actor: "human", label: "pr-open" },
   { id: "ended", actor: "code", terminal: true },
@@ -114,8 +121,14 @@ const DELIVERY_EDGES = [
   { from: "plan-review", to: "code", on: "approved" },
   { from: "plan-review", to: "plan", on: "changes" },
   { from: "code", to: "checks", on: "done" },
-  { from: "checks", to: "publish", on: "passed" },
+  { from: "checks", to: "reviews", on: "passed" },
   { from: "checks", to: "code", on: "failed" },
+  { from: "reviews", to: "publish", on: "passed" },
+  { from: "reviews", to: "code", on: "failed" },
+  { from: "reviews", to: "review-blocked", on: "blocked" },
+  // A person accepts the findings and publishes, or says what to do.
+  { from: "review-blocked", to: "publish", on: "approved" },
+  { from: "review-blocked", to: "code", on: "reply" },
   { from: "publish", to: "pr-open", on: "published" },
   { from: "publish", to: "pr-open", on: "failed" },
   { from: "pr-open", to: "code", on: "reply" },
