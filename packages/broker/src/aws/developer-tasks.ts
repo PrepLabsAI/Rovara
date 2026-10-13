@@ -119,6 +119,7 @@ import {
   WORKFLOW_REGRESSION_INSTRUCTION,
   type WorkflowSendBackProblem,
   type WorkflowDependencyInvocation,
+  workflowDependencyAttemptTerminalProgress,
   WorkflowResolveFindingsInputSchema,
   TaskPeopleRoleRequestSchema,
   TaskPeopleTakeOwnershipRequestSchema,
@@ -844,7 +845,7 @@ export async function submitWorkflowFeedbackDecision(
     if (decision === undefined || decision.decision !== "APPROVE") throw agentXError("CONFIG_INVALID", "the approved decision is no longer current");
     let workflowDependencies: WorkflowDependencyInvocation | undefined;
     if (latest.workflow?.workflowDependenciesApproval !== undefined) {
-      workflowDependencies = await approvedWorkflowDependencies(deps, latest.workflow, latestAccess.peopleRevision);
+      workflowDependencies = await approvedWorkflowDependencies(deps, latest.workflow, latest.workspaceId, latestAccess.peopleRevision);
       const currentCandidate = latest.workflow.candidate;
       if (workflowDependencies === undefined || currentCandidate?.repositories.length !== 1
         || currentCandidate.repositories[0]?.repositoryId !== workflowDependencies.graph.items[0]?.repository) {
@@ -2027,7 +2028,7 @@ async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow
 }
 
 /** Reload the exact whole-plan artifact bound by the Owner so a retry cannot fall back to plain coding. */
-async function approvedWorkflowDependencies(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot, peopleRevision?: number): Promise<WorkflowDependencyInvocation | undefined> {
+async function approvedWorkflowDependencies(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot, workspaceId: string, peopleRevision?: number): Promise<WorkflowDependencyInvocation | undefined> {
   const approval = workflow.workflowDependenciesApproval;
   if (approval === undefined) return undefined;
   const artifact = workflow.artifacts.find((entry) => entry.type === "plan" && entry.sha256 === approval.artifactDigest);
@@ -2038,20 +2039,27 @@ async function approvedWorkflowDependencies(deps: DeveloperTaskRouteDependencies
     throw agentXError("WORKSPACE_NOT_READY", "the approved work breakdown failed its digest check");
   }
   const progress = workflow.workflowDependenciesProgress ?? [];
-  if (progress.length === 0) {
-    // No item checkpoint was acknowledged, so the worker can safely start from the pinned prepared base.
-    return { graph, approval, peopleRevision: peopleRevision ?? 0, sequenceStart: 0, resumeProgress: [] };
+  const operations = await deps.actions.operations(workspaceId);
+  const latestProgress = progress.at(-1);
+  const boundOperation = latestProgress === undefined
+    ? [...operations].filter((operation) => operation.workflowMode === "IMPLEMENT").sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0]
+    : operations.find((operation) => operation.id === latestProgress.operationId);
+  const binding = boundOperation === undefined ? undefined : await deps.actions.workflowBinding(workspaceId, boundOperation.id);
+  if (boundOperation === undefined || binding === undefined || binding.approval.graphDigest !== approval.graphDigest || binding.approval.runId !== approval.runId) {
+    throw agentXError("CONFIG_INVALID", "the approved ordered plan has no matching operation binding; approve a refreshed whole coding plan before continuing");
   }
-  if (progress.at(-1)?.state === "STARTED") {
+  if (latestProgress?.operationId === boundOperation.id && latestProgress.state === "STARTED") {
     throw agentXError("CONFIG_INVALID", "the ordered run has an unresolved item start; inspect the workspace and approve a refreshed whole coding plan before continuing");
   }
-  const last = progress.at(-1)!;
-  const resumeTreeSha = last.state === "IMPLEMENTED" ? last.candidateTreeSha : last.baseTreeSha;
-  if (resumeTreeSha === undefined) throw agentXError("CONFIG_INVALID", "the stopped ordered run has no usable tree checkpoint");
-  const latestByItem = new Map<string, typeof progress[number]>();
-  for (const entry of progress) if (entry.state !== "STARTED") latestByItem.set(entry.itemId, entry);
-  return { graph, approval, resumeTreeSha, peopleRevision: peopleRevision ?? 0, sequenceStart: last.sequence,
-    resumeProgress: [...latestByItem.values()] };
+  const resumeProgress = workflowDependencyAttemptTerminalProgress({ graph, approval, operationId: boundOperation.id,
+    sequenceStart: binding.sequenceStart, resumeProgress: binding.resumeProgress, history: progress });
+  if (resumeProgress === undefined) throw agentXError("CONFIG_INVALID", "the latest ordered-work checkpoints do not match their operation attempt; approve a refreshed whole coding plan before continuing");
+  const last = resumeProgress.at(-1);
+  const resumeTreeSha = last === undefined ? binding.resumeTreeSha
+    : last.state === "IMPLEMENTED" ? last.candidateTreeSha : last.baseTreeSha;
+  if (progress.length > 0 && resumeTreeSha === undefined) throw agentXError("CONFIG_INVALID", "the stopped ordered run has no usable tree checkpoint");
+  return { ...binding, graph, approval, ...(resumeTreeSha === undefined ? {} : { resumeTreeSha }), peopleRevision: peopleRevision ?? 0,
+    sequenceStart: progress.at(-1)?.sequence ?? binding.sequenceStart ?? 0, resumeProgress };
 }
 
 /** The commands of the project's required checks, the approved plan's proposed ones and the owner's selected optional ones, in that order. */
@@ -2113,7 +2121,7 @@ async function retryWorkflowImplementation(
   }
   await actionableWorkspace(deps, task);
   const plan = await approvedCodingPlan(deps, workflow);
-  const workflowDependencies = await approvedWorkflowDependencies(deps, workflow, access.peopleRevision);
+  const workflowDependencies = await approvedWorkflowDependencies(deps, workflow, task.workspaceId, access.peopleRevision);
   if (workflowDependencies !== undefined && deps.workflowDependenciesEnabled !== true) {
     throw agentXError("CONFIG_INVALID", "the approved ordered work plan is retained, but this broker is not enabled to retry it");
   }
@@ -2154,7 +2162,7 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
   }
   await actionableWorkspace(deps, task);
   const plan = await approvedCodingPlan(deps, workflow);
-  const workflowDependencies = await approvedWorkflowDependencies(deps, workflow, access.peopleRevision);
+  const workflowDependencies = await approvedWorkflowDependencies(deps, workflow, task.workspaceId, access.peopleRevision);
   if (workflowDependencies !== undefined && deps.workflowDependenciesEnabled !== true) {
     throw agentXError("CONFIG_INVALID", "the approved ordered work plan is retained, but this broker is not enabled to continue it");
   }
@@ -2204,7 +2212,7 @@ export async function resolveTaskWorkflowFindings(deps: DeveloperTaskRouteDepend
   if (next.stage === "IMPLEMENT") {
     await actionableWorkspace(deps, task);
     const plan = await approvedCodingPlan(deps, workflow);
-    const workflowDependencies = await approvedWorkflowDependencies(deps, workflow, access.peopleRevision);
+    const workflowDependencies = await approvedWorkflowDependencies(deps, workflow, task.workspaceId, access.peopleRevision);
     if (workflowDependencies !== undefined && deps.workflowDependenciesEnabled !== true) {
       throw agentXError("CONFIG_INVALID", "the approved ordered work plan is retained, but this broker is not enabled to continue it");
     }
