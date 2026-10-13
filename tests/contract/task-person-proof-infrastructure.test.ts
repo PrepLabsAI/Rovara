@@ -59,6 +59,11 @@ function realAppControlPlane(env?: string): TemplateJson {
   return Template.fromStack(stack).toJSON();
 }
 
+function normalizeSingleton(value: unknown): unknown {
+  // CDK may emit one IAM Action/Resource as a scalar or a singleton array; normalize only that shape.
+  return Array.isArray(value) && value.length === 1 ? value[0] : value;
+}
+
 describe("the named TEST proof-only installation gate", () => {
   it("declares a distinct default-OFF gate only for the approved named environment", () => {
     const approved = namedTemplate("agentxlivetest123");
@@ -161,8 +166,9 @@ describe("the named TEST proof-only installation gate", () => {
     const policy = Object.entries(resources).find(([id, resource]) => id.includes("TaskPersonProofDispatcherPolicy") && resource.Type === "AWS::IAM::Policy")?.[1];
     expect(policy).toBeDefined();
     const statements = (policy!.Properties!.PolicyDocument as { Statement: Array<Record<string, unknown>> }).Statement;
-    expect(statements).toHaveLength(2);
+    expect(statements).toHaveLength(3);
     const getItem = statements.find((statement) => JSON.stringify(statement.Action).includes("dynamodb:GetItem"));
+    const denyUnprojectedGetItem = statements.find((statement) => statement.Sid === "DenyGetItemUnlessSpecificAttributes");
     const invoke = statements.find((statement) => JSON.stringify(statement.Action).includes("lambda:InvokeFunction"));
     const dispatcherEntries = Object.entries(resources).filter(([id, resource]) => id.startsWith("Dispatcher") && resource.Type === "AWS::Lambda::Function");
     expect(dispatcherEntries).toHaveLength(1);
@@ -181,6 +187,13 @@ describe("the named TEST proof-only installation gate", () => {
         Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" },
       },
     });
+    expect(denyUnprojectedGetItem).toMatchObject({
+      Sid: "DenyGetItemUnlessSpecificAttributes",
+      Effect: "Deny",
+      Condition: { StringNotEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" } },
+    });
+    expect(normalizeSingleton(denyUnprojectedGetItem?.Action)).toBe("dynamodb:GetItem");
+    expect(normalizeSingleton(denyUnprojectedGetItem?.Resource)).toEqual({ "Fn::GetAtt": [tableId, "Arn"] });
     const versionId = Object.keys(resources).find((id) => JSON.stringify(invoke?.Resource).includes(id));
     expect(invoke).toEqual({ Effect: "Allow", Action: ["lambda:InvokeFunction"], Resource: [{ Ref: versionId }] });
     expect(versionId).toContain("TaskPersonProofFunctionCurrentVersion");

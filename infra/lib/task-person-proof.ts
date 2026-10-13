@@ -91,6 +91,15 @@ export class TaskPersonProof extends Construct {
         Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" },
       },
     };
+    const denyUnprojectedDeveloperRead = {
+      Sid: "DenyGetItemUnlessSpecificAttributes",
+      Effect: "Deny",
+      Action: ["dynamodb:GetItem"],
+      Resource: [props.developerSignInTable.tableArn],
+      Condition: {
+        StringNotEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      },
+    };
     const invokeProof = {
       Effect: "Allow",
       Action: ["lambda:InvokeFunction"],
@@ -99,7 +108,7 @@ export class TaskPersonProof extends Construct {
     const dispatcherPolicy = new iam.CfnPolicy(this, "DispatcherPolicy", {
       policyName: `${APPROVED_ENV}-task-person-proof-dispatcher`,
       roles: [props.dispatcher.role.roleName],
-      policyDocument: { Version: "2012-10-17", Statement: [developerRead, invokeProof] },
+      policyDocument: { Version: "2012-10-17", Statement: [developerRead, denyUnprojectedDeveloperRead, invokeProof] },
     });
     dispatcherPolicy.cfnOptions.condition = install;
 
