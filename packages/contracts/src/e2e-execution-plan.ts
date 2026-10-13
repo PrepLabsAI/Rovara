@@ -107,6 +107,7 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
       let fixture: unknown;
       try { fixture = copyBoundedE2EJsonData(JSON.parse(Buffer.from(fixtureSource.bytes).toString("utf8")), { maxBytes: 65_536, maxDepth: 32 }); } catch { throw new Error("synthetic account fixture source must contain bounded JSON data"); }
       if (canonicalJson(fixture) !== canonicalJson(definition)) throw new Error("synthetic account fixture definition differs from its primary source bytes");
+      if (definition.scope !== "SYNTHETIC") throw new Error("richer synthetic account fixture must declare synthetic scope");
     }
     if (definition.profileId !== account.profileId || definition.applicationId !== account.applicationId || Object.keys(definition).some((key) => /people|actor|credential|live|role|permission|answer/i.test(key))) throw new Error("synthetic account fixture attempts unsupported identity or authority semantics");
     accountsByApplicationProfile.set(`${account.applicationId}\0${account.profileId}`, account);

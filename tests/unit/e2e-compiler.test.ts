@@ -110,6 +110,41 @@ describe("trusted E2E compiler", () => {
     expect(() => selectE2EExecutionPlan({ ...selection, portableApprovalBinding: bindingExtraRef })).toThrow(/exactly match/);
   });
 
+  it("requires the richer source fixture to declare synthetic scope without filtering nested business values", () => {
+    const fixturePath = "apps/shop/fixtures/alternate-account.json";
+    const alternateScenario: E2EScenario = { ...scenario, accountProfileId: "synthetic-alt", steps: [{ kind: "invoke-contract", operationId: operation.operationId, input: { businessInput: { status: "LIVE" } } }] };
+    const makeSelection = (definition: Record<string, unknown>) => {
+      const fixtureBytes = Buffer.from(JSON.stringify(definition));
+      const fixtureSource = { path: fixturePath, bytes: fixtureBytes, sha256: hash(fixtureBytes), kind: "blob" as const };
+      const sourceSnapshot: E2ESourceSnapshot = { ...snapshot, treePaths: [...snapshot.treePaths, fixturePath], sources: [...sources, fixtureSource] };
+      const alternateAccount = { ...accountContext, contextId: "account-shop-alt", profileId: "synthetic-alt", fixture: { version: "synthetic-fixture/v1" as const, sourcePath: fixturePath, sourceSha256: fixtureSource.sha256, definition }, sourceRefs: [{ path: fixturePath, sha256: fixtureSource.sha256 }] };
+      const body = { ...bindingBody, accountContexts: [alternateAccount] };
+      const portableApprovalBinding = { ...body, bindingDigest: e2EPortableApprovalBindingDigest(body) };
+      const selectionInput = { ...selection, sourceSnapshot, scenarios: [alternateScenario], policy: { ...policy, baselineScenarioIds: [alternateScenario.scenarioId] }, portableApprovalBinding };
+      return { sourceSnapshot, selectionInput };
+    };
+    const validDefinition = { schemaVersion: "synthetic-fixture/v1", scope: "SYNTHETIC", profileId: "synthetic-alt", applicationId: operation.applicationId, preferences: { status: "LIVE" } };
+    const valid = makeSelection(validDefinition);
+    const plan = selectE2EExecutionPlan(valid.selectionInput);
+    const group = plan.groups[0]!;
+    const bundleBody = { schemaVersion: 1 as const, planDigest: valid.selectionInput.planDigest, templateVersion: "trusted-e2e/v1", scenarios: [alternateScenario], bundleDigest: "0".repeat(64) };
+    const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };
+    const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput: valid.selectionInput, executionPlan: plan, group });
+    expect(compiled.expectedCases).toHaveLength(1);
+    expect(compiled.expectedCases[0]?.scenarioId).toBe("s");
+    const { scope: omittedScope, ...missingScopeDefinition } = validDefinition;
+    void omittedScope;
+    for (const definition of [
+      { ...validDefinition, scope: "LIVE" },
+      { ...validDefinition, scope: "FOREIGN" },
+      missingScopeDefinition,
+      { ...validDefinition, scope: 7 },
+    ]) {
+      const negative = makeSelection(definition);
+      expect(() => selectE2EExecutionPlan(negative.selectionInput)).toThrow();
+    }
+  });
+
   it("requires an approved scenario association when one operation has multiple callable selectors", () => {
     const firstBase = { ...registrationBase, callableSelector: { kind: "named" as const, exportName: "listRows" } };
     const secondBase = { ...registrationBase, callableSelector: { kind: "named" as const, exportName: "otherRows" } };
