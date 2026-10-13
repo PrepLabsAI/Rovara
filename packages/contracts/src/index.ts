@@ -41,6 +41,7 @@ export * from "./swebench.js";
 export * from "./eval-batch.js";
 export * from "./eval-stats.js";
 export * from "./e2e.js";
+export * from "./e2e-view.js";
 export * from "./e2e-catalog.js";
 export * from "./e2e-execution-plan.js";
 export * from "./e2e-portable.js";
