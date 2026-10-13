@@ -1,7 +1,23 @@
 import { createConnection } from "node:net";
 import { chmod, mkdtemp, rm, symlink, unlink, lstat, readlink } from "node:fs/promises";
-import { describe, expect, it } from "vitest";
+import type * as FsPromises from "node:fs/promises";
+import { describe, expect, it, vi } from "vitest";
 import { createE2EWorkerSession } from "../../packages/verifier/src/runtime-session.js";
+
+const injectedLstatFault = vi.hoisted(() => ({ path: "", remaining: 0 }));
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof FsPromises>();
+  return {
+    ...actual,
+    lstat: async (...args: Parameters<typeof actual.lstat>) => {
+      if (String(args[0]) === injectedLstatFault.path && injectedLstatFault.remaining > 0) {
+        injectedLstatFault.remaining -= 1;
+        throw Object.assign(new Error("controlled lstat I/O fault"), { code: "EIO" });
+      }
+      return actual.lstat(...args);
+    },
+  };
+});
 
 const exchange = (path: string, frame: unknown) => new Promise<string>((resolve, reject) => {
   const socket = createConnection(path);
@@ -98,6 +114,47 @@ describe("private E2E worker session", () => {
       expect(await readlink(session.socketPath)).toBe(foreignPath);
       expect((await lstat(foreignPath)).isSymbolicLink()).toBe(true);
     } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("keeps cleanup pending when alias lstat errors cannot prove the owned path is absent", async () => {
+    const directory = await mkdtemp("/tmp/e2ea-");
+    await chmod(directory, 0o700);
+    const session = await createE2EWorkerSession({ directory, capability: "9".repeat(64), expectedByCase: new Map([["case", { payload: { caseId: "case" } }]]), handle: async (payload) => payload });
+    try {
+      injectedLstatFault.path = session.socketPath;
+      injectedLstatFault.remaining = 2;
+      const closed = await session.close();
+      injectedLstatFault.path = "";
+      injectedLstatFault.remaining = 0;
+      expect(closed).toBe(false);
+      expect(session.readback()).toMatchObject({ socket: true, aliasEntryPresent: true, serverListening: false, cleanupConfirmed: false });
+      expect((await lstat(session.socketPath)).isSocket()).toBe(true);
+    } finally {
+      injectedLstatFault.path = "";
+      injectedLstatFault.remaining = 0;
+      await session.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not close through the private bind when sentinel ownership cannot be read", async () => {
+    const directory = await mkdtemp("/tmp/e2ep-");
+    await chmod(directory, 0o700);
+    const session = await createE2EWorkerSession({ directory, capability: "8".repeat(64), expectedByCase: new Map([["case", { payload: { caseId: "case" } }]]), handle: async (payload) => payload });
+    try {
+      injectedLstatFault.path = session.readback().privatePath;
+      injectedLstatFault.remaining = 1;
+      expect(await session.close()).toBe(false);
+      injectedLstatFault.path = "";
+      injectedLstatFault.remaining = 0;
+      expect(session.readback()).toMatchObject({ socket: true, aliasEntryPresent: true, privateSentinelPresent: true, serverListening: true, cleanupConfirmed: false });
+      expect((await lstat(session.socketPath)).isSocket()).toBe(true);
+      expect(session.readback()).toMatchObject({ aliasEntryPresent: true, privateSentinelPresent: true, serverListening: true, cleanupConfirmed: false });
+    } finally {
+      injectedLstatFault.path = "";
+      injectedLstatFault.remaining = 0;
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("quarantines a connected request after owned socket path substitution", async () => {
