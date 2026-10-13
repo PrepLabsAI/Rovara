@@ -142,6 +142,7 @@ export function workflowModel(script: {
   let afterEdits: string[] = [];
   let lastCoderUserText: string | undefined;
   let editsStarted = false;
+  let toolCallSequence = 0;
   const reviewRolesBySession = new Map<string, ReviewRole>();
   const queues: Record<ReviewRole, FauxResponseStep[]> = { CODE: [...(script.reviews?.CODE ?? [])], SECURITY: [...(script.reviews?.SECURITY ?? [])] };
   return async (context, options, state, model) => {
@@ -196,18 +197,18 @@ export function workflowModel(script: {
     }
     if (beforeEdits.length > 0) {
       const command = beforeEdits.shift()!;
-      return fauxAssistantMessage([fauxToolCall("bash", { command }, { id: `before-edit-${beforeEdits.length}` })], { stopReason: "toolUse" });
+      return fauxAssistantMessage([fauxToolCall("bash", { command }, { id: `before-edit-${toolCallSequence++}` })], { stopReason: "toolUse" });
     }
     const edits = typeof script.edits === "function" ? script.edits(latestUserText) : script.edits;
     // With no edits there is nothing to call a tool for, so the coder reports done straight away.
     if (lastIsToolResult(context) && editsStarted && afterEdits.length > 0) {
       const command = afterEdits.shift()!;
-      return fauxAssistantMessage([fauxToolCall("bash", { command }, { id: `after-edit-${afterEdits.length}` })], { stopReason: "toolUse" });
+      return fauxAssistantMessage([fauxToolCall("bash", { command }, { id: `after-edit-${toolCallSequence++}` })], { stopReason: "toolUse" });
     }
     if ((lastIsToolResult(context) && editsStarted) || edits.length === 0) return fauxAssistantMessage(`Done.\n\n${DONE}`);
     editsStarted = true;
     return fauxAssistantMessage(
-      edits.map((edit, index) => fauxToolCall("write", { path: edit.path, content: edit.content }, { id: `edit-${index}` })),
+      edits.map((edit) => fauxToolCall("write", { path: edit.path, content: edit.content }, { id: `edit-${toolCallSequence++}` })),
       { stopReason: "toolUse" },
     );
   };

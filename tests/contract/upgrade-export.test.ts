@@ -117,6 +117,16 @@ describe("agentx upgrade --export (FR-026)", () => {
     expect(parameters).toContainEqual({ ParameterKey: "TaskPeoplePrivateInvitationsEnabled", UsePreviousValue: true });
   });
 
+  it("exports an explicitly enabled workflow-dependencies parameter as a previous value", async () => {
+    const out = await freshDir();
+    await writeUpgradeBundle({
+      dir: out, settings, answers, release: await releaseWithPackage({ ...CONTROL_PLANE_DECLARED, WorkflowDependenciesEnabled: {} }), parts: ["control-plane"], outputs,
+      deployed: { "control-plane": { CallbackSigningKey: "****", WorkflowDependenciesEnabled: "true" } },
+    });
+    const parameters = JSON.parse(await readFile(join(out, "parameters", "control-plane.json"), "utf8")) as Array<Record<string, unknown>>;
+    expect(parameters).toContainEqual({ ParameterKey: "WorkflowDependenciesEnabled", UsePreviousValue: true });
+  });
+
   it("sends the stored sign-in, as agentx upgrade does, only for names the target declares (ruling F29)", async () => {
     const out = await freshDir();
     await writeUpgradeBundle({

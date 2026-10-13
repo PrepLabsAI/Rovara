@@ -119,6 +119,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(p.TaskPeopleChangesEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
     expect(p.TaskPeoplePublicInvitationsEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
     expect(p.TaskPeoplePrivateInvitationsEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
+    expect(p.WorkflowDependenciesEnabled).toMatchObject({ Type: "String", Default: "false", AllowedValues: ["true", "false"] });
     for (const parameter of Object.values(p)) expect(JSON.stringify(parameter)).not.toContain("—");
   });
 
@@ -256,6 +257,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
       AGENTX_TASK_PEOPLE_CHANGES_ENABLED: { Ref: "TaskPeopleChangesEnabled" },
       AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED: { Ref: "TaskPeoplePublicInvitationsEnabled" },
       AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED: { Ref: "TaskPeoplePrivateInvitationsEnabled" },
+      AGENTX_WORKFLOW_DEPENDENCIES_ENABLED: { Ref: "WorkflowDependenciesEnabled" },
     });
     for (const prefix of ["Broker", "DeveloperSignInFunction"]) {
       expect(variables(prefix).DEVELOPER_SIGNIN_SLACK_SINCE).toEqual({ Ref: "DeveloperSignInSlackSince" });
@@ -272,7 +274,7 @@ describe("developer sign-in infrastructure (named environments)", () => {
 describe("the legacy deployment (R3)", () => {
   it("has none of it", () => {
     const text = JSON.stringify(legacy);
-    for (const absent of ["SlackTeamId", "DeveloperSignIn", "DeveloperOidc", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "agentx-developer-jwt", "/v1/dev/", "/v1/auth", "DEVELOPER_TOKEN_ISSUER", "developer-tokens"]) {
+    for (const absent of ["SlackTeamId", "DeveloperSignIn", "DeveloperOidc", "TaskPeopleChangesEnabled", "TaskPeoplePublicInvitationsEnabled", "TaskPeoplePrivateInvitationsEnabled", "WorkflowDependenciesEnabled", "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", "agentx-developer-jwt", "/v1/dev/", "/v1/auth", "DEVELOPER_TOKEN_ISSUER", "developer-tokens"]) {
       expect(text).not.toContain(absent);
     }
     expect(ofType(legacy, "AWS::ApiGatewayV2::Authorizer")).toHaveLength(1);

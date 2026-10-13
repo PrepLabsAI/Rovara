@@ -14,6 +14,7 @@ export interface DeveloperSignInParameters {
   oidcRequiredClaim: CfnParameter; oidcRequiredValues: CfnParameter; oidcDisplayName: CfnParameter;
   slackSince: CfnParameter; oidcSince: CfnParameter;
   taskPeopleChangesEnabled: CfnParameter; taskPeoplePublicInvitationsEnabled: CfnParameter; taskPeoplePrivateInvitationsEnabled: CfnParameter;
+  workflowDependenciesEnabled: CfnParameter;
   /** Spec 025 E16: whether an admin may confirm a change in the AI tool's own pop-up. */
   mcpConfirmElicitation: CfnParameter;
 }
@@ -35,6 +36,7 @@ export function developerSignInParameters(stack: Stack): DeveloperSignInParamete
     taskPeopleChangesEnabled: new CfnParameter(stack, "TaskPeopleChangesEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether task people role changes are enabled in this environment" }),
     taskPeoplePublicInvitationsEnabled: new CfnParameter(stack, "TaskPeoplePublicInvitationsEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether task people may invite members to public channels in this environment" }),
     taskPeoplePrivateInvitationsEnabled: new CfnParameter(stack, "TaskPeoplePrivateInvitationsEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether task people may invite members to private channels in this environment" }),
+    workflowDependenciesEnabled: new CfnParameter(stack, "WorkflowDependenciesEnabled", { type: "String", default: "false", allowedValues: ["true", "false"], description: "Whether bounded serial task work breakdowns are enabled in this environment" }),
     mcpConfirmElicitation: new CfnParameter(stack, "McpConfirmElicitation", { type: "String", default: "enabled", allowedValues: ["enabled", "disabled"], description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button (or the CLI)" }),
   };
 }

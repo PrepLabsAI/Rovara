@@ -68,6 +68,8 @@ import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-cl
 import { createDefaultPiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { createRepositoryCredentialProvider } from "../../packages/worker/src/repository-credentials.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
+import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
+import { workflowDependenciesConfigurationFromEnvironment } from "../../packages/broker/src/aws/workflow-dependencies-configuration.js";
 import { inspectWorkspaceForClose } from "../../packages/worker/src/close-workspace.js";
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import type { CheckRunners } from "../../packages/worker/src/verification/checks.js";
@@ -114,7 +116,7 @@ function signedRequest(rawPath: string, body: string): HttpApiV2Event {
 }
 
 /** The worker's control-plane fetch, delivered straight to the broker handler (callbacks carry no IAM authorizer). */
-function workerFetch(handler: Handler): typeof fetch {
+function workerFetch(handler: Handler, afterResponse?: (request: { path: string; body: string; statusCode: number }) => number | undefined | Promise<number | undefined>): typeof fetch {
   return async (input, init) => {
     const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
     const given = new Headers(init?.headers);
@@ -123,12 +125,14 @@ function workerFetch(handler: Handler): typeof fetch {
       const value = given.get(name);
       if (value !== null) headers[name] = value;
     }
+    const body = typeof init?.body === "string" ? init.body : "";
     const response = await handler({
       version: "2.0", rawPath: url.pathname, rawQueryString: "", headers,
-      ...(typeof init?.body === "string" ? { body: init.body } : {}),
+      ...(typeof init?.body === "string" ? { body } : {}),
       requestContext: { requestId: randomUUID(), http: { method: init?.method ?? "POST" } },
     });
-    return new Response(response.body, { status: response.statusCode, headers: { "content-type": "application/json" } });
+    const status = (await afterResponse?.({ path: url.pathname, body, statusCode: response.statusCode })) ?? response.statusCode;
+    return new Response(response.body, { status, headers: { "content-type": "application/json" } });
   };
 }
 
@@ -259,6 +263,12 @@ export async function createWorkflowE2E(options: {
   initialRepositoryFiles?: readonly { path: string; content: string }[];
   /** The thread brief limit; null turns it off. */
   briefLimit?: number | null;
+  /** The exact deployment environment seam; evaluated by the production helper before broker composition. */
+  workflowDependenciesEnvironment?: Record<string, string | undefined>;
+  /** Changes only the worker's observed callback response, after the real broker callback has committed. */
+  workerCallbackResponse?: (request: { path: string; body: string; statusCode: number }) => number | undefined | Promise<number | undefined>;
+  /** Runs project readiness commands in the real fixture repository. */
+  realProjectCommands?: boolean;
   /** "unavailable": this Slack workspace cannot create a Canvas, so approval cards link the task page. */
   canvas?: "available" | "unavailable";
   /**
@@ -347,15 +357,17 @@ export async function createWorkflowE2E(options: {
     : { ...github.gateway, ...mutableGithubReads, getPullRequestMergeObservation: mergeObservationReader(github, false, mergeObservationRequests, options.mergeObservation) };
   // The plan evidence jobs the broker started: the background Lambda is run by the test, with `runPlanEvidenceJobs`.
   const planEvidenceJobs: PlanEvidenceEvent[] = [];
+  const workflowDependenciesConfiguration = workflowDependenciesConfigurationFromEnvironment(options.workflowDependenciesEnvironment ?? {});
   const harness = await createDeveloperTaskBroker({
     register: false,
     ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.channelMembers === undefined ? {} : { channelMembers: options.channelMembers }),
     ...((options.slackRequestQueue === undefined && options.taskPeople?.changesEnabled === undefined
       && options.taskPeople?.taskPersonProof === undefined && options.taskPeople?.taskPeopleDisplayRead === undefined
-      && options.taskPeople?.inviteTaskPerson === undefined) ? {} : { developerExtra: {
+      && options.taskPeople?.inviteTaskPerson === undefined && options.workflowDependenciesEnvironment === undefined) ? {} : { developerExtra: {
       ...(options.slackRequestQueue === undefined ? {} : { slackRequestQueue: options.slackRequestQueue }),
       ...(taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration }),
+      ...workflowDependenciesConfiguration,
       ...(options.taskPeople?.taskPersonProof === undefined ? {} : { taskPersonProof: options.taskPeople.taskPersonProof }),
       ...(options.taskPeople?.taskPeopleDisplayRead === undefined ? {} : { taskPeopleDisplayRead: options.taskPeople.taskPeopleDisplayRead }),
       ...(options.taskPeople?.inviteTaskPerson === undefined ? {} : { inviteTaskPerson: options.taskPeople.inviteTaskPerson }),
@@ -390,9 +402,11 @@ export async function createWorkflowE2E(options: {
   for (const channelId of options.taskPeople?.boundChannels ?? []) await bindChannel(harness.handler, channelId);
   // After setup, every call that reaches the broker is recorded: an HTTP route, or an event's source and action.
   const brokerCalls: string[] = [];
+  const brokerEvents: Array<Record<string, unknown>> = [];
   const handler: Handler = async (event, context) => {
     const record = event as { rawPath?: unknown; source?: unknown; action?: unknown; type?: unknown };
     brokerCalls.push(typeof record.rawPath === "string" ? record.rawPath : `event:${String(record.source)}/${String(record.action ?? record.type)}`);
+    if (typeof record.source === "string" && typeof record.action === "string") brokerEvents.push(structuredClone(event as Record<string, unknown>));
     return harness.handler(event, context);
   };
   const briefLimit = options.briefLimit === null ? undefined : options.briefLimit ?? E2E_BRIEF_LIMIT;
@@ -492,9 +506,20 @@ export async function createWorkflowE2E(options: {
     runProjectCommand: async (command) => {
       checkRuns.push({ command, tree: await workspaceTree("check") });
       const scripted = options.checkResult?.(command);
+      if (scripted === undefined && options.realProjectCommands === true) {
+        try {
+          const { stdout, stderr } = await execFile(command.executable, command.args, { cwd: join(root, command.cwd), timeout: command.timeoutSeconds * 1_000 });
+          return { timedOut: false, exitCode: 0, stdout, stderr };
+        } catch (error) {
+          const failure = error as Error & { code?: string | number; killed?: boolean; stdout?: string; stderr?: string };
+          return { timedOut: failure.killed === true, exitCode: typeof failure.code === "number" ? failure.code : null,
+            stdout: failure.stdout ?? "", stderr: failure.stderr ?? failure.message };
+        }
+      }
       return { timedOut: false, ...(scripted ?? { exitCode: 0, stdout: "ok\n", stderr: "" }) };
     },
   };
+  const cancellationController = new WorkerCancellationController();
 
   /** The worker's publication, simulated: the workspace tree, committed onto the base, checked out as the head branch and pushed with a push-scoped token. */
   const publish = async (invocation: Extract<WorkerInvocation, { kind: "publish" }>, callbacks: ReturnType<typeof createWorkerCallbackSinks>): Promise<unknown> => {
@@ -689,7 +714,8 @@ export async function createWorkflowE2E(options: {
       ...(ownerRetry ? { ownerRetry: true } : {}) });
     // The code each review run is given: the workspace as it is when the run starts.
     if (invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW") reviewedTrees.push(await workspaceTree(`review-${invocation.operationId}`));
-    const callbacks = createWorkerCallbackSinks({ controlPlaneUrl: CONTROL_PLANE_URL, invocation, fetchImplementation: workerFetch(handler) });
+    const callbacks = createWorkerCallbackSinks({ controlPlaneUrl: CONTROL_PLANE_URL, invocation,
+      fetchImplementation: workerFetch(handler, options.workerCallbackResponse) });
     const { operationId } = invocation;
     const failure = takeFault(failures, invocation);
     if (failure !== undefined) {
@@ -740,6 +766,7 @@ export async function createWorkflowE2E(options: {
         }, authorizeFeedbackApproval: callbacks.authorizeFeedbackApproval, checkRunners,
         ...(options.checkBudgetMs === undefined ? {} : { checkBudgetMs: options.checkBudgetMs }),
         ...(options.workerTimeouts === undefined ? {} : { timeouts: options.workerTimeouts }),
+        cancellationController,
       });
     } catch (error) {
       await callbacks.terminalSink({ operationId, status: "FAILED", error: error instanceof Error ? error.message : String(error) });
@@ -1103,7 +1130,7 @@ export async function createWorkflowE2E(options: {
         });
       }
     },
-    db, s3, handler, slack, github, mergeObservationRequests, repoDirectory, baseCommit, baseTree: github.commits.get(baseCommit)!, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, agentCheckRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs, dispatchReceipts, slackActionTimestamps,
+    db, s3, handler, slack, github, mergeObservationRequests, repoDirectory, baseCommit, baseTree: github.commits.get(baseCommit)!, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, agentCheckRuns, invocations, brokerCalls, brokerEvents, credentialAttempts, routeCalls, routeLogs, dispatchReceipts, slackActionTimestamps,
     ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE, canvasesDeleted,
     /** The broker's EC2 session deleter: each call removes one workspace's compute. */
     deleteEc2Session,
@@ -1355,8 +1382,16 @@ export async function createWorkflowE2E(options: {
       features: (list: readonly string[] | undefined): void => { workerFeatureList = list; },
       /** Changes the fresh People proof used by every later dispatch guard. */
       taskPerson: (proof: CheckTaskPerson | undefined): void => { checkTaskPerson = proof; },
+      /** Re-evaluates the production environment helper against the live broker config for toggle journeys. */
+      workflowDependenciesEnvironment(environment: Record<string, string | undefined>): void {
+        const developerConfiguration = harness.brokerInput.developer;
+        if (developerConfiguration === undefined) throw new Error("broker developer configuration is unavailable");
+        Object.assign(developerConfiguration, workflowDependenciesConfigurationFromEnvironment(environment));
+      },
       /** Runs once during the next worker feature probe, between EC2 delivery's two fresh guard checks. */
       beforeFeatureProbe: (barrier: () => void | Promise<void>): void => { beforeNextFeatureProbe = barrier; },
+      /** Cancels the real run-task through the same controller used by the worker's /cancel handler. */
+      cancelOperation: (operationId: string): Promise<{ status: "CANCELLED" | "INTERRUPTED" }> => cancellationController.cancel(operationId),
       /** Redelivers an existing durable outbox message through the real dispatcher without running the worker. */
       dispatchAgain: async (operationId: string, receiveCount = 1): Promise<boolean> => {
         const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0];

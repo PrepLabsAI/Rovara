@@ -31,7 +31,7 @@ import { readCheckHistory, restoreCheckHistory } from "./verification/check-hist
 import { candidateUnchangedSinceBase, readCandidateRepositories, type CandidateRepositoryInput } from "./verification/candidate.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
-import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, verificationExtension } from "./verification/extension.js";
+import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
 import { gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
@@ -290,6 +290,11 @@ export async function runTaskInvocation(
     // The agent's shell is the devcontainer's, where the repository is at its container path (Minor 11).
     ...(containerPaths === undefined ? {} : { cdTarget: (target: string) => workspaceRelativeCdTarget(target, containerPaths, canonicalRoot) }),
   });
+  const checkRunners = dependencies.checkRunners ?? createCheckRunners({
+    rootPath: canonicalRoot,
+    ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
+  });
+  const checkBudgetMs = dependencies.checkBudgetMs ?? (() => CHECK_ROUND_BUDGET_MS);
   let checkPlan: CheckPlan | undefined;
   let reportedChecks: CheckReport | undefined;
   let reportedChecksCandidate: CandidateRepository[] | undefined;
@@ -298,11 +303,8 @@ export async function runTaskInvocation(
   const verification = verificationExtension({
     // Review Focus 5: a broker that sends no readiness leaves the agent's own commands.
     plan: () => (checkPlan = planChecks(readiness, recorder, checkHistory)),
-    runners: dependencies.checkRunners ?? createCheckRunners({
-      rootPath: canonicalRoot,
-      ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
-    }),
-    budgetMs: dependencies.checkBudgetMs ?? (() => CHECK_ROUND_BUDGET_MS),
+    runners: checkRunners,
+    budgetMs: checkBudgetMs,
     signal: verificationStop.signal,
     recorder,
     ...(workflowDependencies === undefined ? {} : { shouldRun: () => graphFinalItemReady }),
@@ -407,6 +409,7 @@ export async function runTaskInvocation(
     let workflowDependenciesResult: WorkflowDependencyResult | undefined;
     const workflowDependencyProgressEvents: WorkItemProgressV1[] = [];
     let taskFailure: Error | undefined;
+    let completedRetainedPrefix = false;
     let evidenceFailure: unknown;
     let evidenceAttempted = false;
     let diffAttempted = false;
@@ -432,6 +435,61 @@ export async function runTaskInvocation(
         mediaType: "application/json",
         content: checksArtifactContent(finalChecks()),
       });
+    };
+    const runCompletedPrefixProjectChecks = async (
+      repositories: readonly CandidateRepositoryInput[],
+      retainedTreeSha: string,
+    ): Promise<void> => {
+      if (readiness === undefined || readiness.length === 0) {
+        // An agent command from the stopped operation is not a fresh selected project check.
+        checkPlan = { source: "none" };
+        reportedChecks = notVerifiedReport("no_checks");
+        const candidate = await readCandidateRepositories(repositories);
+        if (candidate.length !== 1 || candidate[0]?.treeSha !== retainedTreeSha) {
+          throw agentXError("OPERATION_INTERRUPTED", "workspace changed before the retained ordered-work candidate could be checked");
+        }
+        reportedChecksCandidate = candidate;
+        return;
+      }
+      const plan = planChecks(readiness, recorder, checkHistory);
+      checkPlan = plan;
+      if (plan.source !== "project" || plan.readiness === undefined || plan.readiness.length === 0) {
+        reportedChecks = notVerifiedReport("no_checks");
+        reportedChecksCandidate = undefined;
+        return;
+      }
+      const candidateBefore = await readCandidateRepositories(repositories);
+      if (candidateBefore.length !== 1 || candidateBefore[0]?.treeSha !== retainedTreeSha) {
+        throw agentXError("OPERATION_INTERRUPTED", "workspace changed before the retained ordered-work candidate could be checked");
+      }
+      const round = await runChecks(plan, checkRunners, { budgetMs: checkBudgetMs(), signal: verificationStop.signal });
+      const candidateAfter = await readCandidateRepositories(repositories);
+      const candidateUnchanged = createCandidateManifest(candidateBefore).digest === createCandidateManifest(candidateAfter).digest;
+      if (!candidateUnchanged) {
+        reportedChecks = notVerifiedReport(verificationStop.signal.aborted ? "stopped" : "error", { source: "project", checks: round.entries });
+        reportedChecksCandidate = undefined;
+        onDiagnostic("The workspace changed while AgentX reran the selected project checks; the check results are not bound to the final candidate.");
+        return;
+      }
+      reportedChecksCandidate = candidateBefore;
+      if (round.stopped || verificationStop.signal.aborted) {
+        reportedChecks = notVerifiedReport("stopped", { source: "project", checks: round.entries });
+        if (dependencies.cancellationController?.isCancelled(invocation.operationId)) {
+          throw new WorkerOperationCancelledError(invocation.operationId);
+        }
+        return;
+      }
+      const status = reportStatus(round.entries);
+      reportedChecks = {
+        status,
+        ...(status === "not_verified" ? { notVerifiedReason: round.entries.length > 0 ? "stopped" : "no_checks" } : {}),
+        source: "project",
+        preambleVersion: AGENTX_PREAMBLE_VERSION,
+        preambleSha256: agentxPreambleSha256(),
+        checks: round.entries,
+        extraTry: "not_needed",
+        agentClaim: "none",
+      };
     };
     // Ruling O (I-1): on every ending, the history is the snapshot plus the final round's project outcomes (Ruling M),
     // whatever the agent left at the path. A failed write removes the path; neither ever fails the task.
@@ -536,6 +594,13 @@ export async function runTaskInvocation(
           },
         });
         workflowDependencyProgressEvents.push(...execution.progress.filter((entry) => !workflowDependencyProgressEvents.some((stored) => stored.sequence === entry.sequence)));
+        const resumedItems = new Set((workflowDependencies.resumeProgress ?? [])
+          .filter((entry) => entry.state === "IMPLEMENTED").map((entry) => entry.itemId));
+        const completeRetainedPrefix = execution.progress.length === 0 && taskGraphOrder(graph).every((itemId) => resumedItems.has(itemId));
+        if (completeRetainedPrefix) {
+          completedRetainedPrefix = true;
+          await runCompletedPrefixProjectChecks(repositoryInputs, execution.finalTreeSha);
+        }
       }
       if (planning) {
         let plan = finalText?.trim();
@@ -640,7 +705,7 @@ export async function runTaskInvocation(
         }
       }
       const noChange = fileChanges.noChangeFailure(changed);
-      if (noChange !== undefined) throw noChange;
+      if (noChange !== undefined && !completedRetainedPrefix) throw noChange;
       const warning = fileChanges.emptyDiffWarning(changed);
       if (warning !== undefined) await events.append("progress", { message: warning });
       outcome = "SUCCEEDED";

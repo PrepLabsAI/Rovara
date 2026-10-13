@@ -175,6 +175,8 @@ export function planDocumentInstructions(input: {
   retired?: readonly string[];
   /** Ask for an `anchor` line on each `code` citation. The delivery drops this text for a worker that cannot read it. */
   anchors?: boolean;
+  /** Present only for an enabled coding planner with one repository in the task's pinned project revision. */
+  workBreakdownContext?: { taskId: string; repositoryId: string };
 }): string {
   const checks = input.kind === "plan";
   const retiredIds = (input.retired ?? []).slice(0, RETIRED_CLAIM_IDS_MAX);
@@ -199,6 +201,12 @@ export function planDocumentInstructions(input: {
     "IDs: keep a claim's ID from the previous version of this document when the claim still exists. Give new claims new IDs. Never reuse the ID of a claim that was removed.",
     ...(retiredIds.length === 0 ? [] : [`These claim IDs were removed earlier and must not be used again: ${retiredIds.join(", ")}.`]),
     ...(checks ? ["`checks` goes in the coding plan only. Each check lists in `proves` the IDs of the claims it proves. Checks may prove Not changing items: use `nc1`, `nc2` and so on, counting the `notChanging` entries from 1."] : []),
+    ...(checks && input.workBreakdownContext !== undefined ? [
+      `When this request needs several ordered coding pieces, include a \`workBreakdown\` member in the final \`agentx-plan\` JSON. A small request may omit it. Bind it to this canonical task and its one registered repository: ${JSON.stringify({ schemaVersion: 1, taskId: input.workBreakdownContext.taskId, version: 1, items: [{ id: "<UUID>", title: "<1-80 characters>", description: "<1-2000 characters>", repository: input.workBreakdownContext.repositoryId, dependsOn: [] }] })}.`,
+      "Use UUIDs for item IDs. Keep IDs stable when an item remains the same; increase the graph version when the graph changes. Propose only work in the approved request; do not invent scope or owner approval.",
+      "The graph may contain at most 8 items, 12 dependency edges, and 16,384 canonical bytes. Keep the complete plan within its existing 32,768-byte limit. Use only the bound registered repository name; never substitute a checkout directory path or another repository.",
+      "AgentX executes eligible items in deterministic serial dependency order and publishes one final pull request for the repository. The owner approves the whole graph before execution. Do not claim checks or review as executor self-attestation; AgentX runs checks and independent reviews separately.",
+    ] : []),
     "A later step may change a claim the owner already approved only when it has to.",
     ...(input.previous === undefined ? [] : [previousPlanDocumentBlock(input.previous)]),
   ].join("\n\n");

@@ -4,7 +4,24 @@
 
 Extend the native task-to-PR workflow so an owner can approve an understandable task breakdown with
 dependencies. Keep AgentX as the executor and existing project checks, human approvals, GitHub, and
-merge authority intact. Do not alter the CharterArc objective or claim this design is implemented.
+merge authority intact. Do not alter the CharterArc objective or claim implementation, verification
+or live qualification without evidence for the exact candidate.
+
+## Current serial phase
+
+The owner approved one repository, one final PR, whole-graph reapproval and pause on failure. The
+current contract uses 1–8 items, 12 dependency links and 16,384 canonical graph bytes. It runs through
+the existing coding-plan approval, worker operation, final checks and reviews, publication and human
+merge. The current task is to qualify the runtime connection and its live TEST journey.
+
+Keep deployment default OFF. `WorkflowDependenciesEnabled` supplies the broker's
+`AGENTX_WORKFLOW_DEPENDENCIES_ENABLED`; eligible coding planners receive the task's canonical ID
+and repository from its starting project revision. Existing durable progress acknowledgement and
+operation-attempt fences control serial execution. Worker compatibility is required before delivery.
+
+The review page replaces the draft's Canvas-first presentation. Slack and MCP retain equal actions.
+Production activation and older-version recovery remain separately qualified. OFF prevents new
+graph starts and retries but does not make older code understand retained graph records.
 
 ## Design work
 
