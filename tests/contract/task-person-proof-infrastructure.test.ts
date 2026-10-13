@@ -187,13 +187,25 @@ describe("the named TEST proof-only installation gate", () => {
         Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" },
       },
     });
-    expect(denyUnprojectedGetItem).toMatchObject({
+    const expectedProjectionDeny = {
       Sid: "DenyGetItemUnlessSpecificAttributes",
       Effect: "Deny",
+      Action: "dynamodb:GetItem",
+      Resource: { "Fn::GetAtt": [tableId, "Arn"] },
       Condition: { StringNotEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" } },
-    });
-    expect(normalizeSingleton(denyUnprojectedGetItem?.Action)).toBe("dynamodb:GetItem");
-    expect(normalizeSingleton(denyUnprojectedGetItem?.Resource)).toEqual({ "Fn::GetAtt": [tableId, "Arn"] });
+    };
+    const assertExactProjectionDeny = (statement: Record<string, unknown>) => expect({
+      ...statement,
+      Action: normalizeSingleton(statement.Action),
+      Resource: normalizeSingleton(statement.Resource),
+    }).toEqual(expectedProjectionDeny);
+    assertExactProjectionDeny(denyUnprojectedGetItem!);
+    const extraNullCounterfactual = structuredClone(denyUnprojectedGetItem!);
+    extraNullCounterfactual.Condition = {
+      ...(extraNullCounterfactual.Condition as Record<string, unknown>),
+      Null: { "dynamodb:Select": "false" },
+    };
+    expect(() => assertExactProjectionDeny(extraNullCounterfactual)).toThrow();
     const versionId = Object.keys(resources).find((id) => JSON.stringify(invoke?.Resource).includes(id));
     expect(invoke).toEqual({ Effect: "Allow", Action: ["lambda:InvokeFunction"], Resource: [{ Ref: versionId }] });
     expect(versionId).toContain("TaskPersonProofFunctionCurrentVersion");
