@@ -6,7 +6,7 @@ Make the base file say what its number means.
 
 ## Success criteria
 
-- [ ] docs/rovara-e2e/base.md explains that 3 is the number of retries after the first attempt.
+- [ ] docs/rovara-e2e/base.md says that 3 is the number of retries after the first try.
 - [ ] The file still has its first line unchanged.
 
 ## Approach
