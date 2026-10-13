@@ -30,7 +30,7 @@ export function docsDir(state: { repo: string; issue: number; target?: string | 
 }
 
 /** Where an item's documents live, in its worktree: docs/rovara/<issue>/<artifact>.md. */
-export function artifactPath(issue: number, artifact: "requirements" | "design" | "plan"): string {
+export function artifactPath(issue: number, artifact: "requirements" | "design" | "plan" | "contribution"): string {
   return `docs/rovara/${issue}/${artifact}.md`;
 }
 

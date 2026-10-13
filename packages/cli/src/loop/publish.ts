@@ -19,11 +19,15 @@ export interface PublishInput {
   reviews?: string | undefined;
   startedBy: string;
   /** Who approved each document; the description names them. */
-  approvals: Partial<Record<"requirements" | "design" | "plan", { by: string }>> | undefined;
+  approvals: Partial<Record<"requirements" | "design" | "plan" | "contribution", { by: string }>> | undefined;
   /** Phases declared away when the loop started. */
   skipped: readonly string[] | undefined;
-  /** The pull request's base: the repository's default branch, as GitHub names it. */
+  /** The pull request's base: the repository's default branch, as GitHub names it (or, #359, the branch it follows up). */
   defaultBranch: string;
+  /** #359: the head as `gh pr create` names it when the pull request is in another repository (`owner:branch`). */
+  head?: string;
+  /** #359: what the planning document is called in the description: "Plan", or "Contribution". */
+  planHeading?: string;
   pullRequest: { number: number; url: string } | undefined;
 }
 
@@ -55,7 +59,7 @@ export async function publish(exec: Exec, input: PublishInput): Promise<Publishe
     "",
     `Opened by rovara loop for @${input.startedBy}.${approvalLine(input)}`,
     "",
-    "## Plan",
+    `## ${input.planHeading ?? "Plan"}`,
     "",
     input.plan ?? "(the plan could not be read)",
     "",
@@ -64,7 +68,7 @@ export async function publish(exec: Exec, input: PublishInput): Promise<Publishe
     input.checks,
     ...(input.reviews === undefined ? [] : ["", "## Reviews", "", input.reviews]),
   ].join("\n");
-  const url = (await run(exec, "gh", ["pr", "create", "--repo", input.repo, "--head", input.branch, "--base", base, "--title", title, "--body-file", "-"], { input: body, cwd: input.worktree })).trim().split("\n").pop() ?? "";
+  const url = (await run(exec, "gh", ["pr", "create", "--repo", input.repo, "--head", input.head ?? input.branch, "--base", base, "--title", title, "--body-file", "-"], { input: body, cwd: input.worktree })).trim().split("\n").pop() ?? "";
   const number = Number(/\/pull\/(\d+)$/u.exec(url)?.[1]);
   if (!Number.isInteger(number)) throw new Error(`gh pr create answered something that is not a pull request address: ${url.slice(0, 200)}`);
   return { pullRequest: { number, url }, created: true };
