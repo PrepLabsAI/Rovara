@@ -970,7 +970,7 @@ async function handOffToSelf(lambda: LambdaClient, event: HandedOffWorkflowStart
   if (response.StatusCode !== 202) throw Object.assign(new Error("the start was not handed over"), { name: "StartHandOffRefused" });
 }
 
-interface WorkflowActionValue { taskId: string; revision: number; digest: string; decision: "APPROVE" | "REQUEST_CHANGES" }
+interface WorkflowActionValue { taskId: string; revision: number; digest: string; decision: "APPROVE" | "REQUEST_CHANGES"; workBreakdownDigest?: string }
 
 class WorkflowInteractionRefusal extends Error {
   constructor(message: string) { super(message); this.name = "WorkflowInteractionRefusal"; }
@@ -1031,8 +1031,10 @@ function workflowActionValue(value: string): WorkflowActionValue | undefined {
     const parsed = JSON.parse(value) as Record<string, unknown>;
     if (typeof parsed.taskId !== "string" || !CHANGE_ID.test(parsed.taskId) || !Number.isInteger(parsed.revision)
       || typeof parsed.digest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.digest)
-      || (parsed.decision !== "APPROVE" && parsed.decision !== "REQUEST_CHANGES")) return undefined;
-    return { taskId: parsed.taskId, revision: parsed.revision as number, digest: parsed.digest, decision: parsed.decision };
+      || (parsed.decision !== "APPROVE" && parsed.decision !== "REQUEST_CHANGES")
+      || (parsed.workBreakdownDigest !== undefined && (typeof parsed.workBreakdownDigest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.workBreakdownDigest)))) return undefined;
+    return { taskId: parsed.taskId, revision: parsed.revision as number, digest: parsed.digest, decision: parsed.decision,
+      ...(typeof parsed.workBreakdownDigest === "string" ? { workBreakdownDigest: parsed.workBreakdownDigest } : {}) };
   } catch { return undefined; }
 }
 
@@ -1229,7 +1231,8 @@ export function workflowSlackHandlers(deps: {
     // One canonical order for both the request ID and the submitted decision, so the same selection made in another
     // order is the same decision rather than a replay mismatch.
     const selectedOptionalCheckIds = [...chosenOptionalCheckIds].sort();
-    const requestId = workflowDecisionRequestId({ taskId: value.taskId, revision: value.revision, digest: value.digest, decision: value.decision, reason, selectedOptionalCheckIds });
+    const requestId = workflowDecisionRequestId({ taskId: value.taskId, revision: value.revision, digest: value.digest, decision: value.decision, reason, selectedOptionalCheckIds,
+      ...(value.workBreakdownDigest === undefined ? {} : { workBreakdownDigest: value.workBreakdownDigest }) });
     if (workflow.decisions.some((decision) => decision.requestId === requestId)) {
       console.log(JSON.stringify({ component: "slack-interactivity", event: "workflow.decision_replayed", taskId: value.taskId, requestId }));
       return false;
@@ -1238,6 +1241,7 @@ export function workflowSlackHandlers(deps: {
     await deps.submit({
       taskId: value.taskId, userId, thread,
       expectedRevision: value.revision, artifactDigest: value.digest, decision: value.decision,
+      ...(value.decision === "APPROVE" && value.workBreakdownDigest !== undefined ? { workBreakdownDigest: value.workBreakdownDigest } : {}),
       reason, selectedOptionalCheckIds, requestId,
     });
     return true;
@@ -1805,7 +1809,7 @@ export function workflowSlackHandlers(deps: {
 }
 
 /** Retries of the same Slack modal submission reuse the broker's idempotency key. */
-function workflowDecisionRequestId(input: { taskId: string; revision: number; digest: string; decision: string; reason: string; selectedOptionalCheckIds: string[] }): string {
+function workflowDecisionRequestId(input: { taskId: string; revision: number; digest: string; decision: string; reason: string; selectedOptionalCheckIds: string[]; workBreakdownDigest?: string }): string {
   const digest = createHash("sha256").update(JSON.stringify({ ...input, selectedOptionalCheckIds: [...input.selectedOptionalCheckIds].sort() }), "utf8").digest("hex");
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
 }

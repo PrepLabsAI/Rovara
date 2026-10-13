@@ -37,6 +37,32 @@ describe("parsePlanDocument", () => {
     expect(result).toEqual({ ok: true, plan });
   });
 
+  it("round-trips an optional work breakdown only on coding plans and renders its ordered titles", () => {
+    const workBreakdown = {
+      schemaVersion: 1 as const,
+      taskId: "8c330a74-b4c6-4f01-9356-5fe54fc55b19",
+      version: 1,
+      items: [
+        { id: "11111111-1111-4111-8111-111111111111", title: "Foundation", description: "Build shared support.", repository: "github:acme/payments", dependsOn: [] },
+        { id: "22222222-2222-4222-8222-222222222222", title: "Page", description: "Build the page.", repository: "github:acme/payments", dependsOn: ["11111111-1111-4111-8111-111111111111"] },
+      ],
+    };
+    const plan = { ...planDocument(), workBreakdown };
+    const parsed = parsePlanDocument(planAnswer(plan), { kind: "plan" });
+    expect(parsed).toEqual({ ok: true, plan });
+    expect(parsed.ok && readCanonicalPlan(canonicalPlanJson(parsed.plan))?.workBreakdown).toEqual(workBreakdown);
+    expect(planDocumentMarkdown(plan, { kind: "plan", version: 1, sha256: "a".repeat(64) })).toContain("## Work breakdown\n1. **Foundation**: Build shared support.\n2. **Page**: Build the page. (after Foundation)");
+    expect(parsePlanDocument(planAnswer(plan), { kind: "design" })).toEqual({ ok: false, errors: ["the plan: work breakdown belongs only in the coding plan"] });
+    expect(parsePlanDocument(planAnswer(plan), { kind: "requirements" }).ok).toBe(false);
+  });
+
+  it("preserves graphless plan compatibility", () => {
+    const plan = planDocument();
+    const parsed = parsePlanDocument(planAnswer(plan), { kind: "plan" });
+    expect(parsed).toEqual({ ok: true, plan });
+    expect(parsed.ok && parsed.plan.workBreakdown).toBeUndefined();
+  });
+
   it("uses the last agentx-plan fence and ignores fences with another info string", () => {
     const first = planDocument({ title: "First" });
     const second = planDocument({ title: "Second" });

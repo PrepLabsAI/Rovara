@@ -74,6 +74,8 @@ export interface DeveloperApiConfiguration {
   taskPeopleDisplayRead?: (request: TaskPeopleDisplayReadRequest) => Promise<TaskPeopleDisplayReadResponse>;
   /** D: exact opt-in for role changes; an existing PEOPLE sidecar remains enforced while false. */
   taskPeopleConfiguration?: { peopleChangesEnabled: boolean };
+  /** Spec 059: absent is the safe default; production factories intentionally leave graph starts disabled. */
+  workflowDependenciesEnabled?: boolean;
   /** C: optional distinct claim-bound invitation endpoint; production leaves it absent until separately configured. */
   inviteTaskPerson?: DeveloperTaskRouteDependencies["inviteTaskPerson"];
   /** R10: bound channels' names and privacy, read by DeveloperIdentity. Optional: without it channels are listed by ID. */
@@ -733,6 +735,7 @@ export function developerTaskRouteDependencies(
     issuer: deps.developer.issuer,
     actions: deps.tasks!,
     ...(deps.developer.taskPeopleConfiguration === undefined ? {} : { taskPeopleConfiguration: deps.developer.taskPeopleConfiguration }),
+    ...(deps.developer.workflowDependenciesEnabled === undefined ? {} : { workflowDependenciesEnabled: deps.developer.workflowDependenciesEnabled }),
     checkTaskPerson: async (task, developerId, admission) => {
       return checkTaskPersonIdentity(identityDependencies(admission), task, developerId);
     },

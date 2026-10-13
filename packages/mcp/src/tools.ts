@@ -93,6 +93,7 @@ const TaskShape = {
     verification: z.object({ candidate_digest: z.string(), results: z.array(z.object({ check_id: z.string(), status: z.enum(["PASS", "FAILED", "UNKNOWN"]) })) }).optional(),
     reviews: z.array(z.object({ role: z.enum(["CRITIC", "SECURITY"]), status: z.enum(["PASS", "FINDINGS", "FAILED", "INTERRUPTED", "UNKNOWN"]), candidate_digest: z.string(), failure_reason: z.enum(WORKFLOW_REVIEW_FAILURE_REASONS).optional(), recorded_at: z.string() })).optional(),
     approval_document: z.object({ type: z.string(), sha256: z.string(), version: z.number(), content: z.string().optional() }).optional(),
+    work_breakdown_digest: z.string().regex(/^[a-f0-9]{64}$/).optional().describe("the exact digest of the ordered work breakdown in the current coding plan; required only to approve a plan that contains one"),
     plan: z.object({ sha256: z.string(), version: z.number(), content: z.string().optional() }).optional(),
     feedback_review: z.object({
       status: z.enum(["COLLECTING", "PENDING", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"]),
@@ -114,6 +115,7 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
     : task.workflow?.path === "FULL" && task.workflow.reviewPhase === "DESIGN" ? "design" : "plan";
   const activeArtifact = task.workflow?.artifacts.filter((artifact) => artifact.type === activeArtifactType).at(-1);
   const planArtifact = task.workflow?.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
+  const workBreakdownDigest = activeArtifact?.type === "plan" ? task.workflow?.workBreakdownDigest : undefined;
   // Blocked reviews: the findings the owner still has to accept or have fixed. Reviewer text is shown made safe.
   const blockingFindings = task.workflow === undefined || task.workflow.stage !== "REVIEW" || task.workflow.state !== "BLOCKED" ? []
     : openReviewFindings(task.workflow).map((finding) => ({
@@ -164,6 +166,7 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
         })) }),
         ...(activeArtifact === undefined ? {} : {
           approval_document: { type: activeArtifact.type, sha256: activeArtifact.sha256, version: activeArtifact.version, ...(task.workflow.planContent === undefined ? {} : { content: task.workflow.planContent }) },
+          ...(workBreakdownDigest === undefined ? {} : { work_breakdown_digest: workBreakdownDigest }),
         }),
         ...(planArtifact === undefined ? {} : {
           plan: { sha256: planArtifact.sha256, version: planArtifact.version, ...(planArtifact.type === activeArtifactType && task.workflow.planContent !== undefined ? { content: task.workflow.planContent } : {}) },
@@ -181,7 +184,7 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
 /** What the AI tool can do next with a task in this state. */
 function nextFor(task: DeveloperTaskView): string {
   if (task.workflow?.state === "WAITING" && task.workflow.stage === "PLAN_REVIEW") {
-    return "Review the current approval_document, then use agentx_decide_workflow with its exact sha256 and expected revision. Quick has one approval; Full has requirements, design, and coding-plan approvals before implementation.";
+    return "Review the current approval_document, then use agentx_decide_workflow with its exact sha256 and expected revision. If the task output includes work_breakdown_digest, include that exact value when choosing APPROVE; omit it for REQUEST_CHANGES. Quick has one approval; Full has requirements, design, and coding-plan approvals before implementation.";
   }
   if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "REVIEW") {
     const workflow = task.workflow;
@@ -549,7 +552,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_decide_workflow",
     title: "Approve or respond to an AgentX plan",
-    description: "Records your decision on the current approval document. APPROVE advances Quick or Full to its next stage only when the exact document sha256 and workflow revision match. REQUEST_CHANGES asks AgentX to replace the document without editing files. REJECT closes this workflow. SKIP is refused unless the project explicitly allows it. Use the approval_document digest and revision shown by agentx_get_task.",
+    description: "Records your decision on the current approval document. APPROVE advances Quick or Full to its next stage only when the exact document sha256 and workflow revision match. If agentx_get_task shows work_breakdown_digest, copy it into this call when approving; this binds approval to the exact ordered work plan. Omit it for REQUEST_CHANGES. REQUEST_CHANGES asks AgentX to replace the document without editing files. REJECT closes this workflow. SKIP is refused unless the project explicitly allows it. Use the approval_document digest and revision shown by agentx_get_task.",
     inputSchema: {
       task_id: taskIdInput,
       request_id: z.string().uuid().describe("UUID for safe retry; repeat the same request unchanged if the call times out"),
@@ -557,6 +560,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       decision: z.enum(["APPROVE", "REQUEST_CHANGES", "REJECT", "SKIP"]),
       reason: z.string().trim().min(1).max(500),
       artifact_digest: z.string().regex(/^[a-f0-9]{64}$/),
+      work_breakdown_digest: z.string().regex(/^[a-f0-9]{64}$/).optional().describe("copy work_breakdown_digest from agentx_get_task when approving a coding plan that contains an ordered work breakdown; omit for REQUEST_CHANGES"),
     },
     outputSchema: ActionShape,
     async handler(context, input) {
@@ -566,6 +570,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
         decision: input.decision as "APPROVE" | "REQUEST_CHANGES" | "REJECT" | "SKIP",
         reason: input.reason as string,
         ...(input.artifact_digest === undefined ? {} : { artifactDigest: input.artifact_digest as string }),
+        ...(input.work_breakdown_digest === undefined ? {} : { workBreakdownDigest: input.work_breakdown_digest as string }),
       });
       return { structured: { ...taskOutput(task), request_id: input.request_id }, text: `${taskText(task)} ${nextFor(task)}` };
     },

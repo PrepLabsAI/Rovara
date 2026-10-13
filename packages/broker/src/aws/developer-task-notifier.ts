@@ -11,7 +11,7 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, taskGraphDigest, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
@@ -645,7 +645,7 @@ function structuredCardClaims(plan: PlanDocument): NonNullable<WorkflowMessageCo
  * Canvas can be linked, the task page is; when nothing can be, the card says so. A document whose digest does not
  * match is neither summarised nor linked.
  */
-async function prepareDocumentLink(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot): Promise<{ url?: string; summary?: string[]; structured?: NonNullable<WorkflowMessageContext["structured"]> }> {
+async function prepareDocumentLink(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot): Promise<{ url?: string; summary?: string[]; structured?: NonNullable<WorkflowMessageContext["structured"]>; workBreakdownDigest?: string }> {
   const unavailable = (reason: string) => deps.log({ event: "developer_notifier.document_link_unavailable", taskId: task.taskId, workflowRevision: workflow.revision, reason });
   const plan = workflow.artifacts.filter((artifact) => artifact.type === workflowDocumentType(workflow)).at(-1);
   if (plan === undefined || deps.readArtifact === undefined) {
@@ -663,7 +663,8 @@ async function prepareDocumentLink(deps: NotifierDependencies, task: DeveloperTa
   // the page at this document and version.
   if (loaded.format === "structured") {
     if (fallback === undefined) unavailable("task_page_unconfigured");
-    return { structured: structuredCardClaims(loaded.plan), ...(fallback === undefined ? {} : { url: planReviewLink(fallback, workflow, plan.version) }) };
+    return { structured: structuredCardClaims(loaded.plan), ...(loaded.plan.workBreakdown === undefined ? {} : { workBreakdownDigest: taskGraphDigest(loaded.plan.workBreakdown) }),
+      ...(fallback === undefined ? {} : { url: planReviewLink(fallback, workflow, plan.version) }) };
   }
   const markdown = loaded.markdown;
   const summary = documentSummaryLines(markdown);
@@ -805,6 +806,7 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
     const document = await prepareDocumentLink(deps, task, workflow);
     context.documentSummary = document.summary;
     context.structured = document.structured;
+    context.workBreakdownDigest = document.workBreakdownDigest;
     if (document.url !== undefined) context.documentLink = { url: document.url };
     context.newReplies = await newThreadReplies(deps, task);
     approval = workflow.artifacts.filter((artifact) => artifact.type === workflowDocumentType(workflow)).at(-1);
