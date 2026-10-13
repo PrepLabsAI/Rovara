@@ -9,6 +9,10 @@ const id = (max = 120) => z.string().trim().min(1).max(max);
 const ids = (max = 64) => z.array(id()).min(1).max(max).refine((values) => new Set(values).size === values.length, "identifiers must be unique");
 const timestamp = z.string().datetime();
 const positiveInt = z.number().int().positive();
+const MAX_JSON_LITERAL_BYTES = 65_536;
+const MAX_JSON_LITERAL_DEPTH = 32;
+const MAX_STRUCTURED_RECORD_BYTES = 262_144;
+const MAX_STRUCTURED_RECORD_DEPTH = 64;
 const sourceRelativePath = z.string().min(1).max(1024).superRefine((value, context) => {
   try {
     let decoded = value;
@@ -24,7 +28,8 @@ const sameOriginAppPath = z.string().min(1).max(2048).superRefine((value, contex
   try {
     let decoded = value;
     for (let depth = 0; depth < 4; depth += 1) decoded = decodeURIComponent(decoded);
-    if (value.startsWith("//") || value.startsWith("\\") || value.includes("\\") || decoded.includes("\\")
+    if (value !== value.trim() || /[\u0000-\u001f\u007f]/.test(value)
+      || value.startsWith("//") || value.startsWith("\\") || value.includes("\\") || decoded.includes("\\")
       || /^[a-z][a-z0-9+.-]*:/i.test(value) || /^[a-z][a-z0-9+.-]*:/i.test(decoded) || decoded.startsWith("//")
       || decoded.split("/").some((part) => part === ".." || part === ".") || decoded.includes("\u0000")
       || /%(?:2e|2f|5c)/i.test(decoded)) {
@@ -34,13 +39,15 @@ const sameOriginAppPath = z.string().min(1).max(2048).superRefine((value, contex
 });
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
-function copyJsonValue(value: unknown): JsonValue {
+type JsonBounds = { maxBytes: number; maxDepth: number; maxNodes?: number };
+function copyJsonValue(value: unknown, bounds: JsonBounds): JsonValue {
   const seen = new Set<object>();
+  const maxNodes = bounds.maxNodes ?? 16_384;
   let nodes = 0;
   const copy = (item: unknown, depth: number): JsonValue => {
     nodes += 1;
-    if (nodes > 16_384) throw new TypeError("JSON value exceeds structural limit");
-    if (depth > 32) throw new TypeError("JSON nesting exceeds 32");
+    if (nodes > maxNodes) throw new TypeError("JSON value exceeds structural limit");
+    if (depth > bounds.maxDepth) throw new TypeError(`JSON nesting exceeds ${bounds.maxDepth}`);
     if (item === null || typeof item === "boolean" || typeof item === "string") return item;
     if (typeof item === "number" && Number.isFinite(item)) return item;
     if (typeof item !== "object") throw new TypeError("value is not JSON data");
@@ -51,10 +58,15 @@ function copyJsonValue(value: unknown): JsonValue {
       const descriptors = Object.getOwnPropertyDescriptors(item);
       const keys = Reflect.ownKeys(descriptors);
       if (Array.isArray(item)) {
-        if (prototype !== Array.prototype || keys.some((key) => typeof key !== "string" || (key !== "length" && !/^(0|[1-9][0-9]*)$/.test(key)))) throw new TypeError("array has non-JSON properties");
-        const output: JsonValue[] = [];
         const length = descriptors.length;
         if (length === undefined || !("value" in length) || !Number.isSafeInteger(length.value) || length.value < 0 || length.value > 16_384) throw new TypeError("array length is not bounded data");
+        if (prototype !== Array.prototype || keys.some((key) => {
+          if (typeof key !== "string") return true;
+          if (key === "length") return false;
+          const index = Number(key);
+          return !Number.isInteger(index) || index < 0 || index >= length.value || index > 4_294_967_294 || String(index) !== key;
+        })) throw new TypeError("array has non-index properties");
+        const output: JsonValue[] = [];
         for (let index = 0; index < length.value; index += 1) {
           const descriptor = descriptors[String(index)];
           if (descriptor === undefined || !("value" in descriptor) || descriptor.enumerable !== true) throw new TypeError("array must be dense data");
@@ -74,14 +86,17 @@ function copyJsonValue(value: unknown): JsonValue {
     } finally { seen.delete(item); }
   };
   const copied = copy(value, 0);
-  if (Buffer.byteLength(canonicalJson(copied), "utf8") > 65_536) throw new TypeError("canonical JSON exceeds 65536 bytes");
+  if (Buffer.byteLength(canonicalJson(copied), "utf8") > bounds.maxBytes) throw new TypeError(`canonical JSON exceeds ${bounds.maxBytes} bytes`);
   return copied;
 }
 const safeJsonInput = z.unknown().transform((value, context) => {
-  try { return copyJsonValue(value); }
+  try { return copyJsonValue(value, { maxBytes: MAX_STRUCTURED_RECORD_BYTES, maxDepth: MAX_STRUCTURED_RECORD_DEPTH }); }
   catch { context.addIssue({ code: "custom", message: "value must be bounded JSON data" }); return z.NEVER; }
 });
-const plainJson = safeJsonInput;
+const plainJson = z.unknown().transform((value, context) => {
+  try { return copyJsonValue(value, { maxBytes: MAX_JSON_LITERAL_BYTES, maxDepth: MAX_JSON_LITERAL_DEPTH }); }
+  catch { context.addIssue({ code: "custom", message: "JSON literal must be bounded JSON data" }); return z.NEVER; }
+});
 function safeJsonSchema<T extends z.ZodType>(schema: T) {
   return z.unknown().transform((value, context): z.output<T> => {
     const copied = safeJsonInput.safeParse(value);
@@ -196,8 +211,10 @@ export type E2ECaseCoverage = z.infer<typeof E2ECaseCoverageSchema>;
 export const E2EExpectedCaseSchema = z.object({ caseId: id(160), criterionId: id(120), scenarioId: id(120), upstreamTestId: id(160), targetId: id(80), requestedTargetId: id(80), agentId: id(120), repeat: z.literal(0), assertionDigest: digest, required: z.boolean(), minimumEvidence: E2EEvidenceScopeSchema, requiredRealComponentIds: z.array(id(120)).max(32) }).strict();
 export type E2EExpectedCase = z.infer<typeof E2EExpectedCaseSchema>;
 const E2EGroupSchema = z.object({ groupId: id(80), targetIds: ids(3), runtimeProfileId: id(120), mode: E2EExecutionModeSchema, mockManifestDigest: digest, expectedCases: z.array(E2EExpectedCaseSchema).max(64) }).strict();
-export const E2EExecutionPlanSchema = z.object({ schemaVersion: z.literal(1), digest, candidateDigest: digest, planDigest: digest, criteria: z.array(E2ECriterionExpectationSchema).max(64), effectiveTargets: z.array(E2ETargetSchema).max(12), groups: z.array(E2EGroupSchema).max(4), mocks: z.array(E2EMockSpecSchema).max(200), unavailableCriteria: z.array(z.object({ criterionId: id(120), reason: id(500) }).strict()).max(64) }).strict().superRefine((plan, context) => {
-  if (e2eExecutionPlanDigest(plan) !== plan.digest) context.addIssue({ code: "custom", path: ["digest"], message: "execution plan digest does not match canonical content" });
+export const E2EExecutionPlanSchema = safeJsonSchema(z.object({ schemaVersion: z.literal(1), digest, candidateDigest: digest, planDigest: digest, criteria: z.array(E2ECriterionExpectationSchema).max(64), effectiveTargets: z.array(E2ETargetSchema).max(12), groups: z.array(E2EGroupSchema).max(4), mocks: z.array(E2EMockSpecSchema).max(200), unavailableCriteria: z.array(z.object({ criterionId: id(120), reason: id(500) }).strict()).max(64) }).strict().superRefine((plan, context) => {
+  try {
+    if (e2eExecutionPlanDigest(plan) !== plan.digest) context.addIssue({ code: "custom", path: ["digest"], message: "execution plan digest does not match canonical content" });
+  } catch { context.addIssue({ code: "custom", path: ["digest"], message: "execution plan digest cannot be computed safely" }); }
   if (new Set(plan.criteria.map((criterion) => criterion.criterionId)).size !== plan.criteria.length) context.addIssue({ code: "custom", path: ["criteria"], message: "criterion IDs must be unique" });
   const targets = new Set(plan.effectiveTargets.map((target) => target.targetId));
   if (new Set(plan.effectiveTargets.map((target) => target.targetId)).size !== plan.effectiveTargets.length) context.addIssue({ code: "custom", path: ["effectiveTargets"], message: "effective target IDs must be unique" });
@@ -229,7 +246,7 @@ export const E2EExecutionPlanSchema = z.object({ schemaVersion: z.literal(1), di
       context.addIssue({ code: "custom", path: ["groups"], message: "every expected case must belong to exactly one matching criterion" });
     }
   }
-});
+}));
 export type E2EExecutionPlan = z.infer<typeof E2EExecutionPlanSchema>;
 export function e2eExecutionPlanDigest(plan: E2EExecutionPlan): string { const copied = safeJsonInput.parse(plan) as unknown as E2EExecutionPlan; const { digest: _ignored, ...content } = copied; return createHash("sha256").update(canonicalJson(content)).digest("hex"); }
 
@@ -289,7 +306,7 @@ function resultTimingValid(result: E2EQualifiedResult): boolean {
   const finished = Date.parse(result.finishedAt);
   const deadline = Date.parse(result.binding.deadlineAt);
   const received = Date.parse(result.receivedAt);
-  return admitted <= started && started <= finished && finished <= deadline && received <= finished + 305_000;
+  return admitted <= started && started <= finished && finished <= deadline && received >= finished - 5_000 && received <= finished + 305_000;
 }
 function projection(status: "PASS" | "FAILED" | "UNKNOWN", candidateDigest = "0".repeat(64), producer = "e2e-aggregator", environmentId = "unavailable", recordedAt = new Date(0).toISOString()): WorkflowVerificationResults {
   return { candidateDigest, producer, environmentId, recordedAt, results: [workflowResult(E2E_PROJECT_CHECK_ID, status)] };
