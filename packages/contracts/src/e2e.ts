@@ -209,7 +209,9 @@ export const E2ECriterionExpectationSchema = z.object({ criterionId: id(120), re
 export type E2ECriterionExpectation = z.infer<typeof E2ECriterionExpectationSchema>;
 export const E2ECaseCoverageSchema = z.object({ observedScope: E2EEvidenceScopeSchema, subject: z.enum(["candidate", "simulation", "fixture"]), executedCandidateParts: z.array(id(256)).max(64), realComponentIds: z.array(id(120)).max(32), mockedComponentIds: z.array(id(120)).max(32), unexercisedBehaviors: z.array(id(256)).max(64) }).strict();
 export type E2ECaseCoverage = z.infer<typeof E2ECaseCoverageSchema>;
-export const E2EExpectedCaseSchema = z.object({ caseId: id(160), criterionId: id(120), scenarioId: id(120), upstreamTestId: id(160), targetId: id(80), requestedTargetId: id(80), agentId: id(120), repeat: z.literal(0), assertionDigest: digest, required: z.boolean(), minimumEvidence: E2EEvidenceScopeSchema, requiredRealComponentIds: z.array(id(120)).max(32) }).strict();
+export const E2EExpectedCaseSchema = z.object({ caseId: id(160), criterionId: id(120), scenarioId: id(120), upstreamTestId: id(160), targetId: id(80), requestedTargetId: id(80), agentId: id(120), repeat: z.literal(0), assertionDigest: digest, assertionDigests: z.array(digest).min(1).max(20), required: z.boolean(), minimumEvidence: E2EEvidenceScopeSchema, requiredRealComponentIds: z.array(id(120)).max(32) }).strict().superRefine((item, context) => {
+  if (createHash("sha256").update(canonicalJson(item.assertionDigests)).digest("hex") !== item.assertionDigest) context.addIssue({ code: "custom", path: ["assertionDigest"], message: "aggregate assertion digest must bind the ordered assertion identities" });
+});
 export type E2EExpectedCase = z.infer<typeof E2EExpectedCaseSchema>;
 const E2EGroupSchema = z.object({ groupId: id(80), targetIds: ids(3), runtimeProfileId: id(120), mode: E2EExecutionModeSchema, mockManifestDigest: digest, expectedCases: z.array(E2EExpectedCaseSchema).max(64) }).strict();
 export const E2EExecutionPlanSchema = safeJsonSchema(z.object({ schemaVersion: z.literal(1), digest, candidateDigest: digest, planDigest: digest, criteria: z.array(E2ECriterionExpectationSchema).max(64), effectiveTargets: z.array(E2ETargetSchema).max(12), groups: z.array(E2EGroupSchema).max(4), mocks: z.array(E2EMockSpecSchema).max(200), unavailableCriteria: z.array(z.object({ criterionId: id(120), reason: id(500) }).strict()).max(64) }).strict().superRefine((plan, context) => {
@@ -280,13 +282,22 @@ export const E2ECaseStatusSchema = z.enum(["passed", "failed", "unavailable", "s
 export type E2ECaseStatus = z.infer<typeof E2ECaseStatusSchema>;
 export const E2EArtifactRefSchema = z.object({ artifactId: id(200), sha256: digest, bytes: z.number().int().nonnegative().max(26_214_400), mediaType: id(120), kind: z.enum(["report", "screenshot", "trace", "video", "download"]), captureQualification: z.enum(["synthetic", "redacted", "restricted"]) }).strict();
 export type E2EArtifactRef = z.infer<typeof E2EArtifactRefSchema>;
-export const E2ECaseResultSchema = z.object({ caseId: id(160), status: E2ECaseStatusSchema, reason: id(500), attemptCount: positiveInt.max(2), assertionDigest: digest, artifacts: z.array(E2EArtifactRefSchema).max(200), coverage: E2ECaseCoverageSchema }).strict();
+export const E2EAssertionReceiptSchema = z.object({ assertionIndex: z.number().int().min(0).max(19), assertionDigest: digest, status: E2ECaseStatusSchema, reason: id(500) }).strict();
+export type E2EAssertionReceipt = z.infer<typeof E2EAssertionReceiptSchema>;
+export const E2ECaseResultSchema = z.object({ caseId: id(160), status: E2ECaseStatusSchema, reason: id(500), attemptCount: positiveInt.max(2), assertionDigest: digest, assertionReceipts: z.array(E2EAssertionReceiptSchema).min(1).max(20), artifacts: z.array(E2EArtifactRefSchema).max(200), coverage: E2ECaseCoverageSchema }).strict().superRefine((result, context) => {
+  if (new Set(result.assertionReceipts.map((receipt) => receipt.assertionIndex)).size !== result.assertionReceipts.length) context.addIssue({ code: "custom", path: ["assertionReceipts"], message: "assertion receipt indices must be unique" });
+  if (result.assertionReceipts.some((receipt, index) => receipt.assertionIndex !== index)) context.addIssue({ code: "custom", path: ["assertionReceipts"], message: "assertion receipts must cover contiguous ordered indices" });
+});
 export type E2ECaseResult = z.infer<typeof E2ECaseResultSchema>;
 export const E2EQualifiedResultSchema = z.object({ schemaVersion: z.literal(1), binding: E2ERunBindingSchema, producer: id(120), startedAt: timestamp, finishedAt: timestamp, receivedAt: timestamp, status: E2ECaseStatusSchema, qualification: z.enum(["trusted", "exploratory"]), executionMode: E2EExecutionModeSchema, reason: id(500), cases: z.array(E2ECaseResultSchema).max(64), rawReportSha256: digest.nullable(), modelReceiptIds: z.array(id(200)).max(200), cleanup: z.enum(["confirmed", "pending", "failed"]) }).strict().superRefine((result, context) => {
   if (Date.parse(result.finishedAt) < Date.parse(result.startedAt)) context.addIssue({ code: "custom", path: ["finishedAt"], message: "finish precedes start" });
   if (new Set(result.cases.map((item) => item.caseId)).size !== result.cases.length) context.addIssue({ code: "custom", path: ["cases"], message: "case results must be unique" });
   const expected = new Set(result.binding.expectedCases.map((item) => item.caseId));
   if (result.cases.some((item) => !expected.has(item.caseId))) context.addIssue({ code: "custom", path: ["cases"], message: "result includes an unbound case" });
+  for (const observed of result.cases) {
+    const item = result.binding.expectedCases.find((candidate) => candidate.caseId === observed.caseId);
+    if (item && (observed.assertionReceipts.length !== item.assertionDigests.length || observed.assertionReceipts.some((receipt, index) => receipt.assertionDigest !== item.assertionDigests[index]))) context.addIssue({ code: "custom", path: ["cases"], message: "assertion receipts must match every frozen assertion identity by index" });
+  }
   if (result.cases.reduce((total, item) => total + item.artifacts.length, 0) > 200) context.addIssue({ code: "custom", path: ["cases"], message: "result may contain at most 200 artifacts" });
   if (result.executionMode !== result.binding.executionMode) context.addIssue({ code: "custom", path: ["executionMode"], message: "result mode must match its frozen binding" });
   if (result.binding.modelRouteRevision === null && result.modelReceiptIds.length > 0) context.addIssue({ code: "custom", path: ["modelReceiptIds"], message: "a null model route cannot have model usage receipts" });
@@ -298,7 +309,7 @@ export type E2EProcessResult = z.infer<typeof E2EProcessResultSchema>;
 const evidenceRank: Record<E2EEvidenceScope, number> = { source: 0, "mock-contract": 1, runtime: 2, "external-live": 3 };
 function qualifies(result: E2EQualifiedResult, item: E2EExpectedCase): boolean {
   const observed = result.cases.find((candidate) => candidate.caseId === item.caseId);
-  return result.qualification === "trusted" && result.status === "passed" && result.cleanup === "confirmed" && observed?.status === "passed" && observed.attemptCount === 1 && observed.assertionDigest === item.assertionDigest && observed.coverage.subject === "candidate" && evidenceRank[observed.coverage.observedScope] >= evidenceRank[item.minimumEvidence] && item.requiredRealComponentIds.every((component) => observed.coverage.realComponentIds.includes(component));
+  return result.qualification === "trusted" && result.status === "passed" && result.cleanup === "confirmed" && observed?.status === "passed" && observed.attemptCount === 1 && observed.assertionDigest === item.assertionDigest && observed.assertionReceipts.length === item.assertionDigests.length && observed.assertionReceipts.every((receipt, index) => receipt.assertionIndex === index && receipt.assertionDigest === item.assertionDigests[index] && receipt.status === "passed") && observed.coverage.subject === "candidate" && evidenceRank[observed.coverage.observedScope] >= evidenceRank[item.minimumEvidence] && item.requiredRealComponentIds.every((component) => observed.coverage.realComponentIds.includes(component));
 }
 function workflowResult(checkId: string, status: "PASS" | "FAILED" | "UNKNOWN") { return { checkId, status }; }
 function resultTimingValid(result: E2EQualifiedResult): boolean {

@@ -47,7 +47,7 @@ describe("safe E2E execution plan selection", () => {
     expect(noSandbox.groups).toHaveLength(0);
     expect(noSandbox.unavailableCriteria).toHaveLength(2);
     const arbitrary = selectE2EExecutionPlan({ ...input, scenarios: [{ ...scenario, requiredRealComponentIds: ["bank-api"] }] });
-    expect(arbitrary.groups).toHaveLength(0);
+    expect(arbitrary.groups.flatMap((group) => group.expectedCases)).toHaveLength(1);
     expect(arbitrary.unavailableCriteria).toHaveLength(2);
     expect(arbitrary.criteria.every((criterion) => criterion.requiredRealComponentIds.includes("bank-api"))).toBe(true);
   });

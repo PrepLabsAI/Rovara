@@ -23,6 +23,12 @@ function platformDirectory(path: string, platform: "android" | "ios"): string | 
   const index = parts.indexOf(platform);
   return index < 0 ? undefined : parts.slice(0, index).join("/") || ".";
 }
+function iosBundleIdentifier(path: string, text: string): string | undefined {
+  const raw = /Info\.plist$/i.test(path)
+    ? /<key>\s*CFBundleIdentifier\s*<\/key>\s*<string>\s*([^<\s][^<]*?)\s*<\/string>/i.exec(text)?.[1]
+    : /(?:^|\n)\s*PRODUCT_BUNDLE_IDENTIFIER\s*=\s*([^;\r\n]+)\s*;/m.exec(text)?.[1]?.trim().replace(/^['"]|['"]$/g, "");
+  return raw && !/[()$]/.test(raw) && /^[A-Za-z0-9][A-Za-z0-9.-]{0,199}$/.test(raw) ? raw : undefined;
+}
 export function portableOperationId(exportName: string, applicationId?: string): string {
   if (exportName !== "." && (!exportName.startsWith("./") || exportName.slice(2).split("/").some((part) => part === "" || part === "." || part === ".." || part.includes("*")))) throw new Error("only exact normalized package export names are supported");
   return "op-" + createHash("sha256").update(canonicalJson([applicationId ?? "", exportName])).digest("hex");
@@ -132,17 +138,19 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
     else if (kind === "api") target = { targetId: "api-" + (applications.length + 1), applicationId: appId, runtimeProfileId: "api-phase-unavailable", accountProfileId: "synthetic", kind: "api", protocol: "http", originRef: "app-origin" };
     else if (kind === "mobile") {
       const androidManifest = appFiles.find((path) => /(^|\/)android\/.*AndroidManifest\.xml$/.test(path));
-      const iosMetadata = appFiles.find((path) => /(^|\/)ios\/.*(?:Info\.plist|project\.pbxproj)$/.test(path));
+      const iosMetadata = appFiles.find((path) => /(^|\/)ios\/.*Info\.plist$/.test(path)) ?? appFiles.find((path) => /(^|\/)ios\/.*project\.pbxproj$/.test(path));
       const androidText = androidManifest ? Buffer.from(sources.get(androidManifest)!.bytes).toString("utf8") : "";
       const iosText = iosMetadata ? Buffer.from(sources.get(iosMetadata)!.bytes).toString("utf8") : "";
       const androidId = /\bpackage\s*=\s*["']([^"']+)["']/.exec(androidText)?.[1];
-      const iosId = /(?:CFBundleIdentifier|PRODUCT_BUNDLE_IDENTIFIER)[\s\S]{0,100}?(?:<string>)?([A-Za-z0-9.-]+)(?:<\/string>)?/.exec(iosText)?.[1];
+      const iosId = iosMetadata ? iosBundleIdentifier(iosMetadata, iosText) : undefined;
       const mobileTargets: E2ERepositoryInspection["proposedTargets"] = [];
-      if (androidManifest && androidId) mobileTargets.push({ targetId: "android-" + createHash("sha256").update(androidId).digest("hex").slice(0, 10), applicationId: appId, runtimeProfileId: "android-phase-unavailable", accountProfileId: "synthetic", kind: "mobile", os: "android", appId: androidId, deviceProfileId: "no-device-selected" });
-      if (iosMetadata && iosId) mobileTargets.push({ targetId: "ios-" + createHash("sha256").update(iosId).digest("hex").slice(0, 10), applicationId: appId, runtimeProfileId: "ios-phase-unavailable", accountProfileId: "synthetic", kind: "mobile", os: "ios", appId: iosId, deviceProfileId: "no-device-selected" });
+      if (androidManifest && androidId) mobileTargets.push({ targetId: "android-" + createHash("sha256").update(`${relDir}\0${androidId}`).digest("hex").slice(0, 10), applicationId: appId, runtimeProfileId: "android-phase-unavailable", accountProfileId: "synthetic", kind: "mobile", os: "android", appId: androidId, deviceProfileId: "no-device-selected" });
+      if (iosMetadata && iosId) mobileTargets.push({ targetId: "ios-" + createHash("sha256").update(`${relDir}\0${iosId}`).digest("hex").slice(0, 10), applicationId: appId, runtimeProfileId: "ios-phase-unavailable", accountProfileId: "synthetic", kind: "mobile", os: "ios", appId: iosId, deviceProfileId: "no-device-selected" });
       target = mobileTargets.shift() as E2ERepositoryInspection["proposedTargets"][number];
       if (target) additionalTargets.push(...mobileTargets);
       else missingInputs.push({ inputId: "mobile-target-" + createHash("sha256").update(manifest.path).digest("hex").slice(0, 10), targetIds: [], kind: "target-selection", disposition: "blocking", reason: "React Native package has no native platform manifest with an application identity", sourcePaths: [manifest.path] });
+      if (androidManifest && !androidId) missingInputs.push({ inputId: "android-identity-" + createHash("sha256").update(androidManifest).digest("hex").slice(0, 10), targetIds: [], kind: "target-selection", disposition: "blocking", reason: "Android manifest does not declare a resolvable package identity", sourcePaths: [androidManifest] });
+      if (iosMetadata && !iosId) missingInputs.push({ inputId: "ios-identity-" + createHash("sha256").update(iosMetadata).digest("hex").slice(0, 10), targetIds: [], kind: "target-selection", disposition: "blocking", reason: "iOS metadata does not declare a resolvable bundle identifier", sourcePaths: [iosMetadata] });
     } else target = { targetId: "desktop-" + (applications.length + 1), applicationId: appId, runtimeProfileId: "electron-phase-unavailable", accountProfileId: "synthetic", kind: "desktop", os: "linux", driver: "electron", appId };
     let recipe: E2ERepositoryInspection["applications"][number]["recipe"] = null;
     const hasStart = typeof pkg.scripts?.start === "string" && pkg.scripts.start.trim() !== "";
@@ -190,22 +198,31 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
   const mobileAppSeen = new Set<string>();
   for (const source of nativeMobile) {
     const isAndroid = /(^|\/)android\//.test(source.path);
-    const androidManifestPath = isAndroid && /AndroidManifest\.xml$/.test(source.path) ? source.path : isAndroid ? [...sources.keys()].find((path) => path.startsWith(source.path.split("/android/")[0]! + "/android/") && /AndroidManifest\.xml$/.test(path)) : undefined;
-    const iosMetadataPath = !isAndroid && /(?:Info\.plist|project\.pbxproj|Package\.swift)$/.test(source.path) ? source.path : !isAndroid ? [...sources.keys()].find((path) => path.startsWith(source.path.split("/ios/")[0]! + "/ios/") && /(?:Info\.plist|project\.pbxproj|Package\.swift)$/.test(path)) : undefined;
-    const identitySource = isAndroid ? androidManifestPath : iosMetadataPath;
-    if (!identitySource) continue;
-    const base = platformDirectory(identitySource, isAndroid ? "android" : "ios");
+    const platform = isAndroid ? "android" : "ios";
+    const base = platformDirectory(source.path, platform);
     if (!base) continue;
+    const prefix = base === "." ? `${platform}/` : `${base}/${platform}/`;
+    const sameAppMetadata = [...sources.keys()].filter((path) => path === source.path || path.startsWith(prefix));
+    const androidManifestPath = isAndroid ? sameAppMetadata.find((path) => /AndroidManifest\.xml$/.test(path)) : undefined;
+    const iosMetadataPath = !isAndroid ? sameAppMetadata.find((path) => /Info\.plist$/.test(path)) ?? sameAppMetadata.find((path) => /(?:project\.pbxproj|Package\.swift)$/.test(path)) : undefined;
+    const identitySource = isAndroid ? androidManifestPath ?? sameAppMetadata.find((path) => /build\.gradle(?:\.kts)?$/.test(path)) : iosMetadataPath;
+    if (!identitySource) continue;
     if (mobileAppSeen.has(`${isAndroid}:${base}`) || applications.some((application) => application.sourcePaths.includes(identitySource))) continue;
     const identityText = Buffer.from(sources.get(identitySource)!.bytes).toString("utf8");
-    const nativeAppId = isAndroid ? /\bpackage\s*=\s*["']([^"']+)["']/.exec(identityText)?.[1] : /(?:CFBundleIdentifier|PRODUCT_BUNDLE_IDENTIFIER)[\s\S]{0,100}?(?:<string>)?([A-Za-z0-9.-]+)(?:<\/string>)?/.exec(identityText)?.[1];
-    if (!nativeAppId) continue;
+    const nativeAppId = isAndroid ? /\bpackage\s*=\s*["']([^"']+)["']/.exec(identityText)?.[1] : iosBundleIdentifier(identitySource, identityText);
     mobileAppSeen.add(`${isAndroid}:${base}`);
     const appId = "native-mobile-" + createHash("sha256").update(`${isAndroid}:${base}`).digest("hex").slice(0, 12);
-    const targetId = `${isAndroid ? "android" : "ios"}-` + createHash("sha256").update(nativeAppId).digest("hex").slice(0, 10);
+    const platformName = isAndroid ? "Android" : "iOS";
+    const appSources = sameAppMetadata.slice(0, 128);
+    if (!nativeAppId) {
+      addApplication(appId, "mobile", appSources, []);
+      missingInputs.push({ inputId: `native-mobile-identity-${appId}`, targetIds: [], kind: "target-selection", disposition: "blocking", reason: `${platformName} source metadata has no resolvable application identifier`, sourcePaths: [identitySource] });
+      continue;
+    }
+    const targetId = `${isAndroid ? "android" : "ios"}-` + createHash("sha256").update(`${base}\0${nativeAppId}`).digest("hex").slice(0, 10);
     const platformPrefix = base === "." ? `${isAndroid ? "android" : "ios"}/` : `${base}/${isAndroid ? "android" : "ios"}/`;
-    const appSources = [...sources.keys()].filter((path) => path === identitySource || path.startsWith(platformPrefix)).slice(0, 128);
-    addApplication(appId, "mobile", appSources, [{ targetId, applicationId: appId, runtimeProfileId: isAndroid ? "android-phase-unavailable" : "ios-phase-unavailable", accountProfileId: "synthetic", kind: "mobile", os: isAndroid ? "android" : "ios", appId: nativeAppId, deviceProfileId: "no-device-selected" }]);
+    const nativeSources = [...sources.keys()].filter((path) => path.startsWith(platformPrefix)).slice(0, 128);
+    addApplication(appId, "mobile", nativeSources, [{ targetId, applicationId: appId, runtimeProfileId: isAndroid ? "android-phase-unavailable" : "ios-phase-unavailable", accountProfileId: "synthetic", kind: "mobile", os: isAndroid ? "android" : "ios", appId: nativeAppId, deviceProfileId: "no-device-selected" }]);
     missingInputs.push({ inputId: `native-mobile-runtime-${appId}`, targetIds: [targetId], kind: "runtime", disposition: "mock-substitutable", reason: `The ${isAndroid ? "Android" : "iOS"} build and launch profile is unavailable in this phase`, sourcePaths: [identitySource] });
   }
   const nativeDesktop = [...sources.values()].filter((source) => /(?:\.csproj$|\.sln$|\.xcodeproj\/project\.pbxproj$|\.xcworkspace\/contents\.xcworkspacedata$|(?:^|\/)linux\/(?:CMakeLists\.txt|meson\.build)$)/i.test(source.path));
@@ -222,6 +239,10 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
     addApplication(appId, "desktop", appSources.slice(0, 128), [{ targetId, applicationId: appId, runtimeProfileId: `native-${os}-phase-unavailable`, accountProfileId: "synthetic", kind: "desktop", os, driver: "native", appId }]);
     missingInputs.push({ inputId: "native-runtime-" + appId, targetIds: [targetId], kind: "runtime", disposition: "mock-substitutable", reason: `The ${os} native build and launch profile is unavailable in this phase`, sourcePaths: [source.path] });
   }
+  if (new Set(applications.map((application) => application.applicationId)).size !== applications.length) throw new Error("discovery produced duplicate application identities");
+  if (new Set(proposedTargets.map((target) => target.targetId)).size !== proposedTargets.length) throw new Error("discovery produced duplicate target identities");
+  const edgeKeys = dependencyEdges.map((edge) => canonicalJson([edge.fromApplicationId, edge.toComponentId, edge.contractRef]));
+  if (new Set(edgeKeys).size !== edgeKeys.length) throw new Error("discovery produced duplicate dependency graph edges");
   const inspection = E2ERepositoryInspectionSchema.parse({ candidateDigest: snapshot.candidate.digest, sources: refs, applications, proposedTargets, dependencyEdges, proposedScenarios: [], missingInputs });
   return { inspection, portableOperations };
 }

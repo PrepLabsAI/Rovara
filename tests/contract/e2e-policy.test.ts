@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
+import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 import {
   E2EPolicySchema,
   E2EScenarioBundleSchema,
@@ -34,7 +36,7 @@ function baseBinding() {
     executionPlanDigest: "a".repeat(64), executionMode: "mock-only", mockManifestDigest: "b".repeat(64), authorizationRevision: "auth-r1",
     candidateDigest: "c".repeat(64), planDigest: "d".repeat(64), policyDigest: "e".repeat(64), bundleDigest: "f".repeat(64),
     appBuildDigest: "1".repeat(64), environmentDigest: "2".repeat(64), runtimeManifestDigest: "3".repeat(64), modelRouteRevision: null,
-    expectedCases: [{ caseId: "case-1", criterionId: "criterion-1", scenarioId: "home", upstreamTestId: "home", targetId: "web-main", requestedTargetId: "web-main", agentId: "template-v1", repeat: 0, assertionDigest: "4".repeat(64), required: true, minimumEvidence: "mock-contract", requiredRealComponentIds: [] }],
+    expectedCases: [{ caseId: "case-1", criterionId: "criterion-1", scenarioId: "home", upstreamTestId: "home", targetId: "web-main", requestedTargetId: "web-main", agentId: "template-v1", repeat: 0, assertionDigest: createHash("sha256").update(canonicalJson(["4".repeat(64)])).digest("hex"), assertionDigests: ["4".repeat(64)], required: true, minimumEvidence: "mock-contract", requiredRealComponentIds: [] }],
     admittedAt: "2026-10-12T12:00:00.000Z", deadlineAt: "2026-10-12T12:05:00.000Z",
   };
 }
@@ -43,7 +45,7 @@ const successfulResult = (overrides: Record<string, unknown> = {}) => ({
   schemaVersion: 1, binding: baseBinding(), producer: "trusted-verifier", startedAt: "2026-10-12T12:00:01.000Z",
   finishedAt: "2026-10-12T12:00:02.000Z", receivedAt: "2026-10-12T12:00:03.000Z", status: "passed", qualification: "trusted",
   executionMode: "mock-only", reason: "complete", cases: [{ caseId: "case-1", status: "passed", reason: "assertions-passed", attemptCount: 1,
-    assertionDigest: "4".repeat(64), artifacts: [], coverage: { observedScope: "mock-contract", subject: "candidate", executedCandidateParts: ["src"], realComponentIds: [], mockedComponentIds: ["api"], unexercisedBehaviors: [] } }],
+    assertionDigest: baseBinding().expectedCases[0]!.assertionDigest, assertionReceipts: [{ assertionIndex: 0, assertionDigest: "4".repeat(64), status: "passed", reason: "assertions-passed" }], artifacts: [], coverage: { observedScope: "mock-contract", subject: "candidate", executedCandidateParts: ["src"], realComponentIds: [], mockedComponentIds: ["api"], unexercisedBehaviors: [] } }],
   rawReportSha256: null, modelReceiptIds: [], cleanup: "confirmed", ...overrides,
 });
 
@@ -100,8 +102,10 @@ describe("E2E contracts", () => {
 
   it("binds deterministic group and run limits to the round deadline", () => {
     const binding = baseBinding();
-    expect(e2eBindingDigest(binding as never)).toBe("2d22c47f30122809e129747876bc1250949e59efb801530ac0ab3ad87fae51eb");
+    expect(e2eBindingDigest(binding as never)).toBe("6f684b61e58bf1a7976fcfa46d1e4c772e7e6df01c9eaa0bfd6e939b81892128");
     expect(E2EQualifiedResultSchema.safeParse(successfulResult()).success).toBe(true);
+    expect(E2EQualifiedResultSchema.safeParse(successfulResult({ cases: [{ ...successfulResult().cases[0], assertionReceipts: [] }] })).success).toBe(false);
+    expect(E2EQualifiedResultSchema.safeParse(successfulResult({ cases: [{ ...successfulResult().cases[0], assertionReceipts: [successfulResult().cases[0]!.assertionReceipts[0], successfulResult().cases[0]!.assertionReceipts[0]] }] })).success).toBe(false);
     expect(E2EQualifiedResultSchema.safeParse(successfulResult({ modelReceiptIds: ["receipt-1"] })).success).toBe(false);
     const unknownProtocol = { ...successfulResult(), binding: { ...binding, protocol: "trusted-e2e/v9" } };
     expect(E2EQualifiedResultSchema.safeParse(unknownProtocol).success).toBe(false);

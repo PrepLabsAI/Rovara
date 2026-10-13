@@ -142,9 +142,13 @@ export function githubRepositoryApi(fetchImplementation: typeof fetch): GitHubRe
         if (typeof entry.size !== "number" || !Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > MAX_SNAPSHOT_FILE_BYTES) throw agentXError("RUNTIME_UNAVAILABLE", `snapshot file ${path} exceeds the source size limit`);
         const blobResponse = await fetchImplementation(`${base}/git/blobs/${entry.sha}`, { headers: headers(token) });
         if (!blobResponse.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub could not read immutable source blob for ${path} (HTTP ${blobResponse.status}); ${nextStepFor(blobResponse.status, fullName)}`);
-        const blob = await readJsonBounded<{ sha?: unknown; encoding?: unknown; content?: unknown; size?: unknown }>(blobResponse, Math.min(MAX_BLOB_JSON_BYTES, Math.ceil(entry.size / 3) * 4 + 16_384));
-        if (blob.sha !== entry.sha || blob.encoding !== "base64" || typeof blob.content !== "string" || blob.size !== entry.size || blob.content.length > Math.ceil(entry.size / 3) * 4 + 4 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(blob.content)) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub returned incomplete or mismatched immutable source bytes for ${path}`);
-        const bytes = Buffer.from(blob.content, "base64");
+        const encodedLimit = Math.ceil(entry.size / 3) * 4;
+        const rawContentLimit = encodedLimit + 16_384;
+        const blob = await readJsonBounded<{ sha?: unknown; encoding?: unknown; content?: unknown; size?: unknown }>(blobResponse, Math.min(MAX_BLOB_JSON_BYTES, rawContentLimit + 1024));
+        if (blob.sha !== entry.sha || blob.encoding !== "base64" || typeof blob.content !== "string" || blob.size !== entry.size || blob.content.length > rawContentLimit) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub returned incomplete or mismatched immutable source bytes for ${path}`);
+        const normalizedBase64 = blob.content.replace(/[ \t\r\n]/g, "");
+        if (normalizedBase64.length > encodedLimit || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(normalizedBase64)) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub returned incomplete or mismatched immutable source bytes for ${path}`);
+        const bytes = Buffer.from(normalizedBase64, "base64");
         if (bytes.byteLength !== entry.size) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub source byte count did not match the immutable tree for ${path}`);
         const gitObjectSha = createHash("sha1").update(Buffer.from(`blob ${bytes.byteLength}\0`)).update(bytes).digest("hex");
         if (gitObjectSha !== entry.sha) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub source bytes did not match the immutable Git blob identity for ${path}`);
