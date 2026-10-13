@@ -32,4 +32,12 @@ describe("complete shared E2E view", () => {
     const view = buildE2ESharedView({ plan: null, currentRound: null, results: [], setup: { status: "needs-input", selectedTargetIds: [], executionPlanDigest: null, blockingInputIds: ["auth"], mockSubstitutableInputIds: [] }, actor: "owner", control: { policyPresent: true, workflowPhase: "setup", ownerActionProposals: ["review-setup", "review-setup", "review-setup", "review-setup"] } });
     expect(view.actions).toEqual(["review-setup"]);
   });
+
+  it("drops malformed overlong phase control while preserving a valid empty projection", () => {
+    const view = buildE2ESharedView({ plan: null, currentRound: null, results: [], setup: null, actor: "owner", control: { policyPresent: true, workflowPhase: "x".repeat(121), ownerActionProposals: ["retry-run"] } });
+    expect(view.e2e.status).toBe("UNKNOWN");
+    expect(view.e2e.policyPresence).toBe("absent");
+    expect(view.e2e.workflowPhase).toBeNull();
+    expect(view.actions).toEqual([]);
+  });
 });

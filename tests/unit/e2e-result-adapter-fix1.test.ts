@@ -36,7 +36,7 @@ function fixture() {
   collection.rawReportBytes = Buffer.from(JSON.stringify(report));
   return { oracle, collection, report, identity: exactIdentity, receipt: receipts[0]! };
 }
-function expandToThirteenCases(f: ReturnType<typeof fixture>): void {
+function expandToCases(f: ReturnType<typeof fixture>, caseCount: number): void {
   const baseTuple = f.oracle.selection.tuples[0]!;
   const baseOracleCase = f.oracle.cases[0]!;
   const baseExpected = f.oracle.binding.expectedCases[0]!;
@@ -46,7 +46,7 @@ function expandToThirteenCases(f: ReturnType<typeof fixture>): void {
   const baseReceipts = [...f.collection.receipts];
   const addedRows: DeepMutable<E2EReport["run"]["results"][number]>[] = [];
   const addedPairs: Record<string, unknown>[] = [];
-  for (let index = 1; index < 13; index += 1) {
+  for (let index = 1; index < caseCount; index += 1) {
     const scenarioId = `scenario-extra-${index}`;
     const criterionId = `criterion-extra-${index}`;
     const caseCore = { ...f.identity, caseId: "", upstreamTestId: "", scenarioId, criterionId };
@@ -75,17 +75,23 @@ function expandToThirteenCases(f: ReturnType<typeof fixture>): void {
   }
   f.report.run.results.splice(1, 0, ...addedRows);
   (f.collection.publicList as { pairs: Record<string, unknown>[] }).pairs.splice(1, 0, ...addedPairs);
-  f.report.run.summary.discovered = 14; f.report.run.summary.selected = 13; f.report.run.summary.executed = 13; f.report.run.summary.passed = 13; f.report.run.summary.skipped = 0;
+  f.report.run.summary.discovered = caseCount + 1; f.report.run.summary.selected = caseCount; f.report.run.summary.executed = caseCount; f.report.run.summary.passed = caseCount; f.report.run.summary.skipped = 0;
   f.collection.rawReportBytes = Buffer.from(JSON.stringify(f.report));
 }
 
 describe("complete structural collection qualification", () => {
   it("accepts the exact 260 receipt packet from thirteen twenty-assertion cases", () => {
     const f = fixture();
-    expandToThirteenCases(f);
+    expandToCases(f, 13);
     expect(f.collection.receipts).toHaveLength(260);
     const result = qualifyE2ECollection(f.oracle, f.collection);
     expect(result.status, result.reason).toBe("PASS");
+  });
+  it("retains the complete admitted sixty-four-case twenty-receipt ceiling", () => {
+    const f = fixture();
+    expandToCases(f, 64);
+    expect(f.collection.receipts).toHaveLength(1_280);
+    expect(qualifyE2ECollection(f.oracle, f.collection).status).toBe("PASS");
   });
   it("projects validated actual module inventory rows while retaining the source object protocol", () => {
     expect(projectE2EModuleExportNames({ protocol: E2E_MODULE_EXPORT_INVENTORY_PROTOCOL, exports: [{ name: "zeta", kind: "value" }, { name: "alpha", kind: "callable" }] })).toEqual(["alpha", "zeta"]);
@@ -138,6 +144,46 @@ describe("complete structural collection qualification", () => {
     const unstable = qualifyE2ECollection(f.oracle, retried);
     expect(unstable.status, unstable.reason).toBe("FAILED");
     expect(unstable.result?.cases[0]?.status).toBe("unstable");
+  });
+
+  it("blocks any global runner error even when an external assertion failure is otherwise valid", () => {
+    const f = fixture();
+    const report = parseReport(f.collection.rawReportBytes);
+    const row = report.run.results[0]!;
+    row.status = "failed";
+    row.attempts[0]!.status = "failed";
+    row.attempts[0]!.error = { category: "test", code: "ASSERTION_FAILED", message: "assertion mismatch", retryable: false };
+    report.run.status = "failed";
+    report.run.exitCode = 1;
+    report.run.summary.passed = 0;
+    report.run.summary.failed = 1;
+    f.collection.process.exitCode = 1;
+    f.collection.observations[0]!.responseBytes = Buffer.from(JSON.stringify({ wireId: "0123456789abcdef0123456789abcdef0123456789abcdef", output: false }));
+    f.collection.receipts = f.collection.receipts.map((receipt) => ({ ...receipt, responseSha256: digest(f.collection.observations[0]!.responseBytes), outcome: "failed" }));
+    report.run.errors.push({ category: "test", code: "ASSERTION_FAILED", message: "run-level assertion failure", retryable: false });
+    f.collection.rawReportBytes = Buffer.from(JSON.stringify(report));
+    const result = qualifyE2ECollection(f.oracle, f.collection);
+    expect(result.status).toBe("UNKNOWN");
+    expect(result.result).toBeNull();
+  });
+
+  it("bounds oracle constituents independently and rejects unsafe or oversized snapshots", () => {
+    const ordinary = fixture();
+    const accessor = structuredClone(ordinary.oracle);
+    Object.defineProperty(accessor.cases[0]!, "expectedCandidateInput", { enumerable: true, get: () => 1 });
+    expect(qualifyE2ECollection(accessor, ordinary.collection).status).toBe("UNKNOWN");
+    const proxy = structuredClone(ordinary.oracle);
+    proxy.cases[0] = new Proxy(proxy.cases[0]!, {});
+    expect(qualifyE2ECollection(proxy, ordinary.collection).status).toBe("UNKNOWN");
+    const wideRequest = structuredClone(ordinary.oracle);
+    wideRequest.cases[0]!.expectedRequest = { body: "x".repeat(262_144) };
+    expect(qualifyE2ECollection(wideRequest, ordinary.collection).status).toBe("UNKNOWN");
+    const oversizedMetadata = structuredClone(ordinary.oracle);
+    oversizedMetadata.cases[0]!.tags = ["x".repeat(9_000)];
+    expect(qualifyE2ECollection(oversizedMetadata, ordinary.collection).status).toBe("UNKNOWN");
+    const oversizedApprovedCase = structuredClone(ordinary.oracle);
+    oversizedApprovedCase.cases[0]!.assertions.forEach((assertion) => { assertion.expectedResponse = "y".repeat(15_000); });
+    expect(qualifyE2ECollection(oversizedApprovedCase, ordinary.collection).status).toBe("UNKNOWN");
   });
   it("rejects unmet scope, unsafe collection hooks, stale identity, and malformed bytes without throwing", () => {
     const f = fixture();

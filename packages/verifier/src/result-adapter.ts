@@ -12,6 +12,7 @@ export const E2E_REPORT_MAX_BYTES = 4 * 1024 * 1024;
 export const E2E_APP_RPC_FRAME_MAX_BYTES = 262_144;
 export const E2E_APP_LITERAL_MAX_BYTES = 65_536;
 export const E2E_APP_LITERAL_MAX_DEPTH = 32;
+export const E2E_COLLECTION_ORACLE_MAX_CARRIER_BYTES = 262_144 + 3 * 262_144 + 3 * 16_384 + 64 * (8_192 + 262_144 + 262_144 + 262_144 + 262_144 + 8_192);
 export const E2E_MODULE_EXPORT_INVENTORY_PROTOCOL = "registered-module-export-inventory/v1" as const;
 export const E2E_MODULE_EXPORT_PROJECTION_VERSION = "module-export-names/v1" as const;
 export function projectE2EModuleExportNames(value: unknown): readonly string[] {
@@ -150,7 +151,7 @@ export function createE2ECollectionOracleFromCompiledSuite(input: {
 export function qualifyE2ECollection(oracleInput: E2ECollectionOracle, collectionInput: E2ECollection): E2EStructuralQualification {
   const unavailable = (reason: string, runId: string | null = null, rawReportSha256: string | null = null): E2EStructuralQualification => ({ status: "UNKNOWN", reason, runId, rawReportSha256, result: null });
   try {
-    const oracle = copyBoundedE2EJsonData(oracleInput, { maxBytes: 262_144, maxDepth: 64 }) as E2ECollectionOracle;
+    const oracle = snapshotE2ECollectionOracle(oracleInput);
     const raw = copyCollection(collectionInput);
     const binding = E2ERunBindingSchema.parse(oracle.binding);
     const round = E2ERoundSchema.parse(oracle.round);
@@ -198,7 +199,7 @@ export function qualifyE2ECollection(oracleInput: E2ECollectionOracle, collectio
     if (seen.size !== tuples.length) return unavailable("report omitted a compiled physical row", runId, parsed.rawSha256);
     if (report.run.summary.executed !== selectedRows.filter(({ row }) => row.attempts.length > 0).length || report.run.summary.passed !== selectedRows.filter(({ row }) => row.status === "passed").length || report.run.summary.failed !== selectedRows.filter(({ row }) => row.status === "failed" || row.status === "timed-out").length || report.run.summary.interrupted !== selectedRows.filter(({ row }) => row.status === "interrupted").length || report.run.summary.flaky !== selectedRows.filter(({ row }) => row.status === "flaky").length || report.run.summary.skipped !== selectedRows.filter(({ row }) => row.status === "skipped").length) return unavailable("runner summary contradicts selected-row counts", runId, parsed.rawSha256);
     const observedTestFailure = raw.process.exitCode !== 0 && report.run.status === "failed" && report.run.exitCode === raw.process.exitCode && report.run.errors.every((error) => error.category === "test");
-    if (report.run.errors.some((error) => error.category !== "test") || report.run.exitCode !== raw.process.exitCode || (raw.process.exitCode === 0 ? report.run.status !== "passed" || report.run.errors.length !== 0 : !observedTestFailure)) return unavailable("report and actual process outcomes contradict or contain a run-level error", runId, parsed.rawSha256);
+    if (report.run.errors.length !== 0 || report.run.exitCode !== raw.process.exitCode || (raw.process.exitCode === 0 ? report.run.status !== "passed" : !observedTestFailure)) return unavailable("report and actual process outcomes contradict or contain a run-level error", runId, parsed.rawSha256);
     const normalizedCases: E2EQualifiedResult["cases"] = [];
     if (raw.observations.length !== selectedRows.length || raw.receipts.length !== selectedRows.reduce((total, { tuple }) => total + (oracle.cases.find((item) => item.caseId === tuple.caseId)?.assertions.length ?? 0), 0)) return unavailable("observations or assertion receipts contain missing, duplicate, or foreign rows", runId, parsed.rawSha256);
     for (const { tuple, row } of selectedRows) {
@@ -264,6 +265,58 @@ export function qualifyE2ECollection(oracleInput: E2ECollectionOracle, collectio
     if (filtered.length + selected.length !== tuples.length) return unavailable("selection packet cardinality changed", runId, parsed.rawSha256);
     return { status: anyFailure ? "FAILED" : allPassed ? "PASS" : "UNKNOWN", reason: anyFailure ? "selected case failure preserved" : allPassed ? "complete structural scoped qualification; producer authentication remains external" : "observations do not satisfy every independent evidence floor", runId, rawReportSha256: parsed.rawSha256, result };
   } catch (error) { const detail = error instanceof Error ? error.message.slice(0, 240) : "invalid data"; return unavailable(`collection or independent oracle is malformed, unsafe, or outside structural bounds: ${detail}`); }
+}
+
+/** Safely snapshot each admitted oracle constituent under its own protocol budget. */
+function snapshotE2ECollectionOracle(input: E2ECollectionOracle): E2ECollectionOracle {
+  const commonKeys = ["projectId", "configDigest", "compiledConfigDigest", "runnerName", "runnerVersion", "sourceDigest", "artifacts", "usage", "limits", "environment"] as const;
+  const otherKeys = ["binding", "round", "selection", "fixedAssetDigests", "declaredMockComponentIds", "targets"] as const;
+  const caseKeys = ["caseId", "hostRequestId", "projectionVersion", "compilerCaseIdentity", "registrationKey", "semanticApprovalDigest", "accountIdDigest", "declarationIndex", "sourceLine", "sourceColumn", "tags", "expectedRequest", "expectedCandidateInput", "assertions"] as const;
+  const top = ownRecord(input, [...commonKeys, ...otherKeys, "cases"]);
+  requireExactKeys(top, [...commonKeys, ...otherKeys, "cases"]);
+  const commonInput: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const key of commonKeys) commonInput[key] = top[key];
+  const common = copyBoundedE2EJsonData(commonInput, { maxBytes: 262_144, maxDepth: 64 }) as Omit<E2ECollectionOracle, "cases">;
+  const binding = copyBoundedE2EJsonData(top.binding, { maxBytes: 262_144, maxDepth: 64 }) as E2ERunBinding;
+  const round = copyBoundedE2EJsonData(top.round, { maxBytes: 262_144, maxDepth: 64 }) as E2ERound;
+  const selection = copyBoundedE2EJsonData(top.selection, { maxBytes: 262_144, maxDepth: 64 }) as E2ESelectionPacket;
+  const fixedAssetDigests = copyBoundedE2EJsonData(top.fixedAssetDigests, { maxBytes: 16_384, maxDepth: 16 }) as Readonly<Record<string, string>>;
+  const declaredMockComponentIds = copyBoundedE2EJsonData(top.declaredMockComponentIds, { maxBytes: 16_384, maxDepth: 8 }) as readonly string[];
+  const targets = copyBoundedE2EJsonData(ownArray(top.targets, 3), { maxBytes: 16_384, maxDepth: 16 }) as readonly unknown[];
+  const commonBytes = Buffer.byteLength(canonicalJson(common), "utf8");
+  let carrierBytes = commonBytes + Buffer.byteLength(canonicalJson(binding), "utf8") + Buffer.byteLength(canonicalJson(round), "utf8") + Buffer.byteLength(canonicalJson(selection), "utf8") + Buffer.byteLength(canonicalJson(fixedAssetDigests), "utf8") + Buffer.byteLength(canonicalJson(declaredMockComponentIds), "utf8") + Buffer.byteLength(canonicalJson(targets), "utf8") + 8_192;
+  const rows = ownArray(top.cases, 64);
+  const cases = rows.map((value) => {
+    const row = ownRecord(value, caseKeys);
+    requireExactKeys(row, caseKeys);
+    const metadataInput: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of caseKeys) if (key !== "expectedRequest" && key !== "expectedCandidateInput" && key !== "assertions") metadataInput[key] = row[key];
+    const metadata = copyBoundedE2EJsonData(metadataInput, { maxBytes: 8_192, maxDepth: 64 });
+    const expectedRequest = copyBoundedE2EJsonData(row.expectedRequest, { maxBytes: E2E_APP_RPC_FRAME_MAX_BYTES, maxDepth: 64 });
+    const expectedCandidateInput = copyBoundedE2EJsonData(row.expectedCandidateInput, { maxBytes: E2E_APP_LITERAL_MAX_BYTES, maxDepth: E2E_APP_LITERAL_MAX_DEPTH });
+    const rawAssertions = ownArray(row.assertions, 20);
+    const assertions = rawAssertions.map((rawAssertion) => {
+      const assertion = ownRecord(rawAssertion, ["index", "digest", "expectedResponse"]);
+      requireExactKeys(assertion, ["index", "digest", "expectedResponse"]);
+      const metadata = copyBoundedE2EJsonData({ index: assertion.index, digest: assertion.digest }, { maxBytes: 2_048, maxDepth: 8 });
+      const expectedResponse = copyBoundedE2EJsonData(assertion.expectedResponse, { maxBytes: E2E_APP_LITERAL_MAX_BYTES, maxDepth: E2E_APP_LITERAL_MAX_DEPTH });
+      return { ...(metadata as { index: number; digest: string }), expectedResponse };
+    });
+    const boundedAssertions = copyBoundedE2EJsonData(assertions, { maxBytes: 262_144, maxDepth: 64 }) as typeof assertions;
+    const approvedCaseData = copyBoundedE2EJsonData({ input: expectedCandidateInput, assertions: boundedAssertions.map((assertion) => assertion.expectedResponse) }, { maxBytes: 262_144, maxDepth: 64 });
+    const metadataBytes = Buffer.byteLength(canonicalJson(metadata), "utf8");
+    const requestBytes = Buffer.byteLength(canonicalJson(expectedRequest), "utf8");
+    const approvedBytes = Buffer.byteLength(canonicalJson(approvedCaseData), "utf8");
+    const assertionBytes = Buffer.byteLength(canonicalJson(boundedAssertions), "utf8");
+    carrierBytes += metadataBytes + requestBytes + approvedBytes + assertionBytes + 8_192;
+    return { ...(metadata as Omit<E2ECollectionOracle["cases"][number], "expectedRequest" | "expectedCandidateInput" | "assertions">), expectedRequest, expectedCandidateInput, assertions: boundedAssertions };
+  });
+  if (carrierBytes > E2E_COLLECTION_ORACLE_MAX_CARRIER_BYTES) throw new TypeError("independent oracle constituents exceed the derived structural carrier limit");
+  return { ...common, binding, round, selection, fixedAssetDigests, declaredMockComponentIds, targets, cases };
+}
+
+function requireExactKeys(record: Record<string, unknown>, keys: readonly string[]): void {
+  if (Object.keys(record).length !== keys.length || keys.some((key) => !Object.hasOwn(record, key))) throw new TypeError("bounded record is missing or contains unexpected fields");
 }
 
 function copyCollection(input: E2ECollection): E2ECollection {
