@@ -371,6 +371,93 @@ describe("broker work-breakdown callback integrity", () => {
       resumeProgress: [{ itemId: setup.graph.items[0]!.id, state: "UNKNOWN" }] });
   });
 
+  it("terminalizes the current graph workflow when the native cancel operation completes first", async () => {
+    const setup = await approvedGraph(true, 2);
+    const current = (setup.harness.db.get(`DEVTASK#${setup.taskId}`, "META") as { workflow: { revision: number; workflowDependenciesApproval: { runId: string; graphDigest: string } } }).workflow;
+    const approval = current.workflowDependenciesApproval;
+    const targetOperationId = implementationId(setup);
+    const progress = (itemId: string, sequence: number, state: "STARTED" | "IMPLEMENTED", baseTreeSha: string, candidateTreeSha?: string) => ({
+      schemaVersion: 1, graphDigest: approval.graphDigest, runId: approval.runId, itemId, sequence, state,
+      operationId: targetOperationId, baseTreeSha, ...(candidateTreeSha === undefined ? {} : { candidateTreeSha }),
+      at: new Date().toISOString(), producer: "agentx-worker",
+    });
+    await setup.harness.events(setup.workspaceId, targetOperationId, [
+      { type: "progress", payload: { workItemProgress: progress(setup.graph.items[0]!.id, 1, "STARTED", "a".repeat(40)) } },
+      { type: "progress", payload: { workItemProgress: progress(setup.graph.items[0]!.id, 2, "IMPLEMENTED", "a".repeat(40), "b".repeat(40)) } },
+      { type: "progress", payload: { workItemProgress: progress(setup.graph.items[1]!.id, 3, "STARTED", "b".repeat(40)) } },
+    ]);
+
+    const cancelled = await setup.harness.dev(MAYA, "POST", `/v1/dev/tasks/${setup.taskId}/cancel`, { requestId: randomUUID() });
+    expect(cancelled.status).toBe(200);
+    const cancelOperation = setup.operations().find((item) => item.kind === "cancel");
+    expect(cancelOperation).toBeDefined();
+    await setup.harness.finish(setup.workspaceId, String(cancelOperation!.id), "SUCCEEDED");
+
+    expect(setup.harness.db.get(`WORKSPACE#${setup.workspaceId}`, `OPERATION#${targetOperationId}`)).toMatchObject({ status: "CANCELLED" });
+    const blocked = (setup.harness.db.get(`DEVTASK#${setup.taskId}`, "META") as { workflow: { revision: number; stage: string; state: string; candidate?: unknown; workflowDependenciesProgress: Array<{ itemId: string; sequence: number; state: string; candidateTreeSha?: string; producer: string }> } }).workflow;
+    expect(blocked).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED" });
+    expect(blocked.workflowDependenciesProgress.map(({ itemId, sequence, state, candidateTreeSha, producer }) => ({ itemId, sequence, state, candidateTreeSha, producer }))).toEqual([
+      { itemId: setup.graph.items[0]!.id, sequence: 1, state: "STARTED", candidateTreeSha: undefined, producer: "agentx-worker" },
+      { itemId: setup.graph.items[0]!.id, sequence: 2, state: "IMPLEMENTED", candidateTreeSha: "b".repeat(40), producer: "agentx-worker" },
+      { itemId: setup.graph.items[1]!.id, sequence: 3, state: "STARTED", candidateTreeSha: undefined, producer: "agentx-worker" },
+      { itemId: setup.graph.items[1]!.id, sequence: 4, state: "UNKNOWN", candidateTreeSha: undefined, producer: "agentx-broker-terminal" },
+    ]);
+    expect(blocked.candidate).toBeUndefined();
+    expect(setup.operations().filter((item) => item.workflowMode === "REVIEW" || item.kind === "publish")).toEqual([]);
+
+    const retry = await setup.harness.dev(MAYA, "POST", `/v1/dev/tasks/${setup.taskId}/workflow/retry`, {
+      requestId: randomUUID(), expectedRevision: blocked.revision, instructions: "Resume from the acknowledged item",
+    });
+    expect(retry.status).toBe(200);
+    const retryOperation = setup.operations().find((item) => item.workflowMode === "IMPLEMENT" && item.id !== targetOperationId)!;
+    const retryInvocation = setup.harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === retryOperation.id)[0]!.invocation as {
+      payload: { workflowDependencies: { sequenceStart: number; resumeTreeSha: string; resumeProgress: Array<{ itemId: string; state: string }> } };
+    };
+    expect(retryInvocation.payload.workflowDependencies).toMatchObject({ sequenceStart: 4, resumeTreeSha: "b".repeat(40),
+      resumeProgress: [{ itemId: setup.graph.items[0]!.id, state: "IMPLEMENTED" }, { itemId: setup.graph.items[1]!.id, state: "UNKNOWN" }] });
+
+    const currentWorkflow = (setup.harness.db.get(`DEVTASK#${setup.taskId}`, "META") as { workflow: Record<string, unknown> }).workflow;
+    await setup.harness.finish(setup.workspaceId, String(cancelOperation!.id), "SUCCEEDED");
+    await setup.harness.finish(setup.workspaceId, targetOperationId, "CANCELLED");
+    expect((setup.harness.db.get(`DEVTASK#${setup.taskId}`, "META") as { workflow: Record<string, unknown> }).workflow).toEqual(currentWorkflow);
+    await expect(setup.harness.finish(setup.workspaceId, targetOperationId, "SUCCEEDED")).rejects.toThrow(/terminal result is immutable/);
+  });
+
+  it("keeps a newer graph retry intact when the target finishes before the cancel result", async () => {
+    const setup = await approvedGraph(true, 2);
+    const current = (setup.harness.db.get(`DEVTASK#${setup.taskId}`, "META") as { workflow: { workflowDependenciesApproval: { runId: string; graphDigest: string } } }).workflow;
+    const approval = current.workflowDependenciesApproval;
+    const targetOperationId = implementationId(setup);
+    const progress = (itemId: string, sequence: number, state: "STARTED" | "IMPLEMENTED", baseTreeSha: string, candidateTreeSha?: string) => ({
+      schemaVersion: 1, graphDigest: approval.graphDigest, runId: approval.runId, itemId, sequence, state,
+      operationId: targetOperationId, baseTreeSha, ...(candidateTreeSha === undefined ? {} : { candidateTreeSha }),
+      at: new Date().toISOString(), producer: "agentx-worker",
+    });
+    await setup.harness.events(setup.workspaceId, targetOperationId, [
+      { type: "progress", payload: { workItemProgress: progress(setup.graph.items[0]!.id, 1, "STARTED", "a".repeat(40)) } },
+      { type: "progress", payload: { workItemProgress: progress(setup.graph.items[0]!.id, 2, "IMPLEMENTED", "a".repeat(40), "b".repeat(40)) } },
+      { type: "progress", payload: { workItemProgress: progress(setup.graph.items[1]!.id, 3, "STARTED", "b".repeat(40)) } },
+    ]);
+    expect((await setup.harness.dev(MAYA, "POST", `/v1/dev/tasks/${setup.taskId}/cancel`, { requestId: randomUUID() })).status).toBe(200);
+    const cancelOperation = setup.operations().find((item) => item.kind === "cancel")!;
+
+    await setup.harness.finish(setup.workspaceId, targetOperationId, "CANCELLED", { error: "worker stopped" });
+    const blocked = (setup.harness.db.get(`DEVTASK#${setup.taskId}`, "META") as { workflow: { revision: number } }).workflow;
+    expect((setup.harness.db.get(`DEVTASK#${setup.taskId}`, "META") as { workflow: { workflowDependenciesProgress: Array<{ state: string }> } }).workflow.workflowDependenciesProgress.map((entry) => entry.state))
+      .toEqual(["STARTED", "IMPLEMENTED", "STARTED", "UNKNOWN"]);
+    expect((await setup.harness.dev(MAYA, "POST", `/v1/dev/tasks/${setup.taskId}/workflow/retry`, {
+      requestId: randomUUID(), expectedRevision: blocked.revision, instructions: "Resume the approved graph",
+    })).status).toBe(200);
+    const newerOperation = setup.operations().filter((item) => item.workflowMode === "IMPLEMENT").find((item) => item.id !== targetOperationId)!;
+    const beforeLateCancel = (setup.harness.db.get(`DEVTASK#${setup.taskId}`, "META") as { workflow: Record<string, unknown> }).workflow;
+
+    await setup.harness.finish(setup.workspaceId, String(cancelOperation.id), "SUCCEEDED");
+    expect(setup.harness.db.get(`WORKSPACE#${setup.workspaceId}`, `OPERATION#${targetOperationId}`)).toMatchObject({ status: "CANCELLED" });
+    expect(setup.harness.db.get(`WORKSPACE#${setup.workspaceId}`, `OPERATION#${String(cancelOperation.id)}`)).toMatchObject({ status: "SUCCEEDED" });
+    expect((setup.harness.db.get(`DEVTASK#${setup.taskId}`, "META") as { workflow: Record<string, unknown> }).workflow).toEqual(beforeLateCancel);
+    expect((setup.harness.db.get(`WORKSPACE#${setup.workspaceId}`, "META") as { activeOperationId?: string }).activeOperationId).toBe(String(newerOperation.id));
+  });
+
   it("keeps the approved graph on review-finding FIX and starts it from the reviewed candidate", async () => {
     const setup = await approvedGraph();
     const workflow = (setup.harness.db.get(`DEVTASK#${setup.taskId}`, "META") as { workflow: { workflowDependenciesApproval: { runId: string; graphDigest: string; workflowRevision: number } } }).workflow;

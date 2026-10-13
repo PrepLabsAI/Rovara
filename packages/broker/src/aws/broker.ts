@@ -6921,6 +6921,8 @@ async function completedWorkflowItems(
   inlineEvidence?: InlineEvidence[],
   /** Collects the planner's answers to the comments its Request changes sent, to write as replies once the plan has committed. */
   plannerReplies?: PlannerReplies[],
+  /** A cancel may terminalize only this exact current graph IMPLEMENT operation. */
+  graphCancelTarget?: OperationRecord,
 ): Promise<TransactItems> {
   if (pointer === undefined) return [];
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
@@ -7334,16 +7336,27 @@ async function completedWorkflowItems(
       : [];
   // A saved plan forgets the reasons an earlier answer was unreadable; an unreadable answer keeps its own for Retry planning.
   const forget = planUnreadable === null && task.planUnreadable !== undefined;
+  const graphApproval = graphCancelTarget?.workflowDependencies?.approval;
+  const graphCancelCondition = graphCancelTarget?.workflowDependencies === undefined ? "" :
+    " AND workflow.workflowDependenciesOperationId = :graphOperationId AND workflow.workflowDependenciesApproval.graphDigest = :graphDigest AND workflow.workflowDependenciesApproval.runId = :graphRunId AND workflow.workflowDependenciesApproval.artifactDigest = :graphArtifactDigest AND workflow.workflowDependenciesApproval.workflowRevision = :graphApprovalRevision AND workflow.workflowDependenciesApproval.actorId = :graphActorId";
   return [{ Update: {
     TableName: dependencies.tableName,
     Key: taskKey(task.taskId),
     // A stored plan quoted the replies fed so far; the next plan's window starts after them.
     UpdateExpression: `SET workflow = :workflow, updatedAt = :now${planUnreadable === undefined || planUnreadable === null ? "" : ", planUnreadable = :unreadable"}${planUnreadable === null && task.threadNotesFedThrough !== undefined ? ", threadNotesFedFrom = :fedFrom" : ""}${forget ? " REMOVE planUnreadable" : ""}`,
-    ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running",
+    ConditionExpression: `workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running${graphCancelCondition}`,
     ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
     ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": task.workflow.stage, ":running": "RUNNING",
       ...(planUnreadable === undefined || planUnreadable === null ? {} : { ":unreadable": planUnreadable }),
-      ...(planUnreadable === null && task.threadNotesFedThrough !== undefined ? { ":fedFrom": task.threadNotesFedThrough } : {}) },
+      ...(planUnreadable === null && task.threadNotesFedThrough !== undefined ? { ":fedFrom": task.threadNotesFedThrough } : {}),
+      ...(graphApproval === undefined || graphCancelTarget?.workflowDependencies === undefined ? {} : {
+        ":graphOperationId": graphCancelTarget.id,
+        ":graphDigest": graphApproval.graphDigest,
+        ":graphRunId": graphApproval.runId,
+        ":graphArtifactDigest": graphApproval.artifactDigest,
+        ":graphApprovalRevision": graphApproval.workflowRevision,
+        ":graphActorId": graphApproval.actorId,
+      }) },
   } }, ...dispatch,
   ...(evidenceJob === undefined ? [] : [{ Put: { TableName: dependencies.tableName, Item: planEvidenceJobItem({ taskId: task.taskId, ...evidenceJob, now: Date.parse(now) }), ConditionExpression: "attribute_not_exists(pk)" } }]),
   ...(recordedReplies === undefined ? [] : [{ Put: recordedReplies }])];
@@ -7618,6 +7631,45 @@ function regressedCheckLabels(entries: readonly CheckEntry[]): string[] {
 
 const TERMINAL_ERROR_MAX = 16_384;
 
+/** Return a graph IMPLEMENT operation only when it is still the exact running workflow this cancel targets. */
+async function currentGraphCancelTarget(
+  dependencies: AwsBrokerDependencies,
+  cancel: OperationRecord,
+  target?: OperationRecord,
+): Promise<{ target: OperationRecord; pointer: DeveloperTaskPointerRecord } | undefined> {
+  if (cancel.kind !== "cancel" || cancel.targetOperationId === undefined) return undefined;
+  const [currentTarget, pointer] = await Promise.all([
+    target === undefined ? requireOperation(dependencies, cancel.workspaceId, cancel.targetOperationId) : Promise.resolve(target),
+    getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(cancel.workspaceId)),
+  ]);
+  const binding = currentTarget.workflowDependencies;
+  const approval = binding?.approval;
+  if (currentTarget.kind !== "task" || currentTarget.workflowMode !== "IMPLEMENT" || currentTarget.status !== "CANCEL_REQUESTED"
+    || currentTarget.workspaceId !== cancel.workspaceId || currentTarget.fence !== cancel.fence || binding === undefined || approval === undefined
+    || pointer === undefined || pointer.taskId !== binding.graph.taskId) return undefined;
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  const current = task?.workflow;
+  const currentApproval = current?.workflowDependenciesApproval;
+  if (task?.taskId !== binding.graph.taskId || task.workspaceId !== currentTarget.workspaceId || current === undefined
+    || current.stage !== "IMPLEMENT" || current.state !== "RUNNING"
+    || current.workflowDependenciesOperationId !== currentTarget.id || currentApproval === undefined
+    || currentApproval.graphDigest !== approval.graphDigest || currentApproval.runId !== approval.runId
+    || currentApproval.artifactDigest !== approval.artifactDigest || currentApproval.workflowRevision !== approval.workflowRevision
+    || currentApproval.actorId !== approval.actorId) return undefined;
+  return { target: currentTarget, pointer };
+}
+
+/** Apply the ordinary IMPLEMENT terminal transition inside the cancel transaction for the current graph target. */
+async function cancelledGraphWorkflowItems(
+  dependencies: AwsBrokerDependencies,
+  pointer: DeveloperTaskPointerRecord | undefined,
+  target: OperationRecord | undefined,
+  now: string,
+): Promise<TransactItems> {
+  if (target === undefined || pointer === undefined || pointer.taskId !== target.workflowDependencies?.graph.taskId) return [];
+  return completedWorkflowItems(dependencies, target, pointer, "CANCELLED", now, undefined, undefined, undefined, undefined, target);
+}
+
 async function recordTerminalResult(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
@@ -7664,6 +7716,16 @@ async function recordTerminalResult(
   // compute or storage merely because the owner authorized discarding the checked-out changes.
   const closeCanFinish = operation.kind === "close" && closePreflight !== undefined
     && (closePreflight.safeToClose || operation.discardUnpublished === true);
+  const cancelTargetOperation = operation.kind === "cancel" && terminalStatus === "SUCCEEDED" && operation.targetOperationId !== undefined
+    ? await requireOperation(dependencies, operation.workspaceId, operation.targetOperationId)
+    : undefined;
+  const graphCancellation = cancelTargetOperation === undefined ? undefined
+    : await currentGraphCancelTarget(dependencies, operation, cancelTargetOperation);
+  const graphCancelBoundTarget = cancelTargetOperation?.kind === "task" && cancelTargetOperation.workflowMode === "IMPLEMENT"
+    && cancelTargetOperation.workflowDependencies !== undefined ? cancelTargetOperation : undefined;
+  if (graphCancelBoundTarget !== undefined && graphCancelBoundTarget.fence !== operation.fence) {
+    throw agentXError("STALE_FENCE", "cancel and graph target no longer share the current workspace fence");
+  }
   const workspaceStatus =
     operation.kind === "prepare"
       ? terminalStatus === "SUCCEEDED"
@@ -7695,11 +7757,15 @@ async function recordTerminalResult(
       // Issue 195: a cancel that did not succeed (a duplicate the worker no longer knows, say)
       // never turns a target that already ended into INTERRUPTED. A failed condition falls back
       // below to recording the cancel's own result only.
-      ...(terminalStatus === "SUCCEEDED" ? {} : { ConditionExpression: "#status = :cancelRequested" }),
+      ...(graphCancelBoundTarget !== undefined
+        ? { ConditionExpression: "#status = :cancelRequested AND fence = :targetFence" }
+        : terminalStatus === "SUCCEEDED" ? {} : { ConditionExpression: "#status = :cancelRequested" }),
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
         ":status": cancelledTargetStatus(terminalStatus), ":now": now,
-        ...(terminalStatus === "SUCCEEDED" ? {} : { ":cancelRequested": "CANCEL_REQUESTED" }),
+        ...(graphCancelBoundTarget !== undefined
+          ? { ":cancelRequested": "CANCEL_REQUESTED", ":targetFence": graphCancelBoundTarget.fence }
+          : terminalStatus === "SUCCEEDED" ? {} : { ":cancelRequested": "CANCEL_REQUESTED" }),
       },
     } });
   }
@@ -7753,8 +7819,10 @@ async function recordTerminalResult(
       inlineEvidence.length = 0;
       plannerReplies.length = 0;
       const workflow = await completedWorkflowItems(dependencies, operation, pointer, terminalStatus, now, result, error, inlineEvidence, plannerReplies);
-      recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed, ...workflow], workspaceUpdate, send);
-      evidenceJobs = workflow.flatMap((item) => {
+      const cancelledGraph = graphCancellation === undefined ? []
+        : await cancelledGraphWorkflowItems(dependencies, pointer, graphCancellation.target, now);
+      recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed, ...workflow, ...cancelledGraph], workspaceUpdate, send);
+      evidenceJobs = [...workflow, ...cancelledGraph].flatMap((item) => {
         const row = item.Put?.Item as Partial<PlanEvidenceJob> | undefined;
         return row?.pk === PLAN_EVIDENCE_PK && row.taskId !== undefined && row.artifactId !== undefined ? [planEvidenceEvent(row.taskId, row.artifactId)] : [];
       });
