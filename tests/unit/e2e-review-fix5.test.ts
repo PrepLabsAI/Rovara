@@ -99,10 +99,12 @@ describe("Task2A review fix5 discovery ownership", () => {
     ];
     const proposal = propose(files);
     const iosTargets = proposal.targets.filter((target) => target.kind === "mobile" && target.os === "ios");
-    expect(iosTargets).toHaveLength(2);
-    expect(new Set(iosTargets.map((target) => target.targetId)).size).toBe(2);
+    expect(iosTargets).toHaveLength(3);
+    expect(new Set(iosTargets.map((target) => target.targetId)).size).toBe(3);
     expect(new Set(iosTargets.map((target) => target.applicationId)).size).toBe(1);
     expect(iosTargets.every((target) => proposal.applications.some((application) => application.applicationId === target.applicationId && application.sourcePaths.includes("ios/App.xcodeproj/project.pbxproj")))).toBe(true);
+    expect(iosTargets.filter((target) => target.targetId.startsWith("apple-target-"))).toHaveLength(2);
+    expect(proposal.missingInputs.filter((input) => input.inputId.startsWith("native-association-") && input.targetIds.length === 1)).toHaveLength(2);
   });
 
   it("preserves unrelated same-bundle projects as distinct applications", () => {

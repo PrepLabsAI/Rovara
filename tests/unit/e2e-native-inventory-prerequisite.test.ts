@@ -10,6 +10,7 @@ const snapshot = (files: ReturnType<typeof file>[]): E2ESourceSnapshot => ({ can
 const inspect = (files: ReturnType<typeof file>[]) => inspectE2ERepository(snapshot(files), candidate).inspection;
 
 const plist = `<plist><dict><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIdentifier</key><string>fixture.app</string></dict></plist>`;
+const genuineRNPlist = `<plist><dict><key>CFBundlePackageType</key><string>APPL</string><key>CFBundleIdentifier</key><string>fixture.app</string><key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array></dict></plist>`;
 const pbxProject = (targetRefs: string, configurations: string, targetDefinitions: string, configDefinitions: string) => `{
   objects = {
     P = { isa = PBXProject; targets = (${targetRefs}); };
@@ -97,6 +98,68 @@ describe("native inventory prerequisite", () => {
     expect(ownerIds).toHaveLength(1);
     expect(result.applications.find((application) => application.applicationId === targets[0]?.applicationId)?.sourcePaths).toContain("ios/App.xcodeproj/project.pbxproj");
     expect(result.missingInputs.filter((input) => input.kind === "runtime" && input.targetIds.some((targetId) => targets.some((target) => target.targetId === targetId)))).toHaveLength(2);
+  });
+
+  it("keeps a genuine RN framework target and both PBX refs unresolved when same-plist ownership is ambiguous", () => {
+    const project = pbxProject(
+      "T0, T1",
+      configurationList("C"),
+      `${nativeTarget("T0")} ${nativeTarget("T1")}`,
+      configuration("C", completeSettings),
+    );
+    const files = [
+      file("package.json", JSON.stringify({ name: "native-shell", dependencies: { "react-native": "1" } })),
+      file("ios/App/Info.plist", genuineRNPlist),
+      file("ios/App.xcodeproj/project.pbxproj", project),
+    ];
+    const forward = inspect(files);
+    const reversedSources = inspect([...files].reverse());
+    const reversedRefs = inspect(files.map((source) => source.path.endsWith("project.pbxproj")
+      ? file(source.path, project.replace("targets = (T0, T1)", "targets = (T1, T0)")) : source));
+    const targets = forward.proposedTargets.filter((target) => target.kind === "mobile" && target.os === "ios");
+    const associations = forward.missingInputs.filter((input) => input.inputId.startsWith("native-association-"));
+
+    expect(targets).toHaveLength(3);
+    expect(new Set(targets.map((target) => target.targetId))).toHaveLength(3);
+    expect(associations).toHaveLength(2);
+    expect(associations.every((input) => input.disposition === "mock-substitutable" && input.targetIds.length === 1)).toBe(true);
+    expect(forward.proposedTargets).toEqual(reversedSources.proposedTargets);
+    expect(forward.missingInputs).toEqual(reversedSources.missingInputs);
+    expect(forward.proposedTargets).toEqual(reversedRefs.proposedTargets);
+    expect(forward.missingInputs).toEqual(reversedRefs.missingInputs);
+  });
+
+  it("corroborates a genuine RN framework target only for a unique PBX association", () => {
+    const project = pbxProject("T0", configurationList("C"), nativeTarget("T0"), configuration("C", completeSettings));
+    const result = inspect([
+      file("package.json", JSON.stringify({ name: "native-shell", dependencies: { "react-native": "1" } })),
+      file("ios/App/Info.plist", genuineRNPlist),
+      file("ios/App.xcodeproj/project.pbxproj", project),
+    ]);
+    const targets = result.proposedTargets.filter((target) => target.kind === "mobile" && target.os === "ios");
+
+    expect(targets).toHaveLength(1);
+    expect(targets[0]?.targetId).not.toMatch(/^apple-target-/);
+    expect(result.missingInputs.some((input) => input.inputId.startsWith("native-association-"))).toBe(false);
+  });
+
+  it("keeps cross-project same-plist PBX references unresolved against a genuine RN framework target", () => {
+    const project = pbxProject("T0, T1", configurationList("C"), `${nativeTarget("T0")} ${nativeTarget("T1")}`, configuration("C", completeSettings));
+    const files = [
+      file("package.json", JSON.stringify({ name: "native-shell", dependencies: { "react-native": "1" } })),
+      file("ios/App/Info.plist", genuineRNPlist),
+      file("ios/App.xcodeproj/project.pbxproj", project),
+      file("ios/Widget.xcodeproj/project.pbxproj", project),
+    ];
+    const forward = inspect(files);
+    const reverse = inspect([...files].reverse());
+    const targets = forward.proposedTargets.filter((target) => target.kind === "mobile" && target.os === "ios");
+    const associations = forward.missingInputs.filter((input) => input.inputId.startsWith("native-association-"));
+
+    expect(targets).toHaveLength(5);
+    expect(associations).toHaveLength(4);
+    expect(forward.proposedTargets).toEqual(reverse.proposedTargets);
+    expect(forward.missingInputs).toEqual(reverse.missingInputs);
   });
 
   it("does not infer an Apple platform from an ios directory when plist metadata is generic", () => {

@@ -402,11 +402,12 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
   const consumedFrameworkTargets = new Set<string>();
   const appleTargetProjectSources = new Map<string, string>();
   const xcodeProjects = [...sources.values()].filter((source) => /\.xcodeproj\/project\.pbxproj$/i.test(source.path)).sort((a, b) => a.path.localeCompare(b.path));
+  const preexistingFrameworkTargets = new Set(proposedTargets.filter((target) => !pbxCreatedApplications.has(target.applicationId)).map((target) => `${target.applicationId}\0${target.targetId}`));
+  const appleProjectsByPath = new Map(xcodeProjects.map((source) => [source.path, parseAppleProject(source.path, Buffer.from(source.bytes).toString("utf8"))]));
   for (const projectSource of xcodeProjects) {
     appleOwnedPaths.add(projectSource.path);
-    const preexistingFrameworkTargets = new Set(proposedTargets.filter((target) => !pbxCreatedApplications.has(target.applicationId)).map((target) => `${target.applicationId}\0${target.targetId}`));
-    const project = parseAppleProject(projectSource.path, Buffer.from(projectSource.bytes).toString("utf8"));
-    const projectRecords = project.targets;
+    const project = appleProjectsByPath.get(projectSource.path)!;
+    const projectRecords = [...project.targets].sort((a, b) => a.ref.localeCompare(b.ref));
     if (project.error || projectRecords.length === 0) {
       const id = createHash("sha256").update(projectSource.path).digest("hex").slice(0, 12);
       missingInputs.push({ inputId: "apple-project-metadata-" + id, targetIds: [], kind: "target-selection", disposition: "blocking", reason: project.error ? `Apple project metadata is unresolved: ${project.error}` : "Apple project has no source-confirmed application target", sourcePaths: [projectSource.path] });
@@ -442,15 +443,14 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
           && preexistingFrameworkTargets.has(`${target.applicationId}\0${target.targetId}`))
           .map((target) => ({ application, target }));
       });
-      if (matches.length > 1) {
-        missingInputs.push({ inputId: "apple-target-ownership-" + stable, targetIds: [], kind: "target-selection", disposition: "blocking", reason: "Multiple preexisting framework targets match this Apple project target; ownership is ambiguous", sourcePaths: ownerPaths });
-        continue;
-      }
-      const frameworkMatch = matches[0];
-      if (frameworkMatch) {
-        const key = `${frameworkMatch.application.applicationId}\0${frameworkMatch.target.targetId}`;
-        frameworkMatch.application.sourcePaths = [...new Set([...frameworkMatch.application.sourcePaths, projectSource.path])].sort();
-        appleTargetProjectSources.set(frameworkMatch.target.targetId, projectSource.path);
+      const frameworkMatch = matches.length === 1 ? matches[0] : undefined;
+      const inverseMatches = frameworkMatch ? [...appleProjectsByPath.values()].flatMap((candidateProject) => candidateProject.targets)
+        .filter((candidate) => candidate.platform === record.platform && candidate.bundleId === record.bundleId && candidate.plistPath === record.plistPath).length : 0;
+      const uniquelyCorroboratedFrameworkMatch = frameworkMatch && inverseMatches === 1 ? frameworkMatch : undefined;
+      if (uniquelyCorroboratedFrameworkMatch) {
+        const key = `${uniquelyCorroboratedFrameworkMatch.application.applicationId}\0${uniquelyCorroboratedFrameworkMatch.target.targetId}`;
+        uniquelyCorroboratedFrameworkMatch.application.sourcePaths = [...new Set([...uniquelyCorroboratedFrameworkMatch.application.sourcePaths, projectSource.path])].sort();
+        appleTargetProjectSources.set(uniquelyCorroboratedFrameworkMatch.target.targetId, projectSource.path);
         if (!consumedFrameworkTargets.has(key)) {
           consumedFrameworkTargets.add(key);
           continue;
@@ -476,6 +476,9 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
       }
       appleTargetProjectSources.set(targetId, projectSource.path);
       missingInputs.push({ inputId: "native-runtime-" + stable, targetIds: [targetId], kind: "runtime", disposition: "mock-substitutable", reason: `The ${record.platform} native build and launch profile is unavailable in this phase`, sourcePaths: ownerPaths });
+      if (matches.length > 0 && !uniquelyCorroboratedFrameworkMatch) {
+        missingInputs.push({ inputId: "native-association-" + stable, targetIds: [targetId], kind: "runtime", disposition: "mock-substitutable", reason: "The source-backed native build association is ambiguous; the portable framework target is retained without claiming this PBX reference", sourcePaths: ownerPaths });
+      }
     }
   }
   for (const source of [...sources.values()].filter((item) => /Info\.plist$/i.test(item.path)).sort((a, b) => a.path.localeCompare(b.path))) {
