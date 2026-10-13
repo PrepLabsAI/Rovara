@@ -11,7 +11,7 @@ describe("fixed ordinary-source adapter", () => {
     const source = "export async function run(input) { return { ...input, observed: true }; }\n";
     const manifest = JSON.stringify({ name: "app", exports: { "./rows": "./src/app.js" } });
     const snapshot = { sources: [{ path: "apps/app/package.json", bytes: new TextEncoder().encode(manifest), sha256: sha(manifest), kind: "blob" }, { path: "apps/app/src/app.js", bytes: new TextEncoder().encode(source), sha256: sha(source), kind: "blob" }] } as unknown as E2ESourceSnapshot;
-    const compiled = { caseBindings: new Map([["case", { applicationId: "app", moduleSpecifier: "./src/app.js", packageExportSubpath: "./rows", callableSelector: { kind: "named", exportName: "run" } }]]), expectedCases: [{ caseId: "case", scenarioId: "scenario" }], bundle: { scenarios: [{ scenarioId: "scenario" }] } } as unknown as E2ECompiledSuite;
+    const compiled = { caseBindings: new Map([["case", { applicationId: "app", manifestPath: "apps/app/package.json", moduleSpecifier: "./src/app.js", packageExportSubpath: "./rows", callableSelector: { kind: "named", exportName: "run" } }]]), expectedCases: [{ caseId: "case", scenarioId: "scenario" }], bundle: { scenarios: [{ scenarioId: "scenario" }] } } as unknown as E2ECompiledSuite;
     const feature = createE2EAppAdapterPacket({ compiled, snapshot, caseId: "case", mode: "feature" });
     const inspectionCompiled = { ...compiled, caseBindings: new Map([["case", { ...compiled.caseBindings.get("case"), callableSelector: null, expectedExportNames: ["run"] }]]) } as unknown as E2ECompiledSuite;
     const inspect = createE2EAppAdapterPacket({ compiled: inspectionCompiled, snapshot, caseId: "case", mode: "inspect" });
@@ -37,11 +37,25 @@ describe("fixed ordinary-source adapter", () => {
       { path: "apps/other/package.json", bytes: new TextEncoder().encode(otherManifest), sha256: sha(otherManifest), kind: "blob" },
       { path: "apps/other/src/app.js", bytes: new TextEncoder().encode(source), sha256: sha(source), kind: "blob" },
     ] } as unknown as E2ESourceSnapshot;
-    const compiled = { caseBindings: new Map([["case", { applicationId: "app", moduleSpecifier: "./src/app.js", packageExportSubpath: "./rows", callableSelector: { kind: "default" } }]]), expectedCases: [{ caseId: "case", scenarioId: "scenario" }], bundle: { scenarios: [{ scenarioId: "scenario" }] } } as unknown as E2ECompiledSuite;
+    const compiled = { caseBindings: new Map([["case", { applicationId: "app", manifestPath: "apps/app/package.json", moduleSpecifier: "./src/app.js", packageExportSubpath: "./rows", callableSelector: { kind: "default" } }]]), expectedCases: [{ caseId: "case", scenarioId: "scenario" }], bundle: { scenarios: [{ scenarioId: "scenario" }] } } as unknown as E2ECompiledSuite;
     const packet = createE2EAppAdapterPacket({ compiled, snapshot, caseId: "case", mode: "feature" });
     expect(packet.status).toBe("ready");
     expect(packet.packet?.files.map((item) => item.path)).toContain("apps/app/src/app.js");
     expect(packet.packet?.files.map((item) => item.path)).not.toContain("apps/other/src/app.js");
+  });
+
+  it("resolves a compiler-attested repository-root package without guessing an apps path", () => {
+    const source = "export default async function(input) { return input; }\n";
+    const manifest = JSON.stringify({ name: "root-app", type: "module", exports: { "./rows": "./src/app.js" } });
+    const snapshot = { sources: [
+      { path: "package.json", bytes: new TextEncoder().encode(manifest), sha256: sha(manifest), kind: "blob" },
+      { path: "src/app.js", bytes: new TextEncoder().encode(source), sha256: sha(source), kind: "blob" },
+    ] } as unknown as E2ESourceSnapshot;
+    const compiled = { caseBindings: new Map([["case", { applicationId: "root-app", manifestPath: "package.json", moduleSpecifier: "./src/app.js", packageExportSubpath: "./rows", callableSelector: { kind: "default" } }]]), expectedCases: [{ caseId: "case", scenarioId: "scenario" }], bundle: { scenarios: [{ scenarioId: "scenario" }] } } as unknown as E2ECompiledSuite;
+    const packet = createE2EAppAdapterPacket({ compiled, snapshot, caseId: "case", mode: "feature" });
+    expect(packet.status).toBe("ready");
+    expect(packet.packet?.files.map((item) => item.path)).toContain("src/app.js");
+    expect(new TextDecoder().decode(packet.packet?.files.find((item) => item.path === packet.packet?.entry)?.bytes)).toContain("../src/app.js");
   });
 
   it("installs only the exact source-bound GET mock and denies unmatched real fetches", () => {
@@ -58,7 +72,7 @@ describe("fixed ordinary-source adapter", () => {
       { id: "refusal", inputValue: "refusal", status: 403, body: { error: "refused" } },
       { id: "invalid-data", inputValue: "invalid", status: 200, body: { rows: "bad" } },
     ] };
-    const compiled = { caseBindings: new Map([["case", { applicationId: "app", requestedTargetId: "requested", moduleSpecifier: "./src/app.js", packageExportSubpath: "./rows", callableSelector: { kind: "default" } }]]), expectedCases: [{ caseId: "case", scenarioId: "scenario" }], bundle: { scenarios: [{ scenarioId: "scenario" }] }, group: { mocks: [{ componentId: "api-schema-abc", requestedTargetId: "requested", kind: "api", contractDigest: "0".repeat(64), fixtureVersion: "openapi-json-fixture-v1", sourceRefs: [{ path: "apps/app/openapi.json", sha256: sha(openapi) }], reason: "phase-unavailable", apiFixture }] } } as unknown as E2ECompiledSuite;
+    const compiled = { caseBindings: new Map([["case", { applicationId: "app", manifestPath: "apps/app/package.json", requestedTargetId: "requested", moduleSpecifier: "./src/app.js", packageExportSubpath: "./rows", callableSelector: { kind: "default" } }]]), expectedCases: [{ caseId: "case", scenarioId: "scenario" }], bundle: { scenarios: [{ scenarioId: "scenario" }] }, group: { mocks: [{ componentId: "api-schema-abc", requestedTargetId: "requested", kind: "api", contractDigest: "0".repeat(64), fixtureVersion: "openapi-json-fixture-v1", sourceRefs: [{ path: "apps/app/openapi.json", sha256: sha(openapi) }], reason: "phase-unavailable", apiFixture }] } } as unknown as E2ECompiledSuite;
     const packet = createE2EAppAdapterPacket({ compiled, snapshot, caseId: "case", mode: "feature", mockSpecs: compiled.group.mocks });
     const entry = new TextDecoder().decode(packet.packet?.files.find((file) => file.path === packet.packet?.entry)?.bytes);
     expect(packet.declaredMockComponentIds).toEqual(["api-schema-abc"]);

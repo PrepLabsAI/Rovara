@@ -1,5 +1,5 @@
 import { createConnection } from "node:net";
-import { chmod, mkdtemp, rm, symlink, unlink } from "node:fs/promises";
+import { chmod, mkdtemp, rm, symlink, unlink, lstat, readlink } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { createE2EWorkerSession } from "../../packages/verifier/src/runtime-session.js";
 
@@ -91,12 +91,19 @@ describe("private E2E worker session", () => {
       });
       expect(JSON.parse(raw)).toMatchObject({ schemaVersion: "trusted-worker-response/v1", ok: false });
       expect(session.readback().requestCount).toBe(0);
-      expect(await session.close()).toBe(true);
+      const firstClose = session.close();
+      const secondClose = session.close();
+      expect(firstClose).toBe(secondClose);
+      expect(await firstClose).toBe(false);
       expect(session.readback().closed).toBe(true);
+      expect(session.readback().socket).toBe(false);
+      expect(session.readback()).toMatchObject({ serverListening: true, cleanupConfirmed: false });
+      expect((await lstat(session.socketPath)).isSymbolicLink()).toBe(true);
+      expect(await readlink(session.socketPath)).toBe("/dev/null");
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 
-  it("rejects new registrations after explicit cancellation and deadline expiry", async () => {
+  it("closes the owned socket at the absolute deadline and confirms path absence", async () => {
     const directory = await mkdtemp("/tmp/e2es-expiry-");
     await chmod(directory, 0o700);
     const controller = new AbortController();
@@ -104,12 +111,52 @@ describe("private E2E worker session", () => {
     const session = await createE2EWorkerSession({ directory, capability: token, expectedByCase: new Map([["case", { payload: { caseId: "case" } }]]), handle: async (payload) => payload, signal: controller.signal, deadlineAt: Date.now() + 30 });
     try {
       await new Promise((resolve) => setTimeout(resolve, 40));
-      const expired = await parsed(session.socketPath, { schemaVersion: "trusted-worker-observation/v1", kind: "register", capability: token, workerId: "a".repeat(24) });
-      expect(expired).toMatchObject({ ok: false });
-      controller.abort(new Error("test cancellation"));
-      const cancelled = await parsed(session.socketPath, { schemaVersion: "trusted-worker-observation/v1", kind: "register", capability: token, workerId: "b".repeat(24) });
-      expect(cancelled).toMatchObject({ ok: false });
+      expect(session.readback()).toMatchObject({ socket: false, closed: true });
+      await expect(parsed(session.socketPath, { schemaVersion: "trusted-worker-observation/v1", kind: "register", capability: token, workerId: "a".repeat(24) })).rejects.toThrow();
+      expect(await session.close()).toBe(true);
       expect(session.readback()).toMatchObject({ requestCount: 0, registeredWorkers: 0 });
+      expect(session.readback().socket).toBe(false);
     } finally { await session.close(); await rm(directory, { recursive: true, force: true }); }
+  });
+
+  it("destroys an owned partial client on close and coalesces concurrent close completion", async () => {
+    const directory = await mkdtemp("/tmp/e2es-partial-");
+    await chmod(directory, 0o700);
+    const session = await createE2EWorkerSession({ directory, capability: "e".repeat(64), expectedByCase: new Map([["case", { payload: { caseId: "case" } }]]), handle: async (payload) => payload });
+    const socket = createConnection(session.socketPath);
+    await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+    socket.write('{"partial":');
+    const firstClose = session.close();
+    const secondClose = session.close();
+    expect(firstClose).toBe(secondClose);
+    expect(await firstClose).toBe(true);
+    expect(session.readback()).toMatchObject({ socket: false, closed: true });
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("contains an abrupt disconnect while an observation is active", async () => {
+    const directory = await mkdtemp("/tmp/e2es-abrupt-");
+    await chmod(directory, 0o700);
+    let started!: () => void;
+    let release!: () => void;
+    const began = new Promise<void>((resolve) => { started = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const token = "f".repeat(64);
+    const session = await createE2EWorkerSession({ directory, capability: token, expectedByCase: new Map([["case", { payload: { caseId: "case" } }]]), handle: async (payload) => { started(); await gate; return payload; } });
+    try {
+      const registration = await parsed(session.socketPath, { schemaVersion: "trusted-worker-observation/v1", kind: "register", capability: token, workerId: "b".repeat(24) });
+      const workerToken = (registration.value as { workerToken: string }).workerToken;
+      expect(typeof workerToken).toBe("string");
+      const socket = createConnection(session.socketPath);
+      await new Promise<void>((resolve, reject) => { socket.once("connect", resolve); socket.once("error", reject); });
+      socket.end(`${JSON.stringify({ schemaVersion: "trusted-worker-observation/v1", workerId: "b".repeat(24), workerToken, sequence: 1, payload: { caseId: "case" } })}\n`);
+      await began;
+      socket.destroy();
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(session.readback().requestCount).toBe(1);
+      expect(await session.close()).toBe(true);
+      expect(session.readback().cleanupConfirmed).toBe(true);
+    } finally { release(); await session.close(); await rm(directory, { recursive: true, force: true }); }
   });
 });

@@ -5,7 +5,7 @@ import { canonicalJson, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingS
 import { E2EReportSchema, type E2EReport } from "./report-schema.js";
 import type { E2ESelectionPacket, E2ESelectionTuple } from "./selection.js";
 import { compareE2EPublicList } from "./selection.js";
-import type { E2ECompiledSuite } from "./scenarios.js";
+import { validateE2ECompiledRuntimeAdmission, type E2ECompiledSuite } from "./scenarios.js";
 import { E2E_GENERATED_TEST_PATH, E2E_UPSTREAM_PACKAGE, E2E_UPSTREAM_VERSION } from "./identity.js";
 
 export const E2E_REPORT_MAX_BYTES = 4 * 1024 * 1024;
@@ -87,7 +87,7 @@ export type E2ECollectionOracle = Readonly<{
   declaredMockComponentIds: readonly string[];
   sourceDigest: string; artifacts: readonly unknown[]; usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>; environment: Readonly<{ ci: boolean; trustNoticeShown: boolean; os: string; arch: string; runtime: string }>;
   targets: readonly unknown[];
-  cases: readonly Readonly<{ caseId: string; hostRequestId: string; projectionVersion: typeof E2E_MODULE_EXPORT_PROJECTION_VERSION | null; compilerCaseIdentity: string; registrationKey: string; semanticApprovalDigest: string; accountIdDigest: string; declarationIndex: number; sourceLine: number; sourceColumn: number; tags: readonly string[]; expectedRequest: unknown; expectedCandidateInput: unknown; assertions: readonly Readonly<{ index: number; digest: string; expectedResponse: unknown }>[] }>[];
+  cases: readonly Readonly<{ caseId: string; hostRequestId: string; projectionVersion: typeof E2E_MODULE_EXPORT_PROJECTION_VERSION | null; compilerCaseIdentity: string; registrationKey: string; semanticApprovalDigest: string; accountIdDigest: string; mockComponentIds: readonly string[]; declarationIndex: number; sourceLine: number; sourceColumn: number; tags: readonly string[]; expectedRequest: unknown; expectedCandidateInput: unknown; assertions: readonly Readonly<{ index: number; digest: string; expectedResponse: unknown }>[] }>[];
 }>;
 export type E2EObservedReceipt = Readonly<{
   runId: string; roundId: string; groupId: string; caseId: string; upstreamRunId: string;
@@ -114,12 +114,15 @@ export function createE2ECollectionOracleFromCompiledSuite(input: {
   fixedAssetDigests: Readonly<Record<string, string>>;
   environment: E2ECollectionOracle["environment"]; usage: E2ECollectionOracle["usage"]; limits: E2ECollectionOracle["limits"];
 }): E2ECollectionOracle {
+  validateE2ECompiledRuntimeAdmission(input.compiled, input.compiled.runtimeAdmission?.sourceSnapshot);
   const generated = input.compiled.files.get(E2E_GENERATED_TEST_PATH);
   if (!generated || input.compiled.expectedCases.length !== input.binding.expectedCases.length || input.selection.groupId !== input.binding.groupId || input.selection.planDigest !== input.binding.executionPlanDigest) throw new Error("compiled suite, binding, and selection do not describe one exact group");
   const lines = generated.split("\n");
   if (input.compiled.hostRequestPayloads.size !== input.compiled.expectedCases.length || input.hostRequestIds.size !== input.compiled.expectedCases.length || new Set(input.hostRequestIds.values()).size !== input.hostRequestIds.size) throw new Error("compiled host payload or independently admitted request identity inventory is incomplete or ambiguous");
   const targetNames = [...new Set(input.selection.tuples.map((tuple) => tuple.targetName))];
   const targets = targetNames.map((name, index) => ({ id: name, index, platform: name, environment: "test", engine: { name: "none", version: "unversioned", spiVersion: 1 }, capabilities: [], artifactCapabilities: [], stateCapability: false }));
+  const groupMockIds = [...new Set(input.compiled.group.mocks.map((mock) => mock.componentId))].sort();
+  if (canonicalJson([...input.declaredMockComponentIds].sort()) !== canonicalJson(groupMockIds)) throw new Error("declared group mock inventory differs from its authenticated compiled group");
   const cases = input.compiled.expectedCases.map((expectedCase, declarationIndex) => {
     const caseBinding = input.compiled.caseBindings.get(expectedCase.caseId);
     const scenario = input.compiled.bundle.scenarios.find((item) => item.scenarioId === expectedCase.scenarioId) as E2EScenario | undefined;
@@ -131,6 +134,17 @@ export function createE2ECollectionOracleFromCompiledSuite(input: {
     const sourceInterface = scenario.steps[0]?.kind === "inspect-contract";
     const payload = input.compiled.hostRequestPayloads.get(expectedCase.caseId);
     if (payload === undefined || !generated.includes(JSON.stringify(payload))) throw new Error("compiled suite omitted its exact emitted supervisor payload");
+    const requestedTarget = input.compiled.runtimeAdmissionContext.selectionInput.policy.targets.find((item) => item.targetId === expectedCase.requestedTargetId);
+    const effectiveTarget = input.compiled.runtimeAdmissionContext.executionPlan.effectiveTargets.find((item) => item.targetId === expectedCase.targetId);
+    if (!requestedTarget || !effectiveTarget || effectiveTarget.kind !== "contract" || effectiveTarget.requestedTargetId !== expectedCase.requestedTargetId || requestedTarget.applicationId !== caseBinding.applicationId || effectiveTarget.applicationId !== caseBinding.applicationId) throw new Error("compiled case target and registered application identity do not match the immutable source context");
+    const approvedMocks = input.compiled.runtimeAdmissionContext.selectionInput.portableApprovalBinding?.mockFixtures ?? [];
+    const selectedMocks = input.compiled.group.mocks.filter((mock) => mock.requestedTargetId === expectedCase.requestedTargetId && mock.effectiveTargetId === expectedCase.targetId);
+    for (const mock of selectedMocks) {
+      const approved = approvedMocks.find((item) => item.componentId === mock.componentId && item.requestedTargetId === mock.requestedTargetId);
+      const selected = input.compiled.runtimeAdmissionContext.selectionInput.mockableComponents?.find((item) => item.componentId === mock.componentId && item.requestedTargetId === mock.requestedTargetId);
+      if (!approved || !selected || canonicalJson(approved) !== canonicalJson(selected) || canonicalJson(approved.sourceRefs) !== canonicalJson(mock.sourceRefs)) throw new Error("per-case fixture is not bound to its immutable approval and source registration");
+    }
+    const mockComponentIds = [...new Set(selectedMocks.map((mock) => mock.componentId))].sort();
     const assertions = scenario.assertions.map((assertion, index) => {
       let expectedResponse: unknown;
       if (assertion.kind === "state" && assertion.probeId === "result" || assertion.kind === "json" && assertion.responseId === "result") expectedResponse = assertion.equals;
@@ -139,7 +153,7 @@ export function createE2ECollectionOracleFromCompiledSuite(input: {
       return { index, digest: expectedCase.assertionDigests[index]!, expectedResponse };
     });
     const accountIdDigest = createHash("sha256").update(canonicalJson({ accountProfileId: expectedCase.accountProfileId, accountContextId: expectedCase.accountContextId, accountContextDigest: expectedCase.accountContextDigest })).digest("hex");
-    return { caseId: expectedCase.caseId, hostRequestId, projectionVersion: sourceInterface ? E2E_MODULE_EXPORT_PROJECTION_VERSION : null, compilerCaseIdentity: caseBinding.compilerCaseIdentity, registrationKey: caseBinding.registrationKey, semanticApprovalDigest, accountIdDigest, declarationIndex, sourceLine, sourceColumn: 1, tags: [], expectedRequest: payload, expectedCandidateInput: scenario.steps[0]?.kind === "invoke-contract" ? scenario.steps[0].input : null, assertions };
+    return { caseId: expectedCase.caseId, hostRequestId, projectionVersion: sourceInterface ? E2E_MODULE_EXPORT_PROJECTION_VERSION : null, compilerCaseIdentity: caseBinding.compilerCaseIdentity, registrationKey: caseBinding.registrationKey, semanticApprovalDigest, accountIdDigest, mockComponentIds, declarationIndex, sourceLine, sourceColumn: 1, tags: [], expectedRequest: payload, expectedCandidateInput: scenario.steps[0]?.kind === "invoke-contract" ? scenario.steps[0].input : null, assertions };
   });
   const targetSet = new Set(targetNames);
   if (input.selection.tuples.some((tuple) => !targetSet.has(tuple.targetName))) throw new Error("selection references a target absent from the compiled group");
@@ -157,7 +171,7 @@ export function qualifyE2ECollection(oracleInput: E2ECollectionOracle, collectio
     try { raw = copyCollection(collectionInput); } catch (error) { return unavailable(`collection snapshot is malformed or unsafe: ${error instanceof Error ? error.message : "unknown error"}`); }
     const binding = E2ERunBindingSchema.parse(oracle.binding);
     const round = E2ERoundSchema.parse(oracle.round);
-    if (!/^[a-f0-9]{64}$/.test(oracle.sourceDigest) || !/^[a-f0-9]{64}$/.test(oracle.configDigest) || Object.keys(oracle.fixedAssetDigests).length === 0 || Object.values(oracle.fixedAssetDigests).some((digest) => !/^[a-f0-9]{64}$/.test(digest)) || new Set(oracle.declaredMockComponentIds).size !== oracle.declaredMockComponentIds.length) return unavailable("independent source, configuration, fixed asset, or mock manifest identity is invalid");
+    if (!/^[a-f0-9]{64}$/.test(oracle.sourceDigest) || !/^[a-f0-9]{64}$/.test(oracle.configDigest) || Object.keys(oracle.fixedAssetDigests).length === 0 || Object.values(oracle.fixedAssetDigests).some((digest) => !/^[a-f0-9]{64}$/.test(digest)) || new Set(oracle.declaredMockComponentIds).size !== oracle.declaredMockComponentIds.length || oracle.cases.some((item) => new Set(item.mockComponentIds).size !== item.mockComponentIds.length || canonicalJson([...item.mockComponentIds].sort()) !== canonicalJson(item.mockComponentIds))) return unavailable("independent source, configuration, fixed asset, or mock manifest identity is invalid");
     const currentBinding = round.groupBindings.find((item) => item.runId === binding.runId);
     if (!currentBinding || canonicalJson(currentBinding) !== canonicalJson(binding) || round.roundId !== binding.roundId || round.executionPlanDigest !== binding.executionPlanDigest) return unavailable("binding is not an exact member of the current authoritative round");
     if (oracle.selection.groupId !== binding.groupId || oracle.selection.planDigest !== binding.executionPlanDigest || oracle.selection.tuples.length > 192) return unavailable("selection packet does not bind the current group");
@@ -254,7 +268,7 @@ export function qualifyE2ECollection(oracleInput: E2ECollectionOracle, collectio
       const status = clean ? "passed" : row.status === "flaky" || attemptsForRow.length > 1 ? "unstable" : caseFailed ? "failed" : "unavailable";
       const coverage = copyBoundedE2EJsonData(observation.coverage, { maxBytes: 65_536, maxDepth: 32 });
       const normalizedCoverage = coverage as E2EQualifiedResult["cases"][number]["coverage"];
-      if (canonicalJson(normalizedCoverage.mockedComponentIds) !== canonicalJson([...oracle.declaredMockComponentIds].sort()) || normalizedCoverage.observedMockedComponentIds.some((componentId) => !oracle.declaredMockComponentIds.includes(componentId))) return unavailable("declared and observed mock coverage differs from the immutable group manifest");
+      if (canonicalJson(normalizedCoverage.mockedComponentIds) !== canonicalJson([...expectation.mockComponentIds].sort()) || normalizedCoverage.observedMockedComponentIds.some((componentId) => !expectation.mockComponentIds.includes(componentId))) return unavailable("declared and observed mock coverage differs from the immutable group manifest");
       const evidenceRank = { source: 0, "mock-contract": 1, runtime: 2, "external-live": 3 } as const;
       const scopeMet = normalizedCoverage.subject === "candidate" && evidenceRank[normalizedCoverage.observedScope] >= evidenceRank[expectedCase.minimumEvidence] && expectedCase.requiredRealComponentIds.every((componentId) => normalizedCoverage.realComponentIds.includes(componentId)) && normalizedCoverage.unexercisedBehaviors.length === 0;
       const qualifiedStatus = clean && !scopeMet ? "unavailable" : status;
@@ -273,7 +287,7 @@ export function qualifyE2ECollection(oracleInput: E2ECollectionOracle, collectio
 function snapshotE2ECollectionOracle(input: E2ECollectionOracle): E2ECollectionOracle {
   const commonKeys = ["projectId", "configDigest", "compiledConfigDigest", "runnerName", "runnerVersion", "sourceDigest", "artifacts", "usage", "limits", "environment"] as const;
   const otherKeys = ["binding", "round", "selection", "fixedAssetDigests", "declaredMockComponentIds", "targets"] as const;
-  const caseKeys = ["caseId", "hostRequestId", "projectionVersion", "compilerCaseIdentity", "registrationKey", "semanticApprovalDigest", "accountIdDigest", "declarationIndex", "sourceLine", "sourceColumn", "tags", "expectedRequest", "expectedCandidateInput", "assertions"] as const;
+  const caseKeys = ["caseId", "hostRequestId", "projectionVersion", "compilerCaseIdentity", "registrationKey", "semanticApprovalDigest", "accountIdDigest", "mockComponentIds", "declarationIndex", "sourceLine", "sourceColumn", "tags", "expectedRequest", "expectedCandidateInput", "assertions"] as const;
   const top = ownRecord(input, [...commonKeys, ...otherKeys, "cases"]);
   requireExactKeys(top, [...commonKeys, ...otherKeys, "cases"]);
   const commonInput: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
@@ -293,6 +307,7 @@ function snapshotE2ECollectionOracle(input: E2ECollectionOracle): E2ECollectionO
     requireExactKeys(row, caseKeys);
     const metadataInput: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
     for (const key of caseKeys) if (key !== "expectedRequest" && key !== "expectedCandidateInput" && key !== "assertions") metadataInput[key] = row[key];
+    metadataInput.mockComponentIds = row.mockComponentIds;
     const metadata = copyBoundedE2EJsonData(metadataInput, { maxBytes: 8_192, maxDepth: 64 });
     const expectedRequest = copyBoundedE2EJsonData(row.expectedRequest, { maxBytes: E2E_APP_RPC_FRAME_MAX_BYTES, maxDepth: 64 });
     const expectedCandidateInput = copyBoundedE2EJsonData(row.expectedCandidateInput, { maxBytes: E2E_APP_LITERAL_MAX_BYTES, maxDepth: E2E_APP_LITERAL_MAX_DEPTH });

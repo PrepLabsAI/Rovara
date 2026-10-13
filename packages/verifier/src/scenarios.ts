@@ -1,7 +1,7 @@
 import { types } from "node:util";
 import { createHash } from "node:crypto";
 import { E2EScenarioBundleSchema, E2EExecutionGroupSchema, E2EExecutionPlanSchema, E2EPortableApprovalBindingSchema, canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes, copyBoundedE2ETreePaths, e2ePortableRegistrationKey, inspectE2EPortableSource, inspectE2ERepository, resolveE2EPortableRegistration, selectE2EExecutionPlan, verifyE2ESourceSnapshot, type CandidateManifest, type E2EExecutionPlan, type E2EExpectedCase, type E2EPolicy, type E2EScenario, type E2EScenarioBundle, type E2ESourceSnapshot, type E2EPlanSelectionInput, type E2EMockSpec } from "@agentx/contracts";
-import { type E2ECompiledInventory } from "./identity.js";
+import { verifyE2ECompiledFileInventory, type E2ECompiledInventory } from "./identity.js";
 import { emitE2ECompilationFiles, e2ePortableOperationDescriptorDigest, type E2EOperationRegistration } from "./templates.js";
 import { assertPlanSubset } from "./selection.js";
 
@@ -10,7 +10,50 @@ export type E2EImmutableCompilationContext = Readonly<{
   executionPlan: E2EExecutionPlan;
   group: E2EExecutionPlan["groups"][number];
 }>;
-export type E2ECompiledSuite = Readonly<{ bundle: E2EScenarioBundle; group: E2EExecutionPlan["groups"][number] & { mocks: readonly E2EMockSpec[] }; files: ReadonlyMap<string, string>; inventory: E2ECompiledInventory; expectedConfigDigest: string; expectedCases: readonly E2EExpectedCase[]; hostRequestPayloads: ReadonlyMap<string, unknown>; caseBindings: ReadonlyMap<string, { compilerCaseIdentity: string; registrationKey: string; candidateResponseScope: string; requestProtocol: string; operationId: string; applicationId: string; accountProfileId: string; requestedTargetId: string; packageExportSubpath: string; moduleSpecifier: string; callableSelector: E2EOperationRegistration["callableSelector"]; descriptorDigest: string }>; selectionPacketPath: string }>;
+export type E2ECompiledSuite = Readonly<{ bundle: E2EScenarioBundle; group: E2EExecutionPlan["groups"][number] & { mocks: readonly E2EMockSpec[] }; files: ReadonlyMap<string, string>; inventory: E2ECompiledInventory; expectedConfigDigest: string; expectedCases: readonly E2EExpectedCase[]; hostRequestPayloads: ReadonlyMap<string, unknown>; caseBindings: ReadonlyMap<string, { compilerCaseIdentity: string; registrationKey: string; candidateResponseScope: string; requestProtocol: string; operationId: string; applicationId: string; accountProfileId: string; requestedTargetId: string; packageExportSubpath: string; moduleSpecifier: string; manifestPath: string; callableSelector: E2EOperationRegistration["callableSelector"]; descriptorDigest: string }>; selectionPacketPath: string; runtimeAdmission: E2ECompiledRuntimeAdmission; runtimeAdmissionContext: E2EImmutableCompilationContext }>;
+
+export type E2ECompiledRuntimeAdmission = Readonly<{
+  schemaVersion: "e2e-compiled-runtime-admission/v1";
+  expectedCandidate: CandidateManifest;
+  sourceSnapshot: E2ESourceSnapshot;
+  sourceSnapshotDigest: string;
+  contextDigest: string;
+  caseBindingsDigest: string;
+  bundleDigest: string;
+  compiledInventoryDigest: string;
+}>;
+
+function snapshotDigest(snapshot: E2ESourceSnapshot): string {
+  const hash = createHash("sha256");
+  hash.update(canonicalJson({ candidate: snapshot.candidate, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, treeComplete: snapshot.treeComplete }));
+  for (const path of snapshot.treePaths) hash.update(`\0tree\0${path}`);
+  for (const source of snapshot.sources) hash.update(`\0source\0${source.path}\0${source.kind}\0${source.sha256}\0${createHash("sha256").update(source.bytes).digest("hex")}`);
+  return hash.digest("hex");
+}
+
+function contextDigest(context: E2EImmutableCompilationContext): string {
+  const selection = { ...context.selectionInput, sourceSnapshot: undefined };
+  delete (selection as { sourceSnapshot?: unknown }).sourceSnapshot;
+  return createHash("sha256").update(canonicalJson({ selection, executionPlan: context.executionPlan, group: context.group })).digest("hex");
+}
+
+/** Recheck the complete compiler-origin source and context admission before runtime allocates any assets or process. */
+export function validateE2ECompiledRuntimeAdmission(compiled: E2ECompiledSuite, snapshotInput: unknown): E2ESourceSnapshot {
+  const admission = compiled.runtimeAdmission;
+  if (!admission || admission.schemaVersion !== "e2e-compiled-runtime-admission/v1") throw new Error("compiled suite has no compiler-origin runtime admission");
+  const snapshot = copySnapshot(snapshotInput);
+  verifyE2ESourceSnapshot(snapshot, admission.expectedCandidate);
+  verifyE2ECompiledFileInventory(compiled.files, compiled.inventory);
+  if (compiled.bundle.bundleDigest !== admission.bundleDigest || compiled.inventory.digest !== admission.compiledInventoryDigest || compiled.expectedConfigDigest !== compiled.inventory.upstream.expectedConfigDigest) throw new Error("compiled bundle, generated inventory, or config identity changed after compiler admission");
+  const actualDigest = snapshotDigest(snapshot);
+  if (actualDigest !== admission.sourceSnapshotDigest || actualDigest !== snapshotDigest(admission.sourceSnapshot)) throw new Error("runtime candidate source snapshot differs from its compiler-origin complete inventory");
+  if (canonicalJson(snapshot.candidate) !== canonicalJson(admission.expectedCandidate) || snapshot.commitSha !== admission.sourceSnapshot.commitSha || snapshot.treeSha !== admission.sourceSnapshot.treeSha || canonicalJson(snapshot.treePaths) !== canonicalJson(admission.sourceSnapshot.treePaths)) throw new Error("runtime candidate identity, complete tree, or native Git revision differs from compiler admission");
+  const approvedContextDigest = contextDigest(compiled.runtimeAdmissionContext);
+  if (approvedContextDigest !== admission.contextDigest || snapshotDigest(compiled.runtimeAdmissionContext.selectionInput.sourceSnapshot) !== admission.sourceSnapshotDigest) throw new Error("compiler-origin plan, approval, group, source registration, or context snapshot changed after compilation");
+  const compiledGroupContext = Object.fromEntries(Object.entries(compiled.group).filter(([key]) => key !== "mocks"));
+  if (canonicalJson(compiled.runtimeAdmissionContext.group) !== canonicalJson(compiledGroupContext) || canonicalJson(compiled.runtimeAdmissionContext.group.expectedCases) !== canonicalJson(compiled.expectedCases) || createHash("sha256").update(canonicalJson([...compiled.caseBindings])).digest("hex") !== admission.caseBindingsDigest) throw new Error("compiled runtime group, case inventory, or source binding differs from its authenticated context");
+  return snapshot;
+}
 
 export function compileE2EScenarios(bundleInput: E2EScenarioBundle, effectiveTargetsInput: E2EExecutionPlan["effectiveTargets"], groupInput: E2EExecutionPlan["groups"][number], contextInput: E2EImmutableCompilationContext): E2ECompiledSuite {
   const bundle = E2EScenarioBundleSchema.parse(copyBoundedE2EJsonData(bundleInput, { maxBytes: 262_144, maxDepth: 64 }));
@@ -69,7 +112,13 @@ export function compileE2EScenarios(bundleInput: E2EScenarioBundle, effectiveTar
   const ids = new Set(assignedGroup.expectedCases.map((item) => item.scenarioId));
   const scenarios = bundle.scenarios.filter((scenario) => ids.has(scenario.scenarioId));
   const emitted = emitE2ECompilationFiles({ expectedCases: assignedGroup.expectedCases, scenarios, scenarioRegistrations: binding.scenarioRegistrations ?? [], group: assignedGroup, plan: derivedPlan, bundleDigest: bundle.bundleDigest, registrations: binding.operations, runTimeoutMs: selection.policy.limits.runTimeoutMs, caseTimeoutMs: selection.policy.limits.caseTimeoutMs });
-  return Object.freeze({ bundle, group: Object.freeze({ ...group, mocks: Object.freeze(groupMocks) }), files: emitted.files, inventory: emitted.inventory, expectedConfigDigest: emitted.expectedConfigDigest, expectedCases: Object.freeze([...assignedGroup.expectedCases]), hostRequestPayloads: emitted.hostRequestPayloads, caseBindings: emitted.caseBindings, selectionPacketPath: ".agentx/e2e/selection-packet.json" });
+  const caseBindings = new Map([...emitted.caseBindings].map(([caseId, caseBinding]) => {
+    const operation = operations.get(caseBinding.operationId);
+    if (!operation || operation.applicationId !== caseBinding.applicationId) throw new Error("compiled case binding has no exact source-derived application manifest");
+    return [caseId, Object.freeze({ ...caseBinding, manifestPath: operation.manifestPath })] as const;
+  }));
+  const admission: E2ECompiledRuntimeAdmission = Object.freeze({ schemaVersion: "e2e-compiled-runtime-admission/v1", expectedCandidate: Object.freeze(copyBoundedE2EJsonData(expectedCandidate, { maxBytes: 262_144, maxDepth: 64 }) as CandidateManifest), sourceSnapshot, sourceSnapshotDigest: snapshotDigest(sourceSnapshot), contextDigest: contextDigest(context), caseBindingsDigest: createHash("sha256").update(canonicalJson([...caseBindings])).digest("hex"), bundleDigest: bundle.bundleDigest, compiledInventoryDigest: emitted.inventory.digest });
+  return Object.freeze({ bundle, group: Object.freeze({ ...group, mocks: Object.freeze(groupMocks) }), files: emitted.files, inventory: emitted.inventory, expectedConfigDigest: emitted.expectedConfigDigest, expectedCases: Object.freeze([...assignedGroup.expectedCases]), hostRequestPayloads: emitted.hostRequestPayloads, caseBindings, selectionPacketPath: ".agentx/e2e/selection-packet.json", runtimeAdmission: admission, runtimeAdmissionContext: context });
 }
 
 function copyRecord(value: unknown, allowed: readonly string[], label: string): Record<string, unknown> {

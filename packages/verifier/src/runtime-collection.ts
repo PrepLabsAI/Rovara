@@ -49,6 +49,10 @@ export function collectE2EActualCliRun(input: Readonly<{
     usage: input.usage,
     limits: input.limits,
   });
+  if (!input.actual.cleanupConfirmed || input.actual.cleanupServerListening) {
+    const reason = "owned worker transport cleanup remains pending after actual CLI execution";
+    return { collection: null, oracle, qualification: { status: "UNKNOWN", reason, runId: captured.capture.runId, rawReportSha256: createHash("sha256").update(input.actual.rawReportBytes).digest("hex"), result: null }, unavailableReason: reason };
+  }
   const caseById = new Map(oracle.cases.map((item) => [item.caseId, item]));
   const expectedById = new Map(input.binding.expectedCases.map((item) => [item.caseId, item]));
   const observations: E2ECollection["observations"][number][] = [];
@@ -60,7 +64,7 @@ export function collectE2EActualCliRun(input: Readonly<{
     const hostRequestId = input.hostRequestIds.get(caseId);
     const captureData = capture.capture as Record<string, unknown> | undefined;
     const execution = capture.receipt as Record<string, unknown> | undefined;
-    if (!oracleCase || !expected || !hostRequestId || !captureData || !execution || typeof captureData.requestFrameBase64 !== "string" || typeof captureData.stdoutFrameBase64 !== "string" || typeof captureData.stderrFrameBase64 !== "string" || typeof capture.wireId !== "string" || typeof execution.recordRef !== "string" || execution.cleanup !== "confirmed") return unavailable("actual candidate observation is incomplete or not tied to its compiled case");
+    if (!oracleCase || !expected || !hostRequestId || !captureData || !execution || typeof captureData.requestFrameBase64 !== "string" || typeof captureData.stdoutFrameBase64 !== "string" || typeof captureData.stderrFrameBase64 !== "string" || typeof capture.wireId !== "string" || typeof execution.recordRef !== "string" || execution.cleanup !== "confirmed" || !Array.isArray(capture.declaredMockComponentIds) || canonicalJson(capture.declaredMockComponentIds) !== canonicalJson(oracleCase.mockComponentIds)) return unavailable("actual candidate observation or packet mock installation is incomplete or not tied to its compiled case");
     const requestBytes = Buffer.from(captureData.requestFrameBase64, "base64");
     const responseBytes = Buffer.from(captureData.stdoutFrameBase64, "base64");
     const lastOutput = (captureData.times as Record<string, unknown> | undefined)?.lastOutput;
@@ -69,7 +73,7 @@ export function collectE2EActualCliRun(input: Readonly<{
     const observedAt = new Date(wallMs).toISOString();
     const lifecycleId = execution.recordRef;
     const cleanup = "complete" as const;
-    const coverage = { observedScope: "mock-contract" as const, subject: "candidate" as const, executedCandidateParts: ["registered-source-module-response"], realComponentIds: [], mockedComponentIds: [...input.declaredMockComponentIds].sort(), observedMockedComponentIds: [], unexercisedBehaviors: [] };
+    const coverage = { observedScope: "mock-contract" as const, subject: "candidate" as const, executedCandidateParts: ["registered-source-module-response"], realComponentIds: [], mockedComponentIds: [...oracleCase.mockComponentIds].sort(), observedMockedComponentIds: [], unexercisedBehaviors: [] };
     observations.push({ caseId, requestId: hostRequestId, requestBytes: new Uint8Array(requestBytes), responseBytes: new Uint8Array(responseBytes), observedAt, lifecycleId, cleanup, coverage });
     const requestSha256 = createHash("sha256").update(requestBytes).digest("hex");
     const responseSha256 = createHash("sha256").update(responseBytes).digest("hex");

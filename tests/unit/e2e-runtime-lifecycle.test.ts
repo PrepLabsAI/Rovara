@@ -21,4 +21,40 @@ describe("isolated E2E lease lifecycle", () => {
     expect(result.cleanup).toBe("pending");
     expect(result.process.exitCode).toBeNull();
   });
+
+  it("discards an exit-zero collection resolved only after the absolute deadline", async () => {
+    let sawExpired = false;
+    const deadlineInput = { binding: { deadlineAt: new Date(Date.now() + 35).toISOString() } } as never;
+    const result = await runIsolatedE2E(deadlineInput, { allocate: async () => ({ leaseId: "late-lease", execute: async (signal) => {
+      await new Promise<void>((resolve) => signal.addEventListener("abort", () => { sawExpired = true; resolve(); }, { once: true }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      return collection();
+    }, close: async () => ({ confirmed: true }) }) }, new AbortController().signal);
+    expect(sawExpired).toBe(true);
+    expect(result.process).toMatchObject({ exitCode: null, timedOut: true, aborted: false });
+    expect(result.rawReport).toBeNull();
+  });
+
+  it("discards late allocation and closes a lease that arrives after cancellation", async () => {
+    const controller = new AbortController();
+    let closed = false;
+    const run = runIsolatedE2E({ binding: { deadlineAt: new Date(Date.now() + 5_000).toISOString() } } as never, { allocate: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      return { leaseId: "late-allocation", execute: async () => collection(), close: async () => { closed = true; return { confirmed: true }; } };
+    } }, controller.signal);
+    setTimeout(() => controller.abort(new Error("cancel")), 5);
+    const result = await run;
+    await new Promise((resolve) => setTimeout(resolve, 70));
+    expect(result.process).toMatchObject({ exitCode: null, aborted: true });
+    expect(result.cleanup).toBe("pending");
+    expect(closed).toBe(true);
+  });
+
+  it("settles a never-resolving execute at the admitted deadline", async () => {
+    const deadlineInput = { binding: { deadlineAt: new Date(Date.now() + 35).toISOString() } } as never;
+    const result = await runIsolatedE2E(deadlineInput, { allocate: async () => ({ leaseId: "stalled-lease", execute: async () => new Promise<ReturnType<typeof collection>>(() => undefined), close: async () => ({ confirmed: true }) }) }, new AbortController().signal);
+    expect(result.process).toMatchObject({ exitCode: null, timedOut: true, aborted: false });
+    expect(result.cleanup).toBe("confirmed");
+    expect(result.rawReport).toBeNull();
+  });
 });

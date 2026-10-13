@@ -1,16 +1,17 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { list } from "e2e/runner";
 import { canonicalJson, createCandidateManifest, e2eScenarioBundleDigest, e2EDefaultSyntheticAccountDefinition, E2ERoundSchema, E2ERunBindingSchema, inspectE2EPortableSource, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, e2EPortableApprovalBindingDigest, copyBoundedE2ESourceBytes, copyBoundedE2ETreePaths, e2ePortableRegistrationKey, resolveE2EPortableRegistration, type E2EPolicy, type E2EPortableApprovalBinding, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
-import { compileE2EScenarios, type E2EImmutableCompilationContext } from "../../packages/verifier/src/scenarios.js";
+import { compileE2EScenarios, validateE2ECompiledRuntimeAdmission, type E2EImmutableCompilationContext } from "../../packages/verifier/src/scenarios.js";
 import { e2ePortableOperationDescriptorDigest } from "../../packages/verifier/src/templates.js";
 import { compareE2EPublicList, type E2ESelectionPacket } from "../../packages/verifier/src/selection.js";
 import { verifyE2ECompiledFileInventory } from "../../packages/verifier/src/identity.js";
 import { createE2ECollectionOracleFromCompiledSuite } from "../../packages/verifier/src/result-adapter.js";
+import { runE2EActualCli } from "../../packages/verifier/src/runtime-cli.js";
 
 const hash = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const candidate = createCandidateManifest([{ repositoryId: "acme/shop", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
@@ -47,6 +48,38 @@ const approvedBundle = { ...bundle, bundleDigest: e2eScenarioBundleDigest(bundle
 const immutableCompilationContext: E2EImmutableCompilationContext = { selectionInput: selection, executionPlan: plan, group };
 
 describe("trusted E2E compiler", () => {
+  it("retains complete compiler-origin source admission and rejects foreign or incomplete runtime snapshots", () => {
+    const compiled = compileE2EScenarios(approvedBundle, plan.effectiveTargets, group, immutableCompilationContext);
+    expect(validateE2ECompiledRuntimeAdmission(compiled, snapshot).commitSha).toBe(snapshot.commitSha);
+    const changedBytes = Buffer.from("export const listRows = async(input) => ({ changed: input });\n");
+    const foreign = { ...snapshot, sources: snapshot.sources.map((item) => item.path === "apps/shop/src/rows.js" ? { ...item, bytes: changedBytes, sha256: hash(changedBytes) } : item) };
+    expect(() => validateE2ECompiledRuntimeAdmission(compiled, foreign)).toThrow(/differs from its compiler-origin/);
+    const incomplete = { ...snapshot, treePaths: snapshot.treePaths.slice(0, -1), sources: snapshot.sources.slice(0, -1) };
+    expect(() => validateE2ECompiledRuntimeAdmission(compiled, incomplete)).toThrow();
+    expect(() => validateE2ECompiledRuntimeAdmission({ ...compiled, runtimeAdmission: undefined } as never, snapshot)).toThrow(/no compiler-origin runtime admission/);
+  });
+  it("rejects candidate, tree, source inventory, context, and case-binding changes before any runtime allocation", async () => {
+    const compiled = compileE2EScenarios(approvedBundle, plan.effectiveTargets, group, immutableCompilationContext);
+    const foreignSource = Buffer.from("export const listRows = async(input) => ({ foreign: input });\n");
+    const foreign = { ...snapshot, sources: snapshot.sources.map((item) => item.path === "apps/shop/src/rows.js" ? { ...item, bytes: foreignSource, sha256: hash(foreignSource) } : item) };
+    expect(() => validateE2ECompiledRuntimeAdmission(compiled, { ...foreign, commitSha: "f".repeat(40) })).toThrow();
+    expect(() => validateE2ECompiledRuntimeAdmission(compiled, { ...snapshot, treeSha: "e".repeat(40) })).toThrow();
+    expect(() => validateE2ECompiledRuntimeAdmission(compiled, { ...snapshot, treePaths: snapshot.treePaths.slice(0, -1), sources: snapshot.sources.slice(0, -1) })).toThrow();
+    const changedContext = { ...compiled.runtimeAdmissionContext, selectionInput: { ...compiled.runtimeAdmissionContext.selectionInput, planDigest: "d".repeat(64) } };
+    expect(() => validateE2ECompiledRuntimeAdmission({ ...compiled, runtimeAdmissionContext: changedContext }, snapshot)).toThrow(/context.*changed/);
+    const changedBinding = new Map(compiled.caseBindings);
+    const binding = changedBinding.get(compiled.expectedCases[0]!.caseId)!;
+    changedBinding.set(compiled.expectedCases[0]!.caseId, { ...binding, applicationId: "foreign-app" });
+    expect(() => validateE2ECompiledRuntimeAdmission({ ...compiled, caseBindings: changedBinding }, snapshot)).toThrow(/source binding differs/);
+    const scratch = await mkdtemp("/tmp/e2e-admission-");
+    const evidenceDirectory = join(scratch, "runtime-evidence");
+    await mkdir(evidenceDirectory, { mode: 0o700 });
+    try {
+      const selectionPacket = JSON.parse(compiled.files.get(compiled.selectionPacketPath)!) as E2ESelectionPacket;
+      await expect(runE2EActualCli({ compiled, snapshot: foreign, selection: selectionPacket, hostRequestIds: new Map([[compiled.expectedCases[0]!.caseId, "host-request"]]), sourceRoot: process.cwd(), evidenceDirectory, deadlineAt: Date.now() + 60_000, signal: new AbortController().signal })).rejects.toThrow(/compiler-origin/);
+      expect(await readdir(evidenceDirectory)).toEqual([]);
+    } finally { await rm(scratch, { recursive: true, force: true }); }
+  });
   it("copies byte views through intrinsic accessors and keeps tree membership independently bounded", () => {
     const backing = Uint8Array.from([0, 1, 2, 3]);
     const copied = copyBoundedE2ESourceBytes(backing.subarray(1, 3), 4);

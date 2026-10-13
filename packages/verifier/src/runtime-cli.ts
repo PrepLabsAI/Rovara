@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { canonicalJson, type E2ESourceSnapshot } from "@agentx/contracts";
 import { compareE2EPublicList, type E2ESelectionPacket } from "./selection.js";
 import { createE2ERuntimeAssets, createE2ERuntimeLaunchId, parseE2EFirstPartyCapture, type E2EFirstPartyCaptureResult } from "./runtime-assets.js";
-import type { E2ECompiledSuite } from "./scenarios.js";
+import { validateE2ECompiledRuntimeAdmission, type E2ECompiledSuite } from "./scenarios.js";
 import { createE2EWorkerSession } from "./runtime-session.js";
 import { createE2EAppAdapterPacket } from "./runtime-adapter.js";
 import { evaluateE2EAssertions } from "./runtime-assertions.js";
@@ -56,11 +56,13 @@ export type E2EActualCliRun = Readonly<{
   candidateCaptures: readonly Readonly<Record<string, unknown>>[];
   listProcess: Readonly<{ status: number | null; signal: NodeJS.Signals | null; startedAt: string; finishedAt: string; stdoutSha256: string; stderrSha256: string }>;
   runProcess: Readonly<{ status: number | null; signal: NodeJS.Signals | null; timedOut: boolean; aborted: boolean; startedAt: string; finishedAt: string; stdoutSha256: string; stderrSha256: string; stdoutBytes: number; stderrBytes: number }>;
+  cleanupConfirmed: boolean;
+  cleanupServerListening: boolean;
   evidenceDirectory: string;
 }>;
 
 /** Launch the pinned public e2e CLI with the immutable generated suite and an authenticated host bridge. */
-export async function runE2EActualCli(input: Readonly<{
+type E2EActualCliInput = Readonly<{
   compiled: E2ECompiledSuite;
   snapshot: E2ESourceSnapshot;
   selection: E2ESelectionPacket;
@@ -69,8 +71,15 @@ export async function runE2EActualCli(input: Readonly<{
   evidenceDirectory: string;
   deadlineAt: number;
   signal: AbortSignal;
-}>): Promise<E2EActualCliRun> {
+}>;
+export async function runE2EActualCli(input: E2EActualCliInput): Promise<E2EActualCliRun> {
+  return runE2EActualCliWithSessionFactory(input, createE2EWorkerSession);
+}
+
+/** Trusted-host-only runner seam for proving cleanup-pending qualification; never receives app data. */
+export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput, sessionFactory: typeof createE2EWorkerSession): Promise<E2EActualCliRun> {
   if (process.version !== "v22.23.2" || !process.execPath.includes("node-v22.23.2-darwin-arm64")) throw new Error("actual E2E acceptance must use the pinned direct Node 22.23.2 runtime");
+  const snapshot = validateE2ECompiledRuntimeAdmission(input.compiled, input.snapshot);
   const evidenceDirectory = resolve(input.evidenceDirectory);
   if (await realpath(evidenceDirectory) !== evidenceDirectory) throw new Error("acceptance evidence directory must be canonical");
   const evidenceInfo = await import("node:fs/promises").then(({ lstat }) => lstat(evidenceDirectory));
@@ -99,7 +108,7 @@ export async function runE2EActualCli(input: Readonly<{
   for (const expected of input.compiled.expectedCases) {
     const scenario = input.compiled.bundle.scenarios.find((item) => item.scenarioId === expected.scenarioId);
     if (!scenario) throw new Error("pre-execution suite case has no immutable scenario");
-    const packet = createE2EAppAdapterPacket({ compiled: input.compiled, snapshot: input.snapshot, caseId: expected.caseId, mode: scenario.steps[0]?.kind === "inspect-contract" ? "inspect" : "feature", mockSpecs: input.compiled.group.mocks });
+    const packet = createE2EAppAdapterPacket({ compiled: input.compiled, snapshot, caseId: expected.caseId, mode: scenario.steps[0]?.kind === "inspect-contract" ? "inspect" : "feature", mockSpecs: input.compiled.group.mocks });
     if (packet.status !== "ready" || !packet.packet) throw new Error(packet.reason ?? "candidate adapter is unavailable");
     const packetPrimary = join(evidenceDirectory, `packet-${sha(Buffer.from(expected.caseId)).slice(0, 20)}`);
     await mkdir(packetPrimary, { mode: 0o700 });
@@ -129,7 +138,7 @@ export async function runE2EActualCli(input: Readonly<{
     if (sha(await readFile(harnessPrimary)) !== harnessDigest) throw new Error("pre-execution harness source primary failed byte readback");
   }
   const declaredMockComponentIds = [...new Set([...adapterPackets.values()].flatMap((packet) => packet.declaredMockComponentIds))].sort();
-  const preExecution = { schemaVersion: "e2e-pre-execution-primary/v1", launchId, candidate: { candidateDigest: input.snapshot.candidate.digest, commitSha: input.snapshot.commitSha, treeSha: input.snapshot.treeSha, planDigest: input.compiled.bundle.planDigest, sourceSnapshot: input.snapshot.sources.map((item) => ({ path: item.path, sha256: item.sha256, byteLength: item.bytes.byteLength, kind: item.kind })) }, compiler: { inventory: input.compiled.inventory, files: [...input.compiled.files].map(([path, content]) => ({ path, sha256: sha(Buffer.from(content)), byteLength: Buffer.byteLength(content) })) }, runtime: { launchConfigDigest: assets.launchConfigDigest, fixedAssetDigests: assets.assetDigests }, selection: input.selection, requests: [...input.compiled.hostRequestPayloads].map(([caseId, payload]) => ({ caseId, payload, payloadSha256: sha(Buffer.from(canonicalJson(payload))), logicalRequestId: input.hostRequestIds.get(caseId) ?? null })), assertions: input.compiled.expectedCases.map((expected) => ({ caseId: expected.caseId, assertionDigests: expected.assertionDigests })), adapterPrimaries: [...adapterPrimaryPaths].map(([caseId, path]) => ({ caseId, path })), declaredMockComponentIds, observedConsumedMockComponentIds: [], harnessSource: harnessPrimary ? { path: harnessPrimary, sha256: harnessDigest } : null };
+  const preExecution = { schemaVersion: "e2e-pre-execution-primary/v1", launchId, candidate: { candidateDigest: snapshot.candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, planDigest: input.compiled.bundle.planDigest, sourceSnapshot: snapshot.sources.map((item) => ({ path: item.path, sha256: item.sha256, byteLength: item.bytes.byteLength, kind: item.kind })) }, compiler: { inventory: input.compiled.inventory, files: [...input.compiled.files].map(([path, content]) => ({ path, sha256: sha(Buffer.from(content)), byteLength: Buffer.byteLength(content) })) }, runtime: { launchConfigDigest: assets.launchConfigDigest, fixedAssetDigests: assets.assetDigests }, selection: input.selection, requests: [...input.compiled.hostRequestPayloads].map(([caseId, payload]) => ({ caseId, payload, payloadSha256: sha(Buffer.from(canonicalJson(payload))), logicalRequestId: input.hostRequestIds.get(caseId) ?? null })), assertions: input.compiled.expectedCases.map((expected) => ({ caseId: expected.caseId, assertionDigests: expected.assertionDigests })), adapterPrimaries: [...adapterPrimaryPaths].map(([caseId, path]) => ({ caseId, path })), declaredMockComponentIds, observedConsumedMockComponentIds: [], harnessSource: harnessPrimary ? { path: harnessPrimary, sha256: harnessDigest } : null };
   await writeOwnedFile(join(evidenceDirectory, `pre-execution-${launchId}.json`), `${JSON.stringify(preExecution, null, 2)}\n`);
   const cliPath = join(resolve(input.sourceRoot), "node_modules/e2e/dist/cli/bin.js");
   const pkg = JSON.parse(await readFile(join(resolve(input.sourceRoot), "node_modules/e2e/package.json"), "utf8")) as { version?: unknown };
@@ -139,7 +148,7 @@ export async function runE2EActualCli(input: Readonly<{
   const expectedByCase = new Map([...input.compiled.hostRequestPayloads].map(([caseId, payload]) => [caseId, { payload }]));
   const receiptRows: unknown[] = [];
   const captures: Readonly<Record<string, unknown>>[] = [];
-  const session = await createE2EWorkerSession({ directory: sessionDirectory, capability, expectedByCase, deadlineAt: input.deadlineAt, signal: input.signal, handle: async (payload) => {
+  const session = await sessionFactory({ directory: sessionDirectory, capability, expectedByCase, deadlineAt: input.deadlineAt, signal: input.signal, handle: async (payload) => {
     if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw new Error("worker observation request is malformed");
     const record = payload as Record<string, unknown>;
     const caseId = typeof record.caseId === "string" ? record.caseId : "";
@@ -164,7 +173,7 @@ export async function runE2EActualCli(input: Readonly<{
     const receiptPath = join(evidenceDirectory, `case-${sha(Buffer.from(caseId)).slice(0, 20)}-receipts.json`);
     const capturePath = join(evidenceDirectory, `case-${sha(Buffer.from(caseId)).slice(0, 20)}-capture.json`);
     await writeOwnedFile(receiptPath, `${JSON.stringify({ caseId, assertionReceipts: receipts }, null, 2)}\n`);
-    const capture = { caseId, logicalRequestId: hostRequestId, wireId: observation.capture.wireId, packetSourceDigest: execution.receipt.sourceDigest, originalSourceDigest: packet.originalSourceDigest, adapterDigest: packet.adapterDigest, packetPrimaryDirectory: packetPrimary, candidateObservation: observation.output, receipt: execution.receipt, capture: { requestBytes: observation.capture.requestBytes, requestSha256: observation.capture.requestSha256, requestFrameBase64: Buffer.from(observation.capture.requestFrame).toString("base64"), stdoutBytes: observation.capture.stdoutBytes, stdoutSha256: observation.capture.stdoutSha256, stdoutFrameBase64: Buffer.from(rawFrame).toString("base64"), stderrBytes: observation.capture.stderrBytes, stderrSha256: observation.capture.stderrSha256, stderrFrameBase64: Buffer.from(observation.capture.stderrFrame).toString("base64"), times: observation.capture.times }, assertionReceiptPath: receiptPath };
+    const capture = { caseId, logicalRequestId: hostRequestId, wireId: observation.capture.wireId, packetSourceDigest: execution.receipt.sourceDigest, originalSourceDigest: packet.originalSourceDigest, adapterDigest: packet.adapterDigest, declaredMockComponentIds: packet.declaredMockComponentIds, packetPrimaryDirectory: packetPrimary, candidateObservation: observation.output, receipt: execution.receipt, capture: { requestBytes: observation.capture.requestBytes, requestSha256: observation.capture.requestSha256, requestFrameBase64: Buffer.from(observation.capture.requestFrame).toString("base64"), stdoutBytes: observation.capture.stdoutBytes, stdoutSha256: observation.capture.stdoutSha256, stdoutFrameBase64: Buffer.from(rawFrame).toString("base64"), stderrBytes: observation.capture.stderrBytes, stderrSha256: observation.capture.stderrSha256, stderrFrameBase64: Buffer.from(observation.capture.stderrFrame).toString("base64"), times: observation.capture.times }, assertionReceiptPath: receiptPath };
     await writeOwnedFile(capturePath, `${JSON.stringify(capture, null, 2)}\n`);
     receiptRows.push(...receipts.map((item) => ({ caseId, ...item as object })));
     captures.push(capture);
@@ -193,15 +202,14 @@ export async function runE2EActualCli(input: Readonly<{
     await writeOwnedFile(join(evidenceDirectory, `raw-run-stderr-${launchId}.bin`), execution.stderr);
     const captureBytes = await readFile(capturePath).catch(() => Buffer.alloc(0));
     const runStartCapture = parseE2EFirstPartyCapture(captureBytes, launchId);
-    const receipt = { evidenceType: "actual-pinned-e2e-cli-runtime/v1", launchId, node: { execPath: process.execPath, version: process.version, argv: process.argv }, cli: { path: cliPath, version: pkg.version, listArgv: listArgs, runArgv: runArgs }, runtime: { launchConfigDigest: assets.launchConfigDigest, compilerConfigDigest: input.compiled.expectedConfigDigest, fixedAssetDigests: assets.assetDigests }, list: { status: list.status, signal: list.signal, stdoutSha256: sha(list.stdout), stderrSha256: sha(list.stderr), selected: selected.selected.length, filtered: selected.filtered.length }, publicList: publicListSnapshot, mockInventory: { groupManifestDigest: input.compiled.group.mockManifestDigest, declaredMockComponentIds, observedConsumedMockComponentIds: [] }, run: { status: execution.status, signal: execution.signal, timedOut: execution.timedOut, aborted: execution.aborted, startedAt: execution.startedAt, finishedAt: execution.finishedAt, stdoutSha256: sha(execution.stdout), stderrSha256: sha(execution.stderr), stdoutBytes: execution.stdout.byteLength, stderrBytes: execution.stderr.byteLength }, runStartCapture: captureBytes.toString("utf8"), runStartCaptureStatus: runStartCapture.status, assertionReceipts: receiptRows, candidateCaptures: captures };
+    const cleanupConfirmed = await session.close();
+    const cleanupReadback = session.readback();
+    const receipt = { evidenceType: "actual-pinned-e2e-cli-runtime/v1", launchId, node: { execPath: process.execPath, version: process.version, argv: process.argv }, cli: { path: cliPath, version: pkg.version, listArgv: listArgs, runArgv: runArgs }, runtime: { launchConfigDigest: assets.launchConfigDigest, compilerConfigDigest: input.compiled.expectedConfigDigest, fixedAssetDigests: assets.assetDigests }, list: { status: list.status, signal: list.signal, stdoutSha256: sha(list.stdout), stderrSha256: sha(list.stderr), selected: selected.selected.length, filtered: selected.filtered.length }, publicList: publicListSnapshot, mockInventory: { groupManifestDigest: input.compiled.group.mockManifestDigest, declaredMockComponentIds, observedConsumedMockComponentIds: [] }, run: { status: execution.status, signal: execution.signal, timedOut: execution.timedOut, aborted: execution.aborted, startedAt: execution.startedAt, finishedAt: execution.finishedAt, stdoutSha256: sha(execution.stdout), stderrSha256: sha(execution.stderr), stdoutBytes: execution.stdout.byteLength, stderrBytes: execution.stderr.byteLength }, workerCleanup: { confirmed: cleanupConfirmed, serverListening: cleanupReadback.serverListening, socketPresent: cleanupReadback.socket, parentDevice: cleanupReadback.parentDevice, parentInode: cleanupReadback.parentInode, parentUid: cleanupReadback.parentUid }, runStartCapture: captureBytes.toString("utf8"), runStartCaptureStatus: runStartCapture.status, assertionReceipts: receiptRows, candidateCaptures: captures };
     await writeOwnedFile(join(evidenceDirectory, `actual-cli-receipt-${launchId}.json`), `${JSON.stringify(receipt, null, 2)}\n`);
     if (execution.signal || execution.timedOut || execution.aborted) throw new Error("actual pinned CLI run was interrupted before clean process completion");
-    return Object.freeze({ launchId, launchConfigDigest: assets.launchConfigDigest, fixedAssetDigests: assets.assetDigests, publicList: publicListSnapshot, selected: selected.selected.length, filtered: selected.filtered.length, rawReportBytes: new Uint8Array(execution.stdout), runStartCaptureBytes: new Uint8Array(captureBytes), runStartCapture, assertionReceipts: Object.freeze(receiptRows), declaredMockComponentIds: Object.freeze(declaredMockComponentIds), candidateCaptures: Object.freeze(captures), listProcess: Object.freeze({ status: list.status, signal: list.signal, startedAt: list.startedAt, finishedAt: list.finishedAt, stdoutSha256: sha(list.stdout), stderrSha256: sha(list.stderr) }), runProcess: Object.freeze({ status: execution.status, signal: execution.signal, timedOut: execution.timedOut, aborted: execution.aborted, startedAt: execution.startedAt, finishedAt: execution.finishedAt, stdoutSha256: sha(execution.stdout), stderrSha256: sha(execution.stderr), stdoutBytes: execution.stdout.byteLength, stderrBytes: execution.stderr.byteLength }), evidenceDirectory });
+    return Object.freeze({ launchId, launchConfigDigest: assets.launchConfigDigest, fixedAssetDigests: assets.assetDigests, publicList: publicListSnapshot, selected: selected.selected.length, filtered: selected.filtered.length, rawReportBytes: new Uint8Array(execution.stdout), runStartCaptureBytes: new Uint8Array(captureBytes), runStartCapture, assertionReceipts: Object.freeze(receiptRows), declaredMockComponentIds: Object.freeze(declaredMockComponentIds), candidateCaptures: Object.freeze(captures), listProcess: Object.freeze({ status: list.status, signal: list.signal, startedAt: list.startedAt, finishedAt: list.finishedAt, stdoutSha256: sha(list.stdout), stderrSha256: sha(list.stderr) }), runProcess: Object.freeze({ status: execution.status, signal: execution.signal, timedOut: execution.timedOut, aborted: execution.aborted, startedAt: execution.startedAt, finishedAt: execution.finishedAt, stdoutSha256: sha(execution.stdout), stderrSha256: sha(execution.stderr), stdoutBytes: execution.stdout.byteLength, stderrBytes: execution.stderr.byteLength }), cleanupConfirmed, cleanupServerListening: cleanupReadback.serverListening, evidenceDirectory });
   } finally {
     const closed = await session.close();
-    // Cleanup failure invalidates the captured runtime result and must override a normal return.
-    // eslint-disable-next-line no-unsafe-finally
-    if (!closed) throw new Error("owned private worker socket cleanup was not confirmed");
-    await rmdir(sessionDirectory);
+    if (closed) await rmdir(sessionDirectory);
   }
 }

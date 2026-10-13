@@ -28,7 +28,7 @@ export function createE2EAppAdapterPacket(input: Readonly<{
   const registration = input.compiled.bundle.scenarios.find((scenario) => scenario.scenarioId === input.compiled.expectedCases.find((item) => item.caseId === input.caseId)?.scenarioId);
   if (!binding || !registration) throw new Error("adapter case is absent from compiled source-bound suite");
   const sourceRefs = new Set(input.snapshot.sources.map((item) => item.path));
-  const registeredManifestPath = `apps/${binding.applicationId}/package.json`;
+  const registeredManifestPath = binding.manifestPath;
   if (!/^[a-zA-Z0-9._/-]+$/.test(registeredManifestPath) || registeredManifestPath.split("/").some((part) => !part || part === "." || part === "..")) throw new Error("registered application identity is not an exact candidate package path");
   const moduleMatches = input.snapshot.sources.flatMap((manifest) => {
     if (manifest.path !== registeredManifestPath || manifest.kind !== "blob") return [];
@@ -38,9 +38,11 @@ export function createE2EAppAdapterPacket(input: Readonly<{
       const exports = (parsed as Record<string, unknown>).exports;
       const target = exports && typeof exports === "object" && !Array.isArray(exports) ? (exports as Record<string, unknown>)[binding.packageExportSubpath] : undefined;
       if (target !== binding.moduleSpecifier) return [];
-      const base = manifest.path.slice(0, -"package.json".length);
+      if (manifest.path !== binding.manifestPath) return [];
+      const base = manifest.path === "package.json" ? "" : manifest.path.slice(0, -"package.json".length);
       const relativeTarget = binding.moduleSpecifier.slice(2);
-      return [{ modulePath: `${base}${relativeTarget}`, manifestPath: manifest.path }];
+      const modulePath = `${base}${relativeTarget}`.replace(/^\.\//, "");
+      return [{ modulePath, manifestPath: manifest.path }];
     } catch { return []; }
   });
   const modulePath = moduleMatches.length === 1 ? moduleMatches[0]!.modulePath : "";
@@ -51,7 +53,7 @@ export function createE2EAppAdapterPacket(input: Readonly<{
     return Object.freeze({ status: "unsupported", reason: "candidate module is not an unchanged ordinary JavaScript blob supported by the fixed Node adapter", packet: null, originalSourceDigest: moduleSource?.sha256 ?? "unavailable", adapterDigest: null, declaredMockComponentIds: [] });
   }
   const refs = new Set([modulePath, manifestPath]);
-  const appRoot = manifestPath.slice(0, manifestPath.lastIndexOf("/") + 1);
+  const appRoot = manifestPath.includes("/") ? manifestPath.slice(0, manifestPath.lastIndexOf("/") + 1) : "";
   for (const source of input.snapshot.sources) {
     if (source.path.startsWith("__agentx_adapter__/") || /(^|\/)(?:\.git|\.aws|\.ssh|credentials?|secrets?)(?:\/|$)/i.test(source.path) || /(^|\/)(?:\.env(?:\.|$)|[^/]*(?:token|secret|password|credential|api[-_]?key)[^/]*)$/i.test(source.path)) continue;
     if (source.kind === "blob" && source.path.startsWith(appRoot) && /(?:\.json|\.js|\.mjs|\.cjs)$/.test(source.path)) refs.add(source.path);

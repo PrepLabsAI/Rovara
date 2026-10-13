@@ -1,12 +1,14 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { lstat, realpath, chmod, unlink } from "node:fs/promises";
+import { lstatSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { join, resolve } from "node:path";
 import { copyBoundedE2EJsonData, canonicalJson } from "@agentx/contracts";
 
 const MAX_FRAME_BYTES = 262_144;
 const MAX_DEPTH = 64;
-export type E2EWorkerSessionReadback = Readonly<{ socket: boolean; path: string; mode: number; inode: number; device: number; requestCount: number; registeredWorkers: number; closed: boolean }>;
+const CLEANUP_CAP_MS = 60_000;
+export type E2EWorkerSessionReadback = Readonly<{ socket: boolean; path: string; mode: number; inode: number; device: number; parentDevice: number; parentInode: number; parentUid: number; requestCount: number; registeredWorkers: number; closed: boolean; serverListening: boolean; cleanupConfirmed: boolean }>;
 export type E2EWorkerSession = Readonly<{ socketPath: string; readback: () => E2EWorkerSessionReadback; close: () => Promise<boolean> }>;
 
 export async function createE2EWorkerSession(input: Readonly<{
@@ -35,9 +37,12 @@ export async function createE2EWorkerSession(input: Readonly<{
   const used = new Set<string>();
   const workers = new Map<string, { token: Buffer; expectedSequence: number }>();
   const queue: Array<{ socket: Socket; payload: unknown }> = [];
+  const sockets = new Set<Socket>();
   let processing = false;
   let requestCount = 0;
   let closed = false;
+  let cleanupConfirmed = false;
+  let closePromise: Promise<boolean> | undefined;
   const socketIdentityRef: { value?: { dev: number; ino: number; uid: number } } = {};
   const controller = new AbortController();
   const onAbort = () => controller.abort(input.signal?.reason);
@@ -45,6 +50,7 @@ export async function createE2EWorkerSession(input: Readonly<{
   if (input.signal?.aborted) onAbort();
 
   const send = (socket: Socket, value: unknown) => {
+    if (closed || socket.destroyed) return;
     try {
       const bounded = copyBoundedE2EJsonData(value, { maxBytes: MAX_FRAME_BYTES, maxDepth: MAX_DEPTH });
       const bytes = Buffer.from(`${JSON.stringify({ schemaVersion: "trusted-worker-response/v1", ok: true, value: bounded })}\n`, "utf8");
@@ -53,7 +59,7 @@ export async function createE2EWorkerSession(input: Readonly<{
       socket.end(`${JSON.stringify({ schemaVersion: "trusted-worker-response/v1", ok: false, error: "observation result unavailable" })}\n`);
     }
   };
-  const reject = (socket: Socket, reason: string) => socket.end(`${JSON.stringify({ schemaVersion: "trusted-worker-response/v1", ok: false, error: reason })}\n`);
+  const reject = (socket: Socket, reason: string) => { if (!closed && !socket.destroyed) socket.end(`${JSON.stringify({ schemaVersion: "trusted-worker-response/v1", ok: false, error: reason })}\n`); };
   const drain = async () => {
     if (processing) return;
     processing = true;
@@ -63,15 +69,19 @@ export async function createE2EWorkerSession(input: Readonly<{
         try {
           if (Date.now() >= deadlineAt || controller.signal.aborted) { reject(item.socket, "worker session expired"); continue; }
           const value = await input.handle(item.payload, controller.signal);
-          if (Date.now() >= deadlineAt || controller.signal.aborted) reject(item.socket, "worker observation completed outside its admitted window");
+          if (closed || Date.now() >= deadlineAt || controller.signal.aborted) reject(item.socket, "worker observation completed outside its admitted window");
           else send(item.socket, value);
         } catch { reject(item.socket, "candidate observation unavailable"); }
       }
     } finally { processing = false; if (queue.length > 0) void drain(); }
   };
   const server = createServer({ allowHalfOpen: true }, (socket) => {
+    sockets.add(socket);
+    socket.on("error", () => { sockets.delete(socket); });
+    socket.on("close", () => { sockets.delete(socket); });
     let bytes = Buffer.alloc(0);
     socket.on("data", (chunk) => {
+      if (closed || Date.now() >= deadlineAt || controller.signal.aborted) { socket.destroy(); return; }
       bytes = Buffer.concat([bytes, chunk]);
       if (bytes.byteLength > MAX_FRAME_BYTES) socket.destroy();
     });
@@ -126,17 +136,83 @@ export async function createE2EWorkerSession(input: Readonly<{
     throw new Error("worker session socket did not retain its owned private identity");
   }
   socketIdentityRef.value = { dev: created.dev, ino: created.ino, uid: created.uid };
-  const readback = (): E2EWorkerSessionReadback => ({ socket: !closed, path: socketPath, mode: created.mode & 0o777, inode: created.ino, device: created.dev, requestCount, registeredWorkers: workers.size, closed });
-  return Object.freeze({ socketPath, readback, close: async () => {
-    if (closed) return true;
+  const readback = (): E2EWorkerSessionReadback => {
+    const current = lstatSync(socketPath, { throwIfNoEntry: false });
+    const socketIdentity = socketIdentityRef.value;
+    const ownedPresent = Boolean(current?.isSocket() && !current.isSymbolicLink() && socketIdentity && current.dev === socketIdentity.dev && current.ino === socketIdentity.ino && current.uid === socketIdentity.uid);
+    return { socket: ownedPresent, path: socketPath, mode: created.mode & 0o777, inode: created.ino, device: created.dev, parentDevice: dirStat.dev, parentInode: dirStat.ino, parentUid: dirStat.uid, requestCount, registeredWorkers: workers.size, closed, serverListening: server.listening, cleanupConfirmed };
+  };
+  const close = (): Promise<boolean> => {
+    if (closePromise) return closePromise;
     closed = true;
     controller.abort(new Error("worker session closed"));
     input.signal?.removeEventListener("abort", onAbort);
-    const closeResult = await new Promise<boolean>((done) => server.close((error) => done(!error)));
-    const current = await lstat(socketPath).catch(() => undefined);
-    const socketIdentity = socketIdentityRef.value;
-    if (current?.isSocket() && socketIdentity && current.dev === socketIdentity.dev && current.ino === socketIdentity.ino) await unlink(socketPath);
-    const remains = await lstat(socketPath).then(() => true, () => false);
-    return closeResult && !remains;
-  } });
+    for (const item of queue.splice(0)) item.socket.destroy();
+    for (const socket of sockets) socket.destroy();
+    closePromise = new Promise<boolean>((resolveClose) => {
+      let settled = false;
+      const timer = setTimeout(() => { if (!settled) { settled = true; resolveClose(false); } }, CLEANUP_CAP_MS);
+      const finish = async (serverClosed: boolean) => {
+        if (settled) return;
+        const identity = socketIdentityRef.value;
+        const current = await lstat(socketPath).catch(() => undefined);
+        if (current && current.isSocket() && !current.isSymbolicLink() && identity && current.dev === identity.dev && current.ino === identity.ino && current.uid === identity.uid && (current.mode & 0o777) === 0o600) await unlink(socketPath).catch(() => undefined);
+        const remains = await lstat(socketPath).then(() => true, () => false);
+        settled = true;
+        clearTimeout(timer);
+        cleanupConfirmed = serverClosed && !remains && sockets.size === 0 && queue.length === 0 && !processing;
+        if (!cleanupConfirmed) server.unref();
+        resolveClose(cleanupConfirmed);
+      };
+      void (async () => {
+        const ownedDirectory = async () => {
+          const parent = await lstat(directory).catch(() => undefined);
+          return Boolean(parent?.isDirectory() && !parent.isSymbolicLink() && parent.dev === dirStat.dev && parent.ino === dirStat.ino && parent.uid === dirStat.uid && (parent.mode & 0o777) === 0o700 && await realpath(directory).then((path) => path === directory, () => false));
+        };
+        const isOwnedSocket = (current: Awaited<ReturnType<typeof lstat>> | undefined) => {
+          const identity = socketIdentityRef.value;
+          return Boolean(current?.isSocket() && !current.isSymbolicLink() && identity && current.dev === identity.dev && current.ino === identity.ino && current.uid === identity.uid && (Number(current.mode) & 0o777) === 0o600);
+        };
+        if (!await ownedDirectory()) {
+          settled = true;
+          clearTimeout(timer);
+          server.unref();
+          resolveClose(false);
+          return;
+        }
+        const beforeClose = await lstat(socketPath).catch(() => undefined);
+        if (beforeClose && !isOwnedSocket(beforeClose)) {
+          settled = true;
+          clearTimeout(timer);
+          server.unref();
+          resolveClose(false);
+          return;
+        }
+        if (!await ownedDirectory()) {
+          settled = true;
+          clearTimeout(timer);
+          server.unref();
+          resolveClose(false);
+          return;
+        }
+        const immediatelyBeforeClose = await lstat(socketPath).catch(() => undefined);
+        if ((immediatelyBeforeClose && !isOwnedSocket(immediatelyBeforeClose)) || !await ownedDirectory()) {
+          settled = true;
+          clearTimeout(timer);
+          server.unref();
+          resolveClose(false);
+          return;
+        }
+        try { server.close((error) => { void finish(!error); }); }
+        catch { void finish(false); }
+      })().catch(() => { settled = true; clearTimeout(timer); server.unref(); resolveClose(false); });
+    });
+    void closePromise.finally(() => { clearTimeout(deadlineTimer); input.signal?.removeEventListener("abort", callerAbortCleanup); });
+    return closePromise;
+  };
+  const deadlineTimer = setTimeout(() => { void close(); }, Math.max(0, deadlineAt - Date.now()));
+  const callerAbortCleanup = () => { void close(); };
+  input.signal?.addEventListener("abort", callerAbortCleanup, { once: true });
+  if (input.signal?.aborted) void close();
+  return Object.freeze({ socketPath, readback, close });
 }
