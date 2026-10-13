@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { parseComment } from "../../packages/cli/src/loop/commands-parse.js";
 import { DO_LOOP, LoopDefinitionSchema, nextStep } from "../../packages/cli/src/loop/definitions.js";
-import { decide, SUMMARY_MAX, type LoopEvent } from "../../packages/cli/src/loop/runtime.js";
+import { decide, type LoopEvent } from "../../packages/cli/src/loop/runtime.js";
 import type { WorkItemState } from "../../packages/cli/src/loop/state.js";
 
 const ITEM = { repo: "acme/payments", issue: 42 };
@@ -47,7 +47,8 @@ describe("the Do loop's decisions (#355)", () => {
     expect(decision.effects.map((effect) => effect.kind)).toEqual(["label", "assign", "comment"]);
     expect(decision.effects[0]).toEqual({ kind: "label", label: "working" });
     expect(decision.effects[1]).toMatchObject({ text: expect.stringContaining("Instruction from @maya:\nFix the flaky retry test") as unknown });
-    expect(decision.effects[1]).toMatchObject({ text: expect.stringContaining("Do not push, and do not open a pull request") as unknown });
+    expect(decision.effects[1]).toMatchObject({ text: expect.stringContaining("Never push, and never open a pull request yourself.") as unknown });
+    expect(decision.effects[1]).toMatchObject({ text: expect.stringContaining("This is the Do loop: it has no gates and does not publish anything.") as unknown });
     expect(decision.effects[2]).toMatchObject({ body: expect.stringContaining("tmux attach -t =rovara-acme_payments-42") as unknown });
   });
 
@@ -62,16 +63,16 @@ describe("the Do loop's decisions (#355)", () => {
     const reply: LoopEvent = { kind: "reply", text: "also rename the helper", author: "sam", at: AT };
     const working = decide(DO_LOOP, started(), reply, ITEM);
     expect(working.state?.step).toBe("work");
-    expect(working.effects).toEqual([{ kind: "assign", text: "Reply from @sam on the issue:\nalso rename the helper\n\nWhen you have dealt with it, call loop_complete again with a summary." }]);
+    expect(working.effects).toEqual([{ kind: "assign", text: "Reply from @sam on the issue:\nalso rename the helper\n\nWhen you have dealt with it, commit, then call loop_complete again with a summary." }]);
     const waiting = decide(DO_LOOP, at(started(), "waiting"), reply, ITEM);
     expect(waiting.state?.step).toBe("work");
     expect(waiting.effects.map((effect) => effect.kind)).toEqual(["label", "assign"]);
   });
 
-  it("accepts the agent's claim only with a summary, posts it, and waits for the person", () => {
-    const claim = (summary: string): LoopEvent => ({ kind: "claim", claimId: "c1", summary, at: AT });
-    expect(decide(DO_LOOP, started(), claim("  "), ITEM).effects).toEqual([{ kind: "verdict", claimId: "c1", outcome: "block", reason: "give a summary of what you did; it is posted on the issue" }]);
-    expect(decide(DO_LOOP, started(), claim("x".repeat(SUMMARY_MAX + 1)), ITEM).effects[0]).toMatchObject({ outcome: "block" });
+  it("accepts the agent's claim only when its exit checks pass, posts the summary, and waits for the person", () => {
+    const claim = (summary: string, failures: string[] = []): LoopEvent => ({ kind: "claim", claimId: "c1", summary, failures, at: AT });
+    // The daemon runs the exit checks (exit-checks.ts); the runtime refuses with every failure, joined.
+    expect(decide(DO_LOOP, started(), claim("  ", ["give a summary of what you did; it is posted on the issue", "another"]), ITEM).effects).toEqual([{ kind: "verdict", claimId: "c1", outcome: "block", reason: "give a summary of what you did; it is posted on the issue; another" }]);
     const done = decide(DO_LOOP, started(), claim("Fixed the retry test by waiting on the mock."), ITEM);
     expect(done.state).toMatchObject({ step: "waiting", summary: "Fixed the retry test by waiting on the mock." });
     expect(done.effects).toEqual([
@@ -80,7 +81,7 @@ describe("the Do loop's decisions (#355)", () => {
       { kind: "verdict", claimId: "c1", outcome: "pass", reason: expect.stringContaining("Stop here and wait") as unknown },
     ]);
     // Not the agent's turn while it waits for the person.
-    expect(decide(DO_LOOP, done.state, claim("again"), ITEM).effects[0]).toMatchObject({ outcome: "block", reason: "step waiting is waiting for a person, not for you" });
+    expect(decide(DO_LOOP, done.state, claim("again"), ITEM).effects[0]).toMatchObject({ outcome: "block", reason: "step waiting is not yours: it is waiting for a person" });
   });
 
   it("ends on a closed issue or a stop, ending the session, and ignores everything after", () => {
@@ -90,6 +91,6 @@ describe("the Do loop's decisions (#355)", () => {
     const stopped = decide(DO_LOOP, at(started(), "waiting"), { kind: "stop", author: "maya", at: AT }, ITEM);
     expect(stopped.effects.map((effect) => effect.kind)).toEqual(["label", "end-session", "comment"]);
     expect(decide(DO_LOOP, closed.state, { kind: "reply", text: "one more thing", author: "maya", at: AT }, ITEM).effects).toEqual([]);
-    expect(decide(DO_LOOP, closed.state, { kind: "claim", claimId: "c2", summary: "done", at: AT }, ITEM).effects[0]).toMatchObject({ outcome: "block", reason: "this loop has ended; there is nothing to complete" });
+    expect(decide(DO_LOOP, closed.state, { kind: "claim", claimId: "c2", summary: "done", failures: [], at: AT }, ITEM).effects[0]).toMatchObject({ outcome: "block", reason: "this loop has ended; there is nothing to complete" });
   });
 });

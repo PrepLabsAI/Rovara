@@ -19,6 +19,15 @@ export const LoopRepoConfigSchema = z.object({
     /** Extra arguments for the agent, such as a permission mode. Claude Code starts in its default mode otherwise. */
     args: z.array(z.string().max(200)).max(20).default([]),
   }).strict().default({ name: "claude-code", args: [] }),
+  /**
+   * Quick (#356): the commands that prove a change, run by the loop in the item's worktree after the agent codes it,
+   * in order, each through the shell, as CI runs them. A pull request opens only when every one passes.
+   */
+  checks: z.array(z.object({
+    name: z.string().min(1).max(60),
+    run: z.string().min(1).max(2_000),
+    timeoutSeconds: z.number().int().min(10).max(3_600).default(600),
+  }).strict()).max(20).default([]),
 }).strict();
 export type LoopRepoConfig = z.infer<typeof LoopRepoConfigSchema>;
 
@@ -56,6 +65,10 @@ export function initialLoopConfig(login: string): string {
     "  name: claude-code",
     "  # Claude Code starts in its default permission mode: watch and answer it with tmux attach.",
     "  args: []",
+    "# The commands that prove a change (the Quick loop runs them before it opens a pull request), for example:",
+    "#   - name: tests",
+    "#     run: npm test",
+    "checks: []",
     "",
   ].join("\n");
 }

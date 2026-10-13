@@ -11,6 +11,11 @@ export function itemBranch(issue: number): string {
   return `rovara/${issue}`;
 }
 
+/** Where a Quick loop's plan lives, in the item's worktree. */
+export function planPath(issue: number): string {
+  return `docs/rovara/${issue}/plan.md`;
+}
+
 /** Every comment the loop posts starts with this, so the poller never reads its own words as a command or a reply. */
 export const LOOP_COMMENT_MARKER = "<!-- rovara-loop -->";
 

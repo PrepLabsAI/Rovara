@@ -111,7 +111,7 @@ describe("rovara loop's daemon, on the Do loop (#355)", () => {
     h.world.say(ISSUE, "sam", "Also rename the helper to waitForMock.");
     await h.daemon.poll();
     expect([...(h.world.labels.get(ISSUE) ?? [])]).toEqual(["rovara:working"]);
-    expect(h.world.sessions.get(SESSION)?.received).toEqual(["Reply from @sam on the issue:\nAlso rename the helper to waitForMock.\n\nWhen you have dealt with it, call loop_complete again with a summary."]);
+    expect(h.world.sessions.get(SESSION)?.received).toEqual(["Reply from @sam on the issue:\nAlso rename the helper to waitForMock.\n\nWhen you have dealt with it, commit, then call loop_complete again with a summary."]);
   });
 
   it("resumes a working agent's session that ended, and says so after three failures in a row", async () => {
