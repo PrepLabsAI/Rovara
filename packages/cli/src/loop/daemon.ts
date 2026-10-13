@@ -12,11 +12,13 @@ import { parseComment } from "./commands-parse.js";
 import { readLoopConfig, type LoopRepoConfig } from "./config.js";
 import { loopNamed, stepOf, type LoopDefinition } from "./definitions.js";
 import type { Exec } from "./exec.js";
-import { failedExitChecks, planDigest, readPlan } from "./exit-checks.js";
+import { artifactDigest, failedExitChecks, readArtifact } from "./exit-checks.js";
 import type { GitHub } from "./github.js";
 import type { ClaudeCodeHarness } from "./harness.js";
 import { RESUMED_ASSIGNMENT } from "./instructions.js";
-import { LOOP_COMMENT_MARKER, LOOP_MCP_SERVER, itemBranch, planPath, tmuxSessionName } from "./naming.js";
+import { LOOP_COMMENT_MARKER, LOOP_MCP_SERVER, artifactPath, evidencePath, itemBranch, tmuxSessionName } from "./naming.js";
+import { run } from "./exec.js";
+import type { Artifact } from "./definitions.js";
 import { publish } from "./publish.js";
 import { decide, type Effect, type LoopEvent } from "./runtime.js";
 import type { LoopStore, RegisteredRepo, WorkItemState } from "./state.js";
@@ -110,13 +112,14 @@ export class LoopDaemon {
       const author = comment.author;
       switch (parsed.kind) {
         case "invalid": await this.deps.github.comment(registered.repo, comment.issue, parsed.reason); break;
-        case "start": await this.handle(registered, config, comment.issue, { kind: "start", loop: parsed.loop, instruction: parsed.instruction, author, at }); break;
+        case "start": await this.handle(registered, config, comment.issue, { kind: "start", loop: parsed.loop, instruction: parsed.instruction, author, at, ...(parsed.skip.length === 0 ? {} : { skip: parsed.skip }) }); break;
         case "stop": await this.handle(registered, config, comment.issue, { kind: "stop", author, at }); break;
         case "approve": {
-          // The approval locks the plan as it is now.
+          // The approval locks the artifact the gate shows, as it is now.
           const item = await this.deps.store.item(registered.repo, comment.issue);
-          const plan = item === undefined ? undefined : await readPlan(item.worktree?.path, item.issue);
-          await this.handle(registered, config, comment.issue, { kind: "approve", author, at, ...(plan === undefined ? {} : { planDigest: planDigest(plan) }) });
+          const reviewed = item === undefined ? undefined : stepOf(loopNamed(item.loop), item.step).artifact;
+          const text = item === undefined || reviewed === undefined ? undefined : await readArtifact(item.worktree?.path, item.issue, reviewed);
+          await this.handle(registered, config, comment.issue, { kind: "approve", author, at, ...(text === undefined ? {} : { digest: artifactDigest(text) }) });
           break;
         }
         case "changes": await this.handle(registered, config, comment.issue, { kind: "changes", text: parsed.text, author, at }); break;
@@ -145,10 +148,11 @@ export class LoopDaemon {
       const current = await this.deps.store.item(item.repo, item.issue) ?? item;
       const loop = loopNamed(current.loop);
       const step = stepOf(loop, current.step);
-      const failures = step.actor === "agent" ? await failedExitChecks(step.exit, { summary: claim.data.summary, issue: current.issue, worktree: current.worktree?.path, planDigest: current.planDigest }) : [];
-      const plan = step.exit.includes("plan-sections") ? await readPlan(current.worktree?.path, current.issue) : undefined;
+      const failures = step.actor === "agent" ? await failedExitChecks(step.exit, { summary: claim.data.summary, issue: current.issue, worktree: current.worktree?.path, artifact: step.artifact, approvals: current.approvals }) : [];
+      // The artifact this step wrote is shown at its gate.
+      const artifact = step.artifact === undefined ? undefined : await readArtifact(current.worktree?.path, current.issue, step.artifact);
       await this.handle(registered, await readLoopConfig(registered.path), item.issue, {
-        kind: "claim", claimId: claim.data.claimId, summary: claim.data.summary, failures, ...(plan === undefined ? {} : { plan }), at: this.deps.now().toISOString(),
+        kind: "claim", claimId: claim.data.claimId, summary: claim.data.summary, failures, ...(artifact === undefined ? {} : { artifact }), at: this.deps.now().toISOString(),
       });
     }
   }
@@ -196,10 +200,11 @@ export class LoopDaemon {
 
   private async publishItem(item: WorkItemState, done: (outcome: ActionResult["outcome"], detail: string, extra?: Partial<ActionResult>) => void): Promise<void> {
     if (item.worktree === undefined) throw new Error("the item has no worktree to publish");
+    await this.commitEvidence(item.worktree.path, item.issue, item.checks ?? "The checks passed.");
     const published = await publish(this.deps.exec, {
       repo: item.repo, issue: item.issue, worktree: item.worktree.path, branch: item.worktree.branch,
-      plan: await readPlan(item.worktree.path, item.issue), checks: item.checks ?? "The checks passed.",
-      startedBy: item.startedBy, approvedBy: item.approvedBy, pullRequest: item.pullRequest, defaultBranch: await this.deps.github.defaultBranch(item.repo),
+      plan: await readArtifact(item.worktree.path, item.issue, "plan"), checks: item.checks ?? "The checks passed.",
+      startedBy: item.startedBy, approvals: item.approvals, skipped: item.skipped, pullRequest: item.pullRequest, defaultBranch: await this.deps.github.defaultBranch(item.repo),
     });
     const { number, url } = published.pullRequest;
     done("published", published.created ? `Opened pull request #${number}: ${url}\n\nReply here to ask for changes; the loop runs the checks again and pushes them to the same pull request.` : `Pushed the update to pull request #${number}: ${url}`, { pullRequest: published.pullRequest });
@@ -279,15 +284,28 @@ export class LoopDaemon {
         // Started on the next attend, in the background, so a long check never holds up other items.
         return state;
       case "record-feedback":
-        await this.recordFeedback(state, effect.author, effect.text);
+        await this.recordFeedback(state, effect.artifact, effect.author, effect.text);
         return state;
     }
   }
 
-  /** A change request, added to the plan under "Review feedback", so the plan carries its own history. */
-  private async recordFeedback(state: WorkItemState, author: string, text: string): Promise<void> {
+  /**
+   * The checks report, committed by the loop at docs/rovara/<issue>/evidence/checks.md before it publishes, so the
+   * branch carries what proved it. Added with -f: a repository may ignore docs/. Nothing is committed when unchanged.
+   */
+  private async commitEvidence(worktree: string, issue: number, report: string): Promise<void> {
+    const relative = evidencePath(issue, "checks.md");
+    await mkdir(join(worktree, relative, ".."), { recursive: true });
+    await writeFile(join(worktree, relative), `# Checks\n\nRun by rovara loop before it published this branch.\n\n${report}\n`);
+    await run(this.deps.exec, "git", ["-C", worktree, "add", "-f", relative]);
+    if ((await this.deps.exec("git", ["-C", worktree, "diff", "--cached", "--quiet"])).code === 0) return;
+    await run(this.deps.exec, "git", ["-C", worktree, "commit", "--quiet", "-m", `chore(rovara): checks evidence for #${issue}`, "--", relative]);
+  }
+
+  /** A change request, added to its artifact under "Review feedback", so the document carries its own history. */
+  private async recordFeedback(state: WorkItemState, artifact: Artifact, author: string, text: string): Promise<void> {
     if (state.worktree === undefined) return;
-    const path = join(state.worktree.path, planPath(state.issue));
+    const path = join(state.worktree.path, artifactPath(state.issue, artifact));
     const plan = await readFile(path, "utf8").catch(() => undefined);
     if (plan === undefined) return;
     const entry = `- @${author} (${this.deps.now().toISOString()}): ${text.replace(/\n+/gu, " ")}\n`;
