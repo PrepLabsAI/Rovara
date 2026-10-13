@@ -5,22 +5,22 @@
 // An item whose approved plan names other repositories (#358) has a per-PR loop for each: their own worktree, agent,
 // checks, reviews and pull request, in that repository, saying what they do on the issue.
 import { randomUUID } from "node:crypto";
-import { appendFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, appendFile, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { redactText } from "@agentx/contracts";
 import { z } from "zod";
 import { checksReport, runChecks, shellCheckRun, type CheckRun } from "./check-runner.js";
 import { parseComment } from "./commands-parse.js";
 import { readLoopConfig, type LoopRepoConfig } from "./config.js";
-import { loopNamed, stepOf, type Artifact, type LoopDefinition } from "./definitions.js";
+import { loopNamed, planArtifact, stepOf, type Artifact, type LoopDefinition } from "./definitions.js";
 import { run, type Exec } from "./exec.js";
 import { artifactDigest, failedExitChecks, readArtifact, splitTargets } from "./exit-checks.js";
-import type { GitHub } from "./github.js";
+import type { GitHub, PullRequestRef } from "./github.js";
 import type { AgentHarness } from "./harness.js";
 import { RESUMED_ASSIGNMENT, pullAssignment } from "./instructions.js";
 import { LOOP_COMMENT_MARKER, LOOP_MCP_SERVER, artifactPath, docsDir, elsewhere, evidencePath, itemBranch, tmuxSessionName } from "./naming.js";
 import { publish } from "./publish.js";
-import { agentReviewerRun, reviewsReport, runReviews, type ReviewerRun } from "./reviews.js";
+import { agentReviewerRun, reviewsReport, runBriefReview, runReviews, type ReviewerRun } from "./reviews.js";
 import { decide, type Effect, type LoopEvent } from "./runtime.js";
 import type { LoopStore, RegisteredRepo, WorkItemState } from "./state.js";
 import { ensureWorktree } from "./worktree.js";
@@ -60,6 +60,10 @@ interface PullOwner { home: RegisteredRepo; issue: number; target?: string }
 
 /** A pull request as the issue names it: `#501` in the issue's own repository, `owner/name#501` in another. */
 const pullName = (repo: string, owner: PullOwner, number: number) => `${repo === owner.home.repo ? "" : repo}#${number}`;
+/** #359: the longest review report one comment carries; GitHub takes 65,536 characters a comment. */
+const REPORT_MAX = 60_000;
+type Finding = NonNullable<WorkItemState["findings"]>[number];
+const findingLine = (finding: Finding) => `${finding.n}. ${finding.severity === undefined ? "" : `**${finding.severity}** `}${finding.text}${finding.file === undefined ? "" : ` (\`${finding.file}${finding.line === undefined ? "" : `:${finding.line}`}\`)`}`;
 const keyOf = (item: { repo: string; issue: number; target?: string | undefined }) => `${item.repo}#${item.issue}${item.target === undefined ? "" : `@${item.target}`}`;
 const isTerminal = (item: WorkItemState) => stepOf(loopNamed(item.loop), item.step).terminal;
 
@@ -130,13 +134,16 @@ export class LoopDaemon {
       // Only collaborators are obeyed; anyone else's words never reach the agent.
       if (!isCollaborator(comment.author)) continue;
       const owner = owners.get(comment.issue);
-      if (owner === undefined) await this.dispatch(registered, comment.issue, comment.author, comment.body, comment.updatedAt);
+      // #359: a loop that joined a pull request another loop opened (Review) has its conversation, and starts there.
+      const joined = owner === undefined ? false : await this.joined(registered.repo, comment.issue, comment.body);
+      if (owner === undefined || joined) await this.dispatch(registered, comment.issue, comment.author, comment.body, comment.updatedAt);
       else await this.dispatch(owner.home, owner.issue, comment.author, comment.body, comment.updatedAt, { via: `Comment on pull request ${pullName(registered.repo, owner, comment.issue)}`, target: owner.target });
     }
     await this.deps.store.saveCursor(registered.repo, { since, seen: [...seen].slice(-SEEN_MAX) });
     await this.pollPullRequests(registered, owners, isCollaborator, now);
     for (const item of await this.deps.store.items(registered.repo)) {
       if (isTerminal(item)) continue;
+      if (item.loop === "review" && item.step === "waiting") await this.noticePushes(registered, item, now);
       if (await this.deps.github.issueState(registered.repo, item.issue) === "closed") {
         await this.handle(registered, item.issue, { kind: "closed", at: now });
       }
@@ -159,6 +166,34 @@ export class LoopDaemon {
       }
     }
     return owners;
+  }
+
+  /** #359: whether a comment on a pull request another loop opened belongs to a loop that joined it, or starts one. */
+  private async joined(repo: string, number: number, body: string): Promise<boolean> {
+    const parsed = parseComment(body);
+    if (parsed.kind === "start" && parsed.loop.joins) return true;
+    const item = await this.deps.store.item(repo, number);
+    return item !== undefined && !isTerminal(item) && loopNamed(item.loop).joins;
+  }
+
+  /** #359: the open pull requests a Review loop reviews: the pull request it runs on, or every one that mentions its issue. */
+  private async pullsUnderReview(item: WorkItemState): Promise<PullRequestRef[]> {
+    const itself = await this.deps.github.pullRequest(item.repo, item.issue);
+    if (itself !== undefined) return itself.open ? [itself] : [];
+    const found: PullRequestRef[] = [];
+    for (const linked of await this.deps.github.linkedPulls(item.repo, item.issue)) {
+      const pull = await this.deps.github.pullRequest(linked.repo, linked.number).catch(() => undefined);
+      if (pull?.open === true) found.push(pull);
+    }
+    return found;
+  }
+
+  /** #359: new commits on a pull request a waiting Review loop reviewed, or a new one mentioning its issue, start the next round. */
+  private async noticePushes(registered: RegisteredRepo, item: WorkItemState, at: string): Promise<void> {
+    const changed = (await this.pullsUnderReview(item)).filter((pull) => item.reviewed?.[`${pull.repo}#${pull.number}`] !== pull.head);
+    if (changed.length === 0) return;
+    const named = changed.map((pull) => `${pull.repo}#${pull.number} (\`${pull.head.slice(0, 7)}\`)`).join(", ");
+    await this.handle(registered, item.issue, { kind: "pushed", at, detail: `New commits on ${named}: reviewing again.` });
   }
 
   /**
@@ -222,7 +257,22 @@ export class LoopDaemon {
     };
     switch (parsed.kind) {
       case "invalid": if (on === undefined) await this.deps.github.comment(home.repo, issue, parsed.reason); else await reply(body.trim()); return;
-      case "start": if (on === undefined) await this.handle(home, issue, { kind: "start", loop: parsed.loop, instruction: parsed.instruction, author, at, ...(parsed.skip.length === 0 ? {} : { skip: parsed.skip }) }); else await reply(body.trim()); return;
+      case "start": {
+        if (on !== undefined) { await reply(body.trim()); return; }
+        // #359: Contribute on a pull request follows it up: it starts from the pull request's head, and its own pull
+        // request goes into that branch.
+        let upstream: WorkItemState["upstream"];
+        if (parsed.loop.name === "contribute") {
+          const pull = await this.deps.github.pullRequest(home.repo, issue);
+          if (pull !== undefined && (!pull.open || pull.headRepo === "")) {
+            await this.deps.github.comment(home.repo, issue, pull.open ? "This pull request's branch is gone (its fork was deleted), so there is nothing to follow up." : "This pull request is closed, so there is nothing to contribute to. Start the Contribute loop on its issue instead.");
+            return;
+          }
+          if (pull !== undefined) upstream = { repo: pull.headRepo, branch: pull.headRef, ref: `refs/rovara/contribute/${issue}` };
+        }
+        await this.handle(home, issue, { kind: "start", loop: parsed.loop, instruction: parsed.instruction, author, at, ...(parsed.skip.length === 0 ? {} : { skip: parsed.skip }), ...(upstream === undefined ? {} : { upstream }) });
+        return;
+      }
       case "stop": await this.handle(home, issue, { kind: "stop", author, at }, target); return;
       case "approve": {
         // #358: on an issue waiting on its per-PR loops, an approval is for their blocked reviews.
@@ -240,7 +290,40 @@ export class LoopDaemon {
         await this.handle(home, issue, { kind: "changes", text: parsed.text, author, at }, target);
         return;
       case "reply": await reply(parsed.text); return;
+      case "file": await this.fileFindings(home, issue, author, parsed.numbers); return;
     }
+  }
+
+  /**
+   * #359: `/rovara file 2,4` files a Review loop's findings as issues, in the repository of the pull request each is
+   * about, and says what it filed. A finding is filed once.
+   */
+  private async fileFindings(home: RegisteredRepo, issue: number, author: string, numbers: readonly number[]): Promise<void> {
+    const item = await this.deps.store.item(home.repo, issue);
+    if (item === undefined || (item.findings ?? []).length === 0) {
+      await this.deps.github.comment(home.repo, issue, "There are no review findings here to file. A Review loop (`/rovara review`) numbers its findings, and `/rovara file <n>` files one.");
+      return;
+    }
+    const findings = [...(item.findings ?? [])];
+    const said: string[] = [];
+    for (const n of numbers) {
+      const at = findings.findIndex((finding) => finding.n === n);
+      const finding = findings[at];
+      if (finding === undefined) { said.push(`- ${n}: there is no finding ${n}.`); continue; }
+      const [repo = home.repo] = finding.pull.split("#");
+      if (finding.filed !== undefined) { said.push(`- ${n}: already filed as ${repo}#${finding.filed}.`); continue; }
+      const title = finding.text.length > 100 ? `${finding.text.slice(0, 97)}…` : finding.text;
+      const body = [`Found by a rovara loop review of ${finding.pull}, and filed by @${author}.`, "", findingLine(finding).replace(/^\d+\. /u, ""), "", `From ${home.repo}#${issue}.`].join("\n");
+      try {
+        const filed = await this.deps.github.createIssue(repo, title, body);
+        findings[at] = { ...finding, filed };
+        said.push(`- ${n}: filed as ${repo}#${filed}.`);
+      } catch (error) {
+        said.push(`- ${n}: could not be filed: ${redactText((error as Error).message).slice(0, 300)}`);
+      }
+    }
+    await this.deps.store.saveItem({ ...item, findings });
+    await this.deps.github.comment(home.repo, issue, `@${author} asked to file review findings:\n\n${said.join("\n")}`);
   }
 
   /**
@@ -297,7 +380,7 @@ export class LoopDaemon {
       const step = stepOf(loop, current.step);
       const failures = step.actor === "agent" ? await failedExitChecks(step.exit, {
         summary: claim.data.summary, issue: current.issue, worktree: current.worktree?.path, artifact: step.artifact, approvals: current.approvals,
-        docs: docsDir(current), repo: current.repo, registered: (await this.deps.store.repos()).map((entry) => entry.repo),
+        docs: docsDir(current), repo: current.repo, registered: (await this.deps.store.repos()).map((entry) => entry.repo), criteria: current.criteria ?? [],
       }) : [];
       // The artifact this step wrote is shown at its gate.
       const artifact = step.artifact === undefined ? undefined : await readArtifact(current.worktree?.path, current.issue, step.artifact);
@@ -324,10 +407,13 @@ export class LoopDaemon {
     return found;
   }
 
-  /** #358: the approved plan, which lives in the issue's own worktree, also for a per-PR loop in another repository. */
+  /**
+   * #358: the approved plan, which lives in the issue's own worktree, also for a per-PR loop in another repository;
+   * (#359) Contribute's is its contribution.
+   */
   private async planOf(item: WorkItemState): Promise<string | undefined> {
     const owner = item.target === undefined ? item : await this.deps.store.item(item.repo, item.issue);
-    return readArtifact(owner?.worktree?.path, item.issue, "plan");
+    return readArtifact(owner?.worktree?.path, item.issue, planArtifact(loopNamed(item.loop)));
   }
 
   /** Starts the loop's own step an item is on, unless it is running: also after a restart, which forgot it. */
@@ -345,6 +431,7 @@ export class LoopDaemon {
         const config = await readLoopConfig((await this.whereOf(item, registered)).path);
         if (action === "checks") await this.runItemChecks(item, config, done);
         else if (action === "reviews") await this.reviewItem(item, config, done);
+        else if (action === "review") await this.reviewRound(item, config, done);
         else await this.publishItem(item, done);
       } catch (error) {
         done("failed", redactText((error as Error).message).slice(0, 1_000));
@@ -376,7 +463,9 @@ export class LoopDaemon {
       return;
     }
     const results = await runReviews({
-      exec: this.deps.exec, worktree: item.worktree.path, defaultBranch: await this.deps.github.defaultBranch(item.target ?? item.repo),
+      exec: this.deps.exec, worktree: item.worktree.path,
+      // A follow-up (#359) is judged on what it adds to the pull request it builds on.
+      base: item.upstream?.ref ?? `origin/${await this.deps.github.defaultBranch(item.target ?? item.repo)}`,
       plan: await this.planOf(item), config: config.reviews, run: this.deps.reviewerRun ?? agentReviewerRun,
     });
     const report = reviewsReport(results);
@@ -387,17 +476,79 @@ export class LoopDaemon {
     else done((item.reviewRounds ?? 0) + 1 >= config.reviews.maxRounds ? "blocked" : "failed", report);
   }
 
+  /**
+   * #359: a Review loop round. Each open pull request under review is checked out at its head, in a detached worktree
+   * of its own, and reviewed against the brief; the findings are numbered on from the last round's. Nothing is
+   * changed, committed or pushed.
+   */
+  private async reviewRound(item: WorkItemState, config: LoopRepoConfig, done: (outcome: ActionResult["outcome"], detail: string) => void): Promise<void> {
+    const pulls = await this.pullsUnderReview(item);
+    if (pulls.length === 0) {
+      done("failed", `There is no open pull request to review. ${(await this.deps.github.pullRequest(item.repo, item.issue)) === undefined ? "Mention this issue in a pull request, then reply here to review it." : "This pull request is not open."}`);
+      return;
+    }
+    const everyRepo = await this.deps.store.repos();
+    const earlier = item.findings ?? [];
+    const findings = [...earlier];
+    const reviewed = { ...item.reviewed };
+    const sections: string[] = [];
+    let next = earlier.reduce((most, finding) => Math.max(most, finding.n), 0);
+    let anyReviewed = false;
+    for (const pull of pulls) {
+      const name = `${pull.repo}#${pull.number}`;
+      const where = everyRepo.find((entry) => entry.repo === pull.repo);
+      if (where === undefined) { sections.push(`**${name}**: not reviewed; ${pull.repo} is not added to rovara loop on this computer.`); continue; }
+      const worktree = await this.reviewWorktree(item, where, pull);
+      const review = await runBriefReview({
+        exec: this.deps.exec, worktree, pull: name, base: pull.base, brief: item.instruction, focus: item.focus,
+        earlier: earlier.filter((finding) => finding.pull === name), config: config.reviews, run: this.deps.reviewerRun ?? agentReviewerRun,
+      });
+      reviewed[name] = pull.head;
+      const heading = `**${name}** at \`${pull.head.slice(0, 7)}\``;
+      if (!review.ok) { sections.push(`${heading}: could not be reviewed; ${review.reason}.`); continue; }
+      anyReviewed = true;
+      const numbered = review.findings.map((finding): Finding => ({ n: ++next, pull: name, ...finding }));
+      findings.push(...numbered);
+      sections.push([heading, "", review.summary || "(no summary)", "", ...(numbered.length === 0 ? ["No findings."] : numbered.map(findingLine))].join("\n"));
+    }
+    const rounds = (item.rounds ?? 0) + 1;
+    const current = await this.deps.store.item(item.repo, item.issue);
+    if (current !== undefined) await this.deps.store.saveItem({ ...current, findings: findings.slice(-500), reviewed, rounds });
+    const report = `### Review, round ${rounds}\n\n${sections.join("\n\n")}`;
+    const footer = "---\nNew commits on the pull request start the next round, and so does a reply with more to look at. `/rovara file <n>` files a finding as an issue; `/rovara stop` ends the review.";
+    done(anyReviewed ? "passed" : "failed", `${report.length > REPORT_MAX ? `${report.slice(0, REPORT_MAX)}\n\n…(cut)` : report}\n\n${footer}`);
+  }
+
+  /** #359: a pull request's head, checked out detached in the review's own worktree, with its base branch fetched to diff against. */
+  private async reviewWorktree(item: WorkItemState, where: RegisteredRepo, pull: PullRequestRef): Promise<string> {
+    const dir = join(this.deps.store.itemDir(item.repo, item.issue), "reviews", `${pull.repo.replace("/", "__")}-${pull.number}`);
+    const ref = `refs/rovara/review/${pull.number}`;
+    await run(this.deps.exec, "git", ["-C", where.path, "fetch", "--quiet", "origin", `+pull/${pull.number}/head:${ref}`, `+refs/heads/${pull.base}:refs/remotes/origin/${pull.base}`]);
+    if (await access(dir).then(() => true, () => false)) await run(this.deps.exec, "git", ["-C", dir, "checkout", "--quiet", "--detach", ref]);
+    else await run(this.deps.exec, "git", ["-C", where.path, "worktree", "add", "--detach", dir, ref]);
+    return dir;
+  }
+
   private async publishItem(item: WorkItemState, done: (outcome: ActionResult["outcome"], detail: string, extra?: Partial<ActionResult>) => void): Promise<void> {
     if (item.worktree === undefined) throw new Error("the item has no worktree to publish");
-    const repo = item.target ?? item.repo;
+    const upstream = item.upstream;
+    // #359: a follow-up pull request is opened where the pull request it builds on has its branch: maybe a fork.
+    const repo = upstream?.repo ?? item.target ?? item.repo;
     await this.commitEvidence(item, item.worktree.path, item.checks ?? "The checks passed.", item.reviews);
+    const contribution = planArtifact(loopNamed(item.loop)) === "contribution";
     const published = await publish(this.deps.exec, {
       repo, issueRepo: item.repo, issue: item.issue, worktree: item.worktree.path, branch: item.worktree.branch,
-      closes: elsewhere(item) ? `Part of ${item.repo}#${item.issue}.` : `Closes #${item.issue}.`,
-      plan: await this.planOf(item), checks: item.checks ?? "The checks passed.", reviews: item.reviews,
-      startedBy: item.startedBy, approvals: item.approvals, skipped: item.skipped, pullRequest: item.pullRequest, defaultBranch: await this.deps.github.defaultBranch(repo),
+      closes: upstream !== undefined ? `Builds on ${repo === item.repo ? "" : item.repo}#${item.issue}: a follow-up into its branch \`${upstream.branch}\`, for its author to take or leave.` : elsewhere(item) ? `Part of ${item.repo}#${item.issue}.` : `Closes #${item.issue}.`,
+      plan: await this.planOf(item), checks: item.checks ?? "The checks passed.", reviews: item.reviews, ...(contribution ? { planHeading: "Contribution" } : {}),
+      startedBy: item.startedBy, approvals: item.approvals, skipped: item.skipped, pullRequest: item.pullRequest,
+      defaultBranch: upstream?.branch ?? await this.deps.github.defaultBranch(repo),
+      ...(upstream !== undefined && upstream.repo !== item.repo ? { head: `${item.repo.split("/")[0] ?? ""}:${item.worktree.branch}` } : {}),
     });
     const { number, url } = published.pullRequest;
+    if (upstream !== undefined) {
+      done("published", published.created ? `Opened pull request ${repo === item.repo ? "" : repo}#${number} into this pull request's branch \`${upstream.branch}\`: ${url}\n\nIts author decides what to take. Reply here to ask for changes; the loop runs the checks and reviews again and pushes to the same follow-up.` : `Pushed the update to the follow-up, pull request ${repo === item.repo ? "" : repo}#${number}: ${url}`, { pullRequest: published.pullRequest });
+      return;
+    }
     const opened = item.target === undefined
       ? `Opened pull request #${number}: ${url}\n\nReply here to ask for changes; the loop runs the checks again and pushes them to the same pull request.`
       : `Opened pull request ${repo}#${number}: ${url}\n\nReview it there: what collaborators say on it goes back to its agent. Approve it (a GitHub approval, or \`/rovara approve\` on it) when it's ready.`;
@@ -587,7 +738,9 @@ export class LoopDaemon {
     const where = await this.whereOf(state, registered);
     const config = await readLoopConfig(where.path);
     const worktree = state.worktree ?? { path: join(this.deps.store.itemDir(state.repo, state.issue, state.target), "worktree"), branch: itemBranch(state.issue, state.repo, state.target) };
-    await ensureWorktree(this.deps.exec, where.path, worktree.path, worktree.branch, await this.deps.github.defaultBranch(state.target ?? state.repo));
+    // #359: a follow-up starts from the pull request it builds on, fetched by its number.
+    if (state.upstream !== undefined && state.worktree === undefined) await run(this.deps.exec, "git", ["-C", where.path, "fetch", "--quiet", "origin", `+pull/${state.issue}/head:${state.upstream.ref}`]);
+    await ensureWorktree(this.deps.exec, where.path, worktree.path, worktree.branch, await this.deps.github.defaultBranch(state.target ?? state.repo), state.upstream?.ref);
     // A session keeps the agent it started with, so it can be resumed; a new one uses the repository's (#359).
     const harness = state.session?.harness ?? config.harness.name;
     const session = state.session ?? { harness, tmux: tmuxSessionName(state.repo, state.issue, state.target), ...(harness === "claude-code" ? { id: randomUUID() } : {}) };
