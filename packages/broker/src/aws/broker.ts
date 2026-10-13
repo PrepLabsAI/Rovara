@@ -234,6 +234,7 @@ import { WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../d
 import { approvedFeedbackFixes, withFeedbackFixes, withStatusLines } from "../developer/pull-request-feedback-section.js";
 import { projectKey, requireProject } from "./project-records.js";
 import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
+import { projectSetupTerminalAuthorityChecks } from "./project-setup-terminal-conditions.js";
 import { verifyProjectSetupCapability } from "./project-setup-capability.js";
 import { issueProjectSetupCapability } from "./project-setup-capability.js";
 import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke.js";
@@ -5480,7 +5481,7 @@ async function readSetupChunk(dependencies: AwsBrokerDependencies, key: string):
 async function requireProjectSetupCapability(
   dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string, action: "read-execution" | "write-evidence" | "result",
 ): Promise<{ execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>; claims: NonNullable<ReturnType<typeof verifyProjectSetupCapability>>;
-  runtime: ReturnType<typeof ProjectSetupRuntimeRecordSchema.parse> }> {
+  runtime: ReturnType<typeof ProjectSetupRuntimeRecordSchema.parse>; session: ReturnType<typeof ProjectSetupSessionSchema.parse> }> {
   const token = request.headers["x-agentx-callback-capability"];
   const claims = token ? verifyProjectSetupCapability(dependencies.callbackSigningKey, token) : undefined;
   if (!claims || claims.setupExecutionId !== setupExecutionId || !claims.actions.includes(action)) throw agentXError("CALLBACK_FORBIDDEN", "setup capability does not authorize this artifact action");
@@ -5524,7 +5525,7 @@ async function requireProjectSetupCapability(
     || !admitProjectSetupRuntime(runtime.data, { runtimeCatalogId: catalogId, binding: project.runtimeBinding, scope: "source-interface", now: Date.now() })) {
     throw agentXError("STALE_FENCE", "current configured setup runtime is no longer qualified");
   }
-  return { execution: execution.data, claims, runtime: runtime.data };
+  return { execution: execution.data, claims, runtime: runtime.data, session: session.data };
 }
 
 async function setupAdmissionMatchesExecution(
@@ -5586,20 +5587,45 @@ async function handleProjectSetupCallback(
   const terminalState = processStatus === "SUCCEEDED" ? "SUCCEEDED" : processStatus === "FAILED" ? "FAILED" : "PARKED";
   const persistedResult = { domain: body.domain, candidateDigest: current.candidateDigest, processStatus,
     qualification, cleanupConfirmed, ...(verified?.evidenceRef ? { evidenceRef: verified.evidenceRef } : {}) };
-  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+  const terminalAt = new Date().toISOString();
+  if (Date.parse(authorized.runtime.qualifiedAt) > Date.parse(terminalAt) || Date.parse(authorized.runtime.expiresAt) <= Date.parse(terminalAt)) {
+    const parked = await parkProjectSetupResultAfterAuthorityChange(dependencies, setupExecutionId, operationId, claims, {
+      setupExecutionId: body.setupExecutionId, operationId: body.operationId, candidateDigest: body.candidateDigest,
+      processStatus, qualification, cleanupConfirmed, ...(verified?.evidenceRef ? { evidenceRef: verified.evidenceRef } : {}),
+    });
+    if (parked) return { accepted: true, parked: true, qualification: "UNKNOWN" };
+    throw agentXError("STALE_FENCE", "qualified setup runtime expired before terminal persistence");
+  }
+  const terminalItems = [
+    ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session),
     { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
       UpdateExpression: "SET #state = :state, completedAt = :now, #result = :result",
       ConditionExpression: "#state = :dispatching AND operationId = :operationId AND fence = :fence",
       ExpressionAttributeNames: { "#state": "state", "#result": "result" },
-      ExpressionAttributeValues: { ":state": terminalState, ":now": new Date().toISOString(), ":result": persistedResult,
+      ExpressionAttributeValues: { ":state": terminalState, ":now": terminalAt, ":result": persistedResult,
         ":dispatching": "DISPATCHING", ":operationId": operationId, ":fence": claims.fence } } },
     { Update: { TableName: dependencies.tableName, Key: projectSetupOperationKey(setupExecutionId, operationId),
       UpdateExpression: "SET #status = :status, updatedAt = :now, #result = :result",
       ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND fence = :fence",
       ExpressionAttributeNames: { "#status": "status", "#result": "result" },
-      ExpressionAttributeValues: { ":status": terminalState, ":now": new Date().toISOString(), ":result": persistedResult,
+      ExpressionAttributeValues: { ":status": terminalState, ":now": terminalAt, ":result": persistedResult,
         ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":fence": claims.fence } } },
-  ] }));
+  ];
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: terminalItems }));
+  } catch (error) {
+    const cancellationReasons = error && typeof error === "object"
+      ? (error as { CancellationReasons?: Array<{ Code?: unknown }> }).CancellationReasons : undefined;
+    const authorityConditionFailed = error instanceof Error && error.name === "TransactionCanceledException"
+      && cancellationReasons?.slice(0, 5).some((reason) => reason.Code === "ConditionalCheckFailed");
+    if (!authorityConditionFailed) throw error;
+    const parked = await parkProjectSetupResultAfterAuthorityChange(dependencies, setupExecutionId, operationId, claims, {
+      setupExecutionId: body.setupExecutionId, operationId: body.operationId, candidateDigest: body.candidateDigest,
+      processStatus, qualification, cleanupConfirmed, ...(verified?.evidenceRef ? { evidenceRef: verified.evidenceRef } : {}),
+    });
+    if (!parked) throw error;
+    return { accepted: true, parked: true, qualification: "UNKNOWN" };
+  }
   return { accepted: true };
 }
 

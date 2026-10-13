@@ -472,7 +472,7 @@ function toAction(kind: WriteAction["kind"], input: Record<string, unknown>): Wr
   };
 }
 
-const TOKEN = /\s*(attribute_not_exists|attribute_exists|attribute_type|if_not_exists|list_append|AND|OR|NOT|<>|<=|>=|[=<>(),.+-]|#[A-Za-z0-9_]+|:[A-Za-z0-9_]+|[A-Za-z_][A-Za-z0-9_]*)/y;
+const TOKEN = /\s*(attribute_not_exists|attribute_exists|attribute_type|if_not_exists|list_append|size|AND|OR|NOT|<>|<=|>=|[=<>(),.+-]|#[A-Za-z0-9_]+|:[A-Za-z0-9_]+|[A-Za-z_][A-Za-z0-9_]*)/y;
 
 function tokenize(expression: string): string[] {
   const tokens: string[] = [];
@@ -526,6 +526,11 @@ class Parser {
 
   done(): boolean {
     return this.position >= this.tokens.length;
+  }
+
+  private pathValue(item: Item | undefined, path: string): unknown {
+    return path.split(".").reduce<unknown>((value, segment) =>
+      value && typeof value === "object" ? (value as Item)[segment] : undefined, item);
   }
 
   path(): string {
@@ -631,11 +636,32 @@ class Parser {
       this.expect(",");
       const operand = this.operand(item ?? {});
       this.expect(")");
-      const value = item?.[path];
+      const value = this.pathValue(item, path);
       if (value instanceof Set) return value.has(operand);
       if (typeof value === "string") return typeof operand === "string" && value.includes(operand);
-      if (Array.isArray(value)) return value.includes(operand);
+      if (Array.isArray(value)) return value.some((entry) => dynamoEqual(entry, operand));
       return false;
+    }
+    if (token === "size") {
+      this.next();
+      this.expect("(");
+      const path = this.path();
+      this.expect(")");
+      const value = this.pathValue(item, path);
+      const length = typeof value === "string" ? Buffer.byteLength(value, "utf8")
+        : Array.isArray(value) ? value.length : value instanceof Set ? value.size
+          : plainMap(value) ? Object.keys(value).length : undefined;
+      const comparator = this.next();
+      const right = this.operand(item ?? {}) as number;
+      switch (comparator) {
+        case "=": return length === right;
+        case "<>": return length !== right;
+        case "<": return length !== undefined && length < right;
+        case "<=": return length !== undefined && length <= right;
+        case ">": return length !== undefined && length > right;
+        case ">=": return length !== undefined && length >= right;
+        default: throw new Error(`unsupported size comparator ${comparator}`);
+      }
     }
     const left = this.operand(item ?? {});
     const comparator = this.next();

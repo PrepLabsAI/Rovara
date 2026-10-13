@@ -42,4 +42,19 @@ describe("FakeDynamoDb faults and limits", () => {
       { Put: { TableName: "other", Item: { pk: "A", sk: "META" } } },
     ] }));
   });
+
+  it("evaluates nested document paths for size and contains without accepting a missing nested value", async () => {
+    const db = new FakeDynamoDb();
+    await db.send(new PutCommand({ TableName: "t", Item: { pk: "PROJECT#orders", sk: "REV#1", runtimeBinding: {
+      subnets: [{ subnetId: "subnet-a", availabilityZone: "us-east-1a" }, { subnetId: "subnet-b", availabilityZone: "us-east-1b" }],
+    } } }));
+    const check = (subnet: string) => db.send(new TransactWriteCommand({ TransactItems: [{ ConditionCheck: {
+      TableName: "t", Key: { pk: "PROJECT#orders", sk: "REV#1" },
+      ConditionExpression: "size(runtimeBinding.#subnets) = :count AND contains(runtimeBinding.#subnets, :subnet)",
+      ExpressionAttributeNames: { "#subnets": "subnets" },
+      ExpressionAttributeValues: { ":count": 2, ":subnet": { subnetId: subnet, availabilityZone: "us-east-1a" } },
+    } }] }));
+    await expect(check("subnet-a")).resolves.toEqual({});
+    await expect(check("subnet-foreign")).rejects.toMatchObject({ name: "TransactionCanceledException" });
+  });
 });
