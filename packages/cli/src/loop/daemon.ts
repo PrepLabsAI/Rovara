@@ -11,7 +11,7 @@ import { redactText } from "@agentx/contracts";
 import { z } from "zod";
 import { checksReport, runChecks, shellCheckRun, type CheckRun } from "./check-runner.js";
 import { parseComment } from "./commands-parse.js";
-import { readLoopConfig, type LoopRepoConfig } from "./config.js";
+import { LOOP_CONFIG_PATH, readLoopConfig, type LoopRepoConfig } from "./config.js";
 import { loopNamed, planArtifact, stepOf, type Artifact, type LoopDefinition } from "./definitions.js";
 import { run, type Exec } from "./exec.js";
 import { artifactDigest, failedExitChecks, readArtifact, splitTargets } from "./exit-checks.js";
@@ -23,7 +23,7 @@ import { publish } from "./publish.js";
 import { agentReviewerRun, reviewsReport, runBriefReview, runReviews, type ReviewerRun } from "./reviews.js";
 import { decide, type Effect, type LoopEvent } from "./runtime.js";
 import type { LoopStore, RegisteredRepo, WorkItemState } from "./state.js";
-import { ensureWorktree } from "./worktree.js";
+import { ensureClone, ensureWorktree } from "./worktree.js";
 
 /** A claim the agent's MCP tool left for the daemon, and the daemon's answer. */
 export const ClaimSchema = z.object({ claimId: z.string().uuid(), summary: z.string().max(20_000) }).strict();
@@ -72,6 +72,8 @@ export class LoopDaemon {
   /** The loop's own steps now running, by item, and their results waiting to be handled. */
   private readonly running = new Map<string, Promise<void>>();
   private readonly results = new Map<string, ActionResult>();
+  /** #390: each repository whose .rovara/loop.yaml could not be read, and why, as its issues were told. */
+  private readonly configProblems = new Map<string, string>();
   /** When each item's agent was first seen waiting on a permission prompt, and whether the issue was told. */
   private readonly prompts = new Map<string, { since: number; told: boolean }>();
 
@@ -111,6 +113,7 @@ export class LoopDaemon {
       const current = await this.deps.store.item(item.repo, item.issue, item.target) ?? item;
       await this.startAction(registered, current);
       await this.keepWorking(registered, current);
+      await this.deliverHeld(current);
       await this.noticePrompt(current);
     } catch (error) {
       this.deps.log(`${keyOf(item)}: ${(error as Error).message}`);
@@ -118,7 +121,15 @@ export class LoopDaemon {
   }
 
   private async pollRepo(registered: RegisteredRepo, everyRepo: readonly RegisteredRepo[]): Promise<void> {
-    const config = await readLoopConfig(registered.path);
+    // #390: a configuration that can't be read stops this repository's loops; their issues are told, once.
+    let config: LoopRepoConfig;
+    try {
+      config = await readLoopConfig(registered.path);
+    } catch (error) {
+      await this.configTrouble(registered, (error as Error).message);
+      throw error;
+    }
+    await this.configTrouble(registered, undefined);
     const now = this.deps.now().toISOString();
     const isCollaborator = (login: string) => config.collaborators.some((collaborator) => collaborator.toLowerCase() === login.toLowerCase());
     const owners = await this.pullOwners(registered.repo, everyRepo);
@@ -126,42 +137,79 @@ export class LoopDaemon {
     const cursor = (await this.deps.store.cursor(registered.repo)) ?? { since: now, seen: [] };
     const seen = new Set(cursor.seen);
     let since = cursor.since;
-    for (const comment of await this.deps.github.commentsSince(registered.repo, cursor.since)) {
-      if (comment.updatedAt > since) since = comment.updatedAt;
-      if (seen.has(comment.id)) continue;
-      seen.add(comment.id);
-      if (comment.body.trimStart().startsWith(LOOP_COMMENT_MARKER)) continue;
-      // Only collaborators are obeyed; anyone else's words never reach the agent.
-      if (!isCollaborator(comment.author)) continue;
-      const owner = owners.get(comment.issue);
-      // #359: a loop that joined a pull request another loop opened (Review) has its conversation, and starts there.
-      const joined = owner === undefined ? false : await this.joined(registered.repo, comment.issue, comment.body);
-      if (owner === undefined || joined) await this.dispatch(registered, comment.issue, comment.author, comment.body, comment.updatedAt);
-      else await this.dispatch(owner.home, owner.issue, comment.author, comment.body, comment.updatedAt, { via: `Comment on pull request ${pullName(registered.repo, owner, comment.issue)}`, target: owner.target });
-    }
+    // #390: each part of a poll fails on its own. A comment that can't be handled is logged and counted as read: its
+    // event may already have moved the loop, so reading it again could act twice. The comments after it are read.
+    await this.attempt(`${registered.repo}: comments`, async () => {
+      for (const comment of await this.deps.github.commentsSince(registered.repo, cursor.since)) {
+        if (comment.updatedAt > since) since = comment.updatedAt;
+        if (seen.has(comment.id)) continue;
+        seen.add(comment.id);
+        await this.attempt(`${registered.repo}#${comment.issue}: comment ${comment.id}`, async () => {
+          if (comment.body.trimStart().startsWith(LOOP_COMMENT_MARKER)) return;
+          // Only collaborators are obeyed; anyone else's words never reach the agent.
+          if (!isCollaborator(comment.author)) return;
+          const owner = owners.get(comment.issue);
+          // #359: a loop that joined a pull request another loop opened (Review) has its conversation, and starts there.
+          const joined = owner === undefined ? false : await this.joined(registered.repo, comment.issue, comment.body);
+          if (owner === undefined || joined) await this.dispatch(registered, comment.issue, comment.author, comment.body, comment.updatedAt);
+          else await this.dispatch(owner.home, owner.issue, comment.author, comment.body, comment.updatedAt, { via: `Comment on pull request ${pullName(registered.repo, owner, comment.issue)}`, target: owner.target });
+        });
+      }
+    });
     await this.deps.store.saveCursor(registered.repo, { since, seen: [...seen].slice(-SEEN_MAX) });
-    await this.pollPullRequests(registered, owners, isCollaborator, now);
+    await this.attempt(`${registered.repo}: pull requests`, () => this.pollPullRequests(registered, owners, isCollaborator, now));
     for (const item of await this.deps.store.items(registered.repo)) {
       if (isTerminal(item)) continue;
-      if (item.loop === "review" && item.step === "waiting") await this.noticePushes(registered, item, now);
-      if (await this.deps.github.issueState(registered.repo, item.issue) === "closed") {
-        await this.handle(registered, item.issue, { kind: "closed", at: now });
-      }
+      await this.attempt(keyOf(item), async () => {
+        if (item.loop === "review" && item.step === "waiting") await this.noticePushes(registered, item, now);
+        if (await this.deps.github.issueState(registered.repo, item.issue) === "closed") {
+          await this.handle(registered, item.issue, { kind: "closed", at: now });
+        }
+      });
+    }
+  }
+
+  /** #390: runs one part of a poll; a failure is logged, so the rest of the poll carries on. */
+  private async attempt(label: string, work: () => Promise<void>): Promise<void> {
+    try {
+      await work();
+    } catch (error) {
+      this.deps.log(`${label}: ${redactText((error as Error).message).slice(0, 500)}`);
+    }
+  }
+
+  /**
+   * #390: says on each running loop's issue that the repository's .rovara/loop.yaml can't be read, and why, once per
+   * problem; and, once it reads again, that the loop carries on. `problem` undefined: it reads.
+   */
+  private async configTrouble(registered: RegisteredRepo, problem: string | undefined): Promise<void> {
+    const told = this.configProblems.get(registered.repo);
+    if (problem === told) return;
+    if (problem === undefined) this.configProblems.delete(registered.repo); else this.configProblems.set(registered.repo, problem);
+    const body = problem === undefined
+      ? `\`${LOOP_CONFIG_PATH}\` reads again, so the loop carries on. Anything said here meanwhile is read now.`
+      : `The loop can't read this repository's \`${LOOP_CONFIG_PATH}\`, so it has stopped reading this issue until that's fixed:\n\n> ${redactText(problem).slice(0, 500)}\n\nFix the file in the checkout the loop runs from (\`${registered.path}\`); nothing needs restarting.`;
+    for (const item of await this.deps.store.items(registered.repo)) {
+      if (isTerminal(item)) continue;
+      // Said again only after a fix was said; a first read that works says nothing.
+      if (problem === undefined && told === undefined) continue;
+      await this.attempt(keyOf(item), () => this.deps.github.comment(item.repo, item.issue, body));
     }
   }
 
   /**
    * #358: the open pull requests the loop opened in `repo`, by number, and the loop each belongs to: an issue's own
-   * loop in that repository, or a per-PR loop of an issue in any repository, so what is said on them reaches it.
+   * loop, or a per-PR loop of an issue in any repository, so what is said on them reaches it. (#390) A pull request is
+   * in the repository it was opened in: the item's, a per-PR loop's, or a fork's for a follow-up, never assumed.
    */
   private async pullOwners(repo: string, everyRepo: readonly RegisteredRepo[]): Promise<Map<number, PullOwner>> {
     const owners = new Map<number, PullOwner>();
     for (const home of everyRepo) {
       for (const item of await this.deps.store.items(home.repo)) {
         if (isTerminal(item)) continue;
-        if (home.repo === repo && item.pullRequest !== undefined) owners.set(item.pullRequest.number, { home, issue: item.issue });
+        if (item.pullRequest !== undefined && (item.pullRequest.repo ?? home.repo) === repo) owners.set(item.pullRequest.number, { home, issue: item.issue });
         for (const pull of await this.deps.store.pulls(home.repo, item.issue)) {
-          if (pull.target === repo && pull.pullRequest !== undefined && !isTerminal(pull)) owners.set(pull.pullRequest.number, { home, issue: item.issue, target: pull.target });
+          if (pull.pullRequest !== undefined && (pull.pullRequest.repo ?? pull.target) === repo && !isTerminal(pull)) owners.set(pull.pullRequest.number, { home, issue: item.issue, ...(pull.target === undefined ? {} : { target: pull.target }) });
         }
       }
     }
@@ -546,13 +594,13 @@ export class LoopDaemon {
     });
     const { number, url } = published.pullRequest;
     if (upstream !== undefined) {
-      done("published", published.created ? `Opened pull request ${repo === item.repo ? "" : repo}#${number} into this pull request's branch \`${upstream.branch}\`: ${url}\n\nIts author decides what to take. Reply here to ask for changes; the loop runs the checks and reviews again and pushes to the same follow-up.` : `Pushed the update to the follow-up, pull request ${repo === item.repo ? "" : repo}#${number}: ${url}`, { pullRequest: published.pullRequest });
+      done("published", published.created ? `Opened pull request ${repo === item.repo ? "" : repo}#${number} into this pull request's branch \`${upstream.branch}\`: ${url}\n\nIts author decides what to take. Reply here to ask for changes; the loop runs the checks and reviews again and pushes to the same follow-up.` : `Pushed the update to the follow-up, pull request ${repo === item.repo ? "" : repo}#${number}: ${url}`, { pullRequest: { ...published.pullRequest, repo } });
       return;
     }
     const opened = item.target === undefined
       ? `Opened pull request #${number}: ${url}\n\nReply here to ask for changes; the loop runs the checks again and pushes them to the same pull request.`
       : `Opened pull request ${repo}#${number}: ${url}\n\nReview it there: what collaborators say on it goes back to its agent. Approve it (a GitHub approval, or \`/rovara approve\` on it) when it's ready.`;
-    done("published", published.created ? opened : `Pushed the update to pull request ${item.target === undefined ? "" : repo}#${number}: ${url}`, { pullRequest: published.pullRequest });
+    done("published", published.created ? opened : `Pushed the update to pull request ${item.target === undefined ? "" : repo}#${number}: ${url}`, { pullRequest: { ...published.pullRequest, repo } });
   }
 
   /** A working agent whose session ended (a crash, a closed terminal) is resumed, a few times, then told about. */
@@ -608,9 +656,16 @@ export class LoopDaemon {
     }, target);
     if (state !== undefined) await this.deps.store.saveItem(state);
     if (event.kind === "reply" || event.kind === "changes" || event.kind === "start") this.restarts.delete(keyOf({ repo: registered.repo, issue, target }));
+    // #390: each effect is tried on its own; one that fails (a label GitHub refused) doesn't skip the rest, such as
+    // ending the agent's session or saying what happened.
     for (const effect of decision.effects) {
       if (state === undefined) break;
-      state = await this.apply(registered, state, effect);
+      const before: WorkItemState = state;
+      try {
+        state = await this.apply(registered, before, effect);
+      } catch (error) {
+        this.deps.log(`${keyOf(before)}: ${effect.kind}: ${redactText((error as Error).message).slice(0, 500)}`);
+      }
     }
     // #358: an issue's loop that ended ends its per-PR loops; a per-PR loop that moved may let the issue's loop move.
     if (target === undefined && current !== undefined && !isTerminal(current) && state !== undefined && isTerminal(state)) {
@@ -724,34 +779,87 @@ export class LoopDaemon {
     await appendFile(path, /\n## Review feedback\n/u.test(plan) ? entry : `\n## Review feedback\n\n${entry}`);
   }
 
-  /** Gives the agent `text`: into its running session, or by starting (or resuming) one with it. */
+  /**
+   * Gives the agent `text`: into its running session, or by starting (or resuming) one with it. (#391) While the agent
+   * shows a prompt or dialog, nothing is typed: a message ends with Enter, which would answer it (Claude Code's
+   * folder-trust dialog answers "No, exit"). It is held, and given once the screen is clear.
+   */
   private async assign(registered: RegisteredRepo, state: WorkItemState, text: string): Promise<WorkItemState> {
     if (state.session !== undefined && await this.deps.harness.alive(state.session.tmux)) {
-      await this.deps.harness.deliver(state.session.tmux, text);
+      if (await this.deps.harness.waitingForApproval(state.session.tmux)) await this.hold(state, text);
+      else await this.deps.harness.deliver(state.session.tmux, text);
       return state;
     }
     return this.startSession(registered, state, text, state.session !== undefined);
   }
 
-  private async startSession(registered: RegisteredRepo, state: WorkItemState, prompt: string, resume: boolean): Promise<WorkItemState> {
+  private heldPath(state: WorkItemState): string {
+    return join(this.deps.store.sessionDir(state.repo, state.issue, state.target), "held.json");
+  }
+
+  private async held(state: WorkItemState): Promise<string[]> {
+    const raw = await readFile(this.heldPath(state), "utf8").catch(() => undefined);
+    const parsed = raw === undefined ? undefined : z.array(z.string()).safeParse(JSON.parse(raw));
+    return parsed?.success === true ? parsed.data : [];
+  }
+
+  /** #391: keeps a message for the agent until its screen is clear; on disk, so a restart of the daemon keeps it. */
+  private async hold(state: WorkItemState, text: string): Promise<void> {
+    const messages = [...await this.held(state), text].slice(-20);
+    await mkdir(this.deps.store.sessionDir(state.repo, state.issue, state.target), { recursive: true, mode: 0o700 });
+    await writeFile(this.heldPath(state), JSON.stringify(messages), { mode: 0o600 });
+  }
+
+  /** #391: gives the agent what was held for it, once its screen is clear. */
+  private async deliverHeld(item: WorkItemState): Promise<void> {
+    if (item.session === undefined) return;
+    const messages = await this.held(item);
+    if (messages.length === 0) return;
+    if (!await this.deps.harness.alive(item.session.tmux) || await this.deps.harness.waitingForApproval(item.session.tmux)) return;
+    await rm(this.heldPath(item), { force: true });
+    await this.deps.harness.deliver(item.session.tmux, messages.join("\n\n---\n\n"));
+  }
+
+  private async startSession(registered: RegisteredRepo, state: WorkItemState, givenPrompt: string, wantResume: boolean): Promise<WorkItemState> {
     // A per-PR loop's agent works in, and by the configuration of, the repository it changes.
     const where = await this.whereOf(state, registered);
     const config = await readLoopConfig(where.path);
-    const worktree = state.worktree ?? { path: join(this.deps.store.itemDir(state.repo, state.issue, state.target), "worktree"), branch: itemBranch(state.issue, state.repo, state.target) };
-    // #359: a follow-up starts from the pull request it builds on, fetched by its number.
-    if (state.upstream !== undefined && state.worktree === undefined) await run(this.deps.exec, "git", ["-C", where.path, "fetch", "--quiet", "origin", `+pull/${state.issue}/head:${state.upstream.ref}`]);
-    await ensureWorktree(this.deps.exec, where.path, worktree.path, worktree.branch, await this.deps.github.defaultBranch(state.target ?? state.repo), state.upstream?.ref);
     // A session keeps the agent it started with, so it can be resumed; a new one uses the repository's (#359).
     const harness = state.session?.harness ?? config.harness.name;
+    const itemDir = this.deps.store.itemDir(state.repo, state.issue, state.target);
+    // #392: Codex gets a clone with its git directory beside it, which its sandbox lets it write; Claude Code a worktree.
+    const worktree = state.worktree ?? {
+      path: join(itemDir, "worktree"), branch: itemBranch(state.issue, state.repo, state.target), ...(harness === "codex" ? { gitDir: join(itemDir, "git") } : {}),
+    };
+    const defaultBranch = await this.deps.github.defaultBranch(state.target ?? state.repo);
+    // #359: a follow-up starts from the pull request it builds on, fetched by its number.
+    const pullHead = state.upstream === undefined ? undefined : { fetch: `+pull/${state.issue}/head:${state.upstream.ref}`, ref: state.upstream.ref };
+    if (worktree.gitDir !== undefined) await ensureClone(this.deps.exec, where.path, worktree.path, worktree.gitDir, worktree.branch, defaultBranch, pullHead);
+    else {
+      if (pullHead !== undefined && state.worktree === undefined) await run(this.deps.exec, "git", ["-C", where.path, "fetch", "--quiet", "origin", pullHead.fetch]);
+      await ensureWorktree(this.deps.exec, where.path, worktree.path, worktree.branch, defaultBranch, pullHead?.ref);
+    }
     const session = state.session ?? { harness, tmux: tmuxSessionName(state.repo, state.issue, state.target), ...(harness === "claude-code" ? { id: randomUUID() } : {}) };
     const sessionDir = this.deps.store.sessionDir(state.repo, state.issue, state.target);
     await mkdir(sessionDir, { recursive: true, mode: 0o700 });
+    // #391: a Claude Code session that never got going has no conversation to resume (`--resume` would fail at once,
+    // every time). It starts again, with the item's last full assignment, and whatever came since.
+    const assignmentPath = join(sessionDir, "assignment.md");
+    let resume = wantResume;
+    let prompt = givenPrompt;
+    if (resume && harness === "claude-code" && session.id !== undefined && !await this.deps.harness.hasConversation(session.id)) {
+      resume = false;
+      const assignment = await readFile(assignmentPath, "utf8").catch(() => undefined);
+      if (assignment !== undefined) prompt = `${assignment}\n\n---\nYour earlier session ended before it began, so this is your assignment again.${givenPrompt === RESUMED_ASSIGNMENT ? "" : `\n\nSince then:\n${givenPrompt}`}`;
+    }
+    if (!resume) await writeFile(assignmentPath, prompt, { mode: 0o600 });
     const configPath = join(sessionDir, "mcp.json");
     const [command = process.execPath, ...cliArgs] = this.deps.cliCommand;
     const mcpArgs = [...cliArgs, "loop", "mcp", "--repo", state.repo, "--issue", String(state.issue), ...(state.target === undefined ? [] : ["--target", state.target])];
     await writeFile(configPath, `${JSON.stringify({ mcpServers: { [LOOP_MCP_SERVER]: { command, args: mcpArgs } } }, null, 2)}\n`, { mode: 0o600 });
-    // Codex's sandbox lets it write its worktree; a worktree's commits go to the checkout's git directory, so that too.
-    const writable = harness === "codex" ? await this.gitDirectory(worktree.path) : [];
+    // Codex's sandbox lets it write its checkout, and (#392) the git directory beside it. An older Codex item kept its
+    // worktree, whose git directory Codex may not write; it is still named, for a sandbox that allows it.
+    const writable = harness !== "codex" ? [] : worktree.gitDir !== undefined ? [worktree.gitDir] : await this.gitDirectory(worktree.path);
     await this.deps.harness.start({
       harness, tmux: session.tmux, id: session.id, cwd: worktree.path, mcp: { command, args: mcpArgs, configPath }, writable,
       // Arguments are the repository's harness's; a session that keeps another agent gets none.

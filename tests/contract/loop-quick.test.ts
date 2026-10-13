@@ -46,7 +46,7 @@ async function setUp(options: { checks?: boolean[] } = {}) {
     return passed ? { code: 0, timedOut: false, output: "all good" } : { code: 1, timedOut: false, output: "FAIL client.test.ts > retries on 503\nexpected 2 calls, got 1" };
   };
   const daemon = new LoopDaemon({
-    store, exec: world.exec, github: new GitHub(world.exec), harness: new AgentHarness(world.exec),
+    store, exec: world.exec, github: new GitHub(world.exec), harness: new AgentHarness(world.exec, { claudeHome: join(root, "claude") }),
     cliCommand: ["/usr/local/bin/node", "/opt/rovara/cli.js"], now: () => new Date(world.clock), log: () => undefined, checkRun,
     reviewerRun: async () => ({ ok: true, text: NO_FINDINGS }),
   });

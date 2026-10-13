@@ -50,6 +50,10 @@ reviews:            # the code and security reviews after the checks; see "Revie
 Comments from anyone else are never read as instructions. Comments the loop posts carry a hidden marker,
 so it never mistakes its own words for a command.
 
+The loop reads `.rovara/loop.yaml` from your checkout each time it polls. If the file can't be read (a typo, a field
+it doesn't know), each running loop's issue says so, once, with the reason; the loop stops reading that repository's
+issues until the file is fixed, then says so again and reads what was said meanwhile. Nothing needs restarting.
+
 ## The Do loop
 
 Comment on an issue (or a pull request):
@@ -248,19 +252,28 @@ there. Detach with `Ctrl-b d`; it keeps working.
 - **Claude Code** starts in its **default permission mode**, so it asks before it edits files or runs commands. To
   let it work without asking, give it a permission mode in `harness.args`, for example
   `[--permission-mode, acceptEdits]`.
-- **Codex** (`harness.name: codex`) starts in its **workspace-write sandbox**: it edits the worktree and runs commands
-  there without network access, and asks before anything else. The loop also lets it write the checkout's git
-  directory, which a worktree commits to. `harness.args` adds Codex arguments, for example `[--model, gpt-5-codex]`.
-  Codex picks its own session ID, so the loop resumes it as the latest Codex session in the item's worktree, which
-  only that item uses.
+- **Codex** (`harness.name: codex`) starts in its **workspace-write sandbox**: it edits its checkout and runs
+  commands there without network access, and asks before anything else. Its sandbox lets nothing write a `.git`
+  directory, so a Codex item works in a local clone of your checkout whose git directory sits beside it
+  (`~/.rovara/loop/items/…/git`), which Codex may write, rather than a worktree: it commits without asking. The loop's
+  own tools never ask either. `harness.args` adds Codex arguments, for example `[--model, gpt-5-codex]`. Codex picks
+  its own session ID, so the loop resumes it as the latest Codex session in the item's checkout, which only that item
+  uses.
+- **A repository Claude Code hasn't opened before** asks, the first time, whether you trust the folder. The loop
+  counts that as waiting for you, says so on the issue after a minute, and never types into it (its default answer
+  is "No, exit"). Answer it in tmux, or open the repository with `claude` once beforehand.
 
 How much the agent may do without asking is your decision, per repository.
 
 When the agent has been waiting on a permission prompt for a minute, the loop says so on the issue, with the
 `tmux attach` command, so someone who only watches GitHub knows it needs them.
 
+While the agent shows a prompt or dialog, a reply for it is held, and given once the screen is clear, so nothing
+typed ever answers a prompt by accident.
+
 If its session ends while it's working, the loop resumes it, up to three times in a row; then it says so
-on the issue and waits for your next reply.
+on the issue and waits for your next reply. A session that ended before it began (Claude Code saved no conversation)
+is started again with its assignment, rather than resumed.
 
 ## Commands
 
