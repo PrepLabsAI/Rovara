@@ -325,3 +325,10 @@ export function createE2EOpenApiFixtureDescriptor(bytes: Uint8Array): E2EOpenApi
   } catch { return undefined; }
   return descriptor;
 }
+
+/** Validate a bounded declared mock response against a source-derived OpenAPI response schema. */
+export function validateE2EOpenApiFixtureResponse(input: Readonly<{ descriptor: E2EOpenApiFixtureDescriptor; method: string; path: string; status: number; body: unknown }>): boolean {
+  const operation = input.descriptor.operations.find((item) => item.method === input.method && item.path === input.path);
+  const response = operation?.responses.find((item) => item.status === input.status);
+  return response !== undefined && isFixtureValue(response.schema, input.body);
+}

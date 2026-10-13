@@ -1,5 +1,6 @@
 import { types } from "node:util";
-import { E2EScenarioBundleSchema, E2EExecutionGroupSchema, E2EExecutionPlanSchema, E2EPortableApprovalBindingSchema, canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes, copyBoundedE2ETreePaths, e2ePortableRegistrationKey, inspectE2EPortableSource, inspectE2ERepository, resolveE2EPortableRegistration, selectE2EExecutionPlan, verifyE2ESourceSnapshot, type CandidateManifest, type E2EExecutionPlan, type E2EExpectedCase, type E2EPolicy, type E2EScenario, type E2EScenarioBundle, type E2ESourceSnapshot, type E2EPlanSelectionInput } from "@agentx/contracts";
+import { createHash } from "node:crypto";
+import { E2EScenarioBundleSchema, E2EExecutionGroupSchema, E2EExecutionPlanSchema, E2EPortableApprovalBindingSchema, canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes, copyBoundedE2ETreePaths, e2ePortableRegistrationKey, inspectE2EPortableSource, inspectE2ERepository, resolveE2EPortableRegistration, selectE2EExecutionPlan, verifyE2ESourceSnapshot, type CandidateManifest, type E2EExecutionPlan, type E2EExpectedCase, type E2EPolicy, type E2EScenario, type E2EScenarioBundle, type E2ESourceSnapshot, type E2EPlanSelectionInput, type E2EMockSpec } from "@agentx/contracts";
 import { type E2ECompiledInventory } from "./identity.js";
 import { emitE2ECompilationFiles, e2ePortableOperationDescriptorDigest, type E2EOperationRegistration } from "./templates.js";
 import { assertPlanSubset } from "./selection.js";
@@ -9,7 +10,7 @@ export type E2EImmutableCompilationContext = Readonly<{
   executionPlan: E2EExecutionPlan;
   group: E2EExecutionPlan["groups"][number];
 }>;
-export type E2ECompiledSuite = Readonly<{ bundle: E2EScenarioBundle; files: ReadonlyMap<string, string>; inventory: E2ECompiledInventory; expectedConfigDigest: string; expectedCases: readonly E2EExpectedCase[]; hostRequestPayloads: ReadonlyMap<string, unknown>; caseBindings: ReadonlyMap<string, { compilerCaseIdentity: string; registrationKey: string; candidateResponseScope: string; requestProtocol: string; operationId: string; accountProfileId: string; requestedTargetId: string; packageExportSubpath: string; moduleSpecifier: string; callableSelector: E2EOperationRegistration["callableSelector"]; descriptorDigest: string }>; selectionPacketPath: string }>;
+export type E2ECompiledSuite = Readonly<{ bundle: E2EScenarioBundle; group: E2EExecutionPlan["groups"][number] & { mocks: readonly E2EMockSpec[] }; files: ReadonlyMap<string, string>; inventory: E2ECompiledInventory; expectedConfigDigest: string; expectedCases: readonly E2EExpectedCase[]; hostRequestPayloads: ReadonlyMap<string, unknown>; caseBindings: ReadonlyMap<string, { compilerCaseIdentity: string; registrationKey: string; candidateResponseScope: string; requestProtocol: string; operationId: string; applicationId: string; accountProfileId: string; requestedTargetId: string; packageExportSubpath: string; moduleSpecifier: string; callableSelector: E2EOperationRegistration["callableSelector"]; descriptorDigest: string }>; selectionPacketPath: string }>;
 
 export function compileE2EScenarios(bundleInput: E2EScenarioBundle, effectiveTargetsInput: E2EExecutionPlan["effectiveTargets"], groupInput: E2EExecutionPlan["groups"][number], contextInput: E2EImmutableCompilationContext): E2ECompiledSuite {
   const bundle = E2EScenarioBundleSchema.parse(copyBoundedE2EJsonData(bundleInput, { maxBytes: 262_144, maxDepth: 64 }));
@@ -21,6 +22,9 @@ export function compileE2EScenarios(bundleInput: E2EScenarioBundle, effectiveTar
   const effectiveTargets = copyBoundedE2EJsonData(effectiveTargetsInput, { maxBytes: 262_144, maxDepth: 64 }) as E2EExecutionPlan["effectiveTargets"];
   const group = E2EExecutionGroupSchema.parse(copyBoundedE2EJsonData(groupInput, { maxBytes: 262_144, maxDepth: 64 }));
   if (canonicalJson(context.group) !== canonicalJson(group)) throw new Error("compilation context group and explicit group must be exact equal data");
+  const groupMocks = context.executionPlan.mocks.filter((mock) => group.targetIds.includes(mock.effectiveTargetId));
+  const groupMockDigest = createHash("sha256").update(canonicalJson(groupMocks)).digest("hex");
+  if (groupMockDigest !== group.mockManifestDigest) throw new Error("authenticated compiler group mock manifest does not match the full approved plan mock descriptors");
   if (selection.candidateDigest !== expectedCandidate.digest || bundle.planDigest !== selection.planDigest || canonicalJson(bundle.scenarios) !== canonicalJson(selection.scenarios)) throw new Error("bundle does not match the approved candidate and plan assignments");
   const binding = E2EPortableApprovalBindingSchema.parse(selection.portableApprovalBinding);
   if (canonicalJson(binding.semanticApproval) !== canonicalJson(selection.approvedSemanticApproval)) throw new Error("planner input approval identity differs from its portable registration binding");
@@ -65,7 +69,7 @@ export function compileE2EScenarios(bundleInput: E2EScenarioBundle, effectiveTar
   const ids = new Set(assignedGroup.expectedCases.map((item) => item.scenarioId));
   const scenarios = bundle.scenarios.filter((scenario) => ids.has(scenario.scenarioId));
   const emitted = emitE2ECompilationFiles({ expectedCases: assignedGroup.expectedCases, scenarios, scenarioRegistrations: binding.scenarioRegistrations ?? [], group: assignedGroup, plan: derivedPlan, bundleDigest: bundle.bundleDigest, registrations: binding.operations, runTimeoutMs: selection.policy.limits.runTimeoutMs, caseTimeoutMs: selection.policy.limits.caseTimeoutMs });
-  return Object.freeze({ bundle, files: emitted.files, inventory: emitted.inventory, expectedConfigDigest: emitted.expectedConfigDigest, expectedCases: Object.freeze([...assignedGroup.expectedCases]), hostRequestPayloads: emitted.hostRequestPayloads, caseBindings: emitted.caseBindings, selectionPacketPath: ".agentx/e2e/selection-packet.json" });
+  return Object.freeze({ bundle, group: Object.freeze({ ...group, mocks: Object.freeze(groupMocks) }), files: emitted.files, inventory: emitted.inventory, expectedConfigDigest: emitted.expectedConfigDigest, expectedCases: Object.freeze([...assignedGroup.expectedCases]), hostRequestPayloads: emitted.hostRequestPayloads, caseBindings: emitted.caseBindings, selectionPacketPath: ".agentx/e2e/selection-packet.json" });
 }
 
 function copyRecord(value: unknown, allowed: readonly string[], label: string): Record<string, unknown> {

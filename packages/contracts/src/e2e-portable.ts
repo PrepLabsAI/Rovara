@@ -54,6 +54,14 @@ export const E2ESyntheticAccountContextSchema = z.object({
   approval: z.object({ artifactId: id(160), digest, planDigest: digest }).strict(),
 }).strict();
 export type E2ESyntheticAccountContext = z.infer<typeof E2ESyntheticAccountContextSchema>;
+export const E2EPortableMockFixtureRegistrationSchema = z.object({
+  componentId: id(120), requestedTargetId: id(80), kind: z.literal("api"),
+  sourceRefs: z.array(z.object({ path: id(1024), sha256: digest }).strict()).min(1).max(4),
+  fixture: z.unknown().optional(), fixtureProfile: z.literal("openapi-auto-witness/v1").optional(),
+}).strict().superRefine((registration, context) => {
+  if ((registration.fixture === undefined) === (registration.fixtureProfile === undefined)) context.addIssue({ code: "custom", message: "approved mock registration must select exactly one fixture profile or explicit fixture" });
+});
+export type E2EPortableMockFixtureRegistration = z.infer<typeof E2EPortableMockFixtureRegistrationSchema>;
 export const E2E_DEFAULT_SYNTHETIC_ACCOUNT_SCHEMA = "managed-default-synthetic-account/v1" as const;
 export function e2EDefaultSyntheticAccountDefinition(applicationId: string, profileId: string): Readonly<{ schemaVersion: typeof E2E_DEFAULT_SYNTHETIC_ACCOUNT_SCHEMA; applicationId: string; profileId: string }> {
   return Object.freeze({ schemaVersion: E2E_DEFAULT_SYNTHETIC_ACCOUNT_SCHEMA, applicationId, profileId });
@@ -64,12 +72,16 @@ export const E2EPortableApprovalBindingSchema = z.object({
   semanticApproval: z.object({ artifactId: id(160), digest }).strict(),
   operations: z.array(E2EPortableOperationRegistrationSchema).max(64),
   accountContexts: z.array(E2ESyntheticAccountContextSchema).max(64),
+  mockFixtures: z.array(E2EPortableMockFixtureRegistrationSchema).max(200).optional(),
   scenarioRegistrations: z.array(z.object({ scenarioId: id(120), registrationKey: digest }).strict()).max(32).optional(),
 }).strict().superRefine((binding, context) => {
   const keys = binding.operations.map(e2ePortableRegistrationKey);
   if (new Set(keys).size !== binding.operations.length) context.addIssue({ code: "custom", path: ["operations"], message: "operation registration keys must be unique" });
   if (new Set(binding.accountContexts.map((item) => item.contextId)).size !== binding.accountContexts.length || new Set(binding.accountContexts.map((item) => `${item.applicationId}\0${item.profileId}`)).size !== binding.accountContexts.length) context.addIssue({ code: "custom", path: ["accountContexts"], message: "synthetic account context IDs and application/profile pairs must be unique" });
   for (const [index, account] of binding.accountContexts.entries()) if (new Set(account.sourceRefs.map((ref) => ref.path)).size !== account.sourceRefs.length) context.addIssue({ code: "custom", path: ["accountContexts", index, "sourceRefs"], message: "synthetic account source references must be unique" });
+  const mockFixtures = binding.mockFixtures ?? [];
+  if (new Set(mockFixtures.map((item) => `${item.requestedTargetId}\0${item.componentId}`)).size !== mockFixtures.length) context.addIssue({ code: "custom", path: ["mockFixtures"], message: "approved mock fixture registrations must be unique" });
+  for (const [index, fixture] of mockFixtures.entries()) if (new Set(fixture.sourceRefs.map((ref) => ref.path)).size !== fixture.sourceRefs.length) context.addIssue({ code: "custom", path: ["mockFixtures", index, "sourceRefs"], message: "approved mock fixture source references must be unique" });
   const scenarioRegistrations = binding.scenarioRegistrations ?? [];
   if (new Set(scenarioRegistrations.map((item) => item.scenarioId)).size !== scenarioRegistrations.length) context.addIssue({ code: "custom", path: ["scenarioRegistrations"], message: "scenario registration associations must be unique" });
   const keySet = new Set(keys);

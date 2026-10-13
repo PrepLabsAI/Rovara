@@ -151,8 +151,10 @@ export function createE2ECollectionOracleFromCompiledSuite(input: {
 export function qualifyE2ECollection(oracleInput: E2ECollectionOracle, collectionInput: E2ECollection): E2EStructuralQualification {
   const unavailable = (reason: string, runId: string | null = null, rawReportSha256: string | null = null): E2EStructuralQualification => ({ status: "UNKNOWN", reason, runId, rawReportSha256, result: null });
   try {
-    const oracle = snapshotE2ECollectionOracle(oracleInput);
-    const raw = copyCollection(collectionInput);
+    let oracle: E2ECollectionOracle;
+    try { oracle = snapshotE2ECollectionOracle(oracleInput); } catch (error) { return unavailable(`independent oracle snapshot is malformed or unsafe: ${error instanceof Error ? error.message : "unknown error"}`); }
+    let raw: E2ECollection;
+    try { raw = copyCollection(collectionInput); } catch (error) { return unavailable(`collection snapshot is malformed or unsafe: ${error instanceof Error ? error.message : "unknown error"}`); }
     const binding = E2ERunBindingSchema.parse(oracle.binding);
     const round = E2ERoundSchema.parse(oracle.round);
     if (!/^[a-f0-9]{64}$/.test(oracle.sourceDigest) || !/^[a-f0-9]{64}$/.test(oracle.configDigest) || Object.keys(oracle.fixedAssetDigests).length === 0 || Object.values(oracle.fixedAssetDigests).some((digest) => !/^[a-f0-9]{64}$/.test(digest)) || new Set(oracle.declaredMockComponentIds).size !== oracle.declaredMockComponentIds.length) return unavailable("independent source, configuration, fixed asset, or mock manifest identity is invalid");
@@ -322,16 +324,16 @@ function requireExactKeys(record: Record<string, unknown>, keys: readonly string
 function copyCollection(input: E2ECollection): E2ECollection {
   const top = ownRecord(input, ["rawReportBytes", "runStart", "process", "configDigest", "fixedAssetDigests", "publicList", "receivedAt", "observations", "receipts"]);
   const rawReportBytes = copyBoundedE2ESourceBytes(top.rawReportBytes, E2E_REPORT_MAX_BYTES);
-  const json = (value: unknown, maxBytes = 262_144) => copyBoundedE2EJsonData(value, { maxBytes, maxDepth: 64 });
+  const json = (value: unknown, maxBytes = 262_144, field = "value") => { try { return copyBoundedE2EJsonData(value, { maxBytes, maxDepth: 64 }); } catch (error) { throw new TypeError(`${field}: ${error instanceof Error ? error.message : "invalid JSON data"}`, { cause: error }); } };
   const receiptKeys = ["runId", "roundId", "groupId", "caseId", "upstreamRunId", "candidateDigest", "sourceDigest", "bundleDigest", "compilerCaseIdentity", "registrationKey", "semanticApprovalDigest", "executionDescriptorDigest", "accountIdDigest", "assertionIndex", "assertionDigest", "requestId", "requestSha256", "responseSha256", "observedAt", "lifecycleId", "cleanup", "outcome"];
-  const receiptRows = ownArray(top.receipts, 1280).map((item) => json(ownRecord(item, receiptKeys), 8192) as E2EObservedReceipt);
+  const receiptRows = ownArray(top.receipts, 1280).map((item) => json(ownRecord(item, receiptKeys), 8192, "receipt") as E2EObservedReceipt);
   const observationRows = ownArray(top.observations, 64).map((value) => {
     const item = ownRecord(value, ["caseId", "requestId", "requestBytes", "responseBytes", "observedAt", "lifecycleId", "cleanup", "coverage"]);
-    return { metadata: json({ caseId: item.caseId, requestId: item.requestId, observedAt: item.observedAt, lifecycleId: item.lifecycleId, cleanup: item.cleanup, coverage: item.coverage }, 65_536) as Omit<E2ECaseObservation, "requestBytes" | "responseBytes">, requestBytes: copyBoundedE2ESourceBytes(item.requestBytes, E2E_APP_RPC_FRAME_MAX_BYTES), responseBytes: copyBoundedE2ESourceBytes(item.responseBytes, E2E_APP_RPC_FRAME_MAX_BYTES) };
+    return { metadata: json({ caseId: item.caseId, requestId: item.requestId, observedAt: item.observedAt, lifecycleId: item.lifecycleId, cleanup: item.cleanup, coverage: item.coverage }, 65_536, "observation") as Omit<E2ECaseObservation, "requestBytes" | "responseBytes">, requestBytes: copyBoundedE2ESourceBytes(item.requestBytes, E2E_APP_RPC_FRAME_MAX_BYTES), responseBytes: copyBoundedE2ESourceBytes(item.responseBytes, E2E_APP_RPC_FRAME_MAX_BYTES) };
   });
   const runStart = json(ownRecord(top.runStart, ["runId", "sequence", "launchId", "capturedAt"]), 4096) as E2ECollection["runStart"];
   const process = json(ownRecord(top.process, ["exitCode", "signal", "startedAt", "finishedAt", "drained", "aborted", "timedOut"]), 8192) as E2ECollection["process"];
-  return { rawReportBytes, runStart, process, configDigest: json(top.configDigest, 128) as string, fixedAssetDigests: json(top.fixedAssetDigests, 16_384) as Readonly<Record<string, string>>, publicList: json(top.publicList, 262_144), receivedAt: json(top.receivedAt, 128) as string, receipts: receiptRows, observations: observationRows.map(({ metadata, requestBytes, responseBytes }) => ({ ...metadata, requestBytes, responseBytes })) };
+  return { rawReportBytes, runStart, process, configDigest: json(top.configDigest, 128, "configDigest") as string, fixedAssetDigests: json(top.fixedAssetDigests, 16_384, "fixedAssetDigests") as Readonly<Record<string, string>>, publicList: json(top.publicList, 262_144, "publicList"), receivedAt: json(top.receivedAt, 128, "receivedAt") as string, receipts: receiptRows, observations: observationRows.map(({ metadata, requestBytes, responseBytes }) => ({ ...metadata, requestBytes, responseBytes })) };
 }
 function ownRecord(value: unknown, keys: readonly string[]): Record<string, unknown> {
   if (value === null || typeof value !== "object" || types.isProxy(value) || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) throw new TypeError("collection field must be an ordinary data record");

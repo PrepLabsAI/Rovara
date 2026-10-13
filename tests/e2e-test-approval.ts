@@ -6,6 +6,9 @@ const sha256 = (value: string) => createHash("sha256").update(value).digest("hex
 /** Builds explicit synthetic approval fixtures for tests; production approval comes from trusted plan storage. */
 export function withTestPortableApproval<T extends E2EPlanSelectionInput>(input: T): T {
   if (input.portableApprovalBinding !== undefined) return input;
+  const mockableComponents = (input.mockableComponents ?? []).map((item) => item.fixture !== undefined || item.fixtureProfile !== undefined
+    ? item
+    : { ...item, fixtureProfile: "openapi-auto-witness/v1" as const });
   const discovered = inspectE2ERepository(input.sourceSnapshot, input.expectedCandidate);
   const sourceByPath = new Map(input.sourceSnapshot.sources.map((source) => [source.path, source]));
   const operations = discovered.portableOperations.flatMap((operation) => {
@@ -32,7 +35,8 @@ export function withTestPortableApproval<T extends E2EPlanSelectionInput>(input:
       return [{ ...base, descriptorDigest: e2ePortableOperationDescriptorDigest(base) }];
     });
   });
-  const semanticApproval = { artifactId: "test-semantic-approval/v1", digest: sha256(canonicalJson({ planDigest: input.planDigest, candidateDigest: input.candidateDigest, operations: operations.map((item) => item.descriptorDigest) })) };
+  const mockFixtures = mockableComponents;
+  const semanticApproval = { artifactId: "test-semantic-approval/v1", digest: sha256(canonicalJson({ planDigest: input.planDigest, candidateDigest: input.candidateDigest, operations: operations.map((item) => item.descriptorDigest), mockFixtures })) };
   const accountMap = new Map<string, E2ESyntheticAccountContext>();
   for (const target of discovered.inspection.proposedTargets) {
     const manifest = discovered.portableOperations.find((operation) => operation.applicationId === target.applicationId)?.manifestPath;
@@ -44,7 +48,7 @@ export function withTestPortableApproval<T extends E2EPlanSelectionInput>(input:
       sourceRefs: [{ path: source.path, sha256: source.sha256 }], approval: { ...semanticApproval, planDigest: input.planDigest } });
   }
   const accounts = [...accountMap.values()];
-  const bindingBody = { schemaVersion: "portable-approval-binding/v1" as const, planDigest: input.planDigest, semanticApproval, operations, accountContexts: accounts };
+  const bindingBody = { schemaVersion: "portable-approval-binding/v1" as const, planDigest: input.planDigest, semanticApproval, operations, accountContexts: accounts, mockFixtures };
   const binding = { ...bindingBody, bindingDigest: e2EPortableApprovalBindingDigest(bindingBody) };
-  return { ...input, portableApprovalBinding: binding, approvedSemanticApproval: semanticApproval };
+  return { ...input, mockableComponents, portableApprovalBinding: binding, approvedSemanticApproval: semanticApproval };
 }

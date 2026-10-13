@@ -206,7 +206,13 @@ export function validateE2EScenarioBundleForPolicy(bundle: unknown, policy: unkn
   return parsedBundle;
 }
 
-export const E2EMockSpecSchema = z.object({ componentId: id(120), requestedTargetId: id(80), effectiveTargetId: id(80), kind: z.enum(["api", "database", "queue", "identity", "device-service", "os-service", "model", "driver"]), contractDigest: digest, fixtureVersion: id(80), sourceRefs: z.array(z.object({ path: sourceRelativePath, sha256: digest }).strict()).max(64), reason: z.enum(["unconnected", "unapproved", "declined", "unqualified", "phase-unavailable"]) }).strict();
+export const E2EApiMockVariantSchema = z.object({ id: z.enum(["success", "refusal", "invalid-data"]), inputValue: z.string().max(128), status: z.number().int().min(100).max(599), body: z.unknown() }).strict();
+export const E2EApiMockFixtureSchema = z.object({ schemaVersion: z.literal("source-backed-api-fixtures/v1"), operationId: id(120), method: z.literal("GET"), path: z.string().min(1).max(512), inputField: id(120), variants: z.array(E2EApiMockVariantSchema).min(3).max(3) }).strict().superRefine((fixture, context) => {
+  if (new Set(fixture.variants.map((variant) => variant.id)).size !== 3 || new Set(fixture.variants.map((variant) => variant.inputValue)).size !== 3) context.addIssue({ code: "custom", path: ["variants"], message: "source-backed API fixture variants must have unique IDs and input values" });
+  if (!/^\/[A-Za-z0-9._~/-]{1,511}$/.test(fixture.path) || fixture.path.includes("..") || fixture.path.includes("//") || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(fixture.inputField)) context.addIssue({ code: "custom", path: ["path"], message: "source-backed API mock route and input selector must be canonical and bounded" });
+});
+export type E2EApiMockFixture = z.infer<typeof E2EApiMockFixtureSchema>;
+export const E2EMockSpecSchema = z.object({ componentId: id(120), requestedTargetId: id(80), effectiveTargetId: id(80), kind: z.enum(["api", "database", "queue", "identity", "device-service", "os-service", "model", "driver"]), contractDigest: digest, fixtureVersion: id(80), sourceRefs: z.array(z.object({ path: sourceRelativePath, sha256: digest }).strict()).max(64), reason: z.enum(["unconnected", "unapproved", "declined", "unqualified", "phase-unavailable"]), apiFixture: E2EApiMockFixtureSchema.optional() }).strict();
 export type E2EMockSpec = z.infer<typeof E2EMockSpecSchema>;
 export const E2ERuntimeAvailabilitySchema = z.object({ targetId: id(80), profileId: id(120), connection: z.enum(["connected", "unconnected"]), approval: z.enum(["approved", "pending", "declined"]), qualification: z.enum(["qualified", "unqualified"]), authorizationRevision: id(120) }).strict();
 export type E2ERuntimeAvailability = z.infer<typeof E2ERuntimeAvailabilitySchema>;

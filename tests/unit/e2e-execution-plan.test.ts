@@ -70,7 +70,7 @@ describe("safe E2E execution plan selection", () => {
     expect(plan.criteria).toHaveLength(64);
     expect(plan.criteria.every((criterion) => criterion.required && criterion.minimumEvidence === "mock-contract" && criterion.requiredRealComponentIds.length === 0)).toBe(true);
     expect(plan.groups.flatMap((group) => group.expectedCases)).toHaveLength(32);
-    expect(plan.unavailableCriteria).toHaveLength(32);
+    expect(plan.unavailableCriteria).toHaveLength(64);
     expect(selectE2EExecutionPlan({ ...input, policy: { ...policy, baselineScenarioIds: [] }, scenarios }).digest).toBe(plan.digest);
     const longRequestedId = "x".repeat(80);
     expect(effectiveContractTargetId(longRequestedId)).toHaveLength(73);

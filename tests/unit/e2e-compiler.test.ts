@@ -111,6 +111,23 @@ describe("trusted E2E compiler", () => {
     expect(() => selectE2EExecutionPlan({ ...selection, portableApprovalBinding: bindingExtraRef })).toThrow(/exactly match/);
   });
 
+  it("requires source-backed mock fixtures to match the immutable approval binding", () => {
+    const fixture = { schemaVersion: "source-backed-api-fixtures/v1", operationId: "getRows", method: "GET", path: "/api/rows", inputField: "query", variants: [
+      { id: "success", inputValue: "ok", status: 200, body: { rows: [] } },
+      { id: "refusal", inputValue: "refuse", status: 403, body: { error: "refused" } },
+      { id: "invalid-data", inputValue: "bad", status: 200, body: { rows: "bad" } },
+    ] };
+    const registration = { componentId: "bank-api", requestedTargetId: target.targetId, kind: "api" as const, sourceRefs: [{ path: "apps/shop/openapi.json", sha256: hash("openapi") }], fixture };
+    const bindingWithoutFixture = { ...bindingBody, bindingDigest: "0".repeat(64) };
+    const bindingWithoutFixtureBody = { ...bindingBody };
+    const validUnbound = { ...bindingWithoutFixtureBody, bindingDigest: e2EPortableApprovalBindingDigest(bindingWithoutFixtureBody) };
+    expect(() => selectE2EExecutionPlan({ ...selection, mockableComponents: [registration], portableApprovalBinding: validUnbound })).toThrow(/does not match the immutable portable approval binding/);
+    const approvedBody = { ...bindingBody, mockFixtures: [registration] };
+    const approved = { ...approvedBody, bindingDigest: e2EPortableApprovalBindingDigest(approvedBody) };
+    expect(() => selectE2EExecutionPlan({ ...selection, mockableComponents: [registration], portableApprovalBinding: approved })).not.toThrow(/immutable portable approval binding/);
+    expect(bindingWithoutFixture.bindingDigest).toHaveLength(64);
+  });
+
   it("requires the richer source fixture to declare synthetic scope without filtering nested business values", () => {
     const fixturePath = "apps/shop/fixtures/alternate-account.json";
     const alternateScenario: E2EScenario = { ...scenario, accountProfileId: "synthetic-alt", steps: [{ kind: "invoke-contract", operationId: operation.operationId, input: { businessInput: { status: "LIVE" } } }] };

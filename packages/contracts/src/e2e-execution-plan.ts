@@ -2,20 +2,20 @@ import { createHash } from "node:crypto";
 import {
   E2EExecutionPlanSchema, E2EPolicySchema, E2EScenarioSchema, e2eExecutionPlanDigest,
   type E2EExecutionPlan, type E2EPolicy, type E2ERuntimeAvailability, type E2EScenario,
-  type E2EExpectedCase, type E2EMockSpec,
+  type E2EExpectedCase, type E2EMockSpec, E2EApiMockFixtureSchema,
 } from "./e2e.js";
 import { canonicalJson } from "./canonical-json.js";
 import { copyBoundedE2EJsonData } from "./e2e-safe-data.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
 import type { CandidateManifest } from "./task-workflow.js";
-import { createE2EOpenApiFixtureDescriptor } from "./e2e-openapi-fixture.js";
+import { createE2EOpenApiFixtureDescriptor, validateE2EOpenApiFixtureResponse } from "./e2e-openapi-fixture.js";
 import { E2EPortableApprovalBindingSchema, e2EDefaultSyntheticAccountDefinition, e2ePortableOperationDescriptorDigest, e2ePortableRegistrationKey, e2eSourceInterfaceAssertion, resolveE2EPortableRegistration, type E2EPortableApprovalBinding } from "./e2e-portable.js";
 import { E2E_CANDIDATE_ADAPTER_IDENTITY } from "./e2e-portable.js";
 import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "./e2e-case-identity.js";
 import { inspectE2EPortableSource, inspectE2ERepository, type PortableOperation } from "./e2e-catalog.js";
 
 export const PORTABLE_E2E_TEST_PATH = ".agentx/e2e/generated-contract.test.ts";
-type MockableComponent = { componentId: string; requestedTargetId: string; kind: "api"; sourceRefs: Array<{ path: string; sha256: string }> };
+type MockableComponent = { componentId: string; requestedTargetId: string; kind: "api"; sourceRefs: Array<{ path: string; sha256: string }>; fixture?: unknown; fixtureProfile?: "openapi-auto-witness/v1" };
 export type E2EPlanSelectionInput = {
   candidateDigest: string;
   expectedCandidate: CandidateManifest;
@@ -148,6 +148,15 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
   const mockSpecs: E2EMockSpec[] = [];
   const selected = new Set(input.selectedTargetIds);
   const baseline = new Set(policy.baselineScenarioIds);
+  const mockableComponents = (input.mockableComponents ?? []).map((item) => copyBoundedE2EJsonData(item, { maxBytes: 65_536, maxDepth: 32 }) as MockableComponent);
+  if (mockableComponents.length > 200 || mockableComponents.some((item) => !item || typeof item.componentId !== "string" || typeof item.requestedTargetId !== "string" || item.kind !== "api" || !Array.isArray(item.sourceRefs))
+    || new Set(mockableComponents.map((item) => `${item.requestedTargetId}\0${item.componentId}`)).size !== mockableComponents.length) throw new TypeError("approved source-backed mock selection is malformed or duplicate");
+  const fixtureRegistrations = mockableComponents.filter((item) => item.fixture !== undefined || item.fixtureProfile !== undefined);
+  const approvedFixtureRegistrations = approvalBinding?.mockFixtures ?? [];
+  const registrationOrder = (items: readonly unknown[]) => [...items].sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+  if (canonicalJson(registrationOrder(fixtureRegistrations)) !== canonicalJson(registrationOrder(approvedFixtureRegistrations))) {
+    throw new Error("source-backed mock fixture selection does not match the immutable portable approval binding");
+  }
   for (const scenario of scenarios) {
     const required = scenario.required || baseline.has(scenario.scenarioId);
     if (!required && !scenario.requestedTargetIds.some((targetId) => selected.has(targetId))) continue;
@@ -167,6 +176,7 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
       let unavailableReason: string | undefined;
       if (!approvalBinding || !input.approvedSemanticApproval) unavailableReason = "approved portable operation and synthetic account registry is unavailable";
       else if (!accountContext) unavailableReason = "scenario account profile has no source- and approval-bound SYNTHETIC account context";
+      else if (isInputFixture(accountContext.fixture.definition) && !scenarioInputMatchesFixture(scenario.steps[0], accountContext.fixture.definition)) unavailableReason = "scenario candidate input differs from its source- and approval-bound synthetic account input fixture";
       else if (!registration || (scenario.steps[0]?.kind === "invoke-contract" ? registration.purpose !== "feature-invocation" : scenario.steps[0]?.kind === "inspect-contract" ? registration.purpose !== "source-interface" : true)) unavailableReason = "scenario operation has no approved portable invocation or source-interface registration";
       else if (sourceCapabilityAvailable.get(resolvedRegistration?.registrationKey ?? "") !== true) unavailableReason = scenario.steps[0]?.kind === "inspect-contract" ? "registered module export names do not match source-validated module inventory" : "registered invocation selector is not a source-validated callable capability";
       else if (!sandboxUsable) unavailableReason = "approved qualified default sandbox is unavailable or model route is not disabled";
@@ -174,19 +184,41 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
       else if (!validPortableSemantics(scenario, sourceOperation, registration, requestedTarget.kind)) unavailableReason = "requested steps, assertions, evidence scope, target kind, or agent semantics are not in the supported portable contract profile";
       const criterionMocks: E2EMockSpec[] = [];
       let fixtureUnavailableReason: string | undefined;
-      if (!unavailableReason) for (const componentId of scenario.requiredRealComponentIds) {
+      const requestedMockComponentIds = mockableComponents.filter((item) => item.requestedTargetId === requestedTargetId && (item.fixture !== undefined || item.fixtureProfile !== undefined)).map((item) => item.componentId);
+      const componentIdsForFixtures = [...new Set([...scenario.requiredRealComponentIds, ...requestedMockComponentIds])];
+      if (!unavailableReason) for (const componentId of componentIdsForFixtures) {
         const edge = inspection.dependencyEdges.find((candidate) => candidate.toComponentId === componentId && candidate.fromApplicationId === requestedTarget.applicationId);
-        const descriptor = input.mockableComponents?.find((candidate) => candidate.componentId === componentId && candidate.requestedTargetId === requestedTargetId);
+        const descriptor = mockableComponents.find((candidate) => candidate.componentId === componentId && candidate.requestedTargetId === requestedTargetId);
         const schemaPath = edge?.sourcePaths.find((path) => /(^|\/)(?:openapi|swagger)\.json$/i.test(path));
         const source = schemaPath ? input.sourceSnapshot.sources.find((item) => item.path === schemaPath) : undefined;
         const fixture = source === undefined ? undefined : createE2EOpenApiFixtureDescriptor(source.bytes);
-        if (!edge || !descriptor || descriptor.kind !== "api" || !schemaPath || fixture === undefined || descriptor.sourceRefs.length !== 1 || descriptor.sourceRefs[0]?.path !== schemaPath || descriptor.sourceRefs[0]?.sha256 !== source?.sha256) {
+        const mockFixture = descriptor?.kind === "api" && descriptor.fixture !== undefined ? E2EApiMockFixtureSchema.safeParse(descriptor.fixture) : undefined;
+        const mockData = mockFixture?.success ? mockFixture.data : undefined;
+        const operationFixture = mockData
+          ? fixture?.operations.find((item) => item.operationId === mockData.operationId && item.method === mockData.method && item.path === mockData.path)
+          : fixture?.operations.length === 1 ? fixture.operations[0] : undefined;
+        const successVariant = mockData?.variants.find((item) => item.id === "success");
+        const refusalVariant = mockData?.variants.find((item) => item.id === "refusal");
+        const invalidVariant = mockData?.variants.find((item) => item.id === "invalid-data");
+        const autoWitness = descriptor?.fixture === undefined && descriptor?.fixtureProfile === "openapi-auto-witness/v1" && operationFixture?.responses.length;
+        const variantSetValid = Boolean(autoWitness || operationFixture && successVariant && refusalVariant && invalidVariant
+          && successVariant.status >= 200 && successVariant.status < 300 && mockData && fixture && validateE2EOpenApiFixtureResponse({ descriptor: fixture, method: mockData.method, path: mockData.path, status: successVariant.status, body: successVariant.body })
+          && refusalVariant.status >= 400 && refusalVariant.status < 500
+          && invalidVariant.status >= 200 && invalidVariant.status < 300
+          && mockData && fixture && !validateE2EOpenApiFixtureResponse({ descriptor: fixture, method: mockData.method, path: mockData.path, status: invalidVariant.status, body: invalidVariant.body }));
+        if (!edge || !descriptor || descriptor.kind !== "api" || !schemaPath || fixture === undefined || !(mockFixture?.success || autoWitness) || !variantSetValid || descriptor.sourceRefs.length !== 1 || descriptor.sourceRefs[0]?.path !== schemaPath || descriptor.sourceRefs[0]?.sha256 !== source?.sha256) {
           fixtureUnavailableReason ??= "required real-component floor has no supported source-derived API contract fixture descriptor";
           continue;
         }
+        if (mockFixture?.success) {
+          const invocation = scenario.steps[0];
+          const invocationInput = invocation?.kind === "invoke-contract" && invocation.input && typeof invocation.input === "object" && !Array.isArray(invocation.input) ? invocation.input as Record<string, unknown> : undefined;
+          const appliedVariant = invocationInput && Object.hasOwn(invocationInput, mockFixture.data.inputField) ? mockFixture.data.variants.find((item) => item.inputValue === invocationInput[mockFixture.data.inputField]) : undefined;
+          if (!appliedVariant) { fixtureUnavailableReason ??= "approved input does not select one exact source-bound mock variant"; continue; }
+        }
         criterionMocks.push({ componentId, requestedTargetId, effectiveTargetId: effectiveContractTargetId(requestedTargetId), kind: "api",
-          contractDigest: hex(canonicalJson({ descriptor: fixture, sourceRefs: descriptor.sourceRefs, contractRef: edge.contractRef })),
-          fixtureVersion: fixture.version, sourceRefs: descriptor.sourceRefs, reason: "phase-unavailable" });
+          contractDigest: hex(canonicalJson({ descriptor: fixture, sourceRefs: descriptor.sourceRefs, contractRef: edge.contractRef, fixtureProfile: descriptor.fixtureProfile ?? null, explicitFixture: mockFixture?.data ?? null })),
+          fixtureVersion: fixture.version, sourceRefs: descriptor.sourceRefs, reason: "phase-unavailable", ...(mockFixture?.success ? { apiFixture: mockFixture.data } : {}) });
       }
       if (unavailableReason) { unavailableCriteria.push({ criterionId, reason: unavailableReason }); continue; }
       if (fixtureUnavailableReason) unavailableCriteria.push({ criterionId, reason: fixtureUnavailableReason });
@@ -218,7 +250,13 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
   if (criteria.length > 64) throw new Error("approved scenario and target expansion exceeds 64 criteria");
   const targets: E2EExecutionPlan["effectiveTargets"] = [];
   const groups: E2EExecutionPlan["groups"] = [];
-  const eligibleTargets = [...expectedByTarget.keys()].sort();
+  // Preserve explicitly selected, source-capable targets in the actual group even when no scenario currently selects them.
+  // The pinned public runner list then exposes filtered physical rows for the complete target packet.
+  const selectedPhysicalTargets = (sandboxUsable && expectedByTarget.size > 0 ? input.selectedTargetIds : [])
+    .filter((requestedTargetId) => sourceOperations.some((operation) => operation.targetIds.includes(requestedTargetId)))
+    .map(effectiveContractTargetId)
+    .filter((effectiveTargetId) => !expectedByTarget.has(effectiveTargetId));
+  const eligibleTargets = [...new Set([...expectedByTarget.keys(), ...selectedPhysicalTargets])].sort();
   for (let offset = 0; offset < eligibleTargets.length; offset += 3) {
     const targetIds = eligibleTargets.slice(offset, offset + 3);
     const groupCases = targetIds.flatMap((targetId) => expectedByTarget.get(targetId) ?? []);
@@ -243,4 +281,17 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
   const selectedMocks = [...new Map(mockSpecs.filter((mock) => retainedTargets.has(mock.effectiveTargetId)).map((mock) => [canonicalJson(mock), mock])).values()];
   const base = { schemaVersion: 1 as const, digest: "0".repeat(64), candidateDigest: input.candidateDigest, planDigest: input.planDigest, criteria, effectiveTargets: targets, groups, mocks: selectedMocks, unavailableCriteria: unavailableUnique };
   return E2EExecutionPlanSchema.parse({ ...base, digest: e2eExecutionPlanDigest(base) });
+}
+
+function isInputFixture(value: unknown): value is { schemaVersion: "synthetic-account-input-fixture/v1"; inputField: string; value: unknown } {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && (value as Record<string, unknown>).schemaVersion === "synthetic-account-input-fixture/v1";
+}
+
+function scenarioInputMatchesFixture(step: E2EScenario["steps"][number] | undefined, fixture: unknown): boolean {
+  if (!step || step.kind !== "invoke-contract" || fixture === null || typeof fixture !== "object" || Array.isArray(fixture)) return false;
+  const definition = fixture as Record<string, unknown>;
+  if (typeof definition.inputField !== "string" || !/^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(definition.inputField)) return false;
+  if (step.input === null || typeof step.input !== "object" || Array.isArray(step.input)) return false;
+  const input = step.input as Record<string, unknown>;
+  return Object.hasOwn(input, definition.inputField) && canonicalJson(input[definition.inputField]) === canonicalJson(definition.value);
 }

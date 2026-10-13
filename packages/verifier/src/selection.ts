@@ -16,9 +16,9 @@ export function createE2ESelectionPacket(planInput: E2EExecutionPlan, groupId: s
     if (ids.upstreamTestId !== item.upstreamTestId) throw new Error("execution plan upstream test ID does not match the pinned public identity algorithm");
     return { item, upstreamTestId: ids.upstreamTestId, title };
   });
-  const tuples = selected.flatMap(({ item, upstreamTestId, title }) => group.targetIds.map((targetId) => Object.freeze({ caseId: item.caseId, ...caseBindings.get(item.caseId)!, upstreamTestId, title,
+  const tuples = selected.flatMap(({ item, upstreamTestId, title }) => group.targetIds.map((targetId) => { const binding = caseBindings.get(item.caseId)!; return Object.freeze({ caseId: item.caseId, compilerCaseIdentity: binding.compilerCaseIdentity, registrationKey: binding.registrationKey, candidateResponseScope: binding.candidateResponseScope, requestProtocol: binding.requestProtocol, upstreamTestId, title,
     upstreamResultId: upstreamE2ECaseIdentity({ ...item, targetId }, titleByCaseId.get(item.caseId)!).upstreamResultId,
-    targetId, targetName: `contract-${targetId.slice("contract-".length)}`, agent: "default" as const, disposition: targetId === item.targetId ? "run" as const : "filtered" as const })));
+    targetId, targetName: `contract-${targetId.slice("contract-".length)}`, agent: "default" as const, disposition: targetId === item.targetId ? "run" as const : "filtered" as const }); }));
   const packet = { schemaVersion: 1 as const, algorithm: "e2e-public-list-selection/v1" as const, planDigest: plan.digest, groupId, tuples };
   const resultIds = tuples.map((tuple) => tuple.upstreamResultId);
   if (new Set(resultIds).size !== resultIds.length) throw new Error("duplicate public-list result identity");
