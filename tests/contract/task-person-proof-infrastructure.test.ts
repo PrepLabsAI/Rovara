@@ -59,6 +59,11 @@ function realAppControlPlane(env?: string): TemplateJson {
   return Template.fromStack(stack).toJSON();
 }
 
+function normalizeSingleton(value: unknown): unknown {
+  // CDK may emit one IAM Action/Resource as a scalar or a singleton array; normalize only that shape.
+  return Array.isArray(value) && value.length === 1 ? value[0] : value;
+}
+
 describe("the named TEST proof-only installation gate", () => {
   it("declares a distinct default-OFF gate only for the approved named environment", () => {
     const approved = namedTemplate("agentxlivetest123");
@@ -161,8 +166,9 @@ describe("the named TEST proof-only installation gate", () => {
     const policy = Object.entries(resources).find(([id, resource]) => id.includes("TaskPersonProofDispatcherPolicy") && resource.Type === "AWS::IAM::Policy")?.[1];
     expect(policy).toBeDefined();
     const statements = (policy!.Properties!.PolicyDocument as { Statement: Array<Record<string, unknown>> }).Statement;
-    expect(statements).toHaveLength(2);
+    expect(statements).toHaveLength(3);
     const getItem = statements.find((statement) => JSON.stringify(statement.Action).includes("dynamodb:GetItem"));
+    const denyUnprojectedGetItem = statements.find((statement) => statement.Sid === "DenyGetItemUnlessSpecificAttributes");
     const invoke = statements.find((statement) => JSON.stringify(statement.Action).includes("lambda:InvokeFunction"));
     const dispatcherEntries = Object.entries(resources).filter(([id, resource]) => id.startsWith("Dispatcher") && resource.Type === "AWS::Lambda::Function");
     expect(dispatcherEntries).toHaveLength(1);
@@ -181,6 +187,25 @@ describe("the named TEST proof-only installation gate", () => {
         Null: { "dynamodb:LeadingKeys": "false", "dynamodb:Attributes": "false" },
       },
     });
+    const expectedProjectionDeny = {
+      Sid: "DenyGetItemUnlessSpecificAttributes",
+      Effect: "Deny",
+      Action: "dynamodb:GetItem",
+      Resource: { "Fn::GetAtt": [tableId, "Arn"] },
+      Condition: { StringNotEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" } },
+    };
+    const assertExactProjectionDeny = (statement: Record<string, unknown>) => expect({
+      ...statement,
+      Action: normalizeSingleton(statement.Action),
+      Resource: normalizeSingleton(statement.Resource),
+    }).toEqual(expectedProjectionDeny);
+    assertExactProjectionDeny(denyUnprojectedGetItem!);
+    const extraNullCounterfactual = structuredClone(denyUnprojectedGetItem!);
+    extraNullCounterfactual.Condition = {
+      ...(extraNullCounterfactual.Condition as Record<string, unknown>),
+      Null: { "dynamodb:Select": "false" },
+    };
+    expect(() => assertExactProjectionDeny(extraNullCounterfactual)).toThrow();
     const versionId = Object.keys(resources).find((id) => JSON.stringify(invoke?.Resource).includes(id));
     expect(invoke).toEqual({ Effect: "Allow", Action: ["lambda:InvokeFunction"], Resource: [{ Ref: versionId }] });
     expect(versionId).toContain("TaskPersonProofFunctionCurrentVersion");

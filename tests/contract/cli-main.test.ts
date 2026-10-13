@@ -5,7 +5,7 @@ describe("AgentX executable command surface", () => {
   it("exposes administration and developer sign-in; developer tasks come from AI tools", () => {
     const program = createCliProgram();
 
-    expect(program.commands.map((command) => command.name())).toEqual(["login", "logout", "whoami", "workspaces", "chatgpt", "signin", "config", "doctor", "upgrade", "destroy", "admin", "project", "channel", "connector", "alerts", "env", "deploy", "init", "mcp"]);
+    expect(program.commands.map((command) => command.name())).toEqual(["login", "logout", "whoami", "workspaces", "chatgpt", "signin", "config", "loop", "doctor", "upgrade", "destroy", "admin", "project", "channel", "connector", "alerts", "env", "deploy", "init", "mcp"]);
 
     const admin = program.commands.find((command) => command.name() === "admin");
     expect(admin?.commands.map((command) => command.name())).toEqual(["project", "workspace", "slack", "eval", "credential", "turns", "task", "changes"]);
@@ -19,6 +19,7 @@ describe("AgentX executable command surface", () => {
     expect(subcommands(admin, "task")).toEqual(["share-mode"]);
 
     expect(subcommands(program, "signin")).toEqual(["show", "enable", "disable", "check"]);
+    expect(subcommands(program, "loop")).toEqual(["init", "add", "remove", "start", "stop", "status", "run", "do", "quick", "full", "check", "mcp"]);
     expect(subcommands(program, "chatgpt")).toEqual(["connect", "status", "disconnect"]);
     expect(subcommands(program, "mcp")).toEqual(["install"]);
     expect(subcommands(program, "project")).toEqual(["add"]);

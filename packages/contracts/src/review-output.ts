@@ -1,5 +1,8 @@
+// A reviewer's answer, read the same way by the hosted worker's reviews and by rovara loop's local ones (#358):
+// moved here from packages/worker/src/verification/review-output.ts so both use one copy.
 import { Buffer } from "node:buffer";
-import { redactText, WorkflowReviewFindingSchema, type WorkflowReviewFinding } from "@agentx/contracts";
+import { redactText } from "./redaction.js";
+import { WorkflowReviewFindingSchema, type WorkflowReviewFinding } from "./task-workflow.js";
 
 const REVIEW_RESPONSE_MAX_BYTES = 20_000;
 const REVIEW_RESPONSE_MAX_ENTRIES = 50;
@@ -113,4 +116,29 @@ export function parseWorkflowReviewerResponse(
   // Array.prototype.sort is stable, so equal-rank findings keep the reviewer's order.
   const kept = findings.sort((a, b) => rank(a) - rank(b)).slice(0, REVIEW_REPORT_MAX_FINDINGS);
   return { status: kept.some((finding) => finding.origin === "INTRODUCED" && finding.advisory !== true) ? "FINDINGS" : "PASS", findings: kept };
+}
+
+const REVIEW_JSON_BASE = 'Return only JSON: {"findings":[{"text":"one short sentence","origin":"INTRODUCED"|"PRE_EXISTING","severity":"HIGH"|"MEDIUM"|"LOW","file":"path","line":12%FIELD%}]}. Use {"findings":[]} when you found nothing.';
+
+/**
+ * What a code reviewer may mark advisory: only a remark about something the approved plan explicitly asks for, or about
+ * check coverage. The gate trusts the flag, so the prompt is what keeps it narrow.
+ */
+const ADVISORY_RULE = 'Set "advisory": true only for (1) a remark about something the approved plan explicitly asks for, or (2) a remark about check coverage. A mistake in carrying out the plan, a bug, and every other finding must not be advisory: leave "advisory" out.';
+
+/**
+ * The JSON answer each reviewer is asked for. The security reviewer has no "advisory" field: a security finding is never
+ * advisory (only the owner's accept waives one), and the gate ignores the flag on it.
+ */
+export function reviewJsonShape(role: "CRITIC" | "SECURITY"): string {
+  return role === "CRITIC"
+    ? `${REVIEW_JSON_BASE.replace("%FIELD%", ',"advisory":boolean')} ${ADVISORY_RULE}`
+    : REVIEW_JSON_BASE.replace("%FIELD%", "");
+}
+
+/** What each reviewer looks at: the code reviewer the change's correctness, the security reviewer its security only. */
+export function reviewerFocus(role: "CRITIC" | "SECURITY"): string {
+  return role === "CRITIC"
+    ? "Review logic, correctness, edge cases, compatibility, and whether tests cover the change."
+    : "Review security boundaries, authorization, input validation, secret exposure, unsafe operations, and data handling. Report only security issues; omit anything else.";
 }
