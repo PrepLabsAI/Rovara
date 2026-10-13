@@ -2523,8 +2523,7 @@ describe("checks AgentX proposes in the coding plan", () => {
   });
 
   it("keeps an explicitly approved ordered plan bound when its stopped run is retried", async () => {
-    const github = pullRequestGateway("b".repeat(40));
-    github.getCommitTree = vi.fn(async (_url: string, commit: string) => commit === "d".repeat(40) ? "c".repeat(40) : "b".repeat(40));
+    const github = { ...pullRequestGateway("b".repeat(40)), getCommitTree: vi.fn(async (_url: string, commit: string) => commit === "d".repeat(40) ? "c".repeat(40) : "b".repeat(40)) };
     github.getPullRequestFeedback = vi.fn(async (_url: string, number: number) => ({
       pullRequest: { number, url: "https://github.com/example/demo/pull/42", state: "open" as const, headBranch: "x", baseBranch: "main",
         headCommit: "d".repeat(40), headTreeSha: "c".repeat(40), title: "t", body: "" }, comments: [], threads: [],
@@ -2574,13 +2573,13 @@ describe("checks AgentX proposes in the coding plan", () => {
     const retryOperation = operations(harness, workspaceId).find((item) => item.requestId === requestId)!;
     const retryPayload = (harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === retryOperation.id)[0]?.invocation as { payload: { workflowDependencies?: unknown } }).payload;
     expect(retryPayload.workflowDependencies).toMatchObject({ graph, approval: taskWorkflow(harness, taskId).workflowDependenciesApproval,
-      resumeTreeSha: "f".repeat(40), sequenceStart: 4, resumeProgress: [
+      sequenceStart: 4, resumeProgress: [
         { itemId: graph.items[0]!.id, state: "IMPLEMENTED" }, { itemId: graph.items[1]!.id, state: "UNKNOWN" },
       ] });
 
     const dependencyInvocation = retryPayload.workflowDependencies as { resumeTreeSha: string; sequenceStart: number; resumeProgress: WorkItemProgressV1[] };
     const execution = await executeSerialWorkflowDependencies({ graph, graphDigest, runId: approval.runId, operationId: String(retryOperation.id), initialTreeSha: "f".repeat(40),
-      resumeTreeSha: dependencyInvocation.resumeTreeSha, sequenceStart: dependencyInvocation.sequenceStart, resumeProgress: dependencyInvocation.resumeProgress,
+      sequenceStart: dependencyInvocation.sequenceStart, resumeProgress: dependencyInvocation.resumeProgress,
       now: () => new Date().toISOString(), persist: async (progress) => {
         await harness.events(workspaceId, String(retryOperation.id), [{ type: "progress", payload: { workItemProgress: progress } }]);
       }, execute: async () => ({ treeSha: "c".repeat(40) }) });
