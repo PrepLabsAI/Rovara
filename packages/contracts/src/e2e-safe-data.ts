@@ -56,6 +56,24 @@ export function copyBoundedE2EJsonData(value: unknown, bounds: E2EJsonBounds): u
   return result;
 }
 
+/** Copy a bounded dense array as independently capped ordinary JSON records. */
+export function copyBoundedE2EJsonArrayItems(value: unknown, maxItems: number, itemBounds: E2EJsonBounds): unknown[] {
+  if (typeof value !== "object" || value === null || types.isProxy(value) || !Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) throw new TypeError("bounded inventory must be an ordinary array");
+  const descriptors = Object.getOwnPropertyDescriptors(value);
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, "length");
+  if (!lengthDescriptor || !("value" in lengthDescriptor) || typeof lengthDescriptor.value !== "number" || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0 || lengthDescriptor.value > maxItems) throw new TypeError("bounded inventory exceeds its row limit");
+  const length = lengthDescriptor.value;
+  const keys = Reflect.ownKeys(descriptors);
+  if (keys.some((key) => typeof key !== "string" || key !== "length" && (!/^(?:0|[1-9][0-9]*)$/.test(key) || Number(key) >= length))) throw new TypeError("bounded inventory has extra properties");
+  const items: unknown[] = [];
+  for (let index = 0; index < length; index += 1) {
+    const descriptor = descriptors[String(index)];
+    if (!descriptor || !("value" in descriptor) || descriptor.enumerable !== true) throw new TypeError("bounded inventory must be dense own data");
+    items.push(copyBoundedE2EJsonData(descriptor.value, itemBounds));
+  }
+  return items;
+}
+
 /** Copy source bytes without reading caller properties or invoking iterators/species/constructors. */
 export function copyBoundedE2ESourceBytes(value: unknown, maxBytes: number): Uint8Array {
   if (typeof value !== "object" || value === null || types.isProxy(value) || !types.isUint8Array(value)) throw new TypeError("source bytes are not a bounded Uint8Array value");

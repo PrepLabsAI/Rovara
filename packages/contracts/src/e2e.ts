@@ -4,6 +4,7 @@ import { canonicalJson } from "./canonical-json.js";
 import type { WorkflowVerificationResults } from "./task-workflow.js";
 import { redactText } from "./redaction.js";
 import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "./e2e-case-identity.js";
+import { copyBoundedE2EJsonArrayItems } from "./e2e-safe-data.js";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const id = (max = 120) => z.string().trim().min(1).max(max);
@@ -14,6 +15,8 @@ const MAX_JSON_LITERAL_BYTES = 65_536;
 const MAX_JSON_LITERAL_DEPTH = 32;
 const MAX_STRUCTURED_RECORD_BYTES = 262_144;
 const MAX_STRUCTURED_RECORD_DEPTH = 64;
+const MAX_E2E_AGGREGATE_RESULT_ROWS = 4;
+const MAX_E2E_AGGREGATE_CARRIER_BYTES = (MAX_E2E_AGGREGATE_RESULT_ROWS + 2) * MAX_STRUCTURED_RECORD_BYTES + 4_096;
 const sourceRelativePath = z.string().min(1).max(1024).superRefine((value, context) => {
   try {
     let decoded = value;
@@ -348,12 +351,16 @@ export function aggregateE2EVerification(planInput: E2EExecutionPlan, resultsInp
   if (currentRoundInput === undefined) return projection("UNKNOWN");
   try {
     const planCopy = safeJsonInput.safeParse(planInput);
-    const resultsCopy = safeJsonInput.safeParse(resultsInput);
     const roundCopy = safeJsonInput.safeParse(currentRoundInput);
-    if (!planCopy.success || !resultsCopy.success || !roundCopy.success || !Array.isArray(resultsCopy.data)) return projection("UNKNOWN");
+    if (!planCopy.success || !roundCopy.success) return projection("UNKNOWN");
+    const resultRows = copyBoundedE2EJsonArrayItems(resultsInput, MAX_E2E_AGGREGATE_RESULT_ROWS, { maxBytes: MAX_STRUCTURED_RECORD_BYTES, maxDepth: MAX_STRUCTURED_RECORD_DEPTH });
+    const planBytes = Buffer.byteLength(canonicalJson(planCopy.data), "utf8");
+    const roundBytes = Buffer.byteLength(canonicalJson(roundCopy.data), "utf8");
+    const resultBytes = resultRows.reduce<number>((total, item) => total + Buffer.byteLength(canonicalJson(item), "utf8"), 0);
+    if (planBytes + roundBytes + resultBytes + 4_096 > MAX_E2E_AGGREGATE_CARRIER_BYTES) return projection("UNKNOWN");
     const parsedPlan = E2EExecutionPlanSchema.safeParse(planCopy.data);
     const parsedRound = E2ERoundSchema.safeParse(roundCopy.data);
-    const parsedResults = resultsCopy.data.map((item) => E2EQualifiedResultSchema.safeParse(item));
+    const parsedResults = resultRows.map((item) => E2EQualifiedResultSchema.safeParse(item));
     if (!parsedPlan.success || !parsedRound.success || parsedResults.some((item) => !item.success)) return projection("UNKNOWN", parsedPlan.success ? parsedPlan.data.candidateDigest : undefined);
     const plan = parsedPlan.data;
     const round = parsedRound.data;
