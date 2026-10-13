@@ -23,7 +23,7 @@ export type LoopEvent =
   /** The agent says its step is done. `failures`: the step's exit checks that failed. `artifact`: the step's artifact's text. */
   | { kind: "claim"; claimId: string; summary: string; failures: string[]; artifact?: string; at: string }
   /** A step the loop ran itself finished. `detail`: what to say about it. */
-  | { kind: "action-result"; action: LoopAction; outcome: "passed" | "failed" | "blocked" | "published"; detail: string; pullRequest?: { number: number; url: string }; at: string }
+  | { kind: "action-result"; action: LoopAction; outcome: "passed" | "failed" | "blocked" | "published"; detail: string; pullRequest?: WorkItemState["pullRequest"]; at: string }
   | { kind: "closed"; at: string }
   /** #358: the item's per-PR loops: every pull request approved (`approved`), or one taken back for more work (`reply`). */
   | { kind: "pulls"; outcome: "approved" | "reply"; detail: string; at: string }

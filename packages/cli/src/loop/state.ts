@@ -32,7 +32,12 @@ export const WorkItemStateSchema = z.object({
     id: z.string().uuid().optional(),
   }).strict().optional(),
   /** The item's own git worktree and branch, once made. */
-  worktree: z.object({ path: z.string(), branch: z.string() }).strict().optional(),
+  worktree: z.object({
+    path: z.string(),
+    branch: z.string(),
+    /** #392: a Codex item's checkout is a clone whose git directory is here (Codex may write it), not a worktree. */
+    gitDir: z.string().optional(),
+  }).strict().optional(),
   /** What the agent said it did, at its last accepted claim. */
   summary: z.string().optional(),
   /** Quick and Full (#356, #357): each approved artifact's digest when it was approved, which locks it, and who approved it. */
@@ -70,7 +75,12 @@ export const WorkItemStateSchema = z.object({
   /** #359, Review: rounds run so far. */
   rounds: z.number().int().min(0).optional(),
   /** Quick (#356): the pull request the loop opened. */
-  pullRequest: z.object({ number: z.number().int().positive(), url: z.string().url() }).strict().optional(),
+  pullRequest: z.object({
+    number: z.number().int().positive(),
+    url: z.string().url(),
+    /** #390: the repository it is in, when that is not the item's own (a per-PR loop's, or a follow-up in a fork). */
+    repo: RepoSlug().optional(),
+  }).strict().optional(),
 }).strict();
 export type WorkItemState = z.infer<typeof WorkItemStateSchema>;
 

@@ -72,7 +72,7 @@ export async function createLoopHarness(dirs: string[], options: {
     return typeof answer === "string" ? { ok: true, text: answer } : { ok: false, reason: answer.failed };
   };
   const daemon = new LoopDaemon({
-    store, exec, github: new GitHub(exec), harness: new AgentHarness(exec),
+    store, exec, github: new GitHub(exec), harness: new AgentHarness(exec, { claudeHome: join(root, "claude") }),
     cliCommand: ["/usr/local/bin/node", "/opt/rovara/cli.js"], now: () => new Date(world.clock), log: () => undefined, checkRun, reviewerRun,
   });
   await daemon.poll();

@@ -46,6 +46,10 @@ export class LoopWorld {
   defaultBranch = "main";
   /** What the loop committed itself (its evidence), as "<path>: <message>". */
   readonly loopCommits: string[] = [];
+  /** #390: GitHub API paths that fail (as GitHub's errors do) while they match. */
+  failPaths: RegExp[] = [];
+  /** #392: the clones made for Codex items, as their `git clone` arguments. */
+  readonly clones: string[][] = [];
   /** When set, the next push is refused (someone else pushed to the branch). */
   pushRefused = false;
   /** #358: inline review comments and submitted reviews on pull requests. */
@@ -122,6 +126,7 @@ export class LoopWorld {
     if (first !== "api") return fail(`unexpected gh ${args.join(" ")}`);
     const method = args[1] === "-X" ? args[2] : "GET";
     const path = args[1] === "-X" ? args[3] ?? "" : args[1] === "--paginate" ? args[2] ?? "" : args[1] ?? "";
+    if (this.failPaths.some((pattern) => pattern.test(path))) return fail("gh: Server Error (HTTP 502)");
     const comments = /^repos\/[^/]+\/[^/]+\/issues\/comments\?since=([^&]+)/.exec(path);
     if (comments !== null) {
       const since = decodeURIComponent(comments[1] ?? "");
@@ -154,6 +159,8 @@ export class LoopWorld {
       return ok(`${number}\n`);
     }
     const reviews = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/reviews/.exec(path);
+    // #390: GitHub answers 404 for the reviews of a pull request this repository doesn't have.
+    if (reviews !== null && !this.pullRequests.some((pull) => pull.number === Number(reviews[1])) && !this.openPulls.has(Number(reviews[1]))) return fail("gh: Not Found (HTTP 404)");
     if (reviews !== null) {
       return ok(this.reviews.filter((review) => review.pull === Number(reviews[1]))
         .map((review) => JSON.stringify({ id: review.id, author: review.author, state: review.state, body: review.body, submitted_at: review.submitted_at })).join("\n"));
@@ -175,7 +182,11 @@ export class LoopWorld {
   }
 
   private async git(args: string[]): Promise<ExecResult> {
+    // #392: a Codex item's clone, with its git directory beside it.
+    if (args[0] === "clone") { await mkdir(args[args.length - 1] ?? "", { recursive: true }); this.clones.push(args.slice(1)); return ok(); }
     const sub = args[2];
+    if (sub === "remote" && args[3] === "get-url") return ok(`git@github.com:${this.repo}.git\n`);
+    if (sub === "remote" && args[3] === "set-url") return ok();
     if (sub === "fetch") { const ref = args.find((arg) => arg.startsWith("+pull/")); if (ref !== undefined) this.checkedOut.push(`fetch ${ref}`); return ok(); }
     if (sub === "checkout") { this.checkedOut.push(`${args[args.length - 1] ?? ""} @ ${args[1] ?? ""}`); return ok(); }
     // The loop's own evidence commit: something is always staged in this fake.
