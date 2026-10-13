@@ -12,6 +12,8 @@ export interface PublishInput {
   checks: string;
   startedBy: string;
   approvedBy: string | undefined;
+  /** The pull request's base: the repository's default branch, as GitHub names it. */
+  defaultBranch: string;
   pullRequest: { number: number; url: string } | undefined;
 }
 
@@ -26,8 +28,7 @@ export async function publish(exec: Exec, input: PublishInput): Promise<Publishe
     const [number, url] = found.split(" ");
     return { pullRequest: { number: Number(number), url: url ?? "" }, created: false };
   }
-  const head = await exec("git", ["-C", input.worktree, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
-  const base = head.code === 0 ? head.stdout.trim().replace(/^origin\//u, "") : "main";
+  const base = input.defaultBranch;
   const title = (await run(exec, "gh", ["api", `repos/${input.repo}/issues/${input.issue}`, "--jq", ".title"])).trim() || `Issue #${input.issue}`;
   const body = [
     `Closes #${input.issue}.`,

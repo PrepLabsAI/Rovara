@@ -199,7 +199,7 @@ export class LoopDaemon {
     const published = await publish(this.deps.exec, {
       repo: item.repo, issue: item.issue, worktree: item.worktree.path, branch: item.worktree.branch,
       plan: await readPlan(item.worktree.path, item.issue), checks: item.checks ?? "The checks passed.",
-      startedBy: item.startedBy, approvedBy: item.approvedBy, pullRequest: item.pullRequest,
+      startedBy: item.startedBy, approvedBy: item.approvedBy, pullRequest: item.pullRequest, defaultBranch: await this.deps.github.defaultBranch(item.repo),
     });
     const { number, url } = published.pullRequest;
     done("published", published.created ? `Opened pull request #${number}: ${url}\n\nReply here to ask for changes; the loop runs the checks again and pushes them to the same pull request.` : `Pushed the update to pull request #${number}: ${url}`, { pullRequest: published.pullRequest });
@@ -305,7 +305,7 @@ export class LoopDaemon {
 
   private async startSession(registered: RegisteredRepo, config: LoopRepoConfig, state: WorkItemState, prompt: string, resume: boolean): Promise<WorkItemState> {
     const worktree = state.worktree ?? { path: join(this.deps.store.itemDir(state.repo, state.issue), "worktree"), branch: itemBranch(state.issue) };
-    await ensureWorktree(this.deps.exec, registered.path, worktree.path, worktree.branch);
+    await ensureWorktree(this.deps.exec, registered.path, worktree.path, worktree.branch, await this.deps.github.defaultBranch(state.repo));
     const session = state.session ?? { harness: "claude-code" as const, tmux: tmuxSessionName(state.repo, state.issue), id: randomUUID() };
     const sessionDir = this.deps.store.sessionDir(state.repo, state.issue);
     await mkdir(sessionDir, { recursive: true, mode: 0o700 });
