@@ -31,6 +31,50 @@ function status(results: unknown[], f: ReturnType<typeof fixture>) {
 }
 
 describe("bounded multi-group E2E carriers", () => {
+  it("retains a valid own-data plan when the top-level carrier has accessors or unknown fields", () => {
+    const f = fixture(32);
+    const cases: Array<{ name: string; mutate: (input: Record<string, unknown>, hooks: { count: number }) => void }> = [
+      { name: "results accessor with complete round", mutate: (input, hooks) => Object.defineProperty(input, "results", { enumerable: true, get: () => { hooks.count += 1; return f.results; } }) },
+      { name: "results accessor with partial round", mutate: (input, hooks) => { input.currentRound = null; Object.defineProperty(input, "results", { enumerable: true, get: () => { hooks.count += 1; return [f.results[0]]; } }); } },
+      { name: "results accessor with empty round", mutate: (input, hooks) => { input.currentRound = null; Object.defineProperty(input, "results", { enumerable: true, get: () => { hooks.count += 1; return []; } }); } },
+      { name: "control accessor", mutate: (input, hooks) => Object.defineProperty(input, "control", { enumerable: true, get: () => { hooks.count += 1; return { policyPresent: true, workflowPhase: "e2e", ownerActionProposals: ["retry-run"] }; } }) },
+      { name: "unknown accessor", mutate: (input, hooks) => Object.defineProperty(input, "unexpected", { enumerable: true, get: () => { hooks.count += 1; return "ignored"; } }) },
+    ];
+    const observations: Array<{ name: string; digest: string | null; expectedGroups: number; requiredCriteria: number; unavailableCriteria: number; receivedGroups: number; executedCases: number; qualifiedCriteria: number; policyPresence: string; workflowPhase: string | null; actions: string[]; hookCount: number }> = [];
+    for (const { name, mutate } of cases) {
+      const input: Record<string, unknown> = { plan: f.plan, currentRound: f.round, results: f.results, setup: f.setup, actor: "owner" };
+      const hooks = { count: 0 };
+      mutate(input, hooks);
+      const view = buildE2ESharedView(input as never);
+      observations.push({ name, digest: view.e2e.executionPlanDigest, expectedGroups: view.e2e.expectedGroups, requiredCriteria: view.e2e.requiredCriteria, unavailableCriteria: view.e2e.unavailableCriteria, receivedGroups: view.e2e.receivedGroups, executedCases: view.e2e.executedCases, qualifiedCriteria: view.e2e.qualifiedCriteria, policyPresence: view.e2e.policyPresence, workflowPhase: view.e2e.workflowPhase, actions: view.actions, hookCount: hooks.count });
+    }
+    expect(observations).toEqual(cases.map(({ name }) => ({ name, digest: f.plan.digest, expectedGroups: 2, requiredCriteria: 32, unavailableCriteria: 32, receivedGroups: 0, executedCases: 0, qualifiedCriteria: 0, policyPresence: "absent", workflowPhase: null, actions: [], hookCount: 0 })));
+    expect(observations.every(({ digest }) => digest !== null)).toBe(true);
+  });
+
+  it("does not introspect a proxied top carrier or invoke an accessor plan during fallback", () => {
+    const f = fixture(2);
+    let hooks = 0;
+    const proxied = new Proxy({ plan: f.plan }, {
+      getPrototypeOf() { hooks += 1; throw new Error("proxy prototype hook"); },
+      ownKeys() { hooks += 1; throw new Error("proxy ownKeys hook"); },
+      get() { hooks += 1; throw new Error("proxy get hook"); },
+    });
+    const proxyView = buildE2ESharedView(proxied as never);
+    expect(proxyView.e2e).toMatchObject({ status: "UNKNOWN", executionPlanDigest: null, expectedGroups: 0, requiredCriteria: 0 });
+
+    const withPlanGetter: Record<string, unknown> = { currentRound: f.round, results: f.results, setup: f.setup, actor: "viewer" };
+    Object.defineProperty(withPlanGetter, "plan", { enumerable: true, get: () => { hooks += 1; return f.plan; } });
+    const getterView = buildE2ESharedView(withPlanGetter as never);
+    expect(getterView.e2e).toMatchObject({ status: "UNKNOWN", executionPlanDigest: null, expectedGroups: 0 });
+
+    const cyclicPlan = { ...f.plan } as Record<string, unknown>;
+    cyclicPlan["self"] = cyclicPlan;
+    const malformedView = buildE2ESharedView({ plan: cyclicPlan, currentRound: f.round, results: f.results, setup: f.setup, actor: "viewer", control: {} } as never);
+    expect(malformedView.e2e).toMatchObject({ status: "UNKNOWN", executionPlanDigest: null, expectedGroups: 0, requiredCriteria: 0 });
+    expect(hooks).toBe(0);
+  });
+
   it.each([32, 48, 64])("qualifies every accepted result for %i cases without widening per-record bounds", (caseCount) => {
     const f = fixture(caseCount);
     const forward = status(f.results, f);

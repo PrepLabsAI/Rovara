@@ -16,7 +16,10 @@ export function buildE2ESharedView(input: { plan: unknown; currentRound: unknown
   const fallbackSetup = { status: "unavailable" as const, selectedTargetIds: [], executionPlanDigest: null, blockingInputIds: [], mockSubstitutableInputIds: [] };
   let raw: Record<string, unknown>;
   try { raw = ownInputRecord(input); }
-  catch { return empty(fallbackSetup); }
+  catch {
+    const recoveredPlan = recoverOwnPlan(input);
+    return recoveredPlan ? planUnknown(fallbackSetup, recoveredPlan) : empty(fallbackSetup);
+  }
   const actor: "owner" | "viewer" = raw.actor === "owner" ? "owner" : "viewer";
   let control: NonNullable<typeof input.control> = { policyPresent: false, workflowPhase: null, ownerActionProposals: [] };
   let carrierBytes = 12_288;
@@ -108,6 +111,18 @@ export function buildE2ESharedView(input: { plan: unknown; currentRound: unknown
   const actions: E2ESharedView["actions"] = actor === "owner" && control.policyPresent ? control.ownerActionProposals.filter((action) => action === "review-setup" ? control.workflowPhase === "setup" && setup.status === "needs-input" : action === "retry-run" ? control.workflowPhase === "e2e" && aggregateStatus === "UNKNOWN" && plan.groups.length > 0 : control.workflowPhase === "setup" && setup.status === "mock-ready") : [];
   const projected = E2ESharedViewSchema.safeParse({ schemaVersion: 1, setup, e2e: { status: aggregateStatus, label, executionPlanDigest: plan.digest, expectedGroups: plan.groups.length, receivedGroups: groups.size, executedCases, qualifiedCriteria, requiredCriteria, unavailableCriteria: requiredCriteria - qualifiedCriteria, optionalUnavailableCriteria: plan.criteria.filter((criterion) => !criterion.required && unavailableIds.has(criterion.criterionId)).length, mockedComponentIds: [...new Set(plan.mocks.map((mock) => mock.componentId))].sort(), observedMockedComponentIds: [...observedMockedComponentIds].sort(), unexercisedBehaviors: [...unexercisedBehaviors].sort().slice(0, 256), policyPresence: control.policyPresent ? "present" : "absent", workflowPhase: control.workflowPhase, requiredUnexercisedCriteriaIds: [...new Set([...requiredUnexercisedCriteriaIds, ...plan.criteria.filter((item) => item.required && !qualifiedCriteriaIds.has(item.criterionId)).map((item) => item.criterionId)])].slice(0, 64) }, actions });
   return projected.success ? projected.data : planUnknown(setup, plan);
+}
+function recoverOwnPlan(value: unknown): E2EExecutionPlan | null {
+  try {
+    if (typeof value !== "object" || value === null || types.isProxy(value)) return null;
+    const prototype: unknown = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return null;
+    const descriptor = Object.getOwnPropertyDescriptor(value, "plan");
+    if (!descriptor || descriptor.enumerable !== true || !("value" in descriptor)) return null;
+    const copied = copyBoundedE2EJsonData(descriptor.value, { maxBytes: 262_144, maxDepth: 64 });
+    const parsed = E2EExecutionPlanSchema.safeParse(copied);
+    return parsed.success ? parsed.data : null;
+  } catch { return null; }
 }
 function ownInputRecord(value: unknown): Record<string, unknown> {
   const allowed = ["plan", "currentRound", "results", "setup", "actor", "control"] as const;
