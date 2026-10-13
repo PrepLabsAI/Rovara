@@ -57,4 +57,20 @@ describe("FakeDynamoDb faults and limits", () => {
     await expect(check("subnet-a")).resolves.toEqual({});
     await expect(check("subnet-foreign")).rejects.toMatchObject({ name: "TransactionCanceledException" });
   });
+
+  it("evaluates indexed nested list paths so reordered bindings fail", async () => {
+    const db = new FakeDynamoDb();
+    const subnetA = { subnetId: "subnet-a", availabilityZone: "us-east-1a" };
+    const subnetB = { subnetId: "subnet-b", availabilityZone: "us-east-1b" };
+    await db.send(new PutCommand({ TableName: "t", Item: { pk: "PROJECT#ordered", sk: "REV#1", runtimeBinding: { subnets: [subnetA, subnetB] } } }));
+    await db.send(new PutCommand({ TableName: "t", Item: { pk: "PROJECT#swapped", sk: "REV#1", runtimeBinding: { subnets: [subnetB, subnetA] } } }));
+    const check = (pk: string) => db.send(new TransactWriteCommand({ TransactItems: [{ ConditionCheck: {
+      TableName: "t", Key: { pk, sk: "REV#1" },
+      ConditionExpression: "runtimeBinding.#subnets[0].availabilityZone = :az0 AND runtimeBinding.#subnets[0].subnetId = :id0 AND runtimeBinding.#subnets[1].availabilityZone = :az1 AND runtimeBinding.#subnets[1].subnetId = :id1",
+      ExpressionAttributeNames: { "#subnets": "subnets" },
+      ExpressionAttributeValues: { ":az0": subnetA.availabilityZone, ":id0": subnetA.subnetId, ":az1": subnetB.availabilityZone, ":id1": subnetB.subnetId },
+    } }] }));
+    await expect(check("PROJECT#ordered")).resolves.toEqual({});
+    await expect(check("PROJECT#swapped")).rejects.toMatchObject({ name: "TransactionCanceledException" });
+  });
 });

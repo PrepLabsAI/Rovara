@@ -15,10 +15,22 @@ export function projectSetupTerminalAuthorityChecks(
   runtime: TerminalRuntimeIdentity,
   session: TerminalSessionIdentity,
 ) {
-  const subnetConditions = runtime.binding.subnets.map((_, index) => `contains(binding.#subnets, :subnet${index})`);
-  const subnetValues = Object.fromEntries(runtime.binding.subnets.map((subnet, index) => [`:subnet${index}`, subnet]));
-  const projectSubnetConditions = runtime.binding.subnets.map((_, index) => `contains(runtimeBinding.#subnets, :projectSubnet${index})`);
-  const projectSubnetValues = Object.fromEntries(runtime.binding.subnets.map((subnet, index) => [`:projectSubnet${index}`, subnet]));
+  // The exact binding digest is order-sensitive. `contains` plus a matching list size would
+  // accept the same subnet set in a different order, so fence every indexed entry.
+  const subnetConditions = runtime.binding.subnets.flatMap((_, index) => [
+    `binding.#subnets[${index}].availabilityZone = :subnetAz${index}`,
+    `binding.#subnets[${index}].subnetId = :subnetId${index}`,
+  ]);
+  const subnetValues = Object.fromEntries(runtime.binding.subnets.flatMap((subnet, index) => [
+    [`:subnetAz${index}`, subnet.availabilityZone], [`:subnetId${index}`, subnet.subnetId],
+  ]));
+  const projectSubnetConditions = runtime.binding.subnets.flatMap((_, index) => [
+    `runtimeBinding.#subnets[${index}].availabilityZone = :projectSubnetAz${index}`,
+    `runtimeBinding.#subnets[${index}].subnetId = :projectSubnetId${index}`,
+  ]);
+  const projectSubnetValues = Object.fromEntries(runtime.binding.subnets.flatMap((subnet, index) => [
+    [`:projectSubnetAz${index}`, subnet.availabilityZone], [`:projectSubnetId${index}`, subnet.subnetId],
+  ]));
   return [
     { ConditionCheck: {
       TableName: tableName,
