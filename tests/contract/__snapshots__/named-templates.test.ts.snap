@@ -2083,6 +2083,15 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Description": "Most requests one Slack thread may start in a minute; further requests pause the thread with one notice",
       "Type": "String",
     },
+    "WorkflowDependenciesEnabled": {
+      "AllowedValues": [
+        "true",
+        "false",
+      ],
+      "Default": "false",
+      "Description": "Whether bounded serial task work breakdowns are enabled in this environment",
+      "Type": "String",
+    },
     "WorkspaceKmsKeyArn": {
       "Description": "The foundation's workspace volume KMS key",
       "Type": "String",
@@ -2261,6 +2270,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "AGENTX_ALARM_PREFIX": "agentx-staging-",
             "AGENTX_ENV": "staging",
             "AGENTX_METRICS_NAMESPACE": "AgentX/staging",
+            "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED": {
+              "Ref": "WorkflowDependenciesEnabled",
+            },
             "ARTIFACT_BUCKET_NAME": {
               "Ref": "Artifacts82DD59A1",
             },

@@ -825,6 +825,7 @@ export class ControlPlaneStack extends Stack {
       broker.addEnvironment("AGENTX_TASK_PEOPLE_CHANGES_ENABLED", signInParameters.taskPeopleChangesEnabled.valueAsString);
       broker.addEnvironment("AGENTX_TASK_PEOPLE_PUBLIC_INVITATIONS_ENABLED", signInParameters.taskPeoplePublicInvitationsEnabled.valueAsString);
       broker.addEnvironment("AGENTX_TASK_PEOPLE_PRIVATE_INVITATIONS_ENABLED", signInParameters.taskPeoplePrivateInvitationsEnabled.valueAsString);
+      broker.addEnvironment("AGENTX_WORKFLOW_DEPENDENCIES_ENABLED", signInParameters.workflowDependenciesEnabled.valueAsString);
       // Sign in with ChatGPT (#338): seals each developer's ChatGPT tokens in the State table. A
       // connection belongs to a signed-in developer, so it exists only where developer sign-in
       // does. Only the broker encrypts and decrypts with it, always under an encryption context

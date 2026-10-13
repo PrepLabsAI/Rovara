@@ -7,6 +7,7 @@ cdk.out/
 # docs/ stays ignored except the trees the-loop records into (they must be committed).
 docs/*
 !docs/npm-package.md
+!docs/ordered-work.md
 !docs/specs/
 !docs/decisions/
 !docs/learnings/

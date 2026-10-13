@@ -227,9 +227,10 @@ import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
+import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
@@ -3298,9 +3299,14 @@ async function taskOperationParts(
   // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
   // Spec 061: every planning step answers with a structured plan document; a Quick plan (no phase) is a whole coding plan.
   const planKind = input.workflowPhase === "REQUIREMENTS" ? "requirements" as const : input.workflowPhase === "DESIGN" ? "design" as const : "plan" as const;
-  const documentInstructions = planDocumentInstructions({ kind: planKind, path: input.workflowPhase === undefined ? "QUICK" : "FULL", anchors: true, ...(input.retiredClaimIds === undefined ? {} : { retired: input.retiredClaimIds }) });
   // Only a coding plan (a Quick plan, or a Full implementation plan) proposes checks; requirements and design do not.
   const codingPlan = input.workflowPhase === undefined || input.workflowPhase === "IMPLEMENTATION_PLAN";
+  const workBreakdownContext = codingPlan && input.workflowMode === "PLAN" && input.legacyTask !== true
+    ? await codingPlanWorkBreakdownContext(dependencies, workspace.id)
+    : undefined;
+  const documentInstructions = planDocumentInstructions({ kind: planKind, path: input.workflowPhase === undefined ? "QUICK" : "FULL", anchors: true,
+    ...(workBreakdownContext === undefined ? {} : { workBreakdownContext }),
+    ...(input.retiredClaimIds === undefined ? {} : { retired: input.retiredClaimIds }) });
   const planChecks = codingPlan && input.workflowMode === "PLAN" ? await codingPlanChecksInstructions(dependencies, workspace.id) : "";
   const checksInstructions = planChecks === "" ? "" : `\n\n${planChecks}`;
   // A task started without the workflow still runs its first turn in IMPLEMENT mode; its prompt is unchanged.
@@ -3365,6 +3371,17 @@ async function codingPlanChecksInstructions(dependencies: AwsBrokerDependencies,
   if (task.workflow?.checkPolicy === undefined) return "";
   const project = await requireProject(dependencies, task.project, task.startingRevision);
   return planChecksInstructions(project.definition.repositories.map((repository) => repository.path), task.workflow?.checkPolicy?.required ?? []);
+}
+
+/** Bind planner guidance to the task's starting project revision; never consult the latest project here. */
+async function codingPlanWorkBreakdownContext(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<{ taskId: string; repositoryId: string } | undefined> {
+  if (dependencies.developer?.workflowDependenciesEnabled !== true) return undefined;
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
+  const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  if (task === undefined) throw agentXError("CONFIG_INVALID", "the task for this planning step is missing");
+  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  if (project.definition.repositories.length !== 1) return undefined;
+  return { taskId: task.taskId, repositoryId: project.definition.repositories[0]!.name };
 }
 
 /** Whether the workspace belongs to a developer task with the gated workflow. */
@@ -4081,6 +4098,7 @@ export interface SlackWorkflowDecisionEvent {
   requestId: string;
   expectedRevision: number;
   artifactDigest: string;
+  workBreakdownDigest?: string;
   decision: "APPROVE" | "REQUEST_CHANGES";
   reason: string;
   selectedOptionalCheckIds: string[];
@@ -4304,6 +4322,7 @@ export function isSlackWorkflowDecisionEvent(event: unknown): event is SlackWork
   return value.source === "agentx.slack-ingress" && value.action === "workflow-decision" && value.requestContext === undefined
     && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
     && Number.isInteger(value.expectedRevision) && typeof value.artifactDigest === "string"
+    && (value.workBreakdownDigest === undefined || (typeof value.workBreakdownDigest === "string" && /^[a-f0-9]{64}$/.test(value.workBreakdownDigest)))
     && (value.decision === "APPROVE" || value.decision === "REQUEST_CHANGES") && typeof value.reason === "string"
     && Array.isArray(value.selectedOptionalCheckIds);
 }
@@ -4551,6 +4570,7 @@ async function decideSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: D
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
   const body = JSON.stringify({
     requestId, expectedRevision: event.expectedRevision, artifactDigest: event.artifactDigest,
+    ...(event.decision === "APPROVE" && event.workBreakdownDigest !== undefined ? { workBreakdownDigest: event.workBreakdownDigest } : {}),
     decision: event.decision, reason: event.reason, selectedOptionalCheckIds: event.selectedOptionalCheckIds,
   });
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path: `/v1/dev/tasks/${taskId}/workflow/decision`, headers: {}, requestId, body }, new URL(`/v1/dev/tasks/${taskId}/workflow/decision`, "https://agentx.invalid"));
@@ -5891,12 +5911,15 @@ async function validateWorkflowProgressChunk(
     const attemptTerminals = workflowDependencyAttemptTerminalProgress({ graph: invocation.graph, approval: invocation.approval, operationId: operation.id,
       sequenceStart: invocation.sequenceStart, resumeProgress: invocation.resumeProgress, history: nextWorkflow.workflowDependenciesProgress ?? [] });
     if (attemptTerminals === undefined) throw agentXError("CALLBACK_FORBIDDEN", "work breakdown checkpoints do not match this operation attempt");
+    const attemptSequenceStart = invocation.sequenceStart ?? 0;
+    const attemptHalted = operationHistory.some((entry) => entry.operationId === operation.id && entry.sequence > attemptSequenceStart
+      && (entry.state === "FAILED" || entry.state === "UNKNOWN"));
     const completed = new Set(attemptTerminals.filter((entry) => entry.state === "IMPLEMENTED").map((entry) => entry.itemId));
     const expectedItemId = order.find((itemId) => !completed.has(itemId));
     const previous = (nextWorkflow.workflowDependenciesProgress ?? []).at(-1);
     const expectedBase = active?.baseTreeSha ?? (previous?.state === "IMPLEMENTED" ? previous.candidateTreeSha : firstBaseTree);
     if (progress.state === "STARTED") {
-      if (active !== undefined || expectedItemId === undefined || progress.itemId !== expectedItemId || (expectedBase !== undefined && progress.baseTreeSha !== expectedBase)) {
+      if (attemptHalted || active !== undefined || expectedItemId === undefined || progress.itemId !== expectedItemId || (expectedBase !== undefined && progress.baseTreeSha !== expectedBase)) {
         throw agentXError("CALLBACK_FORBIDDEN", "work breakdown item start does not continue the retained graph tree and order");
       }
     } else if (active === undefined || active.itemId !== progress.itemId || active.baseTreeSha !== progress.baseTreeSha
@@ -8636,22 +8659,9 @@ const repositoryGrants = new RepositoryGrantService(
 const lambdaClient = new LambdaClient(awsClientConfiguration);
 /** Set only in named environments with developer sign-in (infra/lib/developer-signin.ts). */
 function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["inviteTaskPerson"]): DeveloperApiConfiguration | undefined {
-  const issuer = process.env.DEVELOPER_TOKEN_ISSUER;
-  if (!issuer) return undefined;
-  const functionName = requiredEnvironment("DEVELOPER_IDENTITY_FUNCTION_ARN");
-  const teamId = process.env.SLACK_TEAM_ID ?? "";
-  return {
+  return createDeveloperApiConfiguration(process.env, (issuer, functionName) => ({
     // Spec 061 slice 2: "Ask AgentX to reply to this comment" queues on the Slack service's request queue; set only where that service runs.
     ...(process.env.SLACK_REQUEST_QUEUE_URL ? { slackRequestQueue: slackRequestQueue(process.env.SLACK_REQUEST_QUEUE_URL) } : {}),
-    issuer,
-    env: requiredEnvironment("AGENTX_ENV"),
-    methods: { slack: process.env.DEVELOPER_SIGNIN_SLACK === "enabled", oidc: (process.env.DEVELOPER_OIDC_ISSUER ?? "") !== "" },
-    ...(teamId === "" ? {} : { slackTeamId: teamId }),
-    since: developerSinceFromEnvironment(process.env),
-    signInTableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"),
-    taskPeopleConfiguration: { peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true" },
-    // Invitation remains unconfigured in the production composition until its dedicated endpoint is separately accepted.
-    ...(inviteTaskPerson === undefined ? {} : { inviteTaskPerson }),
     channelMembers: channelMembersThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     taskPersonProof: taskPersonProofThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     taskChannelPeople: taskChannelPeopleThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
@@ -8667,7 +8677,7 @@ function developerConfiguration(inviteTaskPerson?: DeveloperApiConfiguration["in
       keys: developerKeysThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
       now: Date.now,
     }),
-  };
+  }), inviteTaskPerson);
 }
 /** The Slack request queue (FIFO) as "Ask AgentX to reply to this comment" sends to it. */
 function slackRequestQueue(queueUrl: string): SlackRequestQueue {

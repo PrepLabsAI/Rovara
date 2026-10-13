@@ -96,6 +96,7 @@ import {
   WORKFLOW_PLAN_MAX_BYTES,
   WORKFLOW_BLOCK_REASONS,
   canonicalPlanJson,
+  canonicalJson,
   retiredClaimIds,
   type PlanClaim,
   type PlanDocument,
@@ -872,7 +873,7 @@ export async function submitWorkflowFeedbackDecision(
         UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
         ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.feedbackReview.#reviewStatus = :pending AND workflow.feedbackReview.reviewRef.sha256 = :reviewDigest AND workflow.feedbackReview.reviewRef.proposalDigest = :proposalDigest AND attribute_not_exists(closedAt)",
         ExpressionAttributeNames: { "#stage": "stage", "#state": "state", "#reviewStatus": "status" },
-        ExpressionAttributeValues: { ":workflow": workflowWithCurrentGraphOperation(running, workflowDependencies === undefined ? undefined : operation.id), ":now": iso(deps), ":revision": current.revision, ":stage": "WAIT_FOR_MERGE", ":state": "WAITING", ":pending": "PENDING", ":reviewDigest": input.reviewDigest, ":proposalDigest": input.proposalDigest },
+        ExpressionAttributeValues: { ":workflow": workflowWithCurrentGraphOperation(running, workflowDependencies === undefined ? undefined : operation.id, workflowDependencies), ":now": iso(deps), ":revision": current.revision, ":stage": "WAIT_FOR_MERGE", ":state": "WAITING", ":pending": "PENDING", ":reviewDigest": input.reviewDigest, ":proposalDigest": input.proposalDigest },
       } }, accessFence(deps, latestAccess)], { sharedTask: latest.shared === true, workflowMode: "IMPLEMENT", ...(readiness === undefined ? {} : { readiness }), workflowFeedbackApproval: approval,
       ...(workflowDependencies === undefined ? {} : { workflowDependencies }), ...taskBaseOption(latest, running) });
     } catch (error) {
@@ -1635,6 +1636,16 @@ export async function decideTaskWorkflow(
       throw error;
     }
   };
+  if (prior?.decision === "APPROVE" && prior.workBreakdownDigest !== undefined && (request.answers?.length ?? 0) === 0) {
+    const detail = await readDecisionDetail(deps, taskId, request.requestId);
+    const recordedComments = detail?.includedCommentIds ?? [];
+    if (request.includedCommentIds !== undefined && !sameIdSet(request.includedCommentIds, recordedComments)) {
+      throw agentXError("CONFIG_INVALID", "request ID was already used for a different workflow decision");
+    }
+    transition({ ...request, selectedOptionalCheckIds: request.selectedOptionalCheckIds ?? prior.selectedOptionalCheckIds ?? [],
+      includedCommentIds: request.includedCommentIds ?? recordedComments }, undefined, prior.workBreakdownDigest);
+    return { task: await taskView(deps, task, { events: 0, details: false }) };
+  }
   // A decision on a document that is no longer waiting is refused before anything else is read: the page says who decided.
   if (prior === undefined && (workflow.revision !== request.expectedRevision || workflow.stage !== "PLAN_REVIEW" || workflow.state !== "WAITING")) {
     if (options.via === "PAGE") throw refused(workflow);
@@ -1781,7 +1792,7 @@ export async function decideTaskWorkflow(
     await withCurrentThreadNotes(deps, task, request.requestId, (current, notes) => {
       const fed = fedThroughUpdate(notes);
       return deps.actions.acceptTask(developerTaskIdentity(current), current.workspaceId, { requestId: request.requestId, conversationId: current.conversationId, prompt: basePrompt + notes.suffix }, (operation) => {
-        const workflowToStore = workflowWithCurrentGraphOperation(next, workflowDependencies === undefined ? undefined : operation.id);
+        const workflowToStore = workflowWithCurrentGraphOperation(next, workflowDependencies === undefined ? undefined : operation.id, workflowDependencies);
         return [
           { Update: {
             TableName: deps.tableName, Key: taskKey(taskId),
@@ -2077,10 +2088,21 @@ async function approvedWorkflowDependencies(deps: DeveloperTaskRouteDependencies
 }
 
 /** Keep the accepted graph attempt pointer in the task update committed with its operation and outbox. */
-function workflowWithCurrentGraphOperation(workflow: WorkflowSnapshot, operationId: string | undefined): WorkflowSnapshot {
+function workflowWithCurrentGraphOperation(workflow: WorkflowSnapshot, operationId: string | undefined, invocation?: WorkflowDependencyInvocation): WorkflowSnapshot {
   const { workflowDependenciesOperationId: _previous, ...withoutPrevious } = workflow;
   void _previous;
-  return operationId === undefined ? withoutPrevious : { ...withoutPrevious, workflowDependenciesOperationId: operationId };
+  if (operationId === undefined) return withoutPrevious;
+  if (invocation === undefined) return { ...withoutPrevious, workflowDependenciesOperationId: operationId };
+  const history = workflow.workflowDependenciesProgress ?? [];
+  const retainedBySequence = new Map<number, (typeof history)[number]>();
+  for (const candidate of invocation.resumeProgress ?? []) {
+    const recorded = history.find((entry) => entry.sequence === candidate.sequence && canonicalJson(entry) === canonicalJson(candidate));
+    if (recorded !== undefined) retainedBySequence.set(recorded.sequence, recorded);
+  }
+  const priorCursor = history.at(-1);
+  if (priorCursor !== undefined) retainedBySequence.set(priorCursor.sequence, priorCursor);
+  const progress = [...retainedBySequence.values()].sort((left, right) => left.sequence - right.sequence);
+  return { ...withoutPrevious, ...(progress.length === 0 ? { workflowDependenciesProgress: [] } : { workflowDependenciesProgress: progress }), workflowDependenciesOperationId: operationId };
 }
 
 /** The commands of the project's required checks, the approved plan's proposed ones and the owner's selected optional ones, in that order. */
@@ -2112,7 +2134,7 @@ async function queueWorkflowCoding(
           UpdateExpression: `SET workflow = :workflow, updatedAt = :now${fed.clause}`,
           ConditionExpression: `workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND attribute_not_exists(closedAt)${fed.condition}`,
           ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
-          ExpressionAttributeValues: { ":workflow": workflowWithCurrentGraphOperation(input.next, input.workflowDependencies === undefined ? undefined : operation.id), ":now": receivedAt, ":revision": workflow.revision, ":stage": workflow.stage, ":state": workflow.state, ...fed.values },
+        ExpressionAttributeValues: { ":workflow": workflowWithCurrentGraphOperation(input.next, input.workflowDependencies === undefined ? undefined : operation.id, input.workflowDependencies), ":now": receivedAt, ":revision": workflow.revision, ":stage": workflow.stage, ":state": workflow.state, ...fed.values },
         } },
         putNew(turnTable(deps), aiToolTurn({
           party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
@@ -3041,12 +3063,32 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     const plans = new Map(versions.flatMap((document) => document.format === "structured" ? [[document.version, document.plan] as const] : []));
     return suggestionsFor(suggestions, { document: type, version: latest.version, plan: latest.plan, plans });
   });
+  let visibleWorkflowDependenciesProgress = workflow?.workflowDependenciesProgress;
+  const graphOperationId = workflow?.workflowDependenciesOperationId;
+  if (workflow !== undefined && graphOperationId !== undefined) {
+    const binding = await deps.actions.workflowBinding(task.workspaceId, graphOperationId);
+    if (binding === undefined) {
+      visibleWorkflowDependenciesProgress = [];
+    } else {
+      const storedProgress = workflow.workflowDependenciesProgress ?? [];
+      const visibleBySequence = new Map<number, (typeof storedProgress)[number]>();
+      for (const retained of binding.resumeProgress ?? []) {
+        const recorded = storedProgress.find((entry) => entry.sequence === retained.sequence && canonicalJson(entry) === canonicalJson(retained));
+        if (recorded !== undefined) visibleBySequence.set(recorded.sequence, recorded);
+      }
+      const sequenceStart = binding.sequenceStart ?? 0;
+      for (const entry of storedProgress) {
+        if (entry.operationId === graphOperationId && entry.sequence > sequenceStart) visibleBySequence.set(entry.sequence, entry);
+      }
+      visibleWorkflowDependenciesProgress = [...visibleBySequence.values()].sort((left, right) => left.sequence - right.sequence);
+    }
+  }
   return {
     taskId, now: deps.now(), title: task.title, ...taskPageStage(workflow, task.closedAt !== undefined, owner, await publicationAttempts(deps, task)),
     path: workflow?.path ?? "QUICK", revision: workflow?.revision ?? 0, stage: taskPageStep(workflow, task.closedAt !== undefined), role: owner ? "owner" : "reader",
     documents, ...(unverified.length === 0 ? {} : { unverified }), checks, checksRan: results.length > 0, ...(checksNote === undefined ? {} : { checksNote }), findings,
     ...(acceptedFindings.length === 0 ? {} : { acceptedFindings }),
-    ...(workflow?.workflowDependenciesProgress === undefined ? {} : { workflowDependenciesProgress: workflow.workflowDependenciesProgress }),
+    ...(visibleWorkflowDependenciesProgress === undefined ? {} : { workflowDependenciesProgress: visibleWorkflowDependenciesProgress }),
     pullRequests: (workflow?.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state })),
     history, access: pageAccess(access), ...(capabilities.peopleRevision === undefined ? {} : { peopleRevision: capabilities.peopleRevision }), canManagePeople: capabilities.canManagePeople,
     canTakeOwnership: capabilities.canTakeOwnership, comments, suggestions: shownSuggestions, askAvailable: await commentAnswersAvailable(deps, task),

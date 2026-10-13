@@ -205,9 +205,9 @@ export function taskGraphOrder(input: unknown): string[] {
 }
 
 /**
- * Project terminal checkpoints for one immutable operation attempt. Global progress remains an
- * audit log; only the binding's explicit retained prefix and acknowledgements after its cursor
- * can qualify this attempt.
+ * Project terminal checkpoints for one immutable operation attempt. The durable event log is the
+ * audit history; snapshot progress is a bounded checkpoint window. Only the binding's explicit
+ * retained prefix and acknowledgements after its cursor can qualify this attempt.
  */
 export function workflowDependencyAttemptTerminalProgress(input: {
   graph: TaskGraphV1;
