@@ -1062,6 +1062,10 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (request.method === "POST" && webhookRetry?.[1]) {
         return json(await retryGithubWebhookAsAdministrator(dependencies, identity, webhookRetry[1]), request.requestId, 202);
       }
+      const projectSetupRetry = /^\/v1\/admin\/projects\/setup-executions\/([0-9a-f-]{36})\/retry$/.exec(url.pathname);
+      if (request.method === "POST" && projectSetupRetry?.[1]) {
+        return json(await retryProjectSetupAsAdministrator(dependencies, identity, projectSetupRetry[1], parseBody(request.body)), request.requestId, 202);
+      }
       const body = parseBody(request.body);
       // Spec 025 phase 25e: admin changes (FR-039 to FR-041, FR-052).
       const changed = await routeAdminChange(adminChanges, identity, { method: request.method, headers: request.headers, body }, url);
@@ -1755,6 +1759,7 @@ async function createProjectSetupAdmissionRows(
   project: RegisteredProjectRecord,
   setupApproval: NonNullable<RegisteredProjectRecord["setupApproval"]>,
   runtime: NonNullable<ReturnType<typeof admitProjectSetupRuntime>>,
+  retry?: { attemptId: string; retryOfExecutionId: string },
 ): Promise<{ transactionItems: Array<Record<string, unknown>> } | undefined> {
   if (!dependencies.projectSetupRuntimeCatalogId || project.runtimeBinding.deploymentMode !== "ec2-ebs") return undefined;
   const endpoint = new URL(runtime.endpoint);
@@ -1802,7 +1807,10 @@ async function createProjectSetupAdmissionRows(
 
   const now = new Date();
   const stableUuid = (label: string) => {
-    const bytes = createHash("sha256").update(`project-setup/v1\0${identity.ownerKey}\0${project.definition.name}\0${project.definition.revision}\0${setupApproval.proposalSha256}\0${runtime.generation}\0${label}`).digest().subarray(0, 16);
+    const stableInput = retry
+      ? `project-setup/retry/v1\0${retry.retryOfExecutionId}\0${retry.attemptId}\0${identity.ownerKey}\0${project.definition.name}\0${project.definition.revision}\0${setupApproval.proposalSha256}\0${runtime.generation}\0${label}`
+      : `project-setup/v1\0${identity.ownerKey}\0${project.definition.name}\0${project.definition.revision}\0${setupApproval.proposalSha256}\0${runtime.generation}\0${label}`;
+    const bytes = createHash("sha256").update(stableInput).digest().subarray(0, 16);
     bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50; bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
     const hex = bytes.toString("hex");
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
@@ -1865,6 +1873,7 @@ async function createProjectSetupAdmissionRows(
     notExecutedTargetIds: derived.unsupportedTargetIds,
     runtime: { runtimeCatalogId: runtime.runtimeCatalogId, catalogRevision: runtime.catalogRevision, bindingDigest: runtime.bindingDigest,
       manifestDigest: runtime.manifestDigest, runnerEnvironment: runtime.runnerEnvironment, generation: runtime.generation, endpoint: runtime.endpoint, expiresAt: runtime.expiresAt },
+    ...(retry ? { retryOfExecutionId: retry.retryOfExecutionId, retryActorKey: identity.ownerKey } : {}),
   };
   const executionBytes = Buffer.from(canonicalJson(executionObject), "utf8");
   const executionDigest = createHash("sha256").update(executionBytes).digest("hex");
@@ -1883,7 +1892,8 @@ async function createProjectSetupAdmissionRows(
     proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256, candidateDigest: setupApproval.candidateDigest,
     policyDigest: approval.policyDigest, bindingDigest: runtime.bindingDigest, runtimeGeneration: runtime.generation,
     executionRef, runtimeCatalogId: runtime.runtimeCatalogId, state: "ACCEPTED", operationId, outboxId, fence,
-    deadlineAt: setupRunContext.deadlineAt, evidenceByteLimit, createdAt: now.toISOString() });
+    deadlineAt: setupRunContext.deadlineAt, evidenceByteLimit, createdAt: now.toISOString(),
+    ...(retry ? { retryOfExecutionId: retry.retryOfExecutionId, retryActorKey: identity.ownerKey } : {}) });
   const session = ProjectSetupSessionSchema.parse({ schemaVersion: 1, setupExecutionId, subjectId, transportCorrelationId,
     approvalRevision: 1, bindingDigest: runtime.bindingDigest, state: "READY", generation: runtime.generation, privateIp: endpoint.hostname });
   const operation = { ...projectSetupOperationKey(setupExecutionId, operationId), entityType: "PROJECT_SETUP_OPERATION",
@@ -1900,6 +1910,79 @@ async function createProjectSetupAdmissionRows(
   const put = (item: Record<string, unknown>) => ({ Put: { TableName: dependencies.tableName, Item: item, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } });
   return { transactionItems: [put({ ...projectSetupExecutionKey(setupExecutionId), entityType: "PROJECT_SETUP_EXECUTION", ...execution }),
     put({ ...projectSetupSessionKey(setupExecutionId), entityType: "PROJECT_SETUP_SESSION", ...session }), put(operation), put(outbox)] };
+}
+
+async function retryProjectSetupAsAdministrator(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  setupExecutionId: string,
+  value: unknown,
+): Promise<{ setupExecutionId: string; operationId: string; status: "QUEUED"; duplicate: boolean }> {
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required for an explicit setup retry");
+  const input = z.object({ requestId: z.string().uuid() }).strict().parse(value);
+  const idempotencyKey = { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `RETRY#${identity.ownerKey}#${input.requestId}` };
+  const executionKey = projectSetupExecutionKey(setupExecutionId);
+  const raw = await getItem<Record<string, unknown>>(dependencies, executionKey);
+  const parked = ProjectSetupExecutionSchema.safeParse(projectSetupDomainRecord(raw, executionKey, "PROJECT_SETUP_EXECUTION"));
+  if (!parked.success || parked.data.state !== "PARKED" || parked.data.result === undefined) throw agentXError("STALE_FENCE", "only an owned parked setup execution can be retried");
+  if (identity.ownerKey !== parked.data.ownerKey) throw agentXError("FORBIDDEN", "setup retry actor must be the original project creator");
+  const project = await requireProject(dependencies, parked.data.projectName, parked.data.projectRevision);
+  await requireAdministrator(dependencies, identity, parked.data.projectName);
+  if (project.runtimeBinding.deploymentMode !== "ec2-ebs") throw agentXError("RUNTIME_UNAVAILABLE", "the approved setup runtime profile is unavailable");
+  if (project.registeredBy !== parked.data.ownerKey || project.setupApproval?.decision !== "approve"
+    || project.setupApproval.proposalRef !== parked.data.proposalRef || project.setupApproval.proposalSha256 !== parked.data.proposalSha256
+    || project.setupApproval.candidateDigest !== parked.data.candidateDigest || project.definition.e2e === undefined
+    || !dependencies.projectSetupRuntimeCatalogId || dependencies.projectSetupRuntimeCatalogId !== parked.data.runtimeCatalogId
+    || projectSetupBindingDigest(project.runtimeBinding) !== parked.data.bindingDigest) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "setup source, policy, binding, or catalog changed; complete normal approval before retry");
+  }
+  const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${project.definition.name}`, sk: `PROPOSAL#${parked.data.proposalSha256}` });
+  if (!approval || approval.ownerKey !== parked.data.ownerKey || approval.decision !== "approve" || approval.proposalRef !== parked.data.proposalRef
+    || approval.policyDigest !== parked.data.policyDigest || !sameJsonContent(approval.policy, project.definition.e2e)) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "current setup approval no longer matches the parked source and policy");
+  }
+  const runtimeKey = projectSetupRuntimeKey(parked.data.runtimeCatalogId, parked.data.bindingDigest);
+  const runtimeItem = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: runtimeKey, ConsistentRead: true }));
+  const runtime = ProjectSetupRuntimeRecordSchema.safeParse(projectSetupRuntimeRecord(runtimeItem.Item, runtimeKey));
+  if (!runtime.success) throw agentXError("RUNTIME_UNAVAILABLE", "the exact approved setup runtime binding is unavailable");
+  const admittedRuntime = admitProjectSetupRuntime(runtime.data, { runtimeCatalogId: parked.data.runtimeCatalogId, binding: project.runtimeBinding,
+    scope: "source-interface", now: Date.now() });
+  if (!admittedRuntime) throw agentXError("RUNTIME_UNAVAILABLE", "the exact approved setup runtime binding is not currently qualified");
+  const prior = await getItem<Record<string, unknown>>(dependencies, idempotencyKey);
+  if (prior && prior.entityType === "PROJECT_SETUP_RETRY" && prior.previousExecutionId === setupExecutionId
+    && prior.retryActorKey === identity.ownerKey && prior.originalCreatorKey === parked.data.ownerKey
+    && typeof prior.setupExecutionId === "string" && typeof prior.operationId === "string") {
+    return { setupExecutionId: prior.setupExecutionId, operationId: prior.operationId, status: "QUEUED", duplicate: true };
+  }
+  const setupApproval = project.setupApproval;
+  const rows = await createProjectSetupAdmissionRows(dependencies, identity, project, setupApproval, admittedRuntime,
+    { attemptId: input.requestId, retryOfExecutionId: setupExecutionId });
+  if (!rows) throw agentXError("RUNTIME_UNAVAILABLE", "the approved source-interface setup run cannot be admitted");
+  const executionPut = rows.transactionItems.find((item) => "Put" in item && (item as { Put: { Item?: { entityType?: unknown } } }).Put.Item?.entityType === "PROJECT_SETUP_EXECUTION") as { Put: { Item: Record<string, unknown> } } | undefined;
+  const operationPut = rows.transactionItems.find((item) => "Put" in item && (item as { Put: { Item?: { entityType?: unknown } } }).Put.Item?.entityType === "PROJECT_SETUP_OPERATION") as { Put: { Item: Record<string, unknown> } } | undefined;
+  if (!executionPut || !operationPut) throw agentXError("RUNTIME_UNAVAILABLE", "setup retry admission rows are incomplete");
+  const nextExecution = executionPut.Put.Item;
+  const nextOperation = operationPut.Put.Item;
+  const marker = { ...idempotencyKey, entityType: "PROJECT_SETUP_RETRY", previousExecutionId: setupExecutionId,
+    setupExecutionId: nextExecution.setupExecutionId, operationId: nextOperation.operationId, retryActorKey: identity.ownerKey,
+    originalCreatorKey: parked.data.ownerKey, createdAt: new Date().toISOString() };
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { ConditionCheck: { TableName: dependencies.tableName, Key: executionKey, ConditionExpression: "#state = :parked AND operationId = :operationId AND fence = :fence",
+        ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":parked": "PARKED", ":operationId": parked.data.operationId, ":fence": parked.data.fence } } },
+      ...rows.transactionItems,
+      { Put: { TableName: dependencies.tableName, Item: marker, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } },
+    ] }));
+  } catch (error) {
+    const duplicate = await getItem<Record<string, unknown>>(dependencies, idempotencyKey);
+    if (duplicate?.entityType === "PROJECT_SETUP_RETRY" && duplicate.previousExecutionId === setupExecutionId
+      && duplicate.retryActorKey === identity.ownerKey && duplicate.originalCreatorKey === parked.data.ownerKey
+      && typeof duplicate.setupExecutionId === "string" && typeof duplicate.operationId === "string") {
+      return { setupExecutionId: duplicate.setupExecutionId, operationId: duplicate.operationId, status: "QUEUED", duplicate: true };
+    }
+    throw error;
+  }
+  return { setupExecutionId: String(nextExecution.setupExecutionId), operationId: String(nextOperation.operationId), status: "QUEUED", duplicate: false };
 }
 
 async function prepareWorkspace(
@@ -5389,7 +5472,8 @@ async function readSetupChunk(dependencies: AwsBrokerDependencies, key: string):
 
 async function requireProjectSetupCapability(
   dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string, action: "read-execution" | "write-evidence" | "result",
-): Promise<{ execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>; claims: NonNullable<ReturnType<typeof verifyProjectSetupCapability>> }> {
+): Promise<{ execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>; claims: NonNullable<ReturnType<typeof verifyProjectSetupCapability>>;
+  runtime: ReturnType<typeof ProjectSetupRuntimeRecordSchema.parse> }> {
   const token = request.headers["x-agentx-callback-capability"];
   const claims = token ? verifyProjectSetupCapability(dependencies.callbackSigningKey, token) : undefined;
   if (!claims || claims.setupExecutionId !== setupExecutionId || !claims.actions.includes(action)) throw agentXError("CALLBACK_FORBIDDEN", "setup capability does not authorize this artifact action");
@@ -5428,7 +5512,7 @@ async function requireProjectSetupCapability(
     || !admitProjectSetupRuntime(runtime.data, { runtimeCatalogId: catalogId, binding: project.runtimeBinding, scope: "source-interface", now: Date.now() })) {
     throw agentXError("STALE_FENCE", "current configured setup runtime is no longer qualified");
   }
-  return { execution: execution.data, claims };
+  return { execution: execution.data, claims, runtime: runtime.data };
 }
 
 async function handleProjectSetupCallback(
@@ -5436,58 +5520,34 @@ async function handleProjectSetupCallback(
   request: AdaptedHttpRequest,
   setupExecutionId: string,
   operationId: string,
-): Promise<{ accepted: true }> {
+): Promise<{ accepted: true; parked?: true; qualification?: "UNKNOWN" }> {
   const token = request.headers["x-agentx-callback-capability"];
   const claims = token ? verifyProjectSetupCapability(dependencies.callbackSigningKey, token) : undefined;
   if (!claims || claims.setupExecutionId !== setupExecutionId || claims.operationId !== operationId) {
     throw agentXError("CALLBACK_FORBIDDEN", "callback capability is outside the project setup result scope");
   }
-  const [executionItem, operationItem, sessionItem] = await Promise.all([
-    getItem<Record<string, unknown>>(dependencies, projectSetupExecutionKey(setupExecutionId)),
-    getItem<Record<string, unknown>>(dependencies, projectSetupOperationKey(setupExecutionId, operationId)),
-    getItem<Record<string, unknown>>(dependencies, projectSetupSessionKey(setupExecutionId)),
-  ]);
-  const execution = ProjectSetupExecutionSchema.safeParse(projectSetupDomainRecord(executionItem, projectSetupExecutionKey(setupExecutionId), "PROJECT_SETUP_EXECUTION"));
-  const operation = ProjectSetupOperationSchema.safeParse(projectSetupDomainRecord(operationItem, projectSetupOperationKey(setupExecutionId, operationId), "PROJECT_SETUP_OPERATION"));
-  const session = ProjectSetupSessionSchema.safeParse(projectSetupDomainRecord(sessionItem, projectSetupSessionKey(setupExecutionId), "PROJECT_SETUP_SESSION"));
-  if (!execution.success || !operation.success || !session.success) throw agentXError("CALLBACK_FORBIDDEN", "project setup execution state is missing or invalid");
-  const current = execution.data;
-  if (current.state !== "DISPATCHING" || operation.data.status !== "DISPATCHING" && operation.data.status !== "DELIVERED"
-    || current.operationId !== operationId || current.subjectId !== claims.subjectId
-    || current.transportCorrelationId !== claims.transportCorrelationId || current.approvalRevision !== claims.approvalRevision
-    || current.fence !== claims.fence || session.data.state !== "READY" || session.data.generation !== current.runtimeGeneration
-    || session.data.bindingDigest !== current.bindingDigest) {
-    throw agentXError("STALE_FENCE", "project setup result is stale or its worker lease is no longer current");
-  }
-  const registered = await requireProject(dependencies, current.projectName, current.projectRevision);
-  if (registered.registeredBy !== current.ownerKey || registered.setupApproval?.decision !== "approve"
-    || registered.setupApproval.proposalSha256 !== current.proposalSha256 || registered.runtimeBinding.deploymentMode !== "ec2-ebs") {
-    throw agentXError("CALLBACK_FORBIDDEN", "project setup approval or source binding is no longer current");
-  }
-  const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${current.projectName}`, sk: `PROPOSAL#${current.proposalSha256}` });
-  if (!approval || approval.ownerKey !== current.ownerKey || approval.decision !== "approve" || approval.proposalRef !== current.proposalRef
-    || approval.policyDigest !== current.policyDigest || !dependencies.projectSetupRuntimeCatalogId) {
-    throw agentXError("CALLBACK_FORBIDDEN", "current setup approval is missing or revoked");
-  }
-  const admittedRuntimeItem = await dependencies.documentClient.send(new GetCommand({
-    TableName: dependencies.tableName, Key: projectSetupRuntimeKey(dependencies.projectSetupRuntimeCatalogId, current.bindingDigest), ConsistentRead: true,
-  }));
-  const runtimeKey = projectSetupRuntimeKey(dependencies.projectSetupRuntimeCatalogId, current.bindingDigest);
-  const runtime = ProjectSetupRuntimeRecordSchema.safeParse(projectSetupRuntimeRecord(admittedRuntimeItem.Item, runtimeKey));
-  if (!runtime.success || !admitProjectSetupRuntime(runtime.data, {
-    runtimeCatalogId: dependencies.projectSetupRuntimeCatalogId, binding: registered.runtimeBinding,
-    scope: "source-interface", now: Date.now(),
-  })) throw agentXError("STALE_FENCE", "approved setup runtime is no longer ready");
   const body = z.object({
     domain: z.literal("project-setup-source-interface/v1"), setupExecutionId: z.string().uuid(), operationId: z.string().uuid(),
     candidateDigest: z.string().regex(/^[a-f0-9]{64}$/), processStatus: z.enum(["SUCCEEDED", "FAILED", "UNKNOWN"]),
     qualification: z.enum(["PASS", "FAILED", "UNKNOWN"]), cleanupConfirmed: z.boolean(),
     evidenceRef: z.object({ key: z.string().min(1).max(512), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
   }).strict().parse(parseBody(request.body));
+  const authorized = await requireProjectSetupCapability(dependencies, request, setupExecutionId, "result").catch(async (error: unknown) => {
+    if (!(error instanceof AgentXError) || !["CALLBACK_FORBIDDEN", "STALE_FENCE", "RUNTIME_UNAVAILABLE"].includes(error.code)) throw error;
+    const parked = await parkProjectSetupResultAfterAuthorityChange(dependencies, setupExecutionId, operationId, claims, {
+      setupExecutionId: body.setupExecutionId, operationId: body.operationId, candidateDigest: body.candidateDigest,
+      processStatus: body.processStatus, qualification: body.qualification, cleanupConfirmed: body.cleanupConfirmed,
+      ...(body.evidenceRef ? { evidenceRef: body.evidenceRef } : {}),
+    });
+    if (!parked) throw error;
+    return undefined;
+  });
+  if (!authorized) return { accepted: true, parked: true, qualification: "UNKNOWN" };
+  const current = authorized.execution;
   if (body.setupExecutionId !== current.setupExecutionId || body.operationId !== current.operationId || body.candidateDigest !== current.candidateDigest) {
     throw agentXError("CALLBACK_FORBIDDEN", "project setup result does not match its immutable source execution");
   }
-  const verified = body.evidenceRef ? await verifyProjectSetupSmokeEvidence(dependencies, current, body.evidenceRef, runtime.data.runnerEnvironment, runtime.data.runnerToolchain) : undefined;
+  const verified = body.evidenceRef ? await verifyProjectSetupSmokeEvidence(dependencies, current, body.evidenceRef, authorized.runtime.runnerEnvironment, authorized.runtime.runnerToolchain) : undefined;
   const processStatus = verified?.processStatus ?? "UNKNOWN";
   const qualification = verified?.qualification ?? "UNKNOWN";
   const cleanupConfirmed = verified?.cleanupConfirmed ?? false;
@@ -5509,6 +5569,62 @@ async function handleProjectSetupCallback(
         ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":fence": claims.fence } } },
   ] }));
   return { accepted: true };
+}
+
+async function parkProjectSetupResultAfterAuthorityChange(
+  dependencies: AwsBrokerDependencies,
+  setupExecutionId: string,
+  operationId: string,
+  claims: NonNullable<ReturnType<typeof verifyProjectSetupCapability>>,
+  body: { setupExecutionId: string; operationId: string; candidateDigest: string; processStatus: "SUCCEEDED" | "FAILED" | "UNKNOWN";
+    qualification: "PASS" | "FAILED" | "UNKNOWN"; cleanupConfirmed: boolean; evidenceRef?: { key: string; sha256: string } },
+): Promise<boolean> {
+  const executionKey = projectSetupExecutionKey(setupExecutionId);
+  const operationKey = projectSetupOperationKey(setupExecutionId, operationId);
+  const [executionItem, operationItem] = await Promise.all([
+    getItem<Record<string, unknown>>(dependencies, executionKey), getItem<Record<string, unknown>>(dependencies, operationKey),
+  ]);
+  const execution = ProjectSetupExecutionSchema.safeParse(projectSetupDomainRecord(executionItem, executionKey, "PROJECT_SETUP_EXECUTION"));
+  const operation = ProjectSetupOperationSchema.safeParse(projectSetupDomainRecord(operationItem, operationKey, "PROJECT_SETUP_OPERATION"));
+  if (!execution.success || !operation.success || execution.data.state !== "DISPATCHING"
+    || !["DISPATCHING", "DELIVERED"].includes(operation.data.status)
+    || claims.setupExecutionId !== setupExecutionId || claims.operationId !== operationId || claims.actions.includes("result") === false
+    || execution.data.operationId !== operationId || execution.data.subjectId !== claims.subjectId || execution.data.fence !== claims.fence
+    || execution.data.transportCorrelationId !== claims.transportCorrelationId || execution.data.approvalRevision !== claims.approvalRevision
+    || operation.data.fence !== claims.fence || body.setupExecutionId !== setupExecutionId || body.operationId !== operationId
+    || body.candidateDigest !== execution.data.candidateDigest) return false;
+  const now = new Date().toISOString();
+  const parkedResult = { domain: "project-setup-source-interface/v1", candidateDigest: execution.data.candidateDigest,
+    processStatus: "UNKNOWN", qualification: "UNKNOWN", cleanupConfirmed: false,
+    reportedProcessStatus: body.processStatus, reportedQualification: body.qualification, reportedCleanupConfirmed: body.cleanupConfirmed,
+    ...(body.evidenceRef ? { unqualifiedEvidenceRef: body.evidenceRef } : {}), parkReason: "current-setup-authority-changed" };
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: { TableName: dependencies.tableName, Key: executionKey,
+        UpdateExpression: "SET #state = :parked, updatedAt = :now, completedAt = :now, #result = :result",
+        ConditionExpression: "#state = :dispatching AND operationId = :operationId AND subjectId = :subjectId AND fence = :fence AND approvalRevision = :approvalRevision AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#state": "state", "#result": "result" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING", ":now": now, ":result": parkedResult,
+          ":operationId": operationId, ":subjectId": claims.subjectId, ":fence": claims.fence, ":approvalRevision": claims.approvalRevision,
+          ":correlation": claims.transportCorrelationId } } },
+      { Update: { TableName: dependencies.tableName, Key: operationKey,
+        UpdateExpression: "SET #status = :parked, updatedAt = :now, #result = :result",
+        ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#status": "status", "#result": "result" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":now": now,
+          ":result": parkedResult, ":setupExecutionId": setupExecutionId, ":operationId": operationId, ":fence": claims.fence,
+          ":correlation": claims.transportCorrelationId } } },
+    ] }));
+    return true;
+  } catch {
+    const [latestExecution, latestOperation] = await Promise.all([
+      getItem<Record<string, unknown>>(dependencies, executionKey), getItem<Record<string, unknown>>(dependencies, operationKey),
+    ]);
+    const latestExec = ProjectSetupExecutionSchema.safeParse(projectSetupDomainRecord(latestExecution, executionKey, "PROJECT_SETUP_EXECUTION"));
+    const latestOp = ProjectSetupOperationSchema.safeParse(projectSetupDomainRecord(latestOperation, operationKey, "PROJECT_SETUP_OPERATION"));
+    return latestExec.success && latestOp.success && latestExec.data.state === "PARKED" && latestOp.data.status === "PARKED"
+      && latestExec.data.operationId === operationId && latestExec.data.fence === claims.fence;
+  }
 }
 
 async function verifyProjectSetupSmokeEvidence(

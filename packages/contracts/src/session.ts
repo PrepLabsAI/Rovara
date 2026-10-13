@@ -169,6 +169,7 @@ export const ProjectSetupExecutionSchema = z.object({
   executionRef: z.object({ key: z.string().regex(/^project-setup-executions\/sha256\/[a-f0-9]{64}\.json$/), sha256: z.string().regex(/^[a-f0-9]{64}$/), byteLength: z.number().int().positive().max(24 * 1024 * 1024) }).strict(),
   runtimeCatalogId: z.string().min(1).max(160), state: z.enum(["ACCEPTED", "DISPATCHING", "SUCCEEDED", "FAILED", "PARKED"]),
   operationId: z.string().uuid(), outboxId: z.string().uuid(), fence: z.number().int().positive(), deadlineAt: z.string().datetime(),
+  retryOfExecutionId: z.string().uuid().optional(), retryActorKey: z.string().min(1).max(512).optional(),
   evidenceByteLimit: z.number().int().positive().max(256 * 1024 * 1024), createdAt: z.string().datetime(),
   updatedAt: z.string().datetime().optional(), completedAt: z.string().datetime().optional(),
   result: z.unknown().optional(), error: z.string().max(2_000).optional(),

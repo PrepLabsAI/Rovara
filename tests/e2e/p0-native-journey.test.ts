@@ -31,6 +31,7 @@ import { deriveProjectSetupSourceSmoke } from "../../packages/broker/src/e2e/pro
 import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "../../packages/broker/src/aws/project-setup-runtime-catalog.js";
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
 import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies.js";
+import { persistOriginalEvidencePrimary, persistOriginalMapPrimary } from "../support/p0-evidence-capture.js";
 
 beforeAll(async () => { await loadSlackBroker(); });
 afterEach(() => vi.unstubAllGlobals());
@@ -204,6 +205,10 @@ describe("P0 normal project onboarding journey", () => {
     const proposalEntry = [...objects.entries()].find(([key]) => key.startsWith("project-setup-proposals/"));
     expect(proposalEntry, "source-backed proposal remains stored under its server-owned key").toBeDefined();
     const storedProposal = JSON.parse(proposalEntry?.[1].toString("utf8") ?? "{}") as Record<string, unknown>;
+    const proposalCandidateDigest = (storedProposal.candidate as { digest?: unknown } | undefined)?.digest;
+    expect(typeof proposalCandidateDigest).toBe("string");
+    const proposalPrimary = await persistOriginalMapPrimary({ root, kind: "setup-proposal", key: proposalEntry![0], objects,
+      producer: "broker source-capture proposal object", sourceCandidateDigest: String(proposalCandidateDigest) });
     expect(storedProposal.candidate).toMatchObject({ repositories: [{ repositoryId, commitSha, treeSha }] });
     expect(githubReads).toContain(`/repos/acme/ordinary-orders/git/trees/${treeSha}?recursive=1`);
     expect(githubReads.length).toBeGreaterThan(Object.keys(sourceFiles).length);
@@ -256,6 +261,9 @@ describe("P0 normal project onboarding journey", () => {
     const executionRef = executionRow.executionRef as { key: string; sha256: string; byteLength: number };
     expect(objects.get(executionRef.key)).toBeDefined();
     expect(executionRef.byteLength).toBe(objects.get(executionRef.key)?.byteLength);
+    const executionPrimary = await persistOriginalMapPrimary({ root, kind: "setup-execution", key: executionRef.key, objects,
+      producer: "broker immutable setup admission", sourceCandidateDigest: snapshot.candidate.digest });
+    expect(executionPrimary.sha256).toBe(executionRef.sha256);
     const workerKeys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
     const journal = new OperationJournal(join(root, "worker-journal"));
     const evidenceRootForWorker = join(root, "setup-smoke-evidence");
@@ -338,6 +346,9 @@ describe("P0 normal project onboarding journey", () => {
     const setupResult = setupOperation?.result as Record<string, unknown> | undefined;
     expect(setupResult?.evidenceRef).toBeDefined();
     const actualRef = setupResult?.evidenceRef as { key: string; sha256: string };
+    const setupEvidencePrimary = await persistOriginalMapPrimary({ root, kind: "setup-transferred-evidence", key: actualRef.key, objects,
+      producer: "authenticated setup worker evidence upload", sourceCandidateDigest: snapshot.candidate.digest });
+    expect(setupEvidencePrimary.sha256).toBe(actualRef.sha256);
     const actualEvidence = JSON.parse(objects.get(actualRef.key)!.toString("utf8")) as {
       unsupportedTargetIds: string[];
       groupRuns: Array<{ actual: { publicList: { pairs: Array<{ disposition: string }> }; assertionReceipts: unknown[]; runProcess: { status: number } }; collection: { status: string; reason?: string; runId?: string | null } }>;
@@ -381,6 +392,7 @@ describe("P0 normal project onboarding journey", () => {
       adminHttpResponses: adminResults.map(({ path, status }) => ({ path, status })),
       setupWorkerHttpResponses: brokerRouteObservations.map(({ path, status }) => ({ path, status })),
       setupExecutionId, operationId: actualInvocation.operationId, executionRef, evidenceRef: actualRef,
+      originalPrimaries: [proposalPrimary, executionPrimary, setupEvidencePrimary],
       discoveredApplications: inspected.inspection.applications.map(({ applicationId, kind, sourcePaths }) => ({ applicationId, kind, sourcePaths })),
       discoveryMissingInputs: inspected.inspection.missingInputs,
       discoveredTargetIds: inspected.inspection.proposedTargets.map(({ targetId }) => targetId).sort(),
@@ -431,6 +443,9 @@ describe("P0 normal project onboarding journey", () => {
       claims: [{ id: "1", text: "The orders list is visible." }], notChanging: ["Existing access rules."], risks: ["Source smoke does not establish native runtime behavior."],
       decisions: [], workBreakdown: graph, e2e: e2eIntent };
     const plannerArtifact = `\`\`\`agentx-plan\n${JSON.stringify(untrustedPlan)}\n\`\`\`\n`;
+    const plannerPrimary = await persistOriginalEvidencePrimary({ root, kind: "untrusted-planner-artifact",
+      key: `callback:/v1/internal/workspaces/${String(featureWorkspaceId)}/operations/${String(planOperation!.id)}/artifacts/plan.md`, bytes: plannerArtifact,
+      producer: "worker model proposal callback request", sourceCandidateDigest: snapshot.candidate.digest });
     const planArtifactCallback = await callbackFor(String(planOperation!.id), "artifacts", { name: "plan.md", mediaType: "text/markdown", content: plannerArtifact });
     expect(planArtifactCallback.status).toBe(200);
     const planTerminal = await callbackFor(String(planOperation!.id), "result", { operationId: planOperation!.id, status: "SUCCEEDED" });
@@ -439,6 +454,10 @@ describe("P0 normal project onboarding journey", () => {
     const canonicalPlanArtifact = plannedTask.workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
     expect(canonicalPlanArtifact).toBeDefined();
     const canonicalPlanBytes = objects.get(String(canonicalPlanArtifact!.objectKey))?.toString("utf8");
+    const canonicalPlanPrimary = await persistOriginalMapPrimary({ root, kind: "canonical-plan-document", key: canonicalPlanArtifact!.objectKey, objects,
+      producer: "broker canonical PlanDocument artifact", sourceCandidateDigest: snapshot.candidate.digest });
+    expect(canonicalPlanPrimary.sha256).toBe(canonicalPlanArtifact!.sha256);
+    expect(canonicalPlanPrimary.byteLength).toBe(Buffer.byteLength(canonicalPlanBytes ?? "", "utf8"));
     const canonicalPlan = readCanonicalPlan(canonicalPlanBytes ?? "");
     expect(canonicalPlan?.e2e).toEqual(e2eIntent);
     expect(hash(Buffer.from(canonicalPlanBytes ?? ""))).toBe(canonicalPlanArtifact?.sha256);
@@ -453,6 +472,7 @@ describe("P0 normal project onboarding journey", () => {
       httpResponses: { taskStart: featureStart.status, prepareCallback: prepareCallback.status, planArtifactCallback: planArtifactCallback.status,
         planTerminalCallback: planTerminal.status, ownerDecision: ownerDecision.status },
       plannerArtifactSha256: hash(Buffer.from(plannerArtifact)), canonicalPlanSha256: canonicalPlanArtifact!.sha256,
+      originalPrimaries: [plannerPrimary, canonicalPlanPrimary],
       e2eIntentDigest: hash(Buffer.from(canonicalJson(e2eIntent))), graphDigest: taskGraphDigest(graph),
       ownerDecision: ownerDecision.body, workflowDependenciesApproval: approvedTask.workflow.workflowDependenciesApproval }, null, 2) + "\n", { mode: 0o600, flag: "wx" });
   }, 70_000);

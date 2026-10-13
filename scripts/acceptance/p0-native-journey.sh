@@ -17,6 +17,10 @@ evidence=${CONTAINED_FOUNDATION_EVIDENCE_DIR:-}
 tmp=${TMPDIR:-}
 [ -n "$evidence" ] && [ -d "$evidence" ] || unavailable 'pre-create CONTAINED_FOUNDATION_EVIDENCE_DIR outside the fresh TMPDIR'
 [ -n "$tmp" ] && [ -d "$tmp" ] || unavailable 'provide a fresh, pre-created TMPDIR'
+[ ! -L "$tmp" ] || unavailable 'TMPDIR cannot be a symbolic link'
+[ -z "$(find "$tmp" -mindepth 1 -print -quit)" ] || unavailable 'TMPDIR must be empty before Vitest starts'
+tmp_owner=$(stat -f '%u' "$tmp" 2>/dev/null || stat -c '%u' "$tmp") || unavailable 'could not verify TMPDIR ownership'
+[ "$tmp_owner" = "$(id -u)" ] || unavailable 'TMPDIR must be owned by the current user'
 evidence_real=$(cd "$evidence" && pwd -P)
 tmp_real=$(cd "$tmp" && pwd -P)
 case "$evidence_real/" in "$tmp_real/"*) unavailable 'contained evidence directory must be outside TMPDIR' ;; esac
