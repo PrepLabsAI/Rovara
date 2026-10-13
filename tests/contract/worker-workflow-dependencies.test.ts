@@ -81,7 +81,7 @@ describe("executeSerialWorkflowDependencies", () => {
     const calls: string[] = [];
     const progress: Array<{ itemId: string; sequence: number; state: string }> = [];
     const result = await executeSerialWorkflowDependencies({
-      graph, graphDigest: taskGraphDigest(graph), runId, operationId, initialTreeSha: candidate("2"), resumeTreeSha: candidate("2"),
+      graph, graphDigest: taskGraphDigest(graph), runId, operationId, initialTreeSha: candidate("2"),
       sequenceStart: 4, resumeProgress: retained, now: () => "2026-10-12T12:02:00.000Z",
       persist: async (entry) => { progress.push(entry); },
       execute: async (item) => { calls.push(item.id); return { treeSha: candidate("5") }; },

@@ -5,7 +5,7 @@ import {
   DEFAULT_DEVELOPER_TASK_POLICY, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
   DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, WORKFLOW_BLOCK_REASONS, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, WORKFLOW_REVIEW_FAILURE_REASONS,
   inertName, openReviewFindings, workflowIsReviewOnly, workflowKeepPullRequestsOffered, type DeveloperTaskView,
-  TaskPeopleRoleSchema, parsePlanDocument, taskGraphDigest,
+  TaskPeopleRoleSchema,
 } from "@agentx/contracts";
 import { z } from "zod";
 import type { AdminControlPlaneClient } from "./admin-client.js";
@@ -115,10 +115,7 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
     : task.workflow?.path === "FULL" && task.workflow.reviewPhase === "DESIGN" ? "design" : "plan";
   const activeArtifact = task.workflow?.artifacts.filter((artifact) => artifact.type === activeArtifactType).at(-1);
   const planArtifact = task.workflow?.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
-  const parsedActivePlan = activeArtifact?.type === "plan" && task.workflow?.planContent !== undefined
-    ? parsePlanDocument(task.workflow.planContent, { kind: "plan" }) : undefined;
-  const workBreakdownDigest = parsedActivePlan?.ok && parsedActivePlan.plan.workBreakdown !== undefined
-    ? taskGraphDigest(parsedActivePlan.plan.workBreakdown) : undefined;
+  const workBreakdownDigest = activeArtifact?.type === "plan" ? task.workflow?.workBreakdownDigest : undefined;
   // Blocked reviews: the findings the owner still has to accept or have fixed. Reviewer text is shown made safe.
   const blockingFindings = task.workflow === undefined || task.workflow.stage !== "REVIEW" || task.workflow.state !== "BLOCKED" ? []
     : openReviewFindings(task.workflow).map((finding) => ({

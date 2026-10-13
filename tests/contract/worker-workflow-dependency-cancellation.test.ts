@@ -60,7 +60,7 @@ describe("worker stops an approved serial graph at acknowledged cancellation", (
         payload: { conversationId: randomUUID(), prompt: "Implement", workflowMode: "IMPLEMENT", workflowBase: [{ repositoryId: "app", baseCommitSha: resolvedCommit }],
           workflowDependencies: { graph, approval: { artifactDigest: "a".repeat(64), graphDigest: taskGraphDigest(graph), workflowRevision: 2, actorId: "b".repeat(64), runId } } } };
       const result = runTaskInvocation(invocation as never, { rootPath, model: { provider: "fixture", modelId: "fixture" }, piAdapter: adapter,
-        cancellationController: controller, eventSink: async (batch: unknown[]) => {
+        cancellationController: controller, eventSink: async (batch) => {
           if (batch.some((entry) => {
             if (entry === null || typeof entry !== "object") return false;
             const payload = (entry as { payload?: unknown }).payload;

@@ -5891,15 +5891,15 @@ async function validateWorkflowProgressChunk(
     const completedPrefix = new Set(retained.filter((entry) => entry.state === "IMPLEMENTED").map((entry) => entry.itemId));
     const currentOperationTerminals = operationHistory.filter((entry) => entry.state !== "STARTED" && entry.state === "IMPLEMENTED").map((entry) => entry.itemId);
     const completed = new Set([...completedPrefix, ...currentOperationTerminals]);
-    const expectedItemId = order.find((itemId) => !completed.has(itemId)) ?? order[0];
+    const expectedItemId = order.find((itemId) => !completed.has(itemId));
     const previous = (nextWorkflow.workflowDependenciesProgress ?? []).at(-1);
     const expectedBase = active?.baseTreeSha ?? (previous?.state === "IMPLEMENTED" ? previous.candidateTreeSha : firstBaseTree);
     if (progress.state === "STARTED") {
-      if (active !== undefined || progress.itemId !== expectedItemId || (expectedBase !== undefined && progress.baseTreeSha !== expectedBase)) {
+      if (active !== undefined || expectedItemId === undefined || progress.itemId !== expectedItemId || (expectedBase !== undefined && progress.baseTreeSha !== expectedBase)) {
         throw agentXError("CALLBACK_FORBIDDEN", "work breakdown item start does not continue the retained graph tree and order");
       }
     } else if (active === undefined || active.itemId !== progress.itemId || active.baseTreeSha !== progress.baseTreeSha
-      || (progress.state === "IMPLEMENTED" && progress.itemId !== expectedItemId)) {
+      || (progress.state === "IMPLEMENTED" && (expectedItemId === undefined || progress.itemId !== expectedItemId))) {
       throw agentXError("CALLBACK_FORBIDDEN", "work breakdown item result has no matching acknowledged start");
     }
     latestSequence = progress.sequence;

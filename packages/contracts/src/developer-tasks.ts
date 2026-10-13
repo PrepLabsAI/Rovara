@@ -276,7 +276,10 @@ export const DeveloperTaskViewSchema = z.object({
   title: z.string(),
   project: z.string(),
   status: DeveloperTaskStatusSchema,
-  workflow: WorkflowSnapshotViewSchema.extend({ planContent: z.string().max(WORKFLOW_PLAN_MAX_BYTES).optional() }).optional(),
+  workflow: WorkflowSnapshotViewSchema.extend({
+    planContent: z.string().max(WORKFLOW_PLAN_MAX_BYTES).optional(),
+    workBreakdownDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  }).optional(),
   failure: DeveloperTaskFailureSchema.optional(),
   startingRevision: z.number().int().positive(),
   client: z.string(),

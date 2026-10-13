@@ -1078,7 +1078,12 @@ export async function taskView(
     if (planArtifact !== undefined) {
       // A structured plan is shown as its Markdown copy, cut to the same limit as a legacy document.
       const loaded = await loadWorkflowDocument((objectKey, maxBytes) => deps.actions.readArtifact(objectKey, maxBytes), planArtifact, {});
-      if (loaded?.format === "structured") workflow = { ...workflow, planContent: shortenMarkdown(loaded.markdown, WORKFLOW_PLAN_MAX_BYTES) };
+      if (loaded?.format === "structured") workflow = {
+        ...workflow,
+        planContent: shortenMarkdown(loaded.markdown, WORKFLOW_PLAN_MAX_BYTES),
+        ...(loaded.artifact.type === "plan" && loaded.plan.workBreakdown !== undefined
+          ? { workBreakdownDigest: taskGraphDigest(loaded.plan.workBreakdown) } : {}),
+      };
       else if (loaded !== undefined && Buffer.byteLength(loaded.markdown, "utf8") <= WORKFLOW_PLAN_MAX_BYTES) workflow = { ...workflow, planContent: loaded.markdown };
       else workflow = { ...workflow, state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.documentUnverified };
     }
@@ -2153,12 +2158,19 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
   if (workflowDependencies !== undefined && deps.workflowDependenciesEnabled !== true) {
     throw agentXError("CONFIG_INVALID", "the approved ordered work plan is retained, but this broker is not enabled to continue it");
   }
+  const restartApprovedGraph = workflowDependencies === undefined ? undefined : {
+    ...workflowDependencies,
+    resumeTreeSha: workflowDependencies.resumeTreeSha,
+    sequenceStart: workflow.workflowDependenciesProgress?.at(-1)?.sequence ?? workflowDependencies.sequenceStart ?? 0,
+    resumeProgress: [],
+  };
   // The problems are reviewer and check output, marked untrusted; the owner's note stays outside, as the instruction.
   const problems = sendBackProblemsPromptSection(sendBackProblems(workflow), promptTagId(task, request.requestId));
   const prompt = (notes: string) => `Address the problems below in the code, keeping to the approved plan. ${NO_PUBLISH_NOTE}\n\n${problems}\n\nOwner note (the owner's own instructions for this step): ${request.instructions}\n\nApproved plan (sha256 ${plan.sha256}):\n${plan.text}${notes}`;
   const next: WorkflowSnapshot = { ...returned, revision: returned.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   return queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow } }, { requestId: request.requestId, prompt, next,
-    request: request.instructions, response: workflowDependencies === undefined ? "AgentX sent the change back to coding" : "AgentX restarted the approved ordered work plan", ...(workflowDependencies === undefined ? {} : { workflowDependencies }) });
+    request: request.instructions, response: workflowDependencies === undefined ? "AgentX sent the change back to coding" : "AgentX restarted the approved ordered work plan",
+    ...(restartApprovedGraph === undefined ? {} : { workflowDependencies: restartApprovedGraph }) });
 }
 
 /**

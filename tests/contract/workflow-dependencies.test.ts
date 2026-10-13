@@ -4,7 +4,7 @@ import { TaskGraphV1Schema, taskGraphDigest, taskGraphOrder, validateTaskGraph }
 const taskId = "8c330a74-b4c6-4f01-9356-5fe54fc55b19";
 const repo = "github:acme/payments";
 const graph = () => ({
-  schemaVersion: 1,
+  schemaVersion: 1 as const,
   taskId,
   version: 1,
   items: [
@@ -68,7 +68,7 @@ describe("TaskGraphV1", () => {
 
   it("hashes canonical object keys while preserving submitted array order", () => {
     const first = graph();
-    const reorderedKeys = JSON.parse(JSON.stringify(first)) as Record<string, unknown>;
+    const reorderedKeys = TaskGraphV1Schema.parse(JSON.parse(JSON.stringify(first)));
     expect(taskGraphDigest(first)).toBe(taskGraphDigest(reorderedKeys));
     const reorderedItems = graph();
     reorderedItems.items.reverse();
