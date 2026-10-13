@@ -3,6 +3,12 @@ import { run, type Exec } from "./exec.js";
 import { LOOP_COMMENT_MARKER } from "./naming.js";
 
 export interface IssueComment { id: number; issue: number; author: string; body: string; updatedAt: string }
+/** #359: a pull request as the Review loop reviews it. */
+export interface PullRequestRef {
+  repo: string; number: number; open: boolean; base: string; head: string; url: string;
+  /** The repository and branch its head commit is on: this repository's, or a fork's. */
+  headRepo: string; headRef: string;
+}
 
 /** The labels the loop puts on issues, so a step shows on the issue list. Not the-loop's `loop:*` labels. */
 export const LABEL_PREFIX = "rovara:";
@@ -70,6 +76,45 @@ export class GitHub {
       if (typeof value.id !== "number" || typeof value.author !== "string" || typeof value.state !== "string" || typeof value.submitted_at !== "string") return [];
       return [{ id: value.id, author: value.author, state: value.state, body: typeof value.body === "string" ? value.body : "", submittedAt: value.submitted_at }];
     });
+  }
+
+  /**
+   * #359: pull request `number`, open or not, with its base branch and head commit; undefined when `number` is an issue,
+   * not a pull request.
+   */
+  async pullRequest(repo: string, number: number): Promise<PullRequestRef | undefined> {
+    const found = await this.exec("gh", ["api", `repos/${repo}/pulls/${number}`, "--jq", "{state, base: .base.ref, head: .head.sha, url: .html_url, headRepo: .head.repo.full_name, headRef: .head.ref}"]);
+    if (found.code !== 0) {
+      if (/HTTP 404|Not Found/u.test(found.stderr)) return undefined;
+      throw new Error(`gh could not read ${repo}#${number}: ${found.stderr.trim().split("\n").pop() ?? ""}`);
+    }
+    const value = JSON.parse(found.stdout) as { state?: unknown; base?: unknown; head?: unknown; url?: unknown; headRepo?: unknown; headRef?: unknown };
+    if (typeof value.base !== "string" || typeof value.head !== "string") return undefined;
+    return {
+      repo, number, open: value.state === "open", base: value.base, head: value.head, url: typeof value.url === "string" ? value.url : "",
+      // A deleted fork has no repository; its branch can no longer take a follow-up.
+      headRepo: typeof value.headRepo === "string" ? value.headRepo : "", headRef: typeof value.headRef === "string" ? value.headRef : "",
+    };
+  }
+
+  /** #359: the pull requests that mention issue `issue` (GitHub's cross-references), in any repository: owner/name and number. */
+  async linkedPulls(repo: string, issue: number): Promise<Array<{ repo: string; number: number }>> {
+    const out = await run(this.exec, "gh", ["api", "--paginate", `repos/${repo}/issues/${issue}/timeline?per_page=100`, "--jq",
+      '.[] | select(.event == "cross-referenced") | .source.issue | select(.pull_request != null) | {repo: .repository.full_name, number}']);
+    const found = new Map<string, { repo: string; number: number }>();
+    for (const line of out.split("\n").filter((entry) => entry.trim() !== "")) {
+      const value = JSON.parse(line) as { repo?: unknown; number?: unknown };
+      if (typeof value.repo === "string" && typeof value.number === "number") found.set(`${value.repo}#${value.number}`, { repo: value.repo, number: value.number });
+    }
+    return [...found.values()];
+  }
+
+  /** #359: opens an issue, and answers its number. */
+  async createIssue(repo: string, title: string, body: string): Promise<number> {
+    const out = await run(this.exec, "gh", ["api", "-X", "POST", `repos/${repo}/issues`, "--input", "-", "--jq", ".number"], { input: JSON.stringify({ title, body }) });
+    const number = Number(out.trim());
+    if (!Number.isInteger(number) || number <= 0) throw new Error(`GitHub answered no issue number for the new issue in ${repo}`);
+    return number;
   }
 
   async issueState(repo: string, issue: number): Promise<"open" | "closed"> {

@@ -16,7 +16,7 @@ import { createLoopMcpServer } from "./mcp.js";
 import { ARTIFACT_SECTIONS } from "./instructions.js";
 import { artifactDigest, missingSections, readArtifact } from "./exit-checks.js";
 import { artifactPath } from "./naming.js";
-import type { LoopDefinition } from "./definitions.js";
+import type { Artifact, LoopDefinition } from "./definitions.js";
 import type { WorkItemState } from "./state.js";
 import { LoopStore, RepoSlugSchema } from "./state.js";
 
@@ -39,7 +39,7 @@ const ATTEND_MS = 2_000;
  */
 async function documentLines(loop: LoopDefinition, state: WorkItemState): Promise<string[]> {
   const artifacts = [...new Set(loop.steps.filter((step) => step.actor === "agent" && step.artifact !== undefined).map((step) => ({ artifact: step.artifact!, phase: step.phase })).map((entry) => JSON.stringify(entry)))]
-    .map((entry) => JSON.parse(entry) as { artifact: "requirements" | "design" | "plan"; phase?: string });
+    .map((entry) => JSON.parse(entry) as { artifact: Artifact; phase?: string });
   const lines: string[] = [];
   for (const { artifact, phase } of artifacts) {
     const path = artifactPath(state.issue, artifact);
@@ -178,20 +178,22 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
       context.stderr.write(`${new Date().toISOString()} rovara loop daemon stopped\n`);
     });
 
-  for (const [keyword, name, what] of [
-    ["do", "Do", "no gates; it never publishes"],
-    ["quick", "Quick", "plan, your approval, code, checks, then a pull request"],
-    ["full", "Full", "requirements, design and plan, each approved; then code, checks and a pull request. Start the instruction with --skip design (or requirements) to declare a phase away"],
+  for (const [keyword, name, what, argument] of [
+    ["do", "Do", "no gates; it never publishes", "<instruction...>"],
+    ["quick", "Quick", "plan, your approval, code, checks, then a pull request", "<instruction...>"],
+    ["full", "Full", "requirements, design and plan, each approved; then code, checks and a pull request. Start the instruction with --skip design (or requirements) to declare a phase away", "<instruction...>"],
+    ["review", "Review", "reviews a pull request, or every one that mentions an issue, round after round, against your brief; it changes no code. Without a brief it asks for one", "[brief...]"],
+    ["contribute", "Contribute", "joins an issue, or someone else's pull request with a follow-up into its branch, to meet a goal and success criteria; it asks for them if the brief lacks them", "[brief...]"],
   ] as const) {
-    loop.command(keyword).description(`start a ${name} loop on an issue (${what}): posts \`/rovara ${keyword} <instruction>\` there as you`)
+    loop.command(keyword).description(`start a ${name} loop on an issue (${what}): posts \`/rovara ${keyword} ${argument.replace("...", "")}\` there as you`)
       .requiredOption("--issue <number>", "the issue (or pull request) number")
       .option("--repo <path>", "the repository's checkout; this directory by default")
-      .argument("<instruction...>", "what the agent should do")
-      .action(async (words: string[], options: { issue: string; repo?: string }) => {
+      .argument(argument, keyword === "review" ? "what the review should cover" : keyword === "contribute" ? "the goal and success criteria (## Goal, ## Success criteria)" : "what the agent should do")
+      .action(async (words: string[] | undefined, options: { issue: string; repo?: string }) => {
         const found = await repoAt(options.repo);
         const issue = Number(options.issue);
         if (!Number.isInteger(issue) || issue <= 0) throw new Error("--issue must be an issue number");
-        await run(exec, "gh", ["api", "-X", "POST", `repos/${found.repo}/issues/${issue}/comments`, "--input", "-"], { input: JSON.stringify({ body: `/rovara ${keyword} ${words.join(" ")}` }) });
+        await run(exec, "gh", ["api", "-X", "POST", `repos/${found.repo}/issues/${issue}/comments`, "--input", "-"], { input: JSON.stringify({ body: `/rovara ${keyword} ${(words ?? []).join(" ")}`.trimEnd() }) });
         say(`Asked for a ${name} loop on ${found.repo}#${issue}. The daemon picks it up on its next read${await daemonPid() === undefined ? "; it is not running: rovara loop start" : ""}.`);
       });
   }
@@ -215,6 +217,7 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
         ...(await documentLines(definition, state)),
         ...(state.session === undefined ? [] : [`Agent: tmux attach -t =${state.session.tmux}`]),
         ...(await pullLines(repo, issue)),
+        ...(state.rounds === undefined ? [] : [`Review: ${state.rounds} round${state.rounds === 1 ? "" : "s"}, ${(state.findings ?? []).length} finding${(state.findings ?? []).length === 1 ? "" : "s"} (${(state.findings ?? []).filter((finding) => finding.filed !== undefined).length} filed as issues)`]),
       ].join("\n"));
     });
 

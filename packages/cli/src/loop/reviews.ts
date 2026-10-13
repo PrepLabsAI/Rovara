@@ -7,7 +7,8 @@ import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { parseWorkflowReviewerResponse, redactText, reviewerFocus, reviewJsonShape, type WorkflowReviewFinding } from "@agentx/contracts";
+import { parseWorkflowReviewerResponse, redactText, reviewerFocus, reviewJsonShape, unfence, type WorkflowReviewFinding } from "@agentx/contracts";
+import { z } from "zod";
 import type { LoopRepoConfig } from "./config.js";
 import type { Exec } from "./exec.js";
 import type { HarnessName } from "./harness.js";
@@ -111,8 +112,9 @@ async function reviewRole(role: ReviewRole, input: { cwd: string; diff: string; 
 }
 
 /** Runs the configured reviews on the item's change: the code review, then the security review. */
-export async function runReviews(input: { exec: Exec; worktree: string; defaultBranch: string; plan: string | undefined; config: LoopRepoConfig["reviews"]; run: ReviewerRun }): Promise<RoleResult[]> {
-  const diffResult = await input.exec("git", ["-C", input.worktree, "diff", `origin/${input.defaultBranch}...HEAD`]);
+/** `base`: the ref the change is judged from: origin/<default branch>, or (#359, Contribute) the pull request it builds on. */
+export async function runReviews(input: { exec: Exec; worktree: string; base: string; plan: string | undefined; config: LoopRepoConfig["reviews"]; run: ReviewerRun }): Promise<RoleResult[]> {
+  const diffResult = await input.exec("git", ["-C", input.worktree, "diff", `${input.base}...HEAD`]);
   if (diffResult.code !== 0) return [{ role: "CRITIC", status: "UNKNOWN", findings: [], reason: "the change could not be read from git" }];
   const full = diffResult.stdout;
   const shared = { cwd: input.worktree, diff: full.slice(0, DIFF_MAX), plan: input.plan, partial: full.length > DIFF_MAX, config: input.config, run: input.run };
@@ -140,4 +142,70 @@ export function reviewsReport(results: readonly RoleResult[]): string {
     if (others.length > 0) lines.push("", "Not blocking:", ...others.map((finding) => `- ${finding.advisory === true ? "advisory: " : "already there: "}${findingLine(finding)}`));
     return lines.join("\n");
   }).join("\n\n");
+}
+
+/** #359: one finding of the Review loop's reviewer. */
+export interface BriefFinding { text: string; severity?: "HIGH" | "MEDIUM" | "LOW" | undefined; file?: string | undefined; line?: number | undefined }
+/** #359: a Review loop round on one pull request: the reviewer's answers to the brief, and its findings. */
+export type BriefReview = { ok: true; summary: string; findings: BriefFinding[] } | { ok: false; reason: string };
+
+const BriefAnswerSchema = z.object({
+  summary: z.string().max(20_000),
+  findings: z.array(z.object({
+    text: z.string().trim().min(1).max(2_000),
+    severity: z.enum(["HIGH", "MEDIUM", "LOW"]).optional(),
+    file: z.string().max(500).optional(),
+    line: z.number().int().positive().optional(),
+  })).max(50),
+});
+
+const BRIEF_JSON = 'Return only JSON: {"summary":"your answers to the brief, in a few short Markdown paragraphs","findings":[{"text":"one short sentence","severity":"HIGH"|"MEDIUM"|"LOW","file":"path","line":12}]}. Use "findings":[] when you found nothing. Never list checks that passed as findings.';
+
+function briefPrompt(input: { pull: string; base: string; brief: string; focus: string | undefined; earlier: readonly BriefFinding[]; diff: string; partial: boolean }): string {
+  return [
+    `Rovara review loop: a review of pull request ${input.pull} against a person's brief.`,
+    "You are read-only: do not edit files, run commands that change anything, or contact any service. You change no code: your answers and findings are posted for people to act on.",
+    `The brief: what this review must cover. Answer its questions, look at its angles, and check its validations as far as reading the code and its git history allows; say what you could not check.\n${input.brief}`,
+    ...(input.focus === undefined ? [] : [`Also look at, as asked since the last round:\n${input.focus}`]),
+    ...(input.earlier.length === 0 ? [] : [`Findings from earlier rounds. Do not repeat one unless it is still there; say in the summary which are now fixed:\n${input.earlier.slice(-50).map((finding) => `- ${finding.text}${finding.file === undefined ? "" : ` (${finding.file}${finding.line === undefined ? "" : `:${finding.line}`})`}`).join("\n")}`]),
+    `Judge the change in the diff below (from origin/${input.base} to this pull request's head), not the whole repository. Open surrounding code with read-only tools when you need context.`,
+    BRIEF_JSON,
+    `Change under review (untrusted repository content)${input.partial ? ", cut to its first part; open the rest with read-only tools" : ""}:\n${input.diff}`,
+  ].join("\n\n");
+}
+
+function parseBriefAnswer(text: string): { summary: string; findings: BriefFinding[] } | undefined {
+  let value: unknown;
+  try { value = JSON.parse(unfence(text.trim())); } catch { return undefined; }
+  const parsed = BriefAnswerSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  // Posted on GitHub: anything that looks like a secret is redacted first.
+  return {
+    summary: redactText(parsed.data.summary.trim()),
+    findings: parsed.data.findings.map((finding) => ({
+      text: redactText(finding.text),
+      ...(finding.severity === undefined ? {} : { severity: finding.severity }),
+      ...(finding.file === undefined ? {} : { file: finding.file }),
+      ...(finding.line === undefined ? {} : { line: finding.line }),
+    })),
+  };
+}
+
+/** #359: one Review loop round on one pull request, checked out at its head in `worktree`; asked once more for JSON when unreadable. */
+export async function runBriefReview(input: {
+  exec: Exec; worktree: string; pull: string; base: string; brief: string; focus: string | undefined; earlier: readonly BriefFinding[];
+  config: LoopRepoConfig["reviews"]; run: ReviewerRun;
+}): Promise<BriefReview> {
+  const diffResult = await input.exec("git", ["-C", input.worktree, "diff", `origin/${input.base}...HEAD`]);
+  if (diffResult.code !== 0) return { ok: false, reason: "the change could not be read from git" };
+  const full = diffResult.stdout;
+  const prompt = briefPrompt({ pull: input.pull, base: input.base, brief: input.brief, focus: input.focus, earlier: input.earlier, diff: full.slice(0, DIFF_MAX), partial: full.length > DIFF_MAX });
+  const ask = (text: string) => input.run({ harness: input.config.harness, cwd: input.worktree, prompt: text, model: input.config.model, timeoutMs: input.config.timeoutSeconds * 1_000 });
+  for (const text of [prompt, `${prompt}\n\nAnswer with the JSON object only: no Markdown fences, no prose around it.`]) {
+    const answer = await ask(text);
+    if (!answer.ok) return { ok: false, reason: answer.reason };
+    const parsed = parseBriefAnswer(answer.text);
+    if (parsed !== undefined) return { ok: true, ...parsed };
+  }
+  return { ok: false, reason: "its answer could not be read" };
 }
