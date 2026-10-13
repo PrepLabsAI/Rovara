@@ -18,4 +18,3 @@ Two one-line end-to-end test changes, one per repository, to exercise the per-PR
 
 - PrepLabsAI/Rovara: add docs/rovara-e2e/387.md
 - ps06756/agentx-phase3-e2e: add a docstring to add() in calculator.py
-- ps06756/Codeforces-Solutions: none (test entry; the loop should refuse it)
