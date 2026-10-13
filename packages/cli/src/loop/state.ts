@@ -44,6 +44,12 @@ export const WorkItemStateSchema = z.object({
   approvals: z.partialRecord(ArtifactSchema, z.object({ digest: z.string().regex(/^[a-f0-9]{64}$/), by: z.string(), at: z.string() }).strict()).optional(),
   /** Full (#357): the phases declared away when the loop started, and by whom (the starter). */
   skipped: z.array(z.string()).max(10).optional(),
+  /** #393: what collaborators asked for after the plan was approved (replies, pull request feedback), for the reviewers. */
+  requests: z.array(z.object({ author: z.string(), text: z.string().max(2_000), at: z.string() }).strict()).max(30).optional(),
+  /** #394: a person published past reviews that blocked or couldn't run, and who; cleared when the reviews pass. */
+  reviewsAccepted: z.object({ by: z.string(), at: z.string(), unrun: z.boolean() }).strict().optional(),
+  /** #394: the last reviews blocked because they couldn't be run or read. */
+  reviewsUnrun: z.boolean().optional(),
   /** #358: review rounds in a row that still blocked; reset when the reviews pass or a person decides. */
   reviewRounds: z.number().int().min(0).optional(),
   /** #358: the last reviews report, for the pull request's description and the evidence. */

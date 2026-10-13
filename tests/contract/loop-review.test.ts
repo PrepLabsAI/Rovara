@@ -12,7 +12,7 @@ const dirs: string[] = [];
 afterEach(async () => { await removeAll(dirs); });
 
 const PULL = 77;
-const answer = (summary: string, findings: Array<Record<string, unknown>> = []) => JSON.stringify({ summary, findings });
+const answer = (summary: string, findings: Array<Record<string, unknown>> = [], still: number[] = []) => JSON.stringify({ summary, findings, still });
 const DOUBLE_BILL = { text: "Retrying a charge can bill the card twice", severity: "HIGH", file: "src/retry.ts", line: 3 };
 const NO_LOG = { text: "Retries are not logged", severity: "LOW" };
 
@@ -30,7 +30,7 @@ describe("the Review loop's commands (#359)", () => {
 
 describe("the Review loop on a pull request (#359)", () => {
   it("waits for its brief, then reviews round after round, changing no code, and files a finding on request", async () => {
-    const h = await createLoopHarness(dirs, { critic: [answer("The retry is not idempotent.", [DOUBLE_BILL]), answer("Idempotent now.", [NO_LOG]), answer("Logging checked.")] });
+    const h = await createLoopHarness(dirs, { critic: [answer("The retry is not idempotent.", [DOUBLE_BILL]), answer("Still not idempotent.", [NO_LOG], [1]), answer("Logging checked.")] });
     h.world.openPulls.set(PULL, { base: "main", head: "aaa1111aaaa", open: true });
     const posted = () => h.world.posted(PULL).at(-1) ?? "";
     const say = async (author: string, body: string) => { h.world.say(PULL, author, body); await h.daemon.poll(); };
@@ -42,6 +42,8 @@ describe("the Review loop on a pull request (#359)", () => {
     expect(h.world.labels.get(PULL)).toEqual(new Set(["rovara:review-brief"]));
     expect(posted()).toContain("It reads and comments, and changes no code.");
     expect(posted()).toContain(BRIEF_TEMPLATE);
+    // #395: the template's code fence is closed on a line of its own, so the comment after it renders.
+    expect(posted()).toContain("```\n\nClose the issue or comment `/rovara stop` to end it.");
     await h.runOwnSteps();
     expect(h.reviewerRuns).toEqual([]);
     await say("mallory", "## Questions\n- Anything at all?");
@@ -57,6 +59,10 @@ describe("the Review loop on a pull request (#359)", () => {
     expect(h.reviewerRuns[0]).toMatchObject({ cwd: worktree, harness: "claude-code" });
     expect(h.reviewerRuns[0]!.prompt).toContain("Is the retry idempotent?");
     expect(h.reviewerRuns[0]!.prompt).toContain(h.world.diff);
+    // #393: the reviewer is told what the pull request says, and what collaborators said.
+    expect(h.reviewerRuns[0]!.prompt).toContain("Pull request acme/payments#77: Pull request 77");
+    expect(h.reviewerRuns[0]!.prompt).toContain("- @maya on acme/payments#77: ## Questions - Is the retry idempotent?");
+    expect(h.reviewerRuns[0]!.prompt).not.toContain("Anything at all?");
     expect((await review())?.step).toBe("waiting");
     expect(h.world.labels.get(PULL)).toEqual(new Set(["rovara:reviewed"]));
     expect(posted()).toContain("### Review, round 1\n\n**acme/payments#77** at `aaa1111`\n\nThe retry is not idempotent.\n\n1. **HIGH** Retrying a charge can bill the card twice (`src/retry.ts:3`)");
@@ -70,10 +76,13 @@ describe("the Review loop on a pull request (#359)", () => {
     expect(posted()).toContain("New commits on acme/payments#77 (`bbb2222`): reviewing again.");
     await h.runOwnSteps();
     expect(h.world.checkedOut.at(-1)).toBe(`refs/rovara/review/77 @ ${worktree}`);
-    expect(h.reviewerRuns[1]!.prompt).toContain("Findings from earlier rounds.");
-    expect(h.reviewerRuns[1]!.prompt).toContain("- Retrying a charge can bill the card twice (src/retry.ts:3)");
+    expect(h.reviewerRuns[1]!.prompt).toContain("Findings from earlier rounds, by number.");
+    expect(h.reviewerRuns[1]!.prompt).toContain("1. Retrying a charge can bill the card twice (src/retry.ts:3)");
     expect(posted()).toContain("### Review, round 2");
+    // #395: finding 1 is still there under its number; only the new one is numbered on.
     expect(posted()).toContain("2. **LOW** Retries are not logged");
+    expect(posted()).toContain("Still there from earlier rounds: 1.");
+    expect(posted()).not.toContain("3. **HIGH**");
 
     // A reply asks round 3 to look at more; it is used once.
     await say("sam", "Also check what is logged on each retry.");

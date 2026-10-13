@@ -42,10 +42,14 @@ export class LoopWorld {
   readonly pushes: string[] = [];
   readonly pullRequests: FakePullRequest[] = [];
   readonly titles = new Map<number, string>();
+  /** #393: issues' and pull requests' descriptions. */
+  readonly bodies = new Map<number, string>();
   /** The default branch GitHub names; the clone's origin/HEAD is never asked. */
   defaultBranch = "main";
   /** What the loop committed itself (its evidence), as "<path>: <message>". */
   readonly loopCommits: string[] = [];
+  /** #394: how many times the loop rewrote a pull request's description. */
+  descriptionUpdates = 0;
   /** #390: GitHub API paths that fail (as GitHub's errors do) while they match. */
   failPaths: RegExp[] = [];
   /** #392: the clones made for Codex items, as their `git clone` arguments. */
@@ -140,6 +144,14 @@ export class LoopWorld {
         .map((comment) => JSON.stringify({ id: comment.id, pull_request_url: `https://api.github.com/repos/${this.repo}/pulls/${comment.pull}`, author: comment.author, body: comment.body, path: comment.path, line: comment.line, updated_at: comment.updated_at })).join("\n"));
     }
     const pull = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/u.exec(path);
+    // #394: the loop rewrites its pull request's description on every push.
+    if (pull !== null && method === "PATCH") {
+      const own = this.pullRequests.find((candidate) => candidate.number === Number(pull[1]));
+      if (own === undefined) return fail("gh: Not Found (HTTP 404)");
+      own.body = (JSON.parse(input) as { body: string }).body;
+      this.descriptionUpdates += 1;
+      return ok("{}");
+    }
     if (pull !== null) {
       const number = Number(pull[1]);
       const own = this.pullRequests.find((candidate) => candidate.number === number);
@@ -148,7 +160,7 @@ export class LoopWorld {
       const value = own === undefined
         ? { headRepo: this.repo, headRef: `feature-${number}`, ...theirs!, url: `https://github.com/${this.repo}/pull/${number}` }
         : { base: own.base, head: `head-${number}`, open: !this.closed.has(number), url: own.url, headRepo: this.repo, headRef: own.head };
-      return ok(JSON.stringify({ state: value.open ? "open" : "closed", base: value.base, head: value.head, url: value.url, headRepo: value.headRepo, headRef: value.headRef }));
+      return ok(JSON.stringify({ state: value.open ? "open" : "closed", base: value.base, head: value.head, url: value.url, headRepo: value.headRepo, headRef: value.headRef, title: this.titles.get(number) ?? `Pull request ${number}`, body: own?.body ?? this.bodies.get(number) ?? "" }));
     }
     const timeline = /^repos\/[^/]+\/[^/]+\/issues\/(\d+)\/timeline/u.exec(path);
     if (timeline !== null) return ok((this.links.get(Number(timeline[1])) ?? []).map((link) => JSON.stringify(link)).join("\n"));
@@ -172,6 +184,11 @@ export class LoopWorld {
     const labels = this.labels.get(number) ?? new Set<string>();
     this.labels.set(number, labels);
     if (rest === "" && method === "GET" && args.includes(".title")) return ok(`${this.titles.get(number) ?? `Issue ${number}`}\n`);
+    // #393: an issue's text, and its conversation, for a reviewer.
+    if (rest === "" && method === "GET" && args.includes("{title, body}")) return ok(JSON.stringify({ title: this.titles.get(number) ?? `Issue ${number}`, body: this.bodies.get(number) ?? "" }));
+    if (rest.startsWith("/comments?") && method === "GET") {
+      return ok(this.comments.filter((comment) => comment.issue === number).map((comment) => JSON.stringify({ author: comment.author, body: comment.body })).join("\n"));
+    }
     if (rest === "" && method === "GET") return ok(this.closed.has(number) ? "closed\n" : "open\n");
     if (rest === "/comments" && method === "POST") { this.say(number, this.developer, (JSON.parse(input) as { body: string }).body); return ok("{}"); }
     if (rest === "/labels" && method === "GET") return ok([...labels].join("\n"));
