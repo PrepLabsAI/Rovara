@@ -9,7 +9,7 @@ import { addProject, ec2Binding } from "../../packages/cli/src/setup/project-add
 import { fakeControlPlane, FOUNDATION_OUTPUTS } from "../../tests/support/setup-fakes.js";
 import { scriptedPrompter } from "../../tests/support/init-fakes.js";
 import {
-  canonicalJson, canonicalPlanJson, createCandidateManifest, WorkerInvocationSchema, parsePlanDocument, readCanonicalPlan,
+  canonicalJson, canonicalPlanJson, createCandidateManifest, ProjectSetupExecutionSchema, WorkerInvocationSchema, parsePlanDocument, readCanonicalPlan,
   planDocumentMarkdown, type E2EPolicy, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { call, createBroker, issuer, loadSlackBroker } from "../../tests/support/slack-broker.js";
@@ -46,7 +46,7 @@ const gitBlob = (cwd: string, revision: string, path: string): Buffer | undefine
 };
 
 describe("P0 normal project onboarding journey", () => {
-  it.each(["unchanged", "admin-revocation", "runtime-generation", "runtime-correlation"] as const)(
+  it.each(["unchanged", "admin-revocation", "runtime-generation", "runtime-correlation", "runtime-catalog-revision"] as const)(
     "rejects setup terminal qualification after current authority changes: %s", async (authorityMutation) => {
     const evidenceRoot = process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR;
     expect(evidenceRoot, "CONTAINED_FOUNDATION_EVIDENCE_DIR must be pre-created outside the fresh TMPDIR").toBeDefined();
@@ -255,6 +255,10 @@ describe("P0 normal project onboarding journey", () => {
       projectRows: broker.db.find((item) => item.entityType === "PROJECT_SETUP_EXECUTION" || item.entityType === "OUTBOX") })).toHaveLength(1);
     expect(outboxes).toHaveLength(1);
     const executionRow = setupExecutions[0]!;
+    expect(executionRow.runtimeCatalogRevision, "the execution records the exact server-admitted catalog revision").toBe(1);
+    const { runtimeCatalogRevision: _catalogRevision, ...legacyExecutionRow } = executionRow;
+    void _catalogRevision;
+    expect(ProjectSetupExecutionSchema.safeParse(legacyExecutionRow).success, "missing admitted catalog revision is not migrated from the current registry").toBe(false);
     const outboxRow = outboxes[0]!;
     const setupExecutionId = String(executionRow.setupExecutionId);
     const operationId = String(executionRow.operationId);
@@ -307,7 +311,9 @@ describe("P0 normal project onboarding journey", () => {
         const currentRuntime = broker.db.get(runtimeCatalogKey.pk, runtimeCatalogKey.sk)!;
         const replacementRuntime = authorityMutation === "runtime-generation"
           ? { ...currentRuntime, generation: Number(currentRuntime.generation) + 1 }
-          : { ...currentRuntime, transportCorrelationId: randomUUID() };
+          : authorityMutation === "runtime-correlation"
+            ? { ...currentRuntime, transportCorrelationId: randomUUID() }
+            : { ...currentRuntime, catalogRevision: Number(currentRuntime.catalogRevision) + 1 };
         broker.db.set(replacementRuntime);
         await writeFile(join(root, `${authorityMutation}-before-terminal.json`), JSON.stringify({ oldRuntime: currentRuntime, currentRuntime: replacementRuntime,
           execution: broker.db.get(`PROJECT_SETUP#${setupExecutionId}`, "EXECUTION") }), { flag: "wx" });
@@ -400,6 +406,10 @@ describe("P0 normal project onboarding journey", () => {
       broker.db.set({ ...originalRuntime, runtimeCatalogId: "replacement-catalog" });
       const changedCatalogRetry = await call(broker.handler, { method: "POST", path: retryPath, user: { subject: "owner", admin: true }, body: { requestId: randomUUID() } });
       expect([409, 503], "a changed runtime catalog requires normal reapproval before allocation").toContain(changedCatalogRetry.status);
+      const changedRevisionRuntime = { ...originalRuntime, catalogRevision: Number(originalRuntime.catalogRevision) + 1 };
+      broker.db.set(changedRevisionRuntime);
+      const changedRevisionRetry = await call(broker.handler, { method: "POST", path: retryPath, user: { subject: "owner", admin: true }, body: { requestId: randomUUID() } });
+      expect([409, 503], "a changed admitted catalog revision requires normal reapproval before allocation").toContain(changedRevisionRetry.status);
       broker.db.set(originalRuntime);
       const originalProjectDefinition = projectRow.definition as Record<string, unknown>;
       const originalPolicy = originalProjectDefinition.e2e as { limits: Record<string, number | undefined> };

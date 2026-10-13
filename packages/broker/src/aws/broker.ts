@@ -1872,7 +1872,8 @@ async function createProjectSetupAdmissionRows(
     discoveredTargetIds: derived.discoveredTargetIds,
     notExecutedTargetIds: derived.unsupportedTargetIds,
     runtime: { runtimeCatalogId: runtime.runtimeCatalogId, catalogRevision: runtime.catalogRevision, bindingDigest: runtime.bindingDigest,
-      manifestDigest: runtime.manifestDigest, runnerEnvironment: runtime.runnerEnvironment, generation: runtime.generation, endpoint: runtime.endpoint, expiresAt: runtime.expiresAt },
+      manifestDigest: runtime.manifestDigest, runnerEnvironment: runtime.runnerEnvironment, generation: runtime.generation,
+      transportCorrelationId, endpoint: runtime.endpoint, expiresAt: runtime.expiresAt },
     ...(retry ? { retryOfExecutionId: retry.retryOfExecutionId, retryActorKey: identity.ownerKey } : {}),
   };
   const executionBytes = Buffer.from(canonicalJson(executionObject), "utf8");
@@ -1891,7 +1892,8 @@ async function createProjectSetupAdmissionRows(
     projectName: project.definition.name, projectRevision: project.definition.revision, ownerKey: identity.ownerKey, approvalRevision: 1,
     proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256, candidateDigest: setupApproval.candidateDigest,
     policyDigest: approval.policyDigest, bindingDigest: runtime.bindingDigest, runtimeGeneration: runtime.generation,
-    executionRef, runtimeCatalogId: runtime.runtimeCatalogId, state: "ACCEPTED", operationId, outboxId, fence,
+    executionRef, runtimeCatalogId: runtime.runtimeCatalogId, runtimeCatalogRevision: runtime.catalogRevision,
+    state: "ACCEPTED", operationId, outboxId, fence,
     deadlineAt: setupRunContext.deadlineAt, evidenceByteLimit, createdAt: now.toISOString(),
     ...(retry ? { retryOfExecutionId: retry.retryOfExecutionId, retryActorKey: identity.ownerKey } : {}) });
   const session = ProjectSetupSessionSchema.parse({ schemaVersion: 1, setupExecutionId, subjectId, transportCorrelationId,
@@ -1947,7 +1949,12 @@ async function retryProjectSetupAsAdministrator(
   if (!runtime.success) throw agentXError("RUNTIME_UNAVAILABLE", "the exact approved setup runtime binding is unavailable");
   const admittedRuntime = admitProjectSetupRuntime(runtime.data, { runtimeCatalogId: parked.data.runtimeCatalogId, binding: project.runtimeBinding,
     scope: "source-interface", now: Date.now() });
-  if (!admittedRuntime) throw agentXError("RUNTIME_UNAVAILABLE", "the exact approved setup runtime binding is not currently qualified");
+  if (!admittedRuntime || admittedRuntime.catalogRevision !== parked.data.runtimeCatalogRevision) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "the admitted setup catalog revision changed; complete normal approval before retry");
+  }
+  if (!(await setupAdmissionMatchesExecution(dependencies, parked.data))) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the immutable setup admission does not match its stored execution identity");
+  }
   const prior = await getItem<Record<string, unknown>>(dependencies, idempotencyKey);
   if (prior && prior.entityType === "PROJECT_SETUP_RETRY" && prior.previousExecutionId === setupExecutionId
     && prior.retryActorKey === identity.ownerKey && prior.originalCreatorKey === parked.data.ownerKey
@@ -5493,6 +5500,9 @@ async function requireProjectSetupCapability(
     || session.data.generation !== execution.data.runtimeGeneration || session.data.bindingDigest !== execution.data.bindingDigest) {
     throw agentXError("STALE_FENCE", "setup artifact operation is no longer current");
   }
+  if (!(await setupAdmissionMatchesExecution(dependencies, execution.data))) {
+    throw agentXError("STALE_FENCE", "immutable setup admission no longer matches its stored execution identity");
+  }
   const project = await requireProject(dependencies, execution.data.projectName, execution.data.projectRevision);
   if (project.runtimeBinding.deploymentMode !== "ec2-ebs") throw agentXError("RUNTIME_UNAVAILABLE", "project setup requires the configured EC2 setup runtime");
   const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${execution.data.projectName}`, sk: `PROPOSAL#${execution.data.proposalSha256}` });
@@ -5508,11 +5518,33 @@ async function requireProjectSetupCapability(
     Key: projectSetupRuntimeKey(catalogId, execution.data.bindingDigest), ConsistentRead: true }));
   const runtimeKey = projectSetupRuntimeKey(catalogId, execution.data.bindingDigest);
   const runtime = ProjectSetupRuntimeRecordSchema.safeParse(projectSetupRuntimeRecord(catalogItem.Item, runtimeKey));
-  if (!runtime.success || runtime.data.transportCorrelationId !== execution.data.transportCorrelationId || runtime.data.generation !== execution.data.runtimeGeneration
+  if (!runtime.success || runtime.data.runtimeCatalogId !== execution.data.runtimeCatalogId
+    || runtime.data.catalogRevision !== execution.data.runtimeCatalogRevision
+    || runtime.data.transportCorrelationId !== execution.data.transportCorrelationId || runtime.data.generation !== execution.data.runtimeGeneration
     || !admitProjectSetupRuntime(runtime.data, { runtimeCatalogId: catalogId, binding: project.runtimeBinding, scope: "source-interface", now: Date.now() })) {
     throw agentXError("STALE_FENCE", "current configured setup runtime is no longer qualified");
   }
   return { execution: execution.data, claims, runtime: runtime.data };
+}
+
+async function setupAdmissionMatchesExecution(
+  dependencies: AwsBrokerDependencies,
+  execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>,
+): Promise<boolean> {
+  const text = await readStoredText(dependencies.s3, dependencies.artifactBucketName, execution.executionRef.key, MAX_SETUP_PROPOSAL_BYTES);
+  if (text === undefined || Buffer.byteLength(text, "utf8") !== execution.executionRef.byteLength
+    || createHash("sha256").update(text, "utf8").digest("hex") !== execution.executionRef.sha256) return false;
+  let admission: unknown;
+  try { admission = JSON.parse(text); } catch { return false; }
+  if (!admission || typeof admission !== "object" || Array.isArray(admission)) return false;
+  const value = admission as Record<string, unknown>;
+  const runtime = value.runtime && typeof value.runtime === "object" && !Array.isArray(value.runtime)
+    ? value.runtime as Record<string, unknown> : undefined;
+  return value.domain === "project-setup-source-interface/v1" && value.setupExecutionId === execution.setupExecutionId
+    && value.subjectId === execution.subjectId && value.transportCorrelationId === execution.transportCorrelationId
+    && value.candidateDigest === execution.candidateDigest && runtime?.runtimeCatalogId === execution.runtimeCatalogId
+    && runtime.catalogRevision === execution.runtimeCatalogRevision && runtime.bindingDigest === execution.bindingDigest
+    && runtime.generation === execution.runtimeGeneration && runtime.transportCorrelationId === execution.transportCorrelationId;
 }
 
 async function handleProjectSetupCallback(
@@ -5658,6 +5690,13 @@ async function verifyProjectSetupSmokeEvidence(
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
     admission = parsed as Record<string, unknown>;
   } catch { return undefined; }
+  const admittedRuntime = admission.runtime && typeof admission.runtime === "object" && !Array.isArray(admission.runtime)
+    ? admission.runtime as Record<string, unknown> : undefined;
+  if (admittedRuntime?.runtimeCatalogId !== execution.runtimeCatalogId
+    || admittedRuntime.catalogRevision !== execution.runtimeCatalogRevision
+    || admittedRuntime.bindingDigest !== execution.bindingDigest
+    || admittedRuntime.generation !== execution.runtimeGeneration
+    || admittedRuntime.transportCorrelationId !== execution.transportCorrelationId) return undefined;
   if (typeof admission.planDigest !== "string" || evidence.planDigest !== admission.planDigest) return undefined;
   if (admission.domain !== "project-setup-source-interface/v1" || admission.setupExecutionId !== execution.setupExecutionId
     || admission.subjectId !== execution.subjectId || admission.transportCorrelationId !== execution.transportCorrelationId

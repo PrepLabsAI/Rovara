@@ -431,7 +431,9 @@ export function createProjectSetupDispatchGuard(input: { documentClient: DynamoD
     Key: projectSetupRuntimeKey(catalogId, row.bindingDigest), ConsistentRead: true }));
   const catalogKey = projectSetupRuntimeKey(catalogId, row.bindingDigest);
   const catalog = ProjectSetupRuntimeRecordSchema.safeParse(setupRuntimeDomainRow(catalogItem.Item, catalogKey));
-  if (!catalog.success || catalog.data.transportCorrelationId !== row.transportCorrelationId || catalog.data.generation !== row.runtimeGeneration
+  if (!catalog.success || catalog.data.runtimeCatalogId !== row.runtimeCatalogId
+    || catalog.data.catalogRevision !== row.runtimeCatalogRevision
+    || catalog.data.transportCorrelationId !== row.transportCorrelationId || catalog.data.generation !== row.runtimeGeneration
     || !admitProjectSetupRuntime(catalog.data, { runtimeCatalogId: catalogId, binding: binding.data, scope: "source-interface", now: (input.now ?? Date.now)() })) return "PARKED";
   const storedSession = session.data;
   if (storedSession.state !== "READY" || storedSession.setupExecutionId !== setupId || storedSession.subjectId !== row.subjectId
