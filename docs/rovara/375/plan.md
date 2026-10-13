@@ -10,4 +10,8 @@ Add `docs/rovara-e2e/375.md` so a reader can see the Full loop's three documents
 
 ## Testing
 
-Check that the file exists with that heading and exactly three lines, one per document, and that `git diff --stat mainline` shows no other new or changed files outside `docs/rovara/375/`.
+Check that the file exists with that heading and exactly three lines, one per document, and that `git diff --stat mainline` shows no other new or changed files outside `docs/rovara/375/`. The loop's check is that `docs/rovara-e2e` exists.
+
+## Review feedback
+
+- @ps06756 (2026-10-13T12:33:01.884Z): Under Testing, say the loop's check is that docs/rovara-e2e exists.
