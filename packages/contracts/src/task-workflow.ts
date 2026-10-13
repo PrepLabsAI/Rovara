@@ -962,13 +962,18 @@ const WorkflowSnapshotShapeSchema = z.object({
   canvasCloseout: WorkflowCanvasCloseoutSchema.optional(),
   canvasCloseoutAttempt: WorkflowCanvasCloseoutAttemptSchema.optional(),
   workflowDependenciesApproval: WorkflowDependencyApprovalSchema.optional(),
+  /** Broker-authored pointer to the accepted operation for the current approved graph attempt; never exposed in task views. */
+  workflowDependenciesOperationId: z.string().uuid().optional(),
   workflowDependenciesProgress: z.array(WorkItemProgressV1Schema).max(32).optional(),
 }).superRefine((workflow, context) => {
-  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, feedbackThreadObservations: workflow.feedbackThreadObservations, verificationRetries: workflow.verificationRetries, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout, canvasCloseoutAttempt: workflow.canvasCloseoutAttempt, workflowDependenciesApproval: workflow.workflowDependenciesApproval, workflowDependenciesProgress: workflow.workflowDependenciesProgress };
+  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, feedbackThreadObservations: workflow.feedbackThreadObservations, verificationRetries: workflow.verificationRetries, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout, canvasCloseoutAttempt: workflow.canvasCloseoutAttempt, workflowDependenciesApproval: workflow.workflowDependenciesApproval, workflowDependenciesOperationId: workflow.workflowDependenciesOperationId, workflowDependenciesProgress: workflow.workflowDependenciesProgress };
   if (Buffer.byteLength(JSON.stringify(taskMetadata), "utf8") > 262_144) {
     context.addIssue({ code: "custom", message: "workflow metadata exceeds the task snapshot storage budget" });
   }
   const dependencyApproval = workflow.workflowDependenciesApproval;
+  if (workflow.workflowDependenciesOperationId !== undefined && dependencyApproval === undefined) {
+    context.addIssue({ code: "custom", path: ["workflowDependenciesOperationId"], message: "the current graph operation must reference a retained graph approval" });
+  }
   if (dependencyApproval !== undefined) {
     if (!workflow.artifacts.some((artifact) => artifact.type === "plan" && artifact.sha256 === dependencyApproval.artifactDigest)
       || !workflow.decisions.some((decision) => decision.workflowRevision === dependencyApproval.workflowRevision
@@ -1623,8 +1628,10 @@ export function submitWorkflowArtifact(
     required: current.checkPolicy.required, optional: current.checkPolicy.optional, selectedOptionalIds: [], proposed: [],
     ...(proposal === undefined ? {} : proposal.data),
   };
-  const { workflowDependenciesApproval: _oldDependencyApproval, workflowDependenciesProgress: _oldDependencyProgress, ...withoutOldDependencyApproval } = current;
+  const { workflowDependenciesApproval: _oldDependencyApproval, workflowDependenciesOperationId: _oldDependencyOperationId,
+    workflowDependenciesProgress: _oldDependencyProgress, ...withoutOldDependencyApproval } = current;
   void _oldDependencyApproval;
+  void _oldDependencyOperationId;
   void _oldDependencyProgress;
   const next = WorkflowSnapshotSchema.parse({
     ...withoutOldDependencyApproval,
