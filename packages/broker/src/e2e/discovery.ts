@@ -106,9 +106,36 @@ function parseAppleProject(path: string, text: string): { targets: AppleProjectT
     const root = dict(parseOpenStep(text)); const objects = dict(root?.objects); const projectRef = stringValue(root?.rootObject);
     if (!objects || !projectRef) throw new Error("PBX project root or objects are missing");
     const project = dict(objects[projectRef]);
-    if (stringValue(project?.isa) !== "PBXProject") throw new Error("PBX rootObject does not reference PBXProject");
+    if (!project || stringValue(project.isa) !== "PBXProject") throw new Error("PBX rootObject does not reference PBXProject");
     const targetRefs = array(project?.targets);
     if (!targetRefs || targetRefs.length > 128 || targetRefs.some((ref) => typeof ref !== "string")) throw new Error("PBX application target list is invalid or exceeds limits");
+    if (new Set(targetRefs).size !== targetRefs.length) throw new Error("PBX application target list contains duplicate source-target references");
+    const projectConfigurations = new Map<string, Record<string, OpenStepValue>>();
+    const ambiguousProjectConfigurationNames = new Set<string>();
+    const projectConfigurationsWithExternalBase = new Set<string>();
+    const projectConfigListRef = stringValue(project.buildConfigurationList);
+    const projectConfigList = dict(projectConfigListRef ? objects[projectConfigListRef] : undefined);
+    if (stringValue(projectConfigList?.isa) === "XCConfigurationList") {
+      const projectConfigRefs = array(projectConfigList?.buildConfigurations);
+      if (projectConfigRefs && projectConfigRefs.length <= 32) for (const configRefValue of projectConfigRefs) {
+        const configRef = stringValue(configRefValue); const config = dict(configRef ? objects[configRef] : undefined);
+        const name = stringValue(config?.name); const settings = dict(config?.buildSettings);
+        if (config && stringValue(config.isa) === "XCBuildConfiguration" && name && settings && !projectConfigurations.has(name) && !ambiguousProjectConfigurationNames.has(name)) {
+          projectConfigurations.set(name, settings);
+          if (stringValue(config.baseConfigurationReference) !== undefined) projectConfigurationsWithExternalBase.add(name);
+        }
+        else if (name) { projectConfigurations.delete(name); ambiguousProjectConfigurationNames.add(name); }
+      }
+    }
+    const projectDir = /^(.*?\.xcodeproj)\/project\.pbxproj$/i.exec(path)?.[1];
+    const plistPathFor = (rawValue: string | undefined): string | undefined => {
+      if (!rawValue || /\\/.test(rawValue)) return undefined;
+      const raw = rawValue.replace(/^\$\((?:SRCROOT|PROJECT_DIR)\)\/?|^\$\{(?:SRCROOT|PROJECT_DIR)\}\/?/, "");
+      if (/\$\(|\$\{/.test(raw)) return undefined;
+      if (!projectDir || !normalizedPath(raw)) return undefined;
+      const joined = projectDir.includes("/") ? `${projectDir.slice(0, projectDir.lastIndexOf("/"))}/${raw}` : raw;
+      return normalizedPath(joined) ? joined : undefined;
+    };
     const output: AppleProjectTarget[] = [];
     for (const targetRefValue of targetRefs) {
       const ref = stringValue(targetRefValue)!; const target = dict(objects[ref]);
@@ -121,27 +148,32 @@ function parseAppleProject(path: string, text: string): { targets: AppleProjectT
       const configs = configRefs.map((configRefValue) => {
         const configRef = stringValue(configRefValue); const config = dict(configRef ? objects[configRef] : undefined);
         if (!config || stringValue(config.isa) !== "XCBuildConfiguration") throw new Error("PBX build configuration is missing or has the wrong type");
-        const settings = dict(config.buildSettings); if (!settings) throw new Error("PBX build settings are missing");
-        return settings;
+        const settings = dict(config.buildSettings) ?? {};
+        const name = stringValue(config.name);
+        const inherited = name ? projectConfigurations.get(name) : undefined;
+        const hasExternalBaseConfig = stringValue(config.baseConfigurationReference) !== undefined;
+        const fact = (key: string): string | undefined => {
+          const own = stringValue(settings[key]);
+          const value = own ?? (!hasExternalBaseConfig && name && !projectConfigurationsWithExternalBase.has(name) && inherited ? stringValue(inherited[key]) : undefined);
+          return value?.trim() || undefined;
+        };
+        const sdk = fact("SDKROOT");
+        const supported = fact("SUPPORTED_PLATFORMS")?.split(/\s+/).filter(Boolean) ?? [];
+        const platformNames = [...(sdk ? [sdk] : []), ...supported];
+        const ios = platformNames.some((value) => value === "iphoneos" || value === "iphonesimulator");
+        const mac = platformNames.some((value) => value === "macosx");
+        const recognized = platformNames.length > 0 && platformNames.every((value) => ["iphoneos", "iphonesimulator", "macosx"].includes(value));
+        const platform: "ios" | "macos" | undefined = recognized && ios !== mac ? ios ? "ios" : "macos" : undefined;
+        const bundleId = fact("PRODUCT_BUNDLE_IDENTIFIER");
+        const normalizedBundle = bundleId && /^[A-Za-z0-9][A-Za-z0-9.-]{0,199}$/.test(bundleId) ? bundleId : undefined;
+        return { platform, bundleId: normalizedBundle, plistPath: plistPathFor(fact("INFOPLIST_FILE")) };
       });
-      const values = (key: string) => [...new Set(configs.map((settings) => stringValue(settings[key])).filter((value): value is string => value !== undefined))];
-      const sdkRoots = values("SDKROOT"); const platformLists = values("SUPPORTED_PLATFORMS"); const bundleIds = values("PRODUCT_BUNDLE_IDENTIFIER"); const plistPaths = values("INFOPLIST_FILE");
-      const platformNames = [...sdkRoots, ...platformLists.flatMap((value) => value.split(/\s+/))].filter(Boolean);
-      const iosFacts = platformNames.some((name) => ["iphoneos", "iphonesimulator"].includes(name));
-      const macFacts = platformNames.some((name) => name === "macosx");
-      const platform = iosFacts === macFacts ? undefined : iosFacts ? "ios" : "macos";
-      const normalizedBundle = bundleIds.length === 1 && /^[A-Za-z0-9][A-Za-z0-9.-]{0,199}$/.test(bundleIds[0]!) ? bundleIds[0] : undefined;
-      let resolvedPlist: string | undefined;
-      if (plistPaths.length === 1) {
-        const xcodeproj = /^(.*?\.xcodeproj)\/project\.pbxproj$/i.exec(path)?.[1];
-        const projectDir = xcodeproj ? xcodeproj.includes("/") ? xcodeproj.slice(0, xcodeproj.lastIndexOf("/")) : "." : undefined;
-        const raw = plistPaths[0]!.replace(/^\$\((?:SRCROOT|PROJECT_DIR)\)\/?|^\$\{(?:SRCROOT|PROJECT_DIR)\}\/?/, "");
-        if (projectDir !== undefined && normalizedPath(raw)) {
-          const joined = projectDir === "." ? raw : `${projectDir}/${raw}`;
-          if (normalizedPath(joined)) resolvedPlist = joined;
-        }
-      }
-      output.push({ ref, ...(platform ? { platform } : {}), ...(normalizedBundle ? { bundleId: normalizedBundle } : {}), ...(resolvedPlist ? { plistPath: resolvedPlist } : {}) });
+      const complete = configs.every((config) => config.platform && config.bundleId && config.plistPath);
+      const oneValue = <T>(values: Array<T | undefined>): T | undefined => values.length > 0 && values.every((value) => value !== undefined && value === values[0]) ? values[0] : undefined;
+      const platform = complete ? oneValue<"ios" | "macos">(configs.map((config) => config.platform)) : undefined;
+      const bundleId = complete ? oneValue<string>(configs.map((config) => config.bundleId)) : undefined;
+      const resolvedPlist = complete ? oneValue<string>(configs.map((config) => config.plistPath)) : undefined;
+      output.push({ ref, ...(platform ? { platform } : {}), ...(bundleId ? { bundleId } : {}), ...(resolvedPlist ? { plistPath: resolvedPlist } : {}) });
     }
     return { targets: output };
   } catch (error) { return { targets: [], error: error instanceof Error ? error.message.slice(0, 240) : "PBX metadata is unsupported" }; }
@@ -296,15 +328,16 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
       for (const iosPath of iosMetadata) {
         const iosText = Buffer.from(sources.get(iosPath)!.bytes).toString("utf8");
         const iosId = iosBundleIdentifier(iosPath, iosText);
-        if (iosId) mobileTargets.push({ targetId: "ios-" + createHash("sha256").update(`${relDir}\0${nativeProjectRoot(iosPath, "ios")}\0${iosId}`).digest("hex").slice(0, 10), applicationId: appId, runtimeProfileId: "ios-phase-unavailable", accountProfileId: "synthetic", kind: "mobile", os: "ios", appId: iosId, deviceProfileId: "no-device-selected" });
-        else missingInputs.push({ inputId: "ios-identity-" + createHash("sha256").update(iosPath).digest("hex").slice(0, 10), targetIds: [], kind: "target-selection", disposition: "blocking", reason: "iOS metadata does not declare a resolvable bundle identifier", sourcePaths: [iosPath] });
+        const metadata = plistMetadata(iosText);
+        const platformProven = metadata.packageType === "APPL" && metadata.platforms.length > 0 && metadata.platforms.every((value) => value === "iPhoneOS" || value === "iPhoneSimulator");
+        if (iosId && platformProven) mobileTargets.push({ targetId: "ios-" + createHash("sha256").update(`${relDir}\0${nativeProjectRoot(iosPath, "ios")}\0${iosId}`).digest("hex").slice(0, 10), applicationId: appId, runtimeProfileId: "ios-phase-unavailable", accountProfileId: "synthetic", kind: "mobile", os: "ios", appId: iosId, deviceProfileId: "no-device-selected" });
       }
       const mobileTargetsByPlatform = new Map<string, Array<Extract<E2ERepositoryInspection["proposedTargets"][number], { kind: "mobile" }>>>();
       for (const item of mobileTargets) if (item.kind === "mobile") mobileTargetsByPlatform.set(item.os, [...(mobileTargetsByPlatform.get(item.os) ?? []), item]);
       for (const [platform, items] of mobileTargetsByPlatform) if (items.length > 1) missingInputs.push({ inputId: `${platform}-project-selection-${createHash("sha256").update(relDir).digest("hex").slice(0, 10)}`, targetIds: items.map((item) => item.targetId), kind: "target-selection", disposition: "blocking", reason: `Multiple ${platform} project identities are owned by this framework package; select the intended app`, sourcePaths: appFiles.filter((path) => new RegExp(`(^|/)${platform}/`).test(path)).slice(0, 32) });
       target = mobileTargets.shift();
       if (target) additionalTargets.push(...mobileTargets);
-      if (!target) missingInputs.push({ inputId: "mobile-target-" + createHash("sha256").update(manifest.path).digest("hex").slice(0, 10), targetIds: [], kind: "target-selection", disposition: "blocking", reason: "React Native package has no native platform manifest with an application identity", sourcePaths: [manifest.path] });
+      if (!target && androidManifests.length === 0 && iosMetadata.length === 0) missingInputs.push({ inputId: "mobile-target-" + createHash("sha256").update(manifest.path).digest("hex").slice(0, 10), targetIds: [], kind: "target-selection", disposition: "blocking", reason: "React Native package has no native platform manifest with an application identity", sourcePaths: [manifest.path] });
 
     } else target = { targetId: "desktop-" + (applications.length + 1), applicationId: appId, runtimeProfileId: "electron-phase-unavailable", accountProfileId: "synthetic", kind: "desktop", os: "linux", driver: "electron", appId };
     let recipe: E2ERepositoryInspection["applications"][number]["recipe"] = null;
@@ -365,9 +398,13 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
     missingInputs.push({ inputId: "service-recipe-" + stableId, targetIds: [targetId], kind: "runtime", disposition: "mock-substitutable", reason: "An API schema was found without a source-backed service launch recipe", sourcePaths: [source.path] });
   }
   const appleOwnedPaths = new Set<string>();
+  const pbxCreatedApplications = new Set<string>();
+  const consumedFrameworkTargets = new Set<string>();
+  const appleTargetProjectSources = new Map<string, string>();
   const xcodeProjects = [...sources.values()].filter((source) => /\.xcodeproj\/project\.pbxproj$/i.test(source.path)).sort((a, b) => a.path.localeCompare(b.path));
   for (const projectSource of xcodeProjects) {
     appleOwnedPaths.add(projectSource.path);
+    const preexistingFrameworkTargets = new Set(proposedTargets.filter((target) => !pbxCreatedApplications.has(target.applicationId)).map((target) => `${target.applicationId}\0${target.targetId}`));
     const project = parseAppleProject(projectSource.path, Buffer.from(projectSource.bytes).toString("utf8"));
     const projectRecords = project.targets;
     if (project.error || projectRecords.length === 0) {
@@ -375,7 +412,6 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
       missingInputs.push({ inputId: "apple-project-metadata-" + id, targetIds: [], kind: "target-selection", disposition: "blocking", reason: project.error ? `Apple project metadata is unresolved: ${project.error}` : "Apple project has no source-confirmed application target", sourcePaths: [projectSource.path] });
       continue;
     }
-    const reusedPackageTargetOwners = new Set<string>();
     for (const record of projectRecords) {
       if (record.plistPath) appleOwnedPaths.add(record.plistPath);
       const ownerPaths = [projectSource.path, ...(record.plistPath && sources.has(record.plistPath) ? [record.plistPath] : [])].sort();
@@ -398,35 +434,57 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
         missingInputs.push({ inputId: "apple-target-metadata-" + stable, targetIds: [], kind: "target-selection", disposition: "blocking", reason: "Apple target and associated plist application/platform/bundle metadata do not agree", sourcePaths: ownerPaths });
         continue;
       }
-      const existingOwner = applications.find((application) => application.sourcePaths.includes(record.plistPath!));
-      const existingTarget = existingOwner && proposedTargets.find((target) => target.applicationId === existingOwner.applicationId
-        && ((record.platform === "ios" && target.kind === "mobile" && target.os === "ios" && target.appId === record.bundleId)
-          || (record.platform === "macos" && target.kind === "desktop" && target.os === "macos" && target.appId === record.bundleId)));
-      if (existingOwner && existingTarget) {
-        existingOwner.sourcePaths = [...new Set([...existingOwner.sourcePaths, projectSource.path])].sort();
-        if (reusedPackageTargetOwners.has(existingOwner.applicationId)) {
-          const targetId = "apple-target-" + stable;
-          const target = record.platform === "ios"
-            ? { targetId, applicationId: existingOwner.applicationId, runtimeProfileId: "ios-phase-unavailable", accountProfileId: "synthetic", kind: "mobile" as const, os: "ios" as const, appId: record.bundleId, deviceProfileId: "no-device-selected" }
-            : { targetId, applicationId: existingOwner.applicationId, runtimeProfileId: "native-macos-phase-unavailable", accountProfileId: "synthetic", kind: "desktop" as const, os: "macos" as const, driver: "native" as const, appId: record.bundleId };
-          proposedTargets.push(target);
-          missingInputs.push({ inputId: "native-runtime-" + stable, targetIds: [targetId], kind: "runtime", disposition: "mock-substitutable", reason: `The ${record.platform} native build and launch profile is unavailable in this phase`, sourcePaths: ownerPaths });
-        } else {
-          reusedPackageTargetOwners.add(existingOwner.applicationId);
-        }
+      const matches = applications.flatMap((application) => {
+        if (!application.sourcePaths.includes(record.plistPath!)) return [];
+        return proposedTargets.filter((target) => target.applicationId === application.applicationId
+          && ((record.platform === "ios" && target.kind === "mobile" && target.os === "ios" && target.appId === record.bundleId)
+            || (record.platform === "macos" && target.kind === "desktop" && target.os === "macos" && target.appId === record.bundleId))
+          && preexistingFrameworkTargets.has(`${target.applicationId}\0${target.targetId}`))
+          .map((target) => ({ application, target }));
+      });
+      if (matches.length > 1) {
+        missingInputs.push({ inputId: "apple-target-ownership-" + stable, targetIds: [], kind: "target-selection", disposition: "blocking", reason: "Multiple preexisting framework targets match this Apple project target; ownership is ambiguous", sourcePaths: ownerPaths });
         continue;
       }
-      const applicationId = "apple-" + stable;
+      const frameworkMatch = matches[0];
+      if (frameworkMatch) {
+        const key = `${frameworkMatch.application.applicationId}\0${frameworkMatch.target.targetId}`;
+        frameworkMatch.application.sourcePaths = [...new Set([...frameworkMatch.application.sourcePaths, projectSource.path])].sort();
+        appleTargetProjectSources.set(frameworkMatch.target.targetId, projectSource.path);
+        if (!consumedFrameworkTargets.has(key)) {
+          consumedFrameworkTargets.add(key);
+          continue;
+        }
+      }
+      const existingOwners = frameworkMatch ? [frameworkMatch.application] : applications.filter((application) => application.sourcePaths.includes(record.plistPath!));
+      if (existingOwners.length > 1) {
+        missingInputs.push({ inputId: "apple-target-ownership-" + stable, targetIds: [], kind: "target-selection", disposition: "blocking", reason: "Multiple existing applications own this Apple plist; target ownership is ambiguous", sourcePaths: ownerPaths });
+        continue;
+      }
+      const existingOwner = existingOwners[0];
+      const applicationId = existingOwner?.applicationId ?? "apple-" + createHash("sha256").update(`${projectSource.path}\0${record.plistPath}`).digest("hex").slice(0, 12);
       const targetId = "apple-target-" + stable;
       const target = record.platform === "ios"
         ? { targetId, applicationId, runtimeProfileId: "ios-phase-unavailable", accountProfileId: "synthetic", kind: "mobile" as const, os: "ios" as const, appId: record.bundleId, deviceProfileId: "no-device-selected" }
         : { targetId, applicationId, runtimeProfileId: "native-macos-phase-unavailable", accountProfileId: "synthetic", kind: "desktop" as const, os: "macos" as const, driver: "native" as const, appId: record.bundleId };
-      addApplication(applicationId, record.platform === "ios" ? "mobile" : "desktop", ownerPaths, [target]);
+      if (existingOwner) {
+        existingOwner.sourcePaths = [...new Set([...existingOwner.sourcePaths, ...ownerPaths])].sort();
+        proposedTargets.push(target);
+      } else {
+        addApplication(applicationId, record.platform === "ios" ? "mobile" : "desktop", ownerPaths, [target]);
+        pbxCreatedApplications.add(applicationId);
+      }
+      appleTargetProjectSources.set(targetId, projectSource.path);
       missingInputs.push({ inputId: "native-runtime-" + stable, targetIds: [targetId], kind: "runtime", disposition: "mock-substitutable", reason: `The ${record.platform} native build and launch profile is unavailable in this phase`, sourcePaths: ownerPaths });
     }
   }
   for (const source of [...sources.values()].filter((item) => /Info\.plist$/i.test(item.path)).sort((a, b) => a.path.localeCompare(b.path))) {
-    if (appleOwnedPaths.has(source.path) || applications.some((application) => application.sourcePaths.includes(source.path))) continue;
+    if (appleOwnedPaths.has(source.path)) continue;
+    const alreadyOwnedByTarget = applications.some((application) => application.sourcePaths.includes(source.path)
+      && proposedTargets.some((target) => target.applicationId === application.applicationId
+        && ((target.kind === "mobile" && target.os === "ios") || (target.kind === "desktop" && target.os === "macos"))));
+    if (alreadyOwnedByTarget) continue;
+    appleOwnedPaths.add(source.path);
     const metadata = plistMetadata(Buffer.from(source.bytes).toString("utf8"));
     const ios = metadata.platforms.length > 0 && metadata.platforms.every((value) => value === "iPhoneOS" || value === "iPhoneSimulator");
     const mac = metadata.platforms.length > 0 && metadata.platforms.every((value) => value === "MacOSX");
@@ -440,9 +498,38 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
       ? { targetId, applicationId, runtimeProfileId: "ios-phase-unavailable", accountProfileId: "synthetic", kind: "mobile" as const, os: "ios" as const, appId: metadata.bundleId, deviceProfileId: "no-device-selected" }
       : { targetId, applicationId, runtimeProfileId: "native-macos-phase-unavailable", accountProfileId: "synthetic", kind: "desktop" as const, os: "macos" as const, driver: "native" as const, appId: metadata.bundleId };
     addApplication(applicationId, ios ? "mobile" : "desktop", [source.path], [target]);
+    if (ios) appleTargetProjectSources.set(targetId, source.path);
     missingInputs.push({ inputId: "native-runtime-" + stable, targetIds: [targetId], kind: "runtime", disposition: "mock-substitutable", reason: `The ${ios ? "ios" : "macos"} native build and launch profile is unavailable in this phase`, sourcePaths: [source.path] });
   }
-  const nativeMobile = [...sources.values()].filter((source) => /(?:^|\/)AndroidManifest\.xml$|(?:^|\/)build\.gradle(?:\.kts)?$|(^|\/)ios\/.*(?:Info\.plist|project\.pbxproj|Package\.swift)$/.test(source.path)).sort((a, b) => a.path.localeCompare(b.path));
+  const packageIosProjectTargets = new Map<string, Map<string, { targetIds: string[]; sourcePaths: Set<string> }>>();
+  for (const target of proposedTargets.filter((item) => item.kind === "mobile" && item.os === "ios")) {
+    const application = applications.find((item) => item.applicationId === target.applicationId);
+    const sourcePath = appleTargetProjectSources.get(target.targetId) ?? application?.sourcePaths.find((item) => /Info\.plist$/i.test(item));
+    if (!sourcePath) continue;
+    const owner = deepestPackageDir(sourcePath);
+    if (owner === undefined) continue;
+    const projectIdentity = appleTargetProjectSources.get(target.targetId) ?? nativeProjectRoot(sourcePath, "ios");
+    if (!projectIdentity) continue;
+    const projects = packageIosProjectTargets.get(owner) ?? new Map<string, { targetIds: string[]; sourcePaths: Set<string> }>();
+    const entry = projects.get(projectIdentity) ?? { targetIds: [], sourcePaths: new Set<string>() };
+    entry.targetIds.push(target.targetId);
+    entry.sourcePaths.add(sourcePath);
+    projects.set(projectIdentity, entry);
+    packageIosProjectTargets.set(owner, projects);
+  }
+  for (const [owner, projects] of packageIosProjectTargets) {
+    if (projects.size < 2) continue;
+    const targetIds = [...projects.values()].flatMap((entry) => entry.targetIds).sort();
+    const sourcePaths = [...new Set([...projects.values()].flatMap((entry) => [...entry.sourcePaths]))].sort();
+    missingInputs.push({ inputId: "ios-project-selection-" + createHash("sha256").update(owner).digest("hex").slice(0, 10), targetIds, kind: "target-selection", disposition: "blocking", reason: "Multiple ios project identities are owned by this framework package; select the intended app", sourcePaths });
+  }
+  for (const source of [...sources.values()].filter((item) => /(^|\/)Package\.swift$|\.xcworkspace\/contents\.xcworkspacedata$|(^|\/)ios\/.*project\.pbxproj$/i.test(item.path)).sort((a, b) => a.path.localeCompare(b.path))) {
+    if (appleOwnedPaths.has(source.path)) continue;
+    appleOwnedPaths.add(source.path);
+    const stable = createHash("sha256").update(source.path).digest("hex").slice(0, 12);
+    missingInputs.push({ inputId: "apple-source-metadata-" + stable, targetIds: [], kind: "target-selection", disposition: "blocking", reason: "Apple source metadata does not prove a supported application platform and target", sourcePaths: [source.path] });
+  }
+  const nativeMobile = [...sources.values()].filter((source) => /(?:^|\/)AndroidManifest\.xml$|(?:^|\/)build\.gradle(?:\.kts)?$/.test(source.path)).sort((a, b) => a.path.localeCompare(b.path));
   const nativeGroups = new Map<string, { platform: "android" | "ios"; root: string; identitySource: string; sourcePaths: string[] }>();
   for (const source of nativeMobile) {
     const platform: "android" | "ios" = /AndroidManifest\.xml$|build\.gradle(?:\.kts)?$/.test(source.path) ? "android" : "ios";
