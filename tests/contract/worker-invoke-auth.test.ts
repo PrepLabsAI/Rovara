@@ -49,6 +49,7 @@ function claimsFor(invocation: WorkerInvocation, overrides: Partial<WorkerInvoke
     operationId: invocation.operationId,
     fence: invocation.fence,
     expiresAt: NOW + 60,
+    purpose: "WORKSPACE",
     ...overrides,
   };
 }

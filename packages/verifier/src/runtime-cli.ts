@@ -3,8 +3,8 @@ import { constants as fsConstants } from "node:fs";
 import { mkdir, open, readFile, realpath, rmdir, symlink } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { list as upstreamList } from "e2e/runner";
-import { join, resolve } from "node:path";
-import { canonicalJson, type E2ESourceSnapshot } from "@agentx/contracts";
+import { isAbsolute, join, resolve } from "node:path";
+import { canonicalJson, ProjectSetupRunnerToolchainSchema, type E2ESourceSnapshot, type ProjectSetupRunnerToolchain } from "@agentx/contracts";
 import { compareE2EPublicList, type E2ESelectionPacket } from "./selection.js";
 import { createE2ERuntimeAssets, createE2ERuntimeLaunchId, parseE2EFirstPartyCapture, type E2EFirstPartyCaptureResult } from "./runtime-assets.js";
 import { validateE2ECompiledRuntimeAdmission, type E2ECompiledSuite } from "./scenarios.js";
@@ -43,6 +43,7 @@ function runProcess(executable: string, args: readonly string[], options: { cwd:
 
 export type E2EActualCliRun = Readonly<{
   launchId: string;
+  runnerToolchain: ProjectSetupRunnerToolchain;
   launchConfigDigest: string;
   fixedAssetDigests: Readonly<Record<string, string>>;
   publicList: unknown;
@@ -66,6 +67,7 @@ type E2EActualCliInput = Readonly<{
   compiled: E2ECompiledSuite;
   snapshot: E2ESourceSnapshot;
   selection: E2ESelectionPacket;
+  runnerToolchain: ProjectSetupRunnerToolchain;
   hostRequestIds: ReadonlyMap<string, string>;
   sourceRoot: string;
   evidenceDirectory: string;
@@ -78,7 +80,10 @@ export async function runE2EActualCli(input: E2EActualCliInput): Promise<E2EActu
 
 /** Trusted-host-only runner seam for proving cleanup-pending qualification; never receives app data. */
 export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput, sessionFactory: typeof createE2EWorkerSession): Promise<E2EActualCliRun> {
-  if (process.version !== "v22.23.2" || !process.execPath.includes("node-v22.23.2-darwin-arm64")) throw new Error("actual E2E acceptance must use the pinned direct Node 22.23.2 runtime");
+  const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse(input.runnerToolchain);
+  if (runnerToolchain.version !== process.version || runnerToolchain.execPath !== process.execPath
+    || runnerToolchain.platform !== process.platform || runnerToolchain.arch !== process.arch
+    || process.version !== "v22.23.2" || !isAbsolute(runnerToolchain.execPath)) throw new Error("actual E2E runner differs from its exact ready-registry Node toolchain identity");
   const snapshot = validateE2ECompiledRuntimeAdmission(input.compiled, input.snapshot);
   const evidenceDirectory = resolve(input.evidenceDirectory);
   if (await realpath(evidenceDirectory) !== evidenceDirectory) throw new Error("acceptance evidence directory must be canonical");
@@ -101,6 +106,7 @@ export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput
     const output = join(project, path);
     await mkdir(join(output, ".."), { recursive: true, mode: 0o700 });
     await writeOwnedFile(output, content);
+    if (sha(await readFile(output)) !== sha(Buffer.from(content))) throw new Error("materialized compiler asset failed exact-byte readback before CLI discovery");
   }
   for (const [name, content] of Object.entries(assets.assets)) await writeOwnedFile(join(project, name), content);
   const adapterPackets = new Map<string, ReturnType<typeof createE2EAppAdapterPacket>>();
@@ -138,7 +144,7 @@ export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput
     if (sha(await readFile(harnessPrimary)) !== harnessDigest) throw new Error("pre-execution harness source primary failed byte readback");
   }
   const declaredMockComponentIds = [...new Set([...adapterPackets.values()].flatMap((packet) => packet.declaredMockComponentIds))].sort();
-  const preExecution = { schemaVersion: "e2e-pre-execution-primary/v1", launchId, candidate: { candidateDigest: snapshot.candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, planDigest: input.compiled.bundle.planDigest, sourceSnapshot: snapshot.sources.map((item) => ({ path: item.path, sha256: item.sha256, byteLength: item.bytes.byteLength, kind: item.kind })) }, compiler: { inventory: input.compiled.inventory, files: [...input.compiled.files].map(([path, content]) => ({ path, sha256: sha(Buffer.from(content)), byteLength: Buffer.byteLength(content) })) }, runtime: { launchConfigDigest: assets.launchConfigDigest, fixedAssetDigests: assets.assetDigests }, selection: input.selection, requests: [...input.compiled.hostRequestPayloads].map(([caseId, payload]) => ({ caseId, payload, payloadSha256: sha(Buffer.from(canonicalJson(payload))), logicalRequestId: input.hostRequestIds.get(caseId) ?? null })), assertions: input.compiled.expectedCases.map((expected) => ({ caseId: expected.caseId, assertionDigests: expected.assertionDigests })), adapterPrimaries: [...adapterPrimaryPaths].map(([caseId, path]) => ({ caseId, path })), declaredMockComponentIds, observedConsumedMockComponentIds: [], harnessSource: harnessPrimary ? { path: harnessPrimary, sha256: harnessDigest } : null };
+  const preExecution = { schemaVersion: "e2e-pre-execution-primary/v1", launchId, runnerToolchain, candidate: { candidateDigest: snapshot.candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, planDigest: input.compiled.bundle.planDigest, sourceSnapshot: snapshot.sources.map((item) => ({ path: item.path, sha256: item.sha256, byteLength: item.bytes.byteLength, kind: item.kind })) }, compiler: { inventory: input.compiled.inventory, files: [...input.compiled.files].map(([path, content]) => ({ path, sha256: sha(Buffer.from(content)), byteLength: Buffer.byteLength(content) })) }, runtime: { launchConfigDigest: assets.launchConfigDigest, fixedAssetDigests: assets.assetDigests }, selection: input.selection, requests: [...input.compiled.hostRequestPayloads].map(([caseId, payload]) => ({ caseId, payload, payloadSha256: sha(Buffer.from(canonicalJson(payload))), logicalRequestId: input.hostRequestIds.get(caseId) ?? null })), assertions: input.compiled.expectedCases.map((expected) => ({ caseId: expected.caseId, assertionDigests: expected.assertionDigests })), adapterPrimaries: [...adapterPrimaryPaths].map(([caseId, path]) => ({ caseId, path })), declaredMockComponentIds, observedConsumedMockComponentIds: [], harnessSource: harnessPrimary ? { path: harnessPrimary, sha256: harnessDigest } : null };
   await writeOwnedFile(join(evidenceDirectory, `pre-execution-${launchId}.json`), `${JSON.stringify(preExecution, null, 2)}\n`);
   const cliPath = join(resolve(input.sourceRoot), "node_modules/e2e/dist/cli/bin.js");
   const pkg = JSON.parse(await readFile(join(resolve(input.sourceRoot), "node_modules/e2e/package.json"), "utf8")) as { version?: unknown };
@@ -184,30 +190,49 @@ export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput
   const listArgs = [cliPath, "list", "--config", config, "--reporter", "json"];
   const runArgs = [cliPath, "run", "--config", config, "--reporter", "json", "--output", ".agentx-run-output", "--no-cache", "--workers", "1", "--retries", "0"];
   try {
-    const list = await runProcess(process.execPath, listArgs, { cwd: project, env, timeoutMs: Math.max(1, Math.min(60_000, input.deadlineAt - Date.now())), signal: input.signal });
+    const list = await runProcess(runnerToolchain.execPath, listArgs, { cwd: project, env, timeoutMs: Math.max(1, Math.min(60_000, input.deadlineAt - Date.now())), signal: input.signal });
     if (list.status !== 0 || list.signal || list.timedOut || list.aborted) throw new Error("actual pinned CLI list did not complete cleanly");
     await writeOwnedFile(join(evidenceDirectory, `public-list-${launchId}.json`), list.stdout);
     await writeOwnedFile(join(evidenceDirectory, `public-list-stderr-${launchId}.bin`), list.stderr);
     const cliList: unknown = JSON.parse(list.stdout.toString("utf8")) as unknown;
     const publicList = await upstreamList({ cwd: project, config, env: { PATH: env.PATH, HOME: env.HOME, TMPDIR: env.TMPDIR, CI: env.CI } });
-    const selectedListRows = (publicList as { pairs?: readonly { disposition?: string }[] }).pairs?.filter((pair) => pair.disposition === "run" || pair.disposition === "skip") ?? [];
-    if (!cliList || typeof cliList !== "object" || Array.isArray(cliList) || !Array.isArray((cliList as Record<string, unknown>).pairs) || canonicalJson((cliList as Record<string, unknown>).pairs) !== canonicalJson(selectedListRows)) throw new Error("public CLI list run/skip rows differ from the pinned runner list API");
     const publicListPath = join(evidenceDirectory, `full-public-list-${launchId}.json`);
     await writeOwnedFile(publicListPath, `${JSON.stringify(publicList, null, 2)}\n`);
+    const selectedListRows = (publicList as { pairs?: readonly { disposition?: string }[] }).pairs?.filter((pair) => pair.disposition === "run" || pair.disposition === "skip") ?? [];
+    const cliPairs = cliList && typeof cliList === "object" && !Array.isArray(cliList) && Array.isArray((cliList as Record<string, unknown>).pairs)
+      ? (cliList as Record<string, unknown>).pairs as unknown[] : undefined;
+    const withoutCliSourceLocation = (value: unknown) => {
+      if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+      const { source, ...identity } = value as Record<string, unknown>;
+      const row = value as Record<string, unknown>;
+      if (!source || typeof source !== "object" || Array.isArray(source)) throw new Error("CLI list source provenance is missing or malformed");
+      const location = source as Record<string, unknown>;
+      if (location.file !== row.file || !Number.isSafeInteger(location.line) || (location.line as number) < 1
+        || !Number.isSafeInteger(location.column) || (location.column as number) < 1
+        || typeof row.file !== "string" || !input.compiled.files.has(row.file)) throw new Error("CLI list source file or coordinate is not bound to its materialized generated file");
+      return { ...identity, source: { file: location.file } };
+    };
+    if (!cliPairs || canonicalJson(cliPairs.map(withoutCliSourceLocation)) !== canonicalJson(selectedListRows.map(withoutCliSourceLocation))) {
+      const mismatchIndex = cliPairs?.findIndex((row, index) => canonicalJson(withoutCliSourceLocation(row)) !== canonicalJson(withoutCliSourceLocation(selectedListRows[index] ?? null))) ?? -1;
+      const cliRow = mismatchIndex >= 0 && cliPairs?.[mismatchIndex] && typeof cliPairs[mismatchIndex] === "object" ? cliPairs[mismatchIndex] as Record<string, unknown> : {};
+      const apiRow = mismatchIndex >= 0 && selectedListRows[mismatchIndex] && typeof selectedListRows[mismatchIndex] === "object" ? selectedListRows[mismatchIndex] as Record<string, unknown> : {};
+      const differingKeys = [...new Set([...Object.keys(cliRow), ...Object.keys(apiRow)].filter((key) => key !== "source"))].filter((key) => canonicalJson(cliRow[key] ?? null) !== canonicalJson(apiRow[key] ?? null));
+      throw new Error(`public CLI list selected tuple identities differ from pinned runner list API (cli=${cliPairs?.length ?? 0},api=${selectedListRows.length},index=${mismatchIndex},keys=${differingKeys.join(",")})`);
+    }
     // Reparse the exact persisted API packet so collection receives ordinary JSON data, not runner-owned instances.
     const publicListSnapshot: unknown = JSON.parse(await readFile(publicListPath, "utf8"));
     const selected = compareE2EPublicList(input.selection, publicListSnapshot);
-    const execution = await runProcess(process.execPath, runArgs, { cwd: project, env, timeoutMs: Math.max(1, Math.min(60_000, input.deadlineAt - Date.now())), signal: input.signal });
+    const execution = await runProcess(runnerToolchain.execPath, runArgs, { cwd: project, env, timeoutMs: Math.max(1, Math.min(60_000, input.deadlineAt - Date.now())), signal: input.signal });
     await writeOwnedFile(join(evidenceDirectory, `raw-report-${launchId}.json`), execution.stdout);
     await writeOwnedFile(join(evidenceDirectory, `raw-run-stderr-${launchId}.bin`), execution.stderr);
     const captureBytes = await readFile(capturePath).catch(() => Buffer.alloc(0));
     const runStartCapture = parseE2EFirstPartyCapture(captureBytes, launchId);
     const cleanupConfirmed = await session.close();
     const cleanupReadback = session.readback();
-    const receipt = { evidenceType: "actual-pinned-e2e-cli-runtime/v1", launchId, node: { execPath: process.execPath, version: process.version, argv: process.argv }, cli: { path: cliPath, version: pkg.version, listArgv: listArgs, runArgv: runArgs }, runtime: { launchConfigDigest: assets.launchConfigDigest, compilerConfigDigest: input.compiled.expectedConfigDigest, fixedAssetDigests: assets.assetDigests }, list: { status: list.status, signal: list.signal, stdoutSha256: sha(list.stdout), stderrSha256: sha(list.stderr), selected: selected.selected.length, filtered: selected.filtered.length }, publicList: publicListSnapshot, mockInventory: { groupManifestDigest: input.compiled.group.mockManifestDigest, declaredMockComponentIds, observedConsumedMockComponentIds: [] }, run: { status: execution.status, signal: execution.signal, timedOut: execution.timedOut, aborted: execution.aborted, startedAt: execution.startedAt, finishedAt: execution.finishedAt, stdoutSha256: sha(execution.stdout), stderrSha256: sha(execution.stderr), stdoutBytes: execution.stdout.byteLength, stderrBytes: execution.stderr.byteLength }, workerCleanup: { confirmed: cleanupConfirmed, serverListening: cleanupReadback.serverListening, socketPresent: cleanupReadback.socket, aliasEntryPresent: cleanupReadback.aliasEntryPresent, privateSentinelPresent: cleanupReadback.privateSentinelPresent, path: cleanupReadback.path, privatePath: cleanupReadback.privatePath, socketInode: cleanupReadback.inode, socketDevice: cleanupReadback.device, sentinelInode: cleanupReadback.sentinelInode, sentinelDevice: cleanupReadback.sentinelDevice, parentDevice: cleanupReadback.parentDevice, parentInode: cleanupReadback.parentInode, parentUid: cleanupReadback.parentUid }, runStartCapture: captureBytes.toString("utf8"), runStartCaptureStatus: runStartCapture.status, assertionReceipts: receiptRows, candidateCaptures: captures };
+    const receipt = { evidenceType: "actual-pinned-e2e-cli-runtime/v1", launchId, node: { ...runnerToolchain, argv: process.argv }, cli: { path: cliPath, version: pkg.version, listArgv: listArgs, runArgv: runArgs }, runtime: { launchConfigDigest: assets.launchConfigDigest, compilerConfigDigest: input.compiled.expectedConfigDigest, fixedAssetDigests: assets.assetDigests }, list: { status: list.status, signal: list.signal, stdoutSha256: sha(list.stdout), stderrSha256: sha(list.stderr), selected: selected.selected.length, filtered: selected.filtered.length }, publicList: publicListSnapshot, mockInventory: { groupManifestDigest: input.compiled.group.mockManifestDigest, declaredMockComponentIds, observedConsumedMockComponentIds: [] }, run: { status: execution.status, signal: execution.signal, timedOut: execution.timedOut, aborted: execution.aborted, startedAt: execution.startedAt, finishedAt: execution.finishedAt, stdoutSha256: sha(execution.stdout), stderrSha256: sha(execution.stderr), stdoutBytes: execution.stdout.byteLength, stderrBytes: execution.stderr.byteLength }, workerCleanup: { confirmed: cleanupConfirmed, serverListening: cleanupReadback.serverListening, socketPresent: cleanupReadback.socket, aliasEntryPresent: cleanupReadback.aliasEntryPresent, privateSentinelPresent: cleanupReadback.privateSentinelPresent, path: cleanupReadback.path, privatePath: cleanupReadback.privatePath, socketInode: cleanupReadback.inode, socketDevice: cleanupReadback.device, sentinelInode: cleanupReadback.sentinelInode, sentinelDevice: cleanupReadback.sentinelDevice, parentDevice: cleanupReadback.parentDevice, parentInode: cleanupReadback.parentInode, parentUid: cleanupReadback.parentUid }, runStartCapture: captureBytes.toString("utf8"), runStartCaptureStatus: runStartCapture.status, assertionReceipts: receiptRows, candidateCaptures: captures };
     await writeOwnedFile(join(evidenceDirectory, `actual-cli-receipt-${launchId}.json`), `${JSON.stringify(receipt, null, 2)}\n`);
     if (execution.signal || execution.timedOut || execution.aborted) throw new Error("actual pinned CLI run was interrupted before clean process completion");
-    return Object.freeze({ launchId, launchConfigDigest: assets.launchConfigDigest, fixedAssetDigests: assets.assetDigests, publicList: publicListSnapshot, selected: selected.selected.length, filtered: selected.filtered.length, rawReportBytes: new Uint8Array(execution.stdout), runStartCaptureBytes: new Uint8Array(captureBytes), runStartCapture, assertionReceipts: Object.freeze(receiptRows), declaredMockComponentIds: Object.freeze(declaredMockComponentIds), candidateCaptures: Object.freeze(captures), listProcess: Object.freeze({ status: list.status, signal: list.signal, startedAt: list.startedAt, finishedAt: list.finishedAt, stdoutSha256: sha(list.stdout), stderrSha256: sha(list.stderr) }), runProcess: Object.freeze({ status: execution.status, signal: execution.signal, timedOut: execution.timedOut, aborted: execution.aborted, startedAt: execution.startedAt, finishedAt: execution.finishedAt, stdoutSha256: sha(execution.stdout), stderrSha256: sha(execution.stderr), stdoutBytes: execution.stdout.byteLength, stderrBytes: execution.stderr.byteLength }), cleanupConfirmed, cleanupServerListening: cleanupReadback.serverListening, evidenceDirectory });
+    return Object.freeze({ launchId, runnerToolchain, launchConfigDigest: assets.launchConfigDigest, fixedAssetDigests: assets.assetDigests, publicList: publicListSnapshot, selected: selected.selected.length, filtered: selected.filtered.length, rawReportBytes: new Uint8Array(execution.stdout), runStartCaptureBytes: new Uint8Array(captureBytes), runStartCapture, assertionReceipts: Object.freeze(receiptRows), declaredMockComponentIds: Object.freeze(declaredMockComponentIds), candidateCaptures: Object.freeze(captures), listProcess: Object.freeze({ status: list.status, signal: list.signal, startedAt: list.startedAt, finishedAt: list.finishedAt, stdoutSha256: sha(list.stdout), stderrSha256: sha(list.stderr) }), runProcess: Object.freeze({ status: execution.status, signal: execution.signal, timedOut: execution.timedOut, aborted: execution.aborted, startedAt: execution.startedAt, finishedAt: execution.finishedAt, stdoutSha256: sha(execution.stdout), stderrSha256: sha(execution.stderr), stdoutBytes: execution.stdout.byteLength, stderrBytes: execution.stderr.byteLength }), cleanupConfirmed, cleanupServerListening: cleanupReadback.serverListening, evidenceDirectory });
   } finally {
     const closed = await session.close();
     if (closed) await rmdir(sessionDirectory);

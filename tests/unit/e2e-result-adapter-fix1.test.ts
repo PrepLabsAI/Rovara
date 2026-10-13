@@ -80,6 +80,21 @@ function expandToCases(f: ReturnType<typeof fixture>, caseCount: number): void {
 }
 
 describe("complete structural collection qualification", () => {
+  it("keeps upstream list source coordinates distinct from generated report coordinates", () => {
+    const f = fixture();
+    const pairs = (f.collection.publicList as { pairs: Array<Record<string, unknown>> }).pairs;
+    pairs[0]!.source = { file: ".agentx/e2e/generated-contract.test.ts", line: 58, column: 1 };
+    pairs[1]!.source = { file: ".agentx/e2e/generated-contract.test.ts", line: 113, column: 1 };
+    f.collection.rawReportBytes = Buffer.from(JSON.stringify(f.report));
+    const result = qualifyE2ECollection(f.oracle, f.collection);
+    expect(result.status, result.reason).toBe("PASS");
+    expect((f.collection.publicList as { pairs: Array<{ source: unknown }> }).pairs[0]!.source).toEqual({ file: ".agentx/e2e/generated-contract.test.ts", line: 58, column: 1 });
+  });
+  it("rejects malformed upstream source coordinates without projecting them away", () => {
+    const f = fixture();
+    (f.collection.publicList as { pairs: Array<Record<string, unknown>> }).pairs[0]!.source = { file: ".agentx/e2e/generated-contract.test.ts", line: 0, column: 1 };
+    expect(qualifyE2ECollection(f.oracle, f.collection).status).toBe("UNKNOWN");
+  });
   it("accepts the exact 260 receipt packet from thirteen twenty-assertion cases", () => {
     const f = fixture();
     expandToCases(f, 13);

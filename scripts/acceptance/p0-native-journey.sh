@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+unavailable() {
+  printf 'UNAVAILABLE: %s\n' "$1" >&2
+  exit 2
+}
+
+node22=${AGENTX_NODE22:-}
+[ -n "$node22" ] || unavailable 'set AGENTX_NODE22 to the pinned Node 22.23.2 executable'
+[ -x "$node22" ] || unavailable 'AGENTX_NODE22 is not an executable file'
+node_version=$("$node22" --version 2>/dev/null) || unavailable 'pinned Node executable could not report its version'
+[ "$node_version" = 'v22.23.2' ] || unavailable "expected Node v22.23.2, got $node_version"
+[ "$("$node22" -p 'process.execPath')" = "$node22" ] || unavailable 'Node executable path did not remain exact'
+
+evidence=${CONTAINED_FOUNDATION_EVIDENCE_DIR:-}
+tmp=${TMPDIR:-}
+[ -n "$evidence" ] && [ -d "$evidence" ] || unavailable 'pre-create CONTAINED_FOUNDATION_EVIDENCE_DIR outside the fresh TMPDIR'
+[ -n "$tmp" ] && [ -d "$tmp" ] || unavailable 'provide a fresh, pre-created TMPDIR'
+evidence_real=$(cd "$evidence" && pwd -P)
+tmp_real=$(cd "$tmp" && pwd -P)
+case "$evidence_real/" in "$tmp_real/"*) unavailable 'contained evidence directory must be outside TMPDIR' ;; esac
+
+command -v docker >/dev/null 2>&1 || unavailable 'Docker CLI is unavailable'
+image='node@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9'
+image_info=$(docker image inspect "$image" --format '{{.RepoDigests}} {{.Os}} {{.Architecture}}' 2>/dev/null) || unavailable 'pinned Docker image is unavailable locally; this command never pulls images'
+case "$image_info" in *"$image"*' linux arm64'*) ;; *) unavailable 'local pinned Docker image identity or platform does not match' ;; esac
+
+exec "$node22" node_modules/vitest/vitest.mjs run tests/e2e/p0-native-journey.test.ts --reporter=dot

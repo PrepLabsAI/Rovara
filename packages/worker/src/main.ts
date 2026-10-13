@@ -12,6 +12,8 @@ import { createWorkerServerState, startWorkerServer } from "./server.js";
 import { invokeAuthenticationFromEnvironment } from "./invoke-auth.js";
 import { resolveTaskSessionModel } from "./task-model.js";
 import { chatGptTokenSource } from "./chatgpt-token.js";
+import { createDefaultProjectSetupExecutor } from "./project-setup-executor.js";
+import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
@@ -23,7 +25,13 @@ const cancellationController = new WorkerCancellationController();
 const state = createWorkerServerState(
   journal,
   {
+    invocationFeatures: ["project.setupSmoke"],
     async execute(invocation: WorkerInvocation): Promise<unknown> {
+      if (invocation.kind === "project-setup-smoke") {
+        const evidenceRoot = requiredEnvironment("CONTAINED_FOUNDATION_EVIDENCE_DIR");
+        const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
+        return createDefaultProjectSetupExecutor({ sourceRoot: rootPath, evidenceRoot, controlPlaneUrl })(invocation);
+      }
       if (invocation.kind === "prepare") {
         const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
         const manifest = await prepareWorkspace({
@@ -97,6 +105,11 @@ const state = createWorkerServerState(
   },
   {
     async onTerminal(result, invocation) {
+      if (invocation.kind === "project-setup-smoke") {
+        const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
+        await postProjectSetupTerminalResult({ controlPlaneUrl, invocation, result });
+        return;
+      }
       const callbacks = createWorkerCallbackSinks({
         controlPlaneUrl: requiredEnvironment("AGENTX_CONTROL_PLANE_URL"),
         invocation,

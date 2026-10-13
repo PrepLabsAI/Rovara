@@ -1134,18 +1134,28 @@ describe("native developer task workflow", () => {
 
   it("starts both reviews automatically once the selected checks pass, bound to the exact checked code", async () => {
     const harness = await createDeveloperTaskBroker();
-    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    const proposedE2EIntent = {
+      schemaVersion: 1 as const,
+      requestedTargetIds: ["payments-web"],
+      accountContextRefs: [{ applicationId: "payments", profileId: "synthetic", sourcePath: "package.json", sourceSha256: "a".repeat(64) }],
+      scenarios: [{ scenarioId: "retry-flow", requirementId: "retry-timeout", requestedTargetIds: ["payments-web"], required: true,
+        accountProfileId: "synthetic", minimumEvidence: "source" as const, requiredRealComponentIds: [],
+        steps: [{ kind: "navigate" as const, path: "/payments" }], assertions: [{ kind: "visible" as const, testId: "retry-status", equals: true }] }],
+      semanticExportDeltas: [],
+    };
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness, planDocument({ e2e: proposedE2EIntent }));
     await finishImplementation();
     const workflow = taskWorkflow(harness, taskId);
     expect(workflow).toMatchObject({ stage: "REVIEW", state: "RUNNING", candidate: { digest: candidate.digest } });
     const review = operations(harness, workspaceId).find((item) => item.workflowMode === "REVIEW")!;
     expect(review.requestId).toBe(workflowRequestId("agentx-auto-review", taskId, workflow.revision - 1, candidate.digest));
-    const payload = (harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === review.id)[0]?.invocation as { payload: { workflowBase?: unknown; workflowReviewChecks?: unknown; workflowReviewPlan?: { markdown: string; sha256: string }; prompt: string } }).payload;
+    const payload = (harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === review.id)[0]?.invocation as { payload: { workflowBase?: unknown; workflowReviewChecks?: unknown; workflowReviewPlan?: { markdown: string; sha256: string; e2eIntent?: unknown }; prompt: string } }).payload;
     expect(payload.workflowBase).toEqual([{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }]);
     // Reviewers get the approved coding plan (the approved artifact's digest and its Markdown), not the owner's note.
     const approvedPlan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)!;
     expect(payload.workflowReviewPlan?.sha256).toBe(approvedPlan.sha256);
-    expect(payload.workflowReviewPlan?.markdown).toContain("Fix retry handling.");
+    expect(payload.workflowReviewPlan?.markdown).toContain("Retry failed payments");
+    expect(payload.workflowReviewPlan?.e2eIntent).toEqual(proposedE2EIntent);
     expect(Buffer.byteLength(payload.workflowReviewPlan!.markdown, "utf8")).toBeLessThanOrEqual(32_768);
     expect(payload.prompt).not.toContain(payload.workflowReviewPlan!.markdown);
     // Reviewers are told which checks ran on the checked code.

@@ -5,6 +5,7 @@ import { redactText } from "./redaction.js";
 import { WorkflowCheckSchema, WORKFLOW_PROPOSED_CHECKS_MAX, type WorkflowCheck, type WorkflowCheckProposal } from "./task-workflow.js";
 import { extractProposedChecks, hasControlCharacter, isNotChangingReference, lastFencedBlock, notChangingReference, proposedCheckTextIssues } from "./workflow-proposed-checks.js";
 import { TaskGraphV1Schema, taskGraphOrder, type TaskGraphV1 } from "./workflow-dependencies.js";
+import { E2EFeaturePlanIntentSchema, type E2EFeaturePlanIntent } from "./e2e.js";
 
 /** The info string of the fenced block that holds a plan document. */
 export const PLAN_DOCUMENT_INFO_STRING = "agentx-plan";
@@ -41,6 +42,8 @@ export interface PlanDocument {
   workBreakdown?: TaskGraphV1 | undefined;
   /** Coding plans only. The validated checks the owner's approval covers, and the claims each proves. */
   checks?: { proposed: WorkflowCheck[]; noneReason?: string | undefined; proposalNote?: string | undefined; proves: Record<string, string[]> };
+  /** Untrusted feature E2E intent, approved only as part of the canonical workflow artifact. */
+  e2e?: E2EFeaturePlanIntent | undefined;
 }
 
 const text = (max: number) => z.string().trim().min(1).max(max);
@@ -158,6 +161,7 @@ const planBodyShape = {
   risks: z.array(text(200)).min(1).max(10),
   decisions: z.array(DecisionSchema).max(PLAN_DECISIONS_MAX),
   workBreakdown: TaskGraphV1Schema.optional(),
+  e2e: E2EFeaturePlanIntentSchema.optional(),
 };
 
 /** The document as the planner writes it: everything but `checks`, which is read separately. */
@@ -396,6 +400,7 @@ export function parsePlanDocument(answer: string, input: {
   const { checks: rawChecks, ...body } = json;
   const errors: string[] = [];
   if (Object.hasOwn(json, "workBreakdown") && input.kind !== "plan") errors.push("the plan: work breakdown belongs only in the coding plan");
+  if (Object.hasOwn(json, "e2e") && input.kind !== "plan") errors.push("the plan: E2E intent belongs only in the coding plan");
   if (Object.hasOwn(json, "checks")) {
     if (input.kind !== "plan") errors.push("the plan: checks belong only in the coding plan");
     else if (input.checks === undefined && !isRecord(rawChecks)) errors.push("the plan: checks should be an object");
@@ -642,6 +647,12 @@ export function planDocumentMarkdown(plan: PlanDocument, input: {
       const prerequisites = item.dependsOn.map((dependency) => byId.get(dependency)?.title).filter((title): title is string => title !== undefined);
       out.push(`${index + 1}. **${line(item.title)}**: ${line(item.description)}${prerequisites.length === 0 ? "" : ` (after ${prerequisites.map(line).join(", ")})`}`);
     });
+  }
+  if (plan.e2e !== undefined) {
+    out.push("## Proposed E2E intent", "The following scenarios and expected values are untrusted model proposals. They become approved only when this canonical plan artifact is approved.");
+    out.push(`- Requested targets and account contexts: ${inlineCode(line(canonicalJson({ requestedTargetIds: plan.e2e.requestedTargetIds, accountContextRefs: plan.e2e.accountContextRefs })))}`);
+    for (const scenario of plan.e2e.scenarios) out.push(`- Scenario ${inlineCode(line(scenario.scenarioId))}: ${inlineCode(line(canonicalJson(scenario)))}`);
+    for (const delta of plan.e2e.semanticExportDeltas) out.push(`- Proposed export delta ${inlineCode(line(delta.operationId))}: ${inlineCode(line(canonicalJson(delta)))}`);
   }
   if (plan.decisions.length > 0) {
     out.push("## Decisions");

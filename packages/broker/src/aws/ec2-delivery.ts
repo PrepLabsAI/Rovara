@@ -20,9 +20,18 @@ export const STARTING_COMPUTE_MESSAGE = "Starting workspace compute";
 
 export type Ec2Delivery = "DELIVERED" | "WAITING_FOR_SESSION" | "WAITING_FOR_TASK_ACCESS";
 
+export interface ProjectSetupSessionPort {
+  ensureSession(input: { setupExecutionId: string; subjectId: string; approvalRevision: number; transportCorrelationId: string; binding: Ec2RuntimeBinding; waitingOutboxId: string }):
+    Promise<{ ready: true; generation: number; privateIp: string } | { ready: false; generation: number; state: string }>;
+}
+
 export interface Ec2DeliveryDependencies {
   sessions: Pick<SessionManager, "ensureSession">;
   binding: (workspaceId: string) => Promise<Ec2RuntimeBinding | undefined>;
+  /** Project setup has a separate lease namespace and never calls SessionManager.ensureSession. */
+  projectSetupSessions?: ProjectSetupSessionPort;
+  /** Reads the registered default binding only after stored setup authority is rechecked. */
+  projectSetupBinding?: (input: { setupExecutionId: string; subjectId: string }) => Promise<Ec2RuntimeBinding | undefined>;
   /** KMS Sign, ECDSA_SHA_256 over the message bytes; returns the DER signature. */
   sign: (message: Uint8Array) => Promise<Uint8Array>;
   post: (url: string, init: { authorization: string; body: string }) => Promise<{ status: number; body: string }>;
@@ -35,6 +44,8 @@ export interface Ec2DeliveryDependencies {
   workerFeatures?: (url: string) => Promise<readonly string[]>;
   /** Rechecks fresh PEOPLE authority after compute is ready, immediately before signing and POST. */
   guardTaskDispatch?: (record: Ec2OutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
+  /** Rechecks stored project setup authority independently from feature-task access. */
+  guardProjectSetupDispatch?: (record: Ec2OutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
   remainingTimeMs?: () => number;
   now?: () => number;
 }
@@ -47,24 +58,53 @@ export interface Ec2DeliveryDependencies {
 export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
   return async (record: Ec2OutboxRecord, invocation: WorkerInvocation, context?: { remainingTimeMs: () => number }): Promise<Ec2Delivery> => {
     const remainingTimeMs = context?.remainingTimeMs ?? dependencies.remainingTimeMs;
-    const binding = await dependencies.binding(record.workspaceId);
-    if (binding === undefined) throw agentXError("CONFIG_INVALID", `workspace ${record.workspaceId} has no ec2-ebs runtime binding`);
-    const session = await dependencies.sessions.ensureSession({ workspaceId: record.workspaceId, binding, waitingOutboxId: record.id });
+    const guardCurrentAuthority = async () => {
+      if (invocation.kind === "project-setup-smoke") {
+        if (dependencies.guardProjectSetupDispatch === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "project setup smoke authority is not configured");
+        return dependencies.guardProjectSetupDispatch(record, remainingTimeMs === undefined ? undefined : { remainingTimeMs });
+      }
+      return dependencies.guardTaskDispatch?.(record, remainingTimeMs === undefined ? undefined : { remainingTimeMs });
+    };
+    if (invocation.kind === "project-setup-smoke" && await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
+    let binding: Ec2RuntimeBinding | undefined;
+    let session: { ready: true; generation: number; privateIp: string } | { ready: false; generation: number; state: string };
+    if (invocation.kind === "project-setup-smoke") {
+      if (dependencies.projectSetupSessions === undefined || dependencies.projectSetupBinding === undefined) {
+        throw agentXError("RUNTIME_UNAVAILABLE", "project setup session transport is not configured");
+      }
+      binding = await dependencies.projectSetupBinding({ setupExecutionId: invocation.payload.setupExecutionId, subjectId: invocation.payload.subjectId });
+      if (binding === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "approved project setup default runtime binding is unavailable");
+      session = await dependencies.projectSetupSessions.ensureSession({
+        setupExecutionId: invocation.payload.setupExecutionId, subjectId: invocation.payload.subjectId,
+        approvalRevision: invocation.payload.approvalRevision,
+        transportCorrelationId: invocation.payload.transportCorrelationId, binding, waitingOutboxId: record.id,
+      });
+    } else {
+      binding = await dependencies.binding(record.workspaceId);
+      if (binding === undefined) throw agentXError("CONFIG_INVALID", `workspace ${record.workspaceId} has no ec2-ebs runtime binding`);
+      session = await dependencies.sessions.ensureSession({ workspaceId: record.workspaceId, binding, waitingOutboxId: record.id });
+    }
     if (!session.ready) {
-      await dependencies.progress(record, STARTING_COMPUTE_MESSAGE);
+      if (invocation.kind !== "project-setup-smoke") await dependencies.progress(record, STARTING_COMPUTE_MESSAGE);
       return "WAITING_FOR_SESSION";
     }
-    if (await dependencies.guardTaskDispatch?.(record, remainingTimeMs === undefined ? undefined : { remainingTimeMs }) === "PARKED") return "WAITING_FOR_TASK_ACCESS";
+    if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures);
-    if (await dependencies.guardTaskDispatch?.(record, remainingTimeMs === undefined ? undefined : { remainingTimeMs }) === "PARKED") return "WAITING_FOR_TASK_ACCESS";
+    if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const payload = workerInvokeTokenPayload({
       workspaceId: record.workspaceId,
       generation: session.generation,
       operationId: invocation.operationId,
       fence: invocation.fence,
       expiresAt: Math.floor((dependencies.now?.() ?? Date.now()) / 1_000) + TOKEN_LIFETIME_SECONDS,
+      ...(invocation.kind === "project-setup-smoke" ? { purpose: "PROJECT_SETUP" as const,
+        setupExecutionId: invocation.payload.setupExecutionId, setupSubjectId: invocation.payload.subjectId,
+        setupApprovalRevision: invocation.payload.approvalRevision } : { purpose: "WORKSPACE" as const }),
     });
     const signature = await dependencies.sign(Buffer.from(payload, "ascii"));
+    // Signing may cross an authority revocation boundary. Recheck setup approval immediately before
+    // the transport side effect; the opaque worker correlation is not durable setup authority.
+    if (invocation.kind === "project-setup-smoke" && await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const response = await dependencies.post(`http://${session.privateIp}:${WORKER_PORT}/invocations`, {
       authorization: `${WORKER_INVOKE_AUTHORIZATION_SCHEME} ${workerInvokeToken(payload, signature)}`,
       body: JSON.stringify(sent),
@@ -116,7 +156,8 @@ async function forWorker(
   const carriesPublishBase = invocation.kind === "publish" && invocation.payload.workflowBaseCommit !== undefined;
   const carriesPullRequestUpdate = invocation.kind === "maintain" && invocation.payload.workflowCandidateTreeSha !== undefined;
   const carriesChatGpt = invocation.kind === "task" && invocation.payload.chatgpt !== undefined;
-  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesReportChecks && !carriesCandidateTree && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies) return invocation;
+  const carriesProjectSetupSmoke = invocation.kind === "project-setup-smoke";
+  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesReportChecks && !carriesCandidateTree && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -142,6 +183,9 @@ async function forWorker(
   }
   if (carriesWorkflowDependencies && !features.includes("task.workflowDependencies")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "ordered work requires a compatible worker that advertises task.workflowDependencies");
+  }
+  if (carriesProjectSetupSmoke && !features.includes("project.setupSmoke")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "project setup smoke requires a worker that implements project.setupSmoke");
   }
   // The pinned base decides what reviewers judge and whether a finding blocks, so it is never dropped.
   if (carriesWorkflowBase && !features.includes("task.workflowBase")) {

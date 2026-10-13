@@ -126,6 +126,79 @@ export const WorkspaceSessionSchema = z
     }
   });
 
+/** Project setup worker transport state is isolated from WORKSPACE# session and operation records. */
+export const ProjectSetupSessionSchema = z.object({
+  schemaVersion: z.literal(1),
+  setupExecutionId: z.string().uuid(),
+  subjectId: z.string().uuid(),
+  transportCorrelationId: z.string().uuid(),
+  approvalRevision: z.number().int().positive(),
+  bindingDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  state: z.enum(["PROVISIONING", "READY", "FAILED", "STOPPED"]),
+  generation: z.number().int().positive(),
+  privateIp: z.ipv4().optional(),
+}).strict().superRefine((session, context) => {
+  if ((session.state === "READY") !== (session.privateIp !== undefined)) {
+    context.addIssue({ code: "custom", path: ["privateIp"], message: "privateIp is present exactly while the setup session is READY" });
+  }
+});
+export type ProjectSetupSession = z.infer<typeof ProjectSetupSessionSchema>;
+
+/** Independently configured identity of the trusted E2E CLI supervisor, not candidate-container output. */
+export const ProjectSetupRunnerEnvironmentSchema = z.object({
+  ci: z.literal(true), trustNoticeShown: z.literal(false), os: z.string().min(1).max(256),
+  arch: z.string().min(1).max(256), runtime: z.string().min(1).max(256),
+}).strict();
+export type ProjectSetupRunnerEnvironment = z.infer<typeof ProjectSetupRunnerEnvironmentSchema>;
+
+/** Exact supervisor Node executable and host identity selected by the ready-only verifier registry. */
+export const ProjectSetupRunnerToolchainSchema = z.object({
+  execPath: z.string().min(1).max(4096), version: z.literal("v22.23.2"),
+  platform: z.string().min(1).max(64), arch: z.string().min(1).max(64),
+}).strict();
+export type ProjectSetupRunnerToolchain = z.infer<typeof ProjectSetupRunnerToolchainSchema>;
+
+/** Durable source-only setup execution metadata; its source bundle is an immutable content-addressed object. */
+export const ProjectSetupExecutionSchema = z.object({
+  schemaVersion: z.literal(1),
+  setupExecutionId: z.string().uuid(), subjectId: z.string().uuid(), transportCorrelationId: z.string().uuid(),
+  projectName: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), projectRevision: z.number().int().positive(), ownerKey: z.string().min(1).max(512),
+  approvalRevision: z.number().int().positive(), proposalRef: z.string().min(1).max(512), proposalSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  candidateDigest: z.string().regex(/^[a-f0-9]{64}$/), policyDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  bindingDigest: z.string().regex(/^[a-f0-9]{64}$/), runtimeGeneration: z.number().int().positive(),
+  executionRef: z.object({ key: z.string().regex(/^project-setup-executions\/sha256\/[a-f0-9]{64}\.json$/), sha256: z.string().regex(/^[a-f0-9]{64}$/), byteLength: z.number().int().positive().max(24 * 1024 * 1024) }).strict(),
+  runtimeCatalogId: z.string().min(1).max(160), state: z.enum(["ACCEPTED", "DISPATCHING", "SUCCEEDED", "FAILED", "PARKED"]),
+  operationId: z.string().uuid(), outboxId: z.string().uuid(), fence: z.number().int().positive(), deadlineAt: z.string().datetime(),
+  evidenceByteLimit: z.number().int().positive().max(256 * 1024 * 1024), createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime().optional(), completedAt: z.string().datetime().optional(),
+  result: z.unknown().optional(), error: z.string().max(2_000).optional(),
+}).strict().superRefine((row, context) => {
+  const terminal = row.state === "SUCCEEDED" || row.state === "FAILED" || row.state === "PARKED";
+  if ((row.state === "ACCEPTED") === (row.updatedAt !== undefined)) context.addIssue({ code: "custom", path: ["updatedAt"], message: "execution transition timestamp must match its state" });
+  if ((row.completedAt !== undefined) !== (terminal && row.result !== undefined)) context.addIssue({ code: "custom", path: ["completedAt"], message: "terminal result and completion timestamp must be stored together" });
+  if (row.error !== undefined && (row.state !== "FAILED" || row.updatedAt === undefined || row.result !== undefined)) context.addIssue({ code: "custom", path: ["error"], message: "dispatch error is valid only on a failed execution without a terminal result" });
+});
+export type ProjectSetupExecution = z.infer<typeof ProjectSetupExecutionSchema>;
+
+export const ProjectSetupOperationSchema = z.object({
+  schemaVersion: z.literal(1), setupExecutionId: z.string().uuid(), operationId: z.string().uuid(),
+  transportCorrelationId: z.string().uuid(), fence: z.number().int().positive(), status: z.enum(["ACCEPTED", "DISPATCHING", "DELIVERED", "SUCCEEDED", "FAILED", "PARKED"]),
+  createdAt: z.string().datetime(), updatedAt: z.string().datetime(), result: z.unknown().optional(), error: z.string().max(2_000).optional(),
+}).strict();
+export type ProjectSetupOperation = z.infer<typeof ProjectSetupOperationSchema>;
+
+export function projectSetupExecutionKey(setupExecutionId: string): { pk: string; sk: "EXECUTION" } {
+  return { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: "EXECUTION" };
+}
+
+export function projectSetupSessionKey(setupExecutionId: string): { pk: string; sk: "SESSION" } {
+  return { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: "SESSION" };
+}
+
+export function projectSetupOperationKey(setupExecutionId: string, operationId: string): { pk: string; sk: string } {
+  return { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `OPERATION#${operationId}` };
+}
+
 /**
  * The state table's sparse index of SESSION items by state, for the idle reaper and reconciler.
  * A SESSION item carries `sessionState` (a copy of `state`) only so that it appears here; no other
@@ -195,8 +268,15 @@ export const WorkerInvokeTokenClaimsSchema = z
     operationId: z.string().uuid(),
     fence: z.number().int().positive(),
     expiresAt: z.number().int().positive(),
+    purpose: z.enum(["WORKSPACE", "PROJECT_SETUP"]).default("WORKSPACE"),
+    setupExecutionId: z.string().uuid().optional(),
+    setupSubjectId: z.string().uuid().optional(),
+    setupApprovalRevision: z.number().int().positive().optional(),
   })
-  .strict();
+  .strict().superRefine((claims, context) => {
+    const hasSetup = claims.setupExecutionId !== undefined && claims.setupSubjectId !== undefined && claims.setupApprovalRevision !== undefined;
+    if ((claims.purpose === "PROJECT_SETUP") !== hasSetup) context.addIssue({ code: "custom", path: ["setupExecutionId"], message: "setup purpose requires exact setup subject claims and workspace purpose forbids them" });
+  });
 
 /** The HTTP authorization scheme of a worker invocation: `Authorization: AgentX-Invoke <token>`. */
 export const WORKER_INVOKE_AUTHORIZATION_SCHEME = "AgentX-Invoke";

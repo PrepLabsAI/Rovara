@@ -49,6 +49,19 @@ export function compareE2EPublicList(packet: E2ESelectionPacket, listed: unknown
       if (!("value" in descriptor) || descriptor.enumerable !== true) throw new Error("public list pair fields must be own data properties");
       if (descriptor.value !== undefined) projected[key] = descriptor.value;
     }
+    const sourceDescriptor = pairDescriptors.source;
+    const tagsDescriptor = pairDescriptors.tags;
+    if (!sourceDescriptor || !("value" in sourceDescriptor) || sourceDescriptor.enumerable !== true || sourceDescriptor.value === null || typeof sourceDescriptor.value !== "object" || types.isProxy(sourceDescriptor.value) || Array.isArray(sourceDescriptor.value)) throw new Error("public list source metadata is missing or unsafe");
+    const sourceDescriptors = Object.getOwnPropertyDescriptors(sourceDescriptor.value);
+    if (Reflect.ownKeys(sourceDescriptors).some((key) => typeof key !== "string" || !["file", "line", "column"].includes(key)) || Object.keys(sourceDescriptors).sort().join(",") !== "column,file,line") throw new Error("public list source metadata has unknown or missing fields");
+    const source: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+    for (const key of ["file", "line", "column"] as const) {
+      const descriptor = sourceDescriptors[key];
+      if (!descriptor || !("value" in descriptor) || descriptor.enumerable !== true) throw new Error("public list source metadata must contain own data fields");
+      source[key] = descriptor.value;
+    }
+    if (source.file !== ".agentx/e2e/generated-contract.test.ts" || !Number.isSafeInteger(source.line) || (source.line as number) < 1 || !Number.isSafeInteger(source.column) || (source.column as number) < 1) throw new Error("public list source metadata is malformed");
+    if (!tagsDescriptor || !("value" in tagsDescriptor) || tagsDescriptor.enumerable !== true || !Array.isArray(tagsDescriptor.value) || types.isProxy(tagsDescriptor.value) || tagsDescriptor.value.some((tag) => typeof tag !== "string")) throw new Error("public list tags are missing or malformed");
     return projected;
   });
   const safeListed = copyBoundedE2EJsonData({ pairs: pairsProjection, unmatched: dataField("unmatched") }, { maxBytes: 262_144, maxDepth: 64 }) as { pairs?: unknown; unmatched?: unknown };

@@ -121,9 +121,18 @@ export function verifyInvokeAuthorization(
  * is journaled, so a captured token cannot carry a different invocation.
  */
 export function invocationMatchesClaims(invocation: WorkerInvocation, claims: WorkerInvokeTokenClaims): boolean {
-  return (
+  const common = (
     invocation.workspaceId === claims.workspaceId &&
     invocation.operationId === claims.operationId &&
     invocation.fence === claims.fence
   );
+  if (!common) return false;
+  if (claims.purpose === "PROJECT_SETUP") {
+    return invocation.kind === "project-setup-smoke"
+      && invocation.payload.setupExecutionId === claims.setupExecutionId
+      && invocation.payload.subjectId === claims.setupSubjectId
+      && invocation.payload.approvalRevision === claims.setupApprovalRevision
+      && invocation.payload.transportCorrelationId === claims.workspaceId;
+  }
+  return invocation.kind !== "project-setup-smoke";
 }

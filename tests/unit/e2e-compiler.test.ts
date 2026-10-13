@@ -76,7 +76,10 @@ describe("trusted E2E compiler", () => {
     await mkdir(evidenceDirectory, { mode: 0o700 });
     try {
       const selectionPacket = JSON.parse(compiled.files.get(compiled.selectionPacketPath)!) as E2ESelectionPacket;
-      await expect(runE2EActualCli({ compiled, snapshot: foreign, selection: selectionPacket, hostRequestIds: new Map([[compiled.expectedCases[0]!.caseId, "host-request"]]), sourceRoot: process.cwd(), evidenceDirectory, deadlineAt: Date.now() + 60_000, signal: new AbortController().signal })).rejects.toThrow(/compiler-origin/);
+      const runnerToolchain = { execPath: process.execPath, version: process.version as "v22.23.2", platform: process.platform, arch: process.arch };
+      await expect(runE2EActualCli({ compiled, snapshot, selection: selectionPacket, runnerToolchain: { ...runnerToolchain, execPath: `${process.execPath}.foreign` }, hostRequestIds: new Map([[compiled.expectedCases[0]!.caseId, "host-request"]]), sourceRoot: process.cwd(), evidenceDirectory, deadlineAt: Date.now() + 60_000, signal: new AbortController().signal })).rejects.toThrow(/ready-registry Node toolchain identity/);
+      expect(await readdir(evidenceDirectory)).toEqual([]);
+      await expect(runE2EActualCli({ compiled, snapshot: foreign, selection: selectionPacket, runnerToolchain, hostRequestIds: new Map([[compiled.expectedCases[0]!.caseId, "host-request"]]), sourceRoot: process.cwd(), evidenceDirectory, deadlineAt: Date.now() + 60_000, signal: new AbortController().signal })).rejects.toThrow(/compiler-origin/);
       expect(await readdir(evidenceDirectory)).toEqual([]);
     } finally { await rm(scratch, { recursive: true, force: true }); }
   });
@@ -380,6 +383,9 @@ describe("trusted E2E compiler", () => {
       expect(verified.selected.map((item) => item.caseId)).toEqual(group.expectedCases.map((item) => item.caseId));
       expect(verified.filtered).toEqual([]);
       expect(actual.pairs.every((item) => item.disposition === "run")).toBe(true);
+      const relocated = { ...actual, pairs: actual.pairs.map((item, index) => ({ ...item, source: { ...item.source, line: index + 41, column: 1 } })) };
+      expect(compareE2EPublicList(packet, relocated).selected.map((item) => item.caseId)).toEqual(group.expectedCases.map((item) => item.caseId));
+      expect(() => compareE2EPublicList(packet, { ...actual, pairs: actual.pairs.map((item, index) => index === 0 ? { ...item, source: { ...item.source, file: "foreign.ts" } } : item) })).toThrow(/source metadata is malformed/);
       expect(() => compareE2EPublicList(packet, { ...actual, pairs: [{ ...actual.pairs[0]!, id: "f".repeat(64) }] })).toThrow(/extra, foreign, or duplicate/);
       let getterInvoked = false;
       const hostileList = Object.defineProperty({}, "pairs", { enumerable: true, get() { getterInvoked = true; return actual.pairs; } });

@@ -2,15 +2,16 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
-import { GetCommand, QueryCommand, DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, QueryCommand, DynamoDBDocumentClient, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { randomUUID } from "node:crypto";
-import { SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, type SlackChannelBinding, type WorkerInvocation } from "@agentx/contracts";
+import { Ec2RuntimeBindingSchema, ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, SlackTeamIdSchema, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey, type SlackChannelBinding, type WorkerInvocation } from "@agentx/contracts";
 import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } from "./lambda.js";
 import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
 import { createEc2Delivery } from "./ec2-delivery.js";
 import { appendOperationEvent } from "./operation-events.js";
-import { SessionManager, workspaceBinding } from "./sessions.js";
+import { ProjectSetupSessionManager, SessionManager, workspaceBinding } from "./sessions.js";
+import { admitProjectSetupRuntime, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
 import { guardTaskDispatch, isTaskDispatchGuardRetryError } from "./task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "./task-authority-admission.js";
 import { createTaskPersonRuntime, type TaskPersonDeveloperRecordProjection, type TaskPersonRuntimePorts } from "./task-person-runtime.js";
@@ -29,6 +30,78 @@ export interface SqsEvent {
 }
 
 export interface DispatcherLambdaContext { getRemainingTimeInMillis(): number }
+
+/** State transitions stay under PROJECT_SETUP#setupExecutionId, never WORKSPACE#transportCorrelationId. */
+export interface ProjectSetupDispatchLifecycle {
+  markDispatching: (record: DurableOutboxRecord) => Promise<boolean | void>;
+  markDelivered: (record: DurableOutboxRecord) => Promise<void>;
+  markFailed: (record: DurableOutboxRecord, error: string) => Promise<void>;
+}
+
+export function createProjectSetupDispatchLifecycle(input: { documentClient: DynamoDBDocumentClient; tableName: string; now?: () => Date }): ProjectSetupDispatchLifecycle {
+  return {
+    async markDispatching(record) {
+      if (record.invocation.kind !== "project-setup-smoke") return false;
+      const setupId = record.invocation.payload.setupExecutionId;
+      const operationKey = projectSetupOperationKey(setupId, record.operationId);
+      const now = (input.now ?? (() => new Date()))().toISOString();
+      try {
+        await input.documentClient.send(new TransactWriteCommand({ TransactItems: [
+          { Update: { TableName: input.tableName, Key: projectSetupExecutionKey(setupId),
+            UpdateExpression: "SET #state = :dispatching, updatedAt = :now",
+            ConditionExpression: "#state = :accepted OR #state = :dispatching",
+            ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":now": now } } },
+          { Update: { TableName: input.tableName, Key: operationKey,
+            UpdateExpression: "SET #status = :dispatching, updatedAt = :now",
+            ConditionExpression: "#status = :accepted OR #status = :dispatching",
+            ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":now": now } } },
+        ] }));
+        return true;
+      } catch (error) {
+        if (error instanceof Error && error.name === "TransactionCanceledException") return false;
+        throw error;
+      }
+    },
+    async markDelivered(record) {
+      if (record.invocation.kind !== "project-setup-smoke") return;
+      await input.documentClient.send(new UpdateCommand({ TableName: input.tableName,
+        Key: projectSetupOperationKey(record.invocation.payload.setupExecutionId, record.operationId),
+        UpdateExpression: "SET #status = :delivered, updatedAt = :now",
+        ConditionExpression: "#status = :dispatching OR #status = :delivered",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":now": (input.now ?? (() => new Date()))().toISOString() } }));
+    },
+    async markFailed(record, message) {
+      if (record.invocation.kind !== "project-setup-smoke") return;
+      const setupId = record.invocation.payload.setupExecutionId;
+      const now = (input.now ?? (() => new Date()))().toISOString();
+      await input.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { Update: { TableName: input.tableName, Key: projectSetupExecutionKey(setupId),
+          UpdateExpression: "SET #state = :failed, updatedAt = :now, error = :error",
+          ConditionExpression: "#state = :accepted OR #state = :dispatching",
+          ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":failed": "FAILED", ":now": now, ":error": message.slice(0, 2_000) } } },
+        { Update: { TableName: input.tableName, Key: projectSetupOperationKey(setupId, record.operationId),
+          UpdateExpression: "SET #status = :failed, updatedAt = :now, #error = :error",
+          ConditionExpression: "#status = :accepted OR #status = :dispatching OR #status = :delivered",
+          ExpressionAttributeNames: { "#status": "status", "#error": "error" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":failed": "FAILED", ":now": now, ":error": message.slice(0, 2_000) } } },
+      ] }));
+    },
+  };
+}
+
+/** Loads only the binding pinned by the stored setup execution and its registered project revision. */
+export function createProjectSetupBindingReader(input: { documentClient: DynamoDBDocumentClient; tableName?: string }) {
+  return async ({ setupExecutionId, subjectId }: { setupExecutionId: string; subjectId: string }) => {
+    const table = input.tableName ?? requiredEnvironment("STATE_TABLE_NAME");
+    const item = await input.documentClient.send(new GetCommand({ TableName: table,
+      Key: projectSetupExecutionKey(setupExecutionId), ConsistentRead: true }));
+    const row = ProjectSetupExecutionSchema.safeParse(setupDomainRow(item.Item, projectSetupExecutionKey(setupExecutionId), "PROJECT_SETUP_EXECUTION"));
+    if (!row.success || row.data.subjectId !== subjectId) return undefined;
+    const project = (await input.documentClient.send(new GetCommand({ TableName: table,
+      Key: { pk: `PROJECT#${row.data.projectName}`, sk: `REV#${String(row.data.projectRevision).padStart(12, "0")}` }, ConsistentRead: true }))).Item as { runtimeBinding?: unknown } | undefined;
+    const binding = Ec2RuntimeBindingSchema.safeParse(project?.runtimeBinding);
+    return binding.success && binding.data.deploymentMode === "ec2-ebs" ? binding.data : undefined;
+  };
+}
 
 export interface DispatchLogEntry {
   level: "warn" | "error";
@@ -49,6 +122,9 @@ export interface DispatchLogEntry {
 export function createDispatcherHandler(dependencies: {
   /** Strongly checks and durably parks PEOPLE-backed work before any dispatch state or worker side effect. */
   guardTaskDispatch?: (record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
+  /** Setup work is authorized from its own stored proposal/execution namespace, never a feature task. */
+  guardProjectSetupDispatch?: (record: DurableOutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
+  projectSetupLifecycle?: ProjectSetupDispatchLifecycle;
   markDispatching: (record: DurableOutboxRecord) => Promise<boolean | void>;
   markDelivered: (id: string) => Promise<void>;
   markFailed: (record: DurableOutboxRecord, error: string) => Promise<void>;
@@ -74,16 +150,29 @@ export function createDispatcherHandler(dependencies: {
         const parsed = JSON.parse(message.body) as DurableOutboxRecord;
         const invocation = WorkerInvocationSchema.parse(parsed.invocation);
         record = { ...parsed, invocation };
-        if (await dependencies.guardTaskDispatch?.(record, { remainingTimeMs }) === "PARKED") continue;
-        const shouldInvoke = await dependencies.markDispatching(record);
+        if (invocation.kind === "project-setup-smoke") {
+          if (record.operationId !== invocation.operationId || record.workspaceId !== invocation.workspaceId
+            || invocation.payload.transportCorrelationId !== invocation.workspaceId) {
+            throw agentXError("CONFIG_INVALID", "project setup outbox identity does not match its authenticated invocation");
+          }
+          if (dependencies.guardProjectSetupDispatch === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "project setup smoke authority is not configured");
+          if (dependencies.projectSetupLifecycle === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "project setup operation storage is not configured");
+          if (await dependencies.guardProjectSetupDispatch(record, { remainingTimeMs }) === "PARKED") continue;
+        } else if (await dependencies.guardTaskDispatch?.(record, { remainingTimeMs }) === "PARKED") continue;
+        const setup = invocation.kind === "project-setup-smoke" ? dependencies.projectSetupLifecycle : undefined;
+        const shouldInvoke = await (setup?.markDispatching(record) ?? dependencies.markDispatching(record));
         if (shouldInvoke === false) {
+          if (setup) await setup.markDelivered(record);
           await dependencies.markDelivered(record.id);
           continue;
         }
         if (record.deploymentMode === "ec2-ebs") {
           if (dependencies.deliverEc2 === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "this dispatcher cannot reach ec2-ebs workers");
           // A record parked until its session is ready is acknowledged without using an attempt.
-          if (await dependencies.deliverEc2(record, invocation, { remainingTimeMs }) === "DELIVERED") await dependencies.markDelivered(record.id);
+          if (await dependencies.deliverEc2(record, invocation, { remainingTimeMs }) === "DELIVERED") {
+            if (setup) await setup.markDelivered(record);
+            await dependencies.markDelivered(record.id);
+          }
           continue;
         }
         throw agentXError("RUNTIME_UNAVAILABLE", "retired deployment mode cannot execute work; register an ec2-ebs project");
@@ -105,7 +194,9 @@ export function createDispatcherHandler(dependencies: {
         });
         if (terminal && record) {
           try {
-            await dependencies.markFailed(record, terminalDispatchError(error, attempt));
+            const setup = record.invocation.kind === "project-setup-smoke" ? dependencies.projectSetupLifecycle : undefined;
+            if (setup) await setup.markFailed(record, terminalDispatchError(error, attempt));
+            else await dependencies.markFailed(record, terminalDispatchError(error, attempt));
             continue;
           } catch (transitionError) {
             logDispatchFailure(dependencies.log, {
@@ -283,6 +374,79 @@ const taskDispatchGuard = (record: DurableOutboxRecord, context?: { remainingTim
     ...(personRuntime === undefined ? {} : { stateAuthorityWitnessForOwnerActor: (task, ownerActorId) => personRuntime.stateAuthorityWitnessForOwnerActor(task, ownerActorId) }),
   }, record);
 };
+
+const setupDomainRow = (item: Record<string, unknown> | undefined, key: { pk: string; sk: string }, entityType: string): Record<string, unknown> | undefined => {
+  if (!item || item.pk !== key.pk || item.sk !== key.sk || item.entityType !== entityType) return undefined;
+  const { pk: _pk, sk: _sk, entityType: _entityType, ...domain } = item;
+  void _pk; void _sk; void _entityType;
+  return domain;
+};
+
+const setupRuntimeDomainRow = (item: Record<string, unknown> | undefined, key: { pk: string; sk: string }): Record<string, unknown> | undefined => {
+  const domain = setupDomainRow(item, key, "PROJECT_SETUP_RUNTIME");
+  return domain === undefined ? undefined : { ...domain, entityType: "PROJECT_SETUP_RUNTIME" };
+};
+
+export function createProjectSetupDispatchGuard(input: { documentClient: DynamoDBDocumentClient; tableName: string; runtimeCatalogId: string; now?: () => number }) {
+  return async (record: DurableOutboxRecord): Promise<"ALLOWED" | "PARKED"> => {
+  const invocation = record.invocation;
+  const catalogId = input.runtimeCatalogId;
+  if (invocation.kind !== "project-setup-smoke" || !catalogId || record.workspaceId !== invocation.payload.transportCorrelationId
+    || record.operationId !== invocation.operationId) return "PARKED";
+  const setupId = invocation.payload.setupExecutionId;
+  const [executionItem, sessionItem, operationItem] = await Promise.all([
+    input.documentClient.send(new GetCommand({ TableName: input.tableName, Key: projectSetupExecutionKey(setupId), ConsistentRead: true })),
+    input.documentClient.send(new GetCommand({ TableName: input.tableName, Key: projectSetupSessionKey(setupId), ConsistentRead: true })),
+    input.documentClient.send(new GetCommand({ TableName: input.tableName, Key: projectSetupOperationKey(setupId, invocation.operationId), ConsistentRead: true })),
+  ]);
+  const execution = ProjectSetupExecutionSchema.safeParse(setupDomainRow(executionItem.Item, projectSetupExecutionKey(setupId), "PROJECT_SETUP_EXECUTION"));
+  const session = ProjectSetupSessionSchema.safeParse(setupDomainRow(sessionItem.Item, projectSetupSessionKey(setupId), "PROJECT_SETUP_SESSION"));
+  const operation = ProjectSetupOperationSchema.safeParse(setupDomainRow(operationItem.Item, projectSetupOperationKey(setupId, invocation.operationId), "PROJECT_SETUP_OPERATION"));
+  if (!execution.success || !session.success || !operation.success) return "PARKED";
+  const row = execution.data;
+  if (row.state !== "ACCEPTED" && row.state !== "DISPATCHING") return "PARKED";
+  if (row.setupExecutionId !== setupId || row.operationId !== invocation.operationId || row.outboxId !== record.id
+    || row.transportCorrelationId !== invocation.payload.transportCorrelationId || row.subjectId !== invocation.payload.subjectId
+    || row.approvalRevision !== invocation.payload.approvalRevision || row.fence !== invocation.fence
+    || row.executionRef.sha256 !== invocation.payload.executionRef.sha256 || row.executionRef.key !== invocation.payload.executionRef.key
+    || operation.data.status !== "ACCEPTED" && operation.data.status !== "DISPATCHING"
+    || operation.data.transportCorrelationId !== row.transportCorrelationId || operation.data.fence !== row.fence) return "PARKED";
+  const stateTable = input.tableName;
+  const projectItem = (await input.documentClient.send(new GetCommand({ TableName: stateTable,
+    Key: { pk: `PROJECT#${row.projectName}`, sk: `REV#${String(row.projectRevision).padStart(12, "0")}` }, ConsistentRead: true }))).Item as Record<string, unknown> | undefined;
+  const project = projectItem as { registeredBy?: unknown; definition?: { revision?: unknown }; runtimeBinding?: unknown; setupApproval?: { proposalSha256?: unknown; proposalRef?: unknown; decision?: unknown } } | undefined;
+  if (!project || project.registeredBy !== row.ownerKey || project.definition?.revision !== row.projectRevision
+    || project.setupApproval?.decision !== "approve" || project.setupApproval.proposalSha256 !== row.proposalSha256
+    || project.setupApproval.proposalRef !== row.proposalRef) return "PARKED";
+  const membership = (await input.documentClient.send(new GetCommand({ TableName: stateTable,
+    Key: { pk: `MEMBER#${row.ownerKey}`, sk: `PROJECT#${row.projectName}` }, ConsistentRead: true }))).Item as { role?: unknown } | undefined;
+  if (membership?.role !== "administrator") return "PARKED";
+  const approved = (await input.documentClient.send(new GetCommand({ TableName: stateTable,
+    Key: { pk: `PROJECT_SETUP#${row.projectName}`, sk: `PROPOSAL#${row.proposalSha256}` }, ConsistentRead: true }))).Item as Record<string, unknown> | undefined;
+  if (!approved || approved.ownerKey !== row.ownerKey || approved.decision !== "approve" || approved.proposalRef !== row.proposalRef
+    || approved.policyDigest !== row.policyDigest) return "PARKED";
+  const binding = Ec2RuntimeBindingSchema.safeParse(project.runtimeBinding);
+  if (!binding.success || binding.data.deploymentMode !== "ec2-ebs") return "PARKED";
+  const catalogItem = await input.documentClient.send(new GetCommand({ TableName: stateTable,
+    Key: projectSetupRuntimeKey(catalogId, row.bindingDigest), ConsistentRead: true }));
+  const catalogKey = projectSetupRuntimeKey(catalogId, row.bindingDigest);
+  const catalog = ProjectSetupRuntimeRecordSchema.safeParse(setupRuntimeDomainRow(catalogItem.Item, catalogKey));
+  if (!catalog.success || catalog.data.transportCorrelationId !== row.transportCorrelationId || catalog.data.generation !== row.runtimeGeneration
+    || !admitProjectSetupRuntime(catalog.data, { runtimeCatalogId: catalogId, binding: binding.data, scope: "source-interface", now: (input.now ?? Date.now)() })) return "PARKED";
+  const storedSession = session.data;
+  if (storedSession.state !== "READY" || storedSession.setupExecutionId !== setupId || storedSession.subjectId !== row.subjectId
+    || storedSession.transportCorrelationId !== row.transportCorrelationId || storedSession.approvalRevision !== row.approvalRevision
+    || storedSession.bindingDigest !== row.bindingDigest || storedSession.generation !== row.runtimeGeneration) return "PARKED";
+  return "ALLOWED";
+  };
+}
+
+async function guardProjectSetupDispatch(record: DurableOutboxRecord): Promise<"ALLOWED" | "PARKED"> {
+  const catalogId = process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID;
+  const stateTable = tableName ?? (process.env.STATE_TABLE_NAME ?? "");
+  if (!catalogId || !stateTable) return "PARKED";
+  return createProjectSetupDispatchGuard({ documentClient, tableName: stateTable, runtimeCatalogId: catalogId })(record);
+}
 /** A worker answers /invocations as soon as it has journaled the operation. */
 const WORKER_POST_TIMEOUT_MS = 10_000;
 /** Asking a worker what it parses (spec 053); one that does not answer gets no optional field. */
@@ -313,6 +477,8 @@ const deliverEc2 = createEc2Delivery({
       },
     },
   }),
+  projectSetupSessions: new ProjectSetupSessionManager({ documentClient, tableName: tableName ?? "" }),
+  projectSetupBinding: createProjectSetupBindingReader({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
   binding: (workspaceId) => workspaceBinding(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), workspaceId),
   async sign(message) {
     const response = await kms.send(new SignCommand({
@@ -334,6 +500,7 @@ const deliverEc2 = createEc2Delivery({
   },
   workerFeatures: (url) => workerPingFeatures(url),
   guardTaskDispatch: taskDispatchGuard,
+  guardProjectSetupDispatch,
   async progress(record, message) {
     await appendOperationEvent(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), {
       workspaceId: record.workspaceId,
@@ -347,6 +514,54 @@ const deliverEc2 = createEc2Delivery({
 
 export const handler = createDispatcherHandler({
   guardTaskDispatch: taskDispatchGuard,
+  guardProjectSetupDispatch,
+  projectSetupLifecycle: {
+    async markDispatching(record) {
+      if (record.invocation.kind !== "project-setup-smoke") return false;
+      const setupId = record.invocation.payload.setupExecutionId;
+      const operationKey = projectSetupOperationKey(setupId, record.operationId);
+      const now = new Date().toISOString();
+      try {
+        await documentClient.send(new TransactWriteCommand({ TransactItems: [
+          { Update: { TableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"), Key: projectSetupExecutionKey(setupId),
+            UpdateExpression: "SET #state = :dispatching, updatedAt = :now",
+            ConditionExpression: "#state = :accepted OR #state = :dispatching",
+            ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":now": now } } },
+          { Update: { TableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"), Key: operationKey,
+            UpdateExpression: "SET #status = :dispatching, updatedAt = :now",
+            ConditionExpression: "#status = :accepted OR #status = :dispatching",
+            ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":now": now } } },
+        ] }));
+        return true;
+      } catch (error) {
+        if (error instanceof Error && error.name === "TransactionCanceledException") return false;
+        throw error;
+      }
+    },
+    async markDelivered(record) {
+      if (record.invocation.kind !== "project-setup-smoke") return;
+      await documentClient.send(new UpdateCommand({ TableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"),
+        Key: projectSetupOperationKey(record.invocation.payload.setupExecutionId, record.operationId),
+        UpdateExpression: "SET #status = :delivered, updatedAt = :now",
+        ConditionExpression: "#status = :dispatching OR #status = :delivered",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":now": new Date().toISOString() } }));
+    },
+    async markFailed(record, message) {
+      if (record.invocation.kind !== "project-setup-smoke") return;
+      const setupId = record.invocation.payload.setupExecutionId;
+      const now = new Date().toISOString();
+      await documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { Update: { TableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"), Key: projectSetupExecutionKey(setupId),
+          UpdateExpression: "SET #state = :failed, updatedAt = :now, error = :error",
+          ConditionExpression: "#state = :accepted OR #state = :dispatching",
+          ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":failed": "FAILED", ":now": now, ":error": message.slice(0, 2_000) } } },
+        { Update: { TableName: tableName ?? requiredEnvironment("STATE_TABLE_NAME"), Key: projectSetupOperationKey(setupId, record.operationId),
+          UpdateExpression: "SET #status = :failed, updatedAt = :now, #error = :error",
+          ConditionExpression: "#status = :accepted OR #status = :dispatching OR #status = :delivered",
+          ExpressionAttributeNames: { "#status": "status", "#error": "error" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":failed": "FAILED", ":now": now, ":error": message.slice(0, 2_000) } } },
+      ] }));
+    },
+  },
   deliverEc2,
   maxAttempts: parseMaximumAttempts(process.env.MAX_DISPATCH_ATTEMPTS),
   async markDispatching(record) {

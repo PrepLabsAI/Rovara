@@ -120,6 +120,7 @@ import {
   WORKFLOW_REGRESSION_INSTRUCTION,
   type WorkflowSendBackProblem,
   type WorkflowDependencyInvocation,
+  type E2EFeaturePlanIntent,
   workflowDependencyAttemptTerminalProgress,
   WorkflowResolveFindingsInputSchema,
   TaskPeopleRoleRequestSchema,
@@ -2036,13 +2037,14 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
 }
 
 /** The owner-approved coding plan, read back and checked against the digest the approval recorded. */
-async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<{ text: string; sha256: string }> {
+async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<{ text: string; sha256: string; e2eIntent?: E2EFeaturePlanIntent }> {
   const plan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
   if (plan === undefined) throw agentXError("WORKSPACE_NOT_READY", "the approved coding plan is missing");
   // A structured plan is given as its Markdown copy, with the owner's answers and the comments they sent with the approval.
   const loaded = await loadWorkflowDocument((objectKey, maxBytes) => deps.actions.readArtifact(objectKey, maxBytes), plan, { answers: await ownerAnswersFor(deps, workflow, plan) });
   if (loaded === undefined) throw agentXError("WORKSPACE_NOT_READY", "the approved coding plan failed its digest check");
-  return { text: loaded.markdown, sha256: plan.sha256 };
+  return { text: loaded.markdown, sha256: plan.sha256,
+    ...(loaded.format === "structured" && loaded.plan.e2e !== undefined ? { e2eIntent: loaded.plan.e2e } : {}) };
 }
 
 /** Reload the exact whole-plan artifact bound by the Owner so a retry cannot fall back to plain coding. */
@@ -2446,7 +2448,10 @@ async function workflowReviewPlanOption(deps: DeveloperTaskRouteDependencies, wo
     if (error instanceof AgentXError && error.code === "WORKSPACE_NOT_READY") return {};
     throw error;
   }
-  return { workflowReviewPlan: { markdown: shortenMarkdown(approved.text, WORKFLOW_PLAN_MAX_BYTES), sha256: approved.sha256 } };
+  return { workflowReviewPlan: {
+    markdown: shortenMarkdown(approved.text, WORKFLOW_PLAN_MAX_BYTES), sha256: approved.sha256,
+    ...(approved.e2eIntent === undefined ? {} : { e2eIntent: approved.e2eIntent }),
+  } };
 }
 
 /**

@@ -14,14 +14,26 @@ import {
   TransactWriteCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import {
   AgentXError,
+  E2ESetupProposalSchema,
+  E2EPolicySchema,
+  E2EScenarioBundleSchema,
+  e2eScenarioBundleDigest,
+  E2ERunBindingSchema,
+  E2ERoundSchema,
+  selectE2EExecutionPlan,
+  inspectE2ERepository,
+  proposeE2ESetup,
+  verifyE2ESourceSnapshot,
+  verifyE2ESetupProposal,
   CHANNEL_TURN_REQUEST_MAX,
+  AGENTX_PROTOCOL_VERSION,
   CheckReportSchema,
   LatestChecksSchema,
   PULL_REQUEST_BODY_MAX_CHARS,
@@ -181,13 +193,19 @@ import {
   indexExpiresAt,
   WORKFLOW_RESOLVE_FINDINGS_MAX,
   sameJsonContent,
+  type E2ESourceSnapshot,
+  type E2ESetupProposal,
+  ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
+  projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey,
+  WorkerInvocationSchema,
 } from "@agentx/contracts";
+import { compileE2EScenarios, collectE2EActualCliRun, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes } from "@agentx/verifier";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
 import { outcomeMetric } from "./admin-change-audit.js";
 import { pressAdminChange, routeAdminChange, type AdminChangeDependencies } from "./admin-changes.js";
 import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans.js";
-import { ZodError } from "zod";
+import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
 import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js";
@@ -215,6 +233,10 @@ import { resolvePlanEvidence } from "../developer/plan-evidence.js";
 import { WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { approvedFeedbackFixes, withFeedbackFixes, withStatusLines } from "../developer/pull-request-feedback-section.js";
 import { projectKey, requireProject } from "./project-records.js";
+import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
+import { verifyProjectSetupCapability } from "./project-setup-capability.js";
+import { issueProjectSetupCapability } from "./project-setup-capability.js";
+import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
   type CallbackClaims, type OperationRecord,
@@ -271,7 +293,22 @@ import { can, resolveTaskAccess, type TaskAccess, type TaskAction } from "../dev
 import { resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
 
 const MAX_ARTIFACT_BYTES = 5_000_000;
+const MAX_SETUP_PROPOSAL_BYTES = 24 * 1024 * 1024;
+// This derived ceiling bounds only the chunked private carrier; each report,
+// frame, literal, record, and admitted group keeps its existing component limit.
+const MAX_SETUP_EVIDENCE_BYTES = e2ePrivateTransferMaxBytes(64, 4);
+const SETUP_ARTIFACT_CHUNK_BYTES = 64 * 1024;
 const EVENT_TRANSACTION_CHUNK = 80;
+
+function projectSetupPolicy(proposal: E2ESetupProposal): ReturnType<typeof E2EPolicySchema.parse> {
+  return E2EPolicySchema.parse({
+    schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [], targets: proposal.targets,
+    defaultSandboxProfileId: "default-sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
+    capture: { screenshots: false, traces: false, video: false, downloads: false },
+    limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000,
+      maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null },
+  });
+}
 
 export interface RegisteredProjectRecord {
   pk: string;
@@ -281,6 +318,7 @@ export interface RegisteredProjectRecord {
   runtimeBinding: RuntimeBinding;
   registeredBy: string;
   registeredAt: string;
+  setupApproval?: { proposalRef: string; proposalSha256: string; candidateDigest: string; decision: "approve" | "decline" };
 }
 
 interface MembershipRecord {
@@ -353,6 +391,10 @@ interface AwsBrokerDependencies {
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
   githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
+  /** Trusted server-side source capture used only by normal project setup discovery. */
+  projectSetupSource?: { capture: (input: { repositoryUrl: string; ref: string }) => Promise<E2ESourceSnapshot> };
+  /** Server-selected catalog namespace for an already configured setup verifier. */
+  projectSetupRuntimeCatalogId?: string;
   /** Reads the GitHub webhook HMAC key from the configured GitHub App secret; `refresh` asks for a fresh read of the secret. */
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
@@ -899,6 +941,23 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (request.method === "POST" && evalCallback !== undefined) {
         return json(await handleSwebenchCallback(swebenchDependencies(dependencies), request.headers["x-agentx-callback-capability"], evalCallback.runId, evalCallback.action, parseBody(request.body)), request.requestId);
       }
+      const setupCallback = /^\/v1\/internal\/project-setups\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/result$/.exec(url.pathname);
+      if (request.method === "POST" && setupCallback?.[1] && setupCallback[2]) {
+        return json(await handleProjectSetupCallback(dependencies, request, setupCallback[1], setupCallback[2]), request.requestId);
+      }
+      const setupArtifact = /^\/v1\/internal\/project-setups\/([0-9a-f-]{36})\/(execution|evidence(?:\/init|\/chunks|\/finalize)?)$/.exec(url.pathname);
+      if (setupArtifact?.[1] && setupArtifact[2] === "execution" && request.method === "GET") {
+        return json(await handleProjectSetupExecutionRead(dependencies, request, setupArtifact[1], url.searchParams.get("offset")), request.requestId);
+      }
+      if (setupArtifact?.[1] && setupArtifact[2] === "evidence/init" && request.method === "POST") {
+        return json(await handleProjectSetupEvidenceInit(dependencies, request, setupArtifact[1]), request.requestId);
+      }
+      if (setupArtifact?.[1] && setupArtifact[2] === "evidence/chunks" && request.method === "POST") {
+        return json(await handleProjectSetupEvidenceChunk(dependencies, request, setupArtifact[1]), request.requestId);
+      }
+      if (setupArtifact?.[1] && setupArtifact[2] === "evidence/finalize" && request.method === "POST") {
+        return json(await handleProjectSetupEvidenceFinalize(dependencies, request, setupArtifact[1]), request.requestId);
+      }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
       const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
         url.pathname,
@@ -1010,6 +1069,113 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // Spec 025 phase 25d: the admin read routes (FR-038), each behind the admin claim (A2).
       const adminRead = await routeAdminRead(adminReads, identity, request, url);
       if (adminRead !== undefined) return json(adminRead, request.requestId);
+
+      if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-proposals") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (!dependencies.projectSetupSource) throw agentXError("RUNTIME_UNAVAILABLE", "trusted project source capture is not configured");
+        const requestBody = z.object({ repositoryUrl: z.string().url().max(500), ref: z.string().min(1).max(255) }).strict().parse(body);
+        const urlParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(requestBody.repositoryUrl);
+        if (!urlParts?.[1] || !urlParts[2]) throw agentXError("CONFIG_INVALID", "setup repository must be a canonical GitHub repository URL");
+        const snapshot = await dependencies.projectSetupSource.capture({ repositoryUrl: requestBody.repositoryUrl, ref: requestBody.ref });
+        const candidate = snapshot.candidate;
+        const sourceRepository = candidate.repositories.length === 1 ? candidate.repositories[0] : undefined;
+        const expectedRepositoryId = `${urlParts[1]}/${urlParts[2]}`;
+        if (!sourceRepository || sourceRepository.repositoryId.toLowerCase() !== expectedRepositoryId.toLowerCase()) throw agentXError("FORBIDDEN", "captured source repository does not match the selected repository");
+        verifyE2ESourceSnapshot(snapshot, candidate);
+        const inspection = inspectE2ERepository(snapshot, candidate).inspection;
+        const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate });
+        const policy = projectSetupPolicy(proposal);
+        const repositoryName = urlParts[2].replace(/\.git$/i, "");
+        const cleanedRepositoryName = repositoryName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);
+        const registeredRepositoryId = /^[a-z]/.test(cleanedRepositoryName) ? cleanedRepositoryName : `repo-${cleanedRepositoryName}`.slice(0, 63);
+        const artifact = {
+          schemaVersion: "project-setup-source-proposal/v1",
+          issuerOwnerKey: identity.ownerKey,
+          repositoryUrl: requestBody.repositoryUrl,
+          selectedRef: requestBody.ref,
+          identityMapping: { schemaVersion: "github-source-to-agentx-registration/v1", sourceRepositoryId: expectedRepositoryId, registeredRepositoryId },
+          candidate,
+          snapshot: { ...snapshot, sources: snapshot.sources.map(source => ({ ...source, bytesBase64: Buffer.from(source.bytes).toString("base64"), bytes: undefined })) },
+          proposal,
+          policy,
+        };
+        const artifactBytes = canonicalJson(artifact);
+        if (Buffer.byteLength(artifactBytes, "utf8") > MAX_SETUP_PROPOSAL_BYTES) throw agentXError("RUNTIME_UNAVAILABLE", "immutable setup proposal exceeds its bounded object size");
+        const artifactDigest = createHash("sha256").update(artifactBytes, "utf8").digest("hex");
+        const proposalRef = `project-setup-proposals/${identity.ownerKey}/${artifactDigest}.json`;
+        try {
+          await dependencies.s3.send(new PutObjectCommand({
+            Bucket: dependencies.artifactBucketName,
+            Key: proposalRef,
+            Body: artifactBytes,
+            ContentType: "application/json",
+            Metadata: { sha256: artifactDigest, owner: identity.ownerKey, candidate: candidate.digest },
+            IfNoneMatch: "*",
+          }));
+        } catch (error) {
+          const code = error && typeof error === "object" ? (error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } }).name : undefined;
+          const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+          if (code !== "PreconditionFailed" && status !== 412) throw error;
+          const retained = await readStoredText(dependencies.s3, dependencies.artifactBucketName, proposalRef, MAX_SETUP_PROPOSAL_BYTES);
+          if (retained !== artifactBytes) throw agentXError("RUNTIME_UNAVAILABLE", "content-addressed setup proposal object conflicts with its expected bytes");
+        }
+        return json({ proposalRef, proposalSha256: artifactDigest, candidateDigest: candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, proposal, policy }, request.requestId);
+      }
+
+      if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-approvals") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        const approvalInput = z.object({ projectName: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), proposalRef: z.string().min(1).max(512), proposalSha256: z.string().regex(/^[a-f0-9]{64}$/), decision: z.enum(["approve", "decline"]) }).strict().parse(body);
+        const expectedPrefix = `project-setup-proposals/${identity.ownerKey}/`;
+        if (!approvalInput.proposalRef.startsWith(expectedPrefix) || approvalInput.proposalRef !== `${expectedPrefix}${approvalInput.proposalSha256}.json`) throw agentXError("FORBIDDEN", "setup proposal reference is outside the authenticated administrator scope");
+        const stored = await readStoredText(dependencies.s3, dependencies.artifactBucketName, approvalInput.proposalRef, MAX_SETUP_PROPOSAL_BYTES);
+        if (!stored || createHash("sha256").update(stored, "utf8").digest("hex") !== approvalInput.proposalSha256) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal is missing or its digest changed");
+        let artifact: Record<string, unknown>;
+        try {
+          const decoded: unknown = JSON.parse(stored);
+          if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) throw new Error("invalid");
+          artifact = decoded as Record<string, unknown>;
+        } catch { throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal is unreadable"); }
+        if (artifact.schemaVersion !== "project-setup-source-proposal/v1" || artifact.issuerOwnerKey !== identity.ownerKey) throw agentXError("FORBIDDEN", "stored setup proposal belongs to another administrator");
+        const storedSnapshot = artifact.snapshot;
+        if (!storedSnapshot || typeof storedSnapshot !== "object" || Array.isArray(storedSnapshot)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source snapshot is missing");
+        const snapshotObject = storedSnapshot as Record<string, unknown>;
+        const rawSources = snapshotObject.sources;
+        if (!Array.isArray(rawSources)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source inventory is invalid");
+        const sources = rawSources.map((raw) => {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source item is invalid");
+          const source = raw as Record<string, unknown>;
+          if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source item is invalid");
+          return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
+        });
+        const snapshot = { ...snapshotObject, sources } as unknown as E2ESourceSnapshot;
+        const candidate = snapshot.candidate;
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup candidate is invalid");
+        verifyE2ESourceSnapshot(snapshot, candidate);
+        const inspection = inspectE2ERepository(snapshot, candidate).inspection;
+        const proposal = verifyE2ESetupProposal(E2ESetupProposalSchema.parse(artifact.proposal), snapshot, candidate);
+        const policy = projectSetupPolicy(proposal);
+        if (!sameJsonContent(artifact.policy, policy)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup policy differs from the fixed approved default");
+        const identityMapping = artifact.identityMapping;
+        if (!identityMapping || typeof identityMapping !== "object" || Array.isArray(identityMapping)
+          || (identityMapping as Record<string, unknown>).schemaVersion !== "github-source-to-agentx-registration/v1"
+          || (identityMapping as Record<string, unknown>).sourceRepositoryId !== candidate.repositories[0]?.repositoryId
+          || typeof (identityMapping as Record<string, unknown>).registeredRepositoryId !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "stored setup repository identity mapping is invalid");
+        const canonicalArtifact = { ...artifact, snapshot: { ...snapshotObject, sources: sources.map(source => ({ path: source.path, sha256: source.sha256, kind: source.kind, bytesBase64: source.bytes.toString("base64") })) }, proposal };
+        if (canonicalJson(canonicalArtifact) !== stored || proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate }).candidateDigest !== proposal.candidateDigest) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal does not match its source-derived bytes");
+        const approvalKey = { pk: `PROJECT_SETUP#${approvalInput.projectName}`, sk: `PROPOSAL#${approvalInput.proposalSha256}` };
+        const existing = await getItem<Record<string, unknown>>(dependencies, approvalKey);
+        if (existing) {
+          if (existing.ownerKey !== identity.ownerKey || existing.decision !== approvalInput.decision) throw agentXError("PROJECT_REVISION_MISMATCH", "setup proposal already has a different immutable decision");
+          return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: true }, request.requestId);
+        }
+        await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: {
+          ...approvalKey, entityType: "PROJECT_SETUP_APPROVAL", ownerKey: identity.ownerKey, projectName: approvalInput.projectName,
+          proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, candidateDigest: proposal.candidateDigest,
+          repositoryUrl: artifact.repositoryUrl, identityMapping, decision: approvalInput.decision, approvedAt: new Date().toISOString(),
+          policyDigest: createHash("sha256").update(canonicalJson(policy), "utf8").digest("hex"), policy, targetIds: proposal.targets.map(target => target.targetId),
+        }, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
+        return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: false }, request.requestId);
+      }
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects") {
         return json(await registerProject(dependencies, identity, body), request.requestId, 201);
@@ -1441,7 +1607,7 @@ function gitHubContext(identity: AuthenticatedIdentity, workspace: WorkspaceInst
 }
 
 /** The registration request's parse, shared by registerProject and a change plan (spec 025 C4). */
-function parseRegistrationInput(value: unknown): { definition: ProjectDefinition; runtimeBinding: ReturnType<typeof parseRuntimeBinding>; wantsPreflight: boolean } {
+function parseRegistrationInput(value: unknown): { definition: ProjectDefinition; runtimeBinding: ReturnType<typeof parseRuntimeBinding>; wantsPreflight: boolean; setupApproval?: { proposalRef: string; proposalSha256: string; decision: "approve" | "decline" } } {
   const input = object(value, "project registration");
   const retired = legacyProjectFields(input.definition);
   if (retired.length > 0) {
@@ -1449,8 +1615,11 @@ function parseRegistrationInput(value: unknown): { definition: ProjectDefinition
   }
   const definition = ProjectDefinitionSchema.parse(input.definition);
   const runtimeBinding = parseRuntimeBinding(input.runtimeBinding);
+  const setupApproval = input.setupApproval === undefined ? undefined : z.object({
+    proposalRef: z.string().min(1).max(512), proposalSha256: z.string().regex(/^[a-f0-9]{64}$/), decision: z.enum(["approve", "decline"]),
+  }).strict().parse(input.setupApproval);
   // Preflight contacts the vendor, so it runs only when the caller asks; older clients never do.
-  return { definition, runtimeBinding, wantsPreflight: input.preflight === true };
+  return { definition, runtimeBinding, wantsPreflight: input.preflight === true, ...(setupApproval === undefined ? {} : { setupApproval }) };
 }
 
 /** Registration's refusals and preflight, for a new revision; registerProject and a change plan share them. */
@@ -1482,7 +1651,43 @@ async function registerProject(
   checked?: { preflight?: PreflightOutcome },
 ): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-  const { definition, runtimeBinding, wantsPreflight } = parseRegistrationInput(value);
+  const { definition, runtimeBinding, wantsPreflight, setupApproval } = parseRegistrationInput(value);
+  let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
+  let setupExecutionCreated = false;
+  let setupApprovalBinding: RegisteredProjectRecord["setupApproval"];
+  if (definition.e2e !== undefined || setupApproval !== undefined) {
+    if (setupApproval === undefined) throw agentXError("FORBIDDEN", "E2E project registration requires a stored source-backed setup decision");
+    const expectedProposalPrefix = `project-setup-proposals/${identity.ownerKey}/`;
+    if (!setupApproval.proposalRef.startsWith(expectedProposalPrefix) || setupApproval.proposalRef !== `${expectedProposalPrefix}${setupApproval.proposalSha256}.json`) throw agentXError("FORBIDDEN", "setup approval reference is outside the authenticated administrator scope");
+    const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${definition.name}`, sk: `PROPOSAL#${setupApproval.proposalSha256}` });
+    if (!approval || approval.ownerKey !== identity.ownerKey || approval.proposalRef !== setupApproval.proposalRef || approval.decision !== setupApproval.decision) throw agentXError("FORBIDDEN", "setup decision is missing, stale, or belongs to another administrator");
+    const repository = definition.repositories[0];
+    const mapping = approval.identityMapping;
+    if (!repository || !mapping || typeof mapping !== "object" || Array.isArray(mapping)
+      || (mapping as Record<string, unknown>).registeredRepositoryId !== repository.name
+      || typeof approval.repositoryUrl !== "string" || approval.repositoryUrl.toLowerCase() !== repository.url.toLowerCase()) throw agentXError("PROJECT_REVISION_MISMATCH", "registered repository identity does not match the source-backed setup decision");
+    if (setupApproval.decision === "approve") {
+      if (definition.e2e === undefined || !sameJsonContent(definition.e2e, approval.policy)) throw agentXError("PROJECT_REVISION_MISMATCH", "E2E policy does not match the approved source-backed setup proposal");
+    } else if (definition.e2e !== undefined) throw agentXError("FORBIDDEN", "declined setup decision cannot register an E2E policy");
+    setupApprovalBinding = { proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256, candidateDigest: String(approval.candidateDigest), decision: setupApproval.decision };
+    if (setupApproval.decision === "approve" && definition.e2e !== undefined && dependencies.projectSetupRuntimeCatalogId
+      && runtimeBinding.deploymentMode === "ec2-ebs") {
+      const bindingDigest = projectSetupBindingDigest(runtimeBinding);
+      const catalogItem = await dependencies.documentClient.send(new GetCommand({
+        TableName: dependencies.tableName,
+        Key: projectSetupRuntimeKey(dependencies.projectSetupRuntimeCatalogId, bindingDigest),
+        ConsistentRead: true,
+      }));
+      const runtimeKey = projectSetupRuntimeKey(dependencies.projectSetupRuntimeCatalogId, bindingDigest);
+      const parsedCatalog = ProjectSetupRuntimeRecordSchema.safeParse(projectSetupRuntimeRecord(catalogItem.Item, runtimeKey));
+      if (parsedCatalog.success) {
+        setupRuntimeAdmission = admitProjectSetupRuntime(parsedCatalog.data, {
+          runtimeCatalogId: dependencies.projectSetupRuntimeCatalogId, binding: runtimeBinding,
+          scope: "source-interface", now: Date.now(),
+        });
+      }
+    }
+  }
   const budget = toolBudget(approvedToolCount(definition));
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
   const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: PreflightOutcome | undefined) => {
@@ -1491,13 +1696,14 @@ async function registerProject(
       project, duplicate,
       tools: { maximum: budget.maximum, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT },
       ...(warnings.length ? { warnings } : {}), ...(preflight ? { preflight: preflight.report } : {}),
+      ...(setupApprovalBinding?.decision === "approve" ? { setupRuntime: setupExecutionCreated ? "QUEUED" : "UNAVAILABLE" } : {}),
     };
   };
   const key = projectKey(definition.name, definition.revision);
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
     // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
-    if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding)) {
+    if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding) || !sameJsonContent(existing.setupApproval, setupApprovalBinding)) {
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
     }
     // A revision stored before the static checks existed stays idempotent: report, never refuse.
@@ -1514,8 +1720,13 @@ async function registerProject(
     runtimeBinding,
     registeredBy: identity.ownerKey,
     registeredAt: now,
+    ...(setupApprovalBinding === undefined ? {} : { setupApproval: setupApprovalBinding }),
   };
   const membership = membershipRecord(identity.ownerKey, definition.name, "administrator");
+  const setupAdmissionRows = setupRuntimeAdmission && setupApprovalBinding?.decision === "approve" && definition.e2e !== undefined
+    ? await createProjectSetupAdmissionRows(dependencies, identity, record, setupApprovalBinding, setupRuntimeAdmission)
+    : undefined;
+  setupExecutionCreated = setupAdmissionRows !== undefined;
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Put: { TableName: dependencies.tableName, Item: record, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -1528,6 +1739,7 @@ async function registerProject(
         ExpressionAttributeNames: { "#name": "name" },
         ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":now": now },
       } },
+      ...(setupAdmissionRows?.transactionItems ?? []),
     ] }));
   } catch (error) {
     // A concurrent registration won; answer as a duplicate without contacting the vendor again.
@@ -1535,6 +1747,159 @@ async function registerProject(
     throw error;
   }
   return respond(withoutKeys(record), false, preflight);
+}
+
+async function createProjectSetupAdmissionRows(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  project: RegisteredProjectRecord,
+  setupApproval: NonNullable<RegisteredProjectRecord["setupApproval"]>,
+  runtime: NonNullable<ReturnType<typeof admitProjectSetupRuntime>>,
+): Promise<{ transactionItems: Array<Record<string, unknown>> } | undefined> {
+  if (!dependencies.projectSetupRuntimeCatalogId || project.runtimeBinding.deploymentMode !== "ec2-ebs") return undefined;
+  const endpoint = new URL(runtime.endpoint);
+  if (endpoint.protocol !== "http:" || !z.ipv4().safeParse(endpoint.hostname).success) return undefined;
+  const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${project.definition.name}`, sk: `PROPOSAL#${setupApproval.proposalSha256}` });
+  if (!approval || approval.ownerKey !== identity.ownerKey || approval.decision !== "approve" || approval.proposalRef !== setupApproval.proposalRef
+    || typeof approval.policyDigest !== "string" || !sameJsonContent(approval.policy, project.definition.e2e)) return undefined;
+  const stored = await readStoredText(dependencies.s3, dependencies.artifactBucketName, setupApproval.proposalRef, MAX_SETUP_PROPOSAL_BYTES);
+  if (!stored || createHash("sha256").update(stored, "utf8").digest("hex") !== setupApproval.proposalSha256) return undefined;
+  let artifact: Record<string, unknown>;
+  try {
+    const decoded: unknown = JSON.parse(stored);
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return undefined;
+    artifact = decoded as Record<string, unknown>;
+  } catch { return undefined; }
+  if (artifact.schemaVersion !== "project-setup-source-proposal/v1" || artifact.issuerOwnerKey !== identity.ownerKey
+    || !artifact.snapshot || typeof artifact.snapshot !== "object" || Array.isArray(artifact.snapshot)) return undefined;
+  const rawSnapshot = artifact.snapshot as Record<string, unknown>;
+  if (!Array.isArray(rawSnapshot.sources)) return undefined;
+  let snapshot: E2ESourceSnapshot;
+  try {
+    snapshot = { ...rawSnapshot, sources: rawSnapshot.sources.map((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid source record");
+      const source = raw as Record<string, unknown>;
+      if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") throw new Error("invalid source record");
+      return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
+    }) } as unknown as E2ESourceSnapshot;
+    verifyE2ESourceSnapshot(snapshot, snapshot.candidate);
+  } catch { return undefined; }
+  const policy = E2EPolicySchema.safeParse(project.definition.e2e);
+  if (!policy.success) return undefined;
+  let derived: ReturnType<typeof deriveProjectSetupSourceSmoke>;
+  try {
+    derived = deriveProjectSetupSourceSmoke({
+      projectName: project.definition.name, proposalSha256: setupApproval.proposalSha256,
+      approval: { proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256, candidateDigest: setupApproval.candidateDigest,
+        policyDigest: approval.policyDigest, runtimeCatalogId: runtime.runtimeCatalogId, catalogRevision: runtime.catalogRevision,
+        bindingDigest: runtime.bindingDigest, manifestDigest: runtime.manifestDigest, generation: runtime.generation },
+      snapshot, policy: policy.data,
+      sandboxAvailability: { targetId: "default-sandbox", profileId: policy.data.defaultSandboxProfileId, connection: "connected", approval: "approved",
+        qualification: "qualified", authorizationRevision: `catalog-${runtime.catalogRevision}` },
+      runtimeAvailability: [],
+    });
+  } catch { return undefined; }
+
+  const now = new Date();
+  const stableUuid = (label: string) => {
+    const bytes = createHash("sha256").update(`project-setup/v1\0${identity.ownerKey}\0${project.definition.name}\0${project.definition.revision}\0${setupApproval.proposalSha256}\0${runtime.generation}\0${label}`).digest().subarray(0, 16);
+    bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50; bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+    const hex = bytes.toString("hex");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  };
+  const setupExecutionId = stableUuid("execution");
+  const subjectId = stableUuid("subject");
+  // This is the exact server-configured worker identity from the ready registry, never a caller
+  // supplied workspace id or a value inferred from the setup execution.
+  const transportCorrelationId = runtime.transportCorrelationId;
+  const operationId = stableUuid("operation");
+  const outboxId = stableUuid("outbox");
+  const fence = 1;
+  let setupRunContext: Record<string, unknown>;
+  let evidenceByteLimit: number;
+  try {
+    const plan = selectE2EExecutionPlan(derived.selectionInput);
+    if (plan.groups.length === 0 || plan.groups.some((group) => group.expectedCases.length === 0)) return undefined;
+    const bundleBody = { schemaVersion: 1 as const, planDigest: derived.planDigest, templateVersion: "trusted-e2e/v1", scenarios: derived.scenarios, bundleDigest: "0".repeat(64) };
+    const bundle = E2EScenarioBundleSchema.parse({ ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) });
+    const compiledGroups = plan.groups.map((group) => ({ group, compiled: compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput: derived.selectionInput, executionPlan: plan, group }) }));
+    const totalCases = compiledGroups.reduce((total, item) => total + item.group.expectedCases.length, 0);
+    evidenceByteLimit = e2ePrivateTransferMaxBytes(totalCases, compiledGroups.length);
+    const roundId = stableUuid("round");
+    const admittedAt = now.toISOString();
+    const deadlineAt = new Date(now.getTime() + policy.data.limits.runTimeoutMs).toISOString();
+    const taskId = `project-setup:${setupExecutionId}`;
+    const groupAdmissions = compiledGroups.map(({ group, compiled }, index) => {
+      const runId = stableUuid(`run-${index}-${group.groupId}`);
+      const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId, roundId, taskId, operationId, operationFence: fence,
+        workflowRevision: project.definition.revision, groupId: group.groupId, executionPlanDigest: plan.digest, executionMode: group.mode,
+        mockManifestDigest: group.mockManifestDigest, authorizationRevision: `setup:${1}`, candidateDigest: setupApproval.candidateDigest,
+        planDigest: derived.planDigest, policyDigest: approval.policyDigest, bundleDigest: bundle.bundleDigest,
+        appBuildDigest: createHash("sha256").update(canonicalJson(compiled.inventory)).digest("hex"),
+        environmentDigest: createHash("sha256").update(canonicalJson(runtime.runnerEnvironment), "utf8").digest("hex"), runtimeManifestDigest: runtime.manifestDigest,
+        modelRouteRevision: null, expectedCases: compiled.expectedCases, admittedAt, deadlineAt });
+      return { group, binding, expectedConfigDigest: compiled.expectedConfigDigest, compiledInventoryDigest: compiled.inventory.digest,
+        expectedCases: compiled.expectedCases, selectionPacketPath: compiled.selectionPacketPath };
+    });
+    const round = E2ERoundSchema.parse({ schemaVersion: 1, roundId, taskId, operationId, operationFence: fence,
+      workflowRevision: project.definition.revision, executionPlanDigest: plan.digest, admittedAt, deadlineAt,
+      limits: policy.data.limits, groupBindings: groupAdmissions.map((item) => item.binding) });
+    setupRunContext = { roundId, admittedAt, deadlineAt, runnerEnvironment: runtime.runnerEnvironment,
+      runnerToolchain: runtime.runnerToolchain, runnerToolchainDigest: runtime.runnerToolchainDigest, plan, bundle, round, groupAdmissions };
+  } catch { return undefined; }
+  const executionObject = {
+    domain: "project-setup-source-interface/v1", schemaVersion: 1, setupExecutionId, subjectId,
+    transportCorrelationId, ownerKey: identity.ownerKey, projectName: project.definition.name, projectRevision: project.definition.revision,
+    approvalRevision: 1, proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256,
+    candidateDigest: setupApproval.candidateDigest, policyDigest: approval.policyDigest, policy: policy.data,
+    sourceSnapshot: { ...snapshot, sources: snapshot.sources.map((source) => ({ path: source.path, sha256: source.sha256, kind: source.kind, bytesBase64: Buffer.from(source.bytes).toString("base64") })) },
+    // The worker reconstructs this exact selection against the retained snapshot bytes and then
+    // recompiles. Snapshot bytes live once in the bounded content-addressed object above.
+    selectionInput: Object.fromEntries(Object.entries(derived.selectionInput).filter(([key]) => key !== "sourceSnapshot")),
+    setupRunContext, evidenceByteLimit,
+    semanticApproval: derived.semanticApproval, planDigest: derived.planDigest, portableApprovalBinding: derived.portableApprovalBinding,
+    scenarios: derived.scenarios, selectedTargetIds: derived.targetIds,
+    unsupportedTargetIds: derived.unsupportedTargetIds,
+    discoveredApplications: derived.discoveredApplications, discoveryMissingInputs: derived.discoveryMissingInputs,
+    discoveredTargetIds: derived.discoveredTargetIds,
+    notExecutedTargetIds: derived.unsupportedTargetIds,
+    runtime: { runtimeCatalogId: runtime.runtimeCatalogId, catalogRevision: runtime.catalogRevision, bindingDigest: runtime.bindingDigest,
+      manifestDigest: runtime.manifestDigest, runnerEnvironment: runtime.runnerEnvironment, generation: runtime.generation, endpoint: runtime.endpoint, expiresAt: runtime.expiresAt },
+  };
+  const executionBytes = Buffer.from(canonicalJson(executionObject), "utf8");
+  const executionDigest = createHash("sha256").update(executionBytes).digest("hex");
+  const executionRef = { key: `project-setup-executions/sha256/${executionDigest}.json`, sha256: executionDigest, byteLength: executionBytes.byteLength };
+  try {
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: executionRef.key, Body: executionBytes,
+      ContentType: "application/json", Metadata: { sha256: executionDigest, owner: identity.ownerKey, candidate: setupApproval.candidateDigest }, IfNoneMatch: "*" }));
+  } catch (error) {
+    const code = error && typeof error === "object" ? (error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } }).name : undefined;
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (code !== "PreconditionFailed" && status !== 412) throw error;
+    if (await readStoredText(dependencies.s3, dependencies.artifactBucketName, executionRef.key, MAX_SETUP_PROPOSAL_BYTES) !== executionBytes.toString("utf8")) return undefined;
+  }
+  const execution = ProjectSetupExecutionSchema.parse({ schemaVersion: 1, setupExecutionId, subjectId, transportCorrelationId,
+    projectName: project.definition.name, projectRevision: project.definition.revision, ownerKey: identity.ownerKey, approvalRevision: 1,
+    proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256, candidateDigest: setupApproval.candidateDigest,
+    policyDigest: approval.policyDigest, bindingDigest: runtime.bindingDigest, runtimeGeneration: runtime.generation,
+    executionRef, runtimeCatalogId: runtime.runtimeCatalogId, state: "ACCEPTED", operationId, outboxId, fence,
+    deadlineAt: setupRunContext.deadlineAt, evidenceByteLimit, createdAt: now.toISOString() });
+  const session = ProjectSetupSessionSchema.parse({ schemaVersion: 1, setupExecutionId, subjectId, transportCorrelationId,
+    approvalRevision: 1, bindingDigest: runtime.bindingDigest, state: "READY", generation: runtime.generation, privateIp: endpoint.hostname });
+  const operation = { ...projectSetupOperationKey(setupExecutionId, operationId), entityType: "PROJECT_SETUP_OPERATION",
+    ...ProjectSetupOperationSchema.parse({ schemaVersion: 1, setupExecutionId, operationId, transportCorrelationId, fence,
+      status: "ACCEPTED", createdAt: now.toISOString(), updatedAt: now.toISOString() }) };
+  const callbackCapability = issueProjectSetupCapability(dependencies.callbackSigningKey, { domain: "PROJECT_SETUP", setupExecutionId, subjectId,
+    transportCorrelationId, operationId, approvalRevision: 1, fence, expiresAt: Math.floor(now.getTime() / 1_000) + 32_400,
+    actions: ["read-execution", "write-evidence", "result"] });
+  const invocation = WorkerInvocationSchema.parse({ protocolVersion: AGENTX_PROTOCOL_VERSION, operationId, workspaceId: transportCorrelationId,
+    fence, projectRevision: project.definition.revision, callbackCapability, kind: "project-setup-smoke",
+    payload: { domain: "project-setup-source-interface/v1", setupExecutionId, subjectId, approvalRevision: 1, transportCorrelationId, executionRef } });
+  const outbox = { pk: `OUTBOX#${outboxId}`, sk: "OUTBOX", id: outboxId, entityType: "OUTBOX", status: "PENDING", operationId,
+    workspaceId: transportCorrelationId, deploymentMode: "ec2-ebs", invocation, createdAt: now.toISOString() };
+  const put = (item: Record<string, unknown>) => ({ Put: { TableName: dependencies.tableName, Item: item, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } });
+  return { transactionItems: [put({ ...projectSetupExecutionKey(setupExecutionId), entityType: "PROJECT_SETUP_EXECUTION", ...execution }),
+    put({ ...projectSetupSessionKey(setupExecutionId), entityType: "PROJECT_SETUP_SESSION", ...session }), put(operation), put(outbox)] };
 }
 
 async function prepareWorkspace(
@@ -4857,6 +5222,449 @@ async function handleCallback(
   }
   const result = await recordTerminalResult(dependencies, operation, body);
   return json({ operation: publicOperation(result) }, request.requestId);
+}
+
+async function handleProjectSetupExecutionRead(dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string, rawOffset: string | null): Promise<unknown> {
+  const authorized = await requireProjectSetupCapability(dependencies, request, setupExecutionId, "read-execution");
+  const offset = rawOffset === null ? 0 : Number(rawOffset);
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset % SETUP_ARTIFACT_CHUNK_BYTES !== 0 || offset >= authorized.execution.executionRef.byteLength) throw agentXError("CONFIG_INVALID", "project setup source chunk offset is invalid");
+  const deadlineAt = authorized.execution.deadlineAt;
+  if (Date.parse(deadlineAt) <= Date.now()) throw agentXError("STALE_FENCE", "project setup source read is past its stored deadline");
+  const lastByte = Math.min(offset + SETUP_ARTIFACT_CHUNK_BYTES, authorized.execution.executionRef.byteLength) - 1;
+  const response = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: authorized.execution.executionRef.key,
+    Range: `bytes=${offset}-${lastByte}` }) as never) as { Body?: { transformToByteArray(): Promise<Uint8Array> }; ContentRange?: string; ContentLength?: number };
+  if (!response.Body || typeof response.ContentRange !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "approved project setup source object is unreadable");
+  const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.ContentRange);
+  if (!range || Number(range[1]) !== offset || Number(range[2]) !== lastByte || Number(range[3]) !== authorized.execution.executionRef.byteLength) throw agentXError("RUNTIME_UNAVAILABLE", "approved project setup source range is inconsistent");
+  const totalBytes = Number(range[3]);
+  const bytes = await response.Body.transformToByteArray();
+  if (totalBytes > MAX_SETUP_PROPOSAL_BYTES || bytes.byteLength !== lastByte - offset + 1 || bytes.byteLength > SETUP_ARTIFACT_CHUNK_BYTES) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "approved project setup source object exceeds its bounded range");
+  }
+  return { setupExecutionId, operationId: authorized.claims.operationId, fence: authorized.claims.fence, executionRef: authorized.execution.executionRef,
+    offset, totalBytes, deadlineAt, chunkBase64: Buffer.from(bytes).toString("base64") };
+}
+
+async function handleProjectSetupEvidenceInit(dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string): Promise<unknown> {
+  const authorized = await requireProjectSetupCapability(dependencies, request, setupExecutionId, "write-evidence");
+  const body = z.object({ schemaVersion: z.literal("project-setup-evidence-upload/v1"), totalBytes: z.number().int().positive().max(MAX_SETUP_EVIDENCE_BYTES),
+    chunkCount: z.number().int().positive().max(Math.ceil(MAX_SETUP_EVIDENCE_BYTES / SETUP_ARTIFACT_CHUNK_BYTES)), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(parseBody(request.body));
+  const expectedChunkCount = Math.ceil(body.totalBytes / SETUP_ARTIFACT_CHUNK_BYTES);
+  if (body.chunkCount !== expectedChunkCount || body.totalBytes > authorized.execution.evidenceByteLimit) throw agentXError("CONFIG_INVALID", "setup evidence exceeds its admitted constituent ceiling or chunk count");
+  const deadlineAt = authorized.execution.deadlineAt;
+  if (Date.parse(deadlineAt) <= Date.now()) throw agentXError("STALE_FENCE", "project setup evidence upload is past its stored deadline");
+  const uploadKey = { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `EVIDENCE_UPLOAD#${authorized.claims.operationId}` };
+  const existing = await getItem<Record<string, unknown>>(dependencies, uploadKey);
+  const existingSession = projectSetupDomainRecord(existing, uploadKey, "PROJECT_SETUP_EVIDENCE_UPLOAD");
+  if (existing) {
+    if (existingSession.status !== "OPEN" || existingSession.setupExecutionId !== setupExecutionId || existingSession.subjectId !== authorized.execution.subjectId
+      || existingSession.operationId !== authorized.claims.operationId || existingSession.fence !== authorized.claims.fence
+      || existingSession.totalBytes !== body.totalBytes || existingSession.chunkCount !== body.chunkCount || existingSession.sha256 !== body.sha256
+      || existingSession.evidenceByteLimit !== authorized.execution.evidenceByteLimit
+      || typeof existingSession.uploadId !== "string") throw agentXError("CALLBACK_FORBIDDEN", "project setup operation already owns a different evidence upload");
+    return { setupExecutionId, operationId: authorized.claims.operationId, fence: authorized.claims.fence, uploadId: existingSession.uploadId,
+      totalBytes: body.totalBytes, chunkCount: body.chunkCount, chunkBytes: SETUP_ARTIFACT_CHUNK_BYTES, deadlineAt: existingSession.deadlineAt };
+  }
+  const uploadId = randomUUID();
+  const item = { ...uploadKey, entityType: "PROJECT_SETUP_EVIDENCE_UPLOAD",
+    schemaVersion: 1, setupExecutionId, subjectId: authorized.execution.subjectId, operationId: authorized.claims.operationId, uploadId, fence: authorized.claims.fence,
+    approvalRevision: authorized.execution.approvalRevision, transportCorrelationId: authorized.execution.transportCorrelationId,
+    totalBytes: body.totalBytes, evidenceByteLimit: authorized.execution.evidenceByteLimit, chunkCount: body.chunkCount, sha256: body.sha256, nextChunkIndex: 0, deadlineAt, status: "OPEN", createdAt: new Date().toISOString() };
+  await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: item, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
+  return { setupExecutionId, operationId: authorized.claims.operationId, fence: authorized.claims.fence, uploadId, totalBytes: body.totalBytes,
+    chunkCount: body.chunkCount, chunkBytes: SETUP_ARTIFACT_CHUNK_BYTES, deadlineAt };
+}
+
+async function handleProjectSetupEvidenceChunk(dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string): Promise<unknown> {
+  const authorized = await requireProjectSetupCapability(dependencies, request, setupExecutionId, "write-evidence");
+  const body = z.object({ schemaVersion: z.literal("project-setup-evidence-chunk/v1"), uploadId: z.string().uuid(), index: z.number().int().nonnegative(),
+    bytesBase64: z.string().min(1).max(Math.ceil(SETUP_ARTIFACT_CHUNK_BYTES * 4 / 3) + 8), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(parseBody(request.body));
+  const key = { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `EVIDENCE_UPLOAD#${authorized.claims.operationId}` };
+  const upload = await getItem<Record<string, unknown>>(dependencies, key);
+  const session = projectSetupDomainRecord(upload, key, "PROJECT_SETUP_EVIDENCE_UPLOAD");
+  const deadlineAt = typeof session.deadlineAt === "string" ? session.deadlineAt : "";
+  if (session.status !== "OPEN" || session.uploadId !== body.uploadId || session.setupExecutionId !== setupExecutionId || session.subjectId !== authorized.execution.subjectId
+    || session.operationId !== authorized.claims.operationId || session.fence !== authorized.claims.fence || session.approvalRevision !== authorized.execution.approvalRevision
+    || session.transportCorrelationId !== authorized.execution.transportCorrelationId || Date.parse(deadlineAt) <= Date.now()) throw agentXError("STALE_FENCE", "setup evidence upload is not current");
+  const totalBytes = Number(session.totalBytes);
+  const chunkCount = Number(session.chunkCount);
+  if (!Number.isSafeInteger(body.index) || body.index >= chunkCount || totalBytes > authorized.execution.evidenceByteLimit
+    || session.evidenceByteLimit !== authorized.execution.evidenceByteLimit || chunkCount !== Math.ceil(totalBytes / SETUP_ARTIFACT_CHUNK_BYTES)) throw agentXError("CONFIG_INVALID", "setup evidence chunk index or admitted total is outside its upload");
+  const bytes = Buffer.from(body.bytesBase64, "base64");
+  const expectedLength = body.index === chunkCount - 1 ? totalBytes - body.index * SETUP_ARTIFACT_CHUNK_BYTES : SETUP_ARTIFACT_CHUNK_BYTES;
+  if (bytes.byteLength !== expectedLength || bytes.toString("base64") !== body.bytesBase64 || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "setup evidence chunk length or digest is invalid");
+  const nextChunkIndex = Number(session.nextChunkIndex);
+  if (body.index > nextChunkIndex) throw agentXError("CONFIG_INVALID", "setup evidence chunks must arrive in order");
+  const objectKey = `project-setup-staging/${setupExecutionId}/${authorized.claims.operationId}/${body.uploadId}/${body.index}.chunk`;
+  if (body.index < nextChunkIndex) {
+    const existing = await readSetupChunk(dependencies, objectKey);
+    if (!existing || !existing.equals(bytes)) throw agentXError("CALLBACK_FORBIDDEN", "replayed setup evidence chunk differs from the owned chunk");
+    return { accepted: true, index: body.index, duplicate: true };
+  }
+  try {
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: objectKey, Body: bytes,
+      ContentType: "application/octet-stream", Metadata: { sha256: body.sha256, upload: body.uploadId, index: String(body.index) }, IfNoneMatch: "*" }));
+  } catch (error) {
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (status !== 412 && (error as { name?: unknown } | undefined)?.name !== "PreconditionFailed") throw error;
+    const existing = await readSetupChunk(dependencies, objectKey);
+    if (!existing || !existing.equals(bytes)) throw agentXError("CALLBACK_FORBIDDEN", "setup evidence chunk key is already occupied by different bytes");
+  }
+  await dependencies.documentClient.send(new UpdateCommand({ TableName: dependencies.tableName, Key: key,
+    UpdateExpression: "SET nextChunkIndex = :next", ConditionExpression: "#status = :open AND nextChunkIndex = :index AND fence = :fence AND operationId = :operationId",
+    ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":next": body.index + 1, ":open": "OPEN", ":index": body.index,
+      ":fence": authorized.claims.fence, ":operationId": authorized.claims.operationId } }));
+  return { accepted: true, index: body.index, duplicate: false };
+}
+
+async function handleProjectSetupEvidenceFinalize(dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string): Promise<unknown> {
+  const authorized = await requireProjectSetupCapability(dependencies, request, setupExecutionId, "write-evidence");
+  const body = z.object({ schemaVersion: z.literal("project-setup-evidence-finalize/v1"), uploadId: z.string().uuid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(parseBody(request.body));
+  const key = { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `EVIDENCE_UPLOAD#${authorized.claims.operationId}` };
+  const raw = await getItem<Record<string, unknown>>(dependencies, key);
+  const session = projectSetupDomainRecord(raw, key, "PROJECT_SETUP_EVIDENCE_UPLOAD");
+  if (session.status === "COMPLETE" && session.uploadId === body.uploadId && session.sha256 === body.sha256 && session.operationId === authorized.claims.operationId
+    && session.fence === authorized.claims.fence && session.evidenceKey === `project-setup-evidence/sha256/${body.sha256}.json`) {
+    return { evidenceRef: { key: session.evidenceKey, sha256: body.sha256 } };
+  }
+  if (session.status !== "OPEN" || session.uploadId !== body.uploadId || session.setupExecutionId !== setupExecutionId || session.subjectId !== authorized.execution.subjectId
+    || session.operationId !== authorized.claims.operationId || session.fence !== authorized.claims.fence || session.sha256 !== body.sha256
+    || Number(session.nextChunkIndex) !== Number(session.chunkCount) || Number(session.totalBytes) > authorized.execution.evidenceByteLimit
+    || session.evidenceByteLimit !== authorized.execution.evidenceByteLimit || Date.parse(String(session.deadlineAt)) <= Date.now()) throw agentXError("STALE_FENCE", "setup evidence upload is incomplete or no longer current");
+  const chunks: Buffer[] = [];
+  const chunkKeys: string[] = [];
+  for (let index = 0; index < Number(session.chunkCount); index += 1) {
+    const chunkKey = `project-setup-staging/${setupExecutionId}/${authorized.claims.operationId}/${body.uploadId}/${index}.chunk`;
+    const chunk = await readSetupChunk(dependencies, chunkKey);
+    if (!chunk) throw agentXError("RUNTIME_UNAVAILABLE", "an owned setup evidence chunk is missing");
+    chunks.push(chunk);
+    chunkKeys.push(chunkKey);
+  }
+  const bytes = Buffer.concat(chunks);
+  if (bytes.byteLength !== Number(session.totalBytes) || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "assembled setup evidence does not match its declared bytes or digest");
+  let evidence: Record<string, unknown>;
+  try {
+    const decoded: unknown = JSON.parse(bytes.toString("utf8"));
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) throw new Error("invalid evidence");
+    evidence = decoded as Record<string, unknown>;
+  } catch { throw agentXError("CONFIG_INVALID", "setup evidence object is malformed"); }
+  if (evidence.schemaVersion !== "project-setup-smoke-evidence/v1" || evidence.setupExecutionId !== setupExecutionId
+    || evidence.subjectId !== authorized.execution.subjectId || evidence.transportCorrelationId !== authorized.execution.transportCorrelationId
+    || evidence.executionRefSha256 !== authorized.execution.executionRef.sha256 || evidence.candidateDigest !== authorized.execution.candidateDigest) {
+    throw agentXError("CALLBACK_FORBIDDEN", "setup evidence is outside its stored project execution");
+  }
+  const evidenceKey = `project-setup-evidence/sha256/${body.sha256}.json`;
+  try {
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: evidenceKey, Body: bytes, ContentType: "application/json",
+      Metadata: { sha256: body.sha256, domain: "project-setup-smoke-evidence-v1" }, IfNoneMatch: "*" }));
+  } catch (error) {
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (status !== 412 && (error as { name?: unknown } | undefined)?.name !== "PreconditionFailed") throw error;
+    if (await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceKey, MAX_SETUP_EVIDENCE_BYTES) !== bytes.toString("utf8")) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "existing setup evidence object does not match its content address");
+    }
+  }
+  await dependencies.documentClient.send(new UpdateCommand({ TableName: dependencies.tableName, Key: { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `EVIDENCE_UPLOAD#${authorized.claims.operationId}` },
+    UpdateExpression: "SET #status = :complete, evidenceKey = :evidenceKey, completedAt = :completedAt",
+    ConditionExpression: "#status = :open AND nextChunkIndex = chunkCount AND operationId = :operationId AND fence = :fence",
+    ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":complete": "COMPLETE", ":open": "OPEN", ":evidenceKey": evidenceKey,
+      ":completedAt": new Date().toISOString(), ":operationId": authorized.claims.operationId, ":fence": authorized.claims.fence } }));
+  for (const chunkKey of chunkKeys) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: chunkKey }));
+  return { evidenceRef: { key: evidenceKey, sha256: body.sha256 } };
+}
+
+async function readSetupChunk(dependencies: AwsBrokerDependencies, key: string): Promise<Buffer | undefined> {
+  try {
+    const response = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: key })) as { Body?: { transformToByteArray(): Promise<Uint8Array> } };
+    if (!response.Body) return undefined;
+    const bytes = Buffer.from(await response.Body.transformToByteArray());
+    return bytes.byteLength > 0 && bytes.byteLength <= SETUP_ARTIFACT_CHUNK_BYTES ? bytes : undefined;
+  } catch (error) {
+    const name = error && typeof error === "object" ? (error as { name?: unknown }).name : undefined;
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (name === "NoSuchKey" || status === 404) return undefined;
+    throw error;
+  }
+}
+
+async function requireProjectSetupCapability(
+  dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string, action: "read-execution" | "write-evidence" | "result",
+): Promise<{ execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>; claims: NonNullable<ReturnType<typeof verifyProjectSetupCapability>> }> {
+  const token = request.headers["x-agentx-callback-capability"];
+  const claims = token ? verifyProjectSetupCapability(dependencies.callbackSigningKey, token) : undefined;
+  if (!claims || claims.setupExecutionId !== setupExecutionId || !claims.actions.includes(action)) throw agentXError("CALLBACK_FORBIDDEN", "setup capability does not authorize this artifact action");
+  const [executionItem, operationItem, sessionItem] = await Promise.all([
+    getItem<Record<string, unknown>>(dependencies, projectSetupExecutionKey(setupExecutionId)),
+    getItem<Record<string, unknown>>(dependencies, projectSetupOperationKey(setupExecutionId, claims.operationId)),
+    getItem<Record<string, unknown>>(dependencies, projectSetupSessionKey(setupExecutionId)),
+  ]);
+  const execution = ProjectSetupExecutionSchema.safeParse(projectSetupDomainRecord(executionItem, projectSetupExecutionKey(setupExecutionId), "PROJECT_SETUP_EXECUTION"));
+  const operation = ProjectSetupOperationSchema.safeParse(projectSetupDomainRecord(operationItem, projectSetupOperationKey(setupExecutionId, claims.operationId), "PROJECT_SETUP_OPERATION"));
+  const session = ProjectSetupSessionSchema.safeParse(projectSetupDomainRecord(sessionItem, projectSetupSessionKey(setupExecutionId), "PROJECT_SETUP_SESSION"));
+  if (!execution.success || !operation.success || !session.success || execution.data.state !== "DISPATCHING"
+    || operation.data.status !== "DISPATCHING" && operation.data.status !== "DELIVERED"
+    || execution.data.operationId !== claims.operationId || execution.data.subjectId !== claims.subjectId
+    || execution.data.transportCorrelationId !== claims.transportCorrelationId || execution.data.approvalRevision !== claims.approvalRevision
+    || execution.data.fence !== claims.fence || operation.data.fence !== claims.fence || session.data.state !== "READY"
+    || session.data.generation !== execution.data.runtimeGeneration || session.data.bindingDigest !== execution.data.bindingDigest) {
+    throw agentXError("STALE_FENCE", "setup artifact operation is no longer current");
+  }
+  const project = await requireProject(dependencies, execution.data.projectName, execution.data.projectRevision);
+  if (project.runtimeBinding.deploymentMode !== "ec2-ebs") throw agentXError("RUNTIME_UNAVAILABLE", "project setup requires the configured EC2 setup runtime");
+  const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${execution.data.projectName}`, sk: `PROPOSAL#${execution.data.proposalSha256}` });
+  if (project.registeredBy !== execution.data.ownerKey || project.setupApproval?.decision !== "approve"
+    || project.setupApproval.proposalSha256 !== execution.data.proposalSha256 || !approval || approval.ownerKey !== execution.data.ownerKey
+    || approval.decision !== "approve" || approval.proposalRef !== execution.data.proposalRef || approval.policyDigest !== execution.data.policyDigest) {
+    throw agentXError("CALLBACK_FORBIDDEN", "current project setup approval is no longer valid");
+  }
+  const member = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${execution.data.ownerKey}`, sk: `PROJECT#${execution.data.projectName}` });
+  const catalogId = dependencies.projectSetupRuntimeCatalogId;
+  if (member?.role !== "administrator" || !catalogId) throw agentXError("CALLBACK_FORBIDDEN", "project setup owner authority or runtime catalog is unavailable");
+  const catalogItem = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName,
+    Key: projectSetupRuntimeKey(catalogId, execution.data.bindingDigest), ConsistentRead: true }));
+  const runtimeKey = projectSetupRuntimeKey(catalogId, execution.data.bindingDigest);
+  const runtime = ProjectSetupRuntimeRecordSchema.safeParse(projectSetupRuntimeRecord(catalogItem.Item, runtimeKey));
+  if (!runtime.success || runtime.data.transportCorrelationId !== execution.data.transportCorrelationId || runtime.data.generation !== execution.data.runtimeGeneration
+    || !admitProjectSetupRuntime(runtime.data, { runtimeCatalogId: catalogId, binding: project.runtimeBinding, scope: "source-interface", now: Date.now() })) {
+    throw agentXError("STALE_FENCE", "current configured setup runtime is no longer qualified");
+  }
+  return { execution: execution.data, claims };
+}
+
+async function handleProjectSetupCallback(
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+  setupExecutionId: string,
+  operationId: string,
+): Promise<{ accepted: true }> {
+  const token = request.headers["x-agentx-callback-capability"];
+  const claims = token ? verifyProjectSetupCapability(dependencies.callbackSigningKey, token) : undefined;
+  if (!claims || claims.setupExecutionId !== setupExecutionId || claims.operationId !== operationId) {
+    throw agentXError("CALLBACK_FORBIDDEN", "callback capability is outside the project setup result scope");
+  }
+  const [executionItem, operationItem, sessionItem] = await Promise.all([
+    getItem<Record<string, unknown>>(dependencies, projectSetupExecutionKey(setupExecutionId)),
+    getItem<Record<string, unknown>>(dependencies, projectSetupOperationKey(setupExecutionId, operationId)),
+    getItem<Record<string, unknown>>(dependencies, projectSetupSessionKey(setupExecutionId)),
+  ]);
+  const execution = ProjectSetupExecutionSchema.safeParse(projectSetupDomainRecord(executionItem, projectSetupExecutionKey(setupExecutionId), "PROJECT_SETUP_EXECUTION"));
+  const operation = ProjectSetupOperationSchema.safeParse(projectSetupDomainRecord(operationItem, projectSetupOperationKey(setupExecutionId, operationId), "PROJECT_SETUP_OPERATION"));
+  const session = ProjectSetupSessionSchema.safeParse(projectSetupDomainRecord(sessionItem, projectSetupSessionKey(setupExecutionId), "PROJECT_SETUP_SESSION"));
+  if (!execution.success || !operation.success || !session.success) throw agentXError("CALLBACK_FORBIDDEN", "project setup execution state is missing or invalid");
+  const current = execution.data;
+  if (current.state !== "DISPATCHING" || operation.data.status !== "DISPATCHING" && operation.data.status !== "DELIVERED"
+    || current.operationId !== operationId || current.subjectId !== claims.subjectId
+    || current.transportCorrelationId !== claims.transportCorrelationId || current.approvalRevision !== claims.approvalRevision
+    || current.fence !== claims.fence || session.data.state !== "READY" || session.data.generation !== current.runtimeGeneration
+    || session.data.bindingDigest !== current.bindingDigest) {
+    throw agentXError("STALE_FENCE", "project setup result is stale or its worker lease is no longer current");
+  }
+  const registered = await requireProject(dependencies, current.projectName, current.projectRevision);
+  if (registered.registeredBy !== current.ownerKey || registered.setupApproval?.decision !== "approve"
+    || registered.setupApproval.proposalSha256 !== current.proposalSha256 || registered.runtimeBinding.deploymentMode !== "ec2-ebs") {
+    throw agentXError("CALLBACK_FORBIDDEN", "project setup approval or source binding is no longer current");
+  }
+  const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${current.projectName}`, sk: `PROPOSAL#${current.proposalSha256}` });
+  if (!approval || approval.ownerKey !== current.ownerKey || approval.decision !== "approve" || approval.proposalRef !== current.proposalRef
+    || approval.policyDigest !== current.policyDigest || !dependencies.projectSetupRuntimeCatalogId) {
+    throw agentXError("CALLBACK_FORBIDDEN", "current setup approval is missing or revoked");
+  }
+  const admittedRuntimeItem = await dependencies.documentClient.send(new GetCommand({
+    TableName: dependencies.tableName, Key: projectSetupRuntimeKey(dependencies.projectSetupRuntimeCatalogId, current.bindingDigest), ConsistentRead: true,
+  }));
+  const runtimeKey = projectSetupRuntimeKey(dependencies.projectSetupRuntimeCatalogId, current.bindingDigest);
+  const runtime = ProjectSetupRuntimeRecordSchema.safeParse(projectSetupRuntimeRecord(admittedRuntimeItem.Item, runtimeKey));
+  if (!runtime.success || !admitProjectSetupRuntime(runtime.data, {
+    runtimeCatalogId: dependencies.projectSetupRuntimeCatalogId, binding: registered.runtimeBinding,
+    scope: "source-interface", now: Date.now(),
+  })) throw agentXError("STALE_FENCE", "approved setup runtime is no longer ready");
+  const body = z.object({
+    domain: z.literal("project-setup-source-interface/v1"), setupExecutionId: z.string().uuid(), operationId: z.string().uuid(),
+    candidateDigest: z.string().regex(/^[a-f0-9]{64}$/), processStatus: z.enum(["SUCCEEDED", "FAILED", "UNKNOWN"]),
+    qualification: z.enum(["PASS", "FAILED", "UNKNOWN"]), cleanupConfirmed: z.boolean(),
+    evidenceRef: z.object({ key: z.string().min(1).max(512), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
+  }).strict().parse(parseBody(request.body));
+  if (body.setupExecutionId !== current.setupExecutionId || body.operationId !== current.operationId || body.candidateDigest !== current.candidateDigest) {
+    throw agentXError("CALLBACK_FORBIDDEN", "project setup result does not match its immutable source execution");
+  }
+  const verified = body.evidenceRef ? await verifyProjectSetupSmokeEvidence(dependencies, current, body.evidenceRef, runtime.data.runnerEnvironment, runtime.data.runnerToolchain) : undefined;
+  const processStatus = verified?.processStatus ?? "UNKNOWN";
+  const qualification = verified?.qualification ?? "UNKNOWN";
+  const cleanupConfirmed = verified?.cleanupConfirmed ?? false;
+  const terminalState = processStatus === "SUCCEEDED" ? "SUCCEEDED" : processStatus === "FAILED" ? "FAILED" : "PARKED";
+  const persistedResult = { domain: body.domain, candidateDigest: current.candidateDigest, processStatus,
+    qualification, cleanupConfirmed, ...(verified?.evidenceRef ? { evidenceRef: verified.evidenceRef } : {}) };
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
+      UpdateExpression: "SET #state = :state, completedAt = :now, #result = :result",
+      ConditionExpression: "#state = :dispatching AND operationId = :operationId AND fence = :fence",
+      ExpressionAttributeNames: { "#state": "state", "#result": "result" },
+      ExpressionAttributeValues: { ":state": terminalState, ":now": new Date().toISOString(), ":result": persistedResult,
+        ":dispatching": "DISPATCHING", ":operationId": operationId, ":fence": claims.fence } } },
+    { Update: { TableName: dependencies.tableName, Key: projectSetupOperationKey(setupExecutionId, operationId),
+      UpdateExpression: "SET #status = :status, updatedAt = :now, #result = :result",
+      ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND fence = :fence",
+      ExpressionAttributeNames: { "#status": "status", "#result": "result" },
+      ExpressionAttributeValues: { ":status": terminalState, ":now": new Date().toISOString(), ":result": persistedResult,
+        ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":fence": claims.fence } } },
+  ] }));
+  return { accepted: true };
+}
+
+async function verifyProjectSetupSmokeEvidence(
+  dependencies: AwsBrokerDependencies,
+  execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>,
+  reference: { key: string; sha256: string },
+  approvedRunnerEnvironmentInput: unknown,
+  approvedRunnerToolchainInput: unknown,
+): Promise<{ evidenceRef: { key: string; sha256: string }; processStatus: "SUCCEEDED" | "FAILED" | "UNKNOWN"; qualification: "PASS" | "FAILED" | "UNKNOWN"; cleanupConfirmed: boolean } | undefined> {
+  const approvedRunnerEnvironment = ProjectSetupRunnerEnvironmentSchema.safeParse(approvedRunnerEnvironmentInput);
+  const approvedRunnerToolchain = ProjectSetupRunnerToolchainSchema.safeParse(approvedRunnerToolchainInput);
+  if (!approvedRunnerEnvironment.success || !approvedRunnerToolchain.success) return undefined;
+  if (reference.key !== `project-setup-evidence/sha256/${reference.sha256}.json`) return undefined;
+  const evidenceText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.key, execution.evidenceByteLimit);
+  if (evidenceText === undefined || createHash("sha256").update(evidenceText, "utf8").digest("hex") !== reference.sha256) return undefined;
+  let evidence: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(evidenceText);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    evidence = parsed as Record<string, unknown>;
+  } catch { return undefined; }
+  if (evidence.schemaVersion !== "project-setup-smoke-evidence/v1" || evidence.setupExecutionId !== execution.setupExecutionId
+    || evidence.subjectId !== execution.subjectId || evidence.transportCorrelationId !== execution.transportCorrelationId
+    || evidence.executionRefSha256 !== execution.executionRef.sha256 || evidence.candidateDigest !== execution.candidateDigest
+    || canonicalJson(evidence.runnerToolchain) !== canonicalJson(approvedRunnerToolchain.data)) return undefined;
+  const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, execution.executionRef.key, MAX_SETUP_PROPOSAL_BYTES);
+  if (admissionText === undefined || createHash("sha256").update(admissionText, "utf8").digest("hex") !== execution.executionRef.sha256) return undefined;
+  let admission: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(admissionText);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    admission = parsed as Record<string, unknown>;
+  } catch { return undefined; }
+  if (typeof admission.planDigest !== "string" || evidence.planDigest !== admission.planDigest) return undefined;
+  if (admission.domain !== "project-setup-source-interface/v1" || admission.setupExecutionId !== execution.setupExecutionId
+    || admission.subjectId !== execution.subjectId || admission.transportCorrelationId !== execution.transportCorrelationId
+    || admission.candidateDigest !== execution.candidateDigest
+    || !admission.sourceSnapshot || typeof admission.sourceSnapshot !== "object" || !admission.selectionInput || typeof admission.selectionInput !== "object"
+    || !admission.setupRunContext || typeof admission.setupRunContext !== "object" || !Array.isArray(admission.scenarios)) return undefined;
+  try {
+    const sourceRecord = admission.sourceSnapshot as Record<string, unknown>;
+    if (!Array.isArray(sourceRecord.sources)) return undefined;
+    const snapshot = { ...sourceRecord, sources: sourceRecord.sources.map((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid source row");
+      const source = raw as Record<string, unknown>;
+      if (typeof source.path !== "string" || typeof source.sha256 !== "string" || source.kind !== "blob" || typeof source.bytesBase64 !== "string") throw new Error("invalid source row");
+      return { path: source.path, sha256: source.sha256, kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") };
+    }) } as unknown as E2ESourceSnapshot;
+    verifyE2ESourceSnapshot(snapshot, snapshot.candidate);
+    const sourceInspection = inspectE2ERepository(snapshot, snapshot.candidate).inspection;
+    const discoveredTargetIds = sourceInspection.proposedTargets.map((target) => target.targetId).sort();
+    if (canonicalJson(admission.discoveredApplications) !== canonicalJson(sourceInspection.applications)
+      || canonicalJson(admission.discoveryMissingInputs) !== canonicalJson(sourceInspection.missingInputs)
+      || canonicalJson(admission.discoveredTargetIds) !== canonicalJson(discoveredTargetIds)
+      || canonicalJson(evidence.discoveredApplications) !== canonicalJson(sourceInspection.applications)
+      || canonicalJson(evidence.discoveryMissingInputs) !== canonicalJson(sourceInspection.missingInputs)
+      || canonicalJson(evidence.discoveredTargetIds) !== canonicalJson(discoveredTargetIds)) return undefined;
+    E2EPolicySchema.parse(admission.policy);
+    const selectionInput = { ...(admission.selectionInput as Record<string, unknown>), sourceSnapshot: snapshot };
+    const plan = selectE2EExecutionPlan(selectionInput as never);
+    if (plan.groups.length === 0) return undefined;
+    const bundleBody = { schemaVersion: 1 as const, planDigest: admission.planDigest, templateVersion: "trusted-e2e/v1", scenarios: admission.scenarios, bundleDigest: "0".repeat(64) };
+    const bundle = E2EScenarioBundleSchema.parse({ ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) });
+    const runContext = admission.setupRunContext as Record<string, unknown>;
+    const round = E2ERoundSchema.parse((evidence.round) ?? null);
+    const groupAdmissions = runContext.groupAdmissions;
+    if (!Array.isArray(groupAdmissions) || groupAdmissions.length !== plan.groups.length || plan.groups.length === 0
+      || canonicalJson(runContext.plan) !== canonicalJson(plan) || canonicalJson(runContext.bundle) !== canonicalJson(bundle)
+      || canonicalJson(runContext.round) !== canonicalJson(round) || canonicalJson(runContext.runnerEnvironment) !== canonicalJson(approvedRunnerEnvironment.data)
+      || canonicalJson(runContext.runnerToolchain) !== canonicalJson(approvedRunnerToolchain.data)
+      || runContext.runnerToolchainDigest !== createHash("sha256").update(canonicalJson(approvedRunnerToolchain.data)).digest("hex")
+      || !Array.isArray(evidence.groupRuns) || evidence.groupRuns.length !== plan.groups.length) return undefined;
+    const authenticatedGroupAdmissions = groupAdmissions as unknown as unknown[];
+    const submittedGroupRuns = evidence.groupRuns as unknown as unknown[];
+    const unsupportedTargetIds = admission.unsupportedTargetIds;
+    const selectedTargetIds = Array.isArray(admission.selectedTargetIds) ? admission.selectedTargetIds : [];
+    const expectedNotExecutedTargetIds = discoveredTargetIds.filter((targetId) => !selectedTargetIds.includes(targetId));
+    if (!Array.isArray(unsupportedTargetIds) || canonicalJson(evidence.unsupportedTargetIds) !== canonicalJson(unsupportedTargetIds)) return undefined;
+    if (canonicalJson(unsupportedTargetIds) !== canonicalJson(expectedNotExecutedTargetIds)
+      || canonicalJson(admission.notExecutedTargetIds) !== canonicalJson(expectedNotExecutedTargetIds)
+      || canonicalJson(evidence.notExecutedTargetIds) !== canonicalJson(expectedNotExecutedTargetIds)) return undefined;
+    const semanticApprovalDigests = new Map(bundle.scenarios.map((scenario) => [scenario.scenarioId, (admission.semanticApproval as { digest: string }).digest]));
+    const qualifications: Array<"PASS" | "FAILED" | "UNKNOWN"> = [];
+    const cleanupStates: boolean[] = [];
+    const processStates: boolean[] = [];
+    for (const [index, group] of plan.groups.entries()) {
+      const admissionGroup = authenticatedGroupAdmissions[index];
+      const rawGroupRun = submittedGroupRuns[index];
+      if (!admissionGroup || !rawGroupRun || typeof admissionGroup !== "object" || typeof rawGroupRun !== "object" || Array.isArray(rawGroupRun)) return undefined;
+      const admitted = admissionGroup as Record<string, unknown>;
+      const groupRun = rawGroupRun as Record<string, unknown>;
+      const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput, executionPlan: plan, group } as never);
+      if (canonicalJson(admitted.group) !== canonicalJson(group) || admitted.expectedConfigDigest !== compiled.expectedConfigDigest
+        || admitted.compiledInventoryDigest !== compiled.inventory.digest || admitted.selectionPacketPath !== compiled.selectionPacketPath
+        || canonicalJson(admitted.expectedCases) !== canonicalJson(compiled.expectedCases)) return undefined;
+      const binding = E2ERunBindingSchema.parse(admitted.binding);
+      if (binding.operationId !== execution.operationId || binding.operationFence !== execution.fence || binding.workflowRevision !== execution.projectRevision
+        || binding.candidateDigest !== execution.candidateDigest || binding.planDigest !== admission.planDigest || binding.groupId !== group.groupId
+        || canonicalJson(round.groupBindings[index]) !== canonicalJson(binding) || canonicalJson(groupRun.group) !== canonicalJson(group)
+        || canonicalJson(groupRun.binding) !== canonicalJson(binding)) return undefined;
+      const selection = JSON.parse(compiled.files.get(compiled.selectionPacketPath) ?? "null") as unknown;
+      if (canonicalJson(groupRun.selection) !== canonicalJson(selection) || !Array.isArray(groupRun.hostRequestIds)) return undefined;
+      const hostRequestIds = new Map<string, string>();
+      for (const row of groupRun.hostRequestIds) {
+        if (!Array.isArray(row) || row.length !== 2 || typeof row[0] !== "string" || typeof row[1] !== "string" || hostRequestIds.has(row[0])) return undefined;
+        hostRequestIds.set(row[0], row[1]);
+      }
+      if (hostRequestIds.size !== compiled.hostRequestPayloads.size || [...compiled.hostRequestPayloads.keys()].some((caseId) => !hostRequestIds.has(caseId))) return undefined;
+      const actualValue = groupRun.actual;
+      if (!actualValue || typeof actualValue !== "object" || Array.isArray(actualValue)) return undefined;
+      const actualRecord = actualValue as Record<string, unknown>;
+      if (canonicalJson(actualRecord.runnerToolchain) !== canonicalJson(approvedRunnerToolchain.data)) return undefined;
+      if (typeof actualRecord.launchId !== "string" || typeof actualRecord.rawReportBase64 !== "string" || typeof actualRecord.runStartCaptureBase64 !== "string"
+        || !Array.isArray(actualRecord.candidateCaptures) || !Array.isArray(actualRecord.assertionReceipts)
+        || typeof actualRecord.cleanupConfirmed !== "boolean" || typeof actualRecord.cleanupServerListening !== "boolean") return undefined;
+      const rawReportBytes = Buffer.from(actualRecord.rawReportBase64, "base64");
+      const runStartCaptureBytes = Buffer.from(actualRecord.runStartCaptureBase64, "base64");
+      const runStartCapture = parseE2EFirstPartyCapture(runStartCaptureBytes, actualRecord.launchId);
+      const actual = { launchId: actualRecord.launchId, launchConfigDigest: actualRecord.launchConfigDigest, fixedAssetDigests: actualRecord.fixedAssetDigests,
+        publicList: actualRecord.publicList, selected: actualRecord.selected, filtered: actualRecord.filtered,
+        rawReportBytes: new Uint8Array(rawReportBytes), runStartCaptureBytes: new Uint8Array(runStartCaptureBytes), runStartCapture,
+        assertionReceipts: actualRecord.assertionReceipts, declaredMockComponentIds: actualRecord.declaredMockComponentIds,
+        candidateCaptures: actualRecord.candidateCaptures, listProcess: actualRecord.listProcess, runProcess: actualRecord.runProcess,
+        cleanupConfirmed: actualRecord.cleanupConfirmed, cleanupServerListening: actualRecord.cleanupServerListening, evidenceDirectory: "" } as never;
+      const actualQualification = collectE2EActualCliRun({ actual, compiled, binding, round, selection: selection as never,
+        sourceDigest: e2eSnapshotSourceDigest(compiled, snapshot.sources.map(({ path, sha256 }) => ({ path, sha256 }))), semanticApprovalDigests, hostRequestIds,
+        declaredMockComponentIds: Array.isArray(actualRecord.declaredMockComponentIds) ? actualRecord.declaredMockComponentIds as string[] : [],
+        environment: approvedRunnerEnvironment.data,
+        usage: { discoveredResults: Number(actualRecord.selected) + Number(actualRecord.filtered), maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 },
+        limits: { maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 } });
+      qualifications.push(actualQualification.qualification?.status ?? "UNKNOWN");
+      cleanupStates.push(actualRecord.cleanupConfirmed === true && actualRecord.cleanupServerListening === false);
+      const runProcess = actualRecord.runProcess as Record<string, unknown> | undefined;
+      processStates.push(runProcess?.status === 0 && runProcess.signal === null && runProcess.aborted === false && runProcess.timedOut === false);
+    }
+    const cleanupConfirmed = cleanupStates.length === plan.groups.length && cleanupStates.every(Boolean);
+    const processStatus = processStates.every(Boolean) ? "SUCCEEDED" : "FAILED";
+    const qualification = qualifications.includes("FAILED") ? "FAILED" : qualifications.length === plan.groups.length && qualifications.every((item) => item === "PASS") ? "PASS" : "UNKNOWN";
+    return { evidenceRef: reference, processStatus, qualification: cleanupConfirmed ? qualification : "UNKNOWN", cleanupConfirmed };
+  } catch {
+    return undefined;
+  }
+}
+
+function projectSetupDomainRecord(item: Record<string, unknown> | undefined, key: { pk: string; sk: string }, entityType: string): Record<string, unknown> {
+  if (!item) return {};
+  if (item.pk !== key.pk || item.sk !== key.sk || item.entityType !== entityType) return {};
+  const { pk: _pk, sk: _sk, entityType: _entityType, ...domain } = item;
+  void _pk; void _sk; void _entityType;
+  return domain;
+}
+
+/** Runtime catalog's strict domain schema includes entityType; validate storage identity before preserving it. */
+function projectSetupRuntimeRecord(item: Record<string, unknown> | undefined, key: { pk: string; sk: string }): Record<string, unknown> {
+  const domain = projectSetupDomainRecord(item, key, "PROJECT_SETUP_RUNTIME");
+  return Object.keys(domain).length === 0 ? domain : { ...domain, entityType: "PROJECT_SETUP_RUNTIME" };
 }
 
 /**
@@ -8784,6 +9592,10 @@ export const handler = createAwsBrokerHandler({
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrants,
   githubPullRequests: githubCredentials,
+  projectSetupSource: { capture: ({ repositoryUrl, ref }) => githubCredentials.captureE2ESourceSnapshot(repositoryUrl, ref) },
+  ...(process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID
+    ? { projectSetupRuntimeCatalogId: process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID }
+    : {}),
   githubWebhookSecret: github.webhookSecret,
   checkRepositoryAccess: (repository) => githubCredentials.checkRepository(repository),
   githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },

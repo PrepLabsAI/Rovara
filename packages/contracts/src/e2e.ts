@@ -185,6 +185,31 @@ export const E2EScenarioSchema = safeJsonSchema(z.object({ scenarioId: id(120), 
   if (scenario.steps[0]?.kind === "inspect-contract" && (scenario.steps.length !== 1 || scenario.assertions.length !== 1 || scenario.assertions[0]?.kind !== "state" || scenario.assertions[0].probeId !== "module-export-names")) context.addIssue({ code: "custom", path: ["assertions"], message: "source-interface inspection requires one fixed module-export-names assertion" });
 }));
 export type E2EScenario = z.infer<typeof E2EScenarioSchema>;
+/** Untrusted feature-plan intent. The broker still derives inherited floors, target availability and evidence bindings. */
+export const E2EFeaturePlanIntentSchema = z.object({
+  schemaVersion: z.literal(1),
+  requestedTargetIds: ids(12),
+  accountContextRefs: z.array(z.object({
+    applicationId: id(120), profileId: id(120), sourcePath: sourceRelativePath, sourceSha256: digest,
+  }).strict()).max(32),
+  scenarios: z.array(E2EScenarioSchema).max(32),
+  semanticExportDeltas: z.array(z.object({
+    applicationId: id(120), operationId: id(120), requestedTargetIds: ids(12), expectedExportNames: z.array(id(120)).max(128), reason: id(500),
+  }).strict()).max(32),
+}).strict().superRefine((intent, context) => {
+  if (new Set(intent.scenarios.map((scenario) => scenario.scenarioId)).size !== intent.scenarios.length) {
+    context.addIssue({ code: "custom", path: ["scenarios"], message: "scenario IDs must be unique" });
+  }
+  const requested = new Set(intent.requestedTargetIds);
+  if (intent.scenarios.some((scenario) => scenario.requestedTargetIds.some((targetId) => !requested.has(targetId)))) {
+    context.addIssue({ code: "custom", path: ["scenarios"], message: "every scenario target must be explicitly requested by the feature plan" });
+  }
+  const accounts = intent.accountContextRefs.map((item) => `${item.applicationId}\0${item.profileId}`);
+  if (new Set(accounts).size !== accounts.length) context.addIssue({ code: "custom", path: ["accountContextRefs"], message: "account context references must be unique by application and profile" });
+  const deltas = intent.semanticExportDeltas.map((item) => `${item.applicationId}\0${item.operationId}`);
+  if (new Set(deltas).size !== deltas.length) context.addIssue({ code: "custom", path: ["semanticExportDeltas"], message: "semantic export deltas must be unique by operation" });
+});
+export type E2EFeaturePlanIntent = z.infer<typeof E2EFeaturePlanIntentSchema>;
 export const E2EScenarioBundleSchema = safeJsonSchema(z.object({ schemaVersion: z.literal(1), planDigest: digest, bundleDigest: digest, templateVersion: id(80), scenarios: z.array(E2EScenarioSchema).max(32) }).strict().superRefine((bundle, context) => {
   if (new Set(bundle.scenarios.map((scenario) => scenario.scenarioId)).size !== bundle.scenarios.length) context.addIssue({ code: "custom", path: ["scenarios"], message: "scenario IDs must be unique" });
   const actual = e2eScenarioBundleDigest(bundle);

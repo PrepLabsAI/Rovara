@@ -13,6 +13,14 @@ export const E2E_APP_RPC_FRAME_MAX_BYTES = 262_144;
 export const E2E_APP_LITERAL_MAX_BYTES = 65_536;
 export const E2E_APP_LITERAL_MAX_DEPTH = 32;
 export const E2E_COLLECTION_ORACLE_MAX_CARRIER_BYTES = 262_144 + 3 * 262_144 + 3 * 16_384 + 64 * (8_192 + 262_144 + 262_144 + 262_144 + 262_144 + 8_192);
+/** Private setup transfer ceiling derived from the authenticated case/group inventory. */
+export function e2ePrivateTransferMaxBytes(caseCount: number, groupCount = 1): number {
+  if (!Number.isSafeInteger(caseCount) || caseCount < 1 || caseCount > 64 || !Number.isSafeInteger(groupCount) || groupCount < 1 || groupCount > 4) {
+    throw new TypeError("private transfer inventory exceeds the admitted E2E case/group limits");
+  }
+  const runBytes = groupCount * (E2E_REPORT_MAX_BYTES + E2E_APP_RPC_FRAME_MAX_BYTES) + caseCount * 3 * E2E_APP_RPC_FRAME_MAX_BYTES;
+  return Math.ceil(runBytes * 4 / 3) + E2E_COLLECTION_ORACLE_MAX_CARRIER_BYTES;
+}
 export const E2E_MODULE_EXPORT_INVENTORY_PROTOCOL = "registered-module-export-inventory/v1" as const;
 export const E2E_MODULE_EXPORT_PROJECTION_VERSION = "module-export-names/v1" as const;
 export function projectE2EModuleExportNames(value: unknown): readonly string[] {
@@ -188,7 +196,15 @@ export function qualifyE2ECollection(oracleInput: E2ECollectionOracle, collectio
     const capturedAt = Date.parse(raw.runStart.capturedAt);
     if (!raw.runStart.runId || !Number.isSafeInteger(raw.runStart.sequence) || raw.runStart.sequence < 1 || !raw.runStart.launchId || raw.runStart.runId !== runId || report.run.id !== raw.runStart.runId) return unavailable("independent run-start capture does not bind the report UUID", runId, parsed.rawSha256);
     if (![now, started, finished, reportStarted, reportFinished, capturedAt].every(Number.isFinite) || finished < started || started < Date.parse(binding.admittedAt) || finished > Date.parse(binding.deadlineAt) || now < finished || now > Date.parse(round.deadlineAt) + 5000 || capturedAt < started - 1000 || capturedAt > reportStarted + 1000 || reportStarted < started || reportFinished < reportStarted || reportFinished > finished) return unavailable("collection timing is outside the admitted round window", runId, parsed.rawSha256);
-    if (report.run.runner.name !== oracle.runnerName || report.run.runner.version !== oracle.runnerVersion || report.run.project.id !== oracle.projectId || report.run.project.configDigest !== oracle.configDigest || raw.configDigest !== oracle.configDigest || canonicalJson(raw.fixedAssetDigests) !== canonicalJson(oracle.fixedAssetDigests) || canonicalJson(report.run.environment) !== canonicalJson(oracle.environment) || canonicalJson(report.run.targets) !== canonicalJson(oracle.targets) || canonicalJson(report.run.usage) !== canonicalJson(oracle.usage) || canonicalJson(report.run.limits) !== canonicalJson(oracle.limits) || report.run.serialGroups.length !== 0) return unavailable("pinned runner, project, configuration, environment, target, or fixed asset identity mismatch", runId, parsed.rawSha256);
+    const identityMismatches = [
+      ...(report.run.runner.name !== oracle.runnerName ? ["runner.name"] : []), ...(report.run.runner.version !== oracle.runnerVersion ? ["runner.version"] : []),
+      ...(report.run.project.id !== oracle.projectId ? ["project.id"] : []), ...(report.run.project.configDigest !== oracle.configDigest ? ["report.configDigest"] : []),
+      ...(raw.configDigest !== oracle.configDigest ? ["capture.configDigest"] : []), ...(canonicalJson(raw.fixedAssetDigests) !== canonicalJson(oracle.fixedAssetDigests) ? ["fixedAssetDigests"] : []),
+      ...(canonicalJson(report.run.environment) !== canonicalJson(oracle.environment) ? ["environment"] : []), ...(canonicalJson(report.run.targets) !== canonicalJson(oracle.targets) ? ["targets"] : []),
+      ...(canonicalJson(report.run.usage) !== canonicalJson(oracle.usage) ? ["usage"] : []), ...(canonicalJson(report.run.limits) !== canonicalJson(oracle.limits) ? ["limits"] : []),
+      ...(report.run.serialGroups.length !== 0 ? ["serialGroups"] : []),
+    ];
+    if (identityMismatches.length > 0) return unavailable(`pinned runtime identity mismatch: ${identityMismatches.join(",")}`, runId, parsed.rawSha256);
     if (binding.modelRouteRevision === null && (report.run.usage.modelTokens !== 0 || report.run.usage.maxModelCallsInStep !== 0 || report.run.usage.maxActionStepsInStep !== 0)) return unavailable("model usage was observed although the admitted route is null", runId, parsed.rawSha256);
     if (raw.process.signal !== null || typeof raw.process.aborted !== "boolean" || typeof raw.process.timedOut !== "boolean" || typeof raw.process.drained !== "boolean" || raw.process.aborted || raw.process.timedOut || !raw.process.drained || !Number.isInteger(raw.process.exitCode)) return unavailable("process was interrupted, timed out, aborted, or not fully drained", runId, parsed.rawSha256);
     const { selected, filtered } = compareE2EPublicList(oracle.selection, raw.publicList);
@@ -205,7 +221,12 @@ export function qualifyE2ECollection(oracleInput: E2ECollectionOracle, collectio
       const rowOracle = oracle.cases.find((item) => item.caseId === tuple.caseId);
       if (!rowOracle || row.declarationIndex !== rowOracle.declarationIndex || row.source.file !== ".agentx/e2e/generated-contract.test.ts" || row.file !== row.source.file || row.source.line !== rowOracle.sourceLine || row.source.column !== rowOracle.sourceColumn || canonicalJson(row.tags ?? []) !== canonicalJson(rowOracle.tags)) return unavailable("report declaration, source location, or tag identity differs from compiled output", runId, parsed.rawSha256);
       const listPair = (raw.publicList as { pairs: Array<{ id: string; source?: unknown; tags?: unknown }> }).pairs.find((pair) => pair.id === tuple.upstreamResultId);
-      if (!listPair || canonicalJson(listPair.source) !== canonicalJson({ file: ".agentx/e2e/generated-contract.test.ts", line: rowOracle.sourceLine, column: rowOracle.sourceColumn }) || canonicalJson(listPair.tags ?? []) !== canonicalJson(rowOracle.tags)) return unavailable("public-list source location or tags differ from compiled output", runId, parsed.rawSha256);
+      // The upstream list is a separate discovery surface. Its source location
+      // can refer to the upstream declaration layout, while the report location
+      // is bound to this run's generated compiler bytes above. Keep the complete
+      // public-list source object in the collection and validate its bounded
+      // shape in compareE2EPublicList; do not equate those two coordinate spaces.
+      if (!listPair || canonicalJson(listPair.tags ?? []) !== canonicalJson(rowOracle.tags)) return unavailable("public-list tags differ from compiled output", runId, parsed.rawSha256);
       if (tuple.disposition === "filtered") {
         const skip = row.skip as { cause?: unknown; reason?: unknown } | undefined;
         const expectedReason = typeof (raw.publicList as { pairs?: unknown[] }).pairs?.find((pair) => (pair as { id?: unknown }).id === tuple.upstreamResultId) === "object" ? ((raw.publicList as { pairs: Array<{ id: string; reason?: string }> }).pairs.find((pair) => pair.id === tuple.upstreamResultId)?.reason) : undefined;

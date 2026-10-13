@@ -60,6 +60,7 @@ export async function registerProject(
     accessToken: string;
     definition: ProjectDefinition;
     runtimeBinding: ProjectRuntimeBinding;
+    setupApproval?: { proposalRef: string; proposalSha256: string; decision: "approve" | "decline" };
   },
   fetchImplementation: typeof fetch = fetch,
 ): Promise<unknown> {
@@ -73,7 +74,7 @@ export async function registerProject(
       "content-type": "application/json",
     },
     // Asks the control plane to check each connector with its vendor; older control planes ignore it.
-    body: JSON.stringify({ definition, runtimeBinding: options.runtimeBinding, preflight: true }),
+    body: JSON.stringify({ definition, runtimeBinding: options.runtimeBinding, preflight: true, ...(options.setupApproval === undefined ? {} : { setupApproval: options.setupApproval }) }),
   });
   const { ok, status, body } = await readJsonResponse(response);
   if (!ok) {

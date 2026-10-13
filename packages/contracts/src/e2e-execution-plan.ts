@@ -52,8 +52,11 @@ const registrationDescriptor = (registration: E2EPortableApprovalBinding["operat
   const body = Object.fromEntries(Object.entries(registration).filter(([key]) => key !== "descriptorDigest"));
   return e2ePortableOperationDescriptorDigest(body);
 };
-const validPortableSemantics = (scenario: E2EScenario, operation: PortableOperation | undefined, registration: E2EPortableApprovalBinding["operations"][number] | undefined, targetKind: string) => {
-  if ((targetKind !== "web" && targetKind !== "api") || !operation || !registration || scenario.steps.length !== 1) return false;
+const validPortableSemantics = (scenario: E2EScenario, operation: PortableOperation | undefined, registration: E2EPortableApprovalBinding["operations"][number] | undefined) => {
+  // A registered, source-verified portable module is a capability of this scenario,
+  // regardless of the discovered application surface label. This proves the portable
+  // source-interface only; native/mobile/desktop execution remains a separate obligation.
+  if (!operation || !registration || scenario.steps.length !== 1) return false;
   const step = scenario.steps[0];
   if (step?.kind === "invoke-contract") return registration.purpose === "feature-invocation" && step.operationId === operation.operationId && scenario.assertions.length > 0 && scenario.assertions.every(supportedPortableAssertion);
   if (step?.kind === "inspect-contract") return registration.purpose === "source-interface" && step.operationId === operation.operationId
@@ -181,7 +184,7 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
       else if (sourceCapabilityAvailable.get(resolvedRegistration?.registrationKey ?? "") !== true) unavailableReason = scenario.steps[0]?.kind === "inspect-contract" ? "registered module export names do not match source-validated module inventory" : "registered invocation selector is not a source-validated callable capability";
       else if (!sandboxUsable) unavailableReason = "approved qualified default sandbox is unavailable or model route is not disabled";
       else if (requestedTarget.applicationId !== sourceOperation?.applicationId || !sourceOperation.targetIds.includes(requestedTargetId)) unavailableReason = "no source-derived portable operation is bound to this requested target";
-      else if (!validPortableSemantics(scenario, sourceOperation, registration, requestedTarget.kind)) unavailableReason = "requested steps, assertions, evidence scope, target kind, or agent semantics are not in the supported portable contract profile";
+      else if (!validPortableSemantics(scenario, sourceOperation, registration)) unavailableReason = "requested steps, assertions, evidence scope, or agent semantics are not in the supported portable contract profile";
       const criterionMocks: E2EMockSpec[] = [];
       let fixtureUnavailableReason: string | undefined;
       const requestedMockComponentIds = mockableComponents.filter((item) => item.requestedTargetId === requestedTargetId && (item.fixture !== undefined || item.fixtureProfile !== undefined)).map((item) => item.componentId);

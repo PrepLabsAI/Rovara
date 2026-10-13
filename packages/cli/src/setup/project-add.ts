@@ -14,6 +14,7 @@ import {
 } from "@agentx/contracts";
 import { listCredentials } from "../admin/credential.js";
 import { cliRuntimeBinding, registerProject } from "../admin/register.js";
+import { readJsonResponse, serverError } from "../admin/http.js";
 import { loadProjectConfig } from "../config.js";
 import type { StackOutputs } from "../deploy/parameters.js";
 import type { Prompter } from "../init/prompts.js";
@@ -123,10 +124,11 @@ export async function writeProjectFile(configDir: string, definition: ProjectDef
 export async function registerRevision(input: {
   env: string; session: AdminSession; definition: ProjectDefinition;
   services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir">;
+  setupApproval?: StoredSetupDecision;
 }): Promise<{ revision: number; preflight: ConnectorPreflight[]; warnings: string[]; file: string }> {
   const foundation = environmentStackName(input.env, "foundation");
   const runtimeBinding = ec2Binding(await input.services.stackOutputs(foundation), foundation);
-  const result = (await registerProject({ controlPlaneUrl: input.session.controlPlaneUrl, accessToken: input.session.accessToken, definition: input.definition, runtimeBinding }, input.services.fetch)) as Record<string, unknown>;
+  const result = (await registerProject({ controlPlaneUrl: input.session.controlPlaneUrl, accessToken: input.session.accessToken, definition: input.definition, runtimeBinding, ...(input.setupApproval === undefined ? {} : { setupApproval: input.setupApproval }) }, input.services.fetch)) as Record<string, unknown>;
   const preflight = RegistrationPreflightSchema.safeParse(result.preflight);
   const warnings = Array.isArray(result.warnings) ? result.warnings.filter((entry): entry is string => typeof entry === "string") : [];
   // Written only after the control plane accepted the revision, so the file never names a revision
@@ -170,6 +172,34 @@ async function existingProject(configDir: string, name: string): Promise<Project
 }
 
 const cloneUrlOf = (fullName: string) => `https://github.com/${fullName}.git`.toLowerCase();
+
+interface StoredSetupDecision { proposalRef: string; proposalSha256: string; decision: "approve" | "decline" }
+
+async function setupRequest(session: AdminSession, fetchImplementation: typeof fetch, path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const response = await fetchImplementation(`${session.controlPlaneUrl.replace(/\/$/, "")}${path}`, {
+    method: "POST", headers: { authorization: `Bearer ${session.accessToken}`, "content-type": "application/json" }, body: JSON.stringify(body),
+  });
+  const { ok, status, body: result } = await readJsonResponse(response);
+  if (!ok) {
+    const { code, message } = serverError(result);
+    throw agentXError(code === "FORBIDDEN" ? "FORBIDDEN" : status >= 500 ? "RUNTIME_UNAVAILABLE" : "CONFIG_INVALID", `${path} failed with HTTP ${status}${message ? `: ${message}` : ""}`);
+  }
+  if (result === undefined || typeof result !== "object" || Array.isArray(result)) throw agentXError("RUNTIME_UNAVAILABLE", `${path} returned an invalid response`);
+  return result as Record<string, unknown>;
+}
+
+function validateSetupProposalResponse(value: Record<string, unknown>): { proposal: E2ESetupProposal; policy: E2EPolicy; proposalRef: string; proposalSha256: string } {
+  const proposal = E2ESetupProposalSchema.parse(value.proposal);
+  const policy = E2EPolicySchema.parse(value.policy);
+  if (typeof value.proposalRef !== "string" || !/^project-setup-proposals\/[a-f0-9]{64}\/[a-f0-9]{64}\.json$/.test(value.proposalRef)
+    || typeof value.proposalSha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.proposalSha256)
+    || value.proposalRef !== `project-setup-proposals/${value.proposalRef.split("/")[1]}/${value.proposalSha256}.json`
+    || value.candidateDigest !== proposal.candidateDigest || policy.targets.length !== proposal.targets.length
+    || proposal.targets.some((target) => !policy.targets.some((configured) => JSON.stringify(configured) === JSON.stringify(target)))) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned an unbound source-backed setup proposal");
+  }
+  return { proposal, policy, proposalRef: value.proposalRef, proposalSha256: value.proposalSha256 };
+}
 
 /** What this rerun asks for that the existing project does not have. Only the answers given are
  * compared (the repository, and any command flags); nothing is asked again and nothing is fetched. */
@@ -234,8 +264,13 @@ export async function addProject(input: {
   const repoName = agentxRepositoryName(repository.name);
   const cwd = `repo/${repoName}`;
   const source = repository;
-  let setupProposal: E2ESetupProposal | undefined;
-  let e2ePolicy: E2EPolicy | undefined;
+  const setupProposalResponse = await setupRequest(input.session, input.services.fetch, "/v1/admin/projects/setup-proposals", {
+    repositoryUrl: source.cloneUrl, ref: source.defaultBranch,
+  });
+  const trustedSetup = validateSetupProposalResponse(setupProposalResponse);
+  let setupProposal = trustedSetup.proposal;
+  const e2ePolicy = trustedSetup.policy;
+  let setupApproval: StoredSetupDecision | undefined;
   if (input.e2eSetup !== undefined) {
     const candidateProposal = E2ESetupProposalSchema.parse(input.e2eSetup.proposal);
     const policy = E2EPolicySchema.parse(input.e2eSetup.policy);
@@ -250,7 +285,9 @@ export async function addProject(input: {
       throw agentXError("CONFIG_INVALID", "E2E setup policy targets must match the source-backed proposal");
     }
     setupProposal = verifiedProposal;
-    e2ePolicy = policy;
+    if (verifiedProposal.candidateDigest !== trustedSetup.proposal.candidateDigest || !isDeepStrictEqual(policy, trustedSetup.policy)) {
+      throw agentXError("CONFIG_INVALID", "locally supplied setup evidence differs from the trusted server proposal");
+    }
   }
   const files = input.e2eSetup === undefined
     ? Object.fromEntries(await Promise.all(BUILD_FILES.map(async (file) => [file, await input.services.repositories.file(input.githubToken, source.fullName, file)] as const)))
@@ -268,6 +305,14 @@ export async function addProject(input: {
     const commandSummary = "setup: " + setup.map(commandLine).join("; ") + "; readiness: " + readiness.map(commandLine).join("; ");
     e2eAccepted = await prompter.confirm("Use this project setup plan? (" + commandSummary + "; targets: " + targetSummary + "; mock substitutions: " + mockSummary + "; unresolved inputs: " + blockerSummary + ")", { defaultValue: true });
     if (!e2eAccepted) { setup = []; readiness = []; }
+    const decision = e2eAccepted ? "approve" : "decline";
+    const approval = await setupRequest(input.session, input.services.fetch, "/v1/admin/projects/setup-approvals", {
+      projectName: name, proposalRef: trustedSetup.proposalRef, proposalSha256: trustedSetup.proposalSha256, decision,
+    });
+    if (approval.proposalRef !== trustedSetup.proposalRef || approval.proposalSha256 !== trustedSetup.proposalSha256 || approval.decision !== decision) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned a mismatched immutable setup decision");
+    }
+    setupApproval = { proposalRef: trustedSetup.proposalRef, proposalSha256: trustedSetup.proposalSha256, decision };
   } else if (flags.setupCommand !== undefined || flags.testCommand !== undefined) {
     if (flags.setupCommand !== undefined) setup = typed(flags.setupCommand, SETUP_TIMEOUT);
     if (flags.testCommand !== undefined) readiness = typed(flags.testCommand, TEST_TIMEOUT);
@@ -287,7 +332,7 @@ export async function addProject(input: {
     setup, readiness, orchestratorInstructions: DEFAULT_INSTRUCTIONS,
     ...(e2eAccepted && e2ePolicy !== undefined ? { e2e: e2ePolicy } : {}),
   });
-  const registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services });
+  const registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services, ...(setupApproval === undefined ? {} : { setupApproval }) });
   input.write(`Registered project ${name}, revision 1, on EC2 workers. Its file is ${registered.file}.`);
   return { name, revision: 1, file: registered.file };
 }
