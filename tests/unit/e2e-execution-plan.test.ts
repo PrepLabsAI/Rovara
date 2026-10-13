@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createCandidateManifest, e2eExecutionPlanDigest, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
-import { effectiveContractTargetId, portableE2EUpstreamTestId, PORTABLE_E2E_TEST_PATH, selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
+import { effectiveContractTargetId, portableE2EUpstreamTestId, PORTABLE_E2E_TEST_PATH, selectE2EExecutionPlan as selectRawE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
+import { withTestPortableApproval } from "../e2e-test-approval.js";
 import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
 
+const selectE2EExecutionPlan = (input: Parameters<typeof selectRawE2EExecutionPlan>[0]) => selectRawE2EExecutionPlan(withTestPortableApproval(input));
 const hash = (text: string) => createHash("sha256").update(text).digest("hex");
 const moduleBytes = Buffer.from("export const exportOrders = () => true");
 const manifestBytes = Buffer.from(JSON.stringify({ name: "app", scripts: { start: "vite" }, exports: { ".": "./src/export.ts" } }));

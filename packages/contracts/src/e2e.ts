@@ -3,6 +3,7 @@ import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import type { WorkflowVerificationResults } from "./task-workflow.js";
 import { redactText } from "./redaction.js";
+import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "./e2e-case-identity.js";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const id = (max = 120) => z.string().trim().min(1).max(max);
@@ -29,7 +30,7 @@ const sameOriginAppPath = z.string().min(1).max(2048).superRefine((value, contex
   try {
     let decoded = value;
     for (let depth = 0; depth < 4; depth += 1) decoded = decodeURIComponent(decoded);
-    if (value !== value.trim() || /[\u0000-\u001f\u007f]/.test(value)
+    if (value !== value.trim() || [...value].some((character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)
       || value.startsWith("//") || value.startsWith("\\") || value.includes("\\") || decoded.includes("\\")
       || /^[a-z][a-z0-9+.-]*:/i.test(value) || /^[a-z][a-z0-9+.-]*:/i.test(decoded) || decoded.startsWith("//")
       || decoded.split("/").some((part) => part === ".." || part === ".") || decoded.includes("\u0000")
@@ -55,7 +56,7 @@ function copyJsonValue(value: unknown, bounds: JsonBounds): JsonValue {
     if (seen.has(item)) throw new TypeError("cyclic JSON value");
     seen.add(item);
     try {
-      const prototype = Object.getPrototypeOf(item);
+      const prototype: unknown = Object.getPrototypeOf(item);
       const descriptors = Object.getOwnPropertyDescriptors(item);
       const keys = Reflect.ownKeys(descriptors);
       if (Array.isArray(item)) {
@@ -162,7 +163,7 @@ export type E2EAppRecipe = z.infer<typeof E2EAppRecipeSchema>;
 const stepSchemas = [
   z.object({ kind: z.literal("navigate"), path: sameOriginAppPath }), z.object({ kind: z.literal("fill"), testId: id(256), value: z.string().max(8192) }), z.object({ kind: z.literal("click"), testId: id(256) }),
   z.object({ kind: z.literal("agent"), goal: z.string().min(1).max(8192), maxActions: positiveInt.max(100) }), z.object({ kind: z.literal("request"), requestId: id(120), path: sameOriginAppPath, method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]), body: plainJson }),
-  z.object({ kind: z.literal("invoke-contract"), operationId: id(120), input: plainJson }), z.object({ kind: z.literal("launch-app") }), z.object({ kind: z.literal("tap"), testId: id(256) }),
+  z.object({ kind: z.literal("invoke-contract"), operationId: id(120), input: plainJson }), z.object({ kind: z.literal("inspect-contract"), operationId: id(120) }), z.object({ kind: z.literal("launch-app") }), z.object({ kind: z.literal("tap"), testId: id(256) }),
   z.object({ kind: z.literal("swipe"), direction: z.enum(["up", "down", "left", "right"]) }), z.object({ kind: z.literal("deep-link"), path: sameOriginAppPath }), z.object({ kind: z.literal("restart-app") }),
   z.object({ kind: z.literal("set-permission"), permission: id(120), value: z.enum(["grant", "deny", "reset"]) }), z.object({ kind: z.literal("choose-file"), fixtureFileId: id(120) }),
 ].map((schema) => schema.strict());
@@ -178,6 +179,7 @@ export const E2EAssertionSchema = safeJsonSchema(z.discriminatedUnion("kind", [
 export type E2EAssertion = z.infer<typeof E2EAssertionSchema>;
 export const E2EScenarioSchema = safeJsonSchema(z.object({ scenarioId: id(120), requirementId: id(120), requestedTargetIds: ids(12), required: z.boolean(), accountProfileId: id(120), minimumEvidence: E2EEvidenceScopeSchema, requiredRealComponentIds: z.array(id(120)).max(32), steps: z.array(E2EStepSchema).max(30), assertions: z.array(E2EAssertionSchema).min(1).max(20) }).strict().superRefine((scenario, context) => {
   if (new Set(scenario.requiredRealComponentIds).size !== scenario.requiredRealComponentIds.length) context.addIssue({ code: "custom", path: ["requiredRealComponentIds"], message: "component IDs must be unique" });
+  if (scenario.steps[0]?.kind === "inspect-contract" && (scenario.steps.length !== 1 || scenario.assertions.length !== 1 || scenario.assertions[0]?.kind !== "state" || scenario.assertions[0].probeId !== "module-export-names")) context.addIssue({ code: "custom", path: ["assertions"], message: "source-interface inspection requires one fixed module-export-names assertion" });
 }));
 export type E2EScenario = z.infer<typeof E2EScenarioSchema>;
 export const E2EScenarioBundleSchema = safeJsonSchema(z.object({ schemaVersion: z.literal(1), planDigest: digest, bundleDigest: digest, templateVersion: id(80), scenarios: z.array(E2EScenarioSchema).max(32) }).strict().superRefine((bundle, context) => {
@@ -186,7 +188,7 @@ export const E2EScenarioBundleSchema = safeJsonSchema(z.object({ schemaVersion: 
   if (bundle.bundleDigest !== actual) context.addIssue({ code: "custom", path: ["bundleDigest"], message: "bundle digest does not match canonical content" });
 }));
 export type E2EScenarioBundle = z.infer<typeof E2EScenarioBundleSchema>;
-export function e2eScenarioBundleDigest(bundle: E2EScenarioBundle): string { const copied = safeJsonInput.parse(bundle) as unknown as E2EScenarioBundle; const { bundleDigest: _ignored, ...content } = copied; return createHash("sha256").update(canonicalJson(content)).digest("hex"); }
+export function e2eScenarioBundleDigest(bundle: E2EScenarioBundle): string { const content = Object.fromEntries(Object.entries(safeJsonInput.parse(bundle) as E2EScenarioBundle).filter(([key]) => key !== "bundleDigest")); return createHash("sha256").update(canonicalJson(content)).digest("hex"); }
 export function validateE2EScenarioBundleForPolicy(bundle: unknown, policy: unknown): E2EScenarioBundle {
   const parsedPolicy = E2EPolicySchema.parse(policy); const parsedBundle = E2EScenarioBundleSchema.parse(bundle);
   for (const scenario of parsedBundle.scenarios) {
@@ -209,11 +211,13 @@ export const E2ECriterionExpectationSchema = z.object({ criterionId: id(120), re
 export type E2ECriterionExpectation = z.infer<typeof E2ECriterionExpectationSchema>;
 export const E2ECaseCoverageSchema = z.object({ observedScope: E2EEvidenceScopeSchema, subject: z.enum(["candidate", "simulation", "fixture"]), executedCandidateParts: z.array(id(256)).max(64), realComponentIds: z.array(id(120)).max(32), mockedComponentIds: z.array(id(120)).max(32), unexercisedBehaviors: z.array(id(256)).max(64) }).strict();
 export type E2ECaseCoverage = z.infer<typeof E2ECaseCoverageSchema>;
-export const E2EExpectedCaseSchema = z.object({ caseId: id(160), criterionId: id(120), scenarioId: id(120), upstreamTestId: id(160), targetId: id(80), requestedTargetId: id(80), agentId: id(120), repeat: z.literal(0), assertionDigest: digest, assertionDigests: z.array(digest).min(1).max(20), required: z.boolean(), minimumEvidence: E2EEvidenceScopeSchema, requiredRealComponentIds: z.array(id(120)).max(32) }).strict().superRefine((item, context) => {
+export const E2EExpectedCaseSchema = z.object({ caseId: id(160), criterionId: id(120), scenarioId: id(120), upstreamTestId: id(512), targetId: id(80), requestedTargetId: id(80), agentId: id(120), repeat: z.literal(0), executionDescriptorDigest: digest, accountContextId: id(120), accountContextDigest: digest, accountProfileId: id(120), assertionDigest: digest, assertionDigests: z.array(digest).min(1).max(20), required: z.boolean(), minimumEvidence: E2EEvidenceScopeSchema, requiredRealComponentIds: z.array(id(120)).max(32) }).strict().superRefine((item, context) => {
   if (createHash("sha256").update(canonicalJson(item.assertionDigests)).digest("hex") !== item.assertionDigest) context.addIssue({ code: "custom", path: ["assertionDigest"], message: "aggregate assertion digest must bind the ordered assertion identities" });
+  if (item.caseId !== e2eCaseIdFromIdentity(item) || item.upstreamTestId !== e2eUpstreamTestIdFromIdentity(item)) context.addIssue({ code: "custom", path: ["caseId"], message: "case and pinned upstream test IDs must bind the full execution and account identity" });
 });
 export type E2EExpectedCase = z.infer<typeof E2EExpectedCaseSchema>;
-const E2EGroupSchema = z.object({ groupId: id(80), targetIds: ids(3), runtimeProfileId: id(120), mode: E2EExecutionModeSchema, mockManifestDigest: digest, expectedCases: z.array(E2EExpectedCaseSchema).max(64) }).strict();
+export const E2EExecutionGroupSchema = z.object({ groupId: id(80), targetIds: ids(3), runtimeProfileId: id(120), mode: E2EExecutionModeSchema, mockManifestDigest: digest, expectedCases: z.array(E2EExpectedCaseSchema).max(64) }).strict();
+const E2EGroupSchema = E2EExecutionGroupSchema;
 export const E2EExecutionPlanSchema = safeJsonSchema(z.object({ schemaVersion: z.literal(1), digest, candidateDigest: digest, planDigest: digest, criteria: z.array(E2ECriterionExpectationSchema).max(64), effectiveTargets: z.array(E2ETargetSchema).max(12), groups: z.array(E2EGroupSchema).max(4), mocks: z.array(E2EMockSpecSchema).max(200), unavailableCriteria: z.array(z.object({ criterionId: id(120), reason: id(500) }).strict()).max(64) }).strict().superRefine((plan, context) => {
   try {
     if (e2eExecutionPlanDigest(plan) !== plan.digest) context.addIssue({ code: "custom", path: ["digest"], message: "execution plan digest does not match canonical content" });
@@ -251,7 +255,7 @@ export const E2EExecutionPlanSchema = safeJsonSchema(z.object({ schemaVersion: z
   }
 }));
 export type E2EExecutionPlan = z.infer<typeof E2EExecutionPlanSchema>;
-export function e2eExecutionPlanDigest(plan: E2EExecutionPlan): string { const copied = safeJsonInput.parse(plan) as unknown as E2EExecutionPlan; const { digest: _ignored, ...content } = copied; return createHash("sha256").update(canonicalJson(content)).digest("hex"); }
+export function e2eExecutionPlanDigest(plan: E2EExecutionPlan): string { const content = Object.fromEntries(Object.entries(safeJsonInput.parse(plan) as E2EExecutionPlan).filter(([key]) => key !== "digest")); return createHash("sha256").update(canonicalJson(content)).digest("hex"); }
 
 export const E2EExpectedCaseManifestSchema = E2EExpectedCaseSchema;
 export const E2ERunBindingSchema = z.object({ schemaVersion: z.literal(1), runId: z.string().uuid(), roundId: z.string().uuid(), taskId: id(120), operationId: id(120), operationFence: positiveInt, workflowRevision: positiveInt, groupId: id(80), executionPlanDigest: digest, executionMode: E2EExecutionModeSchema, mockManifestDigest: digest, authorizationRevision: id(120), candidateDigest: digest, planDigest: digest, policyDigest: digest, bundleDigest: digest, appBuildDigest: digest, environmentDigest: digest, runtimeManifestDigest: digest, modelRouteRevision: id(120).nullable(), expectedCases: z.array(E2EExpectedCaseSchema).max(64), admittedAt: timestamp, deadlineAt: timestamp }).strict().superRefine((binding, context) => {
@@ -284,7 +288,7 @@ export const E2EArtifactRefSchema = z.object({ artifactId: id(200), sha256: dige
 export type E2EArtifactRef = z.infer<typeof E2EArtifactRefSchema>;
 export const E2EAssertionReceiptSchema = z.object({ assertionIndex: z.number().int().min(0).max(19), assertionDigest: digest, status: E2ECaseStatusSchema, reason: id(500) }).strict();
 export type E2EAssertionReceipt = z.infer<typeof E2EAssertionReceiptSchema>;
-export const E2ECaseResultSchema = z.object({ caseId: id(160), status: E2ECaseStatusSchema, reason: id(500), attemptCount: positiveInt.max(2), assertionDigest: digest, assertionReceipts: z.array(E2EAssertionReceiptSchema).min(1).max(20), artifacts: z.array(E2EArtifactRefSchema).max(200), coverage: E2ECaseCoverageSchema }).strict().superRefine((result, context) => {
+export const E2ECaseResultSchema = z.object({ caseId: id(160), executionDescriptorDigest: digest, accountContextId: id(120), accountContextDigest: digest, status: E2ECaseStatusSchema, reason: id(500), attemptCount: positiveInt.max(2), assertionDigest: digest, assertionReceipts: z.array(E2EAssertionReceiptSchema).min(1).max(20), artifacts: z.array(E2EArtifactRefSchema).max(200), coverage: E2ECaseCoverageSchema }).strict().superRefine((result, context) => {
   if (new Set(result.assertionReceipts.map((receipt) => receipt.assertionIndex)).size !== result.assertionReceipts.length) context.addIssue({ code: "custom", path: ["assertionReceipts"], message: "assertion receipt indices must be unique" });
   if (result.assertionReceipts.some((receipt, index) => receipt.assertionIndex !== index)) context.addIssue({ code: "custom", path: ["assertionReceipts"], message: "assertion receipts must cover contiguous ordered indices" });
 });
@@ -296,7 +300,7 @@ export const E2EQualifiedResultSchema = z.object({ schemaVersion: z.literal(1), 
   if (result.cases.some((item) => !expected.has(item.caseId))) context.addIssue({ code: "custom", path: ["cases"], message: "result includes an unbound case" });
   for (const observed of result.cases) {
     const item = result.binding.expectedCases.find((candidate) => candidate.caseId === observed.caseId);
-    if (item && (observed.assertionReceipts.length !== item.assertionDigests.length || observed.assertionReceipts.some((receipt, index) => receipt.assertionDigest !== item.assertionDigests[index]))) context.addIssue({ code: "custom", path: ["cases"], message: "assertion receipts must match every frozen assertion identity by index" });
+    if (item && (observed.executionDescriptorDigest !== item.executionDescriptorDigest || observed.accountContextId !== item.accountContextId || observed.accountContextDigest !== item.accountContextDigest || observed.assertionReceipts.length !== item.assertionDigests.length || observed.assertionReceipts.some((receipt, index) => receipt.assertionDigest !== item.assertionDigests[index]))) context.addIssue({ code: "custom", path: ["cases"], message: "result case must match frozen execution descriptor, account context, and every assertion identity by index" });
   }
   if (result.cases.reduce((total, item) => total + item.artifacts.length, 0) > 200) context.addIssue({ code: "custom", path: ["cases"], message: "result may contain at most 200 artifacts" });
   if (result.executionMode !== result.binding.executionMode) context.addIssue({ code: "custom", path: ["executionMode"], message: "result mode must match its frozen binding" });
@@ -309,7 +313,7 @@ export type E2EProcessResult = z.infer<typeof E2EProcessResultSchema>;
 const evidenceRank: Record<E2EEvidenceScope, number> = { source: 0, "mock-contract": 1, runtime: 2, "external-live": 3 };
 function qualifies(result: E2EQualifiedResult, item: E2EExpectedCase): boolean {
   const observed = result.cases.find((candidate) => candidate.caseId === item.caseId);
-  return result.qualification === "trusted" && result.status === "passed" && result.cleanup === "confirmed" && observed?.status === "passed" && observed.attemptCount === 1 && observed.assertionDigest === item.assertionDigest && observed.assertionReceipts.length === item.assertionDigests.length && observed.assertionReceipts.every((receipt, index) => receipt.assertionIndex === index && receipt.assertionDigest === item.assertionDigests[index] && receipt.status === "passed") && observed.coverage.subject === "candidate" && evidenceRank[observed.coverage.observedScope] >= evidenceRank[item.minimumEvidence] && item.requiredRealComponentIds.every((component) => observed.coverage.realComponentIds.includes(component));
+  return result.qualification === "trusted" && result.status === "passed" && result.cleanup === "confirmed" && observed?.status === "passed" && observed.executionDescriptorDigest === item.executionDescriptorDigest && observed.accountContextId === item.accountContextId && observed.accountContextDigest === item.accountContextDigest && observed.attemptCount === 1 && observed.assertionDigest === item.assertionDigest && observed.assertionReceipts.length === item.assertionDigests.length && observed.assertionReceipts.every((receipt, index) => receipt.assertionIndex === index && receipt.assertionDigest === item.assertionDigests[index] && receipt.status === "passed") && observed.coverage.subject === "candidate" && evidenceRank[observed.coverage.observedScope] >= evidenceRank[item.minimumEvidence] && item.requiredRealComponentIds.every((component) => observed.coverage.realComponentIds.includes(component));
 }
 function workflowResult(checkId: string, status: "PASS" | "FAILED" | "UNKNOWN") { return { checkId, status }; }
 function resultTimingValid(result: E2EQualifiedResult): boolean {
@@ -379,7 +383,7 @@ export function aggregateE2EVerification(planInput: E2EExecutionPlan, resultsInp
     const allExpected = plan.groups.flatMap((group) => group.expectedCases);
     const requiredCases = allExpected.filter((item) => item.required);
     const observed = new Map<string, { result: E2EQualifiedResult; expected: E2EExpectedCase }>();
-    for (const [groupId, result] of resultsByGroup) for (const expected of result.binding.expectedCases) observed.set(expected.caseId, { result, expected });
+    for (const result of resultsByGroup.values()) for (const expected of result.binding.expectedCases) observed.set(expected.caseId, { result, expected });
     const freshTrusted = [...resultsByGroup.values()].every((result) => result.qualification === "trusted" && result.status !== "stale" && !result.cases.some((item) => item.status === "stale" && result.binding.expectedCases.find((expected) => expected.caseId === item.caseId)?.required));
     const pass = identityValid && freshTrusted && requiredCases.length > 0
       && requiredCases.every((item) => { const found = observed.get(item.caseId); return found !== undefined && canonicalJson(found.expected) === canonicalJson(item) && qualifies(found.result, item); })

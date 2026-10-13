@@ -16,12 +16,16 @@ import {
 } from "../../packages/contracts/src/e2e.js";
 import { ProjectDefinitionSchema } from "../../packages/contracts/src/project.js";
 import { WorkflowCheckSchema } from "../../packages/contracts/src/task-workflow.js";
+import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "../../packages/contracts/src/e2e-case-identity.js";
 
 const limits = {
   runTimeoutMs: 600000, startupTimeoutMs: 60000, preparationTimeoutMs: 180000, caseTimeoutMs: 90000,
   maxActionsPerCase: 30, maxModelRequests: 60, maxInputTokens: 200000, maxOutputTokens: 20000, maxSpendUsd: null,
 };
 const target = { targetId: "web-main", applicationId: "app-main", runtimeProfileId: "browser-linux", accountProfileId: "synthetic-tenant" , kind: "web" as const, browser: "chromium" as const, viewport: { width: 1280, height: 800 } };
+const caseIdentity = { scenarioId: "home", targetId: "web-main", requestedTargetId: "web-main", accountProfileId: "synthetic-tenant", accountContextId: "account-home", accountContextDigest: "5".repeat(64), executionDescriptorDigest: "6".repeat(64), minimumEvidence: "mock-contract", requiredRealComponentIds: [] as string[], agentId: "template-v1", repeat: 0, assertionDigests: ["4".repeat(64)] };
+const expectedCase = { caseId: e2eCaseIdFromIdentity(caseIdentity), criterionId: "criterion-1", ...caseIdentity, upstreamTestId: e2eUpstreamTestIdFromIdentity(caseIdentity), assertionDigest: createHash("sha256").update(canonicalJson(caseIdentity.assertionDigests)).digest("hex"), required: true };
+const reidentify = (item: typeof expectedCase): typeof expectedCase => ({ ...item, caseId: e2eCaseIdFromIdentity(item), upstreamTestId: e2eUpstreamTestIdFromIdentity(item) });
 const policy = (overrides: Record<string, unknown> = {}) => ({
   schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: ["home"], targets: [target],
   defaultSandboxProfileId: "sandbox-v1", fallback: "mock-unconnected", modelRouteRevision: null,
@@ -36,7 +40,7 @@ function baseBinding() {
     executionPlanDigest: "a".repeat(64), executionMode: "mock-only", mockManifestDigest: "b".repeat(64), authorizationRevision: "auth-r1",
     candidateDigest: "c".repeat(64), planDigest: "d".repeat(64), policyDigest: "e".repeat(64), bundleDigest: "f".repeat(64),
     appBuildDigest: "1".repeat(64), environmentDigest: "2".repeat(64), runtimeManifestDigest: "3".repeat(64), modelRouteRevision: null,
-    expectedCases: [{ caseId: "case-1", criterionId: "criterion-1", scenarioId: "home", upstreamTestId: "home", targetId: "web-main", requestedTargetId: "web-main", agentId: "template-v1", repeat: 0, assertionDigest: createHash("sha256").update(canonicalJson(["4".repeat(64)])).digest("hex"), assertionDigests: ["4".repeat(64)], required: true, minimumEvidence: "mock-contract", requiredRealComponentIds: [] }],
+    expectedCases: [expectedCase],
     admittedAt: "2026-10-12T12:00:00.000Z", deadlineAt: "2026-10-12T12:05:00.000Z",
   };
 }
@@ -44,7 +48,7 @@ function baseBinding() {
 const successfulResult = (overrides: Record<string, unknown> = {}) => ({
   schemaVersion: 1, binding: baseBinding(), producer: "trusted-verifier", startedAt: "2026-10-12T12:00:01.000Z",
   finishedAt: "2026-10-12T12:00:02.000Z", receivedAt: "2026-10-12T12:00:03.000Z", status: "passed", qualification: "trusted",
-  executionMode: "mock-only", reason: "complete", cases: [{ caseId: "case-1", status: "passed", reason: "assertions-passed", attemptCount: 1,
+  executionMode: "mock-only", reason: "complete", cases: [{ caseId: expectedCase.caseId, executionDescriptorDigest: expectedCase.executionDescriptorDigest, accountContextId: expectedCase.accountContextId, accountContextDigest: expectedCase.accountContextDigest, status: "passed", reason: "assertions-passed", attemptCount: 1,
     assertionDigest: baseBinding().expectedCases[0]!.assertionDigest, assertionReceipts: [{ assertionIndex: 0, assertionDigest: "4".repeat(64), status: "passed", reason: "assertions-passed" }], artifacts: [], coverage: { observedScope: "mock-contract", subject: "candidate", executedCandidateParts: ["src"], realComponentIds: [], mockedComponentIds: ["api"], unexercisedBehaviors: [] } }],
   rawReportSha256: null, modelReceiptIds: [], cleanup: "confirmed", ...overrides,
 });
@@ -69,7 +73,7 @@ describe("E2E contracts", () => {
     expect(E2EScenarioBundleSchema.safeParse(bundle).success).toBe(false);
     const plan = planWithDigest({ schemaVersion: 1, digest: "a".repeat(64), candidateDigest: "b".repeat(64), planDigest: "c".repeat(64), criteria: [], effectiveTargets: [], groups: [], mocks: [], unavailableCriteria: [] });
     expect(E2EExecutionPlanSchema.safeParse(plan).success).toBe(true);
-    const expected = { ...baseBinding().expectedCases[0], criterionId: "criterion-1" };
+    const expected = reidentify({ ...baseBinding().expectedCases[0], criterionId: "criterion-1" } as typeof expectedCase);
     expect(E2EExecutionPlanSchema.safeParse(planWithDigest({ ...plan, groups: [{ groupId: "g1", targetIds: ["web-main"], runtimeProfileId: "sandbox-v1", mode: "mock-only", mockManifestDigest: "d".repeat(64), expectedCases: [expected, expected] }], effectiveTargets: [target] })).success).toBe(false);
   });
 
@@ -90,7 +94,8 @@ describe("E2E contracts", () => {
   });
 
   it("retains requested and effective target identities in criteria and group cases", () => {
-    const testPlan = planWithDigest({ schemaVersion: 1, digest: "a".repeat(64), candidateDigest: "b".repeat(64), planDigest: "c".repeat(64), criteria: [{ criterionId: "criterion-1", requirementId: "r1", scenarioId: "s1", requestedTargetId: "requested-web", required: true, minimumEvidence: "mock-contract", requiredRealComponentIds: [], expectedCaseIds: ["case-1"] }], effectiveTargets: [{ targetId: "web-main", applicationId: "app-main", runtimeProfileId: "browser-linux", accountProfileId: "synthetic-tenant", kind: "contract", requestedTargetId: "requested-web", adapterProfileId: "adapter-v1" }], groups: [{ groupId: "g1", targetIds: ["web-main"], runtimeProfileId: "sandbox-v1", mode: "mock-only", mockManifestDigest: "d".repeat(64), expectedCases: [{ ...baseBinding().expectedCases[0], scenarioId: "s1", targetId: "web-main", requestedTargetId: "requested-web" }] }], mocks: [], unavailableCriteria: [] });
+    const caseItem = reidentify({ ...baseBinding().expectedCases[0], scenarioId: "s1", targetId: "web-main", requestedTargetId: "requested-web" } as typeof expectedCase);
+    const testPlan = planWithDigest({ schemaVersion: 1, digest: "a".repeat(64), candidateDigest: "b".repeat(64), planDigest: "c".repeat(64), criteria: [{ criterionId: "criterion-1", requirementId: "r1", scenarioId: "s1", requestedTargetId: "requested-web", required: true, minimumEvidence: "mock-contract", requiredRealComponentIds: [], expectedCaseIds: [caseItem.caseId] }], effectiveTargets: [{ targetId: "web-main", applicationId: "app-main", runtimeProfileId: "browser-linux", accountProfileId: "synthetic-tenant", kind: "contract", requestedTargetId: "requested-web", adapterProfileId: "adapter-v1" }], groups: [{ groupId: "g1", targetIds: ["web-main"], runtimeProfileId: "sandbox-v1", mode: "mock-only", mockManifestDigest: "d".repeat(64), expectedCases: [caseItem] }], mocks: [], unavailableCriteria: [] });
     expect(E2EExecutionPlanSchema.safeParse(testPlan).success).toBe(true);
   });
 
@@ -102,7 +107,7 @@ describe("E2E contracts", () => {
 
   it("binds deterministic group and run limits to the round deadline", () => {
     const binding = baseBinding();
-    expect(e2eBindingDigest(binding as never)).toBe("6f684b61e58bf1a7976fcfa46d1e4c772e7e6df01c9eaa0bfd6e939b81892128");
+    expect(e2eBindingDigest(binding as never)).toBe("86626b1c17ff1f7b1f7b9b6eef409bf2da053054fe9c6703254f3a2b37fd8a18");
     expect(E2EQualifiedResultSchema.safeParse(successfulResult()).success).toBe(true);
     expect(E2EQualifiedResultSchema.safeParse(successfulResult({ cases: [{ ...successfulResult().cases[0], assertionReceipts: [] }] })).success).toBe(false);
     expect(E2EQualifiedResultSchema.safeParse(successfulResult({ cases: [{ ...successfulResult().cases[0], assertionReceipts: [successfulResult().cases[0]!.assertionReceipts[0], successfulResult().cases[0]!.assertionReceipts[0]] }] })).success).toBe(false);
@@ -112,8 +117,8 @@ describe("E2E contracts", () => {
   });
 
   it("keeps a required criterion UNKNOWN when its group has no result", () => {
-    const expected = { ...baseBinding().expectedCases[0], criterionId: "criterion-1" };
-    const plan = planWithDigest({ schemaVersion: 1, digest: "a".repeat(64), candidateDigest: "b".repeat(64), planDigest: "c".repeat(64), criteria: [{ criterionId: "criterion-1", requirementId: "req-1", scenarioId: "home", requestedTargetId: "web-main", required: true, minimumEvidence: "mock-contract", requiredRealComponentIds: [], expectedCaseIds: ["case-1"] }], effectiveTargets: [target], groups: [{ groupId: "group-1", targetIds: ["web-main"], runtimeProfileId: "browser-linux", mode: "mock-only", mockManifestDigest: "b".repeat(64), expectedCases: [expected] }], mocks: [], unavailableCriteria: [] });
+    const expected = reidentify({ ...baseBinding().expectedCases[0], criterionId: "criterion-1" } as typeof expectedCase);
+    const plan = planWithDigest({ schemaVersion: 1, digest: "a".repeat(64), candidateDigest: "b".repeat(64), planDigest: "c".repeat(64), criteria: [{ criterionId: "criterion-1", requirementId: "req-1", scenarioId: "home", requestedTargetId: "web-main", required: true, minimumEvidence: "mock-contract", requiredRealComponentIds: [], expectedCaseIds: [expected.caseId] }], effectiveTargets: [target], groups: [{ groupId: "group-1", targetIds: ["web-main"], runtimeProfileId: "browser-linux", mode: "mock-only", mockManifestDigest: "b".repeat(64), expectedCases: [expected] }], mocks: [], unavailableCriteria: [] });
     expect(aggregateE2EVerification(plan as never, []).results[0]?.status).toBe("UNKNOWN");
     const emptyRequired = planWithDigest({ ...plan, criteria: [{ ...plan.criteria[0], expectedCaseIds: [] }], groups: [], unavailableCriteria: [{ criterionId: "criterion-1", reason: "runtime profile unavailable" }] });
     expect(E2EExecutionPlanSchema.safeParse(emptyRequired).success).toBe(true);

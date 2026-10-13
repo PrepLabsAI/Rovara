@@ -6,7 +6,6 @@
   "exports": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "dependencies": {
-    "@agentx/broker": "0.1.0",
     "@agentx/contracts": "0.1.0",
     "typescript": "5.9.3"
   }

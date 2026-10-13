@@ -114,8 +114,8 @@ export function githubRepositoryApi(fetchImplementation: typeof fetch): GitHubRe
     accept, authorization: `Bearer ${token}`, "x-github-api-version": "2022-11-28", "user-agent": "agentx-cli",
   });
   return {
-    async snapshot(token, fullName, paths, ref) {
-      if (!Array.isArray(paths) || paths.length === 0 || paths.length > MAX_SNAPSHOT_FILES || new Set(paths).size !== paths.length || paths.some((path) => !safeSnapshotPath(path))) {
+    async snapshot(token: string, fullName: string, paths: readonly string[], ref: string) {
+      if (!Array.isArray(paths) || paths.length === 0 || paths.length > MAX_SNAPSHOT_FILES || new Set(paths).size !== paths.length || paths.some((path: string) => !safeSnapshotPath(path))) {
         throw agentXError("CONFIG_INVALID", "snapshot paths must be unique normalized paths within the bounded source allowlist");
       }
       const base = `${API}/repos/${fullName}`;
@@ -135,6 +135,7 @@ export function githubRepositoryApi(fetchImplementation: typeof fetch): GitHubRe
       const sources: RepositorySnapshot["sources"] = [];
       let totalBytes = 0;
       for (const path of paths) {
+        if (typeof path !== "string") throw agentXError("CONFIG_INVALID", "snapshot paths must be strings");
         const entry = treeBody.tree.find((item) => item.path === path);
         if (entry === undefined || entry.type !== "blob" || entry.mode === "120000" || entry.mode === "160000" || typeof entry.sha !== "string" || !/^[a-f0-9]{40}$/.test(entry.sha)) {
           throw agentXError("CONFIG_INVALID", `snapshot path ${path} is missing or is not a regular Git blob`);

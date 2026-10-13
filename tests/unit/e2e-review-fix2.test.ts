@@ -2,9 +2,11 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalJson, createCandidateManifest, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { inspectE2ERepository, proposeE2ESetup } from "../../packages/broker/src/e2e/discovery.js";
-import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
+import { selectE2EExecutionPlan as selectRawE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
+import { withTestPortableApproval } from "../e2e-test-approval.js";
 import { githubRepositoryApi } from "../../packages/cli/src/setup/project-files.js";
 
+const selectE2EExecutionPlan = (input: Parameters<typeof selectRawE2EExecutionPlan>[0]) => selectRawE2EExecutionPlan(withTestPortableApproval(input));
 const digest = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 const file = (path: string, text: string) => ({ path, bytes: Buffer.from(text), sha256: digest(text), kind: "blob" as const });
 const candidate = createCandidateManifest([{ repositoryId: "acme/orders", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);

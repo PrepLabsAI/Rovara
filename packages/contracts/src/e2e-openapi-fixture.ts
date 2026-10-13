@@ -47,7 +47,7 @@ export type E2EOpenApiFixtureDescriptor = {
     path: string;
     parameters: E2EOpenApiFixtureParameter[];
     requestSchema: E2EFixtureSchema | null;
-    requestFixture: string | number | boolean | null | unknown[] | Record<string, unknown> | null;
+    requestFixture: unknown;
     responses: Array<{ status: number; schema: E2EFixtureSchema; fixture: string | number | boolean | null | unknown[] | Record<string, unknown> }>;
   }>;
 };
@@ -102,7 +102,7 @@ function isFixtureValue(schema: E2EFixtureSchema, value: unknown, depth = 0): bo
     && (schema.maximum === undefined || value <= schema.maximum);
 }
 
-function fixtureValue(schema: E2EFixtureSchema, budget: FixtureBudget, depth = 0): unknown | undefined {
+function fixtureValue(schema: E2EFixtureSchema, budget: FixtureBudget, depth = 0): unknown {
   if (depth > MAX_FIXTURE_DEPTH || ++budget.nodes > MAX_FIXTURE_NODES) return undefined;
   let value: unknown;
   if (schema.enum !== undefined) {
@@ -170,7 +170,7 @@ function parseSchema(value: unknown, schemaBudget: SchemaBudget, depth = 0): E2E
     schema.enum = value.enum as Array<string | number | boolean>;
   }
   if (value.format !== undefined) {
-    if (type !== "string" || !["date", "date-time", "email", "uuid"].includes(String(value.format))) return undefined;
+    if (type !== "string" || typeof value.format !== "string" || !["date", "date-time", "email", "uuid"].includes(value.format)) return undefined;
     schema.format = value.format as NonNullable<E2EFixtureSchema["format"]>;
   }
   for (const key of ["minimum", "maximum", "minLength", "maxLength", "minItems", "maxItems"] as const) {
@@ -245,8 +245,8 @@ function mergeParameters(pathParameters: E2EOpenApiFixtureParameter[], operation
 
 function jsonDepth(value: unknown, depth = 0): number {
   if (value === null || typeof value !== "object") return depth;
-  const children = Array.isArray(value) ? value : Object.values(value);
-  return children.reduce((maximum, child) => Math.max(maximum, jsonDepth(child, depth + 1)), depth);
+  const children: unknown[] = Array.isArray(value) ? value as unknown[] : Object.values(value);
+  return children.reduce<number>((maximum, child) => Math.max(maximum, jsonDepth(child, depth + 1)), depth);
 }
 
 /**
@@ -298,7 +298,7 @@ export function createE2EOpenApiFixtureDescriptor(bytes: Uint8Array): E2EOpenApi
         const fixture = fixtureValue(parsed, fixtureBudget);
         if (fixture === undefined) return undefined;
         requestSchema = parsed;
-        requestFixture = fixture as E2EOpenApiFixtureDescriptor["operations"][number]["requestFixture"];
+        requestFixture = fixture;
       }
       const responses: E2EOpenApiFixtureDescriptor["operations"][number]["responses"] = [];
       for (const [statusText, responseValue] of Object.entries(rawOperation.responses)) {
