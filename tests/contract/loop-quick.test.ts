@@ -10,13 +10,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import { checksReport, runChecks, shellCheckRun, type CheckRun } from "../../packages/cli/src/loop/check-runner.js";
 import { parseComment } from "../../packages/cli/src/loop/commands-parse.js";
 import { LoopDaemon } from "../../packages/cli/src/loop/daemon.js";
-import { failedExitChecks, missingPlanSections, planDigest } from "../../packages/cli/src/loop/exit-checks.js";
+import { artifactDigest, failedExitChecks, missingSections } from "../../packages/cli/src/loop/exit-checks.js";
+import { ARTIFACT_SECTIONS } from "../../packages/cli/src/loop/instructions.js";
 import { GitHub } from "../../packages/cli/src/loop/github.js";
-import { ClaudeCodeHarness } from "../../packages/cli/src/loop/harness.js";
+import { AgentHarness } from "../../packages/cli/src/loop/harness.js";
 import { createLoopMcpServer } from "../../packages/cli/src/loop/mcp.js";
-import { LOOP_COMMENT_MARKER } from "../../packages/cli/src/loop/naming.js";
+import { LOOP_COMMENT_MARKER, evidencePath } from "../../packages/cli/src/loop/naming.js";
 import { LoopStore } from "../../packages/cli/src/loop/state.js";
 import { LoopWorld } from "../support/loop-fakes.js";
+import { NO_FINDINGS, SELF_REVIEW } from "../support/loop-harness.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -44,11 +46,17 @@ async function setUp(options: { checks?: boolean[] } = {}) {
     return passed ? { code: 0, timedOut: false, output: "all good" } : { code: 1, timedOut: false, output: "FAIL client.test.ts > retries on 503\nexpected 2 calls, got 1" };
   };
   const daemon = new LoopDaemon({
-    store, exec: world.exec, github: new GitHub(world.exec), harness: new ClaudeCodeHarness(world.exec),
+    store, exec: world.exec, github: new GitHub(world.exec), harness: new AgentHarness(world.exec),
     cliCommand: ["/usr/local/bin/node", "/opt/rovara/cli.js"], now: () => new Date(world.clock), log: () => undefined, checkRun,
+    reviewerRun: async () => ({ ok: true, text: NO_FINDINGS }),
   });
   await daemon.poll();
   const worktree = () => join(store.itemDir(world.repo, ISSUE), "worktree");
+  /** The agent records its self-review, which a code claim needs (#358). */
+  const selfReview = async () => {
+    await mkdir(join(worktree(), "docs", "rovara", String(ISSUE), "evidence"), { recursive: true });
+    await writeFile(join(worktree(), evidencePath(ISSUE, "self-review.md")), SELF_REVIEW);
+  };
   const writePlan = async (text: string) => {
     await mkdir(join(worktree(), "docs", "rovara", String(ISSUE)), { recursive: true });
     await writeFile(join(worktree(), "docs", "rovara", String(ISSUE), "plan.md"), text);
@@ -72,7 +80,7 @@ async function setUp(options: { checks?: boolean[] } = {}) {
   };
   /** The loop's own steps (checks, publishing) run in the background: attend, let them finish, attend again. */
   const runOwnSteps = async () => {
-    for (let round = 0; round < 3; round += 1) {
+    for (let round = 0; round < 4; round += 1) {
       await daemon.attend();
       await daemon.settle();
     }
@@ -80,7 +88,7 @@ async function setUp(options: { checks?: boolean[] } = {}) {
   };
   const step = async () => (await store.item(world.repo, ISSUE))?.step;
   const label = () => [...(world.labels.get(ISSUE) ?? [])];
-  return { world, store, daemon, checkout, worktree, writePlan, readPlanFile, complete, runOwnSteps, step, label, checkRuns };
+  return { world, store, daemon, checkout, worktree, writePlan, readPlanFile, selfReview, complete, runOwnSteps, step, label, checkRuns };
 }
 
 describe("the Quick loop's commands (#356)", () => {
@@ -95,18 +103,19 @@ describe("the Quick loop's commands (#356)", () => {
 
 describe("the checks on a Quick claim (#356)", () => {
   it("wants a plan with each section filled in, and refuses a changed plan once it is approved", async () => {
-    expect(missingPlanSections(PLAN)).toEqual([]);
-    expect(missingPlanSections("## Summary\nx\n## Changes\n\n## testing\ny\n")).toEqual(["Changes"]);
+    expect(missingSections(PLAN, ARTIFACT_SECTIONS.plan)).toEqual([]);
+    expect(missingSections("## Summary\nx\n## Changes\n\n## testing\ny\n", ARTIFACT_SECTIONS.plan)).toEqual(["Changes"]);
     const dir = await mkdtemp(join(tmpdir(), "rovara-exit-"));
     dirs.push(dir);
-    const facts = { summary: "planned", issue: ISSUE, worktree: dir, planDigest: undefined };
-    expect(await failedExitChecks(["plan-sections"], facts)).toEqual(["there is no plan at docs/rovara/42/plan.md; write it there"]);
+    const facts = { summary: "planned", issue: ISSUE, worktree: dir, artifact: "plan" as const, approvals: undefined };
+    expect(await failedExitChecks(["artifact-sections"], facts)).toEqual(["there is no plan at docs/rovara/42/plan.md; write it there"]);
     await mkdir(join(dir, "docs", "rovara", "42"), { recursive: true });
     await writeFile(join(dir, "docs", "rovara", "42", "plan.md"), "## Summary\nx\n");
-    expect(await failedExitChecks(["plan-sections"], facts)).toEqual(["the plan needs these sections, each with something in it: ## Changes, ## Testing"]);
+    expect(await failedExitChecks(["artifact-sections"], facts)).toEqual(["the plan needs these sections, each with something in it: ## Changes, ## Testing"]);
     await writeFile(join(dir, "docs", "rovara", "42", "plan.md"), PLAN);
-    expect(await failedExitChecks(["require-summary", "plan-sections", "plan-unchanged"], { ...facts, planDigest: planDigest(PLAN) })).toEqual([]);
-    expect(await failedExitChecks(["plan-unchanged"], { ...facts, planDigest: planDigest("something else") })).toEqual(["the approved plan at docs/rovara/42/plan.md was changed; put it back as it was approved, and change only the code"]);
+    const approved = (digest: string) => ({ plan: { digest, by: "maya", at: "2026-10-13T00:00:00.000Z" } });
+    expect(await failedExitChecks(["require-summary", "artifact-sections", "approved-unchanged"], { ...facts, approvals: approved(artifactDigest(PLAN)) })).toEqual([]);
+    expect(await failedExitChecks(["approved-unchanged"], { ...facts, approvals: approved(artifactDigest("something else")) })).toEqual(["the approved plan at docs/rovara/42/plan.md was changed; put it back as approved"]);
     expect(await failedExitChecks(["require-summary"], { ...facts, summary: " " })).toEqual(["give a summary of what you did; it is posted on the issue"]);
   });
 });
@@ -136,11 +145,15 @@ describe("the repository's checks, through a real shell (#356)", () => {
 describe("the Quick loop end to end (#356)", () => {
   it("plans, takes changes into the plan, waits for approval, codes, sends a failing check back, then opens one pull request", async () => {
     const h = await setUp({ checks: [false] });
+    // Like this repository: the default branch is mainline, which GitHub says; origin/HEAD is never asked.
+    h.world.defaultBranch = "mainline";
     h.world.say(ISSUE, "maya", "/rovara quick Retry the payment call on a 503");
     await h.daemon.poll();
     expect(h.label()).toEqual(["rovara:planning"]);
-    expect(h.world.posted(ISSUE).at(-1)).toContain("It plans first: nothing is pushed until the plan is approved and the checks pass.");
-    expect(h.world.sessions.get(SESSION)!.claude.at(-1)).toContain("Your step now: PLAN ONLY.");
+    expect(h.world.posted(ISSUE).at(-1)).toContain("Nothing is pushed until every document is approved and the checks pass.");
+    expect(h.world.sessions.get(SESSION)!.claude.at(-1)).toContain("Your step now: write the plan:");
+    expect(h.world.sessions.get(SESSION)!.claude.at(-1)).toContain("Do not change any code yet.");
+    expect(h.world.calls).toContainEqual(["git", "-C", h.checkout, "worktree", "add", "-b", "rovara/42", h.worktree(), "origin/mainline"]);
 
     // A claim is held to the plan's shape.
     expect(await h.complete("Planned it.")).toBe("Not accepted: there is no plan at docs/rovara/42/plan.md; write it there");
@@ -152,7 +165,7 @@ describe("the Quick loop end to end (#356)", () => {
     const review = h.world.posted(ISSUE).at(-1)!;
     expect(review).toContain("<summary>The plan</summary>");
     expect(review).toContain("Retry the payment call on a 503.");
-    expect(review).toContain("Approve it with `/rovara approve`, or reply with what to change.");
+    expect(review).toContain("Approve the plan with `/rovara approve`, or reply with what to change.");
 
     // Someone else's approval is ignored; a collaborator's reply is a change request that goes into the plan.
     h.world.say(ISSUE, "mallory", "/rovara approve");
@@ -170,15 +183,18 @@ describe("the Quick loop end to end (#356)", () => {
     await h.daemon.poll();
     expect(await h.step()).toBe("code");
     expect(h.label()).toEqual(["rovara:coding"]);
-    expect(h.world.posted(ISSUE).at(-1)).toContain("Plan approved by @maya.");
+    expect(h.world.posted(ISSUE).at(-1)).toContain("The plan was approved by @maya, and is locked at `docs/rovara/42/plan.md`.");
     expect(h.world.sessions.get(SESSION)!.received.at(-1)).toContain("@maya approved the plan. Your step now: implement it.");
-    expect(await h.store.item(h.world.repo, ISSUE)).toMatchObject({ planDigest: planDigest(revised), approvedBy: "maya" });
+    expect(await h.store.item(h.world.repo, ISSUE)).toMatchObject({ approvals: { plan: { digest: artifactDigest(revised), by: "maya" } } });
     expect(h.world.pushes).toEqual([]);
 
-    // A changed plan is refused; the code claim goes to the checks.
+    // A changed plan is refused, and so is code without a self-review; the code claim goes to the checks.
     await h.writePlan(`${revised}\nOne more idea.\n`);
-    expect(await h.complete("Coded it.")).toContain("the approved plan at docs/rovara/42/plan.md was changed");
+    const refused = await h.complete("Coded it.");
+    expect(refused).toContain("the approved plan at docs/rovara/42/plan.md was changed; put it back as approved");
+    expect(refused).toContain("review your own change first, and record it at docs/rovara/42/evidence/self-review.md");
     await h.writePlan(revised);
+    await h.selfReview();
     expect(await h.complete("Coded the retry with backoff.")).toContain("Accepted");
     expect(h.label()).toEqual(["rovara:checking"]);
     expect(h.world.posted(ISSUE).at(-1)).toContain("Running the checks.");
@@ -199,13 +215,17 @@ describe("the Quick loop end to end (#356)", () => {
     expect(h.world.pushes).toEqual(["rovara/42"]);
     expect(h.world.pullRequests).toHaveLength(1);
     const pull = h.world.pullRequests[0]!;
-    expect(pull).toMatchObject({ head: "rovara/42", base: "main", title: "Retry payments on 503" });
+    expect(pull).toMatchObject({ head: "rovara/42", base: "mainline", title: "Retry payments on 503" });
     expect(pull.body).toContain("Closes #42.");
-    expect(pull.body).toContain("the plan was approved by @maya");
+    expect(pull.body).toContain("Approved: the plan by @maya.");
+    // The loop committed its checks report as evidence before it published.
+    expect(h.world.loopCommits).toEqual(["docs/rovara/42/evidence/checks.md, docs/rovara/42/evidence/reviews.md: chore(rovara): evidence for #42"]);
     expect(pull.body).toContain("## Plan");
     expect(pull.body).toContain("- ✅ **tests**");
+    expect(pull.body).toContain("## Reviews\n\n### Code review: passed\n\n### Security review: passed");
     const posted = h.world.posted(ISSUE);
     expect(posted.some((body) => body.includes("The checks passed."))).toBe(true);
+    expect(posted.some((body) => body.includes("The reviews passed."))).toBe(true);
     expect(posted.at(-1)).toContain(`Opened pull request #501: ${pull.url}`);
     expect(await h.store.item(h.world.repo, ISSUE)).toMatchObject({ pullRequest: { number: 501, url: pull.url } });
 
@@ -229,6 +249,7 @@ describe("the Quick loop end to end (#356)", () => {
     await h.complete("Planned.");
     h.world.say(ISSUE, "maya", "/rovara approve");
     await h.daemon.poll();
+    await h.selfReview();
     h.world.pushRefused = true;
     await h.complete("Coded.");
     await h.runOwnSteps();

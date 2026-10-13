@@ -11,8 +11,13 @@ import { LoopDaemon } from "./daemon.js";
 import { LOOPS, loopNamed, stepOf } from "./definitions.js";
 import { realExec, run, type Exec } from "./exec.js";
 import { GitHub } from "./github.js";
-import { ClaudeCodeHarness } from "./harness.js";
+import { AgentHarness } from "./harness.js";
 import { createLoopMcpServer } from "./mcp.js";
+import { ARTIFACT_SECTIONS } from "./instructions.js";
+import { artifactDigest, missingSections, readArtifact } from "./exit-checks.js";
+import { artifactPath } from "./naming.js";
+import type { LoopDefinition } from "./definitions.js";
+import type { WorkItemState } from "./state.js";
 import { LoopStore, RepoSlugSchema } from "./state.js";
 
 export interface LoopCommandContext {
@@ -28,6 +33,30 @@ export interface LoopCommandContext {
 const POLL_SECONDS = 30;
 const ATTEND_MS = 2_000;
 
+/**
+ * Each document the loop writes: declared away, not written yet, missing sections, written but not approved, locked,
+ * or changed since it was approved. `rovara loop check` shows these without running anything.
+ */
+async function documentLines(loop: LoopDefinition, state: WorkItemState): Promise<string[]> {
+  const artifacts = [...new Set(loop.steps.filter((step) => step.actor === "agent" && step.artifact !== undefined).map((step) => ({ artifact: step.artifact!, phase: step.phase })).map((entry) => JSON.stringify(entry)))]
+    .map((entry) => JSON.parse(entry) as { artifact: "requirements" | "design" | "plan"; phase?: string });
+  const lines: string[] = [];
+  for (const { artifact, phase } of artifacts) {
+    const path = artifactPath(state.issue, artifact);
+    if (phase !== undefined && (state.skipped ?? []).includes(phase)) { lines.push(`  ${artifact}: declared away by @${state.startedBy}`); continue; }
+    const text = await readArtifact(state.worktree?.path, state.issue, artifact);
+    const approval = state.approvals?.[artifact];
+    if (text === undefined) { lines.push(`  ${artifact}: ${approval === undefined ? "not written yet" : `MISSING, though @${approval.by} approved it`} (${path})`); continue; }
+    if (approval !== undefined) {
+      lines.push(artifactDigest(text) === approval.digest ? `  ${artifact}: locked, approved by @${approval.by} at ${approval.at}` : `  ${artifact}: CHANGED since @${approval.by} approved it at ${approval.at} (${path})`);
+      continue;
+    }
+    const missing = missingSections(text, ARTIFACT_SECTIONS[artifact]);
+    lines.push(missing.length > 0 ? `  ${artifact}: missing sections ${missing.map((section) => `## ${section}`).join(", ")} (${path})` : `  ${artifact}: written, not approved yet, so not locked (${path})`);
+  }
+  return lines.length === 0 ? [] : ["Documents:", ...lines];
+}
+
 export function registerLoopCommands(program: Command, context: LoopCommandContext): void {
   const exec = context.exec ?? realExec;
   const store = new LoopStore(join(context.home, ".rovara", "loop"));
@@ -37,6 +66,17 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
   const repoAt = async (path: string | undefined) => {
     const full = resolve(path ?? process.cwd());
     return { path: full, repo: await github.repoAt(full) };
+  };
+
+  /** #358: each per-PR loop of an item: its repository, step, pull request and agent. */
+  const pullLines = async (repo: string, issue: number): Promise<string[]> => {
+    const pulls = await store.pulls(repo, issue);
+    if (pulls.length === 0) return [];
+    return ["Pull requests:", ...pulls.map((pull) => {
+      const step = stepOf(loopNamed(pull.loop), pull.step);
+      const where = pull.pullRequest === undefined ? "not opened yet" : pull.pullRequest.url;
+      return `  ${pull.target ?? ""}: step ${pull.step} (${step.terminal ? "ended" : `${step.actor}'s turn`}), ${where}${pull.session === undefined ? "" : `; agent: tmux attach -t =${pull.session.tmux}`}`;
+    })];
   };
 
   const loop = program.command("loop").description("run Rovara's workflow on your GitHub issues with your own local agent (Claude Code), no Rovara install needed");
@@ -117,7 +157,7 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
       await mkdir(store.root, { recursive: true, mode: 0o700 });
       await writeFile(store.pidPath(), String(process.pid), { mode: 0o600 });
       const daemon = new LoopDaemon({
-        store, exec, github, harness: new ClaudeCodeHarness(exec), cliCommand, now: () => new Date(),
+        store, exec, github, harness: new AgentHarness(exec), cliCommand, now: () => new Date(),
         log: (line) => { context.stderr.write(`${new Date().toISOString()} ${line}\n`); },
       });
       let stopping = false;
@@ -138,7 +178,11 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
       context.stderr.write(`${new Date().toISOString()} rovara loop daemon stopped\n`);
     });
 
-  for (const [keyword, name, what] of [["do", "Do", "no gates; it never publishes"], ["quick", "Quick", "plan, your approval, code, checks, then a pull request"]] as const) {
+  for (const [keyword, name, what] of [
+    ["do", "Do", "no gates; it never publishes"],
+    ["quick", "Quick", "plan, your approval, code, checks, then a pull request"],
+    ["full", "Full", "requirements, design and plan, each approved; then code, checks and a pull request. Start the instruction with --skip design (or requirements) to declare a phase away"],
+  ] as const) {
     loop.command(keyword).description(`start a ${name} loop on an issue (${what}): posts \`/rovara ${keyword} <instruction>\` there as you`)
       .requiredOption("--issue <number>", "the issue (or pull request) number")
       .option("--repo <path>", "the repository's checkout; this directory by default")
@@ -168,15 +212,21 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
         `Started by @${state.startedBy} at ${state.startedAt}.`,
         ...(step.label === undefined ? [] : [`The issue should carry the label rovara:${step.label}.`]),
         ...(state.worktree === undefined ? [] : [`Worktree: ${state.worktree.path} (branch ${state.worktree.branch})`]),
+        ...(await documentLines(definition, state)),
         ...(state.session === undefined ? [] : [`Agent: tmux attach -t =${state.session.tmux}`]),
+        ...(await pullLines(repo, issue)),
       ].join("\n"));
     });
 
   loop.command("mcp").description("the agent's tools for one issue, over stdio (the loop starts this for its agent)")
     .requiredOption("--repo <owner/name>", "the repository")
     .requiredOption("--issue <number>", "the issue number")
-    .action(async (options: { repo: string; issue: string }) => {
-      const server = createLoopMcpServer({ store, repo: RepoSlugSchema.parse(options.repo), issue: Number(options.issue), version: context.version });
+    .option("--target <owner/name>", "a per-PR loop's repository")
+    .action(async (options: { repo: string; issue: string; target?: string }) => {
+      const server = createLoopMcpServer({
+        store, repo: RepoSlugSchema.parse(options.repo), issue: Number(options.issue), version: context.version,
+        ...(options.target === undefined ? {} : { target: RepoSlugSchema.parse(options.target) }),
+      });
       await server.connect(new StdioServerTransport());
     });
 }

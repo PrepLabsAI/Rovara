@@ -24,6 +24,7 @@ export * from "./operation.js";
 export * from "./project.js";
 export * from "./protocol.js";
 export * from "./redaction.js";
+export * from "./review-output.js";
 export * from "./release.js";
 export * from "./session.js";
 export * from "./slack.js";

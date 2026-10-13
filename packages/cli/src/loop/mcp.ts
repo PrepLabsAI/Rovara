@@ -15,6 +15,8 @@ export interface LoopMcpOptions {
   store: LoopStore;
   repo: string;
   issue: number;
+  /** #358: a per-PR loop's repository: the session works for that loop of the issue. */
+  target?: string;
   version: string;
   /** How long loop_complete waits for the daemon; the daemon answers within seconds when it runs. */
   waitMs?: number;
@@ -33,14 +35,15 @@ export function createLoopMcpServer(options: LoopMcpOptions): McpServer {
     description: "The loop running on this issue, its current step, and who acts next.",
     inputSchema: {},
   }, async () => {
-    const state = await options.store.item(options.repo, options.issue);
-    if (state === undefined) return text(`No loop is running on ${options.repo}#${options.issue}.`);
+    const state = await options.store.item(options.repo, options.issue, options.target);
+    if (state === undefined) return text(`No loop is running on ${options.repo}#${options.issue}${options.target === undefined ? "" : ` for ${options.target}`}.`);
     const step = stepOf(loopNamed(state.loop), state.step);
     const turn = step.terminal ? "The loop has ended."
       : step.actor === "agent" ? "It is your turn: work, then call loop_complete with a summary."
       : step.actor === "code" ? `The loop is running this step itself (${step.action ?? "its own work"}): wait.`
-      : step.gate ? "It is waiting for a person to approve your plan, or ask for changes: wait." : "It is the person's turn: wait for their reply.";
-    return text([`Loop ${state.loop} on ${state.repo}#${state.issue}, step ${state.step}. ${turn}`, "", `Instruction from @${state.startedBy}:`, state.instruction].join("\n"));
+      : step.gate ? `It is waiting for a person to approve the ${step.artifact ?? "document"}, or ask for changes: wait.` : "It is the person's turn: wait for their reply.";
+    const which = state.target === undefined ? "" : `, its pull request in ${state.target}`;
+    return text([`Loop ${state.loop} on ${state.repo}#${state.issue}${which}, step ${state.step}. ${turn}`, "", `Instruction from @${state.startedBy}:`, state.instruction].join("\n"));
   });
 
   server.registerTool("loop_complete", {
@@ -49,7 +52,7 @@ export function createLoopMcpServer(options: LoopMcpOptions): McpServer {
     inputSchema: { summary: z.string().describe("What you did, and anything you need from the person. Posted on the issue.") },
   }, async ({ summary }) => {
     const claimId = randomUUID();
-    const inbox = options.store.inboxDir(options.repo, options.issue);
+    const inbox = options.store.inboxDir(options.repo, options.issue, options.target);
     await mkdir(inbox, { recursive: true, mode: 0o700 });
     await writeFile(join(inbox, `claim-${claimId}.json`), JSON.stringify({ claimId, summary }), { mode: 0o600 });
     const verdictPath = join(inbox, `verdict-${claimId}.json`);

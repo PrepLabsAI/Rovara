@@ -8,7 +8,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { afterEach, describe, expect, it } from "vitest";
 import { LoopDaemon } from "../../packages/cli/src/loop/daemon.js";
 import { GitHub } from "../../packages/cli/src/loop/github.js";
-import { ClaudeCodeHarness } from "../../packages/cli/src/loop/harness.js";
+import { AgentHarness } from "../../packages/cli/src/loop/harness.js";
 import { createLoopMcpServer } from "../../packages/cli/src/loop/mcp.js";
 import { LOOP_COMMENT_MARKER } from "../../packages/cli/src/loop/naming.js";
 import { LoopStore } from "../../packages/cli/src/loop/state.js";
@@ -31,7 +31,7 @@ async function setUp(options: { collaborators?: string[] } = {}) {
   await store.saveRepos([{ repo: world.repo, path: checkout }]);
   const logs: string[] = [];
   const daemon = new LoopDaemon({
-    store, exec: world.exec, github: new GitHub(world.exec), harness: new ClaudeCodeHarness(world.exec),
+    store, exec: world.exec, github: new GitHub(world.exec), harness: new AgentHarness(world.exec),
     cliCommand: ["/usr/local/bin/node", "/opt/rovara/cli.js"], now: () => new Date(world.clock), log: (line) => logs.push(line),
   });
   // The daemon's first read starts from now: nothing said before the repository was added is replayed.
