@@ -16,6 +16,8 @@ export interface WorkflowMessageContext {
   /** Where the full document reads (a Canvas, or the task page); absent when no link could be made. */
   documentLink?: { url: string } | undefined;
   documentSummary?: readonly string[] | undefined;
+  /** The digest the Owner must include when approving a structured coding plan with a work breakdown. */
+  workBreakdownDigest?: string | undefined;
   /**
    * A structured document's card: its top claims in rank order (for a tiny plan every claim, a child's text starting
    * with two spaces per level), how many claims and decisions it has in all, and whether it is tiny. Replaces `documentSummary`.
@@ -330,7 +332,8 @@ function planReview(context: WorkflowMessageContext, exits: ReturnType<typeof ex
   const name = workflowDocumentName(workflow);
   const document = workflow.artifacts.filter((artifact) => artifact.type === workflowDocumentType(workflow)).at(-1);
   const header = `*${capitalized(name)}${document === undefined ? "" : ` v${document.version}`} is ready for your approval.* No code has changed yet.`;
-  const decide = (decision: "APPROVE" | "REQUEST_CHANGES") => JSON.stringify({ taskId: context.taskId, revision: workflow.revision, digest: document?.sha256, decision });
+  const decide = (decision: "APPROVE" | "REQUEST_CHANGES") => JSON.stringify({ taskId: context.taskId, revision: workflow.revision, digest: document?.sha256, decision,
+    ...(decision === "APPROVE" && context.workBreakdownDigest !== undefined ? { workBreakdownDigest: context.workBreakdownDigest } : {}) });
   const decisions = document === undefined ? [exits.close] : [
     exits.button("agentx_workflow_approve", `Approve ${name}`, { value: decide("APPROVE"), primary: true }),
     exits.button("agentx_workflow_changes", "Request changes", { value: decide("REQUEST_CHANGES") }),

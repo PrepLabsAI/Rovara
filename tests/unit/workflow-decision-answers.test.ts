@@ -119,5 +119,8 @@ describe("decideWorkflow with the owner's answers", () => {
     expect(approval.decisions.at(-1)?.workBreakdownDigest).toBe(graphDigest);
     expect(decideWorkflow(approval, request({ workBreakdownDigest: graphDigest }), actor, { ...options, workBreakdownDigest: graphDigest })).toEqual(approval);
     expect(() => decideWorkflow(approval, request({ workBreakdownDigest: "d".repeat(64) }), actor, { ...options, workBreakdownDigest: "d".repeat(64) })).toThrow(/already used/);
+
+    const changes = decideWorkflow(waiting(), request({ decision: "REQUEST_CHANGES" }), actor, { ...options, workBreakdownDigest: graphDigest });
+    expect(changes.decisions.at(-1)?.decision).toBe("REQUEST_CHANGES");
   });
 });

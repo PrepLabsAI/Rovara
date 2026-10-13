@@ -2085,10 +2085,13 @@ export function decideWorkflow(
   if (currentPlan === undefined || request.data.artifactDigest !== currentPlan.sha256) {
     throw new WorkflowTransitionError("decision must name the current plan digest");
   }
-  if (options.workBreakdownDigest !== request.data.workBreakdownDigest) {
+  if (request.data.decision === "APPROVE" && options.workBreakdownDigest !== request.data.workBreakdownDigest) {
     throw new WorkflowTransitionError(options.workBreakdownDigest === undefined
       ? "decision cannot bind a work breakdown that is not in the current plan"
       : "decision must name the current work breakdown digest");
+  }
+  if (request.data.workBreakdownDigest !== undefined && options.workBreakdownDigest !== request.data.workBreakdownDigest) {
+    throw new WorkflowTransitionError("decision must name the current work breakdown digest");
   }
   if (request.data.workBreakdownDigest !== undefined && (request.data.decision !== "APPROVE" || currentPlan.type !== "plan")) {
     throw new WorkflowTransitionError("a work breakdown can be bound only by approving a coding plan");

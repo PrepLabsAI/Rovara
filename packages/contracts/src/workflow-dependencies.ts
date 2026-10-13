@@ -104,8 +104,8 @@ export const WorkflowDependencyResultSchema = z.object({
   if (new Set(result.items.map((item) => item.itemId)).size !== result.items.length) {
     context.addIssue({ code: "custom", path: ["items"], message: "result item IDs must be unique" });
   }
-  if (result.items.some((item) => item.graphDigest !== result.graphDigest || item.runId !== result.runId || item.operationId !== result.operationId)) {
-    context.addIssue({ code: "custom", path: ["items"], message: "result item progress must match its graph, run and operation" });
+  if (result.items.some((item) => item.graphDigest !== result.graphDigest || item.runId !== result.runId)) {
+    context.addIssue({ code: "custom", path: ["items"], message: "result item progress must match its graph and run" });
   }
   if (result.status === "SUCCEEDED" && (result.items.some((item) => item.state !== "IMPLEMENTED") || result.candidateDigest === undefined)) {
     context.addIssue({ code: "custom", path: ["status"], message: "success requires every item implemented and a final candidate" });
@@ -121,9 +121,20 @@ export const WorkflowDependencyInvocationSchema = z.object({
   graph: TaskGraphV1Schema,
   /** Exact retained tree checkpoint required for an explicit retry after a stopped run. */
   resumeTreeSha: TreeSchema.optional(),
+  /** Monotonic progress cursor for this approved run, including acknowledged checkpoints from prior operations. */
+  sequenceStart: z.number().int().nonnegative().optional(),
+  /** The People revision fenced when the Owner accepted this exact graph operation. */
+  peopleRevision: z.number().int().nonnegative().optional(),
+  /** Latest terminal checkpoints retained from earlier operations of this same approved graph. */
+  resumeProgress: z.array(WorkItemProgressV1Schema).max(TASK_GRAPH_ITEMS_MAX).optional(),
 }).strict().superRefine((invocation, context) => {
   if (taskGraphDigest(invocation.graph) !== invocation.approval.graphDigest) {
     context.addIssue({ code: "custom", path: ["approval", "graphDigest"], message: "approval digest does not match the invoked graph" });
+  }
+  if (invocation.resumeProgress !== undefined && (invocation.resumeProgress.some((item) => item.graphDigest !== invocation.approval.graphDigest
+    || item.runId !== invocation.approval.runId || item.state === "STARTED" || item.sequence > (invocation.sequenceStart ?? 0))
+    || new Set(invocation.resumeProgress.map((item) => item.itemId)).size !== invocation.resumeProgress.length)) {
+    context.addIssue({ code: "custom", path: ["resumeProgress"], message: "retained progress must be unique, terminal and bound to this approved graph run" });
   }
 });
 export type WorkflowDependencyInvocation = z.infer<typeof WorkflowDependencyInvocationSchema>;

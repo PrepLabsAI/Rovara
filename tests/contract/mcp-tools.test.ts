@@ -3,12 +3,13 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
-import { WORKFLOW_REVIEW_FAILURE_REASONS, workflowFindingFingerprint, type DeveloperTaskView } from "@agentx/contracts";
+import { WORKFLOW_REVIEW_FAILURE_REASONS, taskGraphDigest, workflowFindingFingerprint, type DeveloperTaskView } from "@agentx/contracts";
 import {
   DEVELOPER_TOOLS, NEXT_STEPS, REQUIRED_SERVER_MINOR, ToolError, UPGRADE_AGENTX_STEP, compatibilityChecker, createAgentXMcpServer, httpControlPlaneClient,
   type ControlPlaneClient, type ToolContext,
 } from "../../packages/mcp/src/index.js";
 import { toolError as parseToolError } from "../support/mcp-tool-error.js";
+import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 const TASK = "44444444-4444-4444-8444-444444444444";
 const PLANTED = "xoxb-3333333333-planted-secret";
@@ -114,6 +115,31 @@ describe("tool errors (FR-049, ruling F3)", () => {
     expect(result.isError).toBe(true);
     expect(text(result)).toContain("wait_seconds");
     expect(getTask).not.toHaveBeenCalled();
+  });
+});
+
+describe("ordered work approval digest (Spec059)", () => {
+  it("shows the canonical graph digest and passes it for APPROVE while leaving REQUEST_CHANGES optional", async () => {
+    const graph = { schemaVersion: 1 as const, taskId: TASK, version: 1, items: [
+      { id: "11111111-1111-4111-8111-111111111111", title: "Implement", description: "Implement the change", repository: "demo", dependsOn: [] },
+    ] };
+    const planContent = planAnswer(planDocument({ workBreakdown: graph }));
+    const workflow = { stage: "PLAN_REVIEW", state: "WAITING", revision: 3, path: "QUICK", reviewPhase: "PLAN",
+      artifacts: [{ id: "plan-artifact", type: "plan", version: 1, sha256: "a".repeat(64), producer: "agentx", objectKey: "plan.json", createdAt: "2026-10-12T12:00:00.000Z" }],
+      planContent } as never;
+    const planView = view("RUNNING", { workflow });
+    const decideWorkflowTask = vi.fn(async () => planView);
+    const mcp = await connect({ getTask: async () => planView, decideWorkflowTask });
+    const observed = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+    expect(observed.structuredContent).toMatchObject({ workflow: { work_breakdown_digest: taskGraphDigest(graph) } });
+    const decided = await mcp.callTool({ name: "agentx_decide_workflow", arguments: { task_id: TASK, request_id: "33333333-3333-4333-8333-333333333334",
+      expected_revision: 3, decision: "APPROVE", reason: "Approved", artifact_digest: "a".repeat(64), work_breakdown_digest: taskGraphDigest(graph) } });
+    expect(decided.isError).not.toBe(true);
+    expect(decideWorkflowTask).toHaveBeenCalledWith(TASK, expect.objectContaining({ workBreakdownDigest: taskGraphDigest(graph) }));
+    const requestChanges = await mcp.callTool({ name: "agentx_decide_workflow", arguments: { task_id: TASK, request_id: "33333333-3333-4333-8333-333333333335",
+      expected_revision: 3, decision: "REQUEST_CHANGES", reason: "Please revise", artifact_digest: "a".repeat(64) } });
+    expect(requestChanges.isError).not.toBe(true);
+    expect(decideWorkflowTask.mock.calls.at(-1)?.[1]).not.toHaveProperty("workBreakdownDigest");
   });
 });
 

@@ -505,6 +505,9 @@ export async function runTaskInvocation(
         const execution = await executeSerialWorkflowDependencies({
           graph, graphDigest: workflowDependencies.approval.graphDigest, runId: workflowDependencies.approval.runId,
           operationId: invocation.operationId, initialTreeSha,
+          ...(workflowDependencies.sequenceStart === undefined ? {} : { sequenceStart: workflowDependencies.sequenceStart }),
+          ...(workflowDependencies.resumeProgress === undefined ? {} : { resumeProgress: workflowDependencies.resumeProgress }),
+          shouldContinue: () => dependencies.cancellationController?.isCancelled(invocation.operationId) !== true,
           now: () => new Date().toISOString(),
           persist: async (progress) => {
             const valid = WorkItemProgressV1Schema.parse(progress);
@@ -652,7 +655,7 @@ export async function runTaskInvocation(
       }
       if (workflowDependencies !== undefined) {
         if (workflowCandidateRepositories === undefined) throw agentXError("OPERATION_INTERRUPTED", "the final work breakdown candidate could not be recorded");
-        const terminalByItem = new Map<string, WorkItemProgressV1>();
+        const terminalByItem = new Map((workflowDependencies.resumeProgress ?? []).map((progress) => [progress.itemId, progress] as const));
         for (const progress of workflowDependencyProgressEvents) {
           if (progress.state !== "STARTED") terminalByItem.set(progress.itemId, progress);
         }
@@ -705,7 +708,7 @@ export async function runTaskInvocation(
         }
       }
       if (workflowDependencies !== undefined) {
-        const terminalByItem = new Map<string, WorkItemProgressV1>();
+        const terminalByItem = new Map((workflowDependencies.resumeProgress ?? []).map((progress) => [progress.itemId, progress] as const));
         for (const progress of workflowDependencyProgressEvents) if (progress.state !== "STARTED") terminalByItem.set(progress.itemId, progress);
         const itemResults = taskGraphOrder(workflowDependencies.graph).map((itemId) => terminalByItem.get(itemId)).filter((item): item is WorkItemProgressV1 => item !== undefined);
         if (itemResults.length > 0) {
