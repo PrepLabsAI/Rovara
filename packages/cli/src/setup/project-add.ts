@@ -4,10 +4,10 @@
 // connector add can build the next revision from it. The file holds no secret: the repository's
 // credential is a reference (the built-in GitHub App's ref), never a token.
 import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
+import { verifyE2ESetupProposal } from "@agentx/broker/e2e/discovery";
 import {
   ProjectDefinitionSchema, RegistrationPreflightSchema, E2EPolicySchema, E2ESetupProposalSchema, agentXError, environmentStackName,
   type ConnectorPreflight, type Ec2RuntimeBinding, type ProjectDefinition, type E2EPolicy, type E2ESetupProposal,
@@ -240,40 +240,16 @@ export async function addProject(input: {
     const candidateProposal = E2ESetupProposalSchema.parse(input.e2eSetup.proposal);
     const policy = E2EPolicySchema.parse(input.e2eSetup.policy);
     const snapshot = input.e2eSetup.snapshot;
-    if (snapshot.treeComplete !== true || snapshot.sources.length > 512 || snapshot.treePaths.length > 100_000) throw agentXError("CONFIG_INVALID", "E2E setup requires a complete bounded immutable source snapshot");
     if (snapshot.candidate.digest !== candidateProposal.candidateDigest || snapshot.candidate.repositories.length !== 1 || snapshot.candidate.repositories[0]?.repositoryId !== source.fullName) {
       throw agentXError("CONFIG_INVALID", "E2E setup proposal must match this repository's immutable candidate snapshot");
     }
+    let verifiedProposal: E2ESetupProposal;
+    try { verifiedProposal = verifyE2ESetupProposal(candidateProposal, snapshot, snapshot.candidate); }
+    catch (error) { throw agentXError("CONFIG_INVALID", `E2E setup proposal failed source verification: ${error instanceof Error ? error.message : "invalid source evidence"}`); }
     if (candidateProposal.targets.length !== policy.targets.length || candidateProposal.targets.some((target) => !policy.targets.some((configured) => JSON.stringify(configured) === JSON.stringify(target)))) {
       throw agentXError("CONFIG_INVALID", "E2E setup policy targets must match the source-backed proposal");
     }
-    const treePaths = new Set(snapshot.treePaths);
-    let snapshotBytes = 0;
-    const seenSourcePaths = new Set<string>();
-    for (const item of snapshot.sources) {
-      snapshotBytes += item.bytes.byteLength;
-      const normalized = item.path.length > 0 && !item.path.startsWith("/") && !item.path.includes("\\")
-        && !item.path.split("/").some((part) => part === "" || part === "." || part === ".." || /^(?:\.git|\.aws|\.ssh|\.env(?:\..*)?|secrets?|credentials?|.*(?:token|password|private[-_]?key).*)$/i.test(part));
-      if (!normalized || seenSourcePaths.has(item.path) || !treePaths.has(item.path) || item.kind !== "blob" || item.bytes.byteLength > 512 * 1024 || createHash("sha256").update(item.bytes).digest("hex") !== item.sha256) {
-        throw agentXError("CONFIG_INVALID", "E2E setup source bytes do not match the immutable snapshot tree");
-      }
-      seenSourcePaths.add(item.path);
-    }
-    if (snapshotBytes > 4 * 1024 * 1024) throw agentXError("CONFIG_INVALID", "E2E setup source snapshot exceeds the byte limit");
-    const sourceHashes = new Map(snapshot.sources.map((item) => [item.path, item.sha256]));
-    for (const ref of candidateProposal.sources) if (sourceHashes.get(ref.path) !== ref.sha256) throw agentXError("CONFIG_INVALID", "E2E setup proposal source hashes do not match the immutable candidate snapshot");
-    const requireSource = (path: string) => { if (!sourceHashes.has(path)) throw agentXError("CONFIG_INVALID", "E2E setup graph references source outside the immutable candidate snapshot"); };
-    const appIds = new Set(candidateProposal.applications.map((application) => application.applicationId));
-    const targetsById = new Map(candidateProposal.targets.map((target) => [target.targetId, target]));
-    for (const application of candidateProposal.applications) for (const path of application.sourcePaths) requireSource(path);
-    for (const target of candidateProposal.targets) if (!appIds.has(target.applicationId)) throw agentXError("CONFIG_INVALID", "E2E setup target references an unknown application");
-    for (const edge of candidateProposal.dependencyEdges) {
-      if (!appIds.has(edge.fromApplicationId)) throw agentXError("CONFIG_INVALID", "E2E setup dependency references an unknown application");
-      for (const path of edge.sourcePaths) requireSource(path);
-    }
-    for (const missing of candidateProposal.missingInputs) for (const path of missing.sourcePaths) requireSource(path);
-    for (const scenario of candidateProposal.scenarios) if (scenario.requestedTargetIds.some((targetId) => !targetsById.has(targetId))) throw agentXError("CONFIG_INVALID", "E2E setup scenario references an unknown target");
-    setupProposal = candidateProposal;
+    setupProposal = verifiedProposal;
     e2ePolicy = policy;
   }
   const files = input.e2eSetup === undefined

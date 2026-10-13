@@ -149,10 +149,11 @@ describe("the repository API's network calls (githubRepositoryApi)", () => {
 
   it("resolves a ref once and reads only verified blobs from its complete immutable tree", async () => {
     const bytes = Buffer.from('{"name":"shop"}');
+    const gitBlobSha = createHash("sha1").update(Buffer.from(`blob ${bytes.length}\0`)).update(bytes).digest("hex");
     const { calls, fetchImplementation } = recordingFetch([
       jsonResponse(200, { sha: "a".repeat(40), commit: { tree: { sha: "b".repeat(40) } } }),
-      jsonResponse(200, { truncated: false, tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "c".repeat(40), size: bytes.byteLength }] }),
-      jsonResponse(200, { encoding: "base64", size: bytes.byteLength, content: bytes.toString("base64") }),
+      jsonResponse(200, { sha: "b".repeat(40), truncated: false, tree: [{ path: "package.json", mode: "100644", type: "blob", sha: gitBlobSha, size: bytes.byteLength }] }),
+      jsonResponse(200, { sha: gitBlobSha, encoding: "base64", size: bytes.byteLength, content: bytes.toString("base64") }),
     ]);
     const result = await githubRepositoryApi(fetchImplementation).snapshot("ghs_token", "acme/shop", ["package.json"], "main");
     expect(result).toMatchObject({ commitSha: "a".repeat(40), treeSha: "b".repeat(40), treeComplete: true, sources: [{ path: "package.json", sha256: createHash("sha256").update(bytes).digest("hex") }] });
@@ -160,7 +161,7 @@ describe("the repository API's network calls (githubRepositoryApi)", () => {
     expect(calls.map((call) => call.url)).toEqual([
       "https://api.github.com/repos/acme/shop/commits/main",
       "https://api.github.com/repos/acme/shop/git/trees/" + "b".repeat(40) + "?recursive=1",
-      "https://api.github.com/repos/acme/shop/git/blobs/" + "c".repeat(40),
+      "https://api.github.com/repos/acme/shop/git/blobs/" + gitBlobSha,
     ]);
   });
 

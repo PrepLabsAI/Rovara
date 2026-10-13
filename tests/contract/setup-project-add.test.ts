@@ -4,8 +4,9 @@ import { join } from "node:path";
 import type { Command } from "commander";
 import YAML from "yaml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createCandidateManifest, type E2EPolicy, type E2ESetupProposal } from "@agentx/contracts";
+import { createCandidateManifest, type E2EPolicy } from "@agentx/contracts";
 import { createHash } from "node:crypto";
+import { inspectE2ERepository, proposeE2ESetup } from "../../packages/broker/src/e2e/discovery.js";
 import { loadProjectConfig } from "../../packages/cli/src/config.js";
 import { firstProjectStep } from "../../packages/cli/src/init/finish-steps.js";
 import { executeCli } from "../../packages/cli/src/main.js";
@@ -30,6 +31,15 @@ const services = (plane = fakeControlPlane(), repositories = repositoriesFake())
   fetch: plane.fetch, repositories, configDir, stackOutputs: async (name: string) => (name === "agentx-staging-foundation" ? FOUNDATION : undefined),
 });
 const session = { controlPlaneUrl: CONTROL_PLANE, accessToken: "admin-token" };
+const sourceBackedSetup = (bytes: Buffer) => {
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const candidate = createCandidateManifest([{ repositoryId: "acme/payments-api", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
+  const snapshot = { candidate, commitSha: "a".repeat(40), treeSha: "b".repeat(40), treeComplete: true as const, treePaths: ["package.json"], sources: [{ path: "package.json", sha256, bytes, kind: "blob" as const }] };
+  const inspection = inspectE2ERepository(snapshot, candidate).inspection;
+  const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate });
+  const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [], targets: proposal.targets, defaultSandboxProfileId: "sandbox-pending", fallback: "mock-unconnected", modelRouteRevision: null, capture: { screenshots: false, traces: false, video: false, downloads: false }, limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000, maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } };
+  return { proposal, policy, snapshot };
+};
 
 describe("the ec2-ebs binding from the foundation's outputs", () => {
   it("uses the launch template and every zone's subnet, 20 GiB gp3", () => {
@@ -74,14 +84,10 @@ describe("agentx project add (FR-040)", () => {
 
   it("registers a source-backed E2E setup proposal after one plan confirmation and asks for no typed commands", async () => {
     const plane = fakeControlPlane();
-    const bytes = Buffer.from(JSON.stringify({ scripts: { test: "vitest run" } }));
-    const sha256 = createHash("sha256").update(bytes).digest("hex");
-    const candidate = createCandidateManifest([{ repositoryId: "acme/payments-api", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
-    const target = { targetId: "web", applicationId: "payments", runtimeProfileId: "browser-pending", accountProfileId: "synthetic", kind: "web" as const, browser: "chromium" as const, viewport: { width: 1280, height: 720 } };
-    const proposal: E2ESetupProposal = { candidateDigest: candidate.digest, applications: [{ applicationId: "payments", kind: "web", sourcePaths: ["package.json"], recipe: null }], targets: [target], dependencyEdges: [], scenarios: [], sources: [{ path: "package.json", sha256 }], missingInputs: [{ inputId: "auth", targetIds: ["web"], kind: "auth", disposition: "mock-substitutable", reason: "Use an approved mock boundary", sourcePaths: ["package.json"] }], state: "proposed" };
-    const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [], targets: [target], defaultSandboxProfileId: "sandbox-pending", fallback: "mock-unconnected", modelRouteRevision: null, capture: { screenshots: false, traces: false, video: false, downloads: false }, limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000, maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } };
+    const bytes = Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } }));
+    const { proposal, policy, snapshot } = sourceBackedSetup(bytes);
     const prompter = scriptedPrompter(["acme/payments-api", "", true]);
-    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter, write: () => undefined, services: services(plane), flags: {}, e2eSetup: { proposal, policy, snapshot: { candidate, commitSha: "a".repeat(40), treeSha: "b".repeat(40), treeComplete: true, treePaths: ["package.json"], sources: [{ path: "package.json", sha256, bytes, kind: "blob" }] } } });
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter, write: () => undefined, services: services(plane), flags: {}, e2eSetup: { proposal, policy, snapshot } });
     const definition = (plane.registered[0] as { definition: { e2e?: E2EPolicy } }).definition;
     expect(definition.e2e).toEqual(policy);
     expect(prompter.asked.some((question) => question.startsWith("Setup command") || question.startsWith("Test command"))).toBe(false);
@@ -90,13 +96,9 @@ describe("agentx project add (FR-040)", () => {
 
   it("does not register E2E enablement when the single setup-plan confirmation is declined", async () => {
     const plane = fakeControlPlane();
-    const bytes = Buffer.from(JSON.stringify({ scripts: { test: "vitest run" } }));
-    const sha256 = createHash("sha256").update(bytes).digest("hex");
-    const candidate = createCandidateManifest([{ repositoryId: "acme/payments-api", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
-    const target = { targetId: "web", applicationId: "payments", runtimeProfileId: "browser-pending", accountProfileId: "synthetic", kind: "web" as const, browser: "chromium" as const, viewport: { width: 1280, height: 720 } };
-    const proposal: E2ESetupProposal = { candidateDigest: candidate.digest, applications: [{ applicationId: "payments", kind: "web", sourcePaths: ["package.json"], recipe: null }], targets: [target], dependencyEdges: [], scenarios: [], sources: [{ path: "package.json", sha256 }], missingInputs: [], state: "proposed" };
-    const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [], targets: [target], defaultSandboxProfileId: "sandbox-pending", fallback: "mock-unconnected", modelRouteRevision: null, capture: { screenshots: false, traces: false, video: false, downloads: false }, limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000, maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } };
-    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", false]), write: () => undefined, services: services(plane), flags: {}, e2eSetup: { proposal, policy, snapshot: { candidate, commitSha: "a".repeat(40), treeSha: "b".repeat(40), treeComplete: true, treePaths: ["package.json"], sources: [{ path: "package.json", sha256, bytes, kind: "blob" }] } } });
+    const bytes = Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } }));
+    const { proposal, policy, snapshot } = sourceBackedSetup(bytes);
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", false]), write: () => undefined, services: services(plane), flags: {}, e2eSetup: { proposal, policy, snapshot } });
     const definition = (plane.registered[0] as { definition: { e2e?: E2EPolicy; setup: unknown[]; readiness: unknown[] } }).definition;
     expect(definition.e2e).toBeUndefined();
     expect(definition.setup).toEqual([]);

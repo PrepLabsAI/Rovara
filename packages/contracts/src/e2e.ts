@@ -24,6 +24,7 @@ const sourceRelativePath = z.string().min(1).max(1024).superRefine((value, conte
     }
   } catch { context.addIssue({ code: "custom", message: "path contains invalid percent encoding" }); }
 });
+const recipeWorkingDirectory = z.union([z.literal("."), sourceRelativePath]);
 const sameOriginAppPath = z.string().min(1).max(2048).superRefine((value, context) => {
   try {
     let decoded = value;
@@ -151,7 +152,7 @@ export function e2ePolicyDigest(policy: E2EPolicy): string { const copied = safe
 export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64) }).strict();
 export type E2EWorkflowProgress = z.infer<typeof E2EWorkflowProgressSchema>;
 
-const CommandRecipeSchema = z.object({ program: id(256), args: z.array(z.string().max(8192)).max(256), cwd: sourceRelativePath, timeoutMs: positiveInt.max(300_000), env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/), z.string().max(4096)).refine((env) => Object.keys(env).length <= 64 && !Object.keys(env).some((key) => /^(PATH|HOME|AWS_|AGENTX_|PI_|GIT_)/i.test(key) || /(TOKEN|SECRET|PASSWORD|API_KEY)$/i.test(key)) && !Object.values(env).some((value) => redactText(value) !== value), "environment must contain only non-secret allowlisted literals") }).strict().superRefine((command, context) => {
+const CommandRecipeSchema = z.object({ program: id(256), args: z.array(z.string().max(8192)).max(256), cwd: recipeWorkingDirectory, timeoutMs: positiveInt.max(300_000), env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/), z.string().max(4096)).refine((env) => Object.keys(env).length <= 64 && !Object.keys(env).some((key) => /^(PATH|HOME|AWS_|AGENTX_|PI_|GIT_)/i.test(key) || /(TOKEN|SECRET|PASSWORD|API_KEY)$/i.test(key)) && !Object.values(env).some((value) => redactText(value) !== value), "environment must contain only non-secret allowlisted literals") }).strict().superRefine((command, context) => {
   if (/(^|[/\\])(?:sh|bash|zsh|cmd|powershell|pwsh)(\.exe)?$/i.test(command.program) || command.args.some((arg) => /(^|\s)(?:\||&&|;|>|<|\$\(|`)/.test(arg))) context.addIssue({ code: "custom", message: "shell wrappers and shell-interpreted arguments are forbidden" });
 });
 export type E2ECommandRecipe = z.infer<typeof CommandRecipeSchema>;

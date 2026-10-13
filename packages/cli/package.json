@@ -7,6 +7,7 @@
     "agentx": "./dist/bin.js"
   },
   "dependencies": {
+    "@agentx/broker": "0.1.0",
     "@agentx/contracts": "0.1.0",
     "@agentx/gateway": "0.1.0",
     "@agentx/mcp": "0.1.0",
