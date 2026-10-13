@@ -45,6 +45,23 @@ export const WorkItemStateSchema = z.object({
   reviews: z.string().max(20_000).optional(),
   /** Quick (#356): the last checks report, for the pull request's description. */
   checks: z.string().max(20_000).optional(),
+  /** #359, Review: what a collaborator asked the next round to look at too, beside the brief. */
+  focus: z.string().max(20_000).optional(),
+  /** #359, Review: every finding so far, numbered across rounds, and the issue each was filed as. */
+  findings: z.array(z.object({
+    n: z.number().int().positive(),
+    /** The pull request it is about: owner/name#number. */
+    pull: z.string(),
+    text: z.string(),
+    severity: z.enum(["HIGH", "MEDIUM", "LOW"]).optional(),
+    file: z.string().optional(),
+    line: z.number().int().positive().optional(),
+    filed: z.number().int().positive().optional(),
+  }).strict()).max(500).optional(),
+  /** #359, Review: the head commit of each pull request at its last round (owner/name#number to commit). */
+  reviewed: z.record(z.string(), z.string()).optional(),
+  /** #359, Review: rounds run so far. */
+  rounds: z.number().int().min(0).optional(),
   /** Quick (#356): the pull request the loop opened. */
   pullRequest: z.object({ number: z.number().int().positive(), url: z.string().url() }).strict().optional(),
 }).strict();

@@ -51,6 +51,14 @@ export class LoopWorld {
   /** #358: inline review comments and submitted reviews on pull requests. */
   readonly reviewComments: FakeReviewComment[] = [];
   readonly reviews: FakeReview[] = [];
+  /** #359: pull requests opened by people (the loop's own are in pullRequests), by number, and their head commits. */
+  readonly openPulls = new Map<number, { base: string; head: string; open: boolean }>();
+  /** #359: the pull requests that mention each issue (its timeline's cross-references). */
+  readonly links = new Map<number, Array<{ repo: string; number: number }>>();
+  /** #359: issues the loop filed. */
+  readonly filed: Array<{ number: number; title: string; body: string }> = [];
+  /** #359: refs fetched and worktrees checked out for review, as "<ref> @ <dir>". */
+  readonly checkedOut: string[] = [];
   /** #358: what `git diff <default>...HEAD` shows the reviewers. */
   diff = "diff --git a/src/retry.ts b/src/retry.ts\n+export const RETRIES = 3;\n";
 
@@ -126,6 +134,23 @@ export class LoopWorld {
       return ok(this.reviewComments.filter((comment) => comment.updated_at >= since).sort((left, right) => left.updated_at.localeCompare(right.updated_at))
         .map((comment) => JSON.stringify({ id: comment.id, pull_request_url: `https://api.github.com/repos/${this.repo}/pulls/${comment.pull}`, author: comment.author, body: comment.body, path: comment.path, line: comment.line, updated_at: comment.updated_at })).join("\n"));
     }
+    const pull = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/u.exec(path);
+    if (pull !== null) {
+      const number = Number(pull[1]);
+      const own = this.pullRequests.find((candidate) => candidate.number === number);
+      const theirs = this.openPulls.get(number);
+      if (own === undefined && theirs === undefined) return fail("gh: Not Found (HTTP 404)");
+      const value = own === undefined ? { ...theirs!, url: `https://github.com/${this.repo}/pull/${number}` } : { base: own.base, head: `head-${number}`, open: !this.closed.has(number), url: own.url };
+      return ok(JSON.stringify({ state: value.open ? "open" : "closed", base: value.base, head: value.head, url: value.url }));
+    }
+    const timeline = /^repos\/[^/]+\/[^/]+\/issues\/(\d+)\/timeline/u.exec(path);
+    if (timeline !== null) return ok((this.links.get(Number(timeline[1])) ?? []).map((link) => JSON.stringify(link)).join("\n"));
+    if (/^repos\/[^/]+\/[^/]+\/issues$/u.test(path) && method === "POST") {
+      const issue = JSON.parse(input) as { title: string; body: string };
+      const number = 900 + this.filed.length + 1;
+      this.filed.push({ number, ...issue });
+      return ok(`${number}\n`);
+    }
     const reviews = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/reviews/.exec(path);
     if (reviews !== null) {
       return ok(this.reviews.filter((review) => review.pull === Number(reviews[1]))
@@ -149,7 +174,8 @@ export class LoopWorld {
 
   private async git(args: string[]): Promise<ExecResult> {
     const sub = args[2];
-    if (sub === "fetch") return ok();
+    if (sub === "fetch") { const ref = args.find((arg) => arg.startsWith("+pull/")); if (ref !== undefined) this.checkedOut.push(`fetch ${ref}`); return ok(); }
+    if (sub === "checkout") { this.checkedOut.push(`${args[args.length - 1] ?? ""} @ ${args[1] ?? ""}`); return ok(); }
     // The loop's own evidence commit: something is always staged in this fake.
     if (sub === "add") return ok();
     // `diff --cached --quiet` after the evidence is added: something is staged. Otherwise the change under review.
@@ -166,7 +192,8 @@ export class LoopWorld {
     // origin has the default branch; no local branch exists yet.
     if (sub === "rev-parse") return args.includes(`refs/remotes/origin/${this.defaultBranch}`) ? ok("abc123\n") : fail("", 1);
     if (sub === "worktree" && args[3] === "add") {
-      const dir = args[4] === "-b" ? args[6] : args[4];
+      const dir = args[4] === "-b" ? args[6] : args[4] === "--detach" ? args[5] : args[4];
+      if (args[4] === "--detach") this.checkedOut.push(`${args[6] ?? ""} @ ${dir ?? ""}`);
       await mkdir(dir ?? "", { recursive: true });
       return ok();
     }

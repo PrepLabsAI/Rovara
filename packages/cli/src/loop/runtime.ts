@@ -1,4 +1,4 @@
-// rovara loop (#355, #356, #357, #358): the loop's decisions, with no I/O. An event and the item's state go in; the new
+// rovara loop (#355, #356, #357, #358, #359): the loop's decisions, with no I/O. An event and the item's state go in; the new
 // state and the effects to carry out come out. The daemon supplies what needs I/O inside the events (a claim's
 // failed exit checks, an artifact's text and digest, a check run's output) and carries the effects out
 // (daemon.ts), so every decision here is tested without GitHub, git, tmux or an agent.
@@ -25,6 +25,8 @@ export type LoopEvent =
   | { kind: "closed"; at: string }
   /** #358: the item's per-PR loops: every pull request approved (`approved`), or one taken back for more work (`reply`). */
   | { kind: "pulls"; outcome: "approved" | "reply"; detail: string; at: string }
+  /** #359, Review: new commits on a pull request under review; `detail` says which. */
+  | { kind: "pushed"; detail: string; at: string }
   | { kind: "stop"; author: string; at: string };
 
 export type Effect =
@@ -47,6 +49,35 @@ export type Effect =
 export interface Decision { state: WorkItemState | undefined; effects: Effect[] }
 
 const labelOf = (loop: LoopDefinition, step: string) => stepOf(loop, step).label;
+/** Whether a loop has an agent at all (#359: the Review loop has none). */
+const hasAgent = (loop: LoopDefinition) => loop.steps.some((step) => step.actor === "agent");
+
+/** #359: what the Review loop asks for when it was started without a brief. */
+export const BRIEF_TEMPLATE = [
+  "Reply with a brief: what this review should cover. For example:",
+  "",
+  "```markdown",
+  "## Questions",
+  "- What should the review answer?",
+  "",
+  "## Angles",
+  "- What to look at: correctness, security, performance, API design, …",
+  "",
+  "## Validations",
+  "- What to check: behaviour to confirm, edge cases, tests that should exist",
+  "```",
+].join("\n");
+
+/** The comment that says a loop started. */
+function startComment(loop: LoopDefinition, state: WorkItemState, author: string, skipped: readonly string[], tmux: string): string {
+  if (!hasAgent(loop)) {
+    const waiting = state.step === loop.brief;
+    return `Started the **${loop.name}** loop for @${author}. It reads and comments, and changes no code.${waiting ? `\n\n${BRIEF_TEMPLATE}` : " The first round is running."} Close the issue or comment \`/rovara stop\` to end it.`;
+  }
+  const gated = loop.steps.some((step) => step.gate);
+  const skippedLine = skipped.length === 0 ? "" : ` @${author} declared these phases away: ${skipped.map((phase) => `**${phase}**`).join(", ")}.`;
+  return `Started the **${loop.name}** loop for @${author}.${skippedLine}${gated ? " Nothing is pushed until every document is approved and the checks pass." : ""} Reply here to steer it; close the issue or comment \`/rovara stop\` to end it. On the computer running it, \`tmux attach -t =${tmux}\` shows the agent.`;
+}
 const ARTIFACT_NAMES: Record<Artifact, string> = { requirements: "requirements", design: "design", plan: "plan" };
 
 /**
@@ -90,19 +121,20 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
         return { state, effects: [{ kind: "comment", body: `A loop is already running on this issue (step \`${state.step}\`). Reply to steer it, or comment \`/rovara stop\`.` }] };
       }
       const skipped = event.skip ?? [];
-      const start = landingStep(event.loop, event.loop.start, skipped);
+      // #359: a loop started without the brief it needs waits for one.
+      const start = event.instruction.trim() === "" && event.loop.brief !== undefined ? event.loop.brief : landingStep(event.loop, event.loop.start, skipped);
       const next: WorkItemState = {
         version: 1, repo: item.repo, issue: item.issue, loop: event.loop.name, step: start, startedBy: event.author,
         instruction: event.instruction, startedAt: event.at, stepEnteredAt: event.at, ...(skipped.length === 0 ? {} : { skipped }),
       };
-      const gated = event.loop.steps.some((step) => step.gate);
-      const skippedLine = skipped.length === 0 ? "" : ` @${event.author} declared these phases away: ${skipped.map((phase) => `**${phase}**`).join(", ")}.`;
+      const first = stepOf(event.loop, start);
       return {
         state: next,
         effects: [
           { kind: "label", label: labelOf(event.loop, start) },
-          { kind: "assign", text: firstAssignment(next, event.loop) },
-          { kind: "comment", body: `Started the **${event.loop.name}** loop for @${event.author}.${skippedLine}${gated ? " Nothing is pushed until every document is approved and the checks pass." : ""} Reply here to steer it; close the issue or comment \`/rovara stop\` to end it. On the computer running it, \`tmux attach -t =${tmuxSessionName(item.repo, item.issue)}\` shows the agent.` },
+          ...(first.actor === "agent" ? [{ kind: "assign" as const, text: firstAssignment(next, event.loop) }] : []),
+          { kind: "comment", body: startComment(event.loop, next, event.author, skipped, tmuxSessionName(item.repo, item.issue)) },
+          ...(first.action === undefined ? [] : [{ kind: "run" as const, action: first.action }]),
         ],
       };
     }
@@ -121,7 +153,19 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
       }
       const moved = transition(loop, state, "reply", event.at);
       if (moved === undefined) return { state, effects: [] };
+      // #359: a loop with no agent (Review) takes the reply as its brief, or as more for its next round to look at.
+      if (stepOf(loop, moved.state.step).actor !== "agent") {
+        const brief = state.step === loop.brief;
+        const said = brief ? `Thanks @${event.author}: reviewing with this brief.` : `Reviewing again, with what @${event.author} asked to look at.`;
+        return { state: { ...moved.state, ...(brief ? { instruction: event.text } : { focus: event.text }) }, effects: [{ kind: "comment", body: said }, ...moved.effects] };
+      }
       return { state: moved.state, effects: [...moved.effects, { kind: "assign", text: replyAssignment(event.author, event.text) }] };
+    }
+    case "pushed": {
+      if (!running) return { state, effects: [] };
+      const moved = transition(loop, state, "pushed", event.at);
+      if (moved === undefined) return { state, effects: [] };
+      return { state: moved.state, effects: [{ kind: "comment", body: event.detail }, ...moved.effects] };
     }
     case "approve": {
       const step = running ? stepOf(loop, state.step) : undefined;
@@ -201,6 +245,8 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
         }
         return { state: { ...next, reviewRounds: 0 }, effects: [...moved.effects, { kind: "comment", body: `The reviews still block the change, so a person decides.\n\n${event.detail}\n\n---\nPublish it as it is with \`/rovara approve${state.target === undefined ? "" : ` ${state.target}`}\`, or reply with what the agent should do${state.target === undefined ? "" : ` (start the reply with \`${state.target}:\`)`}.` }] };
       }
+      // #359: a review round's report; what it was asked to look at besides the brief is used up.
+      if (event.action === "review") return { state: { ...next, focus: undefined }, effects: [...moved.effects, { kind: "comment", body: event.detail }] };
       if (event.outcome === "failed") return { state: next, effects: [...moved.effects, { kind: "comment", body: `I couldn't publish the change: ${event.detail}\n\nReply here to try again.` }] };
       return { state: next, effects: [...moved.effects, { kind: "comment", body: event.detail }] };
     }
@@ -215,7 +261,7 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
       if (!running) return { state, effects: [] };
       const moved = transition(loop, state, event.kind === "closed" ? "closed" : "stopped", event.at);
       if (moved === undefined) return { state, effects: [] };
-      const said: Effect[] = event.kind === "stop" ? [{ kind: "comment", body: `Stopped by @${event.author}. The agent's session has ended; its branch \`${state.worktree?.branch ?? "(none)"}\` is kept.` }] : [];
+      const said: Effect[] = event.kind !== "stop" ? [] : [{ kind: "comment", body: hasAgent(loop) ? `Stopped by @${event.author}. The agent's session has ended; its branch \`${state.worktree?.branch ?? "(none)"}\` is kept.` : `Stopped by @${event.author}.` }];
       return { state: moved.state, effects: [...moved.effects, { kind: "end-session" }, ...said] };
     }
   }

@@ -4,9 +4,9 @@
 **Claude Code** or **Codex**, and drives that work through a loop. It needs no Rovara install and no AWS account:
 only the Rovara CLI, the GitHub CLI (`gh`, signed in), `tmux`, `git`, and Claude Code or Codex.
 
-> **Status:** **Do**, **Quick** and **Full** are here, with reviews before anything is published, feedback on the
-> pull request, one loop per pull request when a change spans repositories, and Codex as the agent or the critic.
-> The Review and Contribute loops follow ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
+> **Status:** **Do**, **Quick**, **Full** and **Review** are here, with reviews before anything is published, feedback
+> on the pull request, one loop per pull request when a change spans repositories, and Codex as the agent or the
+> critic. The Contribute loop follows ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
 
 The idea is inspired by [the-loop](https://github.com/MadaraUchiha-314/the-loop) by Rohith Ramakrishnan:
 an agent's work driven through a declared process, from your issue tracker. Rovara loop is Rovara's own
@@ -184,6 +184,32 @@ repository: its own agent, worktree and branch, code → checks → reviews → 
 - **Ending.** Closing the issue, or `/rovara stop` on it, ends every per-PR loop. `/rovara stop` on one pull request
   ends only its loop; the others carry on.
 
+## The Review loop
+
+```text
+/rovara review Is a retried charge ever billed twice? Check the timeout handling too.
+```
+
+The Review loop reviews, and **changes no code**: it has no agent session, no branch, and never commits or pushes.
+
+- **What it reviews.** Started on a pull request, that pull request. Started on an issue, every open pull request
+  that mentions the issue, in each repository added on the computer running it. Each is checked out at its head in
+  the review's own detached worktree, and judged on its change from its base branch.
+- **The brief.** It reviews against a collaborator's brief: the questions to answer, the angles to look at, the
+  validations to check. `/rovara review` with nothing after it posts a template (`rovara:review-brief`) and waits;
+  the next reply from a collaborator is the brief.
+- **Rounds.** Each round is a headless, read-only reviewer, on `reviews.harness` and `reviews.model`. It answers the
+  brief, and posts numbered findings (`rovara:reviewed`), numbered on across rounds. New commits on a pull request it
+  reviews, or a reply with more to look at, start the next round, which is told the earlier findings.
+- **Filing.** Nothing is filed by itself: `/rovara file 2` (or `/rovara file 2,4`) files those findings as issues,
+  in the repository of the pull request each is about, once each.
+- **Ending.** `/rovara stop`, or closing the issue or pull request.
+
+Started on a pull request another loop opened, the Review loop runs on that pull request, and the pull request's
+conversation is the review's. Inline review comments and GitHub reviews still reach the loop that opened it. An issue
+runs one loop at a time: to review the pull request a Quick or Full loop is delivering, start the review on the pull
+request.
+
 ## Watching and answering the agent
 
 The agent runs interactively in tmux. `tmux attach -t =rovara-<owner>_<repo>-<issue>` shows it, and you answer it
@@ -214,7 +240,8 @@ on the issue and waits for your next reply.
 | `rovara loop add [path]` · `remove <owner/name>` | starts or stops reading a repository's issues. A repository is read from the moment it's added; older comments are never replayed |
 | `rovara loop start` · `stop` · `status` | the background daemon. Its log is `~/.rovara/loop/daemon.log`; `run` is the same daemon in the foreground |
 | `rovara loop do` · `quick` · `full` `--issue <n> <instruction>` | posts `/rovara do <instruction>` (or `quick`, `full`) on the issue, as you |
-| `rovara loop check <issue> [--repo owner/name]` | where an issue's loop stands, without running anything; each document's state: not written, missing sections, written but not approved, locked, changed since approval, or declared away; and each per-PR loop's step, pull request and agent |
+| `rovara loop review --issue <n> [brief]` | posts `/rovara review [brief]` on the issue or pull request, as you |
+| `rovara loop check <issue> [--repo owner/name]` | where an issue's loop stands, without running anything; each document's state: not written, missing sections, written but not approved, locked, changed since approval, or declared away; each per-PR loop's step, pull request and agent; and a review's rounds and findings |
 
 ## What's kept where
 

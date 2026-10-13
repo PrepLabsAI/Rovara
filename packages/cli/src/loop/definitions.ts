@@ -27,11 +27,11 @@ export type Artifact = z.infer<typeof ArtifactSchema>;
  * change request at a gate, the result of a step the loop runs itself (passed, failed, published), a phase declared
  * away (skipped), the issue closing, a stop.
  */
-export const OutcomeSchema = z.enum(["done", "reply", "approved", "changes", "passed", "failed", "blocked", "published", "skipped", "split", "closed", "stopped"]);
+export const OutcomeSchema = z.enum(["done", "reply", "approved", "changes", "passed", "failed", "blocked", "published", "skipped", "split", "pushed", "closed", "stopped"]);
 export type Outcome = z.infer<typeof OutcomeSchema>;
 
 /** What a step the loop runs itself (actor `code`) does. */
-export const ActionSchema = z.enum(["checks", "reviews", "publish"]);
+export const ActionSchema = z.enum(["checks", "reviews", "publish", "review"]);
 export type LoopAction = z.infer<typeof ActionSchema>;
 
 export const LoopDefinitionSchema = z.object({
@@ -39,6 +39,16 @@ export const LoopDefinitionSchema = z.object({
   /** The keyword that starts it: `/rovara <keyword> ...`. */
   keyword: z.string().regex(/^[a-z]{2,20}$/),
   start: z.string(),
+  /**
+   * #359: the step a loop waits at when its start comment carries no brief (`/rovara review` alone): the loop asks for
+   * one, and a collaborator's reply is it. A loop without one needs its instruction in the start comment.
+   */
+  brief: z.string().optional(),
+  /**
+   * #359: a loop that joins an existing issue or pull request (Review). Started on a pull request another loop opened,
+   * it runs on that pull request, and the pull request's conversation is its, not a reply to the other loop.
+   */
+  joins: z.boolean().default(false),
   steps: z.array(z.object({
     id: z.string().regex(/^[a-z][a-z-]{0,30}$/),
     actor: z.enum(["agent", "human", "code"]),
@@ -64,6 +74,9 @@ export const LoopDefinitionSchema = z.object({
   const ids = new Set(loop.steps.map((step) => step.id));
   if (ids.size !== loop.steps.length) context.addIssue({ code: "custom", message: "step ids must be unique" });
   if (!ids.has(loop.start)) context.addIssue({ code: "custom", message: `start step ${loop.start} is not declared` });
+  if (loop.brief !== undefined && !loop.edges.some((edge) => edge.from === loop.brief && edge.on === "reply" && edge.to === loop.start)) {
+    context.addIssue({ code: "custom", message: `brief step ${loop.brief} must lead to the start step on a reply` });
+  }
   for (const step of loop.steps) {
     if ((step.actor === "code" && !step.terminal) !== (step.action !== undefined)) context.addIssue({ code: "custom", message: `step ${step.id}: a code step, and only a code step, names an action` });
     if (step.gate && step.actor !== "human") context.addIssue({ code: "custom", message: `step ${step.id}: only a person's step can be a gate` });
@@ -233,8 +246,36 @@ export const FULL_LOOP: LoopDefinition = LoopDefinitionSchema.parse({
   ],
 });
 
+/**
+ * #359: the Review loop. It reviews a pull request, or every open pull request that delivers an issue, round after
+ * round, against a collaborator's brief, and changes no code: no agent session, no branch. Each round is a headless,
+ * read-only reviewer; new commits, or a reply with more to look at, start the next. Findings are numbered, and
+ * `/rovara file <n>` files one as an issue.
+ */
+export const REVIEW_LOOP: LoopDefinition = LoopDefinitionSchema.parse({
+  name: "review",
+  keyword: "review",
+  start: "reviewing",
+  brief: "brief",
+  joins: true,
+  steps: [
+    { id: "brief", actor: "human", label: "review-brief" },
+    { id: "reviewing", actor: "code", label: "reviewing", action: "review" },
+    { id: "waiting", actor: "human", label: "reviewed" },
+    { id: "ended", actor: "code", terminal: true },
+  ],
+  edges: [
+    { from: "brief", to: "reviewing", on: "reply" },
+    { from: "reviewing", to: "waiting", on: "passed" },
+    { from: "reviewing", to: "waiting", on: "failed" },
+    { from: "waiting", to: "reviewing", on: "reply" },
+    { from: "waiting", to: "reviewing", on: "pushed" },
+    ...ENDINGS,
+  ],
+});
+
 /** The loops a comment starts. A per-PR loop is started by its Quick or Full loop, never by a comment. */
-export const LOOPS: readonly LoopDefinition[] = [DO_LOOP, QUICK_LOOP, FULL_LOOP];
+export const LOOPS: readonly LoopDefinition[] = [DO_LOOP, QUICK_LOOP, FULL_LOOP, REVIEW_LOOP];
 
 export function loopNamed(name: string): LoopDefinition {
   const found = [...LOOPS, PULL_LOOP].find((loop) => loop.name === name);

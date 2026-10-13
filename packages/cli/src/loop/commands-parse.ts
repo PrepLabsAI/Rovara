@@ -7,6 +7,8 @@ export type ParsedComment =
   | { kind: "stop" }
   | { kind: "approve"; /** #358: `/rovara approve owner/name`: one per-PR loop's blocked reviews, from the issue. */ repo?: string }
   | { kind: "changes"; text: string }
+  /** #359: `/rovara file 2,4`: file a Review loop's findings as issues. */
+  | { kind: "file"; numbers: number[] }
   | { kind: "invalid"; reason: string }
   | { kind: "reply"; text: string };
 
@@ -18,6 +20,13 @@ export function parseComment(body: string): ParsedComment {
   if (match === null) return { kind: "reply", text };
   const keyword = (match[1] ?? "").toLowerCase();
   if (keyword === "stop") return { kind: "stop" };
+  if (keyword === "file") {
+    const numbers = [...new Set((match[2] ?? "").split(/[\s,]+/u).filter((part) => part !== "").map(Number))];
+    if (numbers.length === 0 || numbers.length > 20 || numbers.some((number) => !Number.isInteger(number) || number <= 0)) {
+      return { kind: "invalid", reason: "Say which findings to file, by number: for example `/rovara file 2` or `/rovara file 2,4`." };
+    }
+    return { kind: "file", numbers };
+  }
   if (keyword === "approve") {
     const repo = /^\s+`?([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})`?\s*$/u.exec(match[2] ?? "")?.[1];
     return repo === undefined ? { kind: "approve" } : { kind: "approve", repo };
@@ -46,6 +55,7 @@ export function parseComment(body: string): ParsedComment {
       ? `The ${loop.name} loop has no phases to skip.`
       : `The ${loop.name} loop can skip ${allowed.map((phase) => `\`${phase}\``).join(" and ")}, not ${unknown.map((phase) => `\`${phase}\``).join(", ")}.` };
   }
-  if (instruction === "") return { kind: "invalid", reason: `Say what to do after \`/rovara ${loop.keyword}\`, for example \`/rovara ${loop.keyword} fix the flaky retry test\`.` };
+  // A loop that asks for its brief (#359: Review) starts without one.
+  if (instruction === "" && loop.brief === undefined) return { kind: "invalid", reason: `Say what to do after \`/rovara ${loop.keyword}\`, for example \`/rovara ${loop.keyword} fix the flaky retry test\`.` };
   return { kind: "start", loop, instruction, skip: [...new Set(skip)] };
 }
