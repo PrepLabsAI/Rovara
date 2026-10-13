@@ -23,6 +23,16 @@ export class GitHub {
     return (await run(this.exec, "gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], { cwd: path })).trim();
   }
 
+  /**
+   * The repository's default branch, as GitHub says: a clone's origin/HEAD is set when it was cloned and is not
+   * updated when the default branch changes, so a worktree or pull request based on it can aim at a stale branch.
+   */
+  async defaultBranch(repo: string): Promise<string> {
+    const name = (await run(this.exec, "gh", ["api", `repos/${repo}`, "--jq", ".default_branch"])).trim();
+    if (!/^[A-Za-z0-9._/-]{1,200}$/u.test(name)) throw new Error(`GitHub named no default branch for ${repo}`);
+    return name;
+  }
+
   /** Every issue and pull request comment updated since `since`, oldest first. */
   async commentsSince(repo: string, since: string): Promise<IssueComment[]> {
     const out = await run(this.exec, "gh", [

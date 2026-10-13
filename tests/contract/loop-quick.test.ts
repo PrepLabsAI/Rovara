@@ -136,11 +136,14 @@ describe("the repository's checks, through a real shell (#356)", () => {
 describe("the Quick loop end to end (#356)", () => {
   it("plans, takes changes into the plan, waits for approval, codes, sends a failing check back, then opens one pull request", async () => {
     const h = await setUp({ checks: [false] });
+    // Like this repository: the default branch is mainline, which GitHub says; origin/HEAD is never asked.
+    h.world.defaultBranch = "mainline";
     h.world.say(ISSUE, "maya", "/rovara quick Retry the payment call on a 503");
     await h.daemon.poll();
     expect(h.label()).toEqual(["rovara:planning"]);
     expect(h.world.posted(ISSUE).at(-1)).toContain("It plans first: nothing is pushed until the plan is approved and the checks pass.");
     expect(h.world.sessions.get(SESSION)!.claude.at(-1)).toContain("Your step now: PLAN ONLY.");
+    expect(h.world.calls).toContainEqual(["git", "-C", h.checkout, "worktree", "add", "-b", "rovara/42", h.worktree(), "origin/mainline"]);
 
     // A claim is held to the plan's shape.
     expect(await h.complete("Planned it.")).toBe("Not accepted: there is no plan at docs/rovara/42/plan.md; write it there");
@@ -199,7 +202,7 @@ describe("the Quick loop end to end (#356)", () => {
     expect(h.world.pushes).toEqual(["rovara/42"]);
     expect(h.world.pullRequests).toHaveLength(1);
     const pull = h.world.pullRequests[0]!;
-    expect(pull).toMatchObject({ head: "rovara/42", base: "main", title: "Retry payments on 503" });
+    expect(pull).toMatchObject({ head: "rovara/42", base: "mainline", title: "Retry payments on 503" });
     expect(pull.body).toContain("Closes #42.");
     expect(pull.body).toContain("the plan was approved by @maya");
     expect(pull.body).toContain("## Plan");
