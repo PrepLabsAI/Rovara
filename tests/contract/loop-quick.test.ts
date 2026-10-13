@@ -15,9 +15,10 @@ import { ARTIFACT_SECTIONS } from "../../packages/cli/src/loop/instructions.js";
 import { GitHub } from "../../packages/cli/src/loop/github.js";
 import { ClaudeCodeHarness } from "../../packages/cli/src/loop/harness.js";
 import { createLoopMcpServer } from "../../packages/cli/src/loop/mcp.js";
-import { LOOP_COMMENT_MARKER } from "../../packages/cli/src/loop/naming.js";
+import { LOOP_COMMENT_MARKER, evidencePath } from "../../packages/cli/src/loop/naming.js";
 import { LoopStore } from "../../packages/cli/src/loop/state.js";
 import { LoopWorld } from "../support/loop-fakes.js";
+import { NO_FINDINGS, SELF_REVIEW } from "../support/loop-harness.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -47,9 +48,15 @@ async function setUp(options: { checks?: boolean[] } = {}) {
   const daemon = new LoopDaemon({
     store, exec: world.exec, github: new GitHub(world.exec), harness: new ClaudeCodeHarness(world.exec),
     cliCommand: ["/usr/local/bin/node", "/opt/rovara/cli.js"], now: () => new Date(world.clock), log: () => undefined, checkRun,
+    reviewerRun: async () => ({ ok: true, text: NO_FINDINGS }),
   });
   await daemon.poll();
   const worktree = () => join(store.itemDir(world.repo, ISSUE), "worktree");
+  /** The agent records its self-review, which a code claim needs (#358). */
+  const selfReview = async () => {
+    await mkdir(join(worktree(), "docs", "rovara", String(ISSUE), "evidence"), { recursive: true });
+    await writeFile(join(worktree(), evidencePath(ISSUE, "self-review.md")), SELF_REVIEW);
+  };
   const writePlan = async (text: string) => {
     await mkdir(join(worktree(), "docs", "rovara", String(ISSUE)), { recursive: true });
     await writeFile(join(worktree(), "docs", "rovara", String(ISSUE), "plan.md"), text);
@@ -73,7 +80,7 @@ async function setUp(options: { checks?: boolean[] } = {}) {
   };
   /** The loop's own steps (checks, publishing) run in the background: attend, let them finish, attend again. */
   const runOwnSteps = async () => {
-    for (let round = 0; round < 3; round += 1) {
+    for (let round = 0; round < 4; round += 1) {
       await daemon.attend();
       await daemon.settle();
     }
@@ -81,7 +88,7 @@ async function setUp(options: { checks?: boolean[] } = {}) {
   };
   const step = async () => (await store.item(world.repo, ISSUE))?.step;
   const label = () => [...(world.labels.get(ISSUE) ?? [])];
-  return { world, store, daemon, checkout, worktree, writePlan, readPlanFile, complete, runOwnSteps, step, label, checkRuns };
+  return { world, store, daemon, checkout, worktree, writePlan, readPlanFile, selfReview, complete, runOwnSteps, step, label, checkRuns };
 }
 
 describe("the Quick loop's commands (#356)", () => {
@@ -181,10 +188,13 @@ describe("the Quick loop end to end (#356)", () => {
     expect(await h.store.item(h.world.repo, ISSUE)).toMatchObject({ approvals: { plan: { digest: artifactDigest(revised), by: "maya" } } });
     expect(h.world.pushes).toEqual([]);
 
-    // A changed plan is refused; the code claim goes to the checks.
+    // A changed plan is refused, and so is code without a self-review; the code claim goes to the checks.
     await h.writePlan(`${revised}\nOne more idea.\n`);
-    expect(await h.complete("Coded it.")).toContain("the approved plan at docs/rovara/42/plan.md was changed; put it back as approved");
+    const refused = await h.complete("Coded it.");
+    expect(refused).toContain("the approved plan at docs/rovara/42/plan.md was changed; put it back as approved");
+    expect(refused).toContain("review your own change first, and record it at docs/rovara/42/evidence/self-review.md");
     await h.writePlan(revised);
+    await h.selfReview();
     expect(await h.complete("Coded the retry with backoff.")).toContain("Accepted");
     expect(h.label()).toEqual(["rovara:checking"]);
     expect(h.world.posted(ISSUE).at(-1)).toContain("Running the checks.");
@@ -209,11 +219,13 @@ describe("the Quick loop end to end (#356)", () => {
     expect(pull.body).toContain("Closes #42.");
     expect(pull.body).toContain("Approved: the plan by @maya.");
     // The loop committed its checks report as evidence before it published.
-    expect(h.world.loopCommits).toEqual(["docs/rovara/42/evidence/checks.md: chore(rovara): checks evidence for #42"]);
+    expect(h.world.loopCommits).toEqual(["docs/rovara/42/evidence/checks.md, docs/rovara/42/evidence/reviews.md: chore(rovara): evidence for #42"]);
     expect(pull.body).toContain("## Plan");
     expect(pull.body).toContain("- ✅ **tests**");
+    expect(pull.body).toContain("## Reviews\n\n### Code review: passed\n\n### Security review: passed");
     const posted = h.world.posted(ISSUE);
     expect(posted.some((body) => body.includes("The checks passed."))).toBe(true);
+    expect(posted.some((body) => body.includes("The reviews passed."))).toBe(true);
     expect(posted.at(-1)).toContain(`Opened pull request #501: ${pull.url}`);
     expect(await h.store.item(h.world.repo, ISSUE)).toMatchObject({ pullRequest: { number: 501, url: pull.url } });
 
@@ -237,6 +249,7 @@ describe("the Quick loop end to end (#356)", () => {
     await h.complete("Planned.");
     h.world.say(ISSUE, "maya", "/rovara approve");
     await h.daemon.poll();
+    await h.selfReview();
     h.world.pushRefused = true;
     await h.complete("Coded.");
     await h.runOwnSteps();

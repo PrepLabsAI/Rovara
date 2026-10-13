@@ -4,8 +4,8 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ArtifactSchema, type Artifact, type ExitCheck } from "./definitions.js";
-import { ARTIFACT_SECTIONS } from "./instructions.js";
-import { artifactPath } from "./naming.js";
+import { ARTIFACT_SECTIONS, SELF_REVIEW_SECTIONS } from "./instructions.js";
+import { artifactPath, evidencePath } from "./naming.js";
 import { SUMMARY_MAX } from "./runtime.js";
 import type { WorkItemState } from "./state.js";
 
@@ -69,6 +69,15 @@ export async function failedExitChecks(checks: readonly ExitCheck[], facts: Clai
       else {
         const missing = missingSections(text, ARTIFACT_SECTIONS[facts.artifact]);
         if (missing.length > 0) failures.push(`the ${facts.artifact} needs these sections, each with something in it: ${missing.map((section) => `## ${section}`).join(", ")}`);
+      }
+    }
+    if (check === "self-review") {
+      const path = evidencePath(facts.issue, "self-review.md");
+      const text = facts.worktree === undefined ? undefined : await readFile(join(facts.worktree, path), "utf8").catch(() => undefined);
+      if (text === undefined) failures.push(`review your own change first, and record it at ${path}`);
+      else {
+        const missing = missingSections(text, SELF_REVIEW_SECTIONS);
+        if (missing.length > 0) failures.push(`your self-review needs these sections, each with something in it (write "None" where there is nothing): ${missing.map((section) => `## ${section}`).join(", ")}`);
       }
     }
     if (check === "approved-unchanged") {

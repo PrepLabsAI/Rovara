@@ -4,7 +4,8 @@
 **Claude Code**, and drives that work through a loop. It needs no Rovara install and no AWS account: only
 the Rovara CLI, the GitHub CLI (`gh`, signed in), `tmux`, `git` and Claude Code.
 
-> **Status:** **Do**, **Quick** and **Full** are here. Reviews before a human is asked, and per-PR loops, follow
+> **Status:** **Do**, **Quick** and **Full** are here, with reviews before anything is published and feedback on the
+> pull request. Per-PR loops across repositories, and the reviewer loops, follow
 > ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
 
 The idea is inspired by [the-loop](https://github.com/MadaraUchiha-314/the-loop) by Rohith Ramakrishnan:
@@ -36,6 +37,12 @@ checks:             # what the Quick loop runs before it opens a pull request, i
   - name: tests
     run: npm test
     timeoutSeconds: 600   # optional; 600 by default
+reviews:            # the code and security reviews after the checks; see "Reviews" below
+  enabled: true
+  model: opus       # optional; the model the reviewers run on, so the critic can differ from the agent
+  security: true    # false runs the code review only
+  maxRounds: 3      # rounds in a row that still block before a person decides
+  timeoutSeconds: 900
 ```
 
 Comments from anyone else are never read as instructions. Comments the loop posts carry a hidden marker,
@@ -73,12 +80,14 @@ or `rovara loop quick --issue 42 "…"` from the terminal.
 |---|---|---|
 | **Plan** | The agent writes `docs/rovara/<issue>/plan.md` with `## Summary`, `## Changes` and `## Testing`, and changes no code. A plan missing a section is refused, and the agent is told which | `rovara:planning` |
 | **Plan review** | The plan is posted on the issue. A collaborator comments `/rovara approve`, or replies with what to change (`/rovara changes: …` works too). A change request is added to the plan under "Review feedback", and the plan goes back to the agent | `rovara:plan-review` |
-| **Code** | The approval locks the plan. The agent codes it and commits; a claim with a changed plan is refused | `rovara:coding` |
+| **Code** | The approval locks the plan. The agent codes it, commits, and reviews its own change (`evidence/self-review.md`); a claim with a changed plan, or without the self-review, is refused | `rovara:coding` |
 | **Checks** | The loop runs the repository's `checks` in the agent's worktree. A failure goes back to the agent with the end of its output (secrets redacted), and the issue says so | `rovara:checking` |
-| **Publish** | The loop itself, never the agent, pushes `rovara/<issue>` and opens a pull request that closes the issue, with the plan and the checks in its description | `rovara:publishing` |
-| **Pull request open** | A reply on the issue goes back to the agent; the loop runs the checks again and pushes to the same pull request. Merging closes the issue, which ends the loop | `rovara:pr-open` |
+| **Reviews** | A code review and a security review of the change (see [Reviews](#reviews)). A blocking finding goes back to the agent | `rovara:reviewing` |
+| **Review blocked** | After `maxRounds` rounds that still block, or a review that couldn't be run or read, a person decides: `/rovara approve` publishes as it is, a reply goes back to the agent | `rovara:review-blocked` |
+| **Publish** | The loop itself, never the agent, pushes `rovara/<issue>` and opens a pull request that closes the issue, with the plan, the checks and the reviews in its description | `rovara:publishing` |
+| **Pull request open** | A reply on the issue, or on the pull request (see [Feedback on the pull request](#feedback-on-the-pull-request)), goes back to the agent; the loop runs the checks and reviews again and pushes to the same pull request. Merging closes the issue, which ends the loop | `rovara:pr-open` |
 
-**Nothing is pushed before the plan is approved and the checks pass.** A push git refuses (someone else pushed
+**Nothing is pushed before the plan is approved, the checks pass and the reviews pass (or a person accepts them).** A push git refuses (someone else pushed
 to the branch) is said on the issue, and a reply tries again.
 
 ## The Full loop
@@ -105,8 +114,38 @@ naming it. Then code, checks and a pull request, as in Quick. The pull request s
 `/rovara full --skip design <instruction>` (or `--skip requirements`, or both: `--skip requirements,design`). The
 start comment says who declared it, and so does the pull request. The plan can't be skipped; that's Quick.
 
-**Evidence.** Before it publishes, the loop commits the checks report to `docs/rovara/<issue>/evidence/checks.md`,
-so the branch carries what proved it.
+**Evidence.** Before it publishes, the loop commits the checks report and the reviews report to
+`docs/rovara/<issue>/evidence/` (`checks.md`, `reviews.md`), beside the agent's `self-review.md`, so the branch
+carries what proved it.
+
+## Reviews
+
+Quick and Full review a change three times before it's published:
+
+1. **The agent's own review.** Before it says its code is done, the agent reviews the change against the approved
+   documents and writes `docs/rovara/<issue>/evidence/self-review.md` with `## Findings` and `## Fixed` ("None" where
+   there is nothing). A claim without it is refused.
+2. **A code review and a security review**, after the checks pass. Each is Claude Code run headless (`claude -p`) in
+   the agent's worktree, read-only: plan mode, with only file reading and `git diff`, `git log` and `git show`
+   allowed. Each sees the approved plan and the change from the default branch, and answers with findings in
+   Rovara's own reviewer format, the same as Rovara's hosted reviews. Set `reviews.model` to run them on a different
+   model from the agent's.
+3. **The blocking rule.** A finding blocks when the change introduced it, and, for the code review, it isn't
+   advisory (a remark about something the plan asks for, or about test coverage). A security finding is never
+   advisory. What doesn't block is listed in the report as advice, or as already there.
+
+A blocking finding goes back to the agent with the report, and the checks and reviews run again. After `maxRounds`
+rounds in a row that still block, the issue asks a person. A review that couldn't be run (Claude Code isn't signed
+in, it timed out) or whose answer couldn't be read, even when asked once more, never counts as a pass: a person
+decides that too. Set `reviews.enabled: false` to publish without them.
+
+## Feedback on the pull request
+
+Once the loop has opened a pull request, what collaborators say on it reaches the issue's agent, like a reply on
+the issue: comments on the pull request, inline review comments (with the file and line), and the text of a review
+that asks for changes or comments. A `/rovara` command that starts a loop is only a reply there;
+`/rovara stop`, `/rovara approve` and `/rovara changes` work as on the issue. An approving review is acknowledged on the issue; merging closes the issue, which ends the
+loop. As on the issue, nobody else's words are read.
 
 ## Watching and answering the agent
 

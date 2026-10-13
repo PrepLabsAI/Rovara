@@ -6,6 +6,8 @@ import { LOOP_COMMENT_MARKER } from "../../packages/cli/src/loop/naming.js";
 
 export interface FakeComment { id: number; issue: number; author: string; body: string; updated_at: string }
 export interface FakeSession { name: string; cwd: string; claude: string[]; received: string[]; /** What its terminal shows. */ screen: string }
+export interface FakeReviewComment { id: number; pull: number; author: string; body: string; path: string; line: number; updated_at: string }
+export interface FakeReview { id: number; pull: number; author: string; state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED"; body: string; submitted_at: string }
 export interface FakePullRequest { number: number; url: string; head: string; base: string; title: string; body: string }
 
 const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
@@ -35,6 +37,11 @@ export class LoopWorld {
   readonly loopCommits: string[] = [];
   /** When set, the next push is refused (someone else pushed to the branch). */
   pushRefused = false;
+  /** #358: inline review comments and submitted reviews on pull requests. */
+  readonly reviewComments: FakeReviewComment[] = [];
+  readonly reviews: FakeReview[] = [];
+  /** #358: what `git diff <default>...HEAD` shows the reviewers. */
+  diff = "diff --git a/src/retry.ts b/src/retry.ts\n+export const RETRIES = 3;\n";
 
   constructor(readonly repo = "acme/payments", readonly developer = "maya") {}
 
@@ -44,6 +51,22 @@ export class LoopWorld {
     const comment = { id: this.nextId++, issue, author, body, updated_at: new Date(this.clock).toISOString() };
     this.comments.push(comment);
     return comment;
+  }
+
+  /** Someone leaves an inline review comment on a pull request. */
+  reviewComment(pull: number, author: string, body: string, path = "src/retry.ts", line = 12): FakeReviewComment {
+    this.clock += 1_000;
+    const comment = { id: this.nextId++, pull, author, body, path, line, updated_at: new Date(this.clock).toISOString() };
+    this.reviewComments.push(comment);
+    return comment;
+  }
+
+  /** Someone submits a review on a pull request. */
+  review(pull: number, author: string, state: FakeReview["state"], body = ""): FakeReview {
+    this.clock += 1_000;
+    const review = { id: this.nextId++, pull, author, state, body, submitted_at: new Date(this.clock).toISOString() };
+    this.reviews.push(review);
+    return review;
   }
 
   /** What the loop posted on an issue: its comments carry the marker (the developer may comment there too). */
@@ -86,6 +109,17 @@ export class LoopWorld {
       return ok(this.comments.filter((comment) => comment.updated_at >= since).sort((left, right) => left.updated_at.localeCompare(right.updated_at))
         .map((comment) => JSON.stringify({ id: comment.id, issue_url: `https://api.github.com/repos/${this.repo}/issues/${comment.issue}`, author: comment.author, body: comment.body, updated_at: comment.updated_at })).join("\n"));
     }
+    const reviewComments = /^repos\/[^/]+\/[^/]+\/pulls\/comments\?since=([^&]+)/.exec(path);
+    if (reviewComments !== null) {
+      const since = decodeURIComponent(reviewComments[1] ?? "");
+      return ok(this.reviewComments.filter((comment) => comment.updated_at >= since).sort((left, right) => left.updated_at.localeCompare(right.updated_at))
+        .map((comment) => JSON.stringify({ id: comment.id, pull_request_url: `https://api.github.com/repos/${this.repo}/pulls/${comment.pull}`, author: comment.author, body: comment.body, path: comment.path, line: comment.line, updated_at: comment.updated_at })).join("\n"));
+    }
+    const reviews = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/reviews/.exec(path);
+    if (reviews !== null) {
+      return ok(this.reviews.filter((review) => review.pull === Number(reviews[1]))
+        .map((review) => JSON.stringify({ id: review.id, author: review.author, state: review.state, body: review.body, submitted_at: review.submitted_at })).join("\n"));
+    }
     const issue = /^repos\/[^/]+\/[^/]+\/issues\/(\d+)(\/.*)?$/.exec(path);
     if (issue === null) return fail(`unexpected path ${path}`);
     const number = Number(issue[1]);
@@ -107,8 +141,9 @@ export class LoopWorld {
     if (sub === "fetch") return ok();
     // The loop's own evidence commit: something is always staged in this fake.
     if (sub === "add") return ok();
-    if (sub === "diff") return fail("", 1);
-    if (sub === "commit") { this.loopCommits.push(`${args[args.length - 1] ?? ""}: ${args[args.indexOf("-m") + 1] ?? ""}`); return ok(); }
+    // `diff --cached --quiet` after the evidence is added: something is staged. Otherwise the change under review.
+    if (sub === "diff") return args.includes("--cached") ? fail("", 1) : ok(this.diff);
+    if (sub === "commit") { this.loopCommits.push(`${args.slice(args.indexOf("--") + 1).join(", ")}: ${args[args.indexOf("-m") + 1] ?? ""}`); return ok(); }
     if (sub === "push") {
       if (this.pushRefused) { this.pushRefused = false; return fail("! [rejected] (fetch first)"); }
       this.pushes.push(args[args.length - 1] ?? "");

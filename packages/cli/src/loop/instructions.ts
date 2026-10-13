@@ -1,7 +1,7 @@
 // rovara loop (#355, #356, #357): what the agent is told. Rovara's own words for its own loops; the agent learns the
 // loop from its first assignment, and every later message says who it is from.
 import type { Artifact, LoopDefinition } from "./definitions.js";
-import { LOOP_MCP_SERVER, artifactPath, itemBranch } from "./naming.js";
+import { LOOP_MCP_SERVER, artifactPath, evidencePath as evidencePathOf, itemBranch } from "./naming.js";
 import type { WorkItemState } from "./state.js";
 
 /**
@@ -50,8 +50,8 @@ export function firstAssignment(state: WorkItemState, loop: LoopDefinition): str
     return [...common(state), "- This is the Do loop: it has no gates and does not publish anything.", "", `Instruction from @${state.startedBy}:`, state.instruction].join("\n");
   }
   const outline = loop.name === "full"
-    ? `This is the Full loop: requirements, then a design, then a plan, each approved by a person before the next is written; then you code it, and the loop runs the checks and opens a pull request.${(state.skipped ?? []).length === 0 ? "" : ` These phases were declared away, so there is no document for them: ${(state.skipped ?? []).join(", ")}.`}`
-    : "This is the Quick loop: plan, then a person approves the plan, then you code it, then the loop runs the checks and opens a pull request.";
+    ? `This is the Full loop: requirements, then a design, then a plan, each approved by a person before the next is written; then you code it and review your own change, and the loop runs the checks and a code and a security review, then opens a pull request.${(state.skipped ?? []).length === 0 ? "" : ` These phases were declared away, so there is no document for them: ${(state.skipped ?? []).join(", ")}.`}`
+    : "This is the Quick loop: plan, then a person approves the plan, then you code it and review your own change, then the loop runs the checks and a code and a security review, then opens a pull request.";
   return [
     ...common(state),
     "",
@@ -72,12 +72,22 @@ export function changesAssignment(artifact: Artifact, author: string, text: stri
   return [`@${author} asked for changes to the ${artifact} (they are also added to it, under "Review feedback"):`, text, "", `Update ${artifact === "plan" ? "the plan" : `the ${artifact}`}, keeping its sections, commit it, then call loop_complete again. Still no code changes.`].join("\n");
 }
 
-export function codeAssignment(approver: string, approved: Artifact): string {
+/** #358: what the agent records before it says its code is done, in its own words. */
+export const SELF_REVIEW_SECTIONS = ["Findings", "Fixed"] as const;
+
+const selfReviewLine = (issue: number) => `- Before you call loop_complete, review your own change against the approved documents. Write what you found to ${evidencePathOf(issue, "self-review.md")}, with \`## Findings\` and \`## Fixed\` (write "None" where there is nothing), and commit it. A claim without it is refused. Then the loop runs the checks and a code and a security review before anything is published.`;
+
+export function codeAssignment(approver: string, approved: Artifact, issue: number): string {
   return [
     `@${approver} approved the ${approved}. Your step now: implement it.`,
     "- Do not edit any approved document: they are locked, and a claim with a changed one is refused.",
-    "- Commit as you go. Do not push and do not open a pull request: when you call loop_complete, the loop runs the repository's checks and opens the pull request itself.",
+    "- Commit as you go. Do not push and do not open a pull request: the loop opens the pull request itself.",
+    selfReviewLine(issue),
   ].join("\n");
+}
+
+export function reviewsFailedAssignment(detail: string, issue: number): string {
+  return ["The loop's reviews found problems that block the change:", "", detail, "", "Fix the blocking findings (not the reviews' advice), commit, update your self-review, then call loop_complete again. The checks and reviews run again.", selfReviewLine(issue)].join("\n");
 }
 
 export function checksFailedAssignment(detail: string): string {
