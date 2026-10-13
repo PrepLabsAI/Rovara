@@ -13,7 +13,7 @@ import { LoopDaemon } from "../../packages/cli/src/loop/daemon.js";
 import { artifactDigest, failedExitChecks, missingSections } from "../../packages/cli/src/loop/exit-checks.js";
 import { ARTIFACT_SECTIONS } from "../../packages/cli/src/loop/instructions.js";
 import { GitHub } from "../../packages/cli/src/loop/github.js";
-import { ClaudeCodeHarness } from "../../packages/cli/src/loop/harness.js";
+import { AgentHarness } from "../../packages/cli/src/loop/harness.js";
 import { createLoopMcpServer } from "../../packages/cli/src/loop/mcp.js";
 import { LOOP_COMMENT_MARKER, evidencePath } from "../../packages/cli/src/loop/naming.js";
 import { LoopStore } from "../../packages/cli/src/loop/state.js";
@@ -46,7 +46,7 @@ async function setUp(options: { checks?: boolean[] } = {}) {
     return passed ? { code: 0, timedOut: false, output: "all good" } : { code: 1, timedOut: false, output: "FAIL client.test.ts > retries on 503\nexpected 2 calls, got 1" };
   };
   const daemon = new LoopDaemon({
-    store, exec: world.exec, github: new GitHub(world.exec), harness: new ClaudeCodeHarness(world.exec),
+    store, exec: world.exec, github: new GitHub(world.exec), harness: new AgentHarness(world.exec),
     cliCommand: ["/usr/local/bin/node", "/opt/rovara/cli.js"], now: () => new Date(world.clock), log: () => undefined, checkRun,
     reviewerRun: async () => ({ ok: true, text: NO_FINDINGS }),
   });

@@ -11,7 +11,7 @@ import type { CheckRun } from "../../packages/cli/src/loop/check-runner.js";
 import { LoopDaemon } from "../../packages/cli/src/loop/daemon.js";
 import type { Artifact } from "../../packages/cli/src/loop/definitions.js";
 import { GitHub } from "../../packages/cli/src/loop/github.js";
-import { ClaudeCodeHarness } from "../../packages/cli/src/loop/harness.js";
+import { AgentHarness } from "../../packages/cli/src/loop/harness.js";
 import { createLoopMcpServer } from "../../packages/cli/src/loop/mcp.js";
 import { artifactPath, docsDir, evidencePath, tmuxSessionName } from "../../packages/cli/src/loop/naming.js";
 import type { ReviewerInput, ReviewerRun } from "../../packages/cli/src/loop/reviews.js";
@@ -28,6 +28,8 @@ export const SELF_REVIEW = ["# Self-review", "", "## Findings", "- The retry cou
 
 export async function createLoopHarness(dirs: string[], options: {
   checks?: boolean[]; collaborators?: string[]; reviews?: string[]; critic?: ReviewerAnswer[]; security?: ReviewerAnswer[];
+  /** More lines of .rovara/loop.yaml (#359: `harness:` to run on Codex). */
+  config?: string[];
   /** #358: other repositories, registered on this computer, each with its own checkout, collaborators and checks. */
   others?: Array<{ repo: string; collaborators?: string[]; reviews?: string[] }>;
 } = {}) {
@@ -36,7 +38,7 @@ export async function createLoopHarness(dirs: string[], options: {
   const checkout = join(root, "checkout");
   await mkdir(join(checkout, ".rovara"), { recursive: true });
   await writeFile(join(checkout, ".rovara", "loop.yaml"), [
-    "version: 1", `collaborators: [${(options.collaborators ?? ["maya", "sam"]).join(", ")}]`, "checks:", "  - name: tests", "    run: npm test", ...(options.reviews ?? []), "",
+    "version: 1", `collaborators: [${(options.collaborators ?? ["maya", "sam"]).join(", ")}]`, "checks:", "  - name: tests", "    run: npm test", ...(options.reviews ?? []), ...(options.config ?? []), "",
   ].join("\n"));
   const world = new LoopWorld();
   world.titles.set(LOOP_ISSUE, "Retry payments on 503");
@@ -70,7 +72,7 @@ export async function createLoopHarness(dirs: string[], options: {
     return typeof answer === "string" ? { ok: true, text: answer } : { ok: false, reason: answer.failed };
   };
   const daemon = new LoopDaemon({
-    store, exec, github: new GitHub(exec), harness: new ClaudeCodeHarness(exec),
+    store, exec, github: new GitHub(exec), harness: new AgentHarness(exec),
     cliCommand: ["/usr/local/bin/node", "/opt/rovara/cli.js"], now: () => new Date(world.clock), log: () => undefined, checkRun, reviewerRun,
   });
   await daemon.poll();

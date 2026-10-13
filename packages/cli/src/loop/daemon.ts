@@ -16,11 +16,11 @@ import { loopNamed, stepOf, type Artifact, type LoopDefinition } from "./definit
 import { run, type Exec } from "./exec.js";
 import { artifactDigest, failedExitChecks, readArtifact, splitTargets } from "./exit-checks.js";
 import type { GitHub } from "./github.js";
-import type { ClaudeCodeHarness } from "./harness.js";
+import type { AgentHarness } from "./harness.js";
 import { RESUMED_ASSIGNMENT, pullAssignment } from "./instructions.js";
 import { LOOP_COMMENT_MARKER, LOOP_MCP_SERVER, artifactPath, docsDir, elsewhere, evidencePath, itemBranch, tmuxSessionName } from "./naming.js";
 import { publish } from "./publish.js";
-import { claudeReviewerRun, reviewsReport, runReviews, type ReviewerRun } from "./reviews.js";
+import { agentReviewerRun, reviewsReport, runReviews, type ReviewerRun } from "./reviews.js";
 import { decide, type Effect, type LoopEvent } from "./runtime.js";
 import type { LoopStore, RegisteredRepo, WorkItemState } from "./state.js";
 import { ensureWorktree } from "./worktree.js";
@@ -43,14 +43,14 @@ export interface DaemonDeps {
   store: LoopStore;
   exec: Exec;
   github: GitHub;
-  harness: ClaudeCodeHarness;
+  harness: AgentHarness;
   /** How to run this CLI again, for the agent's MCP server: [node, path to the CLI]. */
   cliCommand: readonly string[];
   now: () => Date;
   log: (line: string) => void;
   /** How the repository's checks run; the shell by default. */
   checkRun?: CheckRun;
-  /** How a reviewer runs (#358); Claude Code, headless and read-only, by default. */
+  /** How a reviewer runs (#358): the repository's chosen agent (#359), headless and read-only, by default. */
   reviewerRun?: ReviewerRun;
 }
 
@@ -377,7 +377,7 @@ export class LoopDaemon {
     }
     const results = await runReviews({
       exec: this.deps.exec, worktree: item.worktree.path, defaultBranch: await this.deps.github.defaultBranch(item.target ?? item.repo),
-      plan: await this.planOf(item), config: config.reviews, run: this.deps.reviewerRun ?? claudeReviewerRun,
+      plan: await this.planOf(item), config: config.reviews, run: this.deps.reviewerRun ?? agentReviewerRun,
     });
     const report = reviewsReport(results);
     const current = await this.deps.store.item(item.repo, item.issue, item.target);
@@ -588,18 +588,32 @@ export class LoopDaemon {
     const config = await readLoopConfig(where.path);
     const worktree = state.worktree ?? { path: join(this.deps.store.itemDir(state.repo, state.issue, state.target), "worktree"), branch: itemBranch(state.issue, state.repo, state.target) };
     await ensureWorktree(this.deps.exec, where.path, worktree.path, worktree.branch, await this.deps.github.defaultBranch(state.target ?? state.repo));
-    const session = state.session ?? { harness: "claude-code" as const, tmux: tmuxSessionName(state.repo, state.issue, state.target), id: randomUUID() };
+    // A session keeps the agent it started with, so it can be resumed; a new one uses the repository's (#359).
+    const harness = state.session?.harness ?? config.harness.name;
+    const session = state.session ?? { harness, tmux: tmuxSessionName(state.repo, state.issue, state.target), ...(harness === "claude-code" ? { id: randomUUID() } : {}) };
     const sessionDir = this.deps.store.sessionDir(state.repo, state.issue, state.target);
     await mkdir(sessionDir, { recursive: true, mode: 0o700 });
-    const mcpConfigPath = join(sessionDir, "mcp.json");
+    const configPath = join(sessionDir, "mcp.json");
     const [command = process.execPath, ...cliArgs] = this.deps.cliCommand;
-    await writeFile(mcpConfigPath, `${JSON.stringify({ mcpServers: { [LOOP_MCP_SERVER]: {
-      command, args: [...cliArgs, "loop", "mcp", "--repo", state.repo, "--issue", String(state.issue), ...(state.target === undefined ? [] : ["--target", state.target])],
-    } } }, null, 2)}\n`, { mode: 0o600 });
-    await this.deps.harness.start({ tmux: session.tmux, id: session.id, cwd: worktree.path, mcpConfigPath, args: config.harness.args, prompt, resume });
+    const mcpArgs = [...cliArgs, "loop", "mcp", "--repo", state.repo, "--issue", String(state.issue), ...(state.target === undefined ? [] : ["--target", state.target])];
+    await writeFile(configPath, `${JSON.stringify({ mcpServers: { [LOOP_MCP_SERVER]: { command, args: mcpArgs } } }, null, 2)}\n`, { mode: 0o600 });
+    // Codex's sandbox lets it write its worktree; a worktree's commits go to the checkout's git directory, so that too.
+    const writable = harness === "codex" ? await this.gitDirectory(worktree.path) : [];
+    await this.deps.harness.start({
+      harness, tmux: session.tmux, id: session.id, cwd: worktree.path, mcp: { command, args: mcpArgs, configPath }, writable,
+      // Arguments are the repository's harness's; a session that keeps another agent gets none.
+      args: harness === config.harness.name ? config.harness.args : [], prompt, resume,
+    });
     const next: WorkItemState = { ...state, worktree, session };
     await this.deps.store.saveItem(next);
     return next;
+  }
+
+  /** The git directory a worktree commits to (the checkout's .git), or none when git cannot say. */
+  private async gitDirectory(worktree: string): Promise<string[]> {
+    const found = await this.deps.exec("git", ["-C", worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    const dir = found.stdout.trim();
+    return found.code === 0 && dir.startsWith("/") ? [dir] : [];
   }
 
   private async writeVerdict(item: { repo: string; issue: number; target?: string | undefined }, claimId: string, verdict: z.infer<typeof VerdictSchema>): Promise<void> {
