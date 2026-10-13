@@ -30,6 +30,18 @@ function nativeProjectRoot(path: string, platform: "android" | "ios"): string | 
   }
   return [...prefix, platform, ...rest.slice(0, -1)].join("/") || platform;
 }
+function componentDepth(path: string): number {
+  return path === "." ? 0 : path.split("/").filter(Boolean).length;
+}
+function nativeDesktopRoot(path: string): { root: string; os: "windows" | "macos" | "linux" } | undefined {
+  const xcode = /^(.*?\.xcodeproj)(?:\/|$)/i.exec(path);
+  if (xcode && !/(^|\/)ios\//i.test(path)) return { root: xcode[1]!, os: "macos" };
+  const workspace = /^(.*?\.xcworkspace)(?:\/|$)/i.exec(path);
+  if (workspace && !/(^|\/)ios\//i.test(path)) return { root: workspace[1]!, os: "macos" };
+  if (/\.csproj$|\.sln$/i.test(path)) return { root: path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".", os: "windows" };
+  if (/(?:^|\/)linux\/(?:CMakeLists\.txt|meson\.build)$/i.test(path)) return { root: path.slice(0, path.lastIndexOf("/")), os: "linux" };
+  return undefined;
+}
 function iosBundleIdentifier(path: string, text: string): string | undefined {
   const raw = /Info\.plist$/i.test(path)
     ? /<key>\s*CFBundleIdentifier\s*<\/key>\s*<string>\s*([^<\s][^<]*?)\s*<\/string>/i.exec(text)?.[1]
@@ -92,7 +104,7 @@ export function verifyE2ESetupProposal(proposal: E2ESetupProposal, snapshot: Ver
 /** Discover a bounded app graph from an immutable source snapshot. Discovery parses data only; it never imports or executes candidate code. */
 export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expectedCandidate: CandidateManifest): { inspection: E2ERepositoryInspection; portableOperations: PortableOperation[] } {
   const sources = verifySnapshot(snapshot, expectedCandidate);
-  const refs = [...sources.values()].filter((source) => !runnerUnsafe.test(source.path)).map(({ path, sha256 }) => ({ path, sha256 }));
+  const refs = [...sources.values()].filter((source) => !runnerUnsafe.test(source.path)).map(({ path, sha256 }) => ({ path, sha256 })).sort((a, b) => a.path.localeCompare(b.path));
   const applications: E2ERepositoryInspection["applications"] = [];
   const proposedTargets: E2ERepositoryInspection["proposedTargets"] = [];
   const dependencyEdges: E2ERepositoryInspection["dependencyEdges"] = [];
@@ -105,7 +117,7 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
   const manifests = [...sources.values()].filter((source) => /(^|\/)package\.json$/.test(source.path) && !runnerUnsafe.test(source.path));
   const manifestDirs = manifests.map((manifest) => manifest.path.includes("/") ? manifest.path.slice(0, manifest.path.lastIndexOf("/")) : ".");
   const deepestPackageDir = (path: string) => manifestDirs.filter((dir) => dir === "." || path.startsWith(dir + "/"))
-    .sort((a, b) => b.split("/").length - a.split("/").length)[0];
+    .sort((a, b) => componentDepth(b) - componentDepth(a) || a.localeCompare(b))[0];
   const declaredNames = new Map<string, number>();
   for (const manifest of manifests) {
     try {
@@ -113,7 +125,12 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
       if (typeof value.name === "string" && /^[a-zA-Z0-9_.@/-]{1,120}$/.test(value.name)) declaredNames.set(value.name, (declaredNames.get(value.name) ?? 0) + 1);
     } catch { /* Invalid manifests do not contribute an application identity. */ }
   }
-  for (const manifest of manifests.slice(0, 32)) {
+  const orderedManifests = [...manifests].sort((a, b) => {
+    const aDir = a.path.includes("/") ? a.path.slice(0, a.path.lastIndexOf("/")) : ".";
+    const bDir = b.path.includes("/") ? b.path.slice(0, b.path.lastIndexOf("/")) : ".";
+    return componentDepth(aDir) - componentDepth(bDir) || aDir.localeCompare(bDir) || a.path.localeCompare(b.path);
+  });
+  for (const manifest of orderedManifests.slice(0, 32)) {
     let data: unknown;
     try { data = JSON.parse(Buffer.from(manifest.bytes).toString("utf8")); } catch { continue; }
     if (data === null || typeof data !== "object" || Array.isArray(data)) continue;
@@ -127,15 +144,19 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
     const electron = "electron" in deps;
     const api = ["express", "fastify", "@hono/node-server", "koa"].some((name) => name in deps) || /(^|\/)(api|server)(\/|$)/i.test(relDir);
     const kind = api ? "api" : mobile ? "mobile" : electron ? "desktop" : "web";
-    const packageNativeFiles = [...sources.keys()].filter((path) => (relDir === "." || path.startsWith(relDir + "/")) && deepestPackageDir(path) === relDir);
+    const packageNativeFiles = [...sources.keys()].filter((path) => (relDir === "." || path.startsWith(relDir + "/")) && deepestPackageDir(path) === relDir).sort();
     const nativeProjectCounts = new Map<string, number>();
     for (const platform of ["android", "ios"] as const) {
       const identities = packageNativeFiles.filter((path) => platform === "android" ? /AndroidManifest\.xml$/.test(path) : /Info\.plist$/.test(path));
       nativeProjectCounts.set(platform, new Set(identities.map((path) => nativeProjectRoot(path, platform))).size);
     }
-    const appFiles = packageNativeFiles.filter((path) => kind === "mobile"
-      ? !/(^|\/)(?:android|ios)\//i.test(path) || (/(^|\/)android\//i.test(path) ? nativeProjectCounts.get("android") === 1 : nativeProjectCounts.get("ios") === 1)
-      : !/(^|\/)(?:android|ios)\//i.test(path));
+    const appFiles = packageNativeFiles.filter((path) => {
+      if (kind === "mobile") return !/(^|\/)(?:android|ios)\//i.test(path)
+        || (/(^|\/)android\//i.test(path) ? nativeProjectCounts.get("android") === 1 : nativeProjectCounts.get("ios") === 1);
+      if (/(^|\/)(?:android|ios)\//i.test(path)) return false;
+      if (kind === "web" || kind === "api") return !/(?:\.csproj$|\.sln$|\.xcodeproj\/project\.pbxproj$|\.xcworkspace\/contents\.xcworkspacedata$|(?:^|\/)linux\/(?:CMakeLists\.txt|meson\.build)$)/i.test(path);
+      return true;
+    });
     const sourcePaths = [manifest.path, ...appFiles.filter((path) => /(?:openapi|swagger|schema|routes?|controllers?|AndroidManifest\.xml|Info\.plist|project\.pbxproj)/i.test(path))].slice(0, 128);
     const packageDependencies = Object.keys(deps ?? {});
     const ops: PortableOperation[] = [];
@@ -220,7 +241,7 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
     addApplication(appId, "api", [source.path], [{ targetId, applicationId: appId, runtimeProfileId: "api-phase-unavailable", accountProfileId: "synthetic", kind: "api", protocol: "http", originRef: "app-origin" }]);
     missingInputs.push({ inputId: "service-recipe-" + (applications.length), targetIds: [targetId], kind: "runtime", disposition: "mock-substitutable", reason: "An API schema was found without a source-backed service launch recipe", sourcePaths: [source.path] });
   }
-  const nativeMobile = [...sources.values()].filter((source) => /(^|\/)android\/.*AndroidManifest\.xml$|(^|\/)ios\/.*(?:Info\.plist|project\.pbxproj|Package\.swift)$/.test(source.path));
+  const nativeMobile = [...sources.values()].filter((source) => /(^|\/)android\/.*(?:AndroidManifest\.xml|build\.gradle(?:\.kts)?)$|(^|\/)ios\/.*(?:Info\.plist|project\.pbxproj|Package\.swift)$/.test(source.path));
   const nativeGroups = new Map<string, { platform: "android" | "ios"; root: string; identitySource: string; sourcePaths: string[] }>();
   for (const source of nativeMobile) {
     const platform: "android" | "ios" = /(^|\/)android\//.test(source.path) ? "android" : "ios";
@@ -238,7 +259,7 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
     const identityText = Buffer.from(sources.get(identitySource)!.bytes).toString("utf8");
     const nativeAppId = platform === "android" ? /\bpackage\s*=\s*["']([^"']+)["']/.exec(identityText)?.[1] : iosBundleIdentifier(identitySource, identityText);
     const appId = "native-mobile-" + createHash("sha256").update(`${platform}\0${root}`).digest("hex").slice(0, 12);
-    const appSources = [...sources.keys()].filter((path) => path === root || path.startsWith(root + "/")).slice(0, 128);
+    const appSources = [...sources.keys()].filter((path) => path === root || path.startsWith(root + "/")).sort().slice(0, 128);
     const platformName = platform === "android" ? "Android" : "iOS";
     if (!nativeAppId) {
       addApplication(appId, "mobile", appSources.length ? appSources : [identitySource], []);
@@ -262,17 +283,25 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
     const actualTargets = proposedTargets.filter((target) => target.kind === "mobile" && entries.some((entry) => target.targetId.startsWith(`${platform}-`) && target.os === platform && applications.find((application) => application.applicationId === target.applicationId)?.sourcePaths.includes(entry.sourcePath)));
     missingInputs.push({ inputId: `${platform}-project-selection-${createHash("sha256").update(owner).digest("hex").slice(0, 10)}`, targetIds: actualTargets.map((target) => target.targetId), kind: "target-selection", disposition: "blocking", reason: `Multiple ${platform} project identities are owned by this package; select the intended app`, sourcePaths: entries.map((entry) => entry.sourcePath).sort() });
   }
-  const nativeDesktop = [...sources.values()].filter((source) => /(?:\.csproj$|\.sln$|\.xcodeproj\/project\.pbxproj$|\.xcworkspace\/contents\.xcworkspacedata$|(?:^|\/)linux\/(?:CMakeLists\.txt|meson\.build)$)/i.test(source.path));
+  const nativeDesktop = [...sources.values()].filter((source) => /(?:\.csproj$|\.sln$|\.xcodeproj\/project\.pbxproj$|\.xcworkspace\/contents\.xcworkspacedata$|(?:^|\/)linux\/(?:CMakeLists\.txt|meson\.build)$)/i.test(source.path)).sort((a, b) => a.path.localeCompare(b.path));
   const seenNativeApps = new Set<string>();
   for (const source of nativeDesktop) {
-    const appDir = source.path.includes("/") ? source.path.slice(0, source.path.lastIndexOf("/")) : ".";
-    const key = appDir.replace(/\/(?:linux|[^/]+\.xcodeproj|[^/]+\.xcworkspace)$/, "");
-    if (seenNativeApps.has(key) || applications.some((application) => application.sourcePaths.includes(source.path))) continue;
+    const project = nativeDesktopRoot(source.path);
+    if (!project) continue;
+    const { root, os } = project;
+    const key = `${os}\0${root}`;
+    if (seenNativeApps.has(key)) continue;
+    const packageOwner = deepestPackageDir(source.path);
+    const packageManifest = packageOwner === undefined ? undefined : packageOwner === "." ? "package.json" : `${packageOwner}/package.json`;
+    const mobileOwner = applications.some((application) => application.kind === "mobile"
+      && packageManifest !== undefined && application.sourcePaths.includes(packageManifest)
+      && application.sourcePaths.includes(source.path)
+      && /(^|\/)ios\//i.test(source.path));
+    if (mobileOwner) continue;
     seenNativeApps.add(key);
     const appId = "native-desktop-" + createHash("sha256").update(key).digest("hex").slice(0, 12);
-    const targetId = "desktop-native-" + (proposedTargets.length + 1);
-    const os = /\.csproj$|\.sln$/i.test(source.path) ? "windows" : /\.xcodeproj\/|\.xcworkspace\//i.test(source.path) ? "macos" : "linux";
-    const appSources = [...sources.keys()].filter((path) => path === source.path || path.startsWith(key + "/"));
+    const targetId = "desktop-native-" + createHash("sha256").update(key).digest("hex").slice(0, 10);
+    const appSources = [...sources.keys()].filter((path) => path === root || path.startsWith(root + "/")).sort();
     addApplication(appId, "desktop", appSources.slice(0, 128), [{ targetId, applicationId: appId, runtimeProfileId: `native-${os}-phase-unavailable`, accountProfileId: "synthetic", kind: "desktop", os, driver: "native", appId }]);
     missingInputs.push({ inputId: "native-runtime-" + appId, targetIds: [targetId], kind: "runtime", disposition: "mock-substitutable", reason: `The ${os} native build and launch profile is unavailable in this phase`, sourcePaths: [source.path] });
   }
@@ -285,6 +314,7 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
   proposedTargets.sort((a, b) => kindOrder[a.kind]! - kindOrder[b.kind]! || a.targetId.localeCompare(b.targetId));
   dependencyEdges.sort((a, b) => canonicalJson([a.fromApplicationId, a.toComponentId, a.contractRef]).localeCompare(canonicalJson([b.fromApplicationId, b.toComponentId, b.contractRef])));
   missingInputs.sort((a, b) => a.inputId.localeCompare(b.inputId));
+  portableOperations.sort((a, b) => a.applicationId.localeCompare(b.applicationId) || a.exportName.localeCompare(b.exportName));
   const inspection = E2ERepositoryInspectionSchema.parse({ candidateDigest: snapshot.candidate.digest, sources: refs, applications, proposedTargets, dependencyEdges, proposedScenarios: [], missingInputs });
   return { inspection, portableOperations };
 }
