@@ -29,6 +29,8 @@ export class LoopWorld {
   readonly pushes: string[] = [];
   readonly pullRequests: FakePullRequest[] = [];
   readonly titles = new Map<number, string>();
+  /** The default branch GitHub names; the clone's origin/HEAD is never asked. */
+  defaultBranch = "main";
   /** When set, the next push is refused (someone else pushed to the branch). */
   pushRefused = false;
 
@@ -58,6 +60,7 @@ export class LoopWorld {
   private gh(args: string[], input: string): ExecResult {
     const [first, second] = args;
     if (first === "api" && second === "user") return ok(`${this.developer}\n`);
+    if (first === "api" && second === `repos/${this.repo}` && args.includes(".default_branch")) return ok(`${this.defaultBranch}\n`);
     if (first === "repo" && second === "view") return ok(`${this.repo}\n`);
     if (first === "label" && second === "create") { this.labelsCreated.push(args[2] ?? ""); return ok(); }
     if (first === "pr" && second === "list") {
@@ -105,8 +108,9 @@ export class LoopWorld {
       this.pushes.push(args[args.length - 1] ?? "");
       return ok();
     }
-    if (sub === "symbolic-ref") return ok("origin/main\n");
-    if (sub === "rev-parse") return fail("", 1);
+    if (sub === "symbolic-ref") return fail("origin/HEAD is not asked any more", 1);
+    // origin has the default branch; no local branch exists yet.
+    if (sub === "rev-parse") return args.includes(`refs/remotes/origin/${this.defaultBranch}`) ? ok("abc123\n") : fail("", 1);
     if (sub === "worktree" && args[3] === "add") {
       const dir = args[4] === "-b" ? args[6] : args[4];
       await mkdir(dir ?? "", { recursive: true });
