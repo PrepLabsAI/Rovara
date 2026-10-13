@@ -9,7 +9,7 @@ export type E2EImmutableCompilationContext = Readonly<{
   executionPlan: E2EExecutionPlan;
   group: E2EExecutionPlan["groups"][number];
 }>;
-export type E2ECompiledSuite = Readonly<{ bundle: E2EScenarioBundle; files: ReadonlyMap<string, string>; inventory: E2ECompiledInventory; expectedConfigDigest: string; expectedCases: readonly E2EExpectedCase[]; caseBindings: ReadonlyMap<string, { compilerCaseIdentity: string; registrationKey: string; candidateResponseScope: string; requestProtocol: string; operationId: string; accountProfileId: string; requestedTargetId: string; packageExportSubpath: string; moduleSpecifier: string; callableSelector: E2EOperationRegistration["callableSelector"]; descriptorDigest: string }>; selectionPacketPath: string }>;
+export type E2ECompiledSuite = Readonly<{ bundle: E2EScenarioBundle; files: ReadonlyMap<string, string>; inventory: E2ECompiledInventory; expectedConfigDigest: string; expectedCases: readonly E2EExpectedCase[]; hostRequestPayloads: ReadonlyMap<string, unknown>; caseBindings: ReadonlyMap<string, { compilerCaseIdentity: string; registrationKey: string; candidateResponseScope: string; requestProtocol: string; operationId: string; accountProfileId: string; requestedTargetId: string; packageExportSubpath: string; moduleSpecifier: string; callableSelector: E2EOperationRegistration["callableSelector"]; descriptorDigest: string }>; selectionPacketPath: string }>;
 
 export function compileE2EScenarios(bundleInput: E2EScenarioBundle, effectiveTargetsInput: E2EExecutionPlan["effectiveTargets"], groupInput: E2EExecutionPlan["groups"][number], contextInput: E2EImmutableCompilationContext): E2ECompiledSuite {
   const bundle = E2EScenarioBundleSchema.parse(copyBoundedE2EJsonData(bundleInput, { maxBytes: 262_144, maxDepth: 64 }));
@@ -65,7 +65,7 @@ export function compileE2EScenarios(bundleInput: E2EScenarioBundle, effectiveTar
   const ids = new Set(assignedGroup.expectedCases.map((item) => item.scenarioId));
   const scenarios = bundle.scenarios.filter((scenario) => ids.has(scenario.scenarioId));
   const emitted = emitE2ECompilationFiles({ expectedCases: assignedGroup.expectedCases, scenarios, scenarioRegistrations: binding.scenarioRegistrations ?? [], group: assignedGroup, plan: derivedPlan, bundleDigest: bundle.bundleDigest, registrations: binding.operations, runTimeoutMs: selection.policy.limits.runTimeoutMs, caseTimeoutMs: selection.policy.limits.caseTimeoutMs });
-  return Object.freeze({ bundle, files: emitted.files, inventory: emitted.inventory, expectedConfigDigest: emitted.expectedConfigDigest, expectedCases: Object.freeze([...assignedGroup.expectedCases]), caseBindings: emitted.caseBindings, selectionPacketPath: ".agentx/e2e/selection-packet.json" });
+  return Object.freeze({ bundle, files: emitted.files, inventory: emitted.inventory, expectedConfigDigest: emitted.expectedConfigDigest, expectedCases: Object.freeze([...assignedGroup.expectedCases]), hostRequestPayloads: emitted.hostRequestPayloads, caseBindings: emitted.caseBindings, selectionPacketPath: ".agentx/e2e/selection-packet.json" });
 }
 
 function copyRecord(value: unknown, allowed: readonly string[], label: string): Record<string, unknown> {

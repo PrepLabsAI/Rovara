@@ -27,4 +27,9 @@ describe("complete shared E2E view", () => {
     const allowedPhase = buildE2ESharedView({ plan: null, currentRound: null, results: [], setup: { status: "needs-input", selectedTargetIds: [], executionPlanDigest: null, blockingInputIds: ["auth"], mockSubstitutableInputIds: [] }, actor: "owner", control: { policyPresent: true, workflowPhase: "setup", ownerActionProposals: ["review-setup"] } });
     expect(allowedPhase.actions).toEqual(["review-setup"]);
   });
+
+  it("deduplicates bounded owner proposals before projecting actions", () => {
+    const view = buildE2ESharedView({ plan: null, currentRound: null, results: [], setup: { status: "needs-input", selectedTargetIds: [], executionPlanDigest: null, blockingInputIds: ["auth"], mockSubstitutableInputIds: [] }, actor: "owner", control: { policyPresent: true, workflowPhase: "setup", ownerActionProposals: ["review-setup", "review-setup", "review-setup", "review-setup"] } });
+    expect(view.actions).toEqual(["review-setup"]);
+  });
 });

@@ -3,13 +3,14 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { list } from "e2e/runner";
-import { createCandidateManifest, e2eScenarioBundleDigest, e2EDefaultSyntheticAccountDefinition, inspectE2EPortableSource, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, e2EPortableApprovalBindingDigest, copyBoundedE2ESourceBytes, copyBoundedE2ETreePaths, e2ePortableRegistrationKey, resolveE2EPortableRegistration, type E2EPolicy, type E2EPortableApprovalBinding, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
+import { canonicalJson, createCandidateManifest, e2eScenarioBundleDigest, e2EDefaultSyntheticAccountDefinition, E2ERoundSchema, E2ERunBindingSchema, inspectE2EPortableSource, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, e2EPortableApprovalBindingDigest, copyBoundedE2ESourceBytes, copyBoundedE2ETreePaths, e2ePortableRegistrationKey, resolveE2EPortableRegistration, type E2EPolicy, type E2EPortableApprovalBinding, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
 import { compileE2EScenarios, type E2EImmutableCompilationContext } from "../../packages/verifier/src/scenarios.js";
 import { e2ePortableOperationDescriptorDigest } from "../../packages/verifier/src/templates.js";
 import { compareE2EPublicList, type E2ESelectionPacket } from "../../packages/verifier/src/selection.js";
 import { verifyE2ECompiledFileInventory } from "../../packages/verifier/src/identity.js";
+import { createE2ECollectionOracleFromCompiledSuite } from "../../packages/verifier/src/result-adapter.js";
 
 const hash = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const candidate = createCandidateManifest([{ repositoryId: "acme/shop", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
@@ -132,6 +133,18 @@ describe("trusted E2E compiler", () => {
     const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput: valid.selectionInput, executionPlan: plan, group });
     expect(compiled.expectedCases).toHaveLength(1);
     expect(compiled.expectedCases[0]?.scenarioId).toBe("s");
+    const emittedPayload = compiled.hostRequestPayloads.get(compiled.expectedCases[0]!.caseId);
+    expect(emittedPayload).toBeDefined();
+    expect(compiled.files.get(".agentx/e2e/generated-contract.test.ts")).toContain(JSON.stringify(emittedPayload));
+    expect(emittedPayload).toMatchObject({ expectedExportNames: null });
+    const selectionPacket = JSON.parse(compiled.files.get(compiled.selectionPacketPath)!) as E2ESelectionPacket;
+    const runBinding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId: "a0000000-0000-4000-8000-000000000001", roundId: "a0000000-0000-4000-8000-000000000010", taskId: "task-1", operationId: "operation-1", operationFence: 1, workflowRevision: 1, groupId: group.groupId, executionPlanDigest: plan.digest, executionMode: group.mode, mockManifestDigest: group.mockManifestDigest, authorizationRevision: "auth-1", candidateDigest: plan.candidateDigest, planDigest: plan.planDigest, policyDigest: hash("policy"), bundleDigest: compiled.bundle.bundleDigest, appBuildDigest: hash("build"), environmentDigest: hash("environment"), runtimeManifestDigest: hash("runtime"), modelRouteRevision: null, expectedCases: compiled.expectedCases, admittedAt: "2026-10-13T12:00:00.000Z", deadlineAt: "2026-10-13T12:01:00.000Z" });
+    const round = E2ERoundSchema.parse({ schemaVersion: 1, roundId: runBinding.roundId, taskId: runBinding.taskId, operationId: runBinding.operationId, operationFence: runBinding.operationFence, workflowRevision: runBinding.workflowRevision, executionPlanDigest: plan.digest, admittedAt: runBinding.admittedAt, deadlineAt: runBinding.deadlineAt, limits: policy.limits, groupBindings: [runBinding] });
+    const oracle = createE2ECollectionOracleFromCompiledSuite({ compiled, binding: runBinding, round, selection: selectionPacket, sourceDigest: hash("source"), launchConfigDigest: compiled.expectedConfigDigest, semanticApprovalDigests: new Map([["s", semanticApproval.digest]]), hostRequestIds: new Map([[compiled.expectedCases[0]!.caseId, "host-request-1"]]), declaredMockComponentIds: [], fixedAssetDigests: { bootstrap: hash("bootstrap") }, environment: { ci: false, trustNoticeShown: true, os: "darwin", arch: "arm64", runtime: "node" }, usage: {}, limits: {} });
+    expect(canonicalJson(oracle.cases[0]!.expectedRequest)).toBe(canonicalJson(emittedPayload));
+    const mutatedPayload = { ...(emittedPayload as Record<string, unknown>), expectedExportNames: [] };
+    const mutatedCompiled = { ...compiled, hostRequestPayloads: new Map([[compiled.expectedCases[0]!.caseId, mutatedPayload]]) };
+    expect(() => createE2ECollectionOracleFromCompiledSuite({ compiled: mutatedCompiled, binding: runBinding, round, selection: selectionPacket, sourceDigest: hash("source"), launchConfigDigest: compiled.expectedConfigDigest, semanticApprovalDigests: new Map([["s", semanticApproval.digest]]), hostRequestIds: new Map([[compiled.expectedCases[0]!.caseId, "host-request-1"]]), declaredMockComponentIds: [], fixedAssetDigests: { bootstrap: hash("bootstrap") }, environment: { ci: false, trustNoticeShown: true, os: "darwin", arch: "arm64", runtime: "node" }, usage: {}, limits: {} })).toThrow();
     const { scope: omittedScope, ...missingScopeDefinition } = validDefinition;
     void omittedScope;
     for (const definition of [

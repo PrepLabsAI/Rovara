@@ -1,14 +1,34 @@
 import { createHash } from "node:crypto";
 import { types } from "node:util";
 import { copyBoundedE2EJsonData, copyBoundedE2ESourceBytes } from "@agentx/contracts";
-import { canonicalJson, E2E_CANDIDATE_INSPECTION_PROTOCOL, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema, type E2EQualifiedResult, type E2ERunBinding, type E2ERound, type E2EScenario } from "@agentx/contracts";
+import { canonicalJson, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema, type E2EQualifiedResult, type E2ERunBinding, type E2ERound, type E2EScenario } from "@agentx/contracts";
 import { E2EReportSchema, type E2EReport } from "./report-schema.js";
 import type { E2ESelectionPacket, E2ESelectionTuple } from "./selection.js";
 import { compareE2EPublicList } from "./selection.js";
 import type { E2ECompiledSuite } from "./scenarios.js";
-import { E2E_CANDIDATE_RESPONSE_PROTOCOL, E2E_GENERATED_TEST_PATH, E2E_SUPERVISOR_RPC_PROTOCOL, E2E_UPSTREAM_PACKAGE, E2E_UPSTREAM_VERSION } from "./identity.js";
+import { E2E_GENERATED_TEST_PATH, E2E_UPSTREAM_PACKAGE, E2E_UPSTREAM_VERSION } from "./identity.js";
 
 export const E2E_REPORT_MAX_BYTES = 4 * 1024 * 1024;
+export const E2E_APP_RPC_FRAME_MAX_BYTES = 262_144;
+export const E2E_APP_LITERAL_MAX_BYTES = 65_536;
+export const E2E_APP_LITERAL_MAX_DEPTH = 32;
+export const E2E_MODULE_EXPORT_INVENTORY_PROTOCOL = "registered-module-export-inventory/v1" as const;
+export const E2E_MODULE_EXPORT_PROJECTION_VERSION = "module-export-names/v1" as const;
+export function projectE2EModuleExportNames(value: unknown): readonly string[] {
+  const inventory = copyBoundedE2EJsonData(value, { maxBytes: E2E_APP_LITERAL_MAX_BYTES, maxDepth: E2E_APP_LITERAL_MAX_DEPTH });
+  if (inventory === null || typeof inventory !== "object" || Array.isArray(inventory)) throw new TypeError("module export inventory must be an object");
+  const record = inventory as Record<string, unknown>;
+  if (Object.keys(record).sort().join(",") !== "exports,protocol" || record.protocol !== E2E_MODULE_EXPORT_INVENTORY_PROTOCOL || !Array.isArray(record.exports) || record.exports.length > 256) throw new TypeError("module export inventory protocol or rows are invalid");
+  const names: string[] = [];
+  for (const row of record.exports) {
+    if (row === null || typeof row !== "object" || Array.isArray(row)) throw new TypeError("module export row is invalid");
+    const item = row as Record<string, unknown>;
+    if (Object.keys(item).sort().join(",") !== "kind,name" || typeof item.name !== "string" || !/^[A-Za-z_$][A-Za-z0-9_$]{0,254}$/.test(item.name) || !["callable", "value", "type"].includes(String(item.kind))) throw new TypeError("module export name or kind is invalid");
+    names.push(item.name);
+  }
+  if (new Set(names).size !== names.length) throw new TypeError("module export names must be unique");
+  return names.sort();
+}
 export type ParsedE2EReport = { kind: "parsed"; report: E2EReport; rawSha256: string } | { kind: "unavailable"; reason: string };
 export function parseE2EReport(input: Uint8Array): ParsedE2EReport {
   try {
@@ -66,7 +86,7 @@ export type E2ECollectionOracle = Readonly<{
   declaredMockComponentIds: readonly string[];
   sourceDigest: string; artifacts: readonly unknown[]; usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>; environment: Readonly<{ ci: boolean; trustNoticeShown: boolean; os: string; arch: string; runtime: string }>;
   targets: readonly unknown[];
-  cases: readonly Readonly<{ caseId: string; compilerCaseIdentity: string; registrationKey: string; semanticApprovalDigest: string; accountIdDigest: string; declarationIndex: number; sourceLine: number; sourceColumn: number; tags: readonly string[]; expectedRequest: unknown; assertions: readonly Readonly<{ index: number; digest: string; expectedResponse: unknown }>[] }>[];
+  cases: readonly Readonly<{ caseId: string; hostRequestId: string; projectionVersion: typeof E2E_MODULE_EXPORT_PROJECTION_VERSION | null; compilerCaseIdentity: string; registrationKey: string; semanticApprovalDigest: string; accountIdDigest: string; declarationIndex: number; sourceLine: number; sourceColumn: number; tags: readonly string[]; expectedRequest: unknown; expectedCandidateInput: unknown; assertions: readonly Readonly<{ index: number; digest: string; expectedResponse: unknown }>[] }>[];
 }>;
 export type E2EObservedReceipt = Readonly<{
   runId: string; roundId: string; groupId: string; caseId: string; upstreamRunId: string;
@@ -88,7 +108,7 @@ export type E2EStructuralQualification = Readonly<{ status: "PASS" | "FAILED" | 
 /** Derive the adapter oracle from the accepted compiler output and separate fixed capture expectations. */
 export function createE2ECollectionOracleFromCompiledSuite(input: {
   compiled: E2ECompiledSuite; binding: E2ERunBinding; round: E2ERound; selection: E2ESelectionPacket;
-  sourceDigest: string; launchConfigDigest: string; semanticApprovalDigests: ReadonlyMap<string, string>;
+  sourceDigest: string; launchConfigDigest: string; semanticApprovalDigests: ReadonlyMap<string, string>; hostRequestIds: ReadonlyMap<string, string>;
   declaredMockComponentIds: readonly string[];
   fixedAssetDigests: Readonly<Record<string, string>>;
   environment: E2ECollectionOracle["environment"]; usage: E2ECollectionOracle["usage"]; limits: E2ECollectionOracle["limits"];
@@ -96,18 +116,20 @@ export function createE2ECollectionOracleFromCompiledSuite(input: {
   const generated = input.compiled.files.get(E2E_GENERATED_TEST_PATH);
   if (!generated || input.compiled.expectedCases.length !== input.binding.expectedCases.length || input.selection.groupId !== input.binding.groupId || input.selection.planDigest !== input.binding.executionPlanDigest) throw new Error("compiled suite, binding, and selection do not describe one exact group");
   const lines = generated.split("\n");
+  if (input.compiled.hostRequestPayloads.size !== input.compiled.expectedCases.length || input.hostRequestIds.size !== input.compiled.expectedCases.length || new Set(input.hostRequestIds.values()).size !== input.hostRequestIds.size) throw new Error("compiled host payload or independently admitted request identity inventory is incomplete or ambiguous");
   const targetNames = [...new Set(input.selection.tuples.map((tuple) => tuple.targetName))];
   const targets = targetNames.map((name, index) => ({ id: name, index, platform: name, environment: "test", engine: { name: "none", version: "unversioned", spiVersion: 1 }, capabilities: [], artifactCapabilities: [], stateCapability: false }));
   const cases = input.compiled.expectedCases.map((expectedCase, declarationIndex) => {
     const caseBinding = input.compiled.caseBindings.get(expectedCase.caseId);
     const scenario = input.compiled.bundle.scenarios.find((item) => item.scenarioId === expectedCase.scenarioId) as E2EScenario | undefined;
     const semanticApprovalDigest = input.semanticApprovalDigests.get(expectedCase.scenarioId);
+    const hostRequestId = input.hostRequestIds.get(expectedCase.caseId);
     const title = input.selection.tuples.find((tuple) => tuple.caseId === expectedCase.caseId)?.title;
     const sourceLine = lines.findIndex((line) => line.startsWith(`test(${JSON.stringify(title)},`)) + 1;
-    if (!caseBinding || !scenario || !semanticApprovalDigest || !title || sourceLine < 1 || caseBinding.compilerCaseIdentity.length !== 64 || expectedCase.executionDescriptorDigest.length !== 64 || expectedCase.accountContextId.length === 0 || expectedCase.accountContextDigest.length !== 64) throw new Error("compiled case is missing its source, registration, semantic, or exact test declaration binding");
+    if (!caseBinding || !scenario || !semanticApprovalDigest || !hostRequestId || !title || sourceLine < 1 || caseBinding.compilerCaseIdentity.length !== 64 || expectedCase.executionDescriptorDigest.length !== 64 || expectedCase.accountContextId.length === 0 || expectedCase.accountContextDigest.length !== 64) throw new Error("compiled case is missing its source, registration, semantic, or exact test declaration binding");
     const sourceInterface = scenario.steps[0]?.kind === "inspect-contract";
-    const registration = input.compiled.caseBindings.get(expectedCase.caseId)!;
-    const payload = { protocol: E2E_SUPERVISOR_RPC_PROTOCOL, purpose: sourceInterface ? "source-interface" : "feature-invocation", registrationKey: registration.registrationKey, inspectionProtocol: sourceInterface ? E2E_CANDIDATE_INSPECTION_PROTOCOL : null, ...(sourceInterface ? { expectedExportNames: scenario.assertions[0]?.kind === "state" && scenario.assertions[0].probeId === "module-export-names" ? scenario.assertions[0].equals : [] } : {}), caseId: expectedCase.caseId, executionDescriptorDigest: expectedCase.executionDescriptorDigest, accountContextId: expectedCase.accountContextId, accountContextDigest: expectedCase.accountContextDigest, candidateResponse: E2E_CANDIDATE_RESPONSE_PROTOCOL, compilerCaseIdentity: registration.compilerCaseIdentity, candidateResponseScope: registration.candidateResponseScope, requestProtocol: registration.requestProtocol, bundleDigest: input.compiled.bundle.bundleDigest, scenarioId: expectedCase.scenarioId, requestedTargetId: registration.requestedTargetId, effectiveTargetId: expectedCase.targetId, accountProfileId: scenario.accountProfileId, operationId: registration.operationId, packageExportSubpath: registration.packageExportSubpath, moduleSpecifier: registration.moduleSpecifier, callableSelector: registration.callableSelector, descriptorSchemaVersion: "portable-source-operation/v1", descriptorDigest: registration.descriptorDigest, input: scenario.steps[0]?.kind === "invoke-contract" ? scenario.steps[0].input : null };
+    const payload = input.compiled.hostRequestPayloads.get(expectedCase.caseId);
+    if (payload === undefined || !generated.includes(JSON.stringify(payload))) throw new Error("compiled suite omitted its exact emitted supervisor payload");
     const assertions = scenario.assertions.map((assertion, index) => {
       let expectedResponse: unknown;
       if (assertion.kind === "state" && assertion.probeId === "result" || assertion.kind === "json" && assertion.responseId === "result") expectedResponse = assertion.equals;
@@ -116,7 +138,7 @@ export function createE2ECollectionOracleFromCompiledSuite(input: {
       return { index, digest: expectedCase.assertionDigests[index]!, expectedResponse };
     });
     const accountIdDigest = createHash("sha256").update(canonicalJson({ accountProfileId: expectedCase.accountProfileId, accountContextId: expectedCase.accountContextId, accountContextDigest: expectedCase.accountContextDigest })).digest("hex");
-    return { caseId: expectedCase.caseId, compilerCaseIdentity: caseBinding.compilerCaseIdentity, registrationKey: caseBinding.registrationKey, semanticApprovalDigest, accountIdDigest, declarationIndex, sourceLine, sourceColumn: 1, tags: [], expectedRequest: payload, assertions };
+    return { caseId: expectedCase.caseId, hostRequestId, projectionVersion: sourceInterface ? E2E_MODULE_EXPORT_PROJECTION_VERSION : null, compilerCaseIdentity: caseBinding.compilerCaseIdentity, registrationKey: caseBinding.registrationKey, semanticApprovalDigest, accountIdDigest, declarationIndex, sourceLine, sourceColumn: 1, tags: [], expectedRequest: payload, expectedCandidateInput: scenario.steps[0]?.kind === "invoke-contract" ? scenario.steps[0].input : null, assertions };
   });
   const targetSet = new Set(targetNames);
   if (input.selection.tuples.some((tuple) => !targetSet.has(tuple.targetName))) throw new Error("selection references a target absent from the compiled group");
@@ -176,7 +198,7 @@ export function qualifyE2ECollection(oracleInput: E2ECollectionOracle, collectio
     if (seen.size !== tuples.length) return unavailable("report omitted a compiled physical row", runId, parsed.rawSha256);
     if (report.run.summary.executed !== selectedRows.filter(({ row }) => row.attempts.length > 0).length || report.run.summary.passed !== selectedRows.filter(({ row }) => row.status === "passed").length || report.run.summary.failed !== selectedRows.filter(({ row }) => row.status === "failed" || row.status === "timed-out").length || report.run.summary.interrupted !== selectedRows.filter(({ row }) => row.status === "interrupted").length || report.run.summary.flaky !== selectedRows.filter(({ row }) => row.status === "flaky").length || report.run.summary.skipped !== selectedRows.filter(({ row }) => row.status === "skipped").length) return unavailable("runner summary contradicts selected-row counts", runId, parsed.rawSha256);
     const observedTestFailure = raw.process.exitCode !== 0 && report.run.status === "failed" && report.run.exitCode === raw.process.exitCode && report.run.errors.every((error) => error.category === "test");
-    if (report.run.exitCode !== raw.process.exitCode || (raw.process.exitCode === 0 ? report.run.status !== "passed" : !observedTestFailure)) return unavailable("report and actual process outcomes contradict", runId, parsed.rawSha256);
+    if (report.run.errors.some((error) => error.category !== "test") || report.run.exitCode !== raw.process.exitCode || (raw.process.exitCode === 0 ? report.run.status !== "passed" || report.run.errors.length !== 0 : !observedTestFailure)) return unavailable("report and actual process outcomes contradict or contain a run-level error", runId, parsed.rawSha256);
     const normalizedCases: E2EQualifiedResult["cases"] = [];
     if (raw.observations.length !== selectedRows.length || raw.receipts.length !== selectedRows.reduce((total, { tuple }) => total + (oracle.cases.find((item) => item.caseId === tuple.caseId)?.assertions.length ?? 0), 0)) return unavailable("observations or assertion receipts contain missing, duplicate, or foreign rows", runId, parsed.rawSha256);
     for (const { tuple, row } of selectedRows) {
@@ -184,9 +206,9 @@ export function qualifyE2ECollection(oracleInput: E2ECollectionOracle, collectio
       const observation = raw.observations.find((item) => item.caseId === tuple.caseId);
       const expectedCase = binding.expectedCases.find((item) => item.caseId === tuple.caseId);
       const attemptsForRow = row.attempts;
-      if (!expectation || !observation || raw.observations.filter((item) => item.caseId === tuple.caseId).length !== 1 || !expectedCase || expectedCase.upstreamTestId !== tuple.upstreamTestId || attemptsForRow.length < 1 || attemptsForRow.length > 2 || attemptsForRow.some((attempt, index) => attempt.index !== index || attempt.durationMs < 0 || !Number.isFinite(attempt.durationMs) || attempt.steps.length !== 0 || canonicalJson(attempt.artifacts) !== canonicalJson(oracle.artifacts)) || attemptsForRow.length > 1 && row.status !== "flaky" || row.status === "passed" && (attemptsForRow.length !== 1 || attemptsForRow[0]?.status !== "passed" || attemptsForRow[0]?.error !== undefined || attemptsForRow[0]?.secondaryErrors.length !== 0) || row.status === "failed" && (attemptsForRow.at(-1)?.status !== "failed" || attemptsForRow.at(-1)?.error?.category !== "test") || row.status === "timed-out" && attemptsForRow.at(-1)?.status !== "timed-out" || row.status === "flaky" && (attemptsForRow.length < 2 || attemptsForRow.at(-1)?.status !== "passed" || attemptsForRow.slice(0, -1).some((attempt) => attempt.status !== "failed" || attempt.error?.category !== "test")) || row.selected !== true || row.kind !== "test" || row.skip !== undefined) return unavailable("selected case lacks exact compiled expectation, observation, or bounded attempt history", runId, parsed.rawSha256);
-      const request = copyBoundedE2ESourceBytes(observation.requestBytes, 65_536);
-      const response = copyBoundedE2ESourceBytes(observation.responseBytes, 65_536);
+      if (!expectation || !observation || raw.observations.filter((item) => item.caseId === tuple.caseId).length !== 1 || !expectedCase || expectedCase.upstreamTestId !== tuple.upstreamTestId || attemptsForRow.length < 1 || attemptsForRow.length > 2 || attemptsForRow.some((attempt, index) => { const attemptStart = Date.parse(attempt.startedAt); const attemptEnd = attemptStart + attempt.durationMs; return attempt.index !== index || attempt.durationMs < 0 || !Number.isFinite(attempt.durationMs) || attempt.durationMs > round.limits.caseTimeoutMs || !Number.isFinite(attemptStart) || !Number.isFinite(attemptEnd) || attemptStart < started || attemptStart > finished || attemptEnd > finished || attemptEnd > Date.parse(binding.deadlineAt) || attempt.steps.length !== 0 || canonicalJson(attempt.artifacts) !== canonicalJson(oracle.artifacts); }) || attemptsForRow.length > 1 && row.status !== "flaky" || row.status === "passed" && (attemptsForRow.length !== 1 || attemptsForRow[0]?.status !== "passed" || attemptsForRow[0]?.error !== undefined || attemptsForRow[0]?.secondaryErrors.length !== 0) || row.status === "failed" && (attemptsForRow.at(-1)?.status !== "failed" || attemptsForRow.at(-1)?.error?.category !== "test") || row.status === "timed-out" && attemptsForRow.at(-1)?.status !== "timed-out" || row.status === "flaky" && (attemptsForRow.length < 2 || attemptsForRow.at(-1)?.status !== "passed" || attemptsForRow.slice(0, -1).some((attempt) => attempt.status !== "failed" || attempt.error?.category !== "test")) || row.selected !== true || row.kind !== "test" || row.skip !== undefined) return unavailable("selected case lacks exact compiled expectation, observation, or bounded attempt history", runId, parsed.rawSha256);
+      const request = copyBoundedE2ESourceBytes(observation.requestBytes, E2E_APP_RPC_FRAME_MAX_BYTES);
+      const response = copyBoundedE2ESourceBytes(observation.responseBytes, E2E_APP_RPC_FRAME_MAX_BYTES);
       const requestSha256 = createHash("sha256").update(request).digest("hex");
       const responseSha256 = createHash("sha256").update(response).digest("hex");
       const receipts = raw.receipts.filter((receipt) => receipt.caseId === tuple.caseId);
@@ -198,17 +220,28 @@ export function qualifyE2ECollection(oracleInput: E2ECollectionOracle, collectio
       let requestData: unknown;
       let responseData: unknown;
       try {
-        requestData = copyBoundedE2EJsonData(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(request)), { maxBytes: 65_536, maxDepth: 32 });
-        responseData = copyBoundedE2EJsonData(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(response)), { maxBytes: 65_536, maxDepth: 32 });
+        requestData = copyBoundedE2EJsonData(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(request)), { maxBytes: 262_144, maxDepth: 64 });
+        responseData = copyBoundedE2EJsonData(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(response)), { maxBytes: 262_144, maxDepth: 64 });
       } catch { return unavailable("actual request or response bytes are not bounded UTF-8 JSON", runId, parsed.rawSha256); }
-      if (requestData === null || typeof requestData !== "object" || (requestData as Record<string, unknown>).requestId !== observation.requestId || canonicalJson((requestData as Record<string, unknown>).input) !== canonicalJson(expectation.expectedRequest)) return unavailable("actual request bytes do not match the independently approved request identity and payload", runId, parsed.rawSha256);
+      if (requestData === null || typeof requestData !== "object" || Array.isArray(requestData) || Object.keys(requestData).sort().join(",") !== "input,wireId" || typeof (requestData as Record<string, unknown>).wireId !== "string" || !/^[a-f0-9]{48}$/.test((requestData as Record<string, unknown>).wireId as string) || observation.requestId !== expectation.hostRequestId) return unavailable("actual app request frame has no fresh wire identity", runId, parsed.rawSha256);
+      let appInput: unknown;
+      try { appInput = copyBoundedE2EJsonData((requestData as Record<string, unknown>).input, { maxBytes: E2E_APP_LITERAL_MAX_BYTES, maxDepth: E2E_APP_LITERAL_MAX_DEPTH }); }
+      catch { return unavailable("actual app input literal exceeds its independent JSON limit", runId, parsed.rawSha256); }
+      if (canonicalJson(appInput) !== canonicalJson(expectation.expectedCandidateInput)) return unavailable("actual app request input differs from the independently approved scenario literal", runId, parsed.rawSha256);
       const assertionOutcomes: ("passed" | "failed")[] = [];
       for (let index = 0; index < sortedReceipts.length; index += 1) {
         const receipt = sortedReceipts[index]!;
         const assertion = expectation.assertions[index]!;
-        if (responseData === null || typeof responseData !== "object" || (responseData as Record<string, unknown>).wireId !== observation.requestId) return unavailable("actual response does not bind its request identifier", runId, parsed.rawSha256);
-        const payload = responseData !== null && typeof responseData === "object" ? (responseData as Record<string, unknown>).output : undefined;
-        const assertionOutcome = canonicalJson(payload) === canonicalJson(assertion.expectedResponse) ? "passed" : "failed";
+        if (responseData === null || typeof responseData !== "object" || Array.isArray(responseData) || Object.keys(responseData).sort().join(",") !== "output,wireId" || (responseData as Record<string, unknown>).wireId !== (requestData as Record<string, unknown>).wireId) return unavailable("actual response does not bind its actual app wire identifier", runId, parsed.rawSha256);
+        let payload: unknown;
+        try { payload = copyBoundedE2EJsonData((responseData as Record<string, unknown>).output, { maxBytes: E2E_APP_LITERAL_MAX_BYTES, maxDepth: E2E_APP_LITERAL_MAX_DEPTH }); }
+        catch { return unavailable("actual app output literal exceeds its independent JSON limit", runId, parsed.rawSha256); }
+        let projectedPayload = payload;
+        if (expectation.projectionVersion === E2E_MODULE_EXPORT_PROJECTION_VERSION && Array.isArray(assertion.expectedResponse)) {
+          try { projectedPayload = projectE2EModuleExportNames(payload); }
+          catch { return unavailable("registered module export inventory failed its fixed projection schema", runId, parsed.rawSha256); }
+        }
+        const assertionOutcome = canonicalJson(projectedPayload) === canonicalJson(assertion.expectedResponse) ? "passed" : "failed";
         if (receipt.assertionIndex !== index || assertion.index !== index || receipt.assertionDigest !== assertion.digest || receipt.assertionDigest !== expectedCase.assertionDigests[index] || receipt.runId !== binding.runId || receipt.roundId !== binding.roundId || receipt.groupId !== binding.groupId || receipt.upstreamRunId !== runId || receipt.candidateDigest !== binding.candidateDigest || receipt.sourceDigest !== oracle.sourceDigest || receipt.bundleDigest !== binding.bundleDigest || receipt.compilerCaseIdentity !== expectation.compilerCaseIdentity || receipt.registrationKey !== expectation.registrationKey || receipt.semanticApprovalDigest !== expectation.semanticApprovalDigest || receipt.executionDescriptorDigest !== expectedCase.executionDescriptorDigest || receipt.accountIdDigest !== expectation.accountIdDigest || receipt.requestId !== observation.requestId || receipt.requestSha256 !== requestSha256 || receipt.responseSha256 !== responseSha256 || receipt.observedAt !== observation.observedAt || receipt.lifecycleId !== observation.lifecycleId || receipt.cleanup !== observation.cleanup || receipt.outcome !== assertionOutcome || row.status === "passed" && assertionOutcome !== "passed") return unavailable("assertion receipt identity, ordering, actual byte hash, window, or lifecycle mismatch", runId, parsed.rawSha256);
         assertionOutcomes.push(assertionOutcome);
       }
@@ -238,10 +271,10 @@ function copyCollection(input: E2ECollection): E2ECollection {
   const rawReportBytes = copyBoundedE2ESourceBytes(top.rawReportBytes, E2E_REPORT_MAX_BYTES);
   const json = (value: unknown, maxBytes = 262_144) => copyBoundedE2EJsonData(value, { maxBytes, maxDepth: 64 });
   const receiptKeys = ["runId", "roundId", "groupId", "caseId", "upstreamRunId", "candidateDigest", "sourceDigest", "bundleDigest", "compilerCaseIdentity", "registrationKey", "semanticApprovalDigest", "executionDescriptorDigest", "accountIdDigest", "assertionIndex", "assertionDigest", "requestId", "requestSha256", "responseSha256", "observedAt", "lifecycleId", "cleanup", "outcome"];
-  const receiptRows = ownArray(top.receipts, 256).map((item) => json(ownRecord(item, receiptKeys), 8192) as E2EObservedReceipt);
+  const receiptRows = ownArray(top.receipts, 1280).map((item) => json(ownRecord(item, receiptKeys), 8192) as E2EObservedReceipt);
   const observationRows = ownArray(top.observations, 64).map((value) => {
     const item = ownRecord(value, ["caseId", "requestId", "requestBytes", "responseBytes", "observedAt", "lifecycleId", "cleanup", "coverage"]);
-    return { metadata: json({ caseId: item.caseId, requestId: item.requestId, observedAt: item.observedAt, lifecycleId: item.lifecycleId, cleanup: item.cleanup, coverage: item.coverage }, 65_536) as Omit<E2ECaseObservation, "requestBytes" | "responseBytes">, requestBytes: copyBoundedE2ESourceBytes(item.requestBytes, 65_536), responseBytes: copyBoundedE2ESourceBytes(item.responseBytes, 65_536) };
+    return { metadata: json({ caseId: item.caseId, requestId: item.requestId, observedAt: item.observedAt, lifecycleId: item.lifecycleId, cleanup: item.cleanup, coverage: item.coverage }, 65_536) as Omit<E2ECaseObservation, "requestBytes" | "responseBytes">, requestBytes: copyBoundedE2ESourceBytes(item.requestBytes, E2E_APP_RPC_FRAME_MAX_BYTES), responseBytes: copyBoundedE2ESourceBytes(item.responseBytes, E2E_APP_RPC_FRAME_MAX_BYTES) };
   });
   const runStart = json(ownRecord(top.runStart, ["runId", "sequence", "launchId", "capturedAt"]), 4096) as E2ECollection["runStart"];
   const process = json(ownRecord(top.process, ["exitCode", "signal", "startedAt", "finishedAt", "drained", "aborted", "timedOut"]), 8192) as E2ECollection["process"];

@@ -18,7 +18,7 @@ export function buildE2ESharedView(input: { plan: unknown; currentRound: unknown
       const copied = copyBoundedE2EJsonData(input.control, { maxBytes: 4096, maxDepth: 8 }) as typeof control;
       const proposals: unknown = copied.ownerActionProposals;
       const allowed = ["review-setup", "retry-run", "connect-runtime"];
-      if (typeof copied.policyPresent === "boolean" && (copied.workflowPhase === null || typeof copied.workflowPhase === "string") && Array.isArray(proposals) && proposals.every((action: unknown) => typeof action === "string" && allowed.includes(action))) control = { ...copied, ownerActionProposals: proposals as typeof control.ownerActionProposals };
+      if (typeof copied.policyPresent === "boolean" && (copied.workflowPhase === null || typeof copied.workflowPhase === "string") && Array.isArray(proposals) && proposals.every((action: unknown) => typeof action === "string" && allowed.includes(action))) control = { ...copied, ownerActionProposals: [...new Set(proposals)].slice(0, 3) as typeof control.ownerActionProposals };
     }
   } catch { /* absent policy and proposals are the safe projection */ }
   let setup: E2ESharedView["setup"] = fallbackSetup;
@@ -65,7 +65,13 @@ export function buildE2ESharedView(input: { plan: unknown; currentRound: unknown
     for (const observed of result.cases) {
       const expected = result.binding.expectedCases.find((item) => item.caseId === observed.caseId);
       const ranks = { source: 0, "mock-contract": 1, runtime: 2, "external-live": 3 } as const;
-      const caseQualified = result.qualification === "trusted" && result.cleanup === "confirmed" && observed.status === "passed" && expected !== undefined && observed.attemptCount === 1 && observed.executionDescriptorDigest === expected.executionDescriptorDigest && observed.accountContextId === expected.accountContextId && observed.accountContextDigest === expected.accountContextDigest && observed.assertionDigest === expected.assertionDigest && observed.assertionReceipts.length === expected.assertionDigests.length && observed.assertionReceipts.every((receipt, index) => receipt.assertionIndex === index && receipt.assertionDigest === expected.assertionDigests[index] && receipt.status === "passed") && observed.coverage.subject === "candidate" && ranks[observed.coverage.observedScope] >= ranks[expected.minimumEvidence] && expected.requiredRealComponentIds.every((id) => observed.coverage.realComponentIds.includes(id)) && observed.coverage.unexercisedBehaviors.length === 0;
+      const admissionTime = Date.parse(result.binding.admittedAt);
+      const deadline = Date.parse(result.binding.deadlineAt);
+      const startedAt = Date.parse(result.startedAt);
+      const finishedAt = Date.parse(result.finishedAt);
+      const receivedAt = Date.parse(result.receivedAt);
+      const resultFresh = [admissionTime, deadline, startedAt, finishedAt, receivedAt].every(Number.isFinite) && startedAt >= admissionTime && finishedAt >= startedAt && finishedAt <= deadline && receivedAt >= finishedAt && receivedAt <= deadline;
+      const caseQualified = resultFresh && result.status === "passed" && result.qualification === "trusted" && result.cleanup === "confirmed" && observed.status === "passed" && expected !== undefined && observed.attemptCount === 1 && observed.executionDescriptorDigest === expected.executionDescriptorDigest && observed.accountContextId === expected.accountContextId && observed.accountContextDigest === expected.accountContextDigest && observed.assertionDigest === expected.assertionDigest && observed.assertionReceipts.length === expected.assertionDigests.length && observed.assertionReceipts.every((receipt, index) => receipt.assertionIndex === index && receipt.assertionDigest === expected.assertionDigests[index] && receipt.status === "passed") && observed.coverage.subject === "candidate" && ranks[observed.coverage.observedScope] >= ranks[expected.minimumEvidence] && expected.requiredRealComponentIds.every((id) => observed.coverage.realComponentIds.includes(id)) && observed.coverage.unexercisedBehaviors.length === 0;
       if ((projected === "PASS" || caseQualified) && expected) qualifiedCaseIds.add(expected.caseId);
       for (const componentId of observed.coverage.observedMockedComponentIds) observedMockedComponentIds.add(componentId);
       for (const behavior of observed.coverage.unexercisedBehaviors) unexercisedBehaviors.add(behavior);
