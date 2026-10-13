@@ -49,7 +49,7 @@ const successfulResult = (overrides: Record<string, unknown> = {}) => ({
   schemaVersion: 1, binding: baseBinding(), producer: "trusted-verifier", startedAt: "2026-10-12T12:00:01.000Z",
   finishedAt: "2026-10-12T12:00:02.000Z", receivedAt: "2026-10-12T12:00:03.000Z", status: "passed", qualification: "trusted",
   executionMode: "mock-only", reason: "complete", cases: [{ caseId: expectedCase.caseId, executionDescriptorDigest: expectedCase.executionDescriptorDigest, accountContextId: expectedCase.accountContextId, accountContextDigest: expectedCase.accountContextDigest, status: "passed", reason: "assertions-passed", attemptCount: 1,
-    assertionDigest: baseBinding().expectedCases[0]!.assertionDigest, assertionReceipts: [{ assertionIndex: 0, assertionDigest: "4".repeat(64), status: "passed", reason: "assertions-passed" }], artifacts: [], coverage: { observedScope: "mock-contract", subject: "candidate", executedCandidateParts: ["src"], realComponentIds: [], mockedComponentIds: ["api"], unexercisedBehaviors: [] } }],
+    assertionDigest: baseBinding().expectedCases[0]!.assertionDigest, assertionReceipts: [{ assertionIndex: 0, assertionDigest: "4".repeat(64), status: "passed", reason: "assertions-passed" }], artifacts: [], coverage: { observedScope: "mock-contract", subject: "candidate", executedCandidateParts: ["src"], realComponentIds: [], mockedComponentIds: ["api"], observedMockedComponentIds: ["api"], unexercisedBehaviors: [] } }],
   rawReportSha256: null, modelReceiptIds: [], cleanup: "confirmed", ...overrides,
 });
 

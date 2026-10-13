@@ -46,5 +46,12 @@ describe("strict upstream E2E report adapter", () => {
   it("turns malformed and over-limit reports into bounded unknowns", () => {
     expect(parseE2EReport(Buffer.from("{"))).toMatchObject({ kind: "unavailable" });
     expect(parseE2EReport(Buffer.alloc(4 * 1024 * 1024 + 1))).toMatchObject({ kind: "unavailable" });
+    expect(parseE2EReport(null as never)).toMatchObject({ kind: "unavailable" });
+    let invoked = false;
+    const hostile = new Uint8Array([123]);
+    Object.defineProperty(hostile, "byteLength", { get() { invoked = true; throw new Error("getter"); } });
+    expect(parseE2EReport(hostile)).toMatchObject({ kind: "unavailable" });
+    expect(invoked).toBe(false);
+    expect(parseE2EReport(new Proxy(new Uint8Array([123]), {}))).toMatchObject({ kind: "unavailable" });
   });
 });
