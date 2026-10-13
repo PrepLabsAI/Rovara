@@ -6,8 +6,8 @@ Make the base file say what its number means.
 
 ## Success criteria
 
-- [ ] docs/rovara-e2e/base.md says that 3 is the number of retries after the first try.
-- [ ] The file still has its first line unchanged.
+- [x] docs/rovara-e2e/base.md says that 3 is the number of retries after the first try. — Evidence: `grep -n "3 is the number of retries after the first try" docs/rovara-e2e/base.md` printed `3:3 is the number of retries after the first try.` (docs/rovara-e2e/base.md:3).
+- [x] The file still has its first line unchanged. — Evidence: `head -1 docs/rovara-e2e/base.md` printed `Base file for the rovara loop e2e test.`, and `git diff 855ce89b -- docs/rovara-e2e/base.md` shows only one added line (line 3), with lines 1 and 2 as context.
 
 ## Approach
 
