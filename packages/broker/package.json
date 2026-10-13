@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     ".": "./dist/index.js",
-    "./e2e/discovery": "./dist/e2e/discovery.js"
+    "./e2e/discovery": "./dist/e2e/discovery.js",
+    "./e2e/execution-plan": "./dist/e2e/execution-plan.js"
   },
   "types": "./dist/index.d.ts",
   "dependencies": {

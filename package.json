@@ -45,6 +45,7 @@
     "@aws-sdk/client-sts": "3.1134.0",
     "@eslint/js": "10.0.1",
     "@types/node": "22.20.3",
+    "e2e": "file:upstream/e2e-0.20.0.tgz",
     "esbuild": "0.28.2",
     "eslint": "10.10.0",
     "tsx": "4.23.13",
