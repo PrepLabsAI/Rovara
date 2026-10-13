@@ -1,10 +1,10 @@
-// rovara loop (#355, #356, #357): the loop's decisions, with no I/O. An event and the item's state go in; the new
+// rovara loop (#355, #356, #357, #358): the loop's decisions, with no I/O. An event and the item's state go in; the new
 // state and the effects to carry out come out. The daemon supplies what needs I/O inside the events (a claim's
 // failed exit checks, an artifact's text and digest, a check run's output) and carries the effects out
 // (daemon.ts), so every decision here is tested without GitHub, git, tmux or an agent.
 import { landingStep, nextStep, stepOf, type Artifact, type LoopAction, type LoopDefinition, type Outcome } from "./definitions.js";
 import { artifactAssignment, changesAssignment, checksFailedAssignment, codeAssignment, firstAssignment, replyAssignment, reviewsFailedAssignment } from "./instructions.js";
-import { artifactPath, tmuxSessionName } from "./naming.js";
+import { artifactPath, docsDir, tmuxSessionName } from "./naming.js";
 import type { WorkItemState } from "./state.js";
 
 /** The longest summary the agent may give; it is posted on the issue. */
@@ -15,13 +15,16 @@ export const ARTIFACT_SHOWN_MAX = 30_000;
 export type LoopEvent =
   | { kind: "start"; loop: LoopDefinition; instruction: string; author: string; at: string; /** Phases declared away. */ skip?: string[] }
   | { kind: "reply"; text: string; author: string; at: string }
-  | { kind: "approve"; author: string; at: string; /** The digest of the artifact the gate approves, now; the approval locks it. */ digest?: string }
+  | { kind: "approve"; author: string; at: string; /** The digest of the artifact the gate approves, now; the approval locks it. */ digest?: string;
+      /** #358: an approved plan that names other repositories: one per-PR loop for each of these. */ targets?: string[] }
   | { kind: "changes"; text: string; author: string; at: string }
   /** The agent says its step is done. `failures`: the step's exit checks that failed. `artifact`: the step's artifact's text. */
   | { kind: "claim"; claimId: string; summary: string; failures: string[]; artifact?: string; at: string }
   /** A step the loop ran itself finished. `detail`: what to say about it. */
   | { kind: "action-result"; action: LoopAction; outcome: "passed" | "failed" | "blocked" | "published"; detail: string; pullRequest?: { number: number; url: string }; at: string }
   | { kind: "closed"; at: string }
+  /** #358: the item's per-PR loops: every pull request approved (`approved`), or one taken back for more work (`reply`). */
+  | { kind: "pulls"; outcome: "approved" | "reply"; detail: string; at: string }
   | { kind: "stop"; author: string; at: string };
 
 export type Effect =
@@ -37,7 +40,9 @@ export type Effect =
   /** Run a step of the loop's own (the daemon runs it, and answers with an action-result event). */
   | { kind: "run"; action: LoopAction }
   /** Add a reviewer's change request to an artifact, so the agent and the record both have it. */
-  | { kind: "record-feedback"; artifact: Artifact; author: string; text: string };
+  | { kind: "record-feedback"; artifact: Artifact; author: string; text: string }
+  /** #358: start a per-PR loop for each repository the approved plan names. */
+  | { kind: "start-pulls"; targets: string[]; approver: string };
 
 export interface Decision { state: WorkItemState | undefined; effects: Effect[] }
 
@@ -120,18 +125,33 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
     }
     case "approve": {
       const step = running ? stepOf(loop, state.step) : undefined;
-      // #358: a step a person can wave on without a document (reviews that still block): the approval publishes.
-      if (running && step !== undefined && !step.gate && nextStep(loop, state.step, "approved") !== undefined) {
+      // #358: a step a person moves on without a document: reviews that still block (the approval publishes), or a
+      // per-PR loop's pull request.
+      if (running && step?.approvable === true) {
         const waved = transition(loop, state, "approved", event.at);
         if (waved === undefined) return { state, effects: [] };
-        return { state: { ...waved.state, reviewRounds: 0 }, effects: [{ kind: "comment", body: `@${event.author} accepted the review findings, so the change is published as it is.` }, ...waved.effects] };
+        const publishes = stepOf(loop, waved.state.step).action === "publish";
+        const said = publishes ? `@${event.author} accepted the review findings, so the change is published as it is.` : `@${event.author} approved pull request #${state.pullRequest?.number ?? "?"}.`;
+        return { state: { ...waved.state, reviewRounds: 0 }, effects: [{ kind: "comment", body: said }, ...waved.effects] };
       }
       if (!running || step?.gate !== true || step.artifact === undefined) return { state, effects: running ? [{ kind: "comment", body: "Nothing is waiting for approval right now." }] : [] };
       const artifact = step.artifact;
-      const moved = transition(loop, state, "approved", event.at);
+      const split = artifact === "plan" && event.targets !== undefined && event.targets.length > 0 ? event.targets : undefined;
+      const moved = transition(loop, state, split === undefined ? "approved" : "split", event.at);
       if (moved === undefined) return { state, effects: [] };
       const approvals = { ...state.approvals, ...(event.digest === undefined ? {} : { [artifact]: { digest: event.digest, by: event.author, at: event.at } }) };
       const next = { ...moved.state, approvals };
+      if (split !== undefined) {
+        return {
+          state: next,
+          effects: [
+            ...moved.effects,
+            { kind: "comment", body: `The plan was approved by @${event.author}, and is locked at \`${artifactPath(item.issue, "plan")}\`. It changes ${split.length} repositories, so each gets its own loop, agent and pull request: ${split.map((repo) => `**${repo}**`).join(", ")}. This issue waits until every pull request is approved. Reply on a pull request to steer its loop; a reply here goes to every loop still working, or to one when it starts with \`owner/name:\`.` },
+            { kind: "end-session" },
+            { kind: "start-pulls", targets: split, approver: event.author },
+          ],
+        };
+      }
       const name = ARTIFACT_NAMES[artifact];
       const after = stepOf(loop, next.step).artifact;
       const what = after === undefined ? "Coding starts; when it's done, the loop runs the checks and the reviews, then opens a pull request." : `The ${ARTIFACT_NAMES[after]} comes next, from it.`;
@@ -177,12 +197,18 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
         if (event.outcome === "passed") return { state: { ...next, reviewRounds: 0 }, effects: [{ kind: "comment", body: `The reviews passed.\n\n${event.detail}` }, ...moved.effects] };
         const rounds = (state.reviewRounds ?? 0) + 1;
         if (event.outcome === "failed") {
-          return { state: { ...next, reviewRounds: rounds }, effects: [...moved.effects, { kind: "comment", body: `The reviews found problems that block the change, so it went back to the agent (round ${rounds}).\n\n${event.detail}` }, { kind: "assign", text: reviewsFailedAssignment(event.detail, state.issue) }] };
+          return { state: { ...next, reviewRounds: rounds }, effects: [...moved.effects, { kind: "comment", body: `The reviews found problems that block the change, so it went back to the agent (round ${rounds}).\n\n${event.detail}` }, { kind: "assign", text: reviewsFailedAssignment(event.detail, state.issue, docsDir(state)) }] };
         }
-        return { state: { ...next, reviewRounds: 0 }, effects: [...moved.effects, { kind: "comment", body: `The reviews still block the change, so a person decides.\n\n${event.detail}\n\n---\nPublish it as it is with \`/rovara approve\`, or reply with what the agent should do.` }] };
+        return { state: { ...next, reviewRounds: 0 }, effects: [...moved.effects, { kind: "comment", body: `The reviews still block the change, so a person decides.\n\n${event.detail}\n\n---\nPublish it as it is with \`/rovara approve${state.target === undefined ? "" : ` ${state.target}`}\`, or reply with what the agent should do${state.target === undefined ? "" : ` (start the reply with \`${state.target}:\`)`}.` }] };
       }
       if (event.outcome === "failed") return { state: next, effects: [...moved.effects, { kind: "comment", body: `I couldn't publish the change: ${event.detail}\n\nReply here to try again.` }] };
       return { state: next, effects: [...moved.effects, { kind: "comment", body: event.detail }] };
+    }
+    case "pulls": {
+      if (!running) return { state, effects: [] };
+      const moved = transition(loop, state, event.outcome, event.at);
+      if (moved === undefined) return { state, effects: [] };
+      return { state: moved.state, effects: [...moved.effects, { kind: "comment", body: event.detail }] };
     }
     case "closed":
     case "stop": {

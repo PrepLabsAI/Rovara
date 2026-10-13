@@ -68,6 +68,17 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
     return { path: full, repo: await github.repoAt(full) };
   };
 
+  /** #358: each per-PR loop of an item: its repository, step, pull request and agent. */
+  const pullLines = async (repo: string, issue: number): Promise<string[]> => {
+    const pulls = await store.pulls(repo, issue);
+    if (pulls.length === 0) return [];
+    return ["Pull requests:", ...pulls.map((pull) => {
+      const step = stepOf(loopNamed(pull.loop), pull.step);
+      const where = pull.pullRequest === undefined ? "not opened yet" : pull.pullRequest.url;
+      return `  ${pull.target ?? ""}: step ${pull.step} (${step.terminal ? "ended" : `${step.actor}'s turn`}), ${where}${pull.session === undefined ? "" : `; agent: tmux attach -t =${pull.session.tmux}`}`;
+    })];
+  };
+
   const loop = program.command("loop").description("run Rovara's workflow on your GitHub issues with your own local agent (Claude Code), no Rovara install needed");
 
   loop.command("init").description(`write ${LOOP_CONFIG_PATH} in this repository, with you as its one collaborator`)
@@ -203,14 +214,19 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
         ...(state.worktree === undefined ? [] : [`Worktree: ${state.worktree.path} (branch ${state.worktree.branch})`]),
         ...(await documentLines(definition, state)),
         ...(state.session === undefined ? [] : [`Agent: tmux attach -t =${state.session.tmux}`]),
+        ...(await pullLines(repo, issue)),
       ].join("\n"));
     });
 
   loop.command("mcp").description("the agent's tools for one issue, over stdio (the loop starts this for its agent)")
     .requiredOption("--repo <owner/name>", "the repository")
     .requiredOption("--issue <number>", "the issue number")
-    .action(async (options: { repo: string; issue: string }) => {
-      const server = createLoopMcpServer({ store, repo: RepoSlugSchema.parse(options.repo), issue: Number(options.issue), version: context.version });
+    .option("--target <owner/name>", "a per-PR loop's repository")
+    .action(async (options: { repo: string; issue: string; target?: string }) => {
+      const server = createLoopMcpServer({
+        store, repo: RepoSlugSchema.parse(options.repo), issue: Number(options.issue), version: context.version,
+        ...(options.target === undefined ? {} : { target: RepoSlugSchema.parse(options.target) }),
+      });
       await server.connect(new StdioServerTransport());
     });
 }

@@ -4,8 +4,13 @@
 import { run, type Exec } from "./exec.js";
 
 export interface PublishInput {
+  /** The repository the pull request is opened in. */
   repo: string;
+  /** #358: the issue's repository, when it is another (a per-PR loop's pull request); its title is the pull request's. */
+  issueRepo?: string;
   issue: number;
+  /** #358: the description's first line: `Closes #<issue>.` by default, or `Part of owner/name#<issue>.` elsewhere. */
+  closes?: string;
   worktree: string;
   branch: string;
   plan: string | undefined;
@@ -44,9 +49,9 @@ export async function publish(exec: Exec, input: PublishInput): Promise<Publishe
     return { pullRequest: { number: Number(number), url: url ?? "" }, created: false };
   }
   const base = input.defaultBranch;
-  const title = (await run(exec, "gh", ["api", `repos/${input.repo}/issues/${input.issue}`, "--jq", ".title"])).trim() || `Issue #${input.issue}`;
+  const title = (await run(exec, "gh", ["api", `repos/${input.issueRepo ?? input.repo}/issues/${input.issue}`, "--jq", ".title"])).trim() || `Issue #${input.issue}`;
   const body = [
-    `Closes #${input.issue}.`,
+    input.closes ?? `Closes #${input.issue}.`,
     "",
     `Opened by rovara loop for @${input.startedBy}.${approvalLine(input)}`,
     "",

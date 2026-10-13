@@ -4,9 +4,9 @@
 **Claude Code**, and drives that work through a loop. It needs no Rovara install and no AWS account: only
 the Rovara CLI, the GitHub CLI (`gh`, signed in), `tmux`, `git` and Claude Code.
 
-> **Status:** **Do**, **Quick** and **Full** are here, with reviews before anything is published and feedback on the
-> pull request. Per-PR loops across repositories, and the reviewer loops, follow
-> ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
+> **Status:** **Do**, **Quick** and **Full** are here, with reviews before anything is published, feedback on the
+> pull request, and one loop per pull request when a change spans repositories. The Review and Contribute loops, and
+> Codex, follow ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
 
 The idea is inspired by [the-loop](https://github.com/MadaraUchiha-314/the-loop) by Rohith Ramakrishnan:
 an agent's work driven through a declared process, from your issue tracker. Rovara loop is Rovara's own
@@ -144,8 +144,43 @@ decides that too. Set `reviews.enabled: false` to publish without them.
 Once the loop has opened a pull request, what collaborators say on it reaches the issue's agent, like a reply on
 the issue: comments on the pull request, inline review comments (with the file and line), and the text of a review
 that asks for changes or comments. A `/rovara` command that starts a loop is only a reply there;
-`/rovara stop`, `/rovara approve` and `/rovara changes` work as on the issue. An approving review is acknowledged on the issue; merging closes the issue, which ends the
-loop. As on the issue, nobody else's words are read.
+`/rovara stop`, `/rovara approve` and `/rovara changes` work as on the issue. An approving review is acknowledged on
+the issue; merging closes the issue, which ends the loop. As on the issue, nobody else's words are read.
+
+## Changes across repositories: one loop per pull request
+
+When a change needs more than one repository, the plan says so in a `## Repositories` section, one repository per
+line, with what changes there:
+
+```markdown
+## Repositories
+- acme/payments: retry the call on a 503
+- acme/web: show a "retrying" banner
+```
+
+Each repository listed must be added on the computer running the loop (`rovara loop add` in its checkout); a plan
+naming one that isn't is refused, and the agent asks for it. A plan without the section, or naming only the issue's
+own repository, makes one pull request as above.
+
+When that plan is approved, the issue's loop waits (`rovara:pull-requests`) and starts one **per-PR loop** for each
+repository: its own agent, worktree and branch, code → checks → reviews → publish → ✋ pull request approval.
+
+- **Where it works.** In the issue's own repository, the per-PR loop carries on in the planning worktree, on
+  `rovara/<issue>`. In another, it gets a worktree from that repository's default branch, on
+  `rovara/<owner>-<name>-<issue>` (that repository's issue numbers mean something else), and its evidence goes in
+  `docs/rovara/<owner>-<name>-<issue>/`.
+- **Whose rules.** Each repository's own `.rovara/loop.yaml`: its checks, reviews and agent settings, and its
+  collaborators for feedback on its pull request. The issue's collaborators approve the plan and steer from the issue.
+- **What the issue shows.** Each per-PR loop says what it does on the issue, starting with its repository's name. Its
+  pull request says `Part of owner/name#<issue>` in another repository, or `Closes #<issue>` in the issue's own.
+- **Steering.** Feedback on a pull request goes to its loop. A reply on the issue goes to every per-PR loop still
+  working (one whose pull request is open takes feedback on it), or to one when it starts with `owner/name:`. When a
+  per-PR loop's reviews still block, `/rovara approve owner/name` on the issue publishes it as it is.
+- **Approving.** A pull request is approved on itself: a GitHub approval from a collaborator, or `/rovara approve` on
+  it. When every pull request is approved, the issue says so (`rovara:pulls-approved`), lists them, and waits for you to
+  merge them. More feedback on an approved pull request sends its loop back to work, and the issue waits again.
+- **Ending.** Closing the issue, or `/rovara stop` on it, ends every per-PR loop. `/rovara stop` on one pull request
+  ends only its loop; the others carry on.
 
 ## Watching and answering the agent
 
@@ -168,7 +203,7 @@ on the issue and waits for your next reply.
 | `rovara loop add [path]` · `remove <owner/name>` | starts or stops reading a repository's issues. A repository is read from the moment it's added; older comments are never replayed |
 | `rovara loop start` · `stop` · `status` | the background daemon. Its log is `~/.rovara/loop/daemon.log`; `run` is the same daemon in the foreground |
 | `rovara loop do` · `quick` · `full` `--issue <n> <instruction>` | posts `/rovara do <instruction>` (or `quick`, `full`) on the issue, as you |
-| `rovara loop check <issue> [--repo owner/name]` | where an issue's loop stands, without running anything, and each document's state: not written, missing sections, written but not approved, locked, changed since approval, or declared away |
+| `rovara loop check <issue> [--repo owner/name]` | where an issue's loop stands, without running anything; each document's state: not written, missing sections, written but not approved, locked, changed since approval, or declared away; and each per-PR loop's step, pull request and agent |
 
 ## What's kept where
 

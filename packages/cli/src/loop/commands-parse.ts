@@ -5,7 +5,7 @@ import { LOOPS, skippablePhases, type LoopDefinition } from "./definitions.js";
 export type ParsedComment =
   | { kind: "start"; loop: LoopDefinition; instruction: string; /** Phases declared away (`--skip design`). */ skip: string[] }
   | { kind: "stop" }
-  | { kind: "approve" }
+  | { kind: "approve"; /** #358: `/rovara approve owner/name`: one per-PR loop's blocked reviews, from the issue. */ repo?: string }
   | { kind: "changes"; text: string }
   | { kind: "invalid"; reason: string }
   | { kind: "reply"; text: string };
@@ -18,7 +18,10 @@ export function parseComment(body: string): ParsedComment {
   if (match === null) return { kind: "reply", text };
   const keyword = (match[1] ?? "").toLowerCase();
   if (keyword === "stop") return { kind: "stop" };
-  if (keyword === "approve") return { kind: "approve" };
+  if (keyword === "approve") {
+    const repo = /^\s+`?([A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100})`?\s*$/u.exec(match[2] ?? "")?.[1];
+    return repo === undefined ? { kind: "approve" } : { kind: "approve", repo };
+  }
   // `/rovara changes: <what>` (the colon is optional); the request is the rest of the comment.
   if (keyword === "changes" || keyword === "changes:") {
     const request = [match[2] ?? "", text.slice(match[0].length)].join("").replace(/^\s*:/u, "").trim();
