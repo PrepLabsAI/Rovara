@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createFeedbackReviewWeb, type FeedbackReviewWebDependencies } from "../../packages/broker/src/aws/feedback-review-web.js";
 import { getWorkflowFeedbackReview, submitWorkflowFeedbackDecision } from "../../packages/broker/src/aws/developer-tasks.js";
 import { authenticateDeveloperSessionId } from "../../packages/broker/src/aws/developer-routes.js";
-import { createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema, type TaskPersonProofRequest, type TaskPersonProofResponse, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
+import { canonicalPlanJson, createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, taskGraphDigest, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema, type TaskPersonProofRequest, type TaskPersonProofResponse, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
 import { createDeveloperTaskBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
 import { githubWorkflowPullRequestKey, taskOwnerKey, type DeveloperTaskRecord } from "../../packages/broker/src/developer/task-records.js";
 import { feedbackReviewNoticeId } from "../../packages/broker/src/developer/notifications.js";
@@ -12,6 +12,7 @@ import { changeTaskPeople, type CheckTaskPerson, type StoredTaskRole, type TaskP
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { SLACK_TEAM } from "../support/slack-broker.js";
+import { planDocument } from "../support/plan-documents.js";
 
 const taskId = randomUUID();
 const origin = "https://agentx.example.test";
@@ -587,6 +588,36 @@ describe("broker-backed feedback review data", () => {
     expect(result).toMatchObject({ status: "APPROVED", nextAction: "implementation" });
     const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { ownerKey: string };
     expect(fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META")?.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING", feedbackDecisions: [{ actorRole: "TASK_OWNER", actorId: task.ownerKey, selectedFindingIds: ["finding-1"] }] });
+  });
+
+  it("carries an existing approved whole-plan graph into PR-feedback coding from the current candidate tree", async () => {
+    const fixture = await preparedReview();
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    Object.assign(fixture.deps, { workflowDependenciesEnabled: true });
+    const graph = { schemaVersion: 1 as const, taskId: fixture.taskId, version: 1, items: [
+      { id: randomUUID(), title: "Handle feedback", description: "Apply the owner-approved feedback", repository: "demo", dependsOn: [] },
+    ] };
+    const graphDigest = taskGraphDigest(graph);
+    const planContent = canonicalPlanJson(planDocument({ workBreakdown: graph }));
+    const artifactDigest = createHash("sha256").update(planContent).digest("hex");
+    const artifactKey = `private/${fixture.taskId}/approved-plan.json`;
+    fixture.harness.s3.objects.set(artifactKey, planContent);
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    const planArtifact = { id: randomUUID(), type: "plan" as const, version: 1, sha256: artifactDigest, producer: "test", objectKey: artifactKey, format: "structured" as const, createdAt: new Date().toISOString() };
+    const approval = { artifactDigest, graphDigest, workflowRevision: 1, actorId: task.ownerKey, runId: randomUUID() };
+    const decision = { requestId: randomUUID(), workflowRevision: 1, decision: "APPROVE" as const, actorId: task.ownerKey, actorRole: "TASK_OWNER" as const,
+      reason: "Approved the exact ordered work plan", artifactDigest, workBreakdownDigest: graphDigest, at: new Date().toISOString() };
+    const workflow = { ...fixture.workflow, artifacts: [...fixture.workflow.artifacts, planArtifact], decisions: [...fixture.workflow.decisions, decision], workflowDependenciesApproval: approval };
+    fixture.harness.db.set({ ...task, workflow });
+    await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+    });
+    const updated = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    const operation = fixture.harness.db.find(item => item.pk === `WORKSPACE#${updated.workspaceId}` && item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT")[0];
+    const outbox = fixture.harness.db.find(item => item.entityType === "OUTBOX" && item.operationId === operation?.id)[0];
+    expect((outbox?.invocation as { payload?: { workflowDependencies?: unknown } } | undefined)?.payload?.workflowDependencies)
+      .toMatchObject({ approval: { graphDigest }, resumeTreeSha: fixture.workflow.candidate?.repositories[0]?.treeSha, sequenceStart: 0, resumeProgress: [] });
   });
 
   it("approving a fix approves its check changes: the coding step and its checks run the updated set, and the review page shows them (0.2.12)", async () => {

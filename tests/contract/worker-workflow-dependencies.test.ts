@@ -70,4 +70,37 @@ describe("executeSerialWorkflowDependencies", () => {
     })).rejects.toThrow("callback unavailable");
     expect(executed).toBe(false);
   });
+
+  it("resumes after a retained completed prefix and an unchanged uncertain item without replaying the prefix", async () => {
+    const retained = [
+      { schemaVersion: 1 as const, graphDigest: taskGraphDigest(graph), runId, itemId: graph.items[0]!.id, sequence: 2, state: "IMPLEMENTED" as const,
+        operationId, baseTreeSha: initialTree, candidateTreeSha: candidate("2"), at: "2026-10-12T12:00:00.000Z", producer: "agentx-worker" },
+      { schemaVersion: 1 as const, graphDigest: taskGraphDigest(graph), runId, itemId: graph.items[1]!.id, sequence: 4, state: "UNKNOWN" as const,
+        operationId, baseTreeSha: candidate("2"), at: "2026-10-12T12:01:00.000Z", producer: "agentx-broker-terminal" },
+    ];
+    const calls: string[] = [];
+    const progress: Array<{ itemId: string; sequence: number; state: string }> = [];
+    const result = await executeSerialWorkflowDependencies({
+      graph, graphDigest: taskGraphDigest(graph), runId, operationId, initialTreeSha: candidate("2"), resumeTreeSha: candidate("2"),
+      sequenceStart: 4, resumeProgress: retained, now: () => "2026-10-12T12:02:00.000Z",
+      persist: async (entry) => { progress.push(entry); },
+      execute: async (item) => { calls.push(item.id); return { treeSha: candidate("5") }; },
+    });
+    expect(calls).toEqual([graph.items[1]!.id, graph.items[2]!.id]);
+    expect(progress.map((entry) => entry.sequence)).toEqual([5, 6, 7, 8]);
+    expect(result.finalTreeSha).toBe(candidate("5"));
+  });
+
+  it("stops before prompting the next item when cancellation occurs during completion acknowledgement", async () => {
+    let continueWork = true;
+    const prompts: string[] = [];
+    await expect(executeSerialWorkflowDependencies({
+      graph, graphDigest: taskGraphDigest(graph), runId, operationId, initialTreeSha: initialTree,
+      now: () => "2026-10-12T12:03:00.000Z",
+      persist: async (entry) => { if (entry.state === "IMPLEMENTED") continueWork = false; },
+      shouldContinue: () => continueWork,
+      execute: async (item) => { prompts.push(item.id); return { treeSha: candidate("6") }; },
+    })).rejects.toThrow(/cancelled after its completion checkpoint/);
+    expect(prompts).toEqual([graph.items[0]!.id]);
+  });
 });

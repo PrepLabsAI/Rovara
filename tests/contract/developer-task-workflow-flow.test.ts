@@ -2,7 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { createCandidateManifest, workflowRequestId } from "../../packages/contracts/src/task-workflow.js";
 import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies.js";
-import { canonicalPlanJson, parsePlanDocument, planDocumentMarkdown, readCanonicalPlan, type PlanDocument, type TaskPersonProofRequest, type TaskPersonProofResponse } from "@agentx/contracts";
+import { executeSerialWorkflowDependencies } from "../../packages/worker/src/workflow-dependencies.js";
+import { canonicalPlanJson, parsePlanDocument, planDocumentMarkdown, readCanonicalPlan, type PlanDocument, type TaskPersonProofRequest, type TaskPersonProofResponse, type WorkItemProgressV1 } from "@agentx/contracts";
 import { SlackThreadWorkspaceResultSchema } from "@agentx/contracts";
 import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, collectWorkflowFeedbackBundles, createWorkflowSnapshot, sharedTaskKey, SharedTaskRecordSchema, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, WorkflowThreadNoteSchema, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
 import * as workflowContracts from "../../packages/contracts/src/task-workflow.js";
@@ -2522,7 +2523,13 @@ describe("checks AgentX proposes in the coding plan", () => {
   });
 
   it("keeps an explicitly approved ordered plan bound when its stopped run is retried", async () => {
-    const harness = await createDeveloperTaskBroker({ developerExtra: { workflowDependenciesEnabled: true }, brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const github = pullRequestGateway("b".repeat(40));
+    github.getCommitTree = vi.fn(async (_url: string, commit: string) => commit === "d".repeat(40) ? "c".repeat(40) : "b".repeat(40));
+    github.getPullRequestFeedback = vi.fn(async (_url: string, number: number) => ({
+      pullRequest: { number, url: "https://github.com/example/demo/pull/42", state: "open" as const, headBranch: "x", baseBranch: "main",
+        headCommit: "d".repeat(40), headTreeSha: "c".repeat(40), title: "t", body: "" }, comments: [], threads: [],
+    }));
+    const harness = await createDeveloperTaskBroker({ developerExtra: { workflowDependenciesEnabled: true }, brokerExtra: { githubPullRequests: github } });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix retry handling", client: "test-client", workflow: true, workflowPath: "QUICK" });
     const taskId = String((started.body.task as { taskId: string }).taskId);
     const workspaceId = String(harness.db.get(`DEVTASK#${taskId}`, "META")?.workspaceId);
@@ -2536,22 +2543,27 @@ describe("checks AgentX proposes in the coding plan", () => {
     await harness.artifact(workspaceId, String(planning.id), "plan.md", planAnswer(plan));
     await harness.finish(workspaceId, String(planning.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
     const artifactDigest = taskWorkflow(harness, taskId).artifacts.at(-1)!.sha256;
+    const graphDigest = taskGraphDigest(graph);
     const approved = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, {
-      requestId: randomUUID(), expectedRevision: taskWorkflow(harness, taskId).revision, decision: "APPROVE", reason: "Approved", artifactDigest,
+      requestId: randomUUID(), expectedRevision: taskWorkflow(harness, taskId).revision, decision: "APPROVE", reason: "Approved", artifactDigest, workBreakdownDigest: graphDigest,
     });
     expect(approved.status, JSON.stringify(approved.body)).toBe(200);
-    expect(taskWorkflow(harness, taskId).workflowDependenciesApproval).toMatchObject({ artifactDigest, graphDigest: taskGraphDigest(graph) });
+    expect(taskWorkflow(harness, taskId).workflowDependenciesApproval).toMatchObject({ artifactDigest, graphDigest });
     const firstRun = operations(harness, workspaceId).find((item) => item.workflowMode === "IMPLEMENT")!;
-    const stoppedProgress = { schemaVersion: 1, graphDigest: taskGraphDigest(graph), runId: taskWorkflow(harness, taskId).workflowDependenciesApproval!.runId,
-      itemId: graph.items[0]!.id, sequence: 2, state: "UNKNOWN", operationId: String(firstRun.id), baseTreeSha: "e".repeat(40),
-      at: new Date().toISOString(), producer: "agentx-worker" };
-    await harness.finish(workspaceId, String(firstRun.id), "FAILED", { error: "worker stopped after durable item checkpoint", result: {
-      workflowDependenciesResult: { schemaVersion: 1, taskId, graphDigest: taskGraphDigest(graph), runId: stoppedProgress.runId,
-        operationId: String(firstRun.id), workflowRevision: taskWorkflow(harness, taskId).workflowDependenciesApproval!.workflowRevision,
-        status: "UNKNOWN", items: [stoppedProgress], at: new Date().toISOString() },
-    } });
+    const approval = taskWorkflow(harness, taskId).workflowDependenciesApproval!;
+    await expect(executeSerialWorkflowDependencies({ graph, graphDigest, runId: approval.runId, operationId: String(firstRun.id), initialTreeSha: "b".repeat(40),
+      now: () => new Date().toISOString(), persist: async (progress) => {
+        await harness.events(workspaceId, String(firstRun.id), [{ type: "progress", payload: { workItemProgress: progress } }]);
+      }, execute: async (item) => {
+        if (item.id === graph.items[0]!.id) return { treeSha: "f".repeat(40) };
+        throw new Error("worker stopped before the second item completed");
+      } })).rejects.toThrow(/paused after an uncertain item/);
+    await harness.finish(workspaceId, String(firstRun.id), "FAILED", { error: "worker stopped after durable item checkpoint" });
     const blocked = taskWorkflow(harness, taskId);
-    expect(blocked).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED", workflowDependenciesProgress: [{ state: "UNKNOWN", itemId: graph.items[0]!.id }] });
+    expect(blocked).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED", workflowDependenciesProgress: [
+      { state: "STARTED", itemId: graph.items[0]!.id }, { state: "IMPLEMENTED", itemId: graph.items[0]!.id },
+      { state: "STARTED", itemId: graph.items[1]!.id }, { state: "UNKNOWN", itemId: graph.items[1]!.id },
+    ] });
     expect(operations(harness, workspaceId).filter((item) => item.workflowMode === "REVIEW" || item.kind === "publish")).toEqual([]);
 
     const requestId = randomUUID();
@@ -2561,21 +2573,25 @@ describe("checks AgentX proposes in the coding plan", () => {
     expect(retried.status, JSON.stringify(retried.body)).toBe(200);
     const retryOperation = operations(harness, workspaceId).find((item) => item.requestId === requestId)!;
     const retryPayload = (harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === retryOperation.id)[0]?.invocation as { payload: { workflowDependencies?: unknown } }).payload;
-    expect(retryPayload.workflowDependencies).toEqual({ graph, approval: taskWorkflow(harness, taskId).workflowDependenciesApproval, resumeTreeSha: "e".repeat(40) });
+    expect(retryPayload.workflowDependencies).toMatchObject({ graph, approval: taskWorkflow(harness, taskId).workflowDependenciesApproval,
+      resumeTreeSha: "f".repeat(40), sequenceStart: 4, resumeProgress: [
+        { itemId: graph.items[0]!.id, state: "IMPLEMENTED" }, { itemId: graph.items[1]!.id, state: "UNKNOWN" },
+      ] });
 
-    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
-    let baseTreeSha = "e".repeat(40);
-    const successfulProgress = graph.items.map((item, index) => {
-      const candidateTreeSha = index === graph.items.length - 1 ? "b".repeat(40) : "f".repeat(40);
-      const progress = { schemaVersion: 1 as const, graphDigest: taskGraphDigest(graph), runId: stoppedProgress.runId, itemId: item.id,
-        sequence: (index + 1) * 2, state: "IMPLEMENTED" as const, operationId: String(retryOperation.id), baseTreeSha, candidateTreeSha,
-        at: new Date().toISOString(), producer: "agentx-worker" };
-      baseTreeSha = candidateTreeSha;
-      return progress;
-    });
+    const dependencyInvocation = retryPayload.workflowDependencies as { resumeTreeSha: string; sequenceStart: number; resumeProgress: WorkItemProgressV1[] };
+    const execution = await executeSerialWorkflowDependencies({ graph, graphDigest, runId: approval.runId, operationId: String(retryOperation.id), initialTreeSha: "f".repeat(40),
+      resumeTreeSha: dependencyInvocation.resumeTreeSha, sequenceStart: dependencyInvocation.sequenceStart, resumeProgress: dependencyInvocation.resumeProgress,
+      now: () => new Date().toISOString(), persist: async (progress) => {
+        await harness.events(workspaceId, String(retryOperation.id), [{ type: "progress", payload: { workItemProgress: progress } }]);
+      }, execute: async () => ({ treeSha: "c".repeat(40) }) });
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "c".repeat(40), baseCommitSha: "e".repeat(40) }]);
+    const successfulProgress = [
+      ...dependencyInvocation.resumeProgress.filter((entry) => entry.state === "IMPLEMENTED"),
+      ...execution.progress.filter((entry) => entry.state === "IMPLEMENTED"),
+    ];
     await harness.finish(workspaceId, String(retryOperation.id), "SUCCEEDED", { result: {
       workflowCandidateRepositories: candidate.repositories, workflowCheckCandidateRepositories: candidate.repositories, checks: passingChecks(),
-      workflowDependenciesResult: { schemaVersion: 1, taskId, graphDigest: taskGraphDigest(graph), runId: stoppedProgress.runId,
+      workflowDependenciesResult: { schemaVersion: 1, taskId, graphDigest, runId: approval.runId,
         operationId: String(retryOperation.id), workflowRevision: taskWorkflow(harness, taskId).workflowDependenciesApproval!.workflowRevision,
         status: "SUCCEEDED", items: successfulProgress, candidateDigest: candidate.digest, at: new Date().toISOString() },
     } });
@@ -2583,7 +2599,7 @@ describe("checks AgentX proposes in the coding plan", () => {
     await passReviews(harness, workspaceId, candidate);
     const publications = operations(harness, workspaceId).filter((item) => item.kind === "publish");
     expect(publications).toHaveLength(1);
-    expect(publications[0]?.publication).toMatchObject({ expectedTreeSha: "b".repeat(40), repository: "demo" });
+    expect(publications[0]?.publication).toMatchObject({ expectedTreeSha: "c".repeat(40), repository: "demo" });
     const publication = publications[0] as { id: string; publication: { repository: string; repositoryUrl: string; headBranch: string; baseBranch: string; title: string; body?: string } };
     await harness.callback(workspaceId, publication.id, "pull-request", { repository: publication.publication.repository,
       repositoryUrl: publication.publication.repositoryUrl, headBranch: publication.publication.headBranch, baseBranch: publication.publication.baseBranch,

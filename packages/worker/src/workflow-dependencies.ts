@@ -11,6 +11,9 @@ export interface ExecuteSerialWorkflowDependenciesInput {
   runId: string;
   operationId: string;
   initialTreeSha: string;
+  sequenceStart?: number;
+  resumeProgress?: readonly WorkItemProgressV1[];
+  shouldContinue?(): boolean;
   now(): string;
   /** Must durably acknowledge the callback before this driver advances. */
   persist(progress: WorkItemProgressV1): Promise<void>;
@@ -42,14 +45,32 @@ export async function executeSerialWorkflowDependencies(
   const outcomes = new Map<string, { treeSha: string; summary?: string }>();
   const progress: WorkItemProgressV1[] = [];
   let treeSha = input.initialTreeSha;
-  let sequence = 0;
+  let sequence = input.sequenceStart ?? 0;
+  const retained = new Map((input.resumeProgress ?? []).map((entry) => [entry.itemId, entry] as const));
+  const order = taskGraphOrder(graph);
+  let firstPending = 0;
+  for (const itemId of order) {
+    const prior = retained.get(itemId);
+    if (prior === undefined || prior.state !== "IMPLEMENTED") break;
+    if (prior.candidateTreeSha === undefined) throw new Error("retained work breakdown checkpoint has no candidate tree");
+    outcomes.set(itemId, { treeSha: prior.candidateTreeSha });
+    treeSha = prior.candidateTreeSha;
+    firstPending += 1;
+  }
+  if (order.slice(firstPending).some((itemId) => retained.get(itemId)?.state === "IMPLEMENTED")) {
+    throw new Error("retained work breakdown checkpoints are not a completed prefix");
+  }
+  if (firstPending > 0 && treeSha !== input.initialTreeSha) {
+    throw new Error("workspace changed since the retained completed work breakdown prefix");
+  }
   const checkpoint = async (value: Omit<WorkItemProgressV1, "sequence">): Promise<void> => {
     const event = WorkItemProgressV1Schema.parse({ ...value, sequence: ++sequence });
     await input.persist(event);
     progress.push(event);
   };
 
-  for (const itemId of taskGraphOrder(graph)) {
+  for (const itemId of order.slice(firstPending)) {
+    if (input.shouldContinue?.() === false) throw new Error("work breakdown stopped because the operation was cancelled");
     const item = itemById.get(itemId);
     if (item === undefined) throw new Error("approved work breakdown order contains an unknown item");
     const predecessorOutcomes = item.dependsOn.map((dependency) => {
@@ -61,6 +82,7 @@ export async function executeSerialWorkflowDependencies(
     await checkpoint({ schemaVersion: 1, graphDigest: input.graphDigest, runId: input.runId, itemId, state: "STARTED", operationId: input.operationId, baseTreeSha, at: input.now(), producer: "agentx-worker" });
     let result: { treeSha: string; summary?: string };
     try {
+      if (input.shouldContinue?.() === false) throw new Error("work breakdown stopped because the operation was cancelled after its start checkpoint");
       result = await input.execute(item, { baseTreeSha, predecessorOutcomes });
       if (!/^[a-f0-9]{40}$/.test(result.treeSha)) throw new Error("item returned an invalid candidate tree");
     } catch (error) {
@@ -87,6 +109,7 @@ export async function executeSerialWorkflowDependencies(
     progress.push(implemented);
     outcomes.set(itemId, { treeSha: result.treeSha, ...(result.summary === undefined ? {} : { summary: result.summary }) });
     treeSha = result.treeSha;
+    if (input.shouldContinue?.() === false) throw new Error("work breakdown stopped because the operation was cancelled after its completion checkpoint");
   }
   return { finalTreeSha: treeSha, progress };
 }
