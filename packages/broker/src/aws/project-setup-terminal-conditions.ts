@@ -15,22 +15,6 @@ export function projectSetupTerminalAuthorityChecks(
   runtime: TerminalRuntimeIdentity,
   session: TerminalSessionIdentity,
 ) {
-  // The exact binding digest is order-sensitive. `contains` plus a matching list size would
-  // accept the same subnet set in a different order, so fence every indexed entry.
-  const subnetConditions = runtime.binding.subnets.flatMap((_, index) => [
-    `binding.#subnets[${index}].availabilityZone = :subnetAz${index}`,
-    `binding.#subnets[${index}].subnetId = :subnetId${index}`,
-  ]);
-  const subnetValues = Object.fromEntries(runtime.binding.subnets.flatMap((subnet, index) => [
-    [`:subnetAz${index}`, subnet.availabilityZone], [`:subnetId${index}`, subnet.subnetId],
-  ]));
-  const projectSubnetConditions = runtime.binding.subnets.flatMap((_, index) => [
-    `runtimeBinding.#subnets[${index}].availabilityZone = :projectSubnetAz${index}`,
-    `runtimeBinding.#subnets[${index}].subnetId = :projectSubnetId${index}`,
-  ]);
-  const projectSubnetValues = Object.fromEntries(runtime.binding.subnets.flatMap((subnet, index) => [
-    [`:projectSubnetAz${index}`, subnet.availabilityZone], [`:projectSubnetId${index}`, subnet.subnetId],
-  ]));
   return [
     { ConditionCheck: {
       TableName: tableName,
@@ -42,13 +26,11 @@ export function projectSetupTerminalAuthorityChecks(
     { ConditionCheck: {
       TableName: tableName,
       Key: { pk: `PROJECT#${execution.projectName}`, sk: `REV#${String(execution.projectRevision).padStart(12, "0")}` },
-      ConditionExpression: ["entityType = :project AND registeredBy = :registeredBy AND #definition.#revision = :projectRevision AND runtimeBinding.#deploymentMode = :deploymentMode AND runtimeBinding.#launchTemplateId = :launchTemplateId AND runtimeBinding.#volumeSizeGiB = :volumeSizeGiB AND runtimeBinding.#volumeType = :volumeType AND size(runtimeBinding.#subnets) = :subnetCount AND #setupApproval.proposalRef = :proposalRef AND #setupApproval.proposalSha256 = :proposalSha AND #setupApproval.candidateDigest = :candidateDigest AND #setupApproval.decision = :approve", ...projectSubnetConditions].join(" AND "),
-      ExpressionAttributeNames: { "#definition": "definition", "#revision": "revision", "#deploymentMode": "deploymentMode", "#launchTemplateId": "launchTemplateId",
-        "#volumeSizeGiB": "volumeSizeGiB", "#volumeType": "volumeType", "#subnets": "subnets", "#setupApproval": "setupApproval" },
+      ConditionExpression: "entityType = :project AND registeredBy = :registeredBy AND #definition.#revision = :projectRevision AND #runtimeBinding = :binding AND #setupApproval.proposalRef = :proposalRef AND #setupApproval.proposalSha256 = :proposalSha AND #setupApproval.candidateDigest = :candidateDigest AND #setupApproval.decision = :approve",
+      ExpressionAttributeNames: { "#definition": "definition", "#revision": "revision", "#runtimeBinding": "runtimeBinding", "#setupApproval": "setupApproval" },
       ExpressionAttributeValues: { ":project": "PROJECT", ":registeredBy": execution.ownerKey, ":projectRevision": execution.projectRevision,
-        ":deploymentMode": "ec2-ebs", ":launchTemplateId": runtime.binding.launchTemplateId, ":volumeSizeGiB": runtime.binding.volumeSizeGiB, ":volumeType": runtime.binding.volumeType,
-        ":subnetCount": runtime.binding.subnets.length, ":proposalRef": execution.proposalRef, ":proposalSha": execution.proposalSha256,
-        ":candidateDigest": execution.candidateDigest, ":approve": "approve", ...projectSubnetValues },
+        ":binding": runtime.binding, ":proposalRef": execution.proposalRef, ":proposalSha": execution.proposalSha256,
+        ":candidateDigest": execution.candidateDigest, ":approve": "approve" },
     } },
     { ConditionCheck: {
       TableName: tableName,
@@ -70,22 +52,16 @@ export function projectSetupTerminalAuthorityChecks(
     { ConditionCheck: {
       TableName: tableName,
       Key: projectSetupRuntimeKey(execution.runtimeCatalogId, execution.bindingDigest),
-      ConditionExpression: ["schemaVersion = :version AND entityType = :entityType AND runtimeCatalogId = :catalogId AND catalogRevision = :catalogRevision AND bindingDigest = :bindingDigest AND manifestDigest = :manifestDigest AND runnerEnvironmentDigest = :environmentDigest AND runnerToolchainDigest = :toolchainDigest AND endpoint = :endpoint AND generation = :generation AND transportCorrelationId = :correlation AND #state = :ready AND size(supportedSetupScopes) = :scopeCount AND contains(supportedSetupScopes, :scope) AND qualifiedAt = :qualifiedAt AND expiresAt = :expiresAt AND binding.#deploymentMode = :deploymentMode AND binding.#launchTemplateId = :launchTemplateId AND binding.#volumeSizeGiB = :volumeSizeGiB AND binding.#volumeType = :volumeType AND size(binding.#subnets) = :subnetCount AND runnerEnvironment.ci = :ci AND runnerEnvironment.trustNoticeShown = :trustNoticeShown AND runnerEnvironment.os = :os AND runnerEnvironment.arch = :environmentArch AND runnerEnvironment.runtime = :runtime AND runnerToolchain.execPath = :execPath AND runnerToolchain.version = :versionToolchain AND runnerToolchain.platform = :platform AND runnerToolchain.arch = :toolchainArch", ...subnetConditions].join(" AND "),
-      ExpressionAttributeNames: { "#state": "state", "#deploymentMode": "deploymentMode", "#launchTemplateId": "launchTemplateId", "#volumeSizeGiB": "volumeSizeGiB", "#volumeType": "volumeType", "#subnets": "subnets" },
+      ConditionExpression: "schemaVersion = :version AND entityType = :entityType AND runtimeCatalogId = :catalogId AND catalogRevision = :catalogRevision AND bindingDigest = :bindingDigest AND manifestDigest = :manifestDigest AND runnerEnvironmentDigest = :environmentDigest AND runnerToolchainDigest = :toolchainDigest AND endpoint = :endpoint AND generation = :generation AND transportCorrelationId = :correlation AND #state = :ready AND #supportedSetupScopes = :supportedSetupScopes AND qualifiedAt = :qualifiedAt AND expiresAt = :expiresAt AND #binding = :binding AND #runnerEnvironment = :runnerEnvironment AND #runnerToolchain = :runnerToolchain",
+      ExpressionAttributeNames: { "#state": "state", "#supportedSetupScopes": "supportedSetupScopes", "#binding": "binding", "#runnerEnvironment": "runnerEnvironment", "#runnerToolchain": "runnerToolchain" },
       ExpressionAttributeValues: {
         ":version": 1, ":entityType": "PROJECT_SETUP_RUNTIME", ":catalogId": execution.runtimeCatalogId,
         ":catalogRevision": execution.runtimeCatalogRevision, ":bindingDigest": execution.bindingDigest,
         ":manifestDigest": runtime.manifestDigest, ":environmentDigest": runtime.runnerEnvironmentDigest,
         ":toolchainDigest": runtime.runnerToolchainDigest, ":endpoint": runtime.endpoint,
         ":generation": execution.runtimeGeneration, ":correlation": execution.transportCorrelationId,
-        ":ready": "READY", ":scope": "source-interface", ":scopeCount": 1, ":qualifiedAt": runtime.qualifiedAt, ":expiresAt": runtime.expiresAt,
-        ":subnetCount": runtime.binding.subnets.length,
-        ":deploymentMode": runtime.binding.deploymentMode, ":launchTemplateId": runtime.binding.launchTemplateId,
-        ":volumeSizeGiB": runtime.binding.volumeSizeGiB, ":volumeType": runtime.binding.volumeType,
-        ":ci": true, ":trustNoticeShown": false, ":os": runtime.runnerEnvironment.os, ":environmentArch": runtime.runnerEnvironment.arch,
-        ":runtime": runtime.runnerEnvironment.runtime, ":execPath": runtime.runnerToolchain.execPath, ":versionToolchain": runtime.runnerToolchain.version,
-        ":platform": runtime.runnerToolchain.platform, ":toolchainArch": runtime.runnerToolchain.arch,
-        ...subnetValues,
+        ":ready": "READY", ":supportedSetupScopes": runtime.supportedSetupScopes, ":qualifiedAt": runtime.qualifiedAt, ":expiresAt": runtime.expiresAt,
+        ":binding": runtime.binding, ":runnerEnvironment": runtime.runnerEnvironment, ":runnerToolchain": runtime.runnerToolchain,
       },
     } },
   ];

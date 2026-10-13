@@ -73,4 +73,25 @@ describe("FakeDynamoDb faults and limits", () => {
     await expect(check("PROJECT#ordered")).resolves.toEqual({});
     await expect(check("PROJECT#swapped")).rejects.toMatchObject({ name: "TransactionCanceledException" });
   });
+
+  it("compares complete binding snapshots, rejecting reordered lists and extra nested fields", async () => {
+    const db = new FakeDynamoDb();
+    const binding = { deploymentMode: "ec2-ebs", launchTemplateId: "lt-12345678", subnets: [
+      { subnetId: "subnet-a", availabilityZone: "us-east-1a" }, { subnetId: "subnet-b", availabilityZone: "us-east-1b" },
+    ], volumeSizeGiB: 20, volumeType: "gp3" };
+    await db.send(new PutCommand({ TableName: "t", Item: { pk: "PROJECT#exact", sk: "REV#1", runtimeBinding: structuredClone(binding) } }));
+    await db.send(new PutCommand({ TableName: "t", Item: { pk: "PROJECT#extra", sk: "REV#1", runtimeBinding: {
+      ...structuredClone(binding), subnets: [{ ...binding.subnets[0], unexpected: true }, binding.subnets[1]],
+    } } }));
+    await db.send(new PutCommand({ TableName: "t", Item: { pk: "PROJECT#swapped-map", sk: "REV#1", runtimeBinding: {
+      ...structuredClone(binding), subnets: [binding.subnets[1], binding.subnets[0]],
+    } } }));
+    const check = (pk: string) => db.send(new TransactWriteCommand({ TransactItems: [{ ConditionCheck: {
+      TableName: "t", Key: { pk, sk: "REV#1" }, ConditionExpression: "runtimeBinding = :binding",
+      ExpressionAttributeValues: { ":binding": binding },
+    } }] }));
+    await expect(check("PROJECT#exact")).resolves.toEqual({});
+    await expect(check("PROJECT#extra")).rejects.toMatchObject({ name: "TransactionCanceledException" });
+    await expect(check("PROJECT#swapped-map")).rejects.toMatchObject({ name: "TransactionCanceledException" });
+  });
 });

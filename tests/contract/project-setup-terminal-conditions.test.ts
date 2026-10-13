@@ -34,15 +34,10 @@ describe("project setup terminal authority transaction checks", () => {
     expect(project?.Key).toEqual({ pk: "PROJECT#orders", sk: "REV#000000000003" });
     expect(project?.ConditionExpression).toContain("setupApproval.proposalSha256 = :proposalSha");
     expect(value(1, ":registeredBy")).toBe("OWNER#1");
-    expect(project?.ConditionExpression).toContain("size(runtimeBinding.#subnets) = :subnetCount");
-    expect(project?.ConditionExpression).toContain("runtimeBinding.#subnets[0].availabilityZone = :projectSubnetAz0");
-    expect(project?.ConditionExpression).toContain("runtimeBinding.#subnets[0].subnetId = :projectSubnetId0");
-    expect(project?.ConditionExpression).toContain("runtimeBinding.#subnets[1].availabilityZone = :projectSubnetAz1");
-    expect(project?.ConditionExpression).toContain("runtimeBinding.#subnets[1].subnetId = :projectSubnetId1");
-    expect(value(1, ":projectSubnetAz0")).toBe("us-east-1a");
-    expect(value(1, ":projectSubnetId0")).toBe("subnet-12345678");
-    expect(value(1, ":projectSubnetAz1")).toBe("us-east-1b");
-    expect(value(1, ":projectSubnetId1")).toBe("subnet-87654321");
+    expect(project?.ConditionExpression).toContain("#runtimeBinding = :binding");
+    expect(value(1, ":binding")).toEqual({ deploymentMode: "ec2-ebs", launchTemplateId: "lt-12345678", subnets: [
+      { availabilityZone: "us-east-1a", subnetId: "subnet-12345678" }, { availabilityZone: "us-east-1b", subnetId: "subnet-87654321" },
+    ], volumeSizeGiB: 20, volumeType: "gp3" });
     const approval = checks[2]?.ConditionCheck;
     expect(approval?.Key).toEqual({ pk: "PROJECT_SETUP#orders", sk: `PROPOSAL#${"e".repeat(64)}` });
     expect(approval?.ConditionExpression).toContain("decision = :approve AND policyDigest = :policyDigest");
@@ -56,16 +51,15 @@ describe("project setup terminal authority transaction checks", () => {
     expect(runtime?.ConditionExpression).toContain("catalogRevision = :catalogRevision AND bindingDigest = :bindingDigest");
     expect(value(4, ":qualifiedAt")).toBe("2026-10-13T10:00:00.000Z");
     expect(value(4, ":expiresAt")).toBe("2026-10-13T11:00:00.000Z");
-    expect(value(4, ":launchTemplateId")).toBe("lt-12345678");
-    expect(value(4, ":execPath")).toBe("/usr/bin/node");
-    expect(runtime?.ConditionExpression).toContain("size(binding.#subnets) = :subnetCount");
-    expect(runtime?.ConditionExpression).toContain("binding.#subnets[0].availabilityZone = :subnetAz0");
-    expect(runtime?.ConditionExpression).toContain("binding.#subnets[0].subnetId = :subnetId0");
-    expect(runtime?.ConditionExpression).toContain("binding.#subnets[1].availabilityZone = :subnetAz1");
-    expect(runtime?.ConditionExpression).toContain("binding.#subnets[1].subnetId = :subnetId1");
-    expect(value(4, ":subnetAz0")).toBe("us-east-1a");
-    expect(value(4, ":subnetId0")).toBe("subnet-12345678");
-    expect(value(4, ":subnetAz1")).toBe("us-east-1b");
-    expect(value(4, ":subnetId1")).toBe("subnet-87654321");
+    expect(runtime?.ConditionExpression).toContain("#binding = :binding");
+    expect(runtime?.ConditionExpression).toContain("#runnerEnvironment = :runnerEnvironment");
+    expect(runtime?.ConditionExpression).toContain("#runnerToolchain = :runnerToolchain");
+    expect(runtime?.ConditionExpression).toContain("#supportedSetupScopes = :supportedSetupScopes");
+    expect(value(4, ":binding")).toEqual({ deploymentMode: "ec2-ebs", launchTemplateId: "lt-12345678", subnets: [
+      { availabilityZone: "us-east-1a", subnetId: "subnet-12345678" }, { availabilityZone: "us-east-1b", subnetId: "subnet-87654321" },
+    ], volumeSizeGiB: 20, volumeType: "gp3" });
+    expect(value(4, ":runnerEnvironment")).toEqual({ ci: true, trustNoticeShown: false, os: "Linux", arch: "arm64", runtime: "Node.js 22" });
+    expect(value(4, ":runnerToolchain")).toEqual({ execPath: "/usr/bin/node", version: "v22.23.2", platform: "linux", arch: "arm64" });
+    expect(value(4, ":supportedSetupScopes")).toEqual(["source-interface"]);
   });
 });
