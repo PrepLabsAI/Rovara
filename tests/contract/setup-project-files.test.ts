@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { agentxRepositoryName, commandLine, githubRepositoryApi, installationToken, parseCommandLine, proposeCommands } from "../../packages/cli/src/setup/project-files.js";
 import { fakeGitHubApi, memoryInitSecrets, TEST_PRIVATE_KEY } from "../support/init-fakes.js";
@@ -144,6 +145,38 @@ describe("the repository API's network calls (githubRepositoryApi)", () => {
     const { fetchImplementation } = recordingFetch([jsonResponse(403, { message: "Forbidden" })]);
     await expect(githubRepositoryApi(fetchImplementation).list("ghs_token"))
       .rejects.toThrow("check that the GitHub App is still installed and can see its repositories");
+  });
+
+  it("resolves a ref once and reads only verified blobs from its complete immutable tree", async () => {
+    const bytes = Buffer.from('{"name":"shop"}');
+    const { calls, fetchImplementation } = recordingFetch([
+      jsonResponse(200, { sha: "a".repeat(40), commit: { tree: { sha: "b".repeat(40) } } }),
+      jsonResponse(200, { truncated: false, tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "c".repeat(40), size: bytes.byteLength }] }),
+      jsonResponse(200, { encoding: "base64", size: bytes.byteLength, content: bytes.toString("base64") }),
+    ]);
+    const result = await githubRepositoryApi(fetchImplementation).snapshot("ghs_token", "acme/shop", ["package.json"], "main");
+    expect(result).toMatchObject({ commitSha: "a".repeat(40), treeSha: "b".repeat(40), treeComplete: true, sources: [{ path: "package.json", sha256: createHash("sha256").update(bytes).digest("hex") }] });
+    expect(result.candidate.repositories).toEqual([{ repositoryId: "acme/shop", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
+    expect(calls.map((call) => call.url)).toEqual([
+      "https://api.github.com/repos/acme/shop/commits/main",
+      "https://api.github.com/repos/acme/shop/git/trees/" + "b".repeat(40) + "?recursive=1",
+      "https://api.github.com/repos/acme/shop/git/blobs/" + "c".repeat(40),
+    ]);
+  });
+
+  it("refuses a truncated tree, unsafe paths, and files that exceed the snapshot bound", async () => {
+    const truncated = recordingFetch([
+      jsonResponse(200, { sha: "a".repeat(40), commit: { tree: { sha: "b".repeat(40) } } }),
+      jsonResponse(200, { truncated: true, tree: [] }),
+    ]);
+    await expect(githubRepositoryApi(truncated.fetchImplementation).snapshot("ghs_token", "acme/shop", ["package.json"], "main")).rejects.toThrow(/truncated|complete/);
+    const unsafe = recordingFetch([]);
+    await expect(githubRepositoryApi(unsafe.fetchImplementation).snapshot("ghs_token", "acme/shop", ["../package.json"], "main")).rejects.toThrow(/path/);
+    const tooLarge = recordingFetch([
+      jsonResponse(200, { sha: "a".repeat(40), commit: { tree: { sha: "b".repeat(40) } } }),
+      jsonResponse(200, { truncated: false, tree: [{ path: "package.json", mode: "100644", type: "blob", sha: "c".repeat(40), size: 600000 }] }),
+    ]);
+    await expect(githubRepositoryApi(tooLarge.fetchImplementation).snapshot("ghs_token", "acme/shop", ["package.json"], "main")).rejects.toThrow(/size/);
   });
 
   it("a 404 file read returns undefined", async () => {

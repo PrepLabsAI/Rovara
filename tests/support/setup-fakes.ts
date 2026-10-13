@@ -1,5 +1,7 @@
 // Fakes for the setup modules (phase 15d2). Nothing here reaches AWS, a vendor or the control plane.
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { createCandidateManifest } from "@agentx/contracts";
 import { join } from "node:path";
 import type { AuthorizeSecrets } from "../../packages/cli/src/admin/authorize.js";
 import { tokenStoreKey, type LoginOptions } from "../../packages/cli/src/auth.js";
@@ -130,6 +132,19 @@ export function fakeRepositories(repositories: Record<string, { defaultBranch?: 
       fullName, name: fullName.split("/")[1]!, defaultBranch: repositories[fullName]!.defaultBranch ?? "main", cloneUrl: `https://github.com/${fullName}.git`,
     })),
     file: async (_token, fullName, path) => { reads.push(`${fullName}:${path}`); return repositories[fullName]?.files[path]; },
+    snapshot: async (_token, fullName, paths, ref) => {
+      const repository = repositories[fullName];
+      if (repository === undefined) throw new Error("repository not found");
+      const commitSha = createHash("sha1").update(fullName + ":" + ref).digest("hex");
+      const treeSha = createHash("sha1").update(JSON.stringify(repository.files)).digest("hex");
+      const sources = paths.map((path) => {
+        const value = repository.files[path];
+        if (value === undefined) throw new Error("source path not found");
+        const bytes = Buffer.from(value);
+        return { path, bytes, sha256: createHash("sha256").update(bytes).digest("hex"), kind: "blob" as const };
+      });
+      return { candidate: createCandidateManifest([{ repositoryId: fullName, commitSha, treeSha }]), commitSha, treeSha, treeComplete: true as const, treePaths: Object.keys(repository.files), sources };
+    },
   };
 }
 

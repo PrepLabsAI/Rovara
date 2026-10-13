@@ -6,7 +6,8 @@
 // are only ever read (regex or JSON.parse, both guarded) to choose between a small set of commands
 // this file writes itself. No file content ever becomes part of a command's executable or args, and
 // no file content, private key or installation token is ever logged.
-import { agentXError, type ProjectCommand } from "@agentx/contracts";
+import { createHash } from "node:crypto";
+import { agentXError, createCandidateManifest, type CandidateManifest, type CandidateRepository, type ProjectCommand } from "@agentx/contracts";
 import type { InitSecrets } from "../init/context.js";
 import { githubAppJwt, githubAppSecretName, parseAppSecret, type GitHubApi } from "../init/github-app.js";
 
@@ -16,7 +17,17 @@ export interface GitHubRepositoryApi {
   list(token: string): Promise<RepositoryInfo[]>;
   /** A file's text at the default branch, or undefined when it does not exist. */
   file(token: string, fullName: string, path: string): Promise<string | undefined>;
+  snapshot(token: string, fullName: string, paths: readonly string[], ref: string): Promise<RepositorySnapshot>;
 }
+export interface RepositorySnapshot {
+  candidate: CandidateManifest;
+  commitSha: string;
+  treeSha: string;
+  treeComplete: true;
+  treePaths: string[];
+  sources: Array<{ path: string; sha256: string; bytes: Uint8Array; kind: "blob" }>;
+}
+
 
 const API = "https://api.github.com";
 /** Seconds a setup command may run (the proposal's and a typed command's alike). */
@@ -28,6 +39,14 @@ const NPM_PLACEHOLDER = /no test specified/;
  * build file this module reads (package.json, pyproject.toml, requirements.txt, a Makefile) states
  * what it needs near the top, so a cap this size never changes what is proposed for a real project. */
 const MAX_FILE_BYTES = 64 * 1024;
+const MAX_SNAPSHOT_FILES = 512;
+const MAX_SNAPSHOT_FILE_BYTES = 512 * 1024;
+const MAX_SNAPSHOT_TOTAL_BYTES = 4 * 1024 * 1024;
+const forbiddenSnapshotPart = /^(?:\.git|\.github|\.aws|\.ssh|\.env(?:\..*)?|secrets?|credentials?|.*(?:token|password|private[-_]?key).*)$/i;
+function safeSnapshotPath(path: string): boolean {
+  return path.length > 0 && path.length <= 1024 && !path.startsWith("/") && !path.includes("\\")
+    && !path.split("/").some((part) => part === "" || part === "." || part === ".." || forbiddenSnapshotPart.test(part));
+}
 
 export const BUILD_FILES: readonly string[] = [
   "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
@@ -76,6 +95,45 @@ export function githubRepositoryApi(fetchImplementation: typeof fetch): GitHubRe
     accept, authorization: `Bearer ${token}`, "x-github-api-version": "2022-11-28", "user-agent": "agentx-cli",
   });
   return {
+    async snapshot(token, fullName, paths, ref) {
+      if (!Array.isArray(paths) || paths.length === 0 || paths.length > MAX_SNAPSHOT_FILES || new Set(paths).size !== paths.length || paths.some((path) => !safeSnapshotPath(path))) {
+        throw agentXError("CONFIG_INVALID", "snapshot paths must be unique normalized paths within the bounded source allowlist");
+      }
+      const base = `${API}/repos/${fullName}`;
+      const commitResponse = await fetchImplementation(`${base}/commits/${encodeURIComponent(ref)}`, { headers: headers(token) });
+      if (!commitResponse.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub could not resolve repository ref in ${fullName} (HTTP ${commitResponse.status}); ${nextStepFor(commitResponse.status, fullName)}`);
+      const commitBody = await commitResponse.json() as { sha?: unknown; commit?: { tree?: { sha?: unknown } } };
+      const commitSha = commitBody.sha;
+      const treeSha = commitBody.commit?.tree?.sha;
+      if (typeof commitSha !== "string" || !/^[a-f0-9]{40}$/.test(commitSha) || typeof treeSha !== "string" || !/^[a-f0-9]{40}$/.test(treeSha)) {
+        throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid immutable commit or tree identity");
+      }
+      const treeResponse = await fetchImplementation(`${base}/git/trees/${treeSha}?recursive=1`, { headers: headers(token) });
+      if (!treeResponse.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub could not read the immutable source tree in ${fullName} (HTTP ${treeResponse.status}); ${nextStepFor(treeResponse.status, fullName)}`);
+      const treeBody = await treeResponse.json() as { truncated?: unknown; tree?: Array<{ path?: unknown; mode?: unknown; type?: unknown; sha?: unknown; size?: unknown }> };
+      if (treeBody.truncated !== false || !Array.isArray(treeBody.tree) || treeBody.tree.length > 100_000) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an incomplete or oversized immutable source tree");
+      const treePaths = new Set(treeBody.tree.map((entry) => entry.path).filter((path): path is string => typeof path === "string"));
+      const sources: RepositorySnapshot["sources"] = [];
+      let totalBytes = 0;
+      for (const path of paths) {
+        const entry = treeBody.tree.find((item) => item.path === path);
+        if (entry === undefined || entry.type !== "blob" || entry.mode === "120000" || entry.mode === "160000" || typeof entry.sha !== "string" || !/^[a-f0-9]{40}$/.test(entry.sha)) {
+          throw agentXError("CONFIG_INVALID", `snapshot path ${path} is missing or is not a regular Git blob`);
+        }
+        if (typeof entry.size !== "number" || !Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > MAX_SNAPSHOT_FILE_BYTES) throw agentXError("RUNTIME_UNAVAILABLE", `snapshot file ${path} exceeds the source size limit`);
+        const blobResponse = await fetchImplementation(`${base}/git/blobs/${entry.sha}`, { headers: headers(token) });
+        if (!blobResponse.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub could not read immutable source blob for ${path} (HTTP ${blobResponse.status}); ${nextStepFor(blobResponse.status, fullName)}`);
+        const blob = await blobResponse.json() as { encoding?: unknown; content?: unknown; size?: unknown };
+        if (blob.encoding !== "base64" || typeof blob.content !== "string" || blob.size !== entry.size) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub returned incomplete immutable source bytes for ${path}`);
+        const bytes = Buffer.from(blob.content.replace(/\s/g, ""), "base64");
+        if (bytes.byteLength !== entry.size) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub source byte count did not match the immutable tree for ${path}`);
+        totalBytes += bytes.byteLength;
+        if (totalBytes > MAX_SNAPSHOT_TOTAL_BYTES) throw agentXError("RUNTIME_UNAVAILABLE", "requested source snapshot exceeds the total byte limit");
+        sources.push({ path, sha256: createHash("sha256").update(bytes).digest("hex"), bytes, kind: "blob" });
+      }
+      const candidate = createCandidateManifest([{ repositoryId: fullName, commitSha, treeSha } satisfies CandidateRepository]);
+      return { candidate, commitSha, treeSha, treeComplete: true as const, treePaths: [...treePaths], sources };
+    },
     async list(token) {
       const all: RepositoryInfo[] = [];
       for (let page = 1; page <= MAX_REPOSITORY_PAGES; page += 1) {

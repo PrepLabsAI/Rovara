@@ -4,12 +4,13 @@
 // connector add can build the next revision from it. The file holds no secret: the repository's
 // credential is a reference (the built-in GitHub App's ref), never a token.
 import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
 import {
-  ProjectDefinitionSchema, RegistrationPreflightSchema, agentXError, environmentStackName,
-  type ConnectorPreflight, type Ec2RuntimeBinding, type ProjectDefinition,
+  ProjectDefinitionSchema, RegistrationPreflightSchema, E2EPolicySchema, E2ESetupProposalSchema, agentXError, environmentStackName,
+  type ConnectorPreflight, type Ec2RuntimeBinding, type ProjectDefinition, type E2EPolicy, type E2ESetupProposal,
 } from "@agentx/contracts";
 import { listCredentials } from "../admin/credential.js";
 import { cliRuntimeBinding, registerProject } from "../admin/register.js";
@@ -17,7 +18,7 @@ import { loadProjectConfig } from "../config.js";
 import type { StackOutputs } from "../deploy/parameters.js";
 import type { Prompter } from "../init/prompts.js";
 import {
-  agentxRepositoryName, commandLine, parseCommandLine, proposeCommands, BUILD_FILES, SETUP_TIMEOUT, TEST_TIMEOUT, type RepositoryInfo,
+  agentxRepositoryName, commandLine, parseCommandLine, proposeCommands, BUILD_FILES, SETUP_TIMEOUT, TEST_TIMEOUT, type RepositoryInfo, type RepositorySnapshot,
 } from "./project-files.js";
 import type { AdminSession, SetupServices } from "./services.js";
 
@@ -186,6 +187,8 @@ export async function addProject(input: {
   env: string; session: AdminSession; githubToken: string; prompter: Prompter; write: (line: string) => void;
   services: Pick<SetupServices, "fetch" | "repositories" | "stackOutputs" | "configDir">;
   flags: { projectName?: string; repository?: string; setupCommand?: string; testCommand?: string };
+  /** A source-verified proposal and policy for the single normal project-setup confirmation. */
+  e2eSetup?: { proposal: E2ESetupProposal; policy: E2EPolicy; snapshot: RepositorySnapshot };
   /** The install page's project card (spec 040 phase 3): told the repository once it is chosen. */
   onRepository?: (fullName: string) => void;
 }): Promise<{ name: string; revision: number; file: string }> {
@@ -231,12 +234,65 @@ export async function addProject(input: {
   const repoName = agentxRepositoryName(repository.name);
   const cwd = `repo/${repoName}`;
   const source = repository;
-  const files = Object.fromEntries(await Promise.all(BUILD_FILES.map(async (file) => [file, await input.services.repositories.file(input.githubToken, source.fullName, file)] as const)));
+  let setupProposal: E2ESetupProposal | undefined;
+  let e2ePolicy: E2EPolicy | undefined;
+  if (input.e2eSetup !== undefined) {
+    const candidateProposal = E2ESetupProposalSchema.parse(input.e2eSetup.proposal);
+    const policy = E2EPolicySchema.parse(input.e2eSetup.policy);
+    const snapshot = input.e2eSetup.snapshot;
+    if (snapshot.treeComplete !== true || snapshot.sources.length > 512 || snapshot.treePaths.length > 100_000) throw agentXError("CONFIG_INVALID", "E2E setup requires a complete bounded immutable source snapshot");
+    if (snapshot.candidate.digest !== candidateProposal.candidateDigest || snapshot.candidate.repositories.length !== 1 || snapshot.candidate.repositories[0]?.repositoryId !== source.fullName) {
+      throw agentXError("CONFIG_INVALID", "E2E setup proposal must match this repository's immutable candidate snapshot");
+    }
+    if (candidateProposal.targets.length !== policy.targets.length || candidateProposal.targets.some((target) => !policy.targets.some((configured) => JSON.stringify(configured) === JSON.stringify(target)))) {
+      throw agentXError("CONFIG_INVALID", "E2E setup policy targets must match the source-backed proposal");
+    }
+    const treePaths = new Set(snapshot.treePaths);
+    let snapshotBytes = 0;
+    const seenSourcePaths = new Set<string>();
+    for (const item of snapshot.sources) {
+      snapshotBytes += item.bytes.byteLength;
+      const normalized = item.path.length > 0 && !item.path.startsWith("/") && !item.path.includes("\\")
+        && !item.path.split("/").some((part) => part === "" || part === "." || part === ".." || /^(?:\.git|\.aws|\.ssh|\.env(?:\..*)?|secrets?|credentials?|.*(?:token|password|private[-_]?key).*)$/i.test(part));
+      if (!normalized || seenSourcePaths.has(item.path) || !treePaths.has(item.path) || item.kind !== "blob" || item.bytes.byteLength > 512 * 1024 || createHash("sha256").update(item.bytes).digest("hex") !== item.sha256) {
+        throw agentXError("CONFIG_INVALID", "E2E setup source bytes do not match the immutable snapshot tree");
+      }
+      seenSourcePaths.add(item.path);
+    }
+    if (snapshotBytes > 4 * 1024 * 1024) throw agentXError("CONFIG_INVALID", "E2E setup source snapshot exceeds the byte limit");
+    const sourceHashes = new Map(snapshot.sources.map((item) => [item.path, item.sha256]));
+    for (const ref of candidateProposal.sources) if (sourceHashes.get(ref.path) !== ref.sha256) throw agentXError("CONFIG_INVALID", "E2E setup proposal source hashes do not match the immutable candidate snapshot");
+    const requireSource = (path: string) => { if (!sourceHashes.has(path)) throw agentXError("CONFIG_INVALID", "E2E setup graph references source outside the immutable candidate snapshot"); };
+    const appIds = new Set(candidateProposal.applications.map((application) => application.applicationId));
+    const targetsById = new Map(candidateProposal.targets.map((target) => [target.targetId, target]));
+    for (const application of candidateProposal.applications) for (const path of application.sourcePaths) requireSource(path);
+    for (const target of candidateProposal.targets) if (!appIds.has(target.applicationId)) throw agentXError("CONFIG_INVALID", "E2E setup target references an unknown application");
+    for (const edge of candidateProposal.dependencyEdges) {
+      if (!appIds.has(edge.fromApplicationId)) throw agentXError("CONFIG_INVALID", "E2E setup dependency references an unknown application");
+      for (const path of edge.sourcePaths) requireSource(path);
+    }
+    for (const missing of candidateProposal.missingInputs) for (const path of missing.sourcePaths) requireSource(path);
+    for (const scenario of candidateProposal.scenarios) if (scenario.requestedTargetIds.some((targetId) => !targetsById.has(targetId))) throw agentXError("CONFIG_INVALID", "E2E setup scenario references an unknown target");
+    setupProposal = candidateProposal;
+    e2ePolicy = policy;
+  }
+  const files = input.e2eSetup === undefined
+    ? Object.fromEntries(await Promise.all(BUILD_FILES.map(async (file) => [file, await input.services.repositories.file(input.githubToken, source.fullName, file)] as const)))
+    : Object.fromEntries(BUILD_FILES.map((file) => [file, input.e2eSetup!.snapshot.sources.find((item) => item.path === file)?.bytes ? Buffer.from(input.e2eSetup!.snapshot.sources.find((item) => item.path === file)!.bytes).toString("utf8") : undefined] as const));
   const proposed = proposeCommands(files, cwd);
   let setup = proposed.setup;
   let readiness = proposed.readiness;
+  let e2eAccepted = false;
   const typed = (line: string, timeout: number) => (line.trim() === "" ? [] : [parseCommandLine(line, cwd, timeout)]);
-  if (flags.setupCommand !== undefined || flags.testCommand !== undefined) {
+  if (setupProposal !== undefined && e2ePolicy !== undefined) {
+    const targetSummary = setupProposal.targets.map((target) => target.kind + ":" + target.targetId).join(", ") || "no targets detected";
+    const mockSummary = setupProposal.missingInputs.filter((item) => item.disposition === "mock-substitutable").map((item) => item.kind).join(", ") || "none detected";
+    const blockerSummary = setupProposal.missingInputs.filter((item) => item.disposition === "blocking").map((item) => item.reason).join("; ") || "none";
+    input.write(setupProposal.missingInputs.length === 0 ? "Detected source-backed E2E setup." : "Detected source-backed E2E setup with unresolved inputs: " + blockerSummary);
+    const commandSummary = "setup: " + setup.map(commandLine).join("; ") + "; readiness: " + readiness.map(commandLine).join("; ");
+    e2eAccepted = await prompter.confirm("Use this project setup plan? (" + commandSummary + "; targets: " + targetSummary + "; mock substitutions: " + mockSummary + "; unresolved inputs: " + blockerSummary + ")", { defaultValue: true });
+    if (!e2eAccepted) { setup = []; readiness = []; }
+  } else if (flags.setupCommand !== undefined || flags.testCommand !== undefined) {
     if (flags.setupCommand !== undefined) setup = typed(flags.setupCommand, SETUP_TIMEOUT);
     if (flags.testCommand !== undefined) readiness = typed(flags.testCommand, TEST_TIMEOUT);
   } else {
@@ -253,6 +309,7 @@ export async function addProject(input: {
     name, revision: 1,
     repositories: [{ name: repoName, url: repository.cloneUrl, path: cwd, defaultBranch: repository.defaultBranch, credentialRef: await builtInGitHubRef(input.session, input.services.fetch) }],
     setup, readiness, orchestratorInstructions: DEFAULT_INSTRUCTIONS,
+    ...(e2eAccepted && e2ePolicy !== undefined ? { e2e: e2ePolicy } : {}),
   });
   const registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services });
   input.write(`Registered project ${name}, revision 1, on EC2 workers. Its file is ${registered.file}.`);
