@@ -459,6 +459,7 @@ the `agentx` CLI.
 | [Project configuration](docs/project-configuration.md)        | Every field of a project file, and how the checks work                         |
 | [Pull requests](docs/pull-requests.md)                        | Publication, maintenance, GitHub App permissions, CodeBuild gates              |
 | [Use Rovara from your AI tool](docs/mcp-install.md)           | `agentx mcp` for Claude Code, Codex and Cursor, and sharing to Slack           |
+| [Rovara loop](docs/loop.md)                                   | Rovara's workflow on your GitHub issues, run locally by your own Claude Code   |
 | [Model providers](docs/openrouter.md) · [your own key](docs/model-providers.md) · [Sign in with ChatGPT](docs/chatgpt.md) | Bedrock, OpenRouter, Anthropic and OpenAI, and each developer's own ChatGPT plan |
 | Connectors: [Linear](docs/connectors/linear.md) · [Jira](docs/connectors/jira.md) · [Asana](docs/connectors/asana.md) · [any MCP server](docs/connectors/custom-mcp.md) | Credentials and setup per connector |
 | [SWE-bench evals](docs/swebench-eval.md)                      | Running SWE-bench tasks against the coding agent from Slack                    |

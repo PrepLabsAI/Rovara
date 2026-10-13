@@ -77,6 +77,8 @@ import { SIGNIN_FLAG_NAMES, type SigninFlags } from "./signin/collect.js";
 import type { SigninServices } from "./signin/commands.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
 import { CLI_VERSION, RELEASE_VERSION } from "./version.js";
+import { registerLoopCommands } from "./loop/cli.js";
+import type { Exec } from "./loop/exec.js";
 
 interface GlobalOptions {
   project?: string;
@@ -146,6 +148,8 @@ export interface CliDependencies {
   };
   /** `chatgpt connect` overrides, for tests: another port, no browser, and no terminal check. */
   chatgpt?: { port?: number; openBrowser?: (url: string) => Promise<void>; isInteractive?: () => boolean };
+  /** `rovara loop` overrides, for tests: every outside program (gh, git, tmux, claude) and how to run this CLI. */
+  loop?: { exec?: Exec; cliCommand?: readonly string[] };
   /** `agentx mcp` reads MCP messages from here; process.stdin by default. */
   stdin?: Readable;
   /** `agentx mcp`'s clock for waits, for tests. */
@@ -445,6 +449,11 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     },
   });
 
+  registerLoopCommands(program, {
+    home, version: CLI_VERSION, stdout: services.stdout, stderr: services.stderr,
+    ...(dependencies.loop?.exec === undefined ? {} : { exec: dependencies.loop.exec }),
+    ...(dependencies.loop?.cliCommand === undefined ? {} : { cliCommand: dependencies.loop.cliCommand }),
+  });
   registerDoctorCommand(program, {
     ...(dependencies.doctor?.store === undefined ? {} : { store: dependencies.doctor.store }),
     ...(dependencies.doctor?.services === undefined ? {} : { services: dependencies.doctor.services }),

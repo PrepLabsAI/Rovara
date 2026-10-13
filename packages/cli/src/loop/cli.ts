@@ -1,0 +1,182 @@
+// rovara loop (#355): the commands. `init` and `add` set a repository up, `start`/`stop`/`status` run the
+// daemon in the background, `run` is the daemon in the foreground, `do` starts a Do loop on an issue,
+// `check` evaluates an item without running anything, and `mcp` is the agent's tool server.
+import { spawn } from "node:child_process";
+import { access, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { Command } from "commander";
+import { LOOP_CONFIG_PATH, initialLoopConfig, readLoopConfig } from "./config.js";
+import { LoopDaemon } from "./daemon.js";
+import { LOOPS, loopNamed, stepOf } from "./definitions.js";
+import { realExec, run, type Exec } from "./exec.js";
+import { GitHub } from "./github.js";
+import { ClaudeCodeHarness } from "./harness.js";
+import { createLoopMcpServer } from "./mcp.js";
+import { LoopStore, RepoSlugSchema } from "./state.js";
+
+export interface LoopCommandContext {
+  home: string;
+  version: string;
+  stdout: { write(text: string): unknown };
+  stderr: { write(text: string): unknown };
+  exec?: Exec;
+  /** How to run this CLI again: [node, path to the CLI]. */
+  cliCommand?: readonly string[];
+}
+
+const POLL_SECONDS = 30;
+const ATTEND_MS = 2_000;
+
+export function registerLoopCommands(program: Command, context: LoopCommandContext): void {
+  const exec = context.exec ?? realExec;
+  const store = new LoopStore(join(context.home, ".rovara", "loop"));
+  const github = new GitHub(exec);
+  const cliCommand = context.cliCommand ?? [process.execPath, process.argv[1] ?? ""];
+  const say = (line: string) => { context.stdout.write(`${line}\n`); };
+  const repoAt = async (path: string | undefined) => {
+    const full = resolve(path ?? process.cwd());
+    return { path: full, repo: await github.repoAt(full) };
+  };
+
+  const loop = program.command("loop").description("run Rovara's workflow on your GitHub issues with your own local agent (Claude Code), no Rovara install needed");
+
+  loop.command("init").description(`write ${LOOP_CONFIG_PATH} in this repository, with you as its one collaborator`)
+    .argument("[path]", "the repository's checkout; this directory by default")
+    .action(async (path: string | undefined) => {
+      const full = resolve(path ?? process.cwd());
+      const target = join(full, LOOP_CONFIG_PATH);
+      if (await access(target).then(() => true, () => false)) { say(`${LOOP_CONFIG_PATH} already exists; nothing changed.`); return; }
+      await mkdir(join(full, ".rovara"), { recursive: true });
+      await writeFile(target, initialLoopConfig(await github.login()));
+      say(`Wrote ${LOOP_CONFIG_PATH}. Commit it, then run rovara loop add.`);
+    });
+
+  loop.command("add").description("let the loop read this repository's issues")
+    .argument("[path]", "the repository's checkout; this directory by default")
+    .action(async (path: string | undefined) => {
+      const found = await repoAt(path);
+      await readLoopConfig(found.path);
+      const repos = (await store.repos()).filter((entry) => entry.repo !== found.repo);
+      await store.saveRepos([...repos, found]);
+      say(`Added ${found.repo} (${found.path}). Comments from now on are read; start the daemon with rovara loop start.`);
+    });
+
+  loop.command("remove").description("stop reading a repository's issues")
+    .argument("<repo>", "owner/name")
+    .action(async (repo: string) => {
+      const repos = await store.repos();
+      await store.saveRepos(repos.filter((entry) => entry.repo !== repo));
+      say(repos.some((entry) => entry.repo === repo) ? `Removed ${repo}.` : `${repo} was not added; nothing changed.`);
+    });
+
+  const daemonPid = async (): Promise<number | undefined> => {
+    const pid = Number((await readFile(store.pidPath(), "utf8").catch(() => "")).trim());
+    if (!Number.isInteger(pid) || pid <= 0) return undefined;
+    try { process.kill(pid, 0); return pid; } catch { return undefined; }
+  };
+
+  loop.command("start").description("run the loop's daemon in the background")
+    .action(async () => {
+      const running = await daemonPid();
+      if (running !== undefined) { say(`The daemon is already running (pid ${running}).`); return; }
+      await mkdir(store.root, { recursive: true, mode: 0o700 });
+      const log = await open(store.logPath(), "a", 0o600);
+      const [command = process.execPath, ...args] = cliCommand;
+      const child = spawn(command, [...args, "loop", "run"], { detached: true, stdio: ["ignore", log.fd, log.fd] });
+      child.unref();
+      await log.close();
+      say(`Started the daemon (pid ${child.pid ?? "?"}). Its log: ${store.logPath()}`);
+    });
+
+  loop.command("stop").description("stop the background daemon; agent sessions keep running")
+    .action(async () => {
+      const pid = await daemonPid();
+      if (pid === undefined) { say("The daemon is not running."); return; }
+      process.kill(pid, "SIGTERM");
+      say(`Stopped the daemon (pid ${pid}).`);
+    });
+
+  loop.command("status").description("the daemon, the repositories it reads, and each issue's loop")
+    .action(async () => {
+      const pid = await daemonPid();
+      say(pid === undefined ? "Daemon: not running (rovara loop start)." : `Daemon: running (pid ${pid}).`);
+      const repos = await store.repos();
+      if (repos.length === 0) say("No repositories added (rovara loop add).");
+      for (const entry of repos) {
+        say(`${entry.repo}  ${entry.path}`);
+        for (const item of await store.items(entry.repo)) {
+          const ended = stepOf(loopNamed(item.loop), item.step).terminal;
+          say(`  #${item.issue}  ${item.loop}  ${item.step}${ended ? "" : item.session === undefined ? "" : `  tmux attach -t =${item.session.tmux}`}`);
+        }
+      }
+    });
+
+  loop.command("run").description("run the daemon in the foreground (rovara loop start runs this in the background)")
+    .action(async () => {
+      await mkdir(store.root, { recursive: true, mode: 0o700 });
+      await writeFile(store.pidPath(), String(process.pid), { mode: 0o600 });
+      const daemon = new LoopDaemon({
+        store, exec, github, harness: new ClaudeCodeHarness(exec), cliCommand, now: () => new Date(),
+        log: (line) => { context.stderr.write(`${new Date().toISOString()} ${line}\n`); },
+      });
+      let stopping = false;
+      const stop = () => { stopping = true; };
+      process.once("SIGTERM", stop);
+      process.once("SIGINT", stop);
+      context.stderr.write(`${new Date().toISOString()} rovara loop daemon started (pid ${process.pid})\n`);
+      let nextPoll = 0;
+      while (!stopping) {
+        if (Date.now() >= nextPoll) {
+          await daemon.poll();
+          nextPoll = Date.now() + POLL_SECONDS * 1_000;
+        }
+        await daemon.attend();
+        await new Promise((done) => setTimeout(done, ATTEND_MS));
+      }
+      await rm(store.pidPath(), { force: true });
+      context.stderr.write(`${new Date().toISOString()} rovara loop daemon stopped\n`);
+    });
+
+  for (const [keyword, name, what] of [["do", "Do", "no gates; it never publishes"], ["quick", "Quick", "plan, your approval, code, checks, then a pull request"]] as const) {
+    loop.command(keyword).description(`start a ${name} loop on an issue (${what}): posts \`/rovara ${keyword} <instruction>\` there as you`)
+      .requiredOption("--issue <number>", "the issue (or pull request) number")
+      .option("--repo <path>", "the repository's checkout; this directory by default")
+      .argument("<instruction...>", "what the agent should do")
+      .action(async (words: string[], options: { issue: string; repo?: string }) => {
+        const found = await repoAt(options.repo);
+        const issue = Number(options.issue);
+        if (!Number.isInteger(issue) || issue <= 0) throw new Error("--issue must be an issue number");
+        await run(exec, "gh", ["api", "-X", "POST", `repos/${found.repo}/issues/${issue}/comments`, "--input", "-"], { input: JSON.stringify({ body: `/rovara ${keyword} ${words.join(" ")}` }) });
+        say(`Asked for a ${name} loop on ${found.repo}#${issue}. The daemon picks it up on its next read${await daemonPid() === undefined ? "; it is not running: rovara loop start" : ""}.`);
+      });
+  }
+
+  loop.command("check").description("evaluate an issue's loop without running anything: its loop, step and state")
+    .argument("<issue>", "the issue number")
+    .option("--repo <owner/name>", "the repository; the one checked out here by default")
+    .action(async (issueText: string, options: { repo?: string }) => {
+      const repo = options.repo === undefined ? (await repoAt(undefined)).repo : RepoSlugSchema.parse(options.repo);
+      const issue = Number(issueText);
+      const state = await store.item(repo, issue);
+      if (state === undefined) { say(`No loop has run on ${repo}#${issue}.`); return; }
+      const definition = LOOPS.find((candidate) => candidate.name === state.loop);
+      if (definition === undefined) throw new Error(`${repo}#${issue} names loop ${state.loop}, which this version does not have`);
+      const step = stepOf(definition, state.step);
+      say([
+        `${repo}#${issue}: loop ${state.loop}, step ${state.step} (${step.terminal ? "ended" : `${step.actor}'s turn`}) since ${state.stepEnteredAt}`,
+        `Started by @${state.startedBy} at ${state.startedAt}.`,
+        ...(step.label === undefined ? [] : [`The issue should carry the label rovara:${step.label}.`]),
+        ...(state.worktree === undefined ? [] : [`Worktree: ${state.worktree.path} (branch ${state.worktree.branch})`]),
+        ...(state.session === undefined ? [] : [`Agent: tmux attach -t =${state.session.tmux}`]),
+      ].join("\n"));
+    });
+
+  loop.command("mcp").description("the agent's tools for one issue, over stdio (the loop starts this for its agent)")
+    .requiredOption("--repo <owner/name>", "the repository")
+    .requiredOption("--issue <number>", "the issue number")
+    .action(async (options: { repo: string; issue: string }) => {
+      const server = createLoopMcpServer({ store, repo: RepoSlugSchema.parse(options.repo), issue: Number(options.issue), version: context.version });
+      await server.connect(new StdioServerTransport());
+    });
+}
