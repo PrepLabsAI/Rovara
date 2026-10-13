@@ -38,6 +38,25 @@ const intrinsicUint8ArraySet = Object.getOwnPropertyDescriptor(BYTE_VIEW_PROTOTY
 type ExportFile = Readonly<{ path: string; bytes: Uint8Array; sha256: string }>;
 export type CandidateExportPacket = Readonly<{ schemaVersion: 1; entry: string; exportName: string; files: readonly ExportFile[]; sourceDigest: string }>;
 export type CandidateRequest = Readonly<{ requestId: string; input: unknown }>;
+type CaptureMoment = Readonly<{ wallMs: number; monotonicMs: number }>;
+export type CandidateCapture = Readonly<{
+  schemaVersion: 1;
+  requestId: string;
+  wireId: string;
+  requestBytes: number;
+  requestSha256: string;
+  requestFraming: "utf8-json-eof-no-trailing-newline";
+  stdoutBytes: number;
+  stdoutSha256: string;
+  stderrBytes: number;
+  stderrSha256: string;
+  responseFraming: "utf8-single-json-line-trailing-newline";
+  requestFrame: Uint8Array;
+  stdoutFrame: Uint8Array;
+  stderrFrame: Uint8Array;
+  times: Readonly<{ requestWriteAttempt: CaptureMoment; firstOutput: CaptureMoment; lastOutput: CaptureMoment; lifecycleReadback: CaptureMoment; cleanupConfirmed: CaptureMoment }>;
+  timeSemantics: "supervisor-observed-stdin-end-attempt-output-owned-child-status-and-cleanup";
+}>;
 export type CandidateObservation = Readonly<{
   scope: typeof CANDIDATE_RESPONSE_SCOPE;
   adapterVersion: typeof CANDIDATE_ADAPTER_VERSION;
@@ -50,6 +69,7 @@ export type CandidateObservation = Readonly<{
   stderrBytes: number;
   stderrSha256: string;
   correlation: "fresh-random-wire-id-matched";
+  capture: CandidateCapture;
 }>;
 export type ContainerReceipt = Readonly<{
   scope: typeof CANDIDATE_RESPONSE_SCOPE;
@@ -79,13 +99,34 @@ export type ReconciliationReceipt = Readonly<{ recordRef: string; plannedName: s
 
 type ContainerState = { Status?: string; Running?: boolean; OOMKilled?: boolean; Dead?: boolean; ExitCode?: number };
 type DockerInspect = { Id: string; Name?: string; State?: ContainerState; Config?: { Image?: string; User?: string; Env?: string[]; Labels?: Record<string, string>; OpenStdin?: boolean; Tty?: boolean; Entrypoint?: string[]; Cmd?: string[] }; HostConfig?: { NetworkMode?: string; ReadonlyRootfs?: boolean; Privileged?: boolean; PidMode?: string; IpcMode?: string; UTSMode?: string; PortBindings?: Record<string, unknown> | null; Devices?: unknown[]; CapAdd?: string[]; CapDrop?: string[]; SecurityOpt?: string[]; PidsLimit?: number; NanoCpus?: number; Memory?: number; MemorySwap?: number; Tmpfs?: Record<string, string> }; Mounts?: Array<{ Type?: string; Source?: string; Destination?: string; RW?: boolean }> };
-type ProcessResult = { stdout: Buffer; stderr: Buffer; code: number | null; aborted: boolean; timedOut: boolean; overflow: boolean; stdoutBytes: number; stderrBytes: number; aggregateBytes: number; inputWritten: boolean; error?: string };
+type ProcessResult = { stdout: Buffer; stderr: Buffer; code: number | null; aborted: boolean; timedOut: boolean; overflow: boolean; stdoutBytes: number; stderrBytes: number; aggregateBytes: number; inputWritten: boolean; requestWrite?: CaptureMoment; firstOutput?: CaptureMoment; lastOutput?: CaptureMoment; childClose?: CaptureMoment; error?: string };
 type InspectResult = { kind: "present"; info: DockerInspect } | { kind: "absent" } | { kind: "unknown"; diagnostic: string };
 type CleanupState = "confirmed" | "pending" | "failed";
 type DurableRecord = { schemaVersion: 1 | 2; recordRef: string; plannedName: string; nonce: string; sourceDigest: string; endpoint: string; image: string; containerId: string | null; cidfile: string; workspace: string | null; workspaceParent?: string | null; requestId: string; sourceBytes: number; phase: string; cleanup: CleanupState; entry?: string; exportName?: string; diagnostic?: string };
 
 function fail(message: string): never { throw new Error(message); }
 function sha(bytes: Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
+function copyNativeBytes(bytes: Uint8Array): Uint8Array {
+  const length = Reflect.apply(intrinsicByteLength, bytes, []) as number;
+  const copy = new intrinsicUint8Array(length);
+  Reflect.apply(intrinsicUint8ArraySet, copy, [bytes]);
+  return copy;
+}
+function captureMoment(): CaptureMoment { return Object.freeze({ wallMs: Date.now(), monotonicMs: performance.now() }); }
+// Typed arrays cannot be frozen while nonempty. Keep canonical copies in this closure and return a
+// fresh intrinsic Uint8Array on every access; mutation of a returned view cannot alter captured bytes.
+function immutableCapture(input: Omit<CandidateCapture, "requestFrame" | "stdoutFrame" | "stderrFrame"> & { requestFrame: Uint8Array; stdoutFrame: Uint8Array; stderrFrame: Uint8Array }): CandidateCapture {
+  const requestFrame = copyNativeBytes(input.requestFrame);
+  const stdoutFrame = copyNativeBytes(input.stdoutFrame);
+  const stderrFrame = copyNativeBytes(input.stderrFrame);
+  const capture = { ...input } as CandidateCapture;
+  Object.defineProperties(capture, {
+    requestFrame: { enumerable: true, configurable: false, get: () => copyNativeBytes(requestFrame) },
+    stdoutFrame: { enumerable: true, configurable: false, get: () => copyNativeBytes(stdoutFrame) },
+    stderrFrame: { enumerable: true, configurable: false, get: () => copyNativeBytes(stderrFrame) },
+  });
+  return Object.freeze(capture);
+}
 function plain(value: unknown): value is Record<string, unknown> { return !!value && typeof value === "object" && !Array.isArray(value) && !utilTypes.isProxy(value); }
 function safeDiagnostic(value: string): string { return [...value].map((character) => { const code = character.codePointAt(0)!; return code < 32 || code === 127 ? " " : character; }).join("").slice(0, 1000); }
 function descriptorRecord(value: unknown, expectedKeys: readonly string[], label: string): Record<string, unknown> {
@@ -300,8 +341,8 @@ function windowState(signal: AbortSignal | undefined, deadline: number): "aborte
 function privateClientEnv(privateRoot: string): NodeJS.ProcessEnv {
   return { PATH: CLIENT_PATH, HOME: join(privateRoot, "home"), DOCKER_CONFIG: join(privateRoot, "docker-config"), DOCKER_HOST: CONTAINED_SOCKET, LANG: "C.UTF-8" };
 }
-function boundedResult(stdout: Buffer[], stderr: Buffer[], code: number | null, aborted: boolean, timedOut: boolean, overflow: boolean, stdoutBytes: number, stderrBytes: number, aggregateBytes: number, inputWritten: boolean, error?: string): ProcessResult {
-  return { stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), code, aborted, timedOut, overflow, stdoutBytes, stderrBytes, aggregateBytes, inputWritten, ...(error ? { error: safeDiagnostic(error) } : {}) };
+function boundedResult(stdout: Buffer[], stderr: Buffer[], code: number | null, aborted: boolean, timedOut: boolean, overflow: boolean, stdoutBytes: number, stderrBytes: number, aggregateBytes: number, inputWritten: boolean, error?: string, times: Pick<ProcessResult, "requestWrite" | "firstOutput" | "lastOutput" | "childClose"> = {}): ProcessResult {
+  return { stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), code, aborted, timedOut, overflow, stdoutBytes, stderrBytes, aggregateBytes, inputWritten, ...times, ...(error ? { error: safeDiagnostic(error) } : {}) };
 }
 function runProcess(args: string[], options: { env: NodeJS.ProcessEnv; cwd: string; input?: Uint8Array; deadline: number; signal?: AbortSignal; maxAggregateBytes?: number }): Promise<ProcessResult> {
   const before = windowState(options.signal, options.deadline);
@@ -320,6 +361,10 @@ function runProcess(args: string[], options: { env: NodeJS.ProcessEnv; cwd: stri
     let inputWritten = false;
     let settled = false;
     let spawnError: string | undefined;
+    let requestWrite: CaptureMoment | undefined;
+    let firstOutput: CaptureMoment | undefined;
+    let lastOutput: CaptureMoment | undefined;
+    let childClose: CaptureMoment | undefined;
     const limit = options.maxAggregateBytes ?? MAX_PROTOCOL_BYTES;
     const remaining = options.deadline - performance.now();
     const timer = setTimeout(() => { timedOut = true; terminate(); }, Math.max(1, remaining));
@@ -330,7 +375,7 @@ function runProcess(args: string[], options: { env: NodeJS.ProcessEnv; cwd: stri
       clearTimeout(timer);
       if (killTimer) clearTimeout(killTimer);
       removeAbortListener(options.signal, onAbort);
-      resolvePromise(boundedResult(stdout, stderr, code, aborted, timedOut, overflow, stdoutBytes, stderrBytes, aggregateBytes, inputWritten, spawnError));
+      resolvePromise(boundedResult(stdout, stderr, code, aborted, timedOut, overflow, stdoutBytes, stderrBytes, aggregateBytes, inputWritten, spawnError, { ...(requestWrite ? { requestWrite } : {}), ...(firstOutput ? { firstOutput } : {}), ...(lastOutput ? { lastOutput } : {}), ...(childClose ? { childClose } : {}) }));
     };
     const terminate = () => {
       if (child) {
@@ -345,6 +390,7 @@ function runProcess(args: string[], options: { env: NodeJS.ProcessEnv; cwd: stri
     catch (error) { spawnError = error instanceof Error ? error.message : "Docker client spawn failed"; settle(null); return; }
     if (signalAborted(options.signal)) onAbort();
     child.stdout!.on("data", (chunk: Buffer) => {
+      firstOutput ??= captureMoment(); lastOutput = captureMoment();
       aggregateBytes += chunk.length; stdoutBytes += chunk.length;
       const room = Math.max(0, limit - storedBytes);
       if (room > 0) { const stored = Buffer.from(chunk.subarray(0, room)); stdout.push(stored); storedBytes += stored.length; }
@@ -360,11 +406,12 @@ function runProcess(args: string[], options: { env: NodeJS.ProcessEnv; cwd: stri
       const current = windowState(options.signal, options.deadline);
       if (current) { if (current === "aborted") aborted = true; else timedOut = true; terminate(); return; }
       inputWritten = true;
+      requestWrite = captureMoment();
       child?.stdin?.end(options.input);
     });
     child.stdin!.on("error", () => { /* a child that closes stdin early cannot produce an admitted response */ });
     child.once("error", (error) => { spawnError = error.message; });
-    child.once("close", (code) => settle(code));
+    child.once("close", (code) => { childClose = captureMoment(); settle(code); });
     if (signalAborted(options.signal)) onAbort();
   });
 }
@@ -640,8 +687,11 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
   let stdoutBytes = 0;
   let stderrBytes = 0;
   let aggregateBytes = 0;
+  let capturedStdout: Uint8Array = new Uint8Array(0);
+  let capturedStderr: Uint8Array = new Uint8Array(0);
   let diagnostic: string | undefined;
-  let provisional: CandidateObservation | null = null;
+  let provisional: Omit<CandidateObservation, "capture"> | null = null;
+  let captureTimes: { requestWriteAttempt?: CaptureMoment; firstOutput?: CaptureMoment; lastOutput?: CaptureMoment; lifecycleReadback?: CaptureMoment; cleanupConfirmed?: CaptureMoment } = {};
   let durablePlanned = false;
   let attemptedCreate = false;
   let cleanup: CleanupState = "confirmed";
@@ -750,6 +800,9 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
     stdoutBytes = started.stdoutBytes;
     stderrBytes = started.stderrBytes;
     aggregateBytes = started.aggregateBytes;
+    capturedStdout = copyNativeBytes(started.stdout);
+    capturedStderr = copyNativeBytes(started.stderr);
+    captureTimes = { ...(started.requestWrite ? { requestWriteAttempt: started.requestWrite } : {}), ...(started.firstOutput ? { firstOutput: started.firstOutput } : {}), ...(started.lastOutput ? { lastOutput: started.lastOutput } : {}) };
     if (started.error) diagnostic = started.error;
     if (started.stderr.length) diagnostic ??= safeDiagnostic(started.stderr.toString("utf8"));
     if (noteWindow() || aborted || timedOut || started.code !== 0 || overflow || !started.inputWritten) throw new Error(diagnostic ?? (overflow ? "candidate process exceeded aggregate stream limit" : "candidate process did not complete within the admitted window"));
@@ -758,6 +811,7 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
     if (afterStart.kind !== "present") fail(afterStart.kind === "unknown" ? afterStart.diagnostic : "candidate container disappeared before lifecycle readback");
     if (!isOwnedContainer(afterStart.info.Config?.Labels, { nonce, sourceDigest: packet.sourceDigest }) || afterStart.info.Id !== record.containerId) fail("candidate lifecycle ownership readback failed");
     if (afterStart.info.State?.Status !== "exited" || afterStart.info.State.ExitCode !== 0 || afterStart.info.State.OOMKilled || afterStart.info.State.Dead || afterStart.info.State.Running) fail("candidate process lifecycle did not report a clean successful exit");
+    captureTimes.lifecycleReadback = captureMoment();
     const parsed = parseCandidateResponse(started.stdout, wireId);
     provisional = Object.freeze({ scope: CANDIDATE_RESPONSE_SCOPE, adapterVersion: CANDIDATE_ADAPTER_VERSION, entry: packet.entry, exportName: packet.exportName, requestId: request.requestId, output: parsed.output, stdoutBytes: parsed.stdoutBytes, stdoutSha256: parsed.stdoutSha256, stderrBytes: started.stderrBytes, stderrSha256: sha(started.stderr), correlation: "fresh-random-wire-id-matched" });
     record.phase = "started"; await writeRecord(record);
@@ -770,6 +824,7 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
       await writeRecord(record).catch((error: unknown) => { diagnostic ??= error instanceof Error ? safeDiagnostic(error.message) : "could not persist cleanup enrollment"; });
       cleanup = await cleanupOwned(record, env, workCwd).catch((error: unknown) => { diagnostic ??= error instanceof Error ? safeDiagnostic(error.message) : "owned cleanup could not be confirmed"; return "pending" as const; });
       await finishRecord(record, { exitCode, timedOut: timedOut || performance.now() >= deadline, aborted: aborted || signalAborted(signal), stdoutBytes, stderrBytes, aggregateBytes, overflow, ...(diagnostic ? { diagnostic } : {}) }, cleanup).catch((error: unknown) => { cleanup = "pending"; diagnostic ??= error instanceof Error ? safeDiagnostic(error.message) : "could not persist final cleanup receipt"; });
+      if (cleanup === "confirmed") captureTimes.cleanupConfirmed = captureMoment();
     } else if (workspace) {
       record.workspace = workspace;
       await cleanupWorkspace(record, false).catch((error: unknown) => {
@@ -784,7 +839,30 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
   if (cleanup === "confirmed" && durablePlanned && attemptedCreate) {
     // `finishRecord` persisted a candidate-process receipt before deleting its recovery enrollment.
   }
-  return Object.freeze({ observation: provisional, receipt, ...(diagnostic ? { error: diagnostic } : {}) });
+  let observation: CandidateObservation | null = null;
+  const { requestWriteAttempt, firstOutput, lastOutput, lifecycleReadback, cleanupConfirmed } = captureTimes;
+  if (provisional && requestWriteAttempt && firstOutput && lastOutput && lifecycleReadback && cleanupConfirmed) {
+    const capture = immutableCapture({
+      schemaVersion: 1,
+      requestId: request.requestId,
+      wireId,
+      requestBytes: frame.bytes.byteLength,
+      requestSha256: sha(frame.bytes),
+      requestFraming: "utf8-json-eof-no-trailing-newline",
+      stdoutBytes,
+      stdoutSha256: sha(capturedStdout),
+      stderrBytes,
+      stderrSha256: sha(capturedStderr),
+      responseFraming: "utf8-single-json-line-trailing-newline",
+      requestFrame: frame.bytes,
+      stdoutFrame: capturedStdout,
+      stderrFrame: capturedStderr,
+      times: Object.freeze({ requestWriteAttempt, firstOutput, lastOutput, lifecycleReadback, cleanupConfirmed }),
+      timeSemantics: "supervisor-observed-stdin-end-attempt-output-owned-child-status-and-cleanup",
+    });
+    observation = Object.freeze({ ...provisional, capture });
+  }
+  return Object.freeze({ observation, receipt, ...(diagnostic ? { error: diagnostic } : {}) });
 }
 
 async function recheckMaterializedExport(packet: CandidateExportPacket, sourcePath: string, bootstrapPath: string): Promise<boolean> {

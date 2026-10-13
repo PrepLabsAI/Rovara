@@ -215,6 +215,54 @@ describe("actual pinned Docker candidate-process foundation", () => {
     expect(data.receipt).not.toHaveProperty("proof");
   });
 
+  it("captures the exact supervisor request and response bytes with bounded first-party timing", async () => {
+    const result = await runContainedCandidate(packet(candidateProcess("({ text: 'café\\nline', escaped: '\\\"' })")), {
+      requestId: "raw-capture-1", input: { text: "café\nline", quote: '"' },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.receipt.cleanup).toBe("confirmed");
+    expect(result.receipt.exitCode).toBe(0);
+    const capture = result.observation?.capture;
+    expect(capture).toBeDefined();
+    if (!capture) throw new Error("successful owned process had no capture");
+    expect(capture.requestId).toBe("raw-capture-1");
+    expect(capture.wireId).toMatch(/^[a-f0-9]{48}$/);
+    expect(capture.requestBytes).toBe(capture.requestFrame.byteLength);
+    expect(capture.requestSha256).toBe(hash(capture.requestFrame));
+    expect(capture.requestFraming).toBe("utf8-json-eof-no-trailing-newline");
+    expect(capture.requestFrame.at(-1)).not.toBe(10);
+    expect(new TextDecoder().decode(capture.requestFrame)).toContain('"text":"café\\nline"');
+    expect(capture.stdoutBytes).toBe(capture.stdoutFrame.byteLength);
+    expect(capture.stdoutSha256).toBe(hash(capture.stdoutFrame));
+    expect(capture.responseFraming).toBe("utf8-single-json-line-trailing-newline");
+    expect(capture.stdoutFrame.at(-1)).toBe(10);
+    expect(new TextDecoder().decode(capture.stdoutFrame)).toContain('"text":"café\\nline"');
+    expect(capture.stderrSha256).toBe(hash(capture.stderrFrame));
+    expect(capture.stderrBytes).toBe(capture.stderrFrame.byteLength);
+    expect(capture.times.requestWriteAttempt.monotonicMs).toBeLessThanOrEqual(capture.times.firstOutput.monotonicMs);
+    expect(capture.times.firstOutput.monotonicMs).toBeLessThanOrEqual(capture.times.lastOutput.monotonicMs);
+    expect(capture.times.lastOutput.monotonicMs).toBeLessThanOrEqual(capture.times.lifecycleReadback.monotonicMs);
+    expect(capture.times.lifecycleReadback.monotonicMs).toBeLessThanOrEqual(capture.times.cleanupConfirmed.monotonicMs);
+    expect(capture.timeSemantics).toContain("supervisor-observed");
+    expect(capture.timeSemantics).not.toMatch(/callable|internal app|application read/i);
+    const exposed = capture.stdoutFrame;
+    exposed.fill(0);
+    expect(capture.stdoutSha256).toBe(hash(capture.stdoutFrame));
+    const readback = result.receipt.containerId ? await expectAbsentContainer(result.receipt.containerId) : { status: null, stdout: "", stderr: "no container ID" };
+    writeEvidence(`unit4a-original-byte-capture-${randomBytes(6).toString("hex")}`, { receipt: result.receipt, capture: {
+      ...capture, requestFrame: Buffer.from(capture.requestFrame).toString("base64"), stdoutFrame: Buffer.from(capture.stdoutFrame).toString("base64"), stderrFrame: Buffer.from(capture.stderrFrame).toString("base64"),
+    }, independentPostCleanupReadback: readback });
+
+    const nearLimit = await runContainedCandidate(packet(candidateProcess("({ text: 'x'.repeat(261850) })")), { requestId: "raw-near-limit", input: null });
+    expect(nearLimit.error).toBeUndefined();
+    expect(nearLimit.receipt.cleanup).toBe("confirmed");
+    expect(nearLimit.observation?.capture.stdoutBytes).toBeGreaterThan(261_850);
+    expect(nearLimit.observation?.capture.stdoutBytes).toBeLessThanOrEqual(262_144);
+    expect(nearLimit.observation?.capture.stdoutSha256).toBe(hash(nearLimit.observation!.capture.stdoutFrame));
+    const nearReadback = nearLimit.receipt.containerId ? await expectAbsentContainer(nearLimit.receipt.containerId) : { status: null, stdout: "", stderr: "no container ID" };
+    writeEvidence(`unit4a-near-limit-capture-${randomBytes(6).toString("hex")}`, { receipt: nearLimit.receipt, stdoutBytes: nearLimit.observation?.capture.stdoutBytes, stdoutSha256: nearLimit.observation?.capture.stdoutSha256, independentPostCleanupReadback: nearReadback });
+  });
+
   it("runs bounded JSON with poisoned host env and probes denied capabilities", async () => {
     const previous = process.env.HOST_POISON_MARKER;
     process.env.HOST_POISON_MARKER = "synthetic-poison-must-not-cross";
