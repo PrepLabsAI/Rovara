@@ -9,6 +9,10 @@
 - Compared with the branch's starting commit (b18fe4eb), the only changes are `docs/rovara-e2e/375.md` and the documents in `docs/rovara/375/`. No code or configuration changed, and the approved documents are unedited.
 - The plan's `git diff --stat mainline` gives the wrong result in this worktree, because the local `mainline` ref is stale. I ran the check against the starting commit instead.
 
+- Where the heading and footer requests came from: both are comments by @ps06756 on pull request #376. The footer: https://github.com/PrepLabsAI/Rovara/pull/376#issuecomment-6145658843. The heading, a review comment on `docs/rovara-e2e/375.md:1`: https://github.com/PrepLabsAI/Rovara/pull/376#discussion_r4258699285.
+- The loop's code review keeps blocking on these two changes because the locked plan doesn't include them. Rework can't settle it either way: removing them goes against @ps06756's requests, and keeping them goes against the plan. The person has to decide.
+- `evidence/checks.md` and `evidence/reviews.md` are written by the loop and predate 7cce3043. The loop rewrites them when it reruns, so I left them alone.
+
 ## Fixed
 
 - The self-review was out of date: it said the file has exactly three lines and was written before the footer was added. It now covers the file as it stands.
