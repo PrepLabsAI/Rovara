@@ -13,11 +13,13 @@ export const ARTIFACT_SECTIONS: Record<Artifact, readonly string[]> = {
   requirements: ["What changes", "Not changing", "Risks"],
   design: ["How it works", "Risks"],
   plan: ["Summary", "Changes", "Testing"],
+  contribution: ["Goal", "Success criteria", "Approach"],
 };
 
 const WHAT: Record<Artifact, string> = {
   requirements: "the requirements: what someone will be able to do or see when this is done, what does not change, and the risks (write \"None\" where there are none). Do not describe how it works or where in the code.",
   design: "the design: how it works, derived from the approved requirements, and its risks. Keep to what the requirements ask for.",
+  contribution: "the contribution, one short document: Goal is the brief's goal; Success criteria lists the brief's criteria exactly as given, one per line as `- [ ] <criterion>`; Approach says how you will meet each criterion, and how you will prove it.",
   plan: "the plan: Summary says what will change and why; Changes lists the files and what changes in each; Testing says how the change will be proved. If the change needs other repositories too, add a `## Repositories` section listing each repository that changes, this one included if it does, one per line as `- owner/name: what changes there`: each gets its own pull request, made by its own agent.",
 };
 
@@ -52,7 +54,9 @@ export function firstAssignment(state: WorkItemState, loop: LoopDefinition): str
   if (loop.name === "do") {
     return [...common(state), "- This is the Do loop: it has no gates and does not publish anything.", "", `Instruction from @${state.startedBy}:`, state.instruction].join("\n");
   }
-  const outline = loop.name === "full"
+  const outline = loop.name === "contribute"
+    ? `This is the Contribute loop: you join ${state.upstream === undefined ? "this issue" : `pull request #${state.issue}, whose branch is someone else's`} to meet the goal below, judged by its success criteria. Plan in one short document; then make the change, review it yourself, and prove each criterion; the loop runs the checks and a code and a security review, then opens a pull request${state.upstream === undefined ? "" : ` into that pull request's branch (${state.upstream.repo}:${state.upstream.branch}), so its author decides what to take. Never push to their branch`}.`
+    : loop.name === "full"
     ? `This is the Full loop: requirements, then a design, then a plan, each approved by a person before the next is written; then you code it and review your own change, and the loop runs the checks and a code and a security review, then opens a pull request.${(state.skipped ?? []).length === 0 ? "" : ` These phases were declared away, so there is no document for them: ${(state.skipped ?? []).join(", ")}.`}`
     : "This is the Quick loop: plan, then a person approves the plan, then you code it and review your own change, then the loop runs the checks and a code and a security review, then opens a pull request.";
   return [
@@ -64,6 +68,17 @@ export function firstAssignment(state: WorkItemState, loop: LoopDefinition): str
     "",
     `Instruction from @${state.startedBy}:`,
     state.instruction,
+  ].join("\n");
+}
+
+/** #359, Contribute: after its document, the change, with each success criterion proved. */
+export function contributionCodeAssignment(state: WorkItemState): string {
+  const path = artifactPath(state.issue, "contribution");
+  return [
+    "Your step now: make the change.",
+    `- Prove each success criterion as you meet it: tick it in ${path} as \`- [x] <criterion> — Evidence: <how you proved it: a test, a command and what it showed, a file and line>\`. Keep the criteria exactly as given. A claim with any criterion not ticked with its evidence is refused.`,
+    "- Commit as you go. Do not push and do not open a pull request: the loop opens it itself.",
+    selfReviewLine(state.issue),
   ].join("\n");
 }
 

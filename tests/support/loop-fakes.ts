@@ -52,7 +52,7 @@ export class LoopWorld {
   readonly reviewComments: FakeReviewComment[] = [];
   readonly reviews: FakeReview[] = [];
   /** #359: pull requests opened by people (the loop's own are in pullRequests), by number, and their head commits. */
-  readonly openPulls = new Map<number, { base: string; head: string; open: boolean }>();
+  readonly openPulls = new Map<number, { base: string; head: string; open: boolean; headRepo?: string; headRef?: string }>();
   /** #359: the pull requests that mention each issue (its timeline's cross-references). */
   readonly links = new Map<number, Array<{ repo: string; number: number }>>();
   /** #359: issues the loop filed. */
@@ -140,8 +140,10 @@ export class LoopWorld {
       const own = this.pullRequests.find((candidate) => candidate.number === number);
       const theirs = this.openPulls.get(number);
       if (own === undefined && theirs === undefined) return fail("gh: Not Found (HTTP 404)");
-      const value = own === undefined ? { ...theirs!, url: `https://github.com/${this.repo}/pull/${number}` } : { base: own.base, head: `head-${number}`, open: !this.closed.has(number), url: own.url };
-      return ok(JSON.stringify({ state: value.open ? "open" : "closed", base: value.base, head: value.head, url: value.url }));
+      const value = own === undefined
+        ? { headRepo: this.repo, headRef: `feature-${number}`, ...theirs!, url: `https://github.com/${this.repo}/pull/${number}` }
+        : { base: own.base, head: `head-${number}`, open: !this.closed.has(number), url: own.url, headRepo: this.repo, headRef: own.head };
+      return ok(JSON.stringify({ state: value.open ? "open" : "closed", base: value.base, head: value.head, url: value.url, headRepo: value.headRepo, headRef: value.headRef }));
     }
     const timeline = /^repos\/[^/]+\/[^/]+\/issues\/(\d+)\/timeline/u.exec(path);
     if (timeline !== null) return ok((this.links.get(Number(timeline[1])) ?? []).map((link) => JSON.stringify(link)).join("\n"));

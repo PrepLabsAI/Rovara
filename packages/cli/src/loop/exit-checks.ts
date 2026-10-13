@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { ArtifactSchema, type Artifact, type ExitCheck } from "./definitions.js";
+import { criteriaProblems } from "./brief.js";
 import { ARTIFACT_SECTIONS, SELF_REVIEW_SECTIONS } from "./instructions.js";
 import { artifactPath, evidencePath } from "./naming.js";
 import { SUMMARY_MAX } from "./runtime.js";
@@ -22,6 +23,8 @@ export interface ClaimFacts {
   /** #358: the issue's repository, and every repository the loop can work in on this computer. */
   repo?: string;
   registered?: readonly string[];
+  /** #359, Contribute: the brief's success criteria. */
+  criteria?: readonly string[];
 }
 
 /** The most repositories one plan may change, each with its own pull request and agent. */
@@ -119,6 +122,12 @@ export async function failedExitChecks(checks: readonly ExitCheck[], facts: Clai
         else if (named.length > PLAN_REPOSITORIES_MAX) failures.push(`the plan names ${named.length} repositories; at most ${PLAN_REPOSITORIES_MAX} can each have a pull request`);
         else if (unknown.length > 0) failures.push(`the loop cannot work in ${unknown.join(", ")} on this computer: ask the person to run \`rovara loop add\` in ${unknown.length === 1 ? "its checkout" : "their checkouts"}, then call loop_complete again`);
       }
+    }
+    if (check === "criteria-kept" || check === "criteria-proved") {
+      const path = artifactPath(facts.issue, "contribution");
+      const text = await readArtifact(facts.worktree, facts.issue, "contribution");
+      if (text === undefined) failures.push(`there is no contribution at ${path}; write it there`);
+      else for (const problem of criteriaProblems(text, facts.criteria ?? [], check === "criteria-proved")) failures.push(`in ${path}, ${problem}`);
     }
     if (check === "approved-unchanged") {
       for (const artifact of await changedApprovals(facts.worktree, facts.issue, facts.approvals)) {

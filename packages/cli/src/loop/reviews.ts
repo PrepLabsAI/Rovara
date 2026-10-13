@@ -112,8 +112,9 @@ async function reviewRole(role: ReviewRole, input: { cwd: string; diff: string; 
 }
 
 /** Runs the configured reviews on the item's change: the code review, then the security review. */
-export async function runReviews(input: { exec: Exec; worktree: string; defaultBranch: string; plan: string | undefined; config: LoopRepoConfig["reviews"]; run: ReviewerRun }): Promise<RoleResult[]> {
-  const diffResult = await input.exec("git", ["-C", input.worktree, "diff", `origin/${input.defaultBranch}...HEAD`]);
+/** `base`: the ref the change is judged from: origin/<default branch>, or (#359, Contribute) the pull request it builds on. */
+export async function runReviews(input: { exec: Exec; worktree: string; base: string; plan: string | undefined; config: LoopRepoConfig["reviews"]; run: ReviewerRun }): Promise<RoleResult[]> {
+  const diffResult = await input.exec("git", ["-C", input.worktree, "diff", `${input.base}...HEAD`]);
   if (diffResult.code !== 0) return [{ role: "CRITIC", status: "UNKNOWN", findings: [], reason: "the change could not be read from git" }];
   const full = diffResult.stdout;
   const shared = { cwd: input.worktree, diff: full.slice(0, DIFF_MAX), plan: input.plan, partial: full.length > DIFF_MAX, config: input.config, run: input.run };

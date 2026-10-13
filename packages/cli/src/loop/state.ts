@@ -45,6 +45,13 @@ export const WorkItemStateSchema = z.object({
   reviews: z.string().max(20_000).optional(),
   /** Quick (#356): the last checks report, for the pull request's description. */
   checks: z.string().max(20_000).optional(),
+  /** #359, Contribute: the success criteria the brief set, as they are compared (brief.ts). */
+  criteria: z.array(z.string().max(1_000)).max(30).optional(),
+  /**
+   * #359, Contribute on someone else's pull request: where its follow-up pull request goes (that pull request's head
+   * repository and branch), and the ref its worktree starts from (that pull request's head, fetched).
+   */
+  upstream: z.object({ repo: z.string(), branch: z.string(), ref: z.string() }).strict().optional(),
   /** #359, Review: what a collaborator asked the next round to look at too, beside the brief. */
   focus: z.string().max(20_000).optional(),
   /** #359, Review: every finding so far, numbered across rounds, and the issue each was filed as. */

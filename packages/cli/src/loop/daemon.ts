@@ -12,7 +12,7 @@ import { z } from "zod";
 import { checksReport, runChecks, shellCheckRun, type CheckRun } from "./check-runner.js";
 import { parseComment } from "./commands-parse.js";
 import { readLoopConfig, type LoopRepoConfig } from "./config.js";
-import { loopNamed, stepOf, type Artifact, type LoopDefinition } from "./definitions.js";
+import { loopNamed, planArtifact, stepOf, type Artifact, type LoopDefinition } from "./definitions.js";
 import { run, type Exec } from "./exec.js";
 import { artifactDigest, failedExitChecks, readArtifact, splitTargets } from "./exit-checks.js";
 import type { GitHub, PullRequestRef } from "./github.js";
@@ -257,7 +257,22 @@ export class LoopDaemon {
     };
     switch (parsed.kind) {
       case "invalid": if (on === undefined) await this.deps.github.comment(home.repo, issue, parsed.reason); else await reply(body.trim()); return;
-      case "start": if (on === undefined) await this.handle(home, issue, { kind: "start", loop: parsed.loop, instruction: parsed.instruction, author, at, ...(parsed.skip.length === 0 ? {} : { skip: parsed.skip }) }); else await reply(body.trim()); return;
+      case "start": {
+        if (on !== undefined) { await reply(body.trim()); return; }
+        // #359: Contribute on a pull request follows it up: it starts from the pull request's head, and its own pull
+        // request goes into that branch.
+        let upstream: WorkItemState["upstream"];
+        if (parsed.loop.name === "contribute") {
+          const pull = await this.deps.github.pullRequest(home.repo, issue);
+          if (pull !== undefined && (!pull.open || pull.headRepo === "")) {
+            await this.deps.github.comment(home.repo, issue, pull.open ? "This pull request's branch is gone (its fork was deleted), so there is nothing to follow up." : "This pull request is closed, so there is nothing to contribute to. Start the Contribute loop on its issue instead.");
+            return;
+          }
+          if (pull !== undefined) upstream = { repo: pull.headRepo, branch: pull.headRef, ref: `refs/rovara/contribute/${issue}` };
+        }
+        await this.handle(home, issue, { kind: "start", loop: parsed.loop, instruction: parsed.instruction, author, at, ...(parsed.skip.length === 0 ? {} : { skip: parsed.skip }), ...(upstream === undefined ? {} : { upstream }) });
+        return;
+      }
       case "stop": await this.handle(home, issue, { kind: "stop", author, at }, target); return;
       case "approve": {
         // #358: on an issue waiting on its per-PR loops, an approval is for their blocked reviews.
@@ -365,7 +380,7 @@ export class LoopDaemon {
       const step = stepOf(loop, current.step);
       const failures = step.actor === "agent" ? await failedExitChecks(step.exit, {
         summary: claim.data.summary, issue: current.issue, worktree: current.worktree?.path, artifact: step.artifact, approvals: current.approvals,
-        docs: docsDir(current), repo: current.repo, registered: (await this.deps.store.repos()).map((entry) => entry.repo),
+        docs: docsDir(current), repo: current.repo, registered: (await this.deps.store.repos()).map((entry) => entry.repo), criteria: current.criteria ?? [],
       }) : [];
       // The artifact this step wrote is shown at its gate.
       const artifact = step.artifact === undefined ? undefined : await readArtifact(current.worktree?.path, current.issue, step.artifact);
@@ -392,10 +407,13 @@ export class LoopDaemon {
     return found;
   }
 
-  /** #358: the approved plan, which lives in the issue's own worktree, also for a per-PR loop in another repository. */
+  /**
+   * #358: the approved plan, which lives in the issue's own worktree, also for a per-PR loop in another repository;
+   * (#359) Contribute's is its contribution.
+   */
   private async planOf(item: WorkItemState): Promise<string | undefined> {
     const owner = item.target === undefined ? item : await this.deps.store.item(item.repo, item.issue);
-    return readArtifact(owner?.worktree?.path, item.issue, "plan");
+    return readArtifact(owner?.worktree?.path, item.issue, planArtifact(loopNamed(item.loop)));
   }
 
   /** Starts the loop's own step an item is on, unless it is running: also after a restart, which forgot it. */
@@ -445,7 +463,9 @@ export class LoopDaemon {
       return;
     }
     const results = await runReviews({
-      exec: this.deps.exec, worktree: item.worktree.path, defaultBranch: await this.deps.github.defaultBranch(item.target ?? item.repo),
+      exec: this.deps.exec, worktree: item.worktree.path,
+      // A follow-up (#359) is judged on what it adds to the pull request it builds on.
+      base: item.upstream?.ref ?? `origin/${await this.deps.github.defaultBranch(item.target ?? item.repo)}`,
       plan: await this.planOf(item), config: config.reviews, run: this.deps.reviewerRun ?? agentReviewerRun,
     });
     const report = reviewsReport(results);
@@ -511,15 +531,24 @@ export class LoopDaemon {
 
   private async publishItem(item: WorkItemState, done: (outcome: ActionResult["outcome"], detail: string, extra?: Partial<ActionResult>) => void): Promise<void> {
     if (item.worktree === undefined) throw new Error("the item has no worktree to publish");
-    const repo = item.target ?? item.repo;
+    const upstream = item.upstream;
+    // #359: a follow-up pull request is opened where the pull request it builds on has its branch: maybe a fork.
+    const repo = upstream?.repo ?? item.target ?? item.repo;
     await this.commitEvidence(item, item.worktree.path, item.checks ?? "The checks passed.", item.reviews);
+    const contribution = planArtifact(loopNamed(item.loop)) === "contribution";
     const published = await publish(this.deps.exec, {
       repo, issueRepo: item.repo, issue: item.issue, worktree: item.worktree.path, branch: item.worktree.branch,
-      closes: elsewhere(item) ? `Part of ${item.repo}#${item.issue}.` : `Closes #${item.issue}.`,
-      plan: await this.planOf(item), checks: item.checks ?? "The checks passed.", reviews: item.reviews,
-      startedBy: item.startedBy, approvals: item.approvals, skipped: item.skipped, pullRequest: item.pullRequest, defaultBranch: await this.deps.github.defaultBranch(repo),
+      closes: upstream !== undefined ? `Builds on ${repo === item.repo ? "" : item.repo}#${item.issue}: a follow-up into its branch \`${upstream.branch}\`, for its author to take or leave.` : elsewhere(item) ? `Part of ${item.repo}#${item.issue}.` : `Closes #${item.issue}.`,
+      plan: await this.planOf(item), checks: item.checks ?? "The checks passed.", reviews: item.reviews, ...(contribution ? { planHeading: "Contribution" } : {}),
+      startedBy: item.startedBy, approvals: item.approvals, skipped: item.skipped, pullRequest: item.pullRequest,
+      defaultBranch: upstream?.branch ?? await this.deps.github.defaultBranch(repo),
+      ...(upstream !== undefined && upstream.repo !== item.repo ? { head: `${item.repo.split("/")[0] ?? ""}:${item.worktree.branch}` } : {}),
     });
     const { number, url } = published.pullRequest;
+    if (upstream !== undefined) {
+      done("published", published.created ? `Opened pull request ${repo === item.repo ? "" : repo}#${number} into this pull request's branch \`${upstream.branch}\`: ${url}\n\nIts author decides what to take. Reply here to ask for changes; the loop runs the checks and reviews again and pushes to the same follow-up.` : `Pushed the update to the follow-up, pull request ${repo === item.repo ? "" : repo}#${number}: ${url}`, { pullRequest: published.pullRequest });
+      return;
+    }
     const opened = item.target === undefined
       ? `Opened pull request #${number}: ${url}\n\nReply here to ask for changes; the loop runs the checks again and pushes them to the same pull request.`
       : `Opened pull request ${repo}#${number}: ${url}\n\nReview it there: what collaborators say on it goes back to its agent. Approve it (a GitHub approval, or \`/rovara approve\` on it) when it's ready.`;
@@ -709,7 +738,9 @@ export class LoopDaemon {
     const where = await this.whereOf(state, registered);
     const config = await readLoopConfig(where.path);
     const worktree = state.worktree ?? { path: join(this.deps.store.itemDir(state.repo, state.issue, state.target), "worktree"), branch: itemBranch(state.issue, state.repo, state.target) };
-    await ensureWorktree(this.deps.exec, where.path, worktree.path, worktree.branch, await this.deps.github.defaultBranch(state.target ?? state.repo));
+    // #359: a follow-up starts from the pull request it builds on, fetched by its number.
+    if (state.upstream !== undefined && state.worktree === undefined) await run(this.deps.exec, "git", ["-C", where.path, "fetch", "--quiet", "origin", `+pull/${state.issue}/head:${state.upstream.ref}`]);
+    await ensureWorktree(this.deps.exec, where.path, worktree.path, worktree.branch, await this.deps.github.defaultBranch(state.target ?? state.repo), state.upstream?.ref);
     // A session keeps the agent it started with, so it can be resumed; a new one uses the repository's (#359).
     const harness = state.session?.harness ?? config.harness.name;
     const session = state.session ?? { harness, tmux: tmuxSessionName(state.repo, state.issue, state.target), ...(harness === "claude-code" ? { id: randomUUID() } : {}) };

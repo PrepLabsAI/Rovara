@@ -4,9 +4,10 @@
 **Claude Code** or **Codex**, and drives that work through a loop. It needs no Rovara install and no AWS account:
 only the Rovara CLI, the GitHub CLI (`gh`, signed in), `tmux`, `git`, and Claude Code or Codex.
 
-> **Status:** **Do**, **Quick**, **Full** and **Review** are here, with reviews before anything is published, feedback
-> on the pull request, one loop per pull request when a change spans repositories, and Codex as the agent or the
-> critic. The Contribute loop follows ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
+> **Status:** **Do**, **Quick**, **Full**, **Review** and **Contribute** are here, with reviews before anything is
+> published, feedback on the pull request, one loop per pull request when a change spans repositories, and Codex as
+> the agent or the critic. Webhooks, Slack approvals and Jira come later
+> ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
 
 The idea is inspired by [the-loop](https://github.com/MadaraUchiha-314/the-loop) by Rohith Ramakrishnan:
 an agent's work driven through a declared process, from your issue tracker. Rovara loop is Rovara's own
@@ -210,6 +211,35 @@ conversation is the review's. Inline review comments and GitHub reviews still re
 runs one loop at a time: to review the pull request a Quick or Full loop is delivering, start the review on the pull
 request.
 
+## The Contribute loop
+
+```text
+/rovara contribute
+## Goal
+Payments survive a flaky gateway.
+
+## Success criteria
+- A 503 is retried at most 3 times.
+- A refund is never retried.
+```
+
+The Contribute loop joins an existing issue, or someone else's pull request, to meet a goal a collaborator sets, and
+is done when every success criterion is proved.
+
+- **The brief.** It won't start without `## Goal` and `## Success criteria` (at least one, as a list). Without them it
+  posts a template (`rovara:contribute-brief`), and answers each reply with what is still missing.
+- **One document.** The agent writes `docs/rovara/<n>/contribution.md`: Goal, Success criteria and Approach. The
+  criteria must be exactly the brief's; a document that drops or changes one is refused. Coding starts as soon as it's
+  written: there is no approval gate.
+- **Proved, not claimed.** The agent ticks each criterion as it meets it, with its evidence:
+  `- [x] A refund is never retried. — Evidence: client.test.ts "never retries a refund" passes`. A claim with any
+  criterion not ticked with its evidence is refused. Then the checks, the reviews and a pull request, as in Quick, with
+  the contribution in its description.
+- **On someone else's pull request**, it never pushes to their branch. It starts from the pull request's head, is
+  reviewed on what it adds, and opens its own pull request **into that pull request's branch**, in a fork if that's
+  where the branch is, so the author decides what to take. A closed pull request, or one whose fork was deleted, has
+  nothing to contribute to.
+
 ## Watching and answering the agent
 
 The agent runs interactively in tmux. `tmux attach -t =rovara-<owner>_<repo>-<issue>` shows it, and you answer it
@@ -240,7 +270,7 @@ on the issue and waits for your next reply.
 | `rovara loop add [path]` · `remove <owner/name>` | starts or stops reading a repository's issues. A repository is read from the moment it's added; older comments are never replayed |
 | `rovara loop start` · `stop` · `status` | the background daemon. Its log is `~/.rovara/loop/daemon.log`; `run` is the same daemon in the foreground |
 | `rovara loop do` · `quick` · `full` `--issue <n> <instruction>` | posts `/rovara do <instruction>` (or `quick`, `full`) on the issue, as you |
-| `rovara loop review --issue <n> [brief]` | posts `/rovara review [brief]` on the issue or pull request, as you |
+| `rovara loop review` · `contribute` `--issue <n> [brief]` | posts `/rovara review [brief]` (or `contribute`) on the issue or pull request, as you |
 | `rovara loop check <issue> [--repo owner/name]` | where an issue's loop stands, without running anything; each document's state: not written, missing sections, written but not approved, locked, changed since approval, or declared away; each per-PR loop's step, pull request and agent; and a review's rounds and findings |
 
 ## What's kept where

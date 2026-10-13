@@ -15,11 +15,15 @@ export const ExitCheckSchema = z.enum([
   "self-review",
   /** #358: every repository the plan's `## Repositories` names is one the loop can work in on this computer. */
   "repositories",
+  /** #359, Contribute: the contribution document's success criteria are exactly the brief's. */
+  "criteria-kept",
+  /** #359, Contribute: and each is ticked with its evidence. */
+  "criteria-proved",
 ]);
 export type ExitCheck = z.infer<typeof ExitCheckSchema>;
 
 /** The documents a loop writes before code, in the order they derive from each other. */
-export const ArtifactSchema = z.enum(["requirements", "design", "plan"]);
+export const ArtifactSchema = z.enum(["requirements", "design", "plan", "contribution"]);
 export type Artifact = z.infer<typeof ArtifactSchema>;
 
 /**
@@ -49,6 +53,8 @@ export const LoopDefinitionSchema = z.object({
    * it runs on that pull request, and the pull request's conversation is its, not a reply to the other loop.
    */
   joins: z.boolean().default(false),
+  /** #359: the sections a brief must fill in before the loop starts (Contribute: a goal and success criteria). */
+  briefSections: z.array(z.string()).default([]),
   steps: z.array(z.object({
     id: z.string().regex(/^[a-z][a-z-]{0,30}$/),
     actor: z.enum(["agent", "human", "code"]),
@@ -274,8 +280,44 @@ export const REVIEW_LOOP: LoopDefinition = LoopDefinitionSchema.parse({
   ],
 });
 
+/**
+ * #359: the Contribute loop. It joins an existing issue, or someone else's pull request, to meet a goal a collaborator
+ * sets with success criteria, and won't start without them. The agent plans in one document, contribution.md, keeping
+ * the criteria as given; codes; and proves each criterion before its change is accepted. Then the loop's checks,
+ * reviews and a pull request: on a pull request, a follow-up into its branch, so its author decides what to take.
+ */
+export const CONTRIBUTE_LOOP: LoopDefinition = LoopDefinitionSchema.parse({
+  name: "contribute",
+  keyword: "contribute",
+  start: "plan",
+  brief: "brief",
+  joins: true,
+  briefSections: ["Goal", "Success criteria"],
+  steps: [
+    { id: "brief", actor: "human", label: "contribute-brief" },
+    { id: "plan", actor: "agent", label: "planning", artifact: "contribution", exit: ["require-summary", "artifact-sections", "criteria-kept"] },
+    ...CHANGE_STEPS.map((step) => (step.id === "code" ? { ...step, exit: [...step.exit, "criteria-proved"] } : step)),
+    { id: "pr-open", actor: "human", label: "pr-open" },
+    { id: "ended", actor: "code", terminal: true },
+  ],
+  edges: [
+    { from: "brief", to: "plan", on: "reply" },
+    { from: "plan", to: "code", on: "done" },
+    ...CHANGE_EDGES,
+    { from: "publish", to: "pr-open", on: "published" },
+    { from: "publish", to: "pr-open", on: "failed" },
+    { from: "pr-open", to: "code", on: "reply" },
+    ...ENDINGS,
+  ],
+});
+
 /** The loops a comment starts. A per-PR loop is started by its Quick or Full loop, never by a comment. */
-export const LOOPS: readonly LoopDefinition[] = [DO_LOOP, QUICK_LOOP, FULL_LOOP, REVIEW_LOOP];
+export const LOOPS: readonly LoopDefinition[] = [DO_LOOP, QUICK_LOOP, FULL_LOOP, REVIEW_LOOP, CONTRIBUTE_LOOP];
+
+/** The document a loop plans in: Contribute's contribution, everyone else's plan. */
+export function planArtifact(loop: LoopDefinition): Artifact {
+  return loop.steps.some((step) => step.artifact === "contribution") ? "contribution" : "plan";
+}
 
 export function loopNamed(name: string): LoopDefinition {
   const found = [...LOOPS, PULL_LOOP].find((loop) => loop.name === name);

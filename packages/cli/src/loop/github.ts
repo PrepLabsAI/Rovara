@@ -4,7 +4,11 @@ import { LOOP_COMMENT_MARKER } from "./naming.js";
 
 export interface IssueComment { id: number; issue: number; author: string; body: string; updatedAt: string }
 /** #359: a pull request as the Review loop reviews it. */
-export interface PullRequestRef { repo: string; number: number; open: boolean; base: string; head: string; url: string }
+export interface PullRequestRef {
+  repo: string; number: number; open: boolean; base: string; head: string; url: string;
+  /** The repository and branch its head commit is on: this repository's, or a fork's. */
+  headRepo: string; headRef: string;
+}
 
 /** The labels the loop puts on issues, so a step shows on the issue list. Not the-loop's `loop:*` labels. */
 export const LABEL_PREFIX = "rovara:";
@@ -79,14 +83,18 @@ export class GitHub {
    * not a pull request.
    */
   async pullRequest(repo: string, number: number): Promise<PullRequestRef | undefined> {
-    const found = await this.exec("gh", ["api", `repos/${repo}/pulls/${number}`, "--jq", "{state, base: .base.ref, head: .head.sha, url: .html_url}"]);
+    const found = await this.exec("gh", ["api", `repos/${repo}/pulls/${number}`, "--jq", "{state, base: .base.ref, head: .head.sha, url: .html_url, headRepo: .head.repo.full_name, headRef: .head.ref}"]);
     if (found.code !== 0) {
       if (/HTTP 404|Not Found/u.test(found.stderr)) return undefined;
       throw new Error(`gh could not read ${repo}#${number}: ${found.stderr.trim().split("\n").pop() ?? ""}`);
     }
-    const value = JSON.parse(found.stdout) as { state?: unknown; base?: unknown; head?: unknown; url?: unknown };
+    const value = JSON.parse(found.stdout) as { state?: unknown; base?: unknown; head?: unknown; url?: unknown; headRepo?: unknown; headRef?: unknown };
     if (typeof value.base !== "string" || typeof value.head !== "string") return undefined;
-    return { repo, number, open: value.state === "open", base: value.base, head: value.head, url: typeof value.url === "string" ? value.url : "" };
+    return {
+      repo, number, open: value.state === "open", base: value.base, head: value.head, url: typeof value.url === "string" ? value.url : "",
+      // A deleted fork has no repository; its branch can no longer take a follow-up.
+      headRepo: typeof value.headRepo === "string" ? value.headRepo : "", headRef: typeof value.headRef === "string" ? value.headRef : "",
+    };
   }
 
   /** #359: the pull requests that mention issue `issue` (GitHub's cross-references), in any repository: owner/name and number. */

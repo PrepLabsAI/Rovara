@@ -95,8 +95,10 @@ export async function createLoopHarness(dirs: string[], options: {
     await writeFile(path, text);
   };
   /** The agent claims its step done through its MCP tool, while the daemon attends to its inbox; `target`: a per-PR loop's agent. */
-  const complete = async (summary: string, target?: string) => {
-    const server = createLoopMcpServer({ store, repo: world.repo, issue: LOOP_ISSUE, version: "test", pollMs: 5, waitMs: 2_000, ...(target === undefined ? {} : { target }) });
+  const complete = (summary: string, target?: string) => completeOn(LOOP_ISSUE, summary, target);
+  /** #359: the same, for a loop on another issue or pull request of the repository. */
+  const completeOn = async (issue: number, summary: string, target?: string) => {
+    const server = createLoopMcpServer({ store, repo: world.repo, issue, version: "test", pollMs: 5, waitMs: 2_000, ...(target === undefined ? {} : { target }) });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     await server.connect(serverSide);
     const client = new Client({ name: "claude-code", version: "test" });
@@ -130,7 +132,7 @@ export async function createLoopHarness(dirs: string[], options: {
   const lastReceived = () => world.sessions.get(LOOP_SESSION)?.received.at(-1) ?? "";
   /** #358: another repository's world and checkout. */
   const other = (repo: string) => others.get(repo)!;
-  return { root, world, store, daemon, checkout, worktree, write, read, selfReview, complete, comment, runOwnSteps, state, step, label, lastPosted, lastReceived, reviewerRuns, checkRuns, pull, pullSession, other };
+  return { root, world, store, daemon, checkout, worktree, write, read, selfReview, complete, comment, runOwnSteps, state, step, label, lastPosted, lastReceived, reviewerRuns, checkRuns, pull, pullSession, other, completeOn };
 }
 
 export async function removeAll(dirs: string[]): Promise<void> {
