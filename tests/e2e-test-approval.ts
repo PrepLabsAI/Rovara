@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { canonicalJson, inspectE2EPortableSource, inspectE2ERepository, e2ePortableOperationDescriptorDigest, e2EPortableApprovalBindingDigest, type E2EPlanSelectionInput, type E2ESyntheticAccountContext } from "@agentx/contracts";
+import { canonicalJson, e2EDefaultSyntheticAccountDefinition, inspectE2EPortableSource, inspectE2ERepository, e2ePortableOperationDescriptorDigest, e2EPortableApprovalBindingDigest, type E2EPlanSelectionInput, type E2ESyntheticAccountContext } from "@agentx/contracts";
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 
@@ -16,15 +16,21 @@ export function withTestPortableApproval<T extends E2EPlanSelectionInput>(input:
     const selector = inspected.exports.some((item) => item.name === "default" && item.kind === "callable")
       ? { kind: "default" as const }
       : inspected.exports.find((item) => item.kind === "callable")?.name;
-    if (selector === undefined) return [];
+    const purposes = new Set(input.scenarios.flatMap((scenario) => scenario.steps.flatMap((step) =>
+      (step.kind === "invoke-contract" || step.kind === "inspect-contract") && step.operationId === operation.operationId
+        ? [step.kind === "invoke-contract" ? "feature-invocation" as const : "source-interface" as const] : [])));
+    if (purposes.size === 0) return [];
     const manifestData = JSON.parse(Buffer.from(manifest.bytes).toString("utf8")) as { exports: Record<string, unknown> };
     const target = manifestData.exports[operation.exportName];
     if (typeof target !== "string") return [];
-    const base = { schemaVersion: "portable-source-operation/v1" as const, operationId: operation.operationId, applicationId: operation.applicationId,
-      purpose: "feature-invocation" as const, packageExportSubpath: operation.exportName, moduleSpecifier: target,
-      callableSelector: typeof selector === "string" ? { kind: "named" as const, exportName: selector } : selector,
-      expectedExportNames: null, sourceRefs: [...operation.sourceRefs] };
-    return [{ ...base, descriptorDigest: e2ePortableOperationDescriptorDigest(base) }];
+    return [...purposes].flatMap((purpose) => {
+      if (purpose === "feature-invocation" && selector === undefined) return [];
+      const base = { schemaVersion: "portable-source-operation/v1" as const, operationId: operation.operationId, applicationId: operation.applicationId,
+        purpose, packageExportSubpath: operation.exportName, moduleSpecifier: target,
+        callableSelector: purpose === "source-interface" ? null : typeof selector === "string" ? { kind: "named" as const, exportName: selector } : selector!,
+        expectedExportNames: purpose === "source-interface" ? inspected.exports.map((item) => item.name).sort() : null, sourceRefs: [...operation.sourceRefs] };
+      return [{ ...base, descriptorDigest: e2ePortableOperationDescriptorDigest(base) }];
+    });
   });
   const semanticApproval = { artifactId: "test-semantic-approval/v1", digest: sha256(canonicalJson({ planDigest: input.planDigest, candidateDigest: input.candidateDigest, operations: operations.map((item) => item.descriptorDigest) })) };
   const accountMap = new Map<string, E2ESyntheticAccountContext>();
@@ -32,7 +38,7 @@ export function withTestPortableApproval<T extends E2EPlanSelectionInput>(input:
     const manifest = discovered.portableOperations.find((operation) => operation.applicationId === target.applicationId)?.manifestPath;
     const source = manifest ? sourceByPath.get(manifest) : undefined;
     if (!source) continue;
-    const definition = { scope: "SYNTHETIC", profileId: target.accountProfileId, applicationId: target.applicationId };
+    const definition = e2EDefaultSyntheticAccountDefinition(target.applicationId, target.accountProfileId);
     accountMap.set(`${target.applicationId}\0${target.accountProfileId}`, { schemaVersion: "synthetic-account-context/v1" as const, contextId: `test-account:${target.applicationId}:${target.accountProfileId}`, profileId: target.accountProfileId,
       applicationId: target.applicationId, scope: "SYNTHETIC" as const, fixture: { version: "synthetic-fixture/v1" as const, sourcePath: source.path, sourceSha256: source.sha256, definition },
       sourceRefs: [{ path: source.path, sha256: source.sha256 }], approval: { ...semanticApproval, planDigest: input.planDigest } });

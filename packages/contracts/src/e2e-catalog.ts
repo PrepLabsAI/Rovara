@@ -51,8 +51,9 @@ export function inspectE2EPortableSource(source: string, path: string): E2EPorta
       continue;
     }
     if (ts.isExportDeclaration(statement)) {
-      if (statement.moduleSpecifier || !statement.exportClause || !ts.isNamedExports(statement.exportClause)) continue;
+      if (statement.isTypeOnly || statement.moduleSpecifier || !statement.exportClause || !ts.isNamedExports(statement.exportClause)) continue;
       for (const element of statement.exportClause.elements) {
+        if (element.isTypeOnly) continue;
         const name = element.name.text;
         const localName = element.propertyName?.text ?? name;
         const value = declarations.get(localName);

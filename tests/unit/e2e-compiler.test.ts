@@ -3,7 +3,7 @@ import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { list } from "e2e/runner";
-import { createCandidateManifest, e2eScenarioBundleDigest, inspectE2EPortableSource, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, e2EPortableApprovalBindingDigest, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
+import { createCandidateManifest, e2eScenarioBundleDigest, e2EDefaultSyntheticAccountDefinition, inspectE2EPortableSource, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, e2EPortableApprovalBindingDigest, copyBoundedE2ESourceBytes, copyBoundedE2ETreePaths, e2ePortableRegistrationKey, resolveE2EPortableRegistration, type E2EPolicy, type E2EPortableApprovalBinding, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
 import { compileE2EScenarios, type E2EImmutableCompilationContext } from "../../packages/verifier/src/scenarios.js";
@@ -34,7 +34,7 @@ const registrationBase = { operationId: operation.operationId, applicationId: op
 const registration = { ...registrationBase, descriptorDigest: contractDescriptorDigest(registrationBase) };
 const semanticApproval = { artifactId: "sem-r1", digest: hash("approved semantic approval") };
 const accountContext = { schemaVersion: "synthetic-account-context/v1" as const, contextId: "account-shop-synthetic", profileId: "synthetic", applicationId: operation.applicationId, scope: "SYNTHETIC" as const,
-  fixture: { version: "synthetic-fixture/v1" as const, sourcePath: operation.manifestPath, sourceSha256: sources[0]!.sha256, definition: { scope: "SYNTHETIC", profileId: "synthetic", applicationId: operation.applicationId } },
+  fixture: { version: "synthetic-fixture/v1" as const, sourcePath: operation.manifestPath, sourceSha256: sources[0]!.sha256, definition: e2EDefaultSyntheticAccountDefinition(operation.applicationId, "synthetic") },
   sourceRefs: [{ path: operation.manifestPath, sha256: sources[0]!.sha256 }], approval: { ...semanticApproval, planDigest: "c".repeat(64) } };
 const bindingBody = { schemaVersion: "portable-approval-binding/v1" as const, planDigest: "c".repeat(64), semanticApproval, operations: [registration], accountContexts: [accountContext] };
 const binding = { ...bindingBody, bindingDigest: e2EPortableApprovalBindingDigest(bindingBody) };
@@ -46,11 +46,31 @@ const approvedBundle = { ...bundle, bundleDigest: e2eScenarioBundleDigest(bundle
 const immutableCompilationContext: E2EImmutableCompilationContext = { selectionInput: selection, executionPlan: plan, group };
 
 describe("trusted E2E compiler", () => {
+  it("copies byte views through intrinsic accessors and keeps tree membership independently bounded", () => {
+    const backing = Uint8Array.from([0, 1, 2, 3]);
+    const copied = copyBoundedE2ESourceBytes(backing.subarray(1, 3), 4);
+    backing[1] = 9;
+    expect([...copied]).toEqual([1, 2]);
+    let getterCalls = 0;
+    const getterBytes = Object.defineProperty(Uint8Array.from([1]), "byteLength", { get() { getterCalls += 1; return 1; } });
+    expect(() => copyBoundedE2ESourceBytes(getterBytes, 4)).toThrow();
+    expect(getterCalls).toBe(0);
+    let speciesCalls = 0;
+    class HostileBytes extends Uint8Array { static get [Symbol.species]() { speciesCalls += 1; return Uint8Array; } }
+    expect(() => copyBoundedE2ESourceBytes(new HostileBytes([1, 2]), 4)).toThrow();
+    expect(speciesCalls).toBe(0);
+    const paths = Array.from({ length: 16_385 }, (_, index) => `apps/a/${index}`);
+    expect(copyBoundedE2ETreePaths(paths)).toHaveLength(16_385);
+    expect(copyBoundedE2ETreePaths(Array.from({ length: 100_000 }, (_, index) => `p${index}`))).toHaveLength(100_000);
+    expect(() => copyBoundedE2ETreePaths(Array.from({ length: 100_001 }, (_, index) => `p${index}`))).toThrow();
+  });
   it("classifies callable aliases and exported data without treating classes or unresolved exports as callable", () => {
     expect(inspectE2EPortableSource("const local = (x) => x; export { local as run };", "src/api.ts").exports).toContainEqual({ name: "run", kind: "callable" });
     expect(inspectE2EPortableSource("export const answer = 42;", "src/api.js").exports).toContainEqual({ name: "answer", kind: "data" });
     expect(inspectE2EPortableSource("export class Client {}", "src/api.ts").exports).toContainEqual({ name: "Client", kind: "data" });
     expect(inspectE2EPortableSource("export { external as run } from './other.js';", "src/api.js").exports).toEqual([]);
+    expect(inspectE2EPortableSource("export type { run };", "src/api.ts").exports).toEqual([]);
+    expect(inspectE2EPortableSource("export { type run };", "src/api.ts").exports).toEqual([]);
     expect(inspectE2EPortableSource("export default (() =>", "src/api.ts").parseable).toBe(false);
   });
   it("emits the distinct registered source-interface inspector with fixed projection and no candidate invoke call", () => {
@@ -79,6 +99,129 @@ describe("trusted E2E compiler", () => {
     const invalidSelection = { ...inspectionSelection, portableApprovalBinding: invalidBinding };
     expect(selectE2EExecutionPlan(invalidSelection).unavailableCriteria.length).toBeGreaterThan(0);
   });
+  it("rejects caller-added defaults and extra source references for the synthetic account", () => {
+    const injectedAccount = { ...accountContext, fixture: { ...accountContext.fixture, definition: { ...accountContext.fixture.definition, answer: "injected" } } };
+    const bindingBodyInjected = { ...bindingBody, accountContexts: [injectedAccount] };
+    const bindingInjected = { ...bindingBodyInjected, bindingDigest: e2EPortableApprovalBindingDigest(bindingBodyInjected) };
+    expect(() => selectE2EExecutionPlan({ ...selection, portableApprovalBinding: bindingInjected })).toThrow(/canonical minimal profile/);
+    const extraRefAccount = { ...accountContext, sourceRefs: [...accountContext.sourceRefs, { path: "apps/shop/src/rows.js", sha256: sources[2]!.sha256 }] };
+    const bindingBodyExtraRef = { ...bindingBody, accountContexts: [extraRefAccount] };
+    const bindingExtraRef = { ...bindingBodyExtraRef, bindingDigest: e2EPortableApprovalBindingDigest(bindingBodyExtraRef) };
+    expect(() => selectE2EExecutionPlan({ ...selection, portableApprovalBinding: bindingExtraRef })).toThrow(/exactly match/);
+  });
+
+  it("requires an approved scenario association when one operation has multiple callable selectors", () => {
+    const firstBase = { ...registrationBase, callableSelector: { kind: "named" as const, exportName: "listRows" } };
+    const secondBase = { ...registrationBase, callableSelector: { kind: "named" as const, exportName: "otherRows" } };
+    const first = { ...firstBase, descriptorDigest: contractDescriptorDigest(firstBase) };
+    const second = { ...secondBase, descriptorDigest: contractDescriptorDigest(secondBase) };
+    expect(e2ePortableRegistrationKey(first)).not.toBe(e2ePortableRegistrationKey(second));
+    expect(resolveE2EPortableRegistration(scenario, [first, second])).toBeUndefined();
+    const selectedKey = e2ePortableRegistrationKey(second);
+    expect(resolveE2EPortableRegistration(scenario, [first, second], [{ scenarioId: "s", registrationKey: selectedKey }])?.registration.callableSelector).toEqual(second.callableSelector);
+    expect(() => resolveE2EPortableRegistration(scenario, [first, second], [{ scenarioId: "s", registrationKey: "f".repeat(64) }])).toThrow(/does not match/);
+  });
+
+  it("binds two explicitly associated named selectors for one operation into their own compiled cases", async () => {
+    const moduleBytes = Buffer.from("export const listRows = async(input) => ({ selector: 'listRows', input }); export const otherRows = async(input) => ({ selector: 'otherRows', input });\n");
+    const sourceSnapshot = { ...snapshot, sources: snapshot.sources.map((item) => item.path === "apps/shop/src/rows.js" ? { ...item, bytes: moduleBytes, sha256: hash(moduleBytes) } : item) };
+    const sourceOperation = inspectE2ERepository(sourceSnapshot, candidate).portableOperations.find((item) => item.operationId === operation.operationId)!;
+    const makeRegistration = (exportName: string) => {
+      const body = { ...registrationBase, sourceRefs: [...sourceOperation.sourceRefs], callableSelector: { kind: "named" as const, exportName } };
+      return { ...body, descriptorDigest: contractDescriptorDigest(body) };
+    };
+    const first = makeRegistration("listRows");
+    const second = makeRegistration("otherRows");
+    const secondScenario = { ...scenario, scenarioId: "other", requirementId: "r-other" };
+    const scenarios = [scenario, secondScenario];
+    const associations = [
+      { scenarioId: "s", registrationKey: e2ePortableRegistrationKey(first) },
+      { scenarioId: "other", registrationKey: e2ePortableRegistrationKey(second) },
+    ];
+    const body = { ...bindingBody, operations: [first, second], scenarioRegistrations: associations };
+    const portableApprovalBinding = { ...body, bindingDigest: e2EPortableApprovalBindingDigest(body) };
+    const selectionInput = { ...selection, sourceSnapshot, scenarios, policy: { ...policy, baselineScenarioIds: ["s", "other"] }, portableApprovalBinding };
+    const executionPlan = selectE2EExecutionPlan(selectionInput);
+    const group = executionPlan.groups[0]!;
+    const bundleBody = { schemaVersion: 1 as const, planDigest: selectionInput.planDigest, templateVersion: "trusted-e2e/v1", scenarios, bundleDigest: "0".repeat(64) };
+    const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };
+    const compiled = compileE2EScenarios(bundle, executionPlan.effectiveTargets, group, { selectionInput, executionPlan, group });
+    expect(compiled.caseBindings.get(group.expectedCases.find((item) => item.scenarioId === "s")!.caseId)?.callableSelector).toEqual(first.callableSelector);
+    expect(compiled.caseBindings.get(group.expectedCases.find((item) => item.scenarioId === "other")!.caseId)?.callableSelector).toEqual(second.callableSelector);
+    expect(new Set([...compiled.caseBindings.values()].map((item) => item.registrationKey)).size).toBe(2);
+    const root = await mkdtemp(join(process.cwd(), ".tmp-e2e-selectors-"));
+    try {
+      for (const [filePath, bytes] of compiled.files) {
+        const absolute = join(root, filePath);
+        await mkdir(dirname(absolute), { recursive: true });
+        await writeFile(absolute, bytes, { flag: "wx" });
+      }
+      const packet = JSON.parse(await readFile(join(root, compiled.selectionPacketPath), "utf8")) as E2ESelectionPacket;
+      const actual = await list({ cwd: root, config: join(root, "e2e.config.json"), env: { CI: "1" } });
+      const verified = compareE2EPublicList(packet, actual);
+      expect(verified.selected).toHaveLength(2);
+      expect(verified.selected.map((item) => item.registrationKey).sort()).toEqual([...compiled.caseBindings.values()].map((item) => item.registrationKey).sort());
+      expect(actual.pairs.every((item) => item.disposition !== "skip")).toBe(true);
+      const receiptPath = process.env.AGENTX_E2E_SELECTOR_LIST_RECEIPT;
+      if (receiptPath) {
+        const destination = resolve(receiptPath);
+        const evidenceRoot = resolve(`${process.cwd()}-evidence`, "task2b-fix2");
+        const relativeDestination = relative(evidenceRoot, destination);
+        if (relativeDestination.startsWith(`..${sep}`) || relativeDestination === ".." || resolve(evidenceRoot, relativeDestination) !== destination) throw new Error("selector public-list receipt must remain under the assigned evidence namespace");
+        const sourceHashes = Object.fromEntries(sourceSnapshot.sources.map((item) => [item.path, item.sha256]));
+        await mkdir(dirname(destination), { recursive: true });
+        await writeFile(destination, `${JSON.stringify({ evidenceType: "pinned-public-list-observation/v1", upstreamPackage: "e2e@0.20.0", node: process.version, platform: process.platform, arch: process.arch, sourceHashes, inventory: compiled.inventory, packet, actual }, null, 2)}\n`, { flag: "wx" });
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("composes inspection and feature registrations for one operation with distinct case identities", () => {
+    const sourceRegistrationBase = { ...registrationBase, purpose: "source-interface" as const, callableSelector: null, expectedExportNames: ["listRows"] };
+    const sourceRegistration = { ...sourceRegistrationBase, descriptorDigest: contractDescriptorDigest(sourceRegistrationBase) };
+    const inspectionScenario: E2EScenario = { ...scenario, scenarioId: "inspect", requirementId: "inspect-r", steps: [{ kind: "inspect-contract", operationId: operation.operationId }], assertions: [{ kind: "state", probeId: "module-export-names", equals: ["listRows"], pollTimeoutMs: 1000 }] };
+    const scenarios = [scenario, inspectionScenario];
+    const bindingBodyBoth = { ...bindingBody, operations: [registration, sourceRegistration] };
+    const bindingBoth = { ...bindingBodyBoth, bindingDigest: e2EPortableApprovalBindingDigest(bindingBodyBoth) };
+    const selectionBoth = { ...selection, scenarios, portableApprovalBinding: bindingBoth };
+    const planBoth = selectE2EExecutionPlan(selectionBoth);
+    const groupBoth = planBoth.groups[0]!;
+    const bundleBodyBoth = { schemaVersion: 1 as const, planDigest: selectionBoth.planDigest, templateVersion: "trusted-e2e/v1", scenarios, bundleDigest: "0".repeat(64) };
+    const bundleBoth = { ...bundleBodyBoth, bundleDigest: e2eScenarioBundleDigest(bundleBodyBoth) };
+    const compiled = compileE2EScenarios(bundleBoth, planBoth.effectiveTargets, groupBoth, { selectionInput: selectionBoth, executionPlan: planBoth, group: groupBoth });
+    const generated = compiled.files.get(".agentx/e2e/generated-contract.test.ts")!;
+    expect(groupBoth.expectedCases.map((item) => item.scenarioId).sort()).toEqual(["inspect", "s"]);
+    expect(generated).toContain("observation.inspectContract(");
+    expect(generated).toContain("observation.request(");
+    expect(compiled.caseBindings.size).toBe(2);
+    expect(new Set([...compiled.caseBindings.values()].map((item) => item.registrationKey)).size).toBe(2);
+    expect(generated).toContain('"assertionIndex":1');
+  });
+
+  it("retains a source-known unavailable criterion while compiling the supported case in the same group", () => {
+    const unavailableScenario: E2EScenario = { ...scenario, scenarioId: "unsupported", requirementId: "r-unsupported" };
+    const unsupportedRegistrationBase = { ...registrationBase, callableSelector: { kind: "named" as const, exportName: "notExported" } };
+    const unsupportedRegistration = { ...unsupportedRegistrationBase, descriptorDigest: contractDescriptorDigest(unsupportedRegistrationBase) };
+    const unsupportedKey = e2ePortableRegistrationKey(unsupportedRegistration);
+    const supportedKey = e2ePortableRegistrationKey(registration);
+    const scenarios = [scenario, unavailableScenario];
+    const bindingBodyMixed = { ...bindingBody, operations: [registration, unsupportedRegistration], scenarioRegistrations: [
+      { scenarioId: "s", registrationKey: supportedKey }, { scenarioId: "unsupported", registrationKey: unsupportedKey },
+    ] };
+    const bindingMixed = { ...bindingBodyMixed, bindingDigest: e2EPortableApprovalBindingDigest(bindingBodyMixed) };
+    const selectionMixed = { ...selection, scenarios, policy: { ...policy, baselineScenarioIds: scenarios.map((item) => item.scenarioId) }, portableApprovalBinding: bindingMixed };
+    const planMixed = selectE2EExecutionPlan(selectionMixed);
+    const groupMixed = planMixed.groups[0]!;
+    expect(groupMixed.expectedCases.map((item) => item.scenarioId)).toEqual(["s"]);
+    expect(planMixed.unavailableCriteria.some((item) => item.reason.includes("source-validated callable capability"))).toBe(true);
+    const bundleBodyMixed = { schemaVersion: 1 as const, planDigest: selectionMixed.planDigest, templateVersion: "trusted-e2e/v1", scenarios, bundleDigest: "0".repeat(64) };
+    const bundleMixed = { ...bundleBodyMixed, bundleDigest: e2eScenarioBundleDigest(bundleBodyMixed) };
+    const compiled = compileE2EScenarios(bundleMixed, planMixed.effectiveTargets, groupMixed, { selectionInput: selectionMixed, executionPlan: planMixed, group: groupMixed });
+    expect(compiled.expectedCases.map((item) => item.scenarioId)).toEqual(["s"]);
+    expect(compiled.caseBindings.size).toBe(1);
+  });
+
   it("requires the immutable planner context and emits a distinct selector, per-assertion map, and immutable inventory", () => {
     expect(() => (compileE2EScenarios as unknown as (...args: unknown[]) => unknown)(approvedBundle, plan.effectiveTargets, group)).toThrow();
     const compiled = compileE2EScenarios(approvedBundle, plan.effectiveTargets, group, immutableCompilationContext);
@@ -117,7 +260,7 @@ describe("trusted E2E compiler", () => {
     const missingSelectorBindingBody = { ...bindingBody, operations: [missingSelectorRegistration] };
     const missingSelectorBinding = { ...missingSelectorBindingBody, bindingDigest: e2EPortableApprovalBindingDigest(missingSelectorBindingBody) };
     expect(() => compileE2EScenarios(approvedBundle, plan.effectiveTargets, group, { ...immutableCompilationContext,
-      selectionInput: { ...selection, portableApprovalBinding: missingSelectorBinding } })).toThrow(/source-validated callable capability/);
+      selectionInput: { ...selection, portableApprovalBinding: missingSelectorBinding } })).toThrow();
     let getterInvoked = false;
     const hostileContext = Object.defineProperty({ ...immutableCompilationContext }, "selectionInput", { enumerable: true, get() { getterInvoked = true; return selection; } });
     expect(() => compileE2EScenarios(approvedBundle, plan.effectiveTargets, group, hostileContext as never)).toThrow(/data properties/);
@@ -157,7 +300,7 @@ describe("trusted E2E compiler", () => {
       const base = `apps/${name}`;
       const items = [{ path: `${base}/package.json`, bytes: packageBytes, sha256: hash(packageBytes), kind: "blob" as const }, { path: `${base}/src/index.js`, bytes: moduleBytes, sha256: hash(moduleBytes), kind: "blob" as const }];
       if (name === "one") {
-        const fixture = Buffer.from(JSON.stringify({ scope: "SYNTHETIC", profileId: "synthetic-alt", applicationId: "one" }));
+        const fixture = Buffer.from(JSON.stringify({ schemaVersion: "synthetic-fixture/v1", scope: "SYNTHETIC", profileId: "synthetic-alt", applicationId: "one" }));
         items.push({ path: `${base}/fixtures/alternate-account.json`, bytes: fixture, sha256: hash(fixture), kind: "blob" as const });
       }
       return items;
@@ -181,14 +324,14 @@ describe("trusted E2E compiler", () => {
       return { ...registrationBase3, descriptorDigest: contractDescriptorDigest(registrationBase3) };
     });
     const semanticApproval3 = { artifactId: "sem-three-apps", digest: hash("approved three app semantics") };
-    const accounts3 = targets3.map((item) => {
+    const accounts3: E2EPortableApprovalBinding["accountContexts"] = targets3.map((item) => {
       const manifestSource = sources3.find((sourceItem) => sourceItem.path === `apps/${item.applicationId}/package.json`)!;
       return { schemaVersion: "synthetic-account-context/v1" as const, contextId: `account-${item.applicationId}`, profileId: item.accountProfileId, applicationId: item.applicationId, scope: "SYNTHETIC" as const,
-        fixture: { version: "synthetic-fixture/v1" as const, sourcePath: manifestSource.path, sourceSha256: manifestSource.sha256, definition: { scope: "SYNTHETIC", profileId: item.accountProfileId, applicationId: item.applicationId } },
+        fixture: { version: "synthetic-fixture/v1" as const, sourcePath: manifestSource.path, sourceSha256: manifestSource.sha256, definition: e2EDefaultSyntheticAccountDefinition(item.applicationId, item.accountProfileId) },
       sourceRefs: [{ path: manifestSource.path, sha256: manifestSource.sha256 }], approval: { ...semanticApproval3, planDigest: selection3.planDigest } };
     });
     const alternateFixture = sources3.find((item) => item.path === "apps/one/fixtures/alternate-account.json")!;
-    const alternateDefinition = JSON.parse(alternateFixture.bytes.toString("utf8")) as { scope: "SYNTHETIC"; profileId: string; applicationId: string };
+    const alternateDefinition = JSON.parse(alternateFixture.bytes.toString("utf8")) as { schemaVersion: "synthetic-fixture/v1"; scope: "SYNTHETIC"; profileId: string; applicationId: string };
     accounts3.push({ schemaVersion: "synthetic-account-context/v1", contextId: "account-one-synthetic-alt", profileId: "synthetic-alt", applicationId: "one", scope: "SYNTHETIC",
       fixture: { version: "synthetic-fixture/v1", sourcePath: alternateFixture.path, sourceSha256: alternateFixture.sha256, definition: alternateDefinition },
       sourceRefs: [{ path: alternateFixture.path, sha256: alternateFixture.sha256 }], approval: { ...semanticApproval3, planDigest: selection3.planDigest } });
@@ -208,7 +351,7 @@ describe("trusted E2E compiler", () => {
       }
       const packet = JSON.parse(await readFile(join(root, compiled3.selectionPacketPath), "utf8")) as E2ESelectionPacket;
       const actual = await list({ cwd: root, config: join(root, "e2e.config.json"), env: { CI: "1" } });
-      const evidenceRoot = join(`${process.cwd()}-evidence`, "task2b-fix1");
+      const evidenceRoot = join(`${process.cwd()}-evidence`, "task2b-fix2");
       const receiptPath = process.env.AGENTX_E2E_LIST_RECEIPT;
       if (receiptPath) {
         const destination = resolve(receiptPath);

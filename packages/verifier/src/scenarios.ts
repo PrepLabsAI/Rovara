@@ -1,5 +1,5 @@
 import { types } from "node:util";
-import { E2EScenarioBundleSchema, E2EExecutionGroupSchema, E2EExecutionPlanSchema, E2EPortableApprovalBindingSchema, canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes, inspectE2EPortableSource, inspectE2ERepository, selectE2EExecutionPlan, verifyE2ESourceSnapshot, type CandidateManifest, type E2EExecutionPlan, type E2EExpectedCase, type E2EPolicy, type E2EScenario, type E2EScenarioBundle, type E2ESourceSnapshot, type E2EPlanSelectionInput } from "@agentx/contracts";
+import { E2EScenarioBundleSchema, E2EExecutionGroupSchema, E2EExecutionPlanSchema, E2EPortableApprovalBindingSchema, canonicalJson, copyBoundedE2EJsonData, copyBoundedE2ESourceBytes, copyBoundedE2ETreePaths, e2ePortableRegistrationKey, inspectE2EPortableSource, inspectE2ERepository, resolveE2EPortableRegistration, selectE2EExecutionPlan, verifyE2ESourceSnapshot, type CandidateManifest, type E2EExecutionPlan, type E2EExpectedCase, type E2EPolicy, type E2EScenario, type E2EScenarioBundle, type E2ESourceSnapshot, type E2EPlanSelectionInput } from "@agentx/contracts";
 import { type E2ECompiledInventory } from "./identity.js";
 import { emitE2ECompilationFiles, e2ePortableOperationDescriptorDigest, type E2EOperationRegistration } from "./templates.js";
 import { assertPlanSubset } from "./selection.js";
@@ -9,7 +9,7 @@ export type E2EImmutableCompilationContext = Readonly<{
   executionPlan: E2EExecutionPlan;
   group: E2EExecutionPlan["groups"][number];
 }>;
-export type E2ECompiledSuite = Readonly<{ bundle: E2EScenarioBundle; files: ReadonlyMap<string, string>; inventory: E2ECompiledInventory; expectedConfigDigest: string; expectedCases: readonly E2EExpectedCase[]; caseBindings: ReadonlyMap<string, { compilerCaseIdentity: string; candidateResponseScope: string; requestProtocol: string; operationId: string; accountProfileId: string; requestedTargetId: string; packageExportSubpath: string; moduleSpecifier: string; callableSelector: E2EOperationRegistration["callableSelector"]; descriptorDigest: string }>; selectionPacketPath: string }>;
+export type E2ECompiledSuite = Readonly<{ bundle: E2EScenarioBundle; files: ReadonlyMap<string, string>; inventory: E2ECompiledInventory; expectedConfigDigest: string; expectedCases: readonly E2EExpectedCase[]; caseBindings: ReadonlyMap<string, { compilerCaseIdentity: string; registrationKey: string; candidateResponseScope: string; requestProtocol: string; operationId: string; accountProfileId: string; requestedTargetId: string; packageExportSubpath: string; moduleSpecifier: string; callableSelector: E2EOperationRegistration["callableSelector"]; descriptorDigest: string }>; selectionPacketPath: string }>;
 
 export function compileE2EScenarios(bundleInput: E2EScenarioBundle, effectiveTargetsInput: E2EExecutionPlan["effectiveTargets"], groupInput: E2EExecutionPlan["groups"][number], contextInput: E2EImmutableCompilationContext): E2ECompiledSuite {
   const bundle = E2EScenarioBundleSchema.parse(copyBoundedE2EJsonData(bundleInput, { maxBytes: 262_144, maxDepth: 64 }));
@@ -27,6 +27,7 @@ export function compileE2EScenarios(bundleInput: E2EScenarioBundle, effectiveTar
   const discovered = inspectE2ERepository(sourceSnapshot, expectedCandidate);
   const operations = new Map(discovered.portableOperations.map((operation) => [operation.operationId, operation]));
   const snapshotSources = new Map(sourceSnapshot.sources.map((item) => [item.path, item]));
+  const sourceCapabilityAvailable = new Map<string, boolean>();
   for (const registration of binding.operations) {
     const operation = operations.get(registration.operationId);
     if (!operation || operation.applicationId !== registration.applicationId || operation.exportName !== registration.packageExportSubpath || canonicalJson(operation.sourceRefs) !== canonicalJson(registration.sourceRefs)) throw new Error("registered operation identity is not in the verified source inventory");
@@ -45,19 +46,25 @@ export function compileE2EScenarios(bundleInput: E2EScenarioBundle, effectiveTar
       const inspected = inspectE2EPortableSource(Buffer.from(source.bytes).toString("utf8"), source.path);
       const selector = registration.callableSelector;
       const exportName = selector === null ? "" : selector.kind === "default" ? "default" : selector.exportName;
-      if (!inspected.parseable || inspected.exports.find((item) => item.name === exportName)?.kind !== "callable") throw new Error(`registered callable selector is not a source-validated callable capability: ${source.path} ${JSON.stringify(inspected)}`);
+      sourceCapabilityAvailable.set(e2ePortableRegistrationKey(registration), inspected.parseable && inspected.exports.find((item) => item.name === exportName)?.kind === "callable");
     } else {
       const inspected = inspectE2EPortableSource(Buffer.from(source.bytes).toString("utf8"), source.path);
-      if (!inspected.parseable || canonicalJson(inspected.exports.map((item) => item.name).sort()) !== canonicalJson([...(registration.expectedExportNames ?? [])].sort())) throw new Error("source-interface export names do not match the verified source module inventory");
+      sourceCapabilityAvailable.set(e2ePortableRegistrationKey(registration), inspected.parseable && canonicalJson(inspected.exports.map((item) => item.name).sort()) === canonicalJson([...(registration.expectedExportNames ?? [])].sort()));
     }
   }
   const derivedPlan = E2EExecutionPlanSchema.parse(selectE2EExecutionPlan(selection));
   if (canonicalJson(derivedPlan) !== canonicalJson(E2EExecutionPlanSchema.parse(context.executionPlan))) throw new Error("supplied execution plan differs from fresh shared planner derivation");
   assertPlanSubset(derivedPlan, effectiveTargets, group);
   const assignedGroup = derivedPlan.groups.find((candidate) => candidate.groupId === group.groupId)!;
+  for (const expectedCase of assignedGroup.expectedCases) {
+    const scenario = bundle.scenarios.find((item) => item.scenarioId === expectedCase.scenarioId);
+    const resolved = scenario ? resolveE2EPortableRegistration(scenario, binding.operations, binding.scenarioRegistrations) : undefined;
+    const registration = resolved?.registration;
+    if (!registration || sourceCapabilityAvailable.get(e2ePortableRegistrationKey(registration)) !== true) throw new Error("assigned expected case lacks source-validated operation capability");
+  }
   const ids = new Set(assignedGroup.expectedCases.map((item) => item.scenarioId));
   const scenarios = bundle.scenarios.filter((scenario) => ids.has(scenario.scenarioId));
-  const emitted = emitE2ECompilationFiles({ expectedCases: assignedGroup.expectedCases, scenarios, group: assignedGroup, plan: derivedPlan, bundleDigest: bundle.bundleDigest, registrations: binding.operations, runTimeoutMs: selection.policy.limits.runTimeoutMs, caseTimeoutMs: selection.policy.limits.caseTimeoutMs });
+  const emitted = emitE2ECompilationFiles({ expectedCases: assignedGroup.expectedCases, scenarios, scenarioRegistrations: binding.scenarioRegistrations ?? [], group: assignedGroup, plan: derivedPlan, bundleDigest: bundle.bundleDigest, registrations: binding.operations, runTimeoutMs: selection.policy.limits.runTimeoutMs, caseTimeoutMs: selection.policy.limits.caseTimeoutMs });
   return Object.freeze({ bundle, files: emitted.files, inventory: emitted.inventory, expectedConfigDigest: emitted.expectedConfigDigest, expectedCases: Object.freeze([...assignedGroup.expectedCases]), caseBindings: emitted.caseBindings, selectionPacketPath: ".agentx/e2e/selection-packet.json" });
 }
 
@@ -90,7 +97,7 @@ function copyOwnArray(value: unknown, maxLength: number, label: string): unknown
 function copySnapshot(value: unknown): E2ESourceSnapshot {
   const record = copyRecord(value, ["candidate", "commitSha", "treeSha", "treeComplete", "treePaths", "sources"], "source snapshot");
   const candidate = copyBoundedE2EJsonData(record.candidate, { maxBytes: 262_144, maxDepth: 64 }) as CandidateManifest;
-  const treePaths = copyBoundedE2EJsonData(record.treePaths, { maxBytes: 262_144, maxDepth: 64 }) as string[];
+  const treePaths = copyBoundedE2ETreePaths(record.treePaths);
   const sources = copyOwnArray(record.sources, 512, "source array").map((raw): E2ESourceSnapshot["sources"][number] => {
     const source = copyRecord(raw, ["path", "sha256", "bytes", "kind"], "source entry");
     if (source.kind !== "blob" && source.kind !== "symlink" && source.kind !== "submodule") throw new TypeError("source kind is invalid");

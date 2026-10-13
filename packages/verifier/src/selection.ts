@@ -2,10 +2,10 @@ import { types } from "node:util";
 import { E2EExecutionPlanSchema, canonicalJson, copyBoundedE2EJsonData, type E2EExecutionPlan, type E2EExpectedCase, type E2ETarget } from "@agentx/contracts";
 import { upstreamE2ECaseIdentity } from "./identity.js";
 
-export type E2ESelectionTuple = Readonly<{ caseId: string; compilerCaseIdentity: string; candidateResponseScope: "contained-candidate-process-response/v1"; requestProtocol: "contained-candidate-host-request/v1"; upstreamTestId: string; upstreamResultId: string; title: string; targetId: string; targetName: string; agent: "default"; disposition: "run" | "filtered" }>;
+export type E2ESelectionTuple = Readonly<{ caseId: string; compilerCaseIdentity: string; registrationKey: string; candidateResponseScope: "contained-candidate-process-response/v1"; requestProtocol: "contained-candidate-host-request/v1"; upstreamTestId: string; upstreamResultId: string; title: string; targetId: string; targetName: string; agent: "default"; disposition: "run" | "filtered" }>;
 export type E2ESelectionPacket = Readonly<{ schemaVersion: 1; algorithm: "e2e-public-list-selection/v1"; planDigest: string; groupId: string; tuples: readonly E2ESelectionTuple[] }>;
 
-export function createE2ESelectionPacket(planInput: E2EExecutionPlan, groupId: string, titleByCaseId: ReadonlyMap<string, string>, caseBindings: ReadonlyMap<string, { compilerCaseIdentity: string; candidateResponseScope: "contained-candidate-process-response/v1"; requestProtocol: "contained-candidate-host-request/v1" }>): E2ESelectionPacket {
+export function createE2ESelectionPacket(planInput: E2EExecutionPlan, groupId: string, titleByCaseId: ReadonlyMap<string, string>, caseBindings: ReadonlyMap<string, { compilerCaseIdentity: string; registrationKey: string; candidateResponseScope: "contained-candidate-process-response/v1"; requestProtocol: "contained-candidate-host-request/v1" }>): E2ESelectionPacket {
   const plan = E2EExecutionPlanSchema.parse(planInput);
   const group = plan.groups.find((item) => item.groupId === groupId);
   if (!group || group.expectedCases.length === 0) throw new Error("selected execution group is absent or empty");

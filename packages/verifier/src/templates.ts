@@ -1,47 +1,44 @@
 import { createHash } from "node:crypto";
-import { canonicalJson, E2E_CANDIDATE_INSPECTION_PROTOCOL, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, type E2EExpectedCase, type E2EExecutionPlan, type E2EPortableOperationRegistration, type E2EPortablePurpose, type E2EScenario } from "@agentx/contracts";
+import { canonicalJson, E2E_CANDIDATE_INSPECTION_PROTOCOL, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, resolveE2EPortableRegistration, type E2EExpectedCase, type E2EExecutionPlan, type E2EPortableOperationRegistration, type E2EPortablePurpose, type E2EScenario } from "@agentx/contracts";
 import { E2E_CANDIDATE_RESPONSE_PROTOCOL, E2E_CANDIDATE_REQUEST_PROTOCOL, E2E_CANDIDATE_RESPONSE_SCOPE, E2E_SUPERVISOR_RPC_PROTOCOL, E2E_GENERATED_CONFIG_PATH, E2E_GENERATED_TEST_PATH, E2E_SELECTION_PACKET_PATH, expectedE2EConfigDigest, upstreamE2ECaseIdentity, type E2ECompiledFile, type E2ECompiledInventory } from "./identity.js";
 import { createE2ESelectionPacket } from "./selection.js";
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
-const stepOperationId = (scenario: E2EScenario | undefined) => {
-  const step = scenario?.steps[0];
-  return step?.kind === "invoke-contract" || step?.kind === "inspect-contract" ? step.operationId : undefined;
-};
 export type E2EOperationRegistration = E2EPortableOperationRegistration;
 export type E2ECompilerPurpose = E2EPortablePurpose;
 export function e2ePortableOperationDescriptorDigest(input: Omit<E2EOperationRegistration, "descriptorDigest">): string {
   return contractDescriptorDigest(input);
 }
 
-export function emitE2ECompilationFiles(input: { expectedCases: readonly E2EExpectedCase[]; scenarios: readonly E2EScenario[]; group: { groupId: string; targetIds: readonly string[] }; plan: E2EExecutionPlan; bundleDigest: string; registrations: readonly E2EOperationRegistration[]; runTimeoutMs: number; caseTimeoutMs: number }): { files: ReadonlyMap<string, string>; inventory: E2ECompiledInventory; expectedConfigDigest: string; caseBindings: ReadonlyMap<string, { compilerCaseIdentity: string; candidateResponseScope: typeof E2E_CANDIDATE_RESPONSE_SCOPE; requestProtocol: typeof E2E_CANDIDATE_REQUEST_PROTOCOL; operationId: string; accountProfileId: string; accountContextId: string; accountContextDigest: string; requestedTargetId: string; packageExportSubpath: string; moduleSpecifier: string; callableSelector: E2EOperationRegistration["callableSelector"]; descriptorDigest: string; executionDescriptorDigest: string }> } {
+export function emitE2ECompilationFiles(input: { expectedCases: readonly E2EExpectedCase[]; scenarios: readonly E2EScenario[]; scenarioRegistrations?: readonly { scenarioId: string; registrationKey: string }[]; group: { groupId: string; targetIds: readonly string[] }; plan: E2EExecutionPlan; bundleDigest: string; registrations: readonly E2EOperationRegistration[]; runTimeoutMs: number; caseTimeoutMs: number }): { files: ReadonlyMap<string, string>; inventory: E2ECompiledInventory; expectedConfigDigest: string; caseBindings: ReadonlyMap<string, { compilerCaseIdentity: string; registrationKey: string; candidateResponseScope: typeof E2E_CANDIDATE_RESPONSE_SCOPE; requestProtocol: typeof E2E_CANDIDATE_REQUEST_PROTOCOL; operationId: string; accountProfileId: string; accountContextId: string; accountContextDigest: string; requestedTargetId: string; packageExportSubpath: string; moduleSpecifier: string; callableSelector: E2EOperationRegistration["callableSelector"]; descriptorDigest: string; executionDescriptorDigest: string }> } {
   if (input.expectedCases.length === 0 || input.group.targetIds.length < 1 || input.group.targetIds.length > 3) throw new Error("compiler requires a nonempty assigned group of at most three targets");
   const scenarios = new Map(input.scenarios.map((scenario) => [scenario.scenarioId, scenario]));
-  const registrations = new Map(input.registrations.map((registration) => [registration.operationId, registration]));
   const titleByCaseId = new Map(input.expectedCases.map((item) => [item.caseId, item.upstreamTestId.slice(item.upstreamTestId.lastIndexOf("::") + 2)]));
   const tests = input.expectedCases.map((item) => {
     const scenario = scenarios.get(item.scenarioId);
-    const operationId = stepOperationId(scenario);
-    const registration = operationId ? registrations.get(operationId) : undefined;
-    if (!scenario || !registration || registration.schemaVersion !== "portable-source-operation/v1" || !/^[a-f0-9]{64}$/.test(registration.descriptorDigest)) throw new Error("expected case has no registered source operation descriptor");
+    const resolved = scenario ? resolveE2EPortableRegistration(scenario, input.registrations, input.scenarioRegistrations) : undefined;
+    const registration = resolved?.registration;
+    if (!scenario || !registration || !resolved || registration.schemaVersion !== "portable-source-operation/v1" || !/^[a-f0-9]{64}$/.test(registration.descriptorDigest)) throw new Error("expected case has no uniquely resolved registered source operation descriptor");
     validateRegistration(registration);
     const title = titleByCaseId.get(item.caseId)!;
     const identity = upstreamE2ECaseIdentity(item, title);
     if (identity.upstreamTestId !== item.upstreamTestId) throw new Error("upstream test identity is not the pinned test ID derived from fixed path and digest title");
-    return { item, scenario, registration, title };
+    return { item, scenario, registration, registrationKey: resolved.registrationKey, title };
   });
+  const caseTestById = new Map(tests.map((item) => [item.item.caseId, item]));
   const caseBindings = new Map(input.expectedCases.map((item) => {
-    const registration = registrations.get(stepOperationId(scenarios.get(item.scenarioId)) ?? "");
-    if (!registration) throw new Error("case has no operation binding");
-    return [item.caseId, Object.freeze({ compilerCaseIdentity: sha256(canonicalJson({ caseId: item.caseId, executionDescriptorDigest: item.executionDescriptorDigest, accountContextId: item.accountContextId, accountContextDigest: item.accountContextDigest, candidateResponse: E2E_CANDIDATE_RESPONSE_PROTOCOL, operationDescriptorDigest: registration.descriptorDigest })), candidateResponseScope: E2E_CANDIDATE_RESPONSE_SCOPE, requestProtocol: E2E_CANDIDATE_REQUEST_PROTOCOL, operationId: registration.operationId, accountProfileId: item.accountProfileId, accountContextId: item.accountContextId, accountContextDigest: item.accountContextDigest, requestedTargetId: item.requestedTargetId, packageExportSubpath: registration.packageExportSubpath, moduleSpecifier: registration.moduleSpecifier, callableSelector: registration.callableSelector, descriptorDigest: registration.descriptorDigest, executionDescriptorDigest: item.executionDescriptorDigest })] as const;
+    const resolved = caseTestById.get(item.caseId);
+    if (!resolved) throw new Error("case has no operation binding");
+    const { registration, registrationKey } = resolved;
+    return [item.caseId, Object.freeze({ compilerCaseIdentity: sha256(canonicalJson({ caseId: item.caseId, executionDescriptorDigest: item.executionDescriptorDigest, registrationKey, accountContextId: item.accountContextId, accountContextDigest: item.accountContextDigest, candidateResponse: E2E_CANDIDATE_RESPONSE_PROTOCOL, operationDescriptorDigest: registration.descriptorDigest })), registrationKey, candidateResponseScope: E2E_CANDIDATE_RESPONSE_SCOPE, requestProtocol: E2E_CANDIDATE_REQUEST_PROTOCOL, operationId: registration.operationId, accountProfileId: item.accountProfileId, accountContextId: item.accountContextId, accountContextDigest: item.accountContextDigest, requestedTargetId: item.requestedTargetId, packageExportSubpath: registration.packageExportSubpath, moduleSpecifier: registration.moduleSpecifier, callableSelector: registration.callableSelector, descriptorDigest: registration.descriptorDigest, executionDescriptorDigest: item.executionDescriptorDigest })] as const;
   }));
   const packet = createE2ESelectionPacket(input.plan, input.group.groupId, titleByCaseId, caseBindings);
   const generatedTest = [
     'import { test } from "e2e";',
     'const observation = globalThis.__agentxE2EObservation;',
-    ...tests.map(({ item, scenario, registration, title }) => {
+    ...tests.map(({ item, scenario, registration, registrationKey, title }) => {
       const caseBinding = caseBindings.get(item.caseId)!;
-      const payload = { protocol: E2E_SUPERVISOR_RPC_PROTOCOL, purpose: registration.purpose, inspectionProtocol: registration.purpose === "source-interface" ? E2E_CANDIDATE_INSPECTION_PROTOCOL : null, expectedExportNames: registration.expectedExportNames, caseId: item.caseId, executionDescriptorDigest: item.executionDescriptorDigest, accountContextId: item.accountContextId, accountContextDigest: item.accountContextDigest, candidateResponse: E2E_CANDIDATE_RESPONSE_PROTOCOL, compilerCaseIdentity: caseBinding.compilerCaseIdentity, candidateResponseScope: E2E_CANDIDATE_RESPONSE_SCOPE, requestProtocol: E2E_CANDIDATE_REQUEST_PROTOCOL, bundleDigest: input.bundleDigest, scenarioId: item.scenarioId, requestedTargetId: item.requestedTargetId, effectiveTargetId: item.targetId, accountProfileId: scenario.accountProfileId, operationId: registration.operationId, packageExportSubpath: registration.packageExportSubpath, moduleSpecifier: registration.moduleSpecifier, callableSelector: registration.callableSelector, descriptorSchemaVersion: registration.schemaVersion, descriptorDigest: registration.descriptorDigest, input: scenario.steps[0]?.kind === "invoke-contract" ? scenario.steps[0].input : null };
+      const payload = { protocol: E2E_SUPERVISOR_RPC_PROTOCOL, purpose: registration.purpose, registrationKey, inspectionProtocol: registration.purpose === "source-interface" ? E2E_CANDIDATE_INSPECTION_PROTOCOL : null, expectedExportNames: registration.expectedExportNames, caseId: item.caseId, executionDescriptorDigest: item.executionDescriptorDigest, accountContextId: item.accountContextId, accountContextDigest: item.accountContextDigest, candidateResponse: E2E_CANDIDATE_RESPONSE_PROTOCOL, compilerCaseIdentity: caseBinding.compilerCaseIdentity, candidateResponseScope: E2E_CANDIDATE_RESPONSE_SCOPE, requestProtocol: E2E_CANDIDATE_REQUEST_PROTOCOL, bundleDigest: input.bundleDigest, scenarioId: item.scenarioId, requestedTargetId: item.requestedTargetId, effectiveTargetId: item.targetId, accountProfileId: scenario.accountProfileId, operationId: registration.operationId, packageExportSubpath: registration.packageExportSubpath, moduleSpecifier: registration.moduleSpecifier, callableSelector: registration.callableSelector, descriptorSchemaVersion: registration.schemaVersion, descriptorDigest: registration.descriptorDigest, input: scenario.steps[0]?.kind === "invoke-contract" ? scenario.steps[0].input : null };
       const tests = scenario.assertions.map((assertion, assertionIndex) => ({ assertionIndex, assertionDigest: item.assertionDigests[assertionIndex], assertion }));
       if (tests.some((assertion) => assertion.assertionDigest === undefined) || tests.length !== item.assertionDigests.length) throw new Error("every approved assertion must map to exactly one ordered digest");
       const observationCall = registration.purpose === "source-interface" ? "observation.inspectContract" : "observation.request";

@@ -5,10 +5,11 @@ import {
   type E2EExpectedCase, type E2EMockSpec,
 } from "./e2e.js";
 import { canonicalJson } from "./canonical-json.js";
+import { copyBoundedE2EJsonData } from "./e2e-safe-data.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
 import type { CandidateManifest } from "./task-workflow.js";
 import { createE2EOpenApiFixtureDescriptor } from "./e2e-openapi-fixture.js";
-import { E2EPortableApprovalBindingSchema, e2ePortableOperationDescriptorDigest, e2eSourceInterfaceAssertion, type E2EPortableApprovalBinding } from "./e2e-portable.js";
+import { E2EPortableApprovalBindingSchema, e2EDefaultSyntheticAccountDefinition, e2ePortableOperationDescriptorDigest, e2ePortableRegistrationKey, e2eSourceInterfaceAssertion, resolveE2EPortableRegistration, type E2EPortableApprovalBinding } from "./e2e-portable.js";
 import { E2E_CANDIDATE_ADAPTER_IDENTITY } from "./e2e-portable.js";
 import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "./e2e-case-identity.js";
 import { inspectE2EPortableSource, inspectE2ERepository, type PortableOperation } from "./e2e-catalog.js";
@@ -83,23 +84,31 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
   if (approvalBinding && (approvalBinding.planDigest !== input.planDigest || !input.approvedSemanticApproval
     || canonicalJson(approvalBinding.semanticApproval) !== canonicalJson(input.approvedSemanticApproval))) throw new Error("portable approval binding does not match the independently supplied plan and approval identity");
   const sourceByPath = new Map(input.sourceSnapshot.sources.map((source) => [source.path, source]));
-  const registrationsById = new Map((approvalBinding?.operations ?? []).map((registration) => [registration.operationId, registration]));
+  const associations = approvalBinding?.scenarioRegistrations ?? [];
+  for (const association of associations) {
+    const scenario = scenariosById.get(association.scenarioId);
+    if (!scenario) throw new Error("scenario registration association references an unknown scenario");
+    resolveE2EPortableRegistration(scenario, approvalBinding?.operations ?? [], associations);
+  }
   const sourceCapabilityAvailable = new Map<string, boolean>();
   const accountsByApplicationProfile = new Map<string, E2EPortableApprovalBinding["accountContexts"][number]>();
   for (const account of approvalBinding?.accountContexts ?? []) {
     if (!approvalBinding || account.approval.planDigest !== input.planDigest || account.approval.artifactId !== approvalBinding.semanticApproval.artifactId || account.approval.digest !== approvalBinding.semanticApproval.digest) throw new Error("synthetic account context is missing the current approval lineage");
     if (!inspection.applications.some((app) => app.applicationId === account.applicationId)) throw new Error("synthetic account context references a foreign application");
     const fixtureSource = sourceByPath.get(account.fixture.sourcePath);
-    if (!fixtureSource || fixtureSource.sha256 !== account.fixture.sourceSha256 || !account.sourceRefs.some((ref) => ref.path === fixtureSource.path && ref.sha256 === fixtureSource.sha256)) throw new Error("synthetic account fixture source reference is not in the verified snapshot");
+    if (!fixtureSource || fixtureSource.sha256 !== account.fixture.sourceSha256 || account.sourceRefs.length !== 1 || account.sourceRefs[0]?.path !== fixtureSource.path || account.sourceRefs[0]?.sha256 !== fixtureSource.sha256) throw new Error("synthetic account fixture source references must exactly match its one verified source blob");
+    const definition = copyBoundedE2EJsonData(account.fixture.definition, { maxBytes: 65_536, maxDepth: 32 }) as Record<string, unknown>;
     const defaultAccountTarget = inspection.proposedTargets.find((target) => target.applicationId === account.applicationId && target.accountProfileId === account.profileId);
     const defaultManifestPath = sourceOperations.find((operation) => operation.applicationId === account.applicationId)?.manifestPath;
-    if (!(defaultAccountTarget && defaultManifestPath === account.fixture.sourcePath)) {
+    if (defaultAccountTarget && defaultManifestPath === account.fixture.sourcePath) {
+      const canonicalDefault = e2EDefaultSyntheticAccountDefinition(account.applicationId, account.profileId);
+      if (canonicalJson(definition) !== canonicalJson(canonicalDefault)) throw new Error("default synthetic account definition differs from the canonical minimal profile");
+    } else {
       let fixture: unknown;
-      try { fixture = JSON.parse(Buffer.from(fixtureSource.bytes).toString("utf8")); } catch { throw new Error("synthetic account fixture source must contain bounded JSON data"); }
-      if (canonicalJson(fixture) !== canonicalJson(account.fixture.definition)) throw new Error("synthetic account fixture definition differs from its primary source bytes");
+      try { fixture = copyBoundedE2EJsonData(JSON.parse(Buffer.from(fixtureSource.bytes).toString("utf8")), { maxBytes: 65_536, maxDepth: 32 }); } catch { throw new Error("synthetic account fixture source must contain bounded JSON data"); }
+      if (canonicalJson(fixture) !== canonicalJson(definition)) throw new Error("synthetic account fixture definition differs from its primary source bytes");
     }
-    const definition = account.fixture.definition as Record<string, unknown>;
-    if (definition.scope !== "SYNTHETIC" || definition.profileId !== account.profileId || definition.applicationId !== account.applicationId || Object.keys(definition).some((key) => /people|actor|credential|live|role/i.test(key))) throw new Error("synthetic account fixture attempts unsupported identity or authority semantics");
+    if (definition.profileId !== account.profileId || definition.applicationId !== account.applicationId || Object.keys(definition).some((key) => /people|actor|credential|live|role|permission|answer/i.test(key))) throw new Error("synthetic account fixture attempts unsupported identity or authority semantics");
     accountsByApplicationProfile.set(`${account.applicationId}\0${account.profileId}`, account);
   }
   for (const registration of approvalBinding?.operations ?? []) {
@@ -120,12 +129,12 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
       const inspectedSource = inspectE2EPortableSource(Buffer.from(module.bytes).toString("utf8"), module.path);
       const selector = registration.callableSelector;
       const exported = selector === null ? undefined : inspectedSource.exports.find((item) => item.name === (selector.kind === "default" ? "default" : selector.exportName));
-      sourceCapabilityAvailable.set(registration.operationId, inspectedSource.parseable && exported?.kind === "callable");
+      sourceCapabilityAvailable.set(e2ePortableRegistrationKey(registration), inspectedSource.parseable && exported?.kind === "callable");
     } else {
       const inspectedSource = inspectE2EPortableSource(Buffer.from(module.bytes).toString("utf8"), module.path);
       const actualNames = inspectedSource.exports.map((item) => item.name).sort();
       const expectedNames = [...(registration.expectedExportNames ?? [])].sort();
-      sourceCapabilityAvailable.set(registration.operationId, inspectedSource.parseable && canonicalJson(actualNames) === canonicalJson(expectedNames));
+      sourceCapabilityAvailable.set(e2ePortableRegistrationKey(registration), inspectedSource.parseable && canonicalJson(actualNames) === canonicalJson(expectedNames));
     }
   }
   const sandbox = input.sandboxAvailability;
@@ -151,13 +160,14 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
       criteria.push(criterion);
       const scenarioOperationId = scenario.steps[0]?.kind === "invoke-contract" || scenario.steps[0]?.kind === "inspect-contract" ? scenario.steps[0].operationId : undefined;
       const sourceOperation = scenarioOperationId ? portableById.get(scenarioOperationId) : undefined;
-      const registration = scenarioOperationId ? registrationsById.get(scenarioOperationId) : undefined;
+      const resolvedRegistration = resolveE2EPortableRegistration(scenario, approvalBinding?.operations ?? [], associations);
+      const registration = resolvedRegistration?.registration;
       const accountContext = accountsByApplicationProfile.get(`${requestedTarget.applicationId}\0${scenario.accountProfileId}`);
       let unavailableReason: string | undefined;
       if (!approvalBinding || !input.approvedSemanticApproval) unavailableReason = "approved portable operation and synthetic account registry is unavailable";
       else if (!accountContext) unavailableReason = "scenario account profile has no source- and approval-bound SYNTHETIC account context";
       else if (!registration || (scenario.steps[0]?.kind === "invoke-contract" ? registration.purpose !== "feature-invocation" : scenario.steps[0]?.kind === "inspect-contract" ? registration.purpose !== "source-interface" : true)) unavailableReason = "scenario operation has no approved portable invocation or source-interface registration";
-      else if (sourceCapabilityAvailable.get(registration.operationId) !== true) unavailableReason = scenario.steps[0]?.kind === "inspect-contract" ? "registered module export names do not match source-validated module inventory" : "registered invocation selector is not a source-validated callable capability";
+      else if (sourceCapabilityAvailable.get(resolvedRegistration?.registrationKey ?? "") !== true) unavailableReason = scenario.steps[0]?.kind === "inspect-contract" ? "registered module export names do not match source-validated module inventory" : "registered invocation selector is not a source-validated callable capability";
       else if (!sandboxUsable) unavailableReason = "approved qualified default sandbox is unavailable or model route is not disabled";
       else if (requestedTarget.applicationId !== sourceOperation?.applicationId || !sourceOperation.targetIds.includes(requestedTargetId)) unavailableReason = "no source-derived portable operation is bound to this requested target";
       else if (!validPortableSemantics(scenario, sourceOperation, registration, requestedTarget.kind)) unavailableReason = "requested steps, assertions, evidence scope, target kind, or agent semantics are not in the supported portable contract profile";
@@ -186,7 +196,7 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
       const accountContextId = accountContext!.contextId;
       const accountContextDigest = hex(canonicalJson(contextBody));
       const effectiveTarget = { targetId: effectiveTargetId, applicationId: requestedTarget.applicationId, runtimeProfileId: "portable-contract-v1", accountProfileId: requestedTarget.accountProfileId, kind: "contract" as const, requestedTargetId, adapterProfileId: "portable-contract-v1" };
-      const executionDescriptorDigest = hex(canonicalJson({ schemaVersion: "portable-execution-descriptor/v1", purpose: registration!.purpose, adapter: E2E_CANDIDATE_ADAPTER_IDENTITY,
+      const executionDescriptorDigest = hex(canonicalJson({ schemaVersion: "portable-execution-descriptor/v1", purpose: registration!.purpose, registrationKey: resolvedRegistration!.registrationKey, adapter: E2E_CANDIDATE_ADAPTER_IDENTITY,
         operation: registration, requestedTarget, effectiveTarget, accountContext: { contextId: accountContextId, digest: accountContextDigest, profileId: scenario.accountProfileId },
         semanticApproval: approvalBinding!.semanticApproval, approvalBindingDigest: approvalBinding!.bindingDigest, steps: scenario.steps, assertionDigests,
         timing: { caseTimeoutMs: policy.limits.caseTimeoutMs, runTimeoutMs: policy.limits.runTimeoutMs, effectiveTestTimeoutMs: Math.min(policy.limits.caseTimeoutMs, policy.limits.runTimeoutMs) } }));
