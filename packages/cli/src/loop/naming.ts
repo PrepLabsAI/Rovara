@@ -11,9 +11,14 @@ export function itemBranch(issue: number): string {
   return `rovara/${issue}`;
 }
 
-/** Where a Quick loop's plan lives, in the item's worktree. */
-export function planPath(issue: number): string {
-  return `docs/rovara/${issue}/plan.md`;
+/** Where an item's documents live, in its worktree: docs/rovara/<issue>/<artifact>.md. */
+export function artifactPath(issue: number, artifact: "requirements" | "design" | "plan"): string {
+  return `docs/rovara/${issue}/${artifact}.md`;
+}
+
+/** Where the loop's own evidence goes, beside the documents. */
+export function evidencePath(issue: number, name: string): string {
+  return `docs/rovara/${issue}/evidence/${name}`;
 }
 
 /** Every comment the loop posts starts with this, so the poller never reads its own words as a command or a reply. */

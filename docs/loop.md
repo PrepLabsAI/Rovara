@@ -4,8 +4,8 @@
 **Claude Code**, and drives that work through a loop. It needs no Rovara install and no AWS account: only
 the Rovara CLI, the GitHub CLI (`gh`, signed in), `tmux`, `git` and Claude Code.
 
-> **Status:** **Do** and **Quick** are here. Full (more approval gates), reviews before a human is asked, and
-> per-PR loops follow ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
+> **Status:** **Do**, **Quick** and **Full** are here. Reviews before a human is asked, and per-PR loops, follow
+> ([design, #354](https://github.com/PrepLabsAI/Rovara/issues/354)).
 
 The idea is inspired by [the-loop](https://github.com/MadaraUchiha-314/the-loop) by Rohith Ramakrishnan:
 an agent's work driven through a declared process, from your issue tracker. Rovara loop is Rovara's own
@@ -81,6 +81,33 @@ or `rovara loop quick --issue 42 "…"` from the terminal.
 **Nothing is pushed before the plan is approved and the checks pass.** A push git refuses (someone else pushed
 to the branch) is said on the issue, and a reply tries again.
 
+## The Full loop
+
+```text
+/rovara full Retry the payment call when the server answers 503
+```
+
+Full is Quick with two more documents before the plan, each written from the one before it, and each approved
+before the next is written:
+
+| Document | Sections | Says |
+|---|---|---|
+| `requirements.md` | `## What changes`, `## Not changing`, `## Risks` | what someone will be able to do or see; not how |
+| `design.md` | `## How it works`, `## Risks` | how it works, derived from the approved requirements |
+| `plan.md` | `## Summary`, `## Changes`, `## Testing` | where in the code, and how the change is proved |
+
+Each document has its own gate (`rovara:requirements-review`, `rovara:design-review`, `rovara:plan-review`). A gate is
+answered as in Quick: `/rovara approve`, or a reply with what to change, which is added to that document under
+"Review feedback". An approval **locks** its document. A later claim that changed any approved document is refused,
+naming it. Then code, checks and a pull request, as in Quick. The pull request says who approved each document.
+
+**Declaring a phase away.** For a change too small for a design, start with
+`/rovara full --skip design <instruction>` (or `--skip requirements`, or both: `--skip requirements,design`). The
+start comment says who declared it, and so does the pull request. The plan can't be skipped; that's Quick.
+
+**Evidence.** Before it publishes, the loop commits the checks report to `docs/rovara/<issue>/evidence/checks.md`,
+so the branch carries what proved it.
+
 ## Watching and answering the agent
 
 Claude Code runs interactively, in its **default permission mode**, so it asks before it edits files or
@@ -101,8 +128,8 @@ on the issue and waits for your next reply.
 | `rovara loop init [path]` | writes `.rovara/loop.yaml` |
 | `rovara loop add [path]` · `remove <owner/name>` | starts or stops reading a repository's issues. A repository is read from the moment it's added; older comments are never replayed |
 | `rovara loop start` · `stop` · `status` | the background daemon. Its log is `~/.rovara/loop/daemon.log`; `run` is the same daemon in the foreground |
-| `rovara loop do` · `quick` `--issue <n> <instruction>` | posts `/rovara do <instruction>` (or `quick`) on the issue, as you |
-| `rovara loop check <issue> [--repo owner/name]` | where an issue's loop stands, without running anything |
+| `rovara loop do` · `quick` · `full` `--issue <n> <instruction>` | posts `/rovara do <instruction>` (or `quick`, `full`) on the issue, as you |
+| `rovara loop check <issue> [--repo owner/name]` | where an issue's loop stands, without running anything, and each document's state: not written, missing sections, written but not approved, locked, changed since approval, or declared away |
 
 ## What's kept where
 

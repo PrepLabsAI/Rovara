@@ -11,13 +11,26 @@ export interface PublishInput {
   plan: string | undefined;
   checks: string;
   startedBy: string;
-  approvedBy: string | undefined;
+  /** Who approved each document; the description names them. */
+  approvals: Partial<Record<"requirements" | "design" | "plan", { by: string }>> | undefined;
+  /** Phases declared away when the loop started. */
+  skipped: readonly string[] | undefined;
   /** The pull request's base: the repository's default branch, as GitHub names it. */
   defaultBranch: string;
   pullRequest: { number: number; url: string } | undefined;
 }
 
 export interface Published { pullRequest: { number: number; url: string }; created: boolean }
+
+/** " Approved: the requirements by @a, the plan by @b. Declared away: design." */
+function approvalLine(input: PublishInput): string {
+  const approved = (["requirements", "design", "plan"] as const).flatMap((artifact) => {
+    const approval = input.approvals?.[artifact];
+    return approval === undefined ? [] : [`the ${artifact} by @${approval.by}`];
+  });
+  const skipped = input.skipped ?? [];
+  return `${approved.length === 0 ? "" : ` Approved: ${approved.join(", ")}.`}${skipped.length === 0 ? "" : ` Declared away: ${skipped.join(", ")}.`}`;
+}
 
 export async function publish(exec: Exec, input: PublishInput): Promise<Published> {
   await run(exec, "git", ["-C", input.worktree, "push", "--quiet", "--set-upstream", "origin", input.branch]);
@@ -33,7 +46,7 @@ export async function publish(exec: Exec, input: PublishInput): Promise<Publishe
   const body = [
     `Closes #${input.issue}.`,
     "",
-    `Opened by rovara loop's Quick loop for @${input.startedBy}${input.approvedBy === undefined ? "" : `; the plan was approved by @${input.approvedBy}`}.`,
+    `Opened by rovara loop for @${input.startedBy}.${approvalLine(input)}`,
     "",
     "## Plan",
     "",

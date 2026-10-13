@@ -39,7 +39,7 @@ export function createLoopMcpServer(options: LoopMcpOptions): McpServer {
     const turn = step.terminal ? "The loop has ended."
       : step.actor === "agent" ? "It is your turn: work, then call loop_complete with a summary."
       : step.actor === "code" ? `The loop is running this step itself (${step.action ?? "its own work"}): wait.`
-      : step.gate ? "It is waiting for a person to approve your plan, or ask for changes: wait." : "It is the person's turn: wait for their reply.";
+      : step.gate ? `It is waiting for a person to approve the ${step.artifact ?? "document"}, or ask for changes: wait.` : "It is the person's turn: wait for their reply.";
     return text([`Loop ${state.loop} on ${state.repo}#${state.issue}, step ${state.step}. ${turn}`, "", `Instruction from @${state.startedBy}:`, state.instruction].join("\n"));
   });
 

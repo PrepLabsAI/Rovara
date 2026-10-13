@@ -3,6 +3,7 @@
 import { appendFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { z } from "zod";
+import { ArtifactSchema } from "./definitions.js";
 
 export const RepoSlugSchema = z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/, "owner/name");
 
@@ -22,9 +23,10 @@ export const WorkItemStateSchema = z.object({
   worktree: z.object({ path: z.string(), branch: z.string() }).strict().optional(),
   /** What the agent said it did, at its last accepted claim. */
   summary: z.string().optional(),
-  /** Quick (#356): the plan's digest when it was approved, which locks it, and who approved it. */
-  planDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
-  approvedBy: z.string().optional(),
+  /** Quick and Full (#356, #357): each approved artifact's digest when it was approved, which locks it, and who approved it. */
+  approvals: z.partialRecord(ArtifactSchema, z.object({ digest: z.string().regex(/^[a-f0-9]{64}$/), by: z.string(), at: z.string() }).strict()).optional(),
+  /** Full (#357): the phases declared away when the loop started, and by whom (the starter). */
+  skipped: z.array(z.string()).max(10).optional(),
   /** Quick (#356): the last checks report, for the pull request's description. */
   checks: z.string().max(20_000).optional(),
   /** Quick (#356): the pull request the loop opened. */

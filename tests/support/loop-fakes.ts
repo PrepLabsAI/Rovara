@@ -31,6 +31,8 @@ export class LoopWorld {
   readonly titles = new Map<number, string>();
   /** The default branch GitHub names; the clone's origin/HEAD is never asked. */
   defaultBranch = "main";
+  /** What the loop committed itself (its evidence), as "<path>: <message>". */
+  readonly loopCommits: string[] = [];
   /** When set, the next push is refused (someone else pushed to the branch). */
   pushRefused = false;
 
@@ -103,6 +105,10 @@ export class LoopWorld {
   private async git(args: string[]): Promise<ExecResult> {
     const sub = args[2];
     if (sub === "fetch") return ok();
+    // The loop's own evidence commit: something is always staged in this fake.
+    if (sub === "add") return ok();
+    if (sub === "diff") return fail("", 1);
+    if (sub === "commit") { this.loopCommits.push(`${args[args.length - 1] ?? ""}: ${args[args.indexOf("-m") + 1] ?? ""}`); return ok(); }
     if (sub === "push") {
       if (this.pushRefused) { this.pushRefused = false; return fail("! [rejected] (fetch first)"); }
       this.pushes.push(args[args.length - 1] ?? "");
