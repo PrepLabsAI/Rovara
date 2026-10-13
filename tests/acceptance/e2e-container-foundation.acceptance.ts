@@ -1,10 +1,11 @@
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { execFileSync, spawnSync } from "node:child_process";
 import childProcess from "node:child_process";
 import * as fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import fsPromises from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { CANDIDATE_RESPONSE_SCOPE, CONTAINED_SOCKET, reconcileOwnedContainers, runContainedCandidate, validateCandidatePacket } from "../../packages/verifier/src/contained-candidate.js";
@@ -315,11 +316,148 @@ describe("actual pinned Docker candidate-process foundation", () => {
     expect(actual[0]?.Config.Labels["agentx.owner"]).toBe("contained-candidate-v1");
     expect(actual[0]?.Config.Labels["agentx.nonce"]).toBe(result.receipt.owner.nonce);
     expect(actual[0]?.Config.Labels["agentx.source"]).toBe(result.receipt.sourceDigest);
-    const reconciled = await reconcileOwnedContainers();
+    const recordPath = join(homedir(), ".local", "state", "agentx", "contained-candidate-v1", `${result.receipt.recordRef}.record.json`);
+    const recordBefore = JSON.parse(fs.readFileSync(recordPath, "utf8")) as { workspace: string; workspaceParent?: string };
+    expect(fs.existsSync(recordBefore.workspace)).toBe(true);
+    const originalCwd = process.cwd();
+    const otherCwd = await mkdtemp(join(tmpdir(), "agentx-foundation-recovery-cwd-"));
+    let reconciled: Awaited<ReturnType<typeof reconcileOwnedContainers>>;
+    try { process.chdir(otherCwd); reconciled = await reconcileOwnedContainers(); }
+    finally { process.chdir(originalCwd); await rm(otherCwd, { recursive: true, force: true }); }
     expect(reconciled).toContainEqual(expect.objectContaining({ recordRef: result.receipt.recordRef, containerId: id, cleanup: "confirmed" }));
+    expect(fs.existsSync(recordBefore.workspace)).toBe(false);
     const after = dockerInspect(id, root);
     expect(after.status).toBe(1);
-    writeEvidence("rm-cleanup-reconcile", { receipt: result.receipt, exactOwnerReadbackBeforeReconcile: before, reconciliation: reconciled, independentReadbackAfterReconcile: after });
+    writeEvidence("rm-cleanup-reconcile", { receipt: result.receipt, exactOwnerReadbackBeforeReconcile: before, durableWorkspaceAnchor: recordBefore, reconciliationCwd: otherCwd, reconciliation: reconciled, workspaceAbsentAfterReconcile: !fs.existsSync(recordBefore.workspace), independentReadbackAfterReconcile: after });
+  });
+
+  it("durably enrolls a planned workspace before preparation and recovers exact cleanup failure across cwd", async () => {
+    const originalMkdir = fsPromises.mkdir;
+    const originalRm = fsPromises.rm;
+    let workspace: string | undefined;
+    let mkdirFaults = 0;
+    let rmFaults = 0;
+    fsPromises.mkdir = (async (path: unknown, ...args: unknown[]) => {
+      if (typeof path === "string" && path.endsWith(`${process.platform === "win32" ? "\\" : "/"}candidate`) && path.includes(".contained-candidate-")) {
+        workspace = path.slice(0, -"candidate".length - 1);
+        mkdirFaults += 1;
+        throw Object.assign(new Error("synthetic preparation EIO"), { code: "EIO" });
+      }
+      return (originalMkdir as (...values: unknown[]) => Promise<string | undefined>)(path, ...args);
+    }) as typeof fsPromises.mkdir;
+    fsPromises.rm = (async (path: unknown, ...args: unknown[]) => {
+      if (typeof path === "string" && path === workspace) {
+        rmFaults += 1;
+        throw Object.assign(new Error("synthetic exact workspace cleanup EIO"), { code: "EIO" });
+      }
+      return (originalRm as (...values: unknown[]) => Promise<void>)(path, ...args);
+    });
+    syncBuiltinESMExports();
+    let result: Awaited<ReturnType<typeof runContainedCandidate>>;
+    try { result = await runContainedCandidate(packet(candidateProcess("({ prepared: true })")), { requestId: "prepare-cleanup-fault", input: null }); }
+    finally {
+      fsPromises.mkdir = originalMkdir;
+      fsPromises.rm = originalRm;
+      syncBuiltinESMExports();
+    }
+    expect(mkdirFaults).toBe(1);
+    expect(rmFaults).toBe(1);
+    expect(result.observation).toBeNull();
+    expect(result.receipt.cleanup).toBe("pending");
+    expect(result.receipt.containerId).toBeNull();
+    if (!workspace) throw new Error("preparation fault did not identify its exact owned workspace");
+    expect(fs.existsSync(workspace)).toBe(true);
+    const recordPath = join(homedir(), ".local", "state", "agentx", "contained-candidate-v1", `${result.receipt.recordRef}.record.json`);
+    expect(fs.existsSync(recordPath)).toBe(true);
+    const recordBefore = JSON.parse(fs.readFileSync(recordPath, "utf8")) as { schemaVersion: number; recordRef: string; plannedName: string; workspace: string; workspaceParent: string };
+    expect(recordBefore.schemaVersion).toBe(2);
+    expect(recordBefore.recordRef).toBe(result.receipt.recordRef);
+    expect(recordBefore.workspace).toBe(workspace);
+    const originalCwd = process.cwd();
+    const otherCwd = await mkdtemp(join(tmpdir(), "agentx-foundation-prepare-recovery-"));
+    let reconciled: Awaited<ReturnType<typeof reconcileOwnedContainers>>;
+    try { process.chdir(otherCwd); reconciled = await reconcileOwnedContainers(); }
+    finally { process.chdir(originalCwd); await rm(otherCwd, { recursive: true, force: true }); }
+    expect(reconciled).toContainEqual(expect.objectContaining({ recordRef: result.receipt.recordRef, plannedName: result.receipt.plannedName, cleanup: "confirmed" }));
+    expect(fs.existsSync(workspace)).toBe(false);
+    expect(fs.existsSync(recordPath)).toBe(false);
+    const root = await controlRoot();
+    const plannedAbsent = spawnSync(DOCKER, ["container", "inspect", result.receipt.plannedName], { env: controlEnv(root), encoding: "utf8", timeout: 10_000 });
+    expect(plannedAbsent.status).toBe(1);
+    expect(plannedAbsent.stdout.trim()).toBe("[]");
+    expect(plannedAbsent.stderr).toMatch(/No such container:/);
+    writeEvidence("preparation-cleanup-recovery", { receipt: result.receipt, exactOwnerRecordBeforeRecovery: recordBefore, exactWorkspaceBeforeRecovery: workspace, preparationFault: "EIO", exactWorkspaceCleanupFault: "EIO", reconciliationCwd: otherCwd, reconciliation: reconciled, workspaceAbsentAfterSourceReconciliation: !fs.existsSync(workspace), durableRecordAbsentAfterSourceReconciliation: !fs.existsSync(recordPath), independentPlannedNameAbsence: { status: plannedAbsent.status, stdout: plannedAbsent.stdout, stderr: plannedAbsent.stderr } });
+
+    let cleanWorkspace: string | undefined;
+    const originalMkdirForCleanupControl = fsPromises.mkdir;
+    fsPromises.mkdir = (async (path: unknown, ...args: unknown[]) => {
+      if (typeof path === "string" && path.endsWith(`${process.platform === "win32" ? "\\" : "/"}candidate`) && path.includes(".contained-candidate-")) {
+        cleanWorkspace = path.slice(0, -"candidate".length - 1);
+        throw Object.assign(new Error("synthetic preparation EIO with available cleanup"), { code: "EIO" });
+      }
+      return (originalMkdirForCleanupControl as (...values: unknown[]) => Promise<string | undefined>)(path, ...args);
+    }) as typeof fsPromises.mkdir;
+    syncBuiltinESMExports();
+    let cleanResult: Awaited<ReturnType<typeof runContainedCandidate>>;
+    try { cleanResult = await runContainedCandidate(packet(candidateProcess("({ prepared: true })")), { requestId: "prepare-fault-cleanup-available", input: null }); }
+    finally { fsPromises.mkdir = originalMkdirForCleanupControl; syncBuiltinESMExports(); }
+    expect(cleanResult.observation).toBeNull();
+    expect(cleanResult.receipt.cleanup).toBe("confirmed");
+    expect(cleanWorkspace).toBeDefined();
+    expect(fs.existsSync(cleanWorkspace!)).toBe(false);
+    const cleanRecordPath = join(homedir(), ".local", "state", "agentx", "contained-candidate-v1", `${cleanResult.receipt.recordRef}.record.json`);
+    const cleanReceiptPath = join(homedir(), ".local", "state", "agentx", "contained-candidate-v1", `${cleanResult.receipt.recordRef}.receipt.json`);
+    expect(fs.existsSync(cleanRecordPath)).toBe(false);
+    expect(fs.existsSync(cleanReceiptPath)).toBe(true);
+    writeEvidence("preparation-cleanup-confirmed", { receipt: cleanResult.receipt, exactWorkspace: cleanWorkspace, workspaceAbsent: !fs.existsSync(cleanWorkspace!), durableRecordAbsent: !fs.existsSync(cleanRecordPath), cleanupReceiptPresent: fs.existsSync(cleanReceiptPath) });
+  });
+
+  it("surfaces corrupt owner rows and refuses an anchored workspace symlink without deleting either", async () => {
+    const stateRoot = join(homedir(), ".local", "state", "agentx", "contained-candidate-v1");
+    const corruptRef = randomBytes(16).toString("hex");
+    const symlinkRef = randomBytes(16).toString("hex");
+    const corruptPath = join(stateRoot, `${corruptRef}.record.json`);
+    const symlinkPath = join(stateRoot, `${symlinkRef}.record.json`);
+    const workspace = join(process.cwd(), `.contained-candidate-${symlinkRef}`);
+    const target = await mkdtemp(join(tmpdir(), "agentx-foundation-foreign-workspace-"));
+    await writeFile(corruptPath, "{}\n", { flag: "wx", mode: 0o600 });
+    await writeFile(symlinkPath, JSON.stringify({
+      schemaVersion: 2,
+      recordRef: symlinkRef,
+      plannedName: `agentx-contained-${randomBytes(10).toString("hex")}`,
+      nonce: randomBytes(24).toString("hex"),
+      sourceDigest: hash(new TextEncoder().encode("synthetic owner row")),
+      endpoint: CONTAINED_SOCKET,
+      image: "node@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9",
+      containerId: null,
+      cidfile: join(stateRoot, `${symlinkRef}.cid`),
+      workspace,
+      workspaceParent: process.cwd(),
+      requestId: "symlink-owner-control",
+      sourceBytes: 0,
+      phase: "cleanup-pending",
+      cleanup: "pending",
+    }), { flag: "wx", mode: 0o600 });
+    fs.symlinkSync(target, workspace);
+    try {
+      const reconciliation = await reconcileOwnedContainers();
+      const corruptReceipt = reconciliation.find((item) => item.recordRef === corruptRef);
+      const symlinkReceipt = reconciliation.find((item) => item.recordRef === symlinkRef);
+      expect(corruptReceipt?.cleanup).toBe("failed");
+      expect(corruptReceipt?.diagnostic).toMatch(/invalid/i);
+      expect(symlinkReceipt?.cleanup).toBe("failed");
+      expect(symlinkReceipt?.diagnostic).toMatch(/workspace changed/i);
+      expect(fs.existsSync(corruptPath)).toBe(true);
+      expect(fs.existsSync(symlinkPath)).toBe(true);
+      expect(fs.lstatSync(workspace).isSymbolicLink()).toBe(true);
+      expect(fs.existsSync(target)).toBe(true);
+      writeEvidence("invalid-owner-controls", { corruptRecord: { recordRef: corruptRef, retained: fs.existsSync(corruptPath), receipt: corruptReceipt }, symlinkOwnerRecord: { recordRef: symlinkRef, retained: fs.existsSync(symlinkPath), workspaceSymlinkRetained: fs.lstatSync(workspace).isSymbolicLink(), targetRetained: fs.existsSync(target), receipt: symlinkReceipt } });
+    } finally {
+      fs.unlinkSync(corruptPath);
+      fs.unlinkSync(symlinkPath);
+      fs.unlinkSync(workspace);
+      await rm(target, { recursive: true, force: true });
+    }
   });
 
   it("rejects source tampering before start and removes the exact created container", async () => {

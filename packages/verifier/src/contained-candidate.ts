@@ -1,8 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, realpath, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, realpath, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import { spawn } from "node:child_process";
 import { types as utilTypes } from "node:util";
@@ -23,6 +23,17 @@ const STOP_GRACE_SECONDS = 10;
 const DOCKER = "/opt/homebrew/bin/docker";
 const CLIENT_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
 const STATE_ROOT = join(homedir(), ".local", "state", "agentx", "contained-candidate-v1");
+const BYTE_VIEW_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
+const UINT8_ARRAY_PROTOTYPE = Uint8Array.prototype;
+const BUFFER_PROTOTYPE = Object.getPrototypeOf(Buffer.alloc(0)) as object;
+// These captured native accessors must receive the candidate view as their receiver.
+/* eslint-disable @typescript-eslint/unbound-method */
+const intrinsicByteLength = Object.getOwnPropertyDescriptor(BYTE_VIEW_PROTOTYPE, "byteLength")!.get as (this: void) => number;
+const intrinsicByteOffset = Object.getOwnPropertyDescriptor(BYTE_VIEW_PROTOTYPE, "byteOffset")!.get as (this: void) => number;
+const intrinsicBuffer = Object.getOwnPropertyDescriptor(BYTE_VIEW_PROTOTYPE, "buffer")!.get as (this: void) => ArrayBufferLike;
+/* eslint-enable @typescript-eslint/unbound-method */
+const intrinsicUint8Array = Uint8Array;
+const intrinsicUint8ArraySet = Object.getOwnPropertyDescriptor(BYTE_VIEW_PROTOTYPE, "set")!.value as (this: object, source: ArrayLike<number>) => void;
 
 type ExportFile = Readonly<{ path: string; bytes: Uint8Array; sha256: string }>;
 export type CandidateExportPacket = Readonly<{ schemaVersion: 1; entry: string; exportName: string; files: readonly ExportFile[]; sourceDigest: string }>;
@@ -71,7 +82,7 @@ type DockerInspect = { Id: string; Name?: string; State?: ContainerState; Config
 type ProcessResult = { stdout: Buffer; stderr: Buffer; code: number | null; aborted: boolean; timedOut: boolean; overflow: boolean; stdoutBytes: number; stderrBytes: number; aggregateBytes: number; inputWritten: boolean; error?: string };
 type InspectResult = { kind: "present"; info: DockerInspect } | { kind: "absent" } | { kind: "unknown"; diagnostic: string };
 type CleanupState = "confirmed" | "pending" | "failed";
-type DurableRecord = { schemaVersion: 1; recordRef: string; plannedName: string; nonce: string; sourceDigest: string; endpoint: string; image: string; containerId: string | null; cidfile: string; workspace: string | null; requestId: string; sourceBytes: number; phase: string; cleanup: CleanupState; entry?: string; exportName?: string; diagnostic?: string };
+type DurableRecord = { schemaVersion: 1 | 2; recordRef: string; plannedName: string; nonce: string; sourceDigest: string; endpoint: string; image: string; containerId: string | null; cidfile: string; workspace: string | null; workspaceParent?: string | null; requestId: string; sourceBytes: number; phase: string; cleanup: CleanupState; entry?: string; exportName?: string; diagnostic?: string };
 
 function fail(message: string): never { throw new Error(message); }
 function sha(bytes: Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
@@ -162,13 +173,25 @@ function assertNoFoldedPathCollisions(paths: readonly string[]): void {
   }
 }
 function copyBytes(value: unknown): Uint8Array {
-  if (utilTypes.isProxy(value) || !(value instanceof Uint8Array)) fail("candidate bytes must be an unproxied Uint8Array");
+  if (utilTypes.isProxy(value) || !utilTypes.isUint8Array(value)) fail("candidate bytes must be an unproxied Uint8Array");
+  let length: number;
+  let offset: number;
+  let backing: ArrayBufferLike;
+  try {
+    length = Reflect.apply(intrinsicByteLength, value, []) as number;
+    offset = Reflect.apply(intrinsicByteOffset, value, []) as number;
+    backing = Reflect.apply(intrinsicBuffer, value, []) as ArrayBufferLike;
+  } catch { return fail("candidate bytes must be a live native Uint8Array"); }
+  if (length > MAX_SOURCE_BYTES) fail("candidate source size exceeds limit");
+  if (utilTypes.isSharedArrayBuffer(backing)) fail("shared candidate bytes are unsupported");
   const prototype: unknown = Object.getPrototypeOf(value);
-  if (prototype !== Uint8Array.prototype && prototype !== Buffer.prototype) fail("candidate bytes must not have a custom prototype");
-  if (typeof SharedArrayBuffer !== "undefined" && value.buffer instanceof SharedArrayBuffer) fail("shared candidate bytes are unsupported");
+  if (prototype !== UINT8_ARRAY_PROTOTYPE && prototype !== BUFFER_PROTOTYPE) fail("candidate bytes must not have a custom prototype");
   const keys = Reflect.ownKeys(value);
-  if (keys.some((key) => typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.byteLength)) fail("candidate bytes contain custom fields");
-  return Uint8Array.from(value);
+  if (keys.some((key) => typeof key !== "string" || !/^(0|[1-9]\d*)$/.test(key) || Number(key) >= length)) fail("candidate bytes contain custom fields");
+  const copy = new intrinsicUint8Array(length);
+  const view = new intrinsicUint8Array(backing, offset, length);
+  Reflect.apply(intrinsicUint8ArraySet, copy, [view]);
+  return copy;
 }
 function digestExport(files: readonly ExportFile[]): string { return sha(new TextEncoder().encode(files.map((file) => `${file.path}\0${file.sha256}\n`).sort().join(""))); }
 function ownerLabels(nonce: string, sourceDigest: string): Readonly<{ nonce: string; labels: Readonly<Record<string, string>> }> {
@@ -363,16 +386,22 @@ async function atomicWrite(path: string, bytes: Uint8Array): Promise<void> {
 async function writeRecord(record: DurableRecord): Promise<void> { await atomicWrite(join(STATE_ROOT, `${record.recordRef}.record.json`), new TextEncoder().encode(JSON.stringify(record))); }
 function recordExact(value: unknown): value is DurableRecord {
   if (!plain(value)) return false;
-  const keys = ["schemaVersion", "recordRef", "plannedName", "nonce", "sourceDigest", "endpoint", "image", "containerId", "cidfile", "workspace", "requestId", "sourceBytes", "phase", "cleanup", "entry", "exportName"];
+  const keys = ["schemaVersion", "recordRef", "plannedName", "nonce", "sourceDigest", "endpoint", "image", "containerId", "cidfile", "workspace", "workspaceParent", "requestId", "sourceBytes", "phase", "cleanup", "entry", "exportName"];
   if (Object.keys(value).some((key) => !keys.includes(key) && key !== "diagnostic")) return false;
-  return value.schemaVersion === 1 && typeof value.recordRef === "string" && /^[a-f0-9]{32}$/.test(value.recordRef)
+  const legacyWorkspaceValid = value.schemaVersion === 1 && (value.workspace === null || typeof value.workspace === "string" && isAbsolute(value.workspace) && dirname(value.workspace) === resolve(dirname(value.workspace)) && /^\.contained-candidate-[A-Za-z0-9]+$/.test(basename(value.workspace)));
+  const anchoredWorkspaceValid = value.schemaVersion === 2 && (value.workspace === null
+    ? value.workspaceParent === null
+    : typeof value.workspace === "string" && typeof value.workspaceParent === "string" && isAbsolute(value.workspaceParent)
+      && resolve(value.workspaceParent) === value.workspaceParent && value.workspace === join(value.workspaceParent, basename(value.workspace))
+      && basename(value.workspace) === `.contained-candidate-${String(value.recordRef)}`);
+  return (value.schemaVersion === 1 || value.schemaVersion === 2) && typeof value.recordRef === "string" && /^[a-f0-9]{32}$/.test(value.recordRef)
     && typeof value.plannedName === "string" && /^agentx-contained-[a-f0-9]{20}$/.test(value.plannedName)
     && typeof value.nonce === "string" && /^[a-f0-9]{48}$/.test(value.nonce)
     && typeof value.sourceDigest === "string" && /^[a-f0-9]{64}$/.test(value.sourceDigest)
     && value.endpoint === CONTAINED_SOCKET && value.image === CONTAINED_IMAGE
     && (value.containerId === null || typeof value.containerId === "string" && /^[a-f0-9]{64}$/.test(value.containerId))
     && typeof value.cidfile === "string" && value.cidfile === join(STATE_ROOT, `${value.recordRef}.cid`)
-    && (value.workspace === null || typeof value.workspace === "string" && dirname(resolve(value.workspace)) === resolve(process.cwd()) && /^\.contained-candidate-[A-Za-z0-9]+$/.test(basename(value.workspace)))
+    && (value.schemaVersion === 1 ? !Object.hasOwn(value, "workspaceParent") && legacyWorkspaceValid : anchoredWorkspaceValid)
     && typeof value.requestId === "string" && validRequestId(value.requestId)
     && (value.entry === undefined || typeof value.entry === "string" && validRelativePath(value.entry) && value.entry.endsWith(".mjs"))
     && (value.exportName === undefined || validExportName(value.exportName))
@@ -446,7 +475,20 @@ async function persistReceipt(record: DurableRecord, receipt: ContainerReceipt):
 }
 async function cleanupWorkspace(record: DurableRecord, persist = true): Promise<void> {
   if (!record.workspace) return;
-  const workspaceInfo = await lstat(record.workspace);
+  const parent = record.schemaVersion === 2 ? record.workspaceParent : dirname(record.workspace);
+  if (!parent || dirname(record.workspace) !== parent || !isAbsolute(record.workspace)
+    || (record.schemaVersion === 2 ? basename(record.workspace) !== `.contained-candidate-${record.recordRef}` : !/^\.contained-candidate-[A-Za-z0-9]+$/.test(basename(record.workspace)))) fail("owned candidate workspace path is outside its durable anchor");
+  if (await realpath(parent) !== parent) fail("owned candidate workspace anchor changed before cleanup");
+  const workspaceInfo = await lstat(record.workspace).catch((error: unknown) => {
+    if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  });
+  if (!workspaceInfo) {
+    record.workspace = null;
+    if (record.schemaVersion === 2) record.workspaceParent = null;
+    if (persist) await writeRecord(record);
+    return;
+  }
   if (!workspaceInfo.isDirectory() || workspaceInfo.isSymbolicLink() || await realpath(record.workspace) !== resolve(record.workspace)) fail("owned candidate workspace changed before cleanup");
   const sourceRoot = join(record.workspace, "candidate");
   const sourceInfo = await lstat(sourceRoot).catch((error: unknown) => {
@@ -466,6 +508,7 @@ async function cleanupWorkspace(record: DurableRecord, persist = true): Promise<
   });
   await rm(record.workspace, { recursive: true, force: true });
   record.workspace = null;
+  if (record.schemaVersion === 2) record.workspaceParent = null;
   if (persist) await writeRecord(record);
 }
 async function cleanupOwned(record: DurableRecord, env: NodeJS.ProcessEnv, cwd: string): Promise<CleanupState> {
@@ -533,7 +576,10 @@ export async function reconcileOwnedContainers(): Promise<readonly Reconciliatio
     throw error;
   });
   let names: string[];
-  try { names = await readdir(STATE_ROOT); } catch { return Object.freeze([]); }
+  try { names = await readdir(STATE_ROOT); } catch (error) {
+    if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return Object.freeze([]);
+    throw error;
+  }
   const results: ReconciliationReceipt[] = [];
   const env = clientEnv(STATE_ROOT);
   await ensurePrivateDirectory(env.HOME!, true);
@@ -541,18 +587,28 @@ export async function reconcileOwnedContainers(): Promise<readonly Reconciliatio
   for (const name of names.filter((item) => /^[a-f0-9]{32}\.record\.json$/.test(item)).sort()) {
     const path = join(STATE_ROOT, name);
     const record = await readRecord(path);
-    if (!record || path !== join(STATE_ROOT, `${record.recordRef}.record.json`)) continue;
+    if (!record || path !== join(STATE_ROOT, `${record.recordRef}.record.json`)) {
+      results.push(Object.freeze({ recordRef: name.slice(0, 32), plannedName: "unverified", containerId: null, cleanup: "failed", diagnostic: "durable ownership record is invalid and retained" }));
+      continue;
+    }
     const cleanup = await cleanupOwned(record, env, STATE_ROOT).catch(() => "pending" as const);
     record.cleanup = cleanup;
     record.phase = cleanup === "confirmed" ? "cleanup-confirmed" : cleanup === "failed" ? "cleanup-failed" : "cleanup-pending";
     if (cleanup === "confirmed") delete record.diagnostic;
     else record.diagnostic = "owned resource state is not positively reconciled";
     if (cleanup === "confirmed") {
-      await cleanupWorkspace(record);
-      const receipt = receiptFor(record, { exitCode: null, timedOut: false, aborted: false, stdoutBytes: 0, stderrBytes: 0, aggregateBytes: 0, overflow: false, cleanup });
-      await persistReceipt(record, receipt);
+      try {
+        await cleanupWorkspace(record);
+        const receipt = receiptFor(record, { exitCode: null, timedOut: false, aborted: false, stdoutBytes: 0, stderrBytes: 0, aggregateBytes: 0, overflow: false, cleanup });
+        await persistReceipt(record, receipt);
+      } catch (error) {
+        record.cleanup = "failed";
+        record.phase = "cleanup-failed";
+        record.diagnostic = error instanceof Error ? safeDiagnostic(error.message) : "owned workspace cleanup was refused";
+        await writeRecord(record);
+      }
     } else await writeRecord(record);
-    results.push(Object.freeze({ recordRef: record.recordRef, plannedName: record.plannedName, containerId: record.containerId, cleanup, ...(record.diagnostic ? { diagnostic: record.diagnostic } : {}) }));
+    results.push(Object.freeze({ recordRef: record.recordRef, plannedName: record.plannedName, containerId: record.containerId, cleanup: record.cleanup, ...(record.diagnostic ? { diagnostic: record.diagnostic } : {}) }));
   }
   return Object.freeze(results);
 }
@@ -570,11 +626,13 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
   const name = `agentx-contained-${randomBytes(10).toString("hex")}`;
   const recordRef = randomBytes(16).toString("hex");
   const cidfile = join(STATE_ROOT, `${recordRef}.cid`);
+  const workspaceParent = resolve(process.cwd());
+  const plannedWorkspace = join(workspaceParent, `.contained-candidate-${recordRef}`);
   const sourceBytes = packet.files.reduce((total, file) => total + file.bytes.byteLength, 0);
   let workspace: string | null = null;
   let env: NodeJS.ProcessEnv = clientEnv(STATE_ROOT);
   let workCwd = STATE_ROOT;
-  const record: DurableRecord = { schemaVersion: 1, recordRef, plannedName: name, nonce, sourceDigest: packet.sourceDigest, endpoint: CONTAINED_SOCKET, image: CONTAINED_IMAGE, containerId: null, cidfile, workspace: null, requestId: request.requestId, sourceBytes, phase: "planned", cleanup: "confirmed", entry: packet.entry, exportName: packet.exportName };
+  const record: DurableRecord = { schemaVersion: 2, recordRef, plannedName: name, nonce, sourceDigest: packet.sourceDigest, endpoint: CONTAINED_SOCKET, image: CONTAINED_IMAGE, containerId: null, cidfile, workspace: plannedWorkspace, workspaceParent, requestId: request.requestId, sourceBytes, phase: "planned", cleanup: "pending", entry: packet.entry, exportName: packet.exportName };
   let exitCode: number | null = null;
   let timedOut = false;
   let aborted = false;
@@ -598,9 +656,29 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
     await ensurePrivateDirectory(STATE_ROOT, true);
     const mkStatus = noteWindow();
     if (mkStatus) throw new Error(mkStatus === "aborted" ? "execution aborted before preparation" : "execution deadline elapsed before preparation");
-    workspace = await mkdtemp(join(process.cwd(), ".contained-candidate-"));
+    if (await lstat(workspaceParent).then((info) => !info.isDirectory() || info.isSymbolicLink() || false, (error: unknown) => {
+      if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return true;
+      throw error;
+    })) fail("owned candidate workspace anchor is unavailable");
+    if (await realpath(workspaceParent) !== workspaceParent) fail("owned candidate workspace anchor is not canonical");
+    const plannedExists = await lstat(plannedWorkspace).then(() => true, (error: unknown) => {
+      if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    });
+    if (plannedExists) fail("random planned candidate workspace is already occupied");
+    await writeRecord(record);
+    durablePlanned = true;
+    try { await mkdir(plannedWorkspace, { mode: 0o700 }); }
+    catch (error) {
+      if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "EEXIST") {
+        record.workspace = null;
+        record.workspaceParent = null;
+        await writeRecord(record);
+      }
+      throw error;
+    }
+    workspace = plannedWorkspace;
     await chmod(workspace, 0o700);
-    record.workspace = workspace;
     env = clientEnv(workspace);
     workCwd = join(workspace, "work");
     await Promise.all([mkdir(join(workspace, "home"), { mode: 0o700 }), mkdir(join(workspace, "docker-config"), { mode: 0o700 }), mkdir(join(workspace, "candidate"), { mode: 0o700 }), mkdir(workCwd, { mode: 0o700 })]);
@@ -636,8 +714,6 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
     const planned = await inspectDocker(name, env, workCwd, deadline, signal);
     if (noteWindow()) throw new Error(aborted ? "execution aborted before allocation" : "execution deadline elapsed before allocation");
     if (planned.kind !== "absent") fail(planned.kind === "present" ? "random planned container name is already occupied" : planned.diagnostic);
-    await writeRecord(record);
-    durablePlanned = true;
     record.phase = "creating";
     record.cleanup = "pending";
     await writeRecord(record);

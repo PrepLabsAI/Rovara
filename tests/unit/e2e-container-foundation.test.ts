@@ -41,6 +41,22 @@ describe("contained candidate foundation", () => {
     expect(() => validateCandidatePacket({ ...packet(), files: [packet().files[0], prefixCollision] })).toThrow(/collision/i);
   });
 
+  it("rejects byte-view accessors before running them and preserves valid Buffer slices", () => {
+    for (const key of ["buffer", "byteLength", "byteOffset", "constructor", Symbol.iterator]) {
+      const bytes = new TextEncoder().encode("export default () => 1;");
+      let getterRuns = 0;
+      Object.defineProperty(bytes, key, { configurable: true, get: () => { getterRuns += 1; return bytes.buffer; } });
+      expect(() => validateCandidatePacket({ schemaVersion: 1, entry: "candidate.mjs", files: [{ path: "candidate.mjs", bytes, sha256: hash("export default () => 1;") }] })).toThrow(/custom|accessor|byte/i);
+      expect(getterRuns).toBe(0);
+    }
+
+    const backing = Buffer.from("xxexport default () => 1;yy");
+    const slice = backing.subarray(2, -2);
+    const admitted = validateCandidatePacket({ schemaVersion: 1, entry: "candidate.mjs", files: [{ path: "candidate.mjs", bytes: slice, sha256: hash("export default () => 1;") }] });
+    backing.fill(0);
+    expect(new TextDecoder().decode(admitted.files[0]!.bytes)).toBe("export default () => 1;");
+  });
+
   it("bounds arbitrary JSON input by encoded bytes and nesting depth", () => {
     expect(validateRequest({ requestId: "req-1", input: { name: "synthetic" } }).requestId).toBe("req-1");
     expect(() => validateRequest({ requestId: "", input: null })).toThrow(/request/i);
