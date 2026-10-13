@@ -23,7 +23,8 @@ export type LoopEvent =
   /** The agent says its step is done. `failures`: the step's exit checks that failed. `artifact`: the step's artifact's text. */
   | { kind: "claim"; claimId: string; summary: string; failures: string[]; artifact?: string; at: string }
   /** A step the loop ran itself finished. `detail`: what to say about it. */
-  | { kind: "action-result"; action: LoopAction; outcome: "passed" | "failed" | "blocked" | "published"; detail: string; pullRequest?: WorkItemState["pullRequest"]; at: string }
+  | { kind: "action-result"; action: LoopAction; outcome: "passed" | "failed" | "blocked" | "published"; detail: string; pullRequest?: WorkItemState["pullRequest"]; at: string;
+      /** #394: blocked because the reviews could not be run or read, not because they found something. */ unrun?: boolean }
   | { kind: "closed"; at: string }
   /** #358: the item's per-PR loops: every pull request approved (`approved`), or one taken back for more work (`reply`). */
   | { kind: "pulls"; outcome: "approved" | "reply"; detail: string; at: string }
@@ -51,6 +52,17 @@ export type Effect =
 export interface Decision { state: WorkItemState | undefined; effects: Effect[] }
 
 const labelOf = (loop: LoopDefinition, step: string) => stepOf(loop, step).label;
+/** The most requests kept for the reviewers, and the most of each. */
+const REQUESTS_MAX = 30;
+
+/**
+ * #393: a collaborator's reply while the change is being made (not while a document is written), kept for the reviewers:
+ * a change they asked for is part of the change, not a deviation from the plan.
+ */
+function withRequest(loop: LoopDefinition, state: WorkItemState, event: { author: string; text: string; at: string }): WorkItemState {
+  if (stepOf(loop, state.step).artifact !== undefined || state.step === loop.brief) return state;
+  return { ...state, requests: [...(state.requests ?? []), { author: event.author, text: event.text.slice(0, 2_000), at: event.at }].slice(-REQUESTS_MAX) };
+}
 /** Whether a loop has an agent at all (#359: the Review loop has none). */
 const hasAgent = (loop: LoopDefinition) => loop.steps.some((step) => step.actor === "agent");
 
@@ -105,7 +117,8 @@ function startComment(loop: LoopDefinition, state: WorkItemState, author: string
   }
   if (!hasAgent(loop)) {
     const waiting = state.step === loop.brief;
-    return `Started the **${loop.name}** loop for @${author}. It reads and comments, and changes no code.${waiting ? `\n\n${BRIEF_TEMPLATE}` : " The first round is running."} Close the issue or comment \`/rovara stop\` to end it.`;
+    // #395: the template ends in a code fence, so what follows it starts on a line of its own.
+    return `Started the **${loop.name}** loop for @${author}. It reads and comments, and changes no code.${waiting ? `\n\n${BRIEF_TEMPLATE}\n\n` : " The first round is running. "}Close the issue or comment \`/rovara stop\` to end it.`;
   }
   const gated = loop.steps.some((step) => step.gate);
   const skippedLine = skipped.length === 0 ? "" : ` @${author} declared these phases away: ${skipped.map((phase) => `**${phase}**`).join(", ")}.`;
@@ -180,7 +193,7 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
       if (!running) return { state, effects: [] };
       const step = stepOf(loop, state.step);
       // While the agent works, a reply or a change request is steering: it reaches the agent and the step stays.
-      if (step.actor === "agent") return { state, effects: [{ kind: "assign", text: replyAssignment(event.author, event.text) }] };
+      if (step.actor === "agent") return { state: withRequest(loop, state, event), effects: [{ kind: "assign", text: replyAssignment(event.author, event.text) }] };
       // At a gate, anything but an approval is a change request: it goes into the artifact, and the artifact goes back.
       if (step.gate && step.artifact !== undefined) {
         const artifact = step.artifact;
@@ -205,7 +218,7 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
         const said = brief ? `Thanks @${event.author}: reviewing with this brief.` : `Reviewing again, with what @${event.author} asked to look at.`;
         return { state: { ...moved.state, ...(brief ? { instruction: event.text } : { focus: event.text }) }, effects: [{ kind: "comment", body: said }, ...moved.effects] };
       }
-      return { state: moved.state, effects: [...moved.effects, { kind: "assign", text: replyAssignment(event.author, event.text) }] };
+      return { state: withRequest(loop, moved.state, event), effects: [...moved.effects, { kind: "assign", text: replyAssignment(event.author, event.text) }] };
     }
     case "pushed": {
       if (!running) return { state, effects: [] };
@@ -222,7 +235,9 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
         if (waved === undefined) return { state, effects: [] };
         const publishes = stepOf(loop, waved.state.step).action === "publish";
         const said = publishes ? `@${event.author} accepted the review findings, so the change is published as it is.` : `@${event.author} approved pull request #${state.pullRequest?.number ?? "?"}.`;
-        return { state: { ...waved.state, reviewRounds: 0 }, effects: [{ kind: "comment", body: said }, ...waved.effects] };
+        // #394: the pull request's description says a person published past the reviews.
+        const accepted = publishes ? { reviewsAccepted: { by: event.author, at: event.at, unrun: state.reviewsUnrun === true } } : {};
+        return { state: { ...waved.state, reviewRounds: 0, ...accepted }, effects: [{ kind: "comment", body: said }, ...waved.effects] };
       }
       if (!running || step?.gate !== true || step.artifact === undefined) return { state, effects: running ? [{ kind: "comment", body: "Nothing is waiting for approval right now." }] : [] };
       const artifact = step.artifact;
@@ -286,12 +301,17 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
       }
       if (event.action === "checks") return { state: next, effects: [{ kind: "comment", body: `The checks passed.\n\n${event.detail}` }, ...moved.effects] };
       if (event.action === "reviews") {
-        if (event.outcome === "passed") return { state: { ...next, reviewRounds: 0 }, effects: [{ kind: "comment", body: `The reviews passed.\n\n${event.detail}` }, ...moved.effects] };
+        if (event.outcome === "passed") {
+          // Passed reviews clear any earlier waiver.
+          return { state: { ...next, reviewRounds: 0, reviewsAccepted: undefined, reviewsUnrun: undefined }, effects: [{ kind: "comment", body: `The reviews passed.\n\n${event.detail}` }, ...moved.effects] };
+        }
         const rounds = (state.reviewRounds ?? 0) + 1;
         if (event.outcome === "failed") {
           return { state: { ...next, reviewRounds: rounds }, effects: [...moved.effects, { kind: "comment", body: `The reviews found problems that block the change, so it went back to the agent (round ${rounds}).\n\n${event.detail}` }, { kind: "assign", text: reviewsFailedAssignment(event.detail, state.issue, docsDir(state)) }] };
         }
-        return { state: { ...next, reviewRounds: 0 }, effects: [...moved.effects, { kind: "comment", body: `The reviews still block the change, so a person decides.\n\n${event.detail}\n\n---\nPublish it as it is with \`/rovara approve${state.target === undefined ? "" : ` ${state.target}`}\`, or reply with what the agent should do${state.target === undefined ? "" : ` (start the reply with \`${state.target}:\`)`}.` }] };
+        // #394: reviews that couldn't be run or read haven't blocked anything; say what happened.
+        const why = event.unrun === true ? "The reviews could not be run, so a person decides." : "The reviews still block the change, so a person decides.";
+        return { state: { ...next, reviewRounds: 0, reviewsUnrun: event.unrun === true }, effects: [...moved.effects, { kind: "comment", body: `${why}\n\n${event.detail}\n\n---\nPublish it as it is with \`/rovara approve${state.target === undefined ? "" : ` ${state.target}`}\`, or reply with what the agent should do${state.target === undefined ? "" : ` (start the reply with \`${state.target}:\`)`}.` }] };
       }
       // #359: a review round's report; what it was asked to look at besides the brief is used up.
       if (event.action === "review") return { state: { ...next, focus: undefined }, effects: [...moved.effects, { kind: "comment", body: event.detail }] };

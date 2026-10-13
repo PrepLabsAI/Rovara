@@ -504,7 +504,7 @@ export class LoopDaemon {
    * `maxRounds` rounds in a row still blocked; then a person decides. A review that could not be run or read never
    * passes: a person decides that too.
    */
-  private async reviewItem(item: WorkItemState, config: LoopRepoConfig, done: (outcome: ActionResult["outcome"], detail: string) => void): Promise<void> {
+  private async reviewItem(item: WorkItemState, config: LoopRepoConfig, done: (outcome: ActionResult["outcome"], detail: string, extra?: Partial<ActionResult>) => void): Promise<void> {
     if (item.worktree === undefined) throw new Error("the item has no worktree to review");
     if (!config.reviews.enabled) {
       done("passed", "Reviews are turned off in `.rovara/loop.yaml`.");
@@ -515,11 +515,13 @@ export class LoopDaemon {
       // A follow-up (#359) is judged on what it adds to the pull request it builds on.
       base: item.upstream?.ref ?? `origin/${await this.deps.github.defaultBranch(item.target ?? item.repo)}`,
       plan: await this.planOf(item), config: config.reviews, run: this.deps.reviewerRun ?? agentReviewerRun,
+      // #393: what collaborators asked for since, and the loop's own evidence left out (it is written after the reviews).
+      requests: item.requests ?? [], exclude: ["checks.md", "reviews.md"].map((name) => evidencePath(item.issue, name, docsDir(item))),
     });
     const report = reviewsReport(results);
     const current = await this.deps.store.item(item.repo, item.issue, item.target);
     if (current !== undefined) await this.deps.store.saveItem({ ...current, reviews: report.slice(0, 20_000) });
-    if (results.some((result) => result.status === "UNKNOWN")) done("blocked", report);
+    if (results.some((result) => result.status === "UNKNOWN")) done("blocked", report, { unrun: true });
     else if (results.every((result) => result.status === "PASS")) done("passed", report);
     else done((item.reviewRounds ?? 0) + 1 >= config.reviews.maxRounds ? "blocked" : "failed", report);
   }
@@ -547,9 +549,10 @@ export class LoopDaemon {
       const where = everyRepo.find((entry) => entry.repo === pull.repo);
       if (where === undefined) { sections.push(`**${name}**: not reviewed; ${pull.repo} is not added to rovara loop on this computer.`); continue; }
       const worktree = await this.reviewWorktree(item, where, pull);
+      const before = earlier.filter((finding) => finding.pull === name);
       const review = await runBriefReview({
         exec: this.deps.exec, worktree, pull: name, base: pull.base, brief: item.instruction, focus: item.focus,
-        earlier: earlier.filter((finding) => finding.pull === name), config: config.reviews, run: this.deps.reviewerRun ?? agentReviewerRun,
+        earlier: before, context: await this.reviewContext(item, pull, config), config: config.reviews, run: this.deps.reviewerRun ?? agentReviewerRun,
       });
       reviewed[name] = pull.head;
       const heading = `**${name}** at \`${pull.head.slice(0, 7)}\``;
@@ -557,7 +560,15 @@ export class LoopDaemon {
       anyReviewed = true;
       const numbered = review.findings.map((finding): Finding => ({ n: ++next, pull: name, ...finding }));
       findings.push(...numbered);
-      sections.push([heading, "", review.summary || "(no summary)", "", ...(numbered.length === 0 ? ["No findings."] : numbered.map(findingLine))].join("\n"));
+      // #395: an earlier finding that's still there keeps its number; only new ones are numbered on.
+      const still = before.filter((finding) => review.still.includes(finding.n));
+      const fixed = before.filter((finding) => !review.still.includes(finding.n) && finding.filed === undefined);
+      sections.push([
+        heading, "", review.summary || "(no summary)", "",
+        ...(numbered.length === 0 ? [still.length === 0 ? "No findings." : "No new findings."] : numbered.map(findingLine)),
+        ...(still.length === 0 ? [] : ["", `Still there from earlier rounds: ${still.map((finding) => finding.n).join(", ")}.`]),
+        ...(before.length === 0 || fixed.length === 0 ? [] : [`Not seen any more: ${fixed.map((finding) => finding.n).join(", ")}.`]),
+      ].join("\n"));
     }
     const rounds = (item.rounds ?? 0) + 1;
     const current = await this.deps.store.item(item.repo, item.issue);
@@ -565,6 +576,30 @@ export class LoopDaemon {
     const report = `### Review, round ${rounds}\n\n${sections.join("\n\n")}`;
     const footer = "---\nNew commits on the pull request start the next round, and so does a reply with more to look at. `/rovara file <n>` files a finding as an issue; `/rovara stop` ends the review.";
     done(anyReviewed ? "passed" : "failed", `${report.length > REPORT_MAX ? `${report.slice(0, REPORT_MAX)}\n\n…(cut)` : report}\n\n${footer}`);
+  }
+
+  /**
+   * #393: what a Review loop's reviewer is told besides the code: the pull request's title and description, the issue it
+   * reviews from (when that isn't the pull request), and collaborators' comments on them. Cut to a size.
+   */
+  private async reviewContext(item: WorkItemState, pull: PullRequestRef, config: LoopRepoConfig): Promise<string> {
+    const cut = (text: string, max: number) => (text.length > max ? `${text.slice(0, max)}…` : text);
+    const isCollaborator = (login: string) => config.collaborators.some((collaborator) => collaborator.toLowerCase() === login.toLowerCase());
+    const parts = [`Pull request ${pull.repo}#${pull.number}: ${pull.title}\n${cut(pull.body, 4_000)}`];
+    const self = pull.repo === item.repo && pull.number === item.issue;
+    if (!self) {
+      const issue = await this.deps.github.issueText(item.repo, item.issue).catch(() => undefined);
+      if (issue !== undefined) parts.push(`Issue ${item.repo}#${item.issue}: ${issue.title}\n${cut(issue.body, 4_000)}`);
+    }
+    const said: string[] = [];
+    for (const [repo, number] of self ? [[item.repo, item.issue] as const] : [[item.repo, item.issue] as const, [pull.repo, pull.number] as const]) {
+      for (const comment of await this.deps.github.issueComments(repo, number).catch(() => [])) {
+        if (comment.body.trimStart().startsWith(LOOP_COMMENT_MARKER) || !isCollaborator(comment.author) || comment.body.trimStart().startsWith("/rovara")) continue;
+        said.push(`- @${comment.author} on ${repo}#${number}: ${cut(comment.body.replace(/\s+/gu, " "), 800)}`);
+      }
+    }
+    if (said.length > 0) parts.push(`Collaborators said:\n${said.slice(-30).join("\n")}`);
+    return cut(parts.join("\n\n"), 16_000);
   }
 
   /** #359: a pull request's head, checked out detached in the review's own worktree, with its base branch fetched to diff against. */
@@ -588,7 +623,7 @@ export class LoopDaemon {
       repo, issueRepo: item.repo, issue: item.issue, worktree: item.worktree.path, branch: item.worktree.branch,
       closes: upstream !== undefined ? `Builds on ${repo === item.repo ? "" : item.repo}#${item.issue}: a follow-up into its branch \`${upstream.branch}\`, for its author to take or leave.` : elsewhere(item) ? `Part of ${item.repo}#${item.issue}.` : `Closes #${item.issue}.`,
       plan: await this.planOf(item), checks: item.checks ?? "The checks passed.", reviews: item.reviews, ...(contribution ? { planHeading: "Contribution" } : {}),
-      startedBy: item.startedBy, approvals: item.approvals, skipped: item.skipped, pullRequest: item.pullRequest,
+      startedBy: item.startedBy, approvals: item.approvals, skipped: item.skipped, pullRequest: item.pullRequest, reviewsAccepted: item.reviewsAccepted,
       defaultBranch: upstream?.branch ?? await this.deps.github.defaultBranch(repo),
       ...(upstream !== undefined && upstream.repo !== item.repo ? { head: `${item.repo.split("/")[0] ?? ""}:${item.worktree.branch}` } : {}),
     });

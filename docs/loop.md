@@ -91,7 +91,7 @@ or `rovara loop quick --issue 42 "…"` from the terminal.
 | **Reviews** | A code review and a security review of the change (see [Reviews](#reviews)). A blocking finding goes back to the agent | `rovara:reviewing` |
 | **Review blocked** | After `maxRounds` rounds that still block, or a review that couldn't be run or read, a person decides: `/rovara approve` publishes as it is, a reply goes back to the agent | `rovara:review-blocked` |
 | **Publish** | The loop itself, never the agent, pushes `rovara/<issue>` and opens a pull request that closes the issue, with the plan, the checks and the reviews in its description | `rovara:publishing` |
-| **Pull request open** | A reply on the issue, or on the pull request (see [Feedback on the pull request](#feedback-on-the-pull-request)), goes back to the agent; the loop runs the checks and reviews again and pushes to the same pull request. Merging closes the issue, which ends the loop | `rovara:pr-open` |
+| **Pull request open** | A reply on the issue, or on the pull request (see [Feedback on the pull request](#feedback-on-the-pull-request)), goes back to the agent; the loop runs the checks and reviews again, pushes to the same pull request, and rewrites its description to match: the checks, the reviews, and whether a person published past them. Merging closes the issue, which ends the loop | `rovara:pr-open` |
 
 **Nothing is pushed before the plan is approved, the checks pass and the reviews pass (or a person accepts them).** A push git refuses (someone else pushed
 to the branch) is said on the issue, and a reply tries again.
@@ -134,8 +134,10 @@ Quick and Full review a change three times before it's published:
 2. **A code review and a security review**, after the checks pass, each run headless and read-only in the agent's
    worktree: Claude Code (`claude -p`) in plan mode, with only file reading and `git diff`, `git log` and `git show`
    allowed; or, with `reviews.harness: codex`, Codex (`codex exec`) in its read-only sandbox. Each sees the approved
-   plan and the change from the default branch, and answers with findings in Rovara's own reviewer format, the same
-   as Rovara's hosted reviews. Set `reviews.harness` to the other agent, or `reviews.model` to another model, so the
+   plan, what collaborators asked for since it was approved (replies and pull request feedback: a change one of them
+   asked for isn't a deviation from the plan), and the change from the default branch, without the loop's own
+   evidence files, which it writes after the reviews. Each answers with findings in Rovara's own reviewer format, the
+   same as Rovara's hosted reviews. Set `reviews.harness` to the other agent, or `reviews.model` to another model, so the
    critic isn't the agent marking its own work.
 3. **The blocking rule.** A finding blocks when the change introduced it, and, for the code review, it isn't
    advisory (a remark about something the plan asks for, or about test coverage). A security finding is never
@@ -203,9 +205,11 @@ The Review loop reviews, and **changes no code**: it has no agent session, no br
 - **The brief.** It reviews against a collaborator's brief: the questions to answer, the angles to look at, the
   validations to check. `/rovara review` with nothing after it posts a template (`rovara:review-brief`) and waits;
   the next reply from a collaborator is the brief.
-- **Rounds.** Each round is a headless, read-only reviewer, on `reviews.harness` and `reviews.model`. It answers the
-  brief, and posts numbered findings (`rovara:reviewed`), numbered on across rounds. New commits on a pull request it
-  reviews, or a reply with more to look at, start the next round, which is told the earlier findings.
+- **Rounds.** Each round is a headless, read-only reviewer, on `reviews.harness` and `reviews.model`. It reads the
+  pull request's title and description, the issue's, and collaborators' comments as well as the code, answers the
+  brief, and posts numbered findings (`rovara:reviewed`). New commits on a pull request it reviews, or a reply with more
+  to look at, start the next round. A finding still there keeps its number ("Still there from earlier rounds: 1, 3");
+  only new ones are numbered on.
 - **Filing.** Nothing is filed by itself: `/rovara file 2` (or `/rovara file 2,4`) files those findings as issues,
   in the repository of the pull request each is about, once each.
 - **Ending.** `/rovara stop`, or closing the issue or pull request.
