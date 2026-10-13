@@ -307,7 +307,7 @@ describe("authenticated PR feedback review web journey", () => {
 describe("broker-backed feedback review data", () => {
   /** `firstFinding` changes the first finding (and its reference): for example, to leave it to the owner as a question. */
   async function preparedReview(prCount = 1, firstFinding: Record<string, unknown> = {}, checkPolicy?: WorkflowCheckPolicyInput,
-    secondFinding: Record<string, unknown> = {}, taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>) {
+    secondFinding: Record<string, unknown> = {}, taskPersonProof?: (request: TaskPersonProofRequest) => Promise<TaskPersonProofResponse>, workflowDependenciesEnabled = false) {
     const now = "2026-10-05T12:00:00.000Z";
     const repositories = prCount === 1 ? [{ repositoryId: "demo", number: 42 }] : [
       { repositoryId: "demo", number: 42 }, { repositoryId: "ui", number: 43 },
@@ -328,9 +328,10 @@ describe("broker-backed feedback review data", () => {
     });
     const harness = await createDeveloperTaskBroker({
       brokerExtra: { githubPullRequests: { getPullRequestFeedback: githubRead } },
-      ...(taskPersonProof === undefined ? {} : { developerExtra: {
-        taskPeopleConfiguration: { peopleChangesEnabled: true }, taskPersonProof,
-      } }),
+      ...(workflowDependenciesEnabled || taskPersonProof !== undefined ? { developerExtra: {
+        ...(workflowDependenciesEnabled ? { workflowDependenciesEnabled: true } : {}),
+        ...(taskPersonProof === undefined ? {} : { taskPeopleConfiguration: { peopleChangesEnabled: true }, taskPersonProof }),
+      } } : {}),
     });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Handle retries", client: "test", workflow: true, workflowPath: "QUICK" });
     const taskId = String((started.body.task as { taskId: string }).taskId);
@@ -591,7 +592,7 @@ describe("broker-backed feedback review data", () => {
   });
 
   it("carries an existing approved whole-plan graph into PR-feedback coding from the current candidate tree", async () => {
-    const fixture = await preparedReview();
+    const fixture = await preparedReview(1, {}, undefined, {}, undefined, true);
     const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
     Object.assign(fixture.deps, { workflowDependenciesEnabled: true });
     const graph = { schemaVersion: 1 as const, taskId: fixture.taskId, version: 1, items: [
@@ -604,20 +605,46 @@ describe("broker-backed feedback review data", () => {
     fixture.harness.s3.objects.set(artifactKey, planContent);
     const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
     const planArtifact = { id: randomUUID(), type: "plan" as const, version: 1, sha256: artifactDigest, producer: "test", objectKey: artifactKey, format: "structured" as const, createdAt: new Date().toISOString() };
-    const approval = { artifactDigest, graphDigest, workflowRevision: 1, actorId: task.ownerKey, runId: randomUUID() };
-    const decision = { requestId: randomUUID(), workflowRevision: 1, decision: "APPROVE" as const, actorId: task.ownerKey, actorRole: "TASK_OWNER" as const,
-      reason: "Approved the exact ordered work plan", artifactDigest, workBreakdownDigest: graphDigest, at: new Date().toISOString() };
-    const workflow = { ...fixture.workflow, artifacts: [...fixture.workflow.artifacts, planArtifact], decisions: [...fixture.workflow.decisions, decision], workflowDependenciesApproval: approval };
-    fixture.harness.db.set({ ...task, workflow });
+    // Seed an owner-waiting plan, then use the broker's actual approval path so this
+    // fixture has the operation, private binding, approval, and pointer production writes together.
+    const planReview = { ...fixture.workflow, revision: 1, stage: "PLAN_REVIEW" as const, state: "WAITING" as const,
+      reviewPhase: undefined, artifacts: [...fixture.workflow.artifacts, planArtifact], workflowDependenciesApproval: undefined,
+      workflowDependenciesOperationId: undefined, workflowDependenciesProgress: undefined };
+    fixture.harness.db.set({ ...task, workflow: planReview });
+    const approved = await fixture.harness.dev(MAYA, "POST", `/v1/dev/tasks/${fixture.taskId}/workflow/decision`, {
+      requestId: randomUUID(), expectedRevision: planReview.revision, decision: "APPROVE", reason: "Approved the exact ordered work plan",
+      artifactDigest, workBreakdownDigest: graphDigest,
+    });
+    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
+    const approvedTask = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    const approval = approvedTask.workflow!.workflowDependenciesApproval!;
+    const approvedOperationId = approvedTask.workflow!.workflowDependenciesOperationId;
+    expect(approvedOperationId).toBeDefined();
+    const approvedOperation = fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION" && item.id === approvedOperationId)[0];
+    expect(approvedOperation).toMatchObject({ kind: "task", workflowMode: "IMPLEMENT", workspaceId: task.workspaceId, conversationId: task.conversationId });
+    await fixture.harness.finish(task.workspaceId, String(approvedOperationId), "FAILED", { error: "The approved graph run stopped before implementation." });
+    const stoppedTask = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
+    expect(fixture.harness.db.find(item => item.entityType === "OPERATION" && item.id === approvedOperationId)[0]).toMatchObject({ status: "FAILED" });
+    expect(stoppedTask.workflow?.workflowDependenciesApproval).toEqual(approval);
+    expect(stoppedTask.workflow?.workflowDependenciesOperationId).toBe(approvedOperationId);
+    const workflow = { ...fixture.workflow, artifacts: [...fixture.workflow.artifacts, planArtifact], decisions: stoppedTask.workflow!.decisions,
+      workflowDependenciesApproval: approval, workflowDependenciesOperationId: approvedOperationId };
+    fixture.harness.db.set({ ...stoppedTask, workflow });
     await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
       requestId: randomUUID(), expectedRevision: workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
       bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
     });
     const updated = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as unknown as DeveloperTaskRecord;
-    const operation = fixture.harness.db.find(item => item.pk === `WORKSPACE#${updated.workspaceId}` && item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT")[0];
+    const currentOperationId = updated.workflow?.workflowDependenciesOperationId;
+    expect(currentOperationId).toBeDefined();
+    expect(currentOperationId).not.toBe(approvedOperationId);
+    const operation = fixture.harness.db.find(item => item.pk === `WORKSPACE#${updated.workspaceId}` && item.entityType === "OPERATION" && item.id === currentOperationId)[0];
     const outbox = fixture.harness.db.find(item => item.entityType === "OUTBOX" && item.operationId === operation?.id)[0];
+    expect(updated.workflow?.workflowDependenciesOperationId).toBe(operation?.id);
+    expect(operation).toMatchObject({ kind: "task", workflowMode: "IMPLEMENT", workspaceId: task.workspaceId, conversationId: task.conversationId });
+    expect(outbox).toMatchObject({ operationId: currentOperationId });
     expect((outbox?.invocation as { payload?: { workflowDependencies?: unknown } } | undefined)?.payload?.workflowDependencies)
-      .toMatchObject({ approval: { graphDigest }, resumeTreeSha: fixture.workflow.candidate?.repositories[0]?.treeSha, sequenceStart: 0, resumeProgress: [] });
+      .toMatchObject({ graph, approval, resumeTreeSha: fixture.workflow.candidate?.repositories[0]?.treeSha, sequenceStart: 0, resumeProgress: [] });
   });
 
   it("approving a fix approves its check changes: the coding step and its checks run the updated set, and the review page shows them (0.2.12)", async () => {
