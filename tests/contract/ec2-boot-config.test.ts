@@ -13,6 +13,7 @@ import {
 import { SECRET_ARN_MAX_LENGTH } from "../../packages/contracts/src/model-providers.js";
 
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
+const workerLauncher = /cat >\/usr\/local\/libexec\/agentx-worker-start <<'LAUNCHER'\n([\s\S]*?)\nLAUNCHER/.exec(bootScript)?.[1] ?? "";
 
 const config: Ec2WorkerBootConfig = {
   workspaceId: randomUUID(),
@@ -52,7 +53,8 @@ describe("EC2 worker user data", () => {
   it("prepends every boot value to the script as a quoted export", () => {
     const userData = ec2WorkerBootScript(config, bootScript);
     expect(userData.startsWith("#!/bin/bash\n")).toBe(true);
-    expect(userData.match(/^#!/gm)).toHaveLength(1);
+    expect(userData.match(/^#!/gm)).toHaveLength(2);
+    expect(userData).toContain("cat >/usr/local/libexec/agentx-worker-start <<'LAUNCHER'\n#!/bin/bash");
     expect(userData).toContain(`export AGENTX_WORKSPACE_ID='${config.workspaceId}'`);
     expect(userData).toContain("export AGENTX_SESSION_GENERATION='2'");
     expect(userData).toContain("export AGENTX_EXPECT_NEW_VOLUME='false'");
@@ -123,9 +125,11 @@ describe("EC2 worker user data", () => {
     expect(bootScript).toContain(`printf '{"data-root": "%s"}\\n' "$DOCKER_DATA_ROOT" >/etc/docker/daemon.json`);
     // The daemon starts only after the workspace is mounted, so its data root is on the volume.
     expect(bootScript.indexOf("mount_workspace \"$device\"")).toBeLessThan(bootScript.indexOf("  ensure_docker\n"));
-    expect(bootScript).toContain("runtime_volume=\"--volume $RUNTIME_ROOT:$RUNTIME_ROOT\"");
-    expect(bootScript).toContain("runtime_mounts=\"$RUNTIME_ROOT\"");
-    expect(bootScript).toContain("--volume $MOUNT_PATH:$MOUNT_PATH $runtime_volume --volume $DOCKER_SOCKET:$DOCKER_SOCKET --group-add $docker_gid");
+    expect(workerLauncher).toContain('args=(run --rm --name "$WORKER_CONTAINER" --network host --env-file "$WORKER_ENV_FILE" --volume "$MOUNT_PATH:$MOUNT_PATH")');
+    expect(workerLauncher).toContain('args+=(--volume "$RUNTIME_ROOT:$RUNTIME_ROOT" --env CONTAINED_FOUNDATION_EVIDENCE_DIR="$RUNTIME_ROOT/evidence" --env TMPDIR="$RUNTIME_ROOT/tmp")');
+    expect(workerLauncher).toContain("args+=(--env TMPDIR=/tmp)");
+    expect(bootScript).toContain("ExecStart=/usr/local/libexec/agentx-worker-start");
+    expect(bootScript).toContain("RequiresMountsFor=$MOUNT_PATH");
   });
 
   it("prepares fixed private EBS runtime paths and retries the pinned contained image before starting the worker", () => {
@@ -137,8 +141,9 @@ describe("EC2 worker user data", () => {
     expect(bootScript).toContain('readonly CONTAINED_STATE_ROOT=$RUNTIME_ROOT/state');
     expect(bootScript).toContain('install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$RUNTIME_SOURCE/$path"');
     expect(bootScript).toContain('verifier unavailable; setup smoke withheld');
-    expect(bootScript).toContain("printf 'CONTAINED_FOUNDATION_EVIDENCE_DIR=%s\\nTMPDIR=%s\\n'");
     expect(bootScript).toContain("printf 'TMPDIR=/tmp\\n'");
+    expect(workerLauncher).toContain('args+=(--volume "$RUNTIME_ROOT:$RUNTIME_ROOT" --env CONTAINED_FOUNDATION_EVIDENCE_DIR="$RUNTIME_ROOT/evidence" --env TMPDIR="$RUNTIME_ROOT/tmp")');
+    expect(workerLauncher).toContain("args+=(--env TMPDIR=/tmp)");
     expect(bootScript).toContain('docker pull "$CONTAINED_IMAGE"');
     expect(bootScript).toContain('optional verifier image unavailable; worker continues');
     expect(bootScript).toContain('pull_contained_image || true');

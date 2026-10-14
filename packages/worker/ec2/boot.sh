@@ -74,12 +74,6 @@ retry() {
   done
 }
 
-# Serves the failure on the worker's port: /ping answers 503 with {"status":"BootFailed","reason"}.
-# It runs as a transient unit, outside cloud-init's, so it outlives this script; the provisioner
-# terminates the instance once it reads the reason. The reason is read from FAILURE_FILE, since
-# systemd would expand any $ in an argument. The unit is Type=notify and the server says READY once
-# it listens, so systemd-run fails (and the console says so) when it cannot. Best effort: without
-# it, the probe's timeout still fails the session.
 report_boot_failure() {
   systemd-run --unit=agentx-boot-failure --collect --property=Type=notify python3 -c '
 import http.server, json, os, socket, sys
@@ -156,8 +150,6 @@ sysfs_disks() {
   done
 }
 
-# A Nitro instance exposes an EBS volume as an NVMe disk whose serial is the volume ID without its
-# dash. lsblk, sysfs or by-id may show it first (#223).
 volume_device() {
   local serial=${AGENTX_VOLUME_ID//-/} device
   for device in $({ lsblk -dno NAME,SERIAL; sysfs_disks; } 2>/dev/null | awk -v s="$serial" '$2 == s { print "/dev/" $1 }') \
@@ -166,8 +158,6 @@ volume_device() {
   done
 }
 
-# Rescans the PCI bus at 20, 50 and 80s in case the kernel missed the hot-add. waited is at least
-# the sleeps, as the tests' sleep is instant.
 wait_for_device() {
   local start=$SECONDS waited=0 tries=0 rescans=0 device line
   until device=$(volume_device) && [[ -n "$device" ]]; do
@@ -189,9 +179,6 @@ wait_for_device() {
   printf '%s\n' "$device"
 }
 
-# Formats only a volume that is blank and that this generation created. A blank volume that should
-# already hold the workspace means data was lost or the wrong volume is attached: formatting it would
-# hide that, so the boot fails instead.
 prepare_filesystem() {
   local device=$1 signatures type
   signatures=$(blkid --probe --output export "$device" || true)
@@ -208,8 +195,6 @@ prepare_filesystem() {
   fi
 }
 
-# Mounts through fstab, so the worker unit's RequiresMountsFor keeps the container from ever starting
-# on the root volume if the instance reboots without its workspace.
 mount_workspace() {
   local device=$1 uuid
   uuid=$(blkid --probe --output value --match-tag UUID "$device")
@@ -309,10 +294,6 @@ EOF
   printf 'TMPDIR=/tmp\n' >>"$WORKER_ENV_FILE"
 }
 
-# Rebuild the optional same-path bind each time systemd starts the worker. The backing store lives
-# on the workspace EBS volume, so RequiresMountsFor below orders this check after the durable mount.
-# Any invalid or unavailable runtime path only disables verifier-specific container mounts; the
-# ordinary worker still starts with its normal /tmp.
 write_worker_launcher() {
   local docker=$1 instance_id=$2
   install -d -m 0700 /etc/agentx
@@ -379,13 +360,6 @@ LAUNCHER
   chmod 0600 /etc/agentx/log-group /etc/agentx/instance-id
 }
 
-# The container shares the host network, so the worker listens on the instance's port 8080 and
-# reaches the instance role's credentials through IMDS with a hop limit of 1. It also gets the host's
-# Docker socket, to run the project's devcontainer (#121): root on this instance, which serves only
-# this workspace. The workspace is mounted at the same path as on the host, so the bind mounts the
-# devcontainer CLI asks the host's Docker for name the same files. Before a push the worker removes
-# every container but its own (packages/worker/src/workspace-containers.ts), so this unit must stay
-# the only container the boot starts.
 write_worker_unit() {
   local region=$1 instance_id=$2 docker
   docker=$(command -v docker)

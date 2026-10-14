@@ -1,7 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { buildSync } from "esbuild";
+import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
 
 describe("runtime installation qualifier packaging", () => {
@@ -27,5 +29,25 @@ describe("runtime installation qualifier packaging", () => {
       });
       expect(output).toBe("ready");
     } finally { rmSync(emptyHostRoot, { recursive: true, force: true }); }
+  });
+
+  it("loads pure verifier exports from a CommonJS bundle without starting the E2E runner", () => {
+    const bundleDirectory = mkdtempSync(join(tmpdir(), "agentx-verifier-cjs-"));
+    const bundlePath = join(bundleDirectory, "verifier.cjs");
+    try {
+      const bundled = buildSync({
+        entryPoints: [resolve("packages/verifier/src/index.ts")],
+        bundle: true,
+        platform: "node",
+        format: "cjs",
+        target: "node22",
+        outfile: bundlePath,
+        write: false,
+      });
+      writeFileSync(bundlePath, bundled.outputFiles[0]!.contents);
+      const verifier = createRequire(import.meta.url)(bundlePath) as { parseE2EReport?: unknown; qualifyE2EReport?: unknown };
+      expect(typeof verifier.parseE2EReport).toBe("function");
+      expect(typeof verifier.qualifyE2EReport).toBe("function");
+    } finally { rmSync(bundleDirectory, { recursive: true, force: true }); }
   });
 });

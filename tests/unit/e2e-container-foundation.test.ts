@@ -2,8 +2,10 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   CONTAINED_IMAGE,
+  CONTAINED_RUNTIME_PROFILE,
   CONTAINED_SOCKET,
   buildCreateArgs,
+  containedRuntimeProfileForHost,
   isOwnedContainer,
   runContainedCandidate,
   validateCandidatePacket,
@@ -68,7 +70,7 @@ describe("contained candidate foundation", () => {
     expect(() => validateRequest({ requestId: "deep", input: deep })).toThrow(/depth/i);
   });
 
-  it("builds only the fixed Docker containment profile and explicit local endpoint", () => {
+  it("builds only the fixed Docker containment profile and explicit host endpoint", () => {
     const args = buildCreateArgs({ name: "agentx-contained-0123456789abcdefabcd", cidfile: "/tmp/ax/cid", sourcePath: "/tmp/ax/source", entry: "café #?.mjs", sourceDigest: "a".repeat(64), nonce: "a".repeat(48) });
     expect(args).toContain(CONTAINED_IMAGE);
     expect(args).toContain("--pull=never");
@@ -85,7 +87,25 @@ describe("contained candidate foundation", () => {
     expect(args.at(-1)).toBe("/candidate/.agentx-bootstrap.mjs");
     expect(args).toContain("AGENTX_ENTRY=/candidate/café #?.mjs");
     expect(args).toContain("AGENTX_EXPORT=default");
-    expect(CONTAINED_SOCKET).toBe("unix:///Users/abhishekgarg/.colima/default/docker.sock");
+    const darwin = containedRuntimeProfileForHost("darwin", "arm64");
+    expect(darwin).toMatchObject({
+      id: "darwin-arm64-colima-v1",
+      dockerPath: "/opt/homebrew/bin/docker",
+      dockerHost: "unix:///Users/abhishekgarg/.colima/default/docker.sock",
+      socketEndpoint: "unix:///Users/abhishekgarg/.colima/default/docker.sock",
+    });
+    const linux = containedRuntimeProfileForHost("linux", "arm64");
+    expect(linux).toMatchObject({
+      id: "linux-arm64-docker-v1",
+      dockerPath: "/usr/local/bin/docker",
+      dockerHost: "unix:///var/run/docker.sock",
+      socketEndpoint: "unix:///var/run/docker.sock",
+      installedRuntimeRoot: "/opt/agentx",
+    });
+    const unsupported = containedRuntimeProfileForHost("linux", "x64");
+    expect(unsupported).toBeUndefined();
+    expect(unsupported?.dockerHost ?? "").toBe("");
+    expect(CONTAINED_SOCKET).toBe(CONTAINED_RUNTIME_PROFILE?.dockerHost ?? "");
     expect(() => buildCreateArgs({ name: "agentx-contained-0123456789abcdefabcd", cidfile: "/tmp/ax,cid", sourcePath: "/tmp/ax/source", entry: "candidate.mjs", sourceDigest: "a".repeat(64), nonce: "a".repeat(48) })).toThrow(/input/i);
   });
 

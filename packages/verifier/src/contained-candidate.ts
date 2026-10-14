@@ -739,11 +739,11 @@ export async function reconcileOwnedContainers(): Promise<readonly Reconciliatio
 }
 
 export async function runContainedCandidate(packetInput: unknown, requestInput: unknown, optionsInput?: RunOptions): Promise<ContainedExecution> {
-  if (!CONTAINED_RUNTIME_PROFILE) throw new Error("contained verifier runtime is unavailable on this host");
   // All caller-controlled data is copied synchronously before the first await or filesystem effect.
   const packet = validateCandidatePacket(packetInput);
   const request = validateRequest(requestInput);
   const options = snapshotOptions(optionsInput);
+  if (!CONTAINED_RUNTIME_PROFILE) throw new Error("contained verifier runtime is unavailable on this host");
   const signal = options.signal;
   const startedAt = performance.now();
   const deadline = startedAt + MAX_DURATION_MS;
