@@ -7,6 +7,7 @@ import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Command } from "commander";
+import { DeveloperTaskResponseSchema } from "@agentx/contracts";
 import { LOOP_CONFIG_PATH, initialLoopConfig, readLoopConfig } from "./config.js";
 import { LoopDaemon } from "./daemon.js";
 import { LOOPS, loopNamed, stepOf } from "./definitions.js";
@@ -185,7 +186,8 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
     .option("--task <task-id>", "task UUID selected from a normal Developer task response; validated by the server")
     .option("--issue <number>", "existing loop issue number for task binding")
     .option("--target <repo>", "target repository for the existing issue child")
-    .action(async (repo: string, options: { standaloneLocal?: boolean; task?: string; issue?: string; target?: string }) => {
+    .option("--worktree <path>", "explicit retained Git worktree for creating a missing native publication route")
+    .action(async (repo: string, options: { standaloneLocal?: boolean; task?: string; issue?: string; target?: string; worktree?: string }) => {
       const standaloneRequested = options.standaloneLocal === true;
       const taskRequested = options.task !== undefined;
       if (standaloneRequested === taskRequested || (!taskRequested && (options.issue !== undefined || options.target !== undefined)) ||
@@ -204,17 +206,40 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
         const issue = Number(options.issue);
         if (!Number.isSafeInteger(issue) || issue <= 0) throw new Error("--issue must be an existing issue number");
         const item = await store.item(found.repo, issue, options.target);
-        if (item === undefined) throw new Error("the selected loop issue/target child does not exist on this computer; publication remains on hold");
-        const targetRepo = item.target ?? item.repo;
-        if (options.target !== undefined && options.target.toLowerCase() !== targetRepo.toLowerCase()) throw new Error("the selected target does not match the existing loop child; publication remains on hold");
+        const adopting = item === undefined;
+        if (adopting && options.worktree === undefined) throw new Error("the selected loop issue/target child does not exist on this computer; pass --worktree <path> to validate and create its native publication route");
+        if (adopting && options.target !== undefined) throw new Error("native publication route adoption supports only the issue's home repository; publication remains on hold");
+        const targetRepo = item?.target ?? item?.repo ?? found.repo;
+        if (item !== undefined && options.target !== undefined && options.target.toLowerCase() !== targetRepo.toLowerCase()) throw new Error("the selected target does not match the existing loop child; publication remains on hold");
         if (targetRepo.toLowerCase() !== found.repo.toLowerCase()) throw new Error("registered cross-target task binding is not available; publication remains on hold");
-        if (item.worktree === undefined) throw new Error("the selected loop item has no retained worktree; publication remains on hold");
+        if (item !== undefined && item.worktree === undefined) throw new Error("the selected loop item has no retained worktree; publication remains on hold");
+        const worktreePath = adopting ? await realpath(options.worktree!).catch(() => { throw new Error("the explicit worktree path is unavailable; publication remains on hold"); }) : item.worktree!.path;
+        if (item !== undefined && options.worktree !== undefined && await realpath(options.worktree) !== worktreePath) throw new Error("the explicit worktree does not match the existing loop route; publication remains on hold");
+        const worktreeRepo = await github.repoAt(worktreePath);
+        const worktreeRepositoryId = await github.repositoryId(worktreeRepo);
+        const worktreeCommonGitDir = await github.commonGitDir(worktreePath);
+        if (worktreeRepo.toLowerCase() !== actualRepo.toLowerCase() || worktreeRepositoryId !== repositoryId || worktreeCommonGitDir !== commonGitDir) {
+          throw new Error("the explicit worktree is not bound to the registered source checkout; publication remains on hold");
+        }
+        let branch: string;
+        if (adopting) {
+          try { branch = (await run(exec, "git", ["-C", worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD"])).trim(); }
+          catch { throw new Error("the explicit worktree must have a checked-out symbolic branch; detached worktrees remain on hold"); }
+        } else branch = item.worktree!.branch;
+        if (adopting) {
+          if (options.target !== undefined || await github.issueState(found.repo, issue) !== "open" || await github.pullRequest(found.repo, issue) !== undefined) {
+            throw new Error("native publication route adoption requires an existing open issue in its home repository; publication remains on hold");
+          }
+        }
         const records = await store.enrollments();
         const observation = { hostId, uid, account, repo: actualRepo, repositoryId, checkoutPath, commonGitDir };
         const enrollmentResolution = resolveLoopEnrollment(records, observation);
         if (enrollmentResolution.kind !== "registered") throw new Error(`registered task binding is on hold (${enrollmentResolution.kind === "hold" ? enrollmentResolution.reasonCode : "standalone_enrollment"})`);
-        const baseRef = item.upstream?.ref ?? `origin/${item.upstream?.branch ?? await github.defaultBranch(targetRepo)}`;
-        const candidate = await captureCandidate(exec, item.worktree.path, item.worktree.branch, baseRef);
+        if (adopting && enrollmentResolution.enrollment.taskRef !== undefined && enrollmentResolution.enrollment.taskRef !== options.task) {
+          throw new Error("the registered source is already bound to a different native task; publication remains on hold");
+        }
+        const baseRef = item?.upstream?.ref ?? `origin/${item?.upstream?.branch ?? await github.defaultBranch(targetRepo)}`;
+        const candidate = await captureCandidate(exec, worktreePath, branch, baseRef);
         const joined = await resolveRegisteredPublication({
           enrollment: enrollmentResolution.enrollment,
           subject: { projectName: enrollmentResolution.project, projectRevision: enrollmentResolution.projectRevision,
@@ -228,20 +253,40 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
           subject: { projectName: enrollmentResolution.project, projectRevision: enrollmentResolution.projectRevision,
             repositoryId: enrollmentResolution.repositoryId, commitSha: candidate.commitSha, treeSha: candidate.treeSha, baseCommitSha: candidate.baseCommitSha },
           logicalRepositoryName: enrollmentResolution.enrollment.logicalRepositoryName, join: joined.response, now: new Date() });
-        const [latestCandidate, latestRepo, latestId, latestAccount, latestCheckout, latestCommonGitDir, latestRecords, latestItem] = await Promise.all([
-          captureCandidate(exec, item.worktree.path, item.worktree.branch, baseRef), github.repoAt(found.path), github.repositoryId(actualRepo), github.login(),
-          realpath(found.path), github.commonGitDir(found.path), store.enrollments(), store.item(found.repo, issue, options.target),
+        if (item?.nativeImport !== undefined && (item.nativeImport.enrollmentId !== enrollmentResolution.enrollment.enrollmentId || item.nativeImport.taskRef !== options.task ||
+            item.nativeImport.sourceBindingRef !== enrollmentResolution.enrollment.sourceBindingRef || item.nativeImport.proofDigest !== nativeEvidence.proofDigest)) {
+          throw new Error("the existing route is bound to different native task proof; publication remains on hold");
+        }
+        const workflowPath = DeveloperTaskResponseSchema.parse(rawTask).task.workflow?.path;
+        if (adopting && workflowPath === undefined) throw new Error("the native task does not identify a supported Quick or Full publication route");
+        const routeItem: WorkItemState | undefined = adopting ? {
+          version: 1, repo: found.repo, issue, loop: workflowPath!.toLowerCase(), step: "publish", startedBy: account,
+          instruction: `Native task ${options.task} publication route.`, startedAt: new Date().toISOString(), stepEnteredAt: new Date().toISOString(),
+          worktree: { path: worktreePath, branch }, nativeImport: { schemaVersion: 1, enrollmentId: enrollmentResolution.enrollment.enrollmentId,
+            taskRef: options.task, sourceBindingRef: enrollmentResolution.enrollment.sourceBindingRef, proofDigest: nativeEvidence.proofDigest, importedAt: nativeEvidence.importedAt },
+        } : undefined;
+        const [latestCandidate, latestRepo, latestId, latestAccount, latestCheckout, latestCommonGitDir, latestWorktreeRepo, latestWorktreeId, latestWorktreeCommonGitDir, latestRecords, latestRepos, latestItem] = await Promise.all([
+          captureCandidate(exec, worktreePath, branch, baseRef), github.repoAt(found.path), github.repositoryId(actualRepo), github.login(),
+          realpath(found.path), github.commonGitDir(found.path), github.repoAt(worktreePath), github.repositoryId(worktreeRepo), github.commonGitDir(worktreePath),
+          store.enrollments(), store.repos(), store.item(found.repo, issue, options.target),
         ]);
         const latestResolution = resolveLoopEnrollment(latestRecords, { hostId, uid, account: latestAccount, repo: latestRepo, repositoryId: latestId, checkoutPath: latestCheckout, commonGitDir: latestCommonGitDir });
-        if (!sameCandidate(candidate, latestCandidate) || latestRepo.toLowerCase() !== found.repo.toLowerCase() || latestResolution.kind !== "registered" ||
+        const latestRegisteredRepo = latestRepos.find((entry) => entry.repo.toLowerCase() === found.repo.toLowerCase());
+        if (adopting && (await github.issueState(found.repo, issue) !== "open" || await github.pullRequest(found.repo, issue) !== undefined)) {
+          throw new Error("the selected issue changed during native task validation; publication remains on hold");
+        }
+        if (!sameCandidate(candidate, latestCandidate) || latestRepo.toLowerCase() !== found.repo.toLowerCase() || latestAccount.toLowerCase() !== account.toLowerCase() ||
+            latestCheckout !== checkoutPath || latestCommonGitDir !== commonGitDir || latestWorktreeRepo.toLowerCase() !== actualRepo.toLowerCase() ||
+            latestId !== repositoryId || latestWorktreeId !== repositoryId || latestWorktreeCommonGitDir !== commonGitDir || latestRegisteredRepo?.path !== found.path || latestResolution.kind !== "registered" ||
             latestResolution.enrollment.enrollmentId !== enrollmentResolution.enrollment.enrollmentId ||
-            latestResolution.enrollment.projectRevision !== enrollmentResolution.projectRevision ||
-            latestResolution.enrollment.sourceBindingRef !== enrollmentResolution.enrollment.sourceBindingRef || latestItem === undefined ||
-            latestItem.repo !== item.repo || latestItem.issue !== item.issue || latestItem.target !== item.target ||
-            latestItem.upstream?.repo !== item.upstream?.repo || latestItem.upstream?.branch !== item.upstream?.branch || latestItem.upstream?.ref !== item.upstream?.ref ||
-            latestItem.worktree?.path !== item.worktree.path || latestItem.worktree.branch !== item.worktree.branch) {
+            latestResolution.enrollment.projectRevision !== enrollmentResolution.projectRevision || latestResolution.enrollment.sourceBindingRef !== enrollmentResolution.enrollment.sourceBindingRef ||
+            latestResolution.enrollment.taskRef !== enrollmentResolution.enrollment.taskRef ||
+            (adopting ? latestItem !== undefined : latestItem === undefined || latestItem.repo !== item?.repo || latestItem.issue !== item?.issue || latestItem.target !== item?.target ||
+              latestItem.upstream?.repo !== item?.upstream?.repo || latestItem.upstream?.branch !== item?.upstream?.branch || latestItem.upstream?.ref !== item?.upstream?.ref ||
+              latestItem.worktree?.path !== item?.worktree?.path || latestItem.worktree?.branch !== item?.worktree?.branch)) {
           throw new Error("the host binding or Git candidate changed during task validation; no task reference was stored");
         }
+        if (routeItem !== undefined) await store.saveItemIfAbsent(routeItem);
         await store.bindTaskRef(enrollmentResolution.enrollment.enrollmentId, options.task, nativeEvidence);
         say(`Bound task ${options.task} to the current authenticated native evidence for ${found.repo}#${issue}. The server join and task proof are reloaded before each publication attempt.`);
         return;

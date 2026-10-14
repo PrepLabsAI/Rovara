@@ -1,7 +1,8 @@
 // rovara loop (#355, #358): where each work item stands, kept on this computer under ~/.rovara/loop. It is a
 // cache: the issue (its comments, its rovara:<step> label, open or closed) is the truth it is rebuilt from. A work
 // item whose plan changes several repositories has one inner loop per pull request, kept under the item.
-import { appendFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { appendFile, link, mkdir, readFile, readdir, rename, unlink, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ArtifactSchema } from "./definitions.js";
@@ -9,6 +10,13 @@ import { LoopEnrollmentSchema, NativeTaskEvidenceReceiptSchema, type LoopEnrollm
 
 const RepoSlug = () => z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/, "owner/name");
 export const RepoSlugSchema = RepoSlug();
+
+/** Routing provenance only: the authoritative imported proof stays in the registered enrollment receipt. */
+const NativeImportRouteSchema = z.object({
+  schemaVersion: z.literal(1), enrollmentId: z.string().uuid(), taskRef: z.string().uuid(),
+  sourceBindingRef: z.string().regex(/^cli-source:v1:[a-f0-9]{64}$/u), proofDigest: z.string().regex(/^[a-f0-9]{64}$/u),
+  importedAt: z.string().datetime(),
+}).strict();
 
 export const WorkItemStateSchema = z.object({
   version: z.literal(1),
@@ -34,6 +42,8 @@ export const WorkItemStateSchema = z.object({
   }).strict().optional(),
   /** The item's own git worktree and branch, once made. */
   worktree: z.object({ path: z.string(), branch: z.string() }).strict().optional(),
+  /** A pointer to separately retained native task proof; it is never local check or review evidence. */
+  nativeImport: NativeImportRouteSchema.optional(),
   /** What the agent said it did, at its last accepted claim. */
   summary: z.string().optional(),
   /** Quick and Full (#356, #357): each approved artifact's digest when it was approved, which locks it, and who approved it. */
@@ -190,6 +200,20 @@ export class LoopStore {
 
   async saveItem(state: WorkItemState): Promise<void> {
     await writeJson(join(this.itemDir(state.repo, state.issue, state.target), "state.json"), WorkItemStateSchema.parse(state));
+  }
+
+  /** Atomically create a new route without replacing a row another command or daemon created. */
+  async saveItemIfAbsent(state: WorkItemState): Promise<void> {
+    const parsed = WorkItemStateSchema.parse(state);
+    const path = join(this.itemDir(parsed.repo, parsed.issue, parsed.target), "state.json");
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+    await writeFile(temporary, `${JSON.stringify(parsed, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    try {
+      await link(temporary, path);
+    } finally {
+      await unlink(temporary).catch(() => undefined);
+    }
   }
 
   /** #358: an item's inner loops, one per pull request, in the order of the repositories' names. */

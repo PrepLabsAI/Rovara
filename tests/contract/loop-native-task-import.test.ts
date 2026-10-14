@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { arch, hostname } from "node:os";
 import { join } from "node:path";
 import { canonicalJson } from "@agentx/contracts";
@@ -12,6 +12,7 @@ import { createDeveloperPublicationJoinTransport } from "../../packages/cli/src/
 import { realExec, type Exec } from "../../packages/cli/src/loop/exec.js";
 import { captureCandidate } from "../../packages/cli/src/loop/candidate.js";
 import { createRegisteredEnrollment } from "../../packages/cli/src/loop/enrollment.js";
+import { initialLoopConfig } from "../../packages/cli/src/loop/config.js";
 import { createLoopPublicationContextResolver } from "../../packages/cli/src/loop/cli.js";
 import { GitHub } from "../../packages/cli/src/loop/github.js";
 import { LoopStore } from "../../packages/cli/src/loop/state.js";
@@ -59,9 +60,10 @@ async function serve(handler: (request: Request) => Response | Promise<Response>
   return `http://127.0.0.1:${address.port}`;
 }
 
-function taskView(input: { candidate: Awaited<ReturnType<typeof captureCandidate>>; taskRef?: string; repositoryId?: string; at?: string; mutate?: (workflow: Record<string, unknown>) => void }) {
+function taskView(input: { candidate: Awaited<ReturnType<typeof captureCandidate>>; taskRef?: string; repositoryId?: string; baseCommitSha?: string; at?: string; mutate?: (workflow: Record<string, unknown>) => void }) {
   const at = input.at ?? stamp();
-  const repository = { repositoryId: input.repositoryId ?? "payments", commitSha: input.candidate.commitSha, treeSha: input.candidate.treeSha, baseCommitSha: input.candidate.baseCommitSha };
+  const repository = { repositoryId: input.repositoryId ?? "payments", commitSha: input.candidate.commitSha, treeSha: input.candidate.treeSha,
+    baseCommitSha: input.baseCommitSha ?? input.candidate.baseCommitSha };
   const candidateDigest = createHash("sha256").update(JSON.stringify({ schemaVersion: 1, repositories: [repository] })).digest("hex");
   const artifactDigest = "b".repeat(64);
   const policyDigest = "c".repeat(64);
@@ -78,7 +80,7 @@ function taskView(input: { candidate: Awaited<ReturnType<typeof captureCandidate
       currentRoundId: runId, currentGroupRunIds: [runId], resultRefs: [], qualifiedRound: { candidateDigest, contractDigest: artifactDigest, policyDigest,
         bundleDigest: "2".repeat(64), executionPlanDigest: planDigest, roundId: runId, groupRunIds: [runId], admissionSha256, evidenceSha256 } },
     candidate: { schemaVersion: 1, repositories: [repository], digest: candidateDigest },
-    reviewBase: [{ repositoryId: repository.repositoryId, baseCommitSha: input.candidate.baseCommitSha }],
+    reviewBase: [{ repositoryId: repository.repositoryId, baseCommitSha: repository.baseCommitSha }],
     verification: { candidateDigest, producer: "agentx-worker-checks", environmentId: "native-env-1", recordedAt: at, results: [{ checkId: "required-1", status: "PASS" }] },
     reviews: ["CRITIC", "SECURITY"].map((role) => ({ operationId: "31111111-2222-4333-8444-555555555555", candidateDigest, role,
       provider: "native-review", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: at })),
@@ -98,13 +100,15 @@ describe("normal CLI import of authenticated native task evidence", () => {
     const checkout = join(root, "checkout");
     await mkdir(checkout, { recursive: true });
     git(checkout, "init", "-b", "main"); git(checkout, "config", "user.email", "test@example.invalid"); git(checkout, "config", "user.name", "Synthetic fixture");
-    await writeFile(join(checkout, "tracked.txt"), "base\n"); git(checkout, "add", "tracked.txt"); git(checkout, "commit", "-m", "base");
+    await mkdir(join(checkout, ".rovara"), { recursive: true });
+    await writeFile(join(checkout, ".rovara", "loop.yaml"), initialLoopConfig("synthetic-user"));
+    await writeFile(join(checkout, "tracked.txt"), "base\n"); git(checkout, "add", "."); git(checkout, "commit", "-m", "base");
     const baseCommitSha = git(checkout, "rev-parse", "HEAD");
     git(checkout, "branch", "rovara/42"); git(checkout, "switch", "rovara/42");
     await writeFile(join(checkout, "tracked.txt"), "candidate\n"); git(checkout, "commit", "-am", "candidate"); git(checkout, "update-ref", "refs/remotes/origin/main", baseCommitSha);
     const candidate = await captureCandidate(realExec, checkout, "rovara/42", "origin/main");
     const evidenceAt = stamp();
-    let mode: "valid" | "same-name" | "missing-check" | "failed-check" | "missing-security" | "forged-producer" | "foreign-candidate" | "foreign-task" | "stale-round" | "stale-contract" | "future-time" | "stale-time" | "foreign-approval" | "foreign-repository-identity" = "valid";
+    let mode: "valid" | "same-name" | "missing-check" | "failed-check" | "missing-security" | "forged-producer" | "foreign-candidate" | "foreign-task" | "stale-round" | "stale-contract" | "future-time" | "stale-time" | "foreign-approval" | "foreign-repository-identity" | "foreign-base" | "unknown-join" | "expired-join" | "task-read-refused" | "issue-closed" | "issue-is-pr" | "branch-drift" | "row-conflict" = "valid";
     let calls: string[] = [];
     const logicalRepositoryForMode = () => mode === "same-name" || mode === "foreign-repository-identity" ? "payments" : "api";
     const baseUrl = await serve(async (request) => {
@@ -113,15 +117,21 @@ describe("normal CLI import of authenticated native task evidence", () => {
       if (request.method === "POST" && path === "/v1/dev/tasks") return Response.json({ task: { taskId } });
       if (request.method === "POST" && path === `/v1/dev/tasks/${taskId}/e2e-publication-context`) {
         const body = await request.json() as { subject: { projectName: string; projectRevision: number; repositoryId: number; commitSha: string; treeSha: string; baseCommitSha: string } };
-        const current = taskView({ candidate, repositoryId: logicalRepositoryForMode(), at: evidenceAt });
         const subject = body.subject;
+        if (mode === "unknown-join") return Response.json({ schemaVersion: 1, status: "UNKNOWN", reasonCode: "task_not_qualified", subject, checkedAt: stamp() });
+        const current = taskView({ candidate, repositoryId: logicalRepositoryForMode(), ...(mode === "foreign-base" ? { baseCommitSha: "9".repeat(40) } : {}), at: evidenceAt });
         return Response.json({ schemaVersion: 1, status: "READY", requestId: "fixture-request", subject,
           candidateDigest: current.candidateDigest, contractDigest: current.artifactDigest, policyDigest: current.policyDigest,
-          planDigest: current.planDigest, roundId: runId, evidenceSetDigest: current.evidenceSetDigest, checkedAt: stamp() });
+          planDigest: current.planDigest, roundId: runId, evidenceSetDigest: current.evidenceSetDigest,
+          checkedAt: mode === "expired-join" ? new Date(Date.now() - 120_000).toISOString() : stamp() });
       }
       if (request.method === "GET" && path === `/v1/dev/tasks/${taskId}`) {
+        if (mode === "task-read-refused") return Response.json({ error: "task read refused" }, { status: 404 });
+        if (mode === "branch-drift") git(checkout, "switch", "main");
+        if (mode === "row-conflict") await store.saveItem({ version: 1, repo: "acme/payments", issue: 42, loop: "quick", step: "publish", startedBy: "other-user",
+          instruction: "concurrent route", startedAt: stamp(), stepEnteredAt: stamp(), worktree: { path: "/foreign/worktree", branch: "foreign" } });
         const taskCandidate = mode === "foreign-candidate" ? { ...candidate, commitSha: "0".repeat(40) } : candidate;
-        const current = taskView({ candidate: taskCandidate, at: evidenceAt, repositoryId: logicalRepositoryForMode(), mutate(workflow) {
+        const current = taskView({ candidate: taskCandidate, at: evidenceAt, repositoryId: logicalRepositoryForMode(), ...(mode === "foreign-base" ? { baseCommitSha: "9".repeat(40) } : {}), mutate(workflow) {
           const verification = workflow.verification as { producer: string; results: Array<{ checkId: string; status: string }>; recordedAt: string };
           const e2e = workflow.e2e as { currentRoundId: string; contractDigest: string; qualifiedRound: { contractDigest: string } };
           if (mode === "missing-check") verification.results = [{ checkId: "unselected-check", status: "PASS" }];
@@ -146,37 +156,113 @@ describe("normal CLI import of authenticated native task evidence", () => {
     const start = await fetch(`${baseUrl}/v1/dev/tasks`, { method: "POST", headers: { authorization: "Bearer synthetic-cli-session" } });
     const selectedTaskId = (await start.json() as { task: { taskId: string } }).task.taskId;
     const store = new LoopStore(join(home, ".rovara", "loop"));
-    await store.saveRepos([{ repo: "acme/payments", path: checkout }]);
     const hostId = `${hostname()}:${process.platform}:${arch()}`;
     const enrollment = createRegisteredEnrollment({ namespace: `${baseUrl}/env/dev/project/payments`, hostId, uid: process.getuid?.() ?? 0,
       account: "synthetic-user", project: "payments", projectRevision: 3, repository: "acme/payments", repositoryId: 1234, logicalRepositoryName: "api",
       checkoutPath: checkout, commonGitDir: join(checkout, ".git"), sourceBindingRef: `cli-source:v1:${"1".repeat(64)}`, now: new Date() });
     await store.saveEnrollment(enrollment);
-    await store.saveItem({ version: 1, repo: "acme/payments", issue: 42, loop: "quick", step: "publish", startedBy: "synthetic-user", instruction: "Fix it",
-      startedAt: stamp(), stepEnteredAt: stamp(), worktree: { path: checkout, branch: "rovara/42" } });
+    const foreignCheckout = join(root, "foreign-checkout");
+    await mkdir(foreignCheckout, { recursive: true });
+    git(foreignCheckout, "init", "-b", "main"); git(foreignCheckout, "config", "user.email", "test@example.invalid"); git(foreignCheckout, "config", "user.name", "Foreign fixture");
+    await writeFile(join(foreignCheckout, "foreign.txt"), "foreign\n"); git(foreignCheckout, "add", "foreign.txt"); git(foreignCheckout, "commit", "-m", "foreign checkout");
     const ghExec: Exec = async (command, args, options) => {
       if (command !== "gh") return realExec(command, args, options);
-      if (args[0] === "repo" && args[1] === "view") return { code: 0, stdout: "acme/payments\n", stderr: "" };
+      if (args[0] === "repo" && args[1] === "view") return { code: 0, stdout: options?.cwd === foreignCheckout ? "fork/payments\n" : "acme/payments\n", stderr: "" };
       if (args[0] === "api" && args[1] === "user") return { code: 0, stdout: "synthetic-user\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "repos/fork/payments" && args.at(-1) === ".id") return { code: 0, stdout: "5678\n", stderr: "" };
       if (args[0] === "api" && args[1] === "repos/acme/payments" && args.at(-1) === ".id") return { code: 0, stdout: "1234\n", stderr: "" };
       if (args[0] === "api" && args[1] === "repos/acme/payments" && args.at(-1) === ".default_branch") return { code: 0, stdout: "main\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "repos/acme/payments/issues/42") return { code: 0, stdout: mode === "issue-closed" ? "closed\n" : "open\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "repos/acme/payments/pulls/42") return mode === "issue-is-pr"
+        ? { code: 0, stdout: JSON.stringify({ state: "open", base: "main", head: candidate.commitSha, url: "https://github.com/acme/payments/pull/42", headRepo: "acme/payments", headRef: "rovara/42" }), stderr: "" }
+        : { code: 1, stdout: "", stderr: "HTTP 404 Not Found" };
       return { code: 1, stdout: "", stderr: `unexpected synthetic gh call: ${args.join(" ")}` };
     };
-    const invoke = async () => {
+    const setupOutput: string[] = [];
+    const setup = (args: string[]) => executeCli(args, { environments: { home }, loop: { exec: ghExec },
+      stdout: { write: (value) => setupOutput.push(value) }, stderr: { write: (value) => setupOutput.push(value) } });
+    expect(await setup(["loop", "init", checkout]), setupOutput.join("")).toBe(0);
+    expect(await setup(["loop", "add", checkout]), setupOutput.join("")).toBe(0);
+    expect(await store.repos()).toEqual([{ repo: "acme/payments", path: checkout }]);
+    const invoke = async (worktreePath: string | null = checkout) => {
       const output: string[] = [];
-      const exitCode = await executeCli(["--env", "dev", "loop", "enroll", "acme/payments", "--task", selectedTaskId, "--issue", "42"], {
+      const args = ["--env", "dev", "loop", "enroll", "acme/payments", "--task", selectedTaskId, "--issue", "42", ...(worktreePath === null ? [] : ["--worktree", worktreePath])];
+      const exitCode = await executeCli(args, {
         environments: { home }, tokenStore, fetchImplementation: fetch.bind(globalThis), loop: { exec: ghExec },
         stdout: { write: (value) => output.push(value) }, stderr: { write: (value) => output.push(value) },
       });
-      return { exitCode, output: output.join(""), enrollment: (await store.enrollments())[0] };
+      return { exitCode, output: output.join(""), enrollment: (await store.enrollments())[0], item: await store.item("acme/payments", 42) };
     };
 
+    const expectNoRoute = async (nextMode: typeof mode, reason: string, expectedCalls: string[], worktreePath?: string) => {
+      await rm(join(store.itemDir("acme/payments", 42), "state.json"), { force: true });
+      await writeFile(store.enrollmentPath(), `${JSON.stringify([enrollment])}\n`);
+      mode = nextMode;
+      calls = [];
+      const result = await invoke(worktreePath);
+      expect(result.exitCode, `${nextMode}: ${result.output}`).toBe(1);
+      expect(result.output, nextMode).toContain(reason);
+      expect(result.item).toBeUndefined();
+      expect(result.enrollment).not.toHaveProperty("taskRef");
+      expect(calls).toEqual(expectedCalls);
+      return result;
+    };
+
+    calls = [];
+    const missingWorktree = await invoke(null);
+    expect(missingWorktree.exitCode, missingWorktree.output).toBe(1);
+    expect(missingWorktree.item).toBeUndefined();
+    expect(missingWorktree.enrollment).not.toHaveProperty("taskRef");
+
+    await expectNoRoute("valid", "not bound to the registered source checkout", [], foreignCheckout);
+    git(checkout, "switch", "--detach", "HEAD");
+    const detached = await expectNoRoute("valid", "checked-out symbolic branch", [], checkout);
+    expect(detached.item).toBeUndefined();
+    git(checkout, "switch", "rovara/42");
+    await expectNoRoute("issue-closed", "existing open issue", []);
+    await expectNoRoute("issue-is-pr", "existing open issue", []);
+    await expectNoRoute("unknown-join", "task_not_qualified", [`POST /v1/dev/tasks/${taskId}/e2e-publication-context`]);
+    await expectNoRoute("expired-join", "server_observation_stale", [`POST /v1/dev/tasks/${taskId}/e2e-publication-context`]);
+    await expectNoRoute("task-read-refused", "native task read refused", [`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
+    await expectNoRoute("foreign-base", "candidate_subject_mismatch", [`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
+    const drifted = await expectNoRoute("branch-drift", "candidate_branch_changed", [`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
+    expect(drifted.item).toBeUndefined();
+    git(checkout, "switch", "rovara/42");
+    mode = "row-conflict";
+    calls = [];
+    const conflicted = await invoke();
+    expect(conflicted.exitCode, conflicted.output).toBe(1);
+    expect(conflicted.output).toContain("host binding or Git candidate changed");
+    expect(conflicted.item).toMatchObject({ instruction: "concurrent route", worktree: { path: "/foreign/worktree" } });
+    expect(conflicted.enrollment).not.toHaveProperty("taskRef");
+    expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
+    await rm(join(store.itemDir("acme/payments", 42), "state.json"), { force: true });
+
+    mode = "valid";
+    calls = [];
     const valid = await invoke();
     expect(valid.exitCode, valid.output).toBe(0);
     expect(valid.enrollment).toMatchObject({ taskRef: taskId, nativeEvidence: { taskRef: taskId, verification: { producer: "agentx-worker-checks", checkIds: ["required-1"] }, reviews: [{ role: "CRITIC" }, { role: "SECURITY" }] } });
-    expect(calls).toEqual(["POST /v1/dev/tasks", `POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
+    expect(valid.item).toMatchObject({ loop: "quick", step: "publish", startedBy: "synthetic-user", worktree: { path: checkout, branch: "rovara/42" },
+      nativeImport: { taskRef: taskId, proofDigest: valid.enrollment?.kind === "registered" ? valid.enrollment.nativeEvidence?.proofDigest : undefined } });
+    expect(valid.item).not.toHaveProperty("checksCandidate");
+    expect(valid.item).not.toHaveProperty("reviewsCandidate");
+    expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
+
+    const publicationTransport = createDeveloperPublicationJoinTransport({ home, env: "dev", tokenStore, fetch: fetch.bind(globalThis) });
+    const resolver = createLoopPublicationContextResolver({ store, github: new GitHub(ghExec), hostId, uid: process.getuid?.() ?? 0, publicationJoin: publicationTransport });
+    calls = [];
+    const admission = await resolver({ issueRepo: "acme/payments", issue: 42, targetRepo: "acme/payments", destinationRepo: "acme/payments", worktree: checkout, candidate });
+    expect(admission).toEqual({ kind: "registered-ready" });
+    expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
+    mode = "stale-round";
+    calls = [];
+    const changedRound = await resolver({ issueRepo: "acme/payments", issue: 42, targetRepo: "acme/payments", destinationRepo: "acme/payments", worktree: checkout, candidate });
+    expect(changedRound.kind).toBe("hold");
+    expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
 
     mode = "same-name";
+    await rm(join(store.itemDir("acme/payments", 42), "state.json"), { force: true });
     const sameNameEnrollment = { ...enrollment, logicalRepositoryName: "payments" };
     await writeFile(store.enrollmentPath(), `${JSON.stringify([sameNameEnrollment])}\n`);
     calls = [];
@@ -186,6 +272,7 @@ describe("normal CLI import of authenticated native task evidence", () => {
     expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
 
     mode = "valid";
+    await rm(join(store.itemDir("acme/payments", 42), "state.json"), { force: true });
     const legacyEnrollment = { ...valid.enrollment } as Record<string, unknown>;
     delete legacyEnrollment.logicalRepositoryName;
     delete legacyEnrollment.nativeEvidence;
@@ -197,6 +284,7 @@ describe("normal CLI import of authenticated native task evidence", () => {
     expect(missingMapping.enrollment).not.toHaveProperty("nativeEvidence");
     expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
 
+    await rm(join(store.itemDir("acme/payments", 42), "state.json"), { force: true });
     await writeFile(store.enrollmentPath(), `${JSON.stringify([valid.enrollment])}\n`);
     mode = "foreign-repository-identity";
     calls = [];
@@ -206,35 +294,23 @@ describe("normal CLI import of authenticated native task evidence", () => {
     expect(foreignRepository.enrollment).toMatchObject({ nativeEvidence: { proofDigest: valid.enrollment?.kind === "registered" ? valid.enrollment.nativeEvidence?.proofDigest : undefined } });
     expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
 
-    await writeFile(store.enrollmentPath(), `${JSON.stringify([valid.enrollment])}\n`);
-    mode = "valid";
-    calls = [];
-    const publicationTransport = createDeveloperPublicationJoinTransport({ home, env: "dev", tokenStore, fetch: fetch.bind(globalThis) });
-    const resolver = createLoopPublicationContextResolver({ store, github: new GitHub(ghExec), hostId, uid: process.getuid?.() ?? 0, publicationJoin: publicationTransport });
-    const admission = await resolver({ issueRepo: "acme/payments", issue: 42, targetRepo: "acme/payments", destinationRepo: "acme/payments", worktree: checkout, candidate });
-    expect(admission).toEqual({ kind: "registered-ready" });
-    expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
-    mode = "stale-round";
-    calls = [];
-    const changedRound = await resolver({ issueRepo: "acme/payments", issue: 42, targetRepo: "acme/payments", destinationRepo: "acme/payments", worktree: checkout, candidate });
-    expect(changedRound.kind).toBe("hold");
-    expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
-
-    const expectedReason: Record<Exclude<typeof mode, "valid" | "same-name" | "foreign-repository-identity">, string> = {
+    const expectedReason: Record<string, string> = {
       "missing-check": "checks_incomplete_or_failed", "failed-check": "checks_incomplete_or_failed",
       "missing-security": "reviews_missing_or_untrusted", "forged-producer": "checks_missing_or_untrusted",
       "foreign-candidate": "candidate_digest_mismatch", "foreign-task": "task_identity_mismatch",
       "stale-round": "e2e_round_binding_mismatch", "stale-contract": "e2e_round_binding_mismatch",
       "future-time": "evidence_time_invalid", "stale-time": "evidence_time_invalid", "foreign-approval": "owner_approval_missing",
     };
-    for (const invalid of Object.keys(expectedReason) as Array<keyof typeof expectedReason>) {
+    for (const [invalid, reason] of Object.entries(expectedReason)) {
+      await rm(join(store.itemDir("acme/payments", 42), "state.json"), { force: true });
       await writeFile(store.enrollmentPath(), `${JSON.stringify([enrollment])}\n`);
-      mode = invalid;
+      mode = invalid as typeof mode;
       calls = [];
       const next = await invoke();
       expect(next.exitCode, `${invalid}: ${next.output}`).toBe(1);
-      expect(next.output, invalid).toContain(`native task evidence ${expectedReason[invalid]}`);
+      expect(next.output, invalid).toContain(`native task evidence ${reason}`);
       expect(next.enrollment).not.toHaveProperty("nativeEvidence");
+      expect(next.item).toBeUndefined();
       expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
     }
   });
