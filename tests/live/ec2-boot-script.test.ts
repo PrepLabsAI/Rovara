@@ -94,6 +94,14 @@ exit 1
 EOF
 # systemctl fails the one call named by SYSTEMCTL_FAILS, such as "restart docker.service".
 printf '#!/bin/bash\necho "systemctl $*" >> /tmp/calls.log\n[[ "$*" != "$SYSTEMCTL_FAILS" ]]\n' > /shims/systemctl
+cat >/shims/mount <<'EOF'
+#!/bin/bash
+if [[ "$FAIL_RUNTIME_RECONSTRUCTION" == 1 && "$1" == --bind ]]; then
+  echo "mount optional runtime reconstruction failed" >> /tmp/calls.log
+  exit 1
+fi
+exec /usr/bin/mount "$@"
+EOF
 printf '#!/bin/bash\necho "udevadm $*" >> /tmp/calls.log\n' > /shims/udevadm
 # Records the wait instead of waiting, so the retry backoff costs the test nothing.
 printf '#!/bin/bash\necho "sleep $*" >> /tmp/calls.log\n' > /shims/sleep
@@ -116,6 +124,18 @@ mkdir -p /var/run && touch /var/run/docker.sock
 # real PCI bus. The rescan test fails if it goes, since it reads the rescan file under /tmp/host.
 PATH=/shims:$PATH AGENTX_HOST_ROOT=/tmp/host bash /tmp/user-data.sh
 echo "@@exit=$?"
+if [[ "$SIMULATE_RUNTIME_RESTART" == 1 ]]; then
+  # The first worker start uses the boot-time bind. Then emulate a host reboot: mounts disappear,
+  # fstab restores only the durable workspace, and the real systemd ExecStart launcher reconstructs
+  # the optional runtime bind (or safely falls back when that bind fails).
+  PATH=/shims:$PATH /usr/local/libexec/agentx-worker-start
+  umount /mnt/agentx-runtime 2>/dev/null || true
+  umount /mnt/workspace 2>/dev/null || true
+  mount /mnt/workspace
+  PATH=/shims:$PATH /usr/local/libexec/agentx-worker-start
+  echo "@@restartmounted=$(mountpoint -q /mnt/agentx-runtime && echo yes || echo no)"
+  echo "@@restartcalls"; cat /tmp/calls.log
+fi
 echo "@@ping=$(python3 - <<'EOF'
 import time, urllib.error, urllib.request
 for _ in range(50):
@@ -142,6 +162,7 @@ if [[ -d "$tmpdir" ]] && touch "$probe"; then echo "@@ordinarytmp=available"; rm
 echo "@@fstab"; cat /etc/fstab
 echo "@@env"; cat /etc/agentx/worker.env 2>/dev/null
 echo "@@unit"; cat /etc/systemd/system/agentx-worker.service 2>/dev/null
+echo "@@launcher"; cat /usr/local/libexec/agentx-worker-start 2>/dev/null
 echo "@@calls"; cat /tmp/calls.log
 umount /mnt/workspace 2>/dev/null; losetup --detach "$device"
 `;
@@ -179,6 +200,10 @@ interface Faults {
   sysfs?: boolean;
   /** Makes every write to the PCI rescan file fail. */
   rescanFails?: boolean;
+  /** Executes the installed worker launcher across a simulated reboot of the EBS workspace mount. */
+  runtimeRestart?: boolean;
+  /** Makes the post-reboot optional runtime bind fail; the ordinary worker must still launch. */
+  failRuntimeReconstruction?: boolean;
 }
 
 async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "existing" | "foreign", faults: Faults = {}) {
@@ -199,6 +224,8 @@ async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "exi
     "--env", `BY_ID=${faults.byId ? "1" : ""}`,
     "--env", `SYSFS=${faults.sysfs ? "1" : ""}`,
     "--env", `RESCAN_FAILS=${faults.rescanFails ? "1" : ""}`,
+    "--env", `SIMULATE_RUNTIME_RESTART=${faults.runtimeRestart ? "1" : ""}`,
+    "--env", `FAIL_RUNTIME_RECONSTRUCTION=${faults.failRuntimeReconstruction ? "1" : ""}`,
     "--env", `USER_DATA_B64=${userData}`,
     IMAGE, "bash", "-c", HARNESS,
   ], { encoding: "utf8", timeout: 120_000 });
@@ -208,8 +235,9 @@ async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "exi
   const calls = section("calls");
   return {
     exit: Number(field("exit")), type: field("type"), mounted: field("mounted") === "yes", owner: field("owner"),
+    restartMounted: field("restartmounted") === "yes", restartCalls: section("restartcalls"),
     kept: field("kept"), envMode: field("envmode"), ping: field("ping"), rescan: field("rescan"), ordinaryTmp: field("ordinarytmp"),
-    fstab: section("fstab"), env: section("env"), unit: section("unit"), calls, log: result.stderr,
+    fstab: section("fstab"), env: section("env"), unit: section("unit"), launcher: section("launcher"), calls, log: result.stderr,
     sleeps: calls.split("\n").filter((line) => line.startsWith("sleep ")).map((line) => Number(line.slice("sleep ".length))),
     count: (call: string) => calls.split("\n").filter((line) => line === call).length,
   };
@@ -252,9 +280,11 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.env).toContain("AGENTX_WORKSPACE_ROOT=/mnt/workspace");
     expect(result.env).toContain("AWS_REGION=us-east-1");
     expect(result.unit).toContain("RequiresMountsFor=/mnt/workspace");
-    expect(result.unit).toContain("--network host");
-    expect(result.unit).toContain(`--log-opt awslogs-stream=${bootConfig.workspaceId}/1/i-0123456789abcdef0`);
-    expect(result.unit).toContain(` ${WORKER_IMAGE}\n`);
+    expect(result.unit).toContain("ExecStart=/usr/local/libexec/agentx-worker-start");
+    expect(result.launcher).toContain("/mnt/workspace/.agentx-runtime");
+    expect(result.launcher).toContain("--volume \"$RUNTIME_ROOT:$RUNTIME_ROOT\"");
+    expect(result.launcher).toContain("--network host");
+    expect(result.launcher).toContain("--log-opt awslogs-stream=");
     expect(result.calls).toContain("docker login --username AWS --password-stdin 111122223333.dkr.ecr.us-east-1.amazonaws.com");
     expect(result.calls).toContain(`docker pull ${WORKER_IMAGE}`);
     expect(result.calls).toContain("systemctl enable --now agentx-worker.service");
@@ -312,7 +342,7 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expectBackoff(result.sleeps, 1);
     expect(result.log).toMatch(/could not read the instance's placement\/region from instance metadata \(try 1 of 5\); retrying in [23]s/);
     expect(result.env).toContain("AWS_REGION=us-east-1\n");
-    expect(result.unit).toContain("awslogs-stream=");
+    expect(result.launcher).toContain("--log-opt awslogs-stream=");
   }, 180_000);
 
   it("gives up on the registry login after 5 tries and reports why on /ping", async () => {
@@ -342,8 +372,10 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.count("docker pull node@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9")).toBe(5);
     expect(result.log).toContain("optional verifier image unavailable; worker continues");
     expect(result.unit).toContain("ExecStart=");
-    expect(result.env).toContain("CONTAINED_FOUNDATION_EVIDENCE_DIR=/mnt/agentx-runtime/evidence");
-    expect(result.env).toContain("TMPDIR=/mnt/agentx-runtime/tmp");
+    expect(result.env).toContain("TMPDIR=/tmp");
+    expect(result.env).not.toContain("CONTAINED_FOUNDATION_EVIDENCE_DIR=");
+    expect(result.unit).toContain("RequiresMountsFor=/mnt/workspace");
+    expect(result.unit).not.toContain("RequiresMountsFor=/mnt/workspace /mnt/agentx-runtime");
     expect(result.calls).toContain("systemctl enable --now agentx-worker.service");
     expect(result.calls).not.toContain("systemd-run --unit=agentx-boot-failure --collect --property=Type=notify");
   }, 180_000);
@@ -376,6 +408,32 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.unit).toContain("RequiresMountsFor=/mnt/workspace");
     expect(result.log).toContain("verifier unavailable; setup smoke withheld");
     expect(result.calls).toContain("systemctl enable --now agentx-worker.service");
+  }, 180_000);
+
+  it("reconstructs the optional EBS-backed runtime bind when the worker starts after a reboot", async () => {
+    const result = await boot(config(), "blank", { runtimeRestart: true });
+    expect(result.exit, result.log).toBe(0);
+    expect(result.restartMounted).toBe(true);
+    expect(result.unit).toContain("RequiresMountsFor=/mnt/workspace");
+    expect(result.unit).not.toContain("/mnt/agentx-runtime");
+    const dockerRuns = result.restartCalls.split("\n").filter((line) => line.startsWith("docker run "));
+    expect(dockerRuns).toHaveLength(2);
+    expect(dockerRuns[1]).toContain("--volume /mnt/agentx-runtime:/mnt/agentx-runtime");
+    expect(dockerRuns[1]).toContain("CONTAINED_FOUNDATION_EVIDENCE_DIR=/mnt/agentx-runtime/evidence");
+    expect(dockerRuns[1]).toContain("TMPDIR=/mnt/agentx-runtime/tmp");
+  }, 180_000);
+
+  it("starts the ordinary worker with /tmp when reboot reconstruction of the optional runtime bind fails", async () => {
+    const result = await boot(config(), "blank", { runtimeRestart: true, failRuntimeReconstruction: true });
+    expect(result.exit, result.log).toBe(0);
+    expect(result.restartMounted).toBe(false);
+    const dockerRuns = result.restartCalls.split("\n").filter((line) => line.startsWith("docker run "));
+    expect(dockerRuns).toHaveLength(2);
+    expect(dockerRuns[1]).not.toContain("--volume /mnt/agentx-runtime:/mnt/agentx-runtime");
+    expect(dockerRuns[1]).toContain("TMPDIR=/tmp");
+    expect(result.restartCalls).toContain("mount optional runtime reconstruction failed");
+    expect(result.unit).toContain("RequiresMountsFor=/mnt/workspace");
+    expect(result.unit).not.toContain("/mnt/agentx-runtime");
   }, 180_000);
 
   it("reports the step that stopped the boot when a command fails without a reason of its own", async () => {

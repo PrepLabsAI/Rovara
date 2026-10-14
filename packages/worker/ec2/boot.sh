@@ -306,11 +306,77 @@ AGENTX_INVOKE_PUBLIC_KEY=$AGENTX_INVOKE_PUBLIC_KEY
 AGENTX_WORKSPACE_ID=$AGENTX_WORKSPACE_ID
 AGENTX_SESSION_GENERATION=$AGENTX_SESSION_GENERATION
 EOF
-  if [[ "$CONTAINED_RUNTIME_AVAILABLE_BOOT" == true ]]; then
-    printf 'CONTAINED_FOUNDATION_EVIDENCE_DIR=%s\nTMPDIR=%s\n' "$EVIDENCE_ROOT" "$CONTAINED_TMP_ROOT" >>"$WORKER_ENV_FILE"
-  else
-    printf 'TMPDIR=/tmp\n' >>"$WORKER_ENV_FILE"
+  printf 'TMPDIR=/tmp\n' >>"$WORKER_ENV_FILE"
+}
+
+# Rebuild the optional same-path bind each time systemd starts the worker. The backing store lives
+# on the workspace EBS volume, so RequiresMountsFor below orders this check after the durable mount.
+# Any invalid or unavailable runtime path only disables verifier-specific container mounts; the
+# ordinary worker still starts with its normal /tmp.
+write_worker_launcher() {
+  local docker=$1 instance_id=$2
+  install -d -m 0700 /etc/agentx
+  install -d -o root -g root -m 0755 /usr/local/libexec
+  printf '%s\n' "$AGENTX_WORKER_IMAGE" >/etc/agentx/worker-image
+  chmod 0600 /etc/agentx/worker-image
+  printf '%s\n' "$docker" >/etc/agentx/docker-path
+  chmod 0600 /etc/agentx/docker-path
+  cat >/usr/local/libexec/agentx-worker-start <<'LAUNCHER'
+#!/bin/bash
+set -u
+readonly MOUNT_PATH=/mnt/workspace
+readonly RUNTIME_SOURCE=/mnt/workspace/.agentx-runtime
+readonly RUNTIME_ROOT=/mnt/agentx-runtime
+readonly WORKER_ENV_FILE=/etc/agentx/worker.env
+readonly WORKER_CONTAINER=agentx-worker
+readonly DOCKER_SOCKET=/var/run/docker.sock
+readonly WORKER_UID=1000
+readonly WORKER_GID=1000
+log() { printf 'agentx-worker-start: %s\n' "$*" >&2; }
+docker=$(cat /etc/agentx/docker-path 2>/dev/null || true)
+worker_image=$(cat /etc/agentx/worker-image 2>/dev/null || true)
+[[ "$docker" == /* && -x "$docker" ]] || { log 'Docker CLI unavailable'; exit 1; }
+[[ "$worker_image" =~ ^[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]] || { log 'worker image identity is invalid'; exit 1; }
+docker_gid=$(stat -c %g "$DOCKER_SOCKET") || { log 'Docker socket unavailable'; exit 1; }
+runtime_ready=false
+if [[ -d "$RUNTIME_SOURCE" && ! -L "$RUNTIME_SOURCE" && $(stat -c %u:%g:%a "$RUNTIME_SOURCE" 2>/dev/null) == 0:0:755 ]]; then
+  runtime_children_valid=true
+  for path in candidates evidence state tmp; do
+    child="$RUNTIME_SOURCE/$path"
+    if [[ ! -d "$child" || -L "$child" || $(stat -c %u:%g:%a "$child" 2>/dev/null) != 1000:1000:700 ]]; then
+      runtime_children_valid=false
+      break
+    fi
+  done
+  if [[ "$runtime_children_valid" == true && ! -L "$RUNTIME_ROOT" ]]; then
+    if [[ ! -e "$RUNTIME_ROOT" ]]; then install -d -o root -g root -m 0755 "$RUNTIME_ROOT" 2>/dev/null || true; fi
+    if [[ -d "$RUNTIME_ROOT" && $(stat -c %u:%g:%a "$RUNTIME_ROOT" 2>/dev/null) == 0:0:755 ]]; then
+      if mountpoint -q "$RUNTIME_ROOT"; then
+        source_id=$(stat -c %d:%i "$RUNTIME_SOURCE" 2>/dev/null || true)
+        active_id=$(stat -c %d:%i "$RUNTIME_ROOT" 2>/dev/null || true)
+        [[ -n "$source_id" && "$source_id" == "$active_id" ]] && runtime_ready=true
+      elif mount --bind "$RUNTIME_SOURCE" "$RUNTIME_ROOT" 2>/dev/null && mountpoint -q "$RUNTIME_ROOT"; then
+        source_id=$(stat -c %d:%i "$RUNTIME_SOURCE" 2>/dev/null || true)
+        active_id=$(stat -c %d:%i "$RUNTIME_ROOT" 2>/dev/null || true)
+        [[ -n "$source_id" && "$source_id" == "$active_id" ]] && runtime_ready=true
+      fi
+    fi
   fi
+fi
+args=(run --rm --name "$WORKER_CONTAINER" --network host --env-file "$WORKER_ENV_FILE" --volume "$MOUNT_PATH:$MOUNT_PATH")
+if [[ "$runtime_ready" == true ]]; then
+  args+=(--volume "$RUNTIME_ROOT:$RUNTIME_ROOT" --env CONTAINED_FOUNDATION_EVIDENCE_DIR="$RUNTIME_ROOT/evidence" --env TMPDIR="$RUNTIME_ROOT/tmp")
+else
+  log 'verifier unavailable; worker continues with /tmp'
+  args+=(--env TMPDIR=/tmp)
+fi
+args+=(--volume "$DOCKER_SOCKET:$DOCKER_SOCKET" --group-add "$docker_gid" --log-driver awslogs --log-opt awslogs-region="$(sed -n 's/^AWS_REGION=//p' "$WORKER_ENV_FILE")" --log-opt awslogs-group="$(cat /etc/agentx/log-group)" --log-opt awslogs-stream="$(sed -n 's/^AGENTX_WORKSPACE_ID=//p' "$WORKER_ENV_FILE")/$(sed -n 's/^AGENTX_SESSION_GENERATION=//p' "$WORKER_ENV_FILE")/$(cat /etc/agentx/instance-id)" "$worker_image")
+exec "$docker" "${args[@]}"
+LAUNCHER
+  chmod 0755 /usr/local/libexec/agentx-worker-start
+  printf '%s\n' "$AGENTX_LOG_GROUP" >/etc/agentx/log-group
+  printf '%s\n' "$instance_id" >/etc/agentx/instance-id
+  chmod 0600 /etc/agentx/log-group /etc/agentx/instance-id
 }
 
 # The container shares the host network, so the worker listens on the instance's port 8080 and
@@ -321,24 +387,20 @@ EOF
 # every container but its own (packages/worker/src/workspace-containers.ts), so this unit must stay
 # the only container the boot starts.
 write_worker_unit() {
-  local region=$1 instance_id=$2 docker docker_gid runtime_volume= runtime_mounts=
+  local region=$1 instance_id=$2 docker
   docker=$(command -v docker)
-  docker_gid=$(stat -c %g "$DOCKER_SOCKET")
-  if [[ "$CONTAINED_RUNTIME_AVAILABLE_BOOT" == true ]]; then
-    runtime_volume="--volume $RUNTIME_ROOT:$RUNTIME_ROOT"
-    runtime_mounts="$RUNTIME_ROOT"
-  fi
+  write_worker_launcher "$docker" "$instance_id"
   cat >"/etc/systemd/system/$WORKER_UNIT" <<EOF
 [Unit]
 Description=AgentX worker for workspace $AGENTX_WORKSPACE_ID generation $AGENTX_SESSION_GENERATION
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
-RequiresMountsFor=$MOUNT_PATH $runtime_mounts
+RequiresMountsFor=$MOUNT_PATH
 
 [Service]
 ExecStartPre=-$docker rm --force $WORKER_CONTAINER
-ExecStart=$docker run --rm --name $WORKER_CONTAINER --network host --env-file $WORKER_ENV_FILE --volume $MOUNT_PATH:$MOUNT_PATH $runtime_volume --volume $DOCKER_SOCKET:$DOCKER_SOCKET --group-add $docker_gid --log-driver awslogs --log-opt awslogs-region=$region --log-opt awslogs-group=$AGENTX_LOG_GROUP --log-opt awslogs-stream=$AGENTX_WORKSPACE_ID/$AGENTX_SESSION_GENERATION/$instance_id $AGENTX_WORKER_IMAGE
+ExecStart=/usr/local/libexec/agentx-worker-start
 ExecStop=$docker stop $WORKER_CONTAINER
 Restart=always
 RestartSec=5

@@ -1,5 +1,5 @@
 import type { WorkerInvocation } from "@agentx/contracts";
-import { inspectContainedRuntimeReadiness, type ContainedRuntimeReadiness } from "@agentx/verifier";
+import { CONTAINED_RUNTIME_PROFILE, inspectContainedRuntimeReadiness, type ContainedRuntimeReadiness } from "@agentx/verifier";
 import { OperationJournal } from "./journal.js";
 import { prepareWorkspace, preparedBaseResult } from "./prepare.js";
 import { createWorkerCallbackSinks } from "./callback-client.js";
@@ -20,6 +20,11 @@ import { executeWorkerCancelInvocation } from "./cancel-invocation.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
+const trustedRuntimeBackingOwner = CONTAINED_RUNTIME_PROFILE?.id === "linux-arm64-docker-v1"
+  && rootPath === "/mnt/workspace"
+  && CONTAINED_RUNTIME_PROFILE.stateRoot === "/mnt/agentx-runtime/state"
+  ? { uid: 0, gid: 0 }
+  : undefined;
 
 // Read first, so a partly configured EC2 boot fails before the port opens.
 const invokeAuthentication = invokeAuthenticationFromEnvironment();
@@ -49,6 +54,7 @@ const state = createWorkerServerState(
           rootPath,
           project: invocation.payload.project,
           creationIdentity: invocation.workspaceId,
+          ...(trustedRuntimeBackingOwner === undefined ? {} : { trustedRuntimeBackingOwner }),
           credentialProvider: createRepositoryCredentialProvider({
             controlPlaneUrl,
             invocation,

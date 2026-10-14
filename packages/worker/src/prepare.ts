@@ -41,6 +41,7 @@ import type {
 
 const execFileAsync = promisify(execFile);
 const MANIFEST_PATH = ".agentx/preparation-manifest.json";
+const RUNTIME_BACKING_DIRECTORY = ".agentx-runtime";
 const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
 /**
  * Docker's data root on an EC2 worker's workspace volume (#121), so images, containers and named
@@ -115,6 +116,8 @@ export interface PrepareWorkspaceOptions {
   devcontainerCli?: DevcontainerCli;
   /** Where preparation reports what it does not fail on. Messages arrive redacted. Default: the worker's log. */
   onDiagnostic?: (message: string) => void;
+  /** Internal worker-only trust anchor for the fixed top-level verifier backing directory. */
+  trustedRuntimeBackingOwner?: Readonly<{ uid: number; gid: number }>;
 }
 
 export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promise<PreparationManifest> {
@@ -124,6 +127,9 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
   const canonicalRoot = await realpath(rootPath);
   const materializer = options.materializer ?? cloneRepository;
   const target = devcontainerTarget(canonicalRoot, project);
+  const runtimeBackingPath = options.trustedRuntimeBackingOwner === undefined
+    ? undefined
+    : resolve(canonicalRoot, RUNTIME_BACKING_DIRECTORY);
   const devcontainerCli = target === undefined ? undefined : options.devcontainerCli ?? createDevcontainerCli();
   // With a devcontainer, setup and readiness run in it, like the agent's shell.
   const commandRunner = options.commandRunner
@@ -137,7 +143,7 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
   );
 
   if (manifest.complete) {
-    await assertContainedSymlinks(canonicalRoot);
+    await assertContainedSymlinks(canonicalRoot, canonicalRoot, options.trustedRuntimeBackingOwner);
     return manifest;
   }
 
@@ -145,6 +151,7 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
     for (const repository of project.repositories) {
       if (manifest.repositories.some((entry) => entry.name === repository.name)) continue;
       const destination = containedPath(canonicalRoot, repository.path);
+      assertRepositoryPathDoesNotOverlapRuntimeBacking(destination, runtimeBackingPath);
       const existing = await pathKind(destination);
       if (existing === "missing") {
         await mkdir(resolve(destination, ".."), { recursive: true });
@@ -164,7 +171,7 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
           `unrecorded checkout at ${repository.path} has HEAD ${head}; refusing to reset it`,
         );
       }
-      await assertContainedSymlinks(canonicalRoot);
+      await assertContainedSymlinks(canonicalRoot, canonicalRoot, options.trustedRuntimeBackingOwner);
       const now = new Date().toISOString();
       manifest.repositories.push({
         name: repository.name,
@@ -205,7 +212,7 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
       if (result.exitCode !== 0 || result.timedOut === true) {
         throw new Error(describeCommandFailure("setup step", index, command, result));
       }
-      await assertContainedSymlinks(canonicalRoot);
+      await assertContainedSymlinks(canonicalRoot, canonicalRoot, options.trustedRuntimeBackingOwner);
       manifest.completedSetupSteps.push(index);
       manifest = await writeManifest(canonicalRoot, withoutFailure(manifest));
     }
@@ -435,7 +442,36 @@ function containedPath(rootPath: string, configuredPath: string): string {
   return candidate;
 }
 
-async function assertContainedSymlinks(rootPath: string, directory = rootPath): Promise<void> {
+function pathContains(parent: string, candidate: string): boolean {
+  const fromParent = relative(parent, candidate);
+  return fromParent === "" || (fromParent !== ".." && !fromParent.startsWith(`..${sep}`) && !isAbsolute(fromParent));
+}
+
+function assertRepositoryPathDoesNotOverlapRuntimeBacking(repositoryPath: string, runtimeBackingPath: string | undefined): void {
+  if (runtimeBackingPath !== undefined
+    && (pathContains(runtimeBackingPath, repositoryPath) || pathContains(repositoryPath, runtimeBackingPath))) {
+    throw new Error("repository path overlaps the reserved verifier runtime backing directory");
+  }
+}
+
+async function assertTrustedRuntimeBacking(
+  rootPath: string,
+  runtimeBackingOwner: Readonly<{ uid: number; gid: number }>,
+): Promise<void> {
+  const backingPath = resolve(rootPath, RUNTIME_BACKING_DIRECTORY);
+  const metadata = await lstat(backingPath);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()
+    || metadata.uid !== runtimeBackingOwner.uid || metadata.gid !== runtimeBackingOwner.gid
+    || (metadata.mode & 0o777) !== 0o755 || await realpath(backingPath) !== backingPath) {
+    throw new Error("trusted verifier runtime backing directory is not the fixed private root");
+  }
+}
+
+async function assertContainedSymlinks(
+  rootPath: string,
+  directory = rootPath,
+  runtimeBackingOwner?: Readonly<{ uid: number; gid: number }>,
+): Promise<void> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -452,6 +488,10 @@ async function assertContainedSymlinks(rootPath: string, directory = rootPath): 
   }
   for (const entry of entries) {
     if (directory === rootPath && entry.name === DOCKER_DATA_DIRECTORY) continue;
+    if (directory === rootPath && runtimeBackingOwner !== undefined && entry.name === RUNTIME_BACKING_DIRECTORY) {
+      await assertTrustedRuntimeBacking(rootPath, runtimeBackingOwner);
+      continue;
+    }
     const entryPath = resolve(directory, entry.name);
     const metadata = await lstat(entryPath);
     if (metadata.isSymbolicLink()) {
@@ -463,7 +503,7 @@ async function assertContainedSymlinks(rootPath: string, directory = rootPath): 
       }
       containedPath(rootPath, relative(rootPath, target));
     } else if (metadata.isDirectory() && entry.name !== ".git") {
-      await assertContainedSymlinks(rootPath, entryPath);
+      await assertContainedSymlinks(rootPath, entryPath, runtimeBackingOwner);
     }
   }
 }
