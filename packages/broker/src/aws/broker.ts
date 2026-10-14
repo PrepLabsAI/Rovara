@@ -247,7 +247,9 @@ import { verifyProjectSetupCapability } from "./project-setup-capability.js";
 import { issueProjectSetupCapability } from "./project-setup-capability.js";
 import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke.js";
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission } from "../e2e/feature-plan-intent.js";
-import { e2eFeatureVerifierKey } from "./e2e-feature-verifier-catalog.js";
+import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
+import { workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
+import { createWorkflowE2EDisplayObject } from "./workflow-e2e-notifier-projection.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
   type CallbackClaims, type OperationRecord,
@@ -260,7 +262,7 @@ import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
+import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
@@ -344,6 +346,7 @@ interface MembershipRecord {
   ownerKey: string;
   projectName: string;
   role: "developer" | "administrator";
+  grantId: string;
 }
 
 interface ProjectModelSelectionRecord {
@@ -893,6 +896,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
+          workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
           refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
       }
       // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
@@ -1070,6 +1074,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
+          workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
           refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url), request.requestId);
       }
 
@@ -1759,15 +1764,20 @@ async function registerProject(
       { Update: {
         TableName: dependencies.tableName,
         Key: projectCatalogKey(definition.name),
-        UpdateExpression: "SET entityType = :entity, #name = :name, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+        UpdateExpression: "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+        ConditionExpression: "attribute_not_exists(latestRevision) OR latestRevision < :revision",
         ExpressionAttributeNames: { "#name": "name" },
-        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":now": now },
+        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":revision": definition.revision, ":now": now },
       } },
       ...(setupAdmissionRows?.transactionItems ?? []),
     ] }));
   } catch (error) {
     // A concurrent registration won; answer as a duplicate without contacting the vendor again.
-    if (isConditional(error)) return registerProject(dependencies, identity, value, preflight ? { preflight } : {});
+    if (isConditional(error)) {
+      const winner = await getItem<RegisteredProjectRecord>(dependencies, key);
+      if (winner !== undefined) return registerProject(dependencies, identity, value, preflight ? { preflight } : {});
+      throw agentXError("PROJECT_REVISION_MISMATCH", "a newer project revision was registered before this revision could be committed");
+    }
     throw error;
   }
   return respond(withoutKeys(record), false, preflight);
@@ -6101,32 +6111,40 @@ async function verifyProjectSetupSmokeEvidence(
   }
 }
 
+interface WorkflowE2EVerificationDiagnostic {
+  reason?: string;
+  /** Exact authority rows validated for this result, carried into the same task-state transaction. */
+  authorityChecks?: Array<Record<string, unknown>>;
+}
+
 /** Independently recompiles and collects every group; worker-supplied verdict fields are ignored. */
 async function verifyWorkflowE2EEvidence(
-  dependencies: Pick<AwsBrokerDependencies, "documentClient" | "tableName" | "s3" | "artifactBucketName">, operation: OperationRecord, task: DeveloperTaskRecord, candidate: ReturnType<typeof CandidateManifestSchema.parse>,
+  dependencies: AwsBrokerDependencies, operation: OperationRecord, task: DeveloperTaskRecord, candidate: ReturnType<typeof CandidateManifestSchema.parse>,
   projection?: { plan?: unknown; round?: unknown; results: unknown[]; allowStaleProjection?: boolean },
+  diagnostic?: WorkflowE2EVerificationDiagnostic,
 ): Promise<"PASS" | "FAILED" | "UNKNOWN"> {
+  const unavailable = (reason: string): "UNKNOWN" => { if (diagnostic !== undefined) diagnostic.reason = reason; return "UNKNOWN"; };
   try {
     const workflow = task.workflow;
-    if (workflow === undefined) return "UNKNOWN";
+    if (workflow === undefined) return unavailable("workflow-missing");
     const reference = operation.workflowE2EAdmission;
     const evidenceRef = operation.workflowE2EEvidenceRef;
     const staleProjection = projection?.allowStaleProjection === true;
     if (!reference || !evidenceRef || reference.taskId !== task.taskId || reference.candidateDigest !== candidate.digest
       || (!staleProjection && (workflow.e2e?.currentRoundId !== reference.roundId
-        || canonicalJson(workflow.e2e.currentGroupRunIds) !== canonicalJson(reference.groupRunIds)))) return "UNKNOWN";
+        || canonicalJson(workflow.e2e.currentGroupRunIds) !== canonicalJson(reference.groupRunIds)))) return unavailable("current-admission-reference-mismatch");
     const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
     const evidenceText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
     if (admissionText === undefined || evidenceText === undefined || createHash("sha256").update(admissionText).digest("hex") !== reference.admissionRef.sha256
       || Buffer.byteLength(admissionText) !== reference.admissionRef.byteLength || evidenceRef.key !== `workflow-e2e-evidence/sha256/${evidenceRef.sha256}.json`
-      || createHash("sha256").update(evidenceText).digest("hex") !== evidenceRef.sha256 || Buffer.byteLength(evidenceText) !== evidenceRef.byteLength) return "UNKNOWN";
+      || createHash("sha256").update(evidenceText).digest("hex") !== evidenceRef.sha256 || Buffer.byteLength(evidenceText) !== evidenceRef.byteLength) return unavailable("admission-or-evidence-reference-integrity");
     const admission = JSON.parse(admissionText) as Record<string, unknown>;
     const evidence = JSON.parse(evidenceText) as Record<string, unknown>;
     if (admission.schemaVersion !== "workflow-e2e-admission/v1" || evidence.schemaVersion !== "workflow-e2e-evidence/v1"
       || evidence.admissionSha256 !== reference.admissionRef.sha256 || evidence.taskId !== task.taskId || evidence.operationId !== operation.id
-      || evidence.operationFence !== operation.fence || evidence.workflowRevision !== reference.workflowRevision || evidence.candidateDigest !== candidate.digest) return "UNKNOWN";
+      || evidence.operationFence !== operation.fence || evidence.workflowRevision !== reference.workflowRevision || evidence.candidateDigest !== candidate.digest) return unavailable("admission-or-evidence-subject-binding");
     const sourceRecord = admission.sourceSnapshot as Record<string, unknown>;
-    if (!sourceRecord || !Array.isArray(sourceRecord.sources)) return "UNKNOWN";
+    if (!sourceRecord || !Array.isArray(sourceRecord.sources)) return unavailable("admitted-source-snapshot-shape");
     const snapshot = { ...sourceRecord, sources: sourceRecord.sources.map((raw) => {
       const row = raw as Record<string, unknown>;
       if (typeof row.path !== "string" || typeof row.sha256 !== "string" || row.kind !== "blob" || typeof row.bytesBase64 !== "string") throw new Error("invalid source row");
@@ -6140,7 +6158,7 @@ async function verifyWorkflowE2EEvidence(
     const plan = selectE2EExecutionPlan(selectionInput as never);
     const bundle = E2EScenarioBundleSchema.parse(admission.bundle);
     const round = E2ERoundSchema.parse(admission.round);
-    if (projection !== undefined) { projection.plan = plan; projection.round = round; }
+    const projectionResults: unknown[] = [];
     const runtime = admission.runtime as Record<string, unknown>;
     const runnerEnvironment = ProjectSetupRunnerEnvironmentSchema.parse(runtime.runnerEnvironment);
     const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse(runtime.runnerToolchain);
@@ -6151,36 +6169,36 @@ async function verifyWorkflowE2EEvidence(
       || round.roundId !== reference.roundId || round.taskId !== task.taskId || round.operationId !== operation.id || round.operationFence !== operation.fence
       || round.workflowRevision !== reference.workflowRevision || plan.groups.length === 0 || plan.groups.length !== groupAdmissions.length
       || plan.groups.length !== groupRuns.length || plan.groups.length !== reference.groupRunIds.length
-      || canonicalJson(plan) !== canonicalJson(admission.plan) || bundle.bundleDigest !== e2eScenarioBundleDigest(bundle)) return "UNKNOWN";
+      || canonicalJson(plan) !== canonicalJson(admission.plan) || bundle.bundleDigest !== e2eScenarioBundleDigest(bundle)) return unavailable("current-plan-round-or-group-binding");
     const semantic = (admission.portableApprovalBinding as { semanticApproval?: { digest?: unknown } } | undefined)?.semanticApproval?.digest;
-    if (typeof semantic !== "string" || !/^[a-f0-9]{64}$/u.test(semantic)) return "UNKNOWN";
+    if (typeof semantic !== "string" || !/^[a-f0-9]{64}$/u.test(semantic)) return unavailable("semantic-approval-binding");
     const semanticApprovalDigests = new Map(bundle.scenarios.map((scenario) => [scenario.scenarioId, semantic]));
     const qualifications: Array<"PASS" | "FAILED" | "UNKNOWN"> = [];
     for (const [index, group] of plan.groups.entries()) {
       const admitted = groupAdmissions[index]; const run = groupRuns[index];
-      if (!admitted || !run || canonicalJson(admitted.group) !== canonicalJson(group) || canonicalJson(run.group) !== canonicalJson(group)) return "UNKNOWN";
+      if (!admitted || !run || canonicalJson(admitted.group) !== canonicalJson(group) || canonicalJson(run.group) !== canonicalJson(group)) return unavailable("admitted-group-identity");
       const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput, executionPlan: plan, group } as never);
       if (admitted.expectedConfigDigest !== compiled.expectedConfigDigest || admitted.compiledInventoryDigest !== compiled.inventory.digest
-        || admitted.selectionPacketPath !== compiled.selectionPacketPath || canonicalJson(admitted.expectedCases) !== canonicalJson(compiled.expectedCases)) return "UNKNOWN";
+        || admitted.selectionPacketPath !== compiled.selectionPacketPath || canonicalJson(admitted.expectedCases) !== canonicalJson(compiled.expectedCases)) return unavailable("compiled-group-expectations");
       const binding = E2ERunBindingSchema.parse(admitted.binding);
       if (binding.runId !== reference.groupRunIds[index] || binding.taskId !== task.taskId || binding.operationId !== operation.id
         || binding.operationFence !== operation.fence || binding.workflowRevision !== reference.workflowRevision || binding.candidateDigest !== candidate.digest
-        || binding.roundId !== reference.roundId || canonicalJson(round.groupBindings[index]) !== canonicalJson(binding) || canonicalJson(run.binding) !== canonicalJson(binding)) return "UNKNOWN";
+        || binding.roundId !== reference.roundId || canonicalJson(round.groupBindings[index]) !== canonicalJson(binding) || canonicalJson(run.binding) !== canonicalJson(binding)) return unavailable("group-run-binding");
       const selection = JSON.parse(compiled.files.get(compiled.selectionPacketPath) ?? "null") as unknown;
-      if (canonicalJson(run.selection) !== canonicalJson(selection) || !Array.isArray(run.hostRequestIds)) return "UNKNOWN";
+      if (canonicalJson(run.selection) !== canonicalJson(selection) || !Array.isArray(run.hostRequestIds)) return unavailable("compiled-selection-or-host-request-list");
       const hostRequestIds = new Map<string, string>();
       for (const entry of run.hostRequestIds) {
-        if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string" || typeof entry[1] !== "string" || hostRequestIds.has(entry[0])) return "UNKNOWN";
+        if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string" || typeof entry[1] !== "string" || hostRequestIds.has(entry[0])) return unavailable("host-request-identity-list");
         hostRequestIds.set(entry[0], entry[1]);
       }
-      if (hostRequestIds.size !== compiled.hostRequestPayloads.size) return "UNKNOWN";
+      if (hostRequestIds.size !== compiled.hostRequestPayloads.size) return unavailable("host-request-count");
       const rawActual = run.actual as Record<string, unknown>;
       if (!rawActual || typeof rawActual.launchId !== "string" || typeof rawActual.rawReportBase64 !== "string" || typeof rawActual.runStartCaptureBase64 !== "string"
         || canonicalJson(rawActual.runnerToolchain) !== canonicalJson(runnerToolchain) || !Array.isArray(rawActual.candidateCaptures)
-        || !Array.isArray(rawActual.assertionReceipts) || typeof rawActual.cleanupConfirmed !== "boolean" || typeof rawActual.cleanupServerListening !== "boolean") return "UNKNOWN";
+        || !Array.isArray(rawActual.assertionReceipts) || typeof rawActual.cleanupConfirmed !== "boolean" || typeof rawActual.cleanupServerListening !== "boolean") return unavailable("actual-run-capture-shape-or-toolchain");
       const rawReportBytes = Buffer.from(rawActual.rawReportBase64, "base64");
       const runStartCaptureBytes = Buffer.from(rawActual.runStartCaptureBase64, "base64");
-      if (rawReportBytes.toString("base64") !== rawActual.rawReportBase64 || runStartCaptureBytes.toString("base64") !== rawActual.runStartCaptureBase64) return "UNKNOWN";
+      if (rawReportBytes.toString("base64") !== rawActual.rawReportBase64 || runStartCaptureBytes.toString("base64") !== rawActual.runStartCaptureBase64) return unavailable("actual-run-capture-encoding");
       const actual = { ...rawActual, rawReportBytes: new Uint8Array(rawReportBytes), runStartCaptureBytes: new Uint8Array(runStartCaptureBytes),
         runStartCapture: parseE2EFirstPartyCapture(runStartCaptureBytes, rawActual.launchId), evidenceDirectory: "" } as never;
       const result = collectE2EActualCliRun({ actual, compiled, binding, round, selection: selection as never,
@@ -6191,11 +6209,11 @@ async function verifyWorkflowE2EEvidence(
         usage: { discoveredResults: Number(rawActual.selected) + Number(rawActual.filtered), maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 },
         limits: { maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 } });
       const process = rawActual.runProcess as Record<string, unknown> | undefined;
-      if (projection !== undefined && result.qualification?.result !== null && result.qualification?.result !== undefined) {
+      if (result.qualification?.result !== null && result.qualification?.result !== undefined) {
         // This is a broker-side projection of the independently re-collected result. The raw
         // collector labels its structural output exploratory; only this verified path promotes
         // the projection after matching the stored admission, source, round, capture and receipts.
-        projection.results.push({ ...result.qualification.result, producer: "broker-independent-e2e-verifier", qualification: "trusted",
+        projectionResults.push({ ...result.qualification.result, producer: "broker-independent-e2e-verifier", qualification: "trusted",
           ...(process?.status === 0 && process.signal === null && process.aborted === false && process.timedOut === false ? {} : { status: "failed", reason: "host-process-failed" }) });
       }
       if (process?.status !== 0 || process.signal !== null || process.aborted !== false || process.timedOut !== false) qualifications.push("FAILED");
@@ -6204,14 +6222,220 @@ async function verifyWorkflowE2EEvidence(
     // Re-collect every supported admitted group for an honest scoped projection even when a
     // required criterion has no executable source-interface case. That criterion still holds
     // aggregate readiness: incomplete required coverage can never become PASS.
-    if (!e2ePlanHasCompleteRequiredCriteria(plan)) return "UNKNOWN";
+    const currentAuthorityValid = await workflowE2ECurrentAuthorityIsValid(dependencies, task, candidate, admission, snapshot, diagnostic);
+    if (projection !== undefined) {
+      projection.plan = plan;
+      projection.round = round;
+      if (currentAuthorityValid) projection.results.push(...projectionResults);
+    }
+    if (!currentAuthorityValid) return unavailable(diagnostic?.reason ?? "current-owner-policy-source-or-runtime-authority");
+    if (!e2ePlanHasCompleteRequiredCriteria(plan)) return unavailable("required-criteria-unavailable");
     return qualifications.includes("FAILED") ? "FAILED" : qualifications.every((item) => item === "PASS") ? "PASS" : "UNKNOWN";
-  } catch { return "UNKNOWN"; }
+  } catch { return unavailable("verification-exception"); }
+}
+
+/** Rebuilds the admitted feature context from current canonical approval, project policy, source and runtime rows. */
+async function workflowE2ECurrentAuthorityIsValid(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord,
+  candidate: ReturnType<typeof CandidateManifestSchema.parse>,
+  admission: Record<string, unknown>,
+  admittedSnapshot: E2ESourceSnapshot,
+  diagnostic?: WorkflowE2EVerificationDiagnostic,
+): Promise<boolean> {
+  const reject = (reason: string): false => { if (diagnostic !== undefined) diagnostic.reason = reason; return false; };
+  let stage = "workflow";
+  try {
+    const workflow = task.workflow;
+    const approval = workflow?.workflowDependenciesApproval;
+    const artifact = approval === undefined ? undefined : workflow?.artifacts.find((entry) => entry.type === "plan" && entry.sha256 === approval.artifactDigest);
+    const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
+    if (!workflow || workflow.e2e?.required !== true || workflow.candidate?.digest !== candidate.digest || !approval || !artifact || !catalogId
+      || task.closedAt !== undefined) return reject("current-task-or-approval-missing");
+    stage = "canonical-artifact";
+    const approved = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), artifact, {});
+    if (approved?.format !== "structured" || approved.plan.e2e === undefined
+      || !workflow.decisions.some((decision) => decision.decision === "APPROVE" && decision.actorId === approval.actorId
+        && decision.artifactDigest === approval.artifactDigest && decision.workBreakdownDigest === approval.graphDigest
+        && decision.workflowRevision === approval.workflowRevision)) return reject("canonical-artifact-or-owner-decision-mismatch");
+    stage = "project-record";
+    const project = await requireProject(dependencies, task.project, task.startingRevision);
+    const latestProject = await requireLatestProject(dependencies, task.project);
+    if (latestProject.setupApproval === undefined) return reject("current-project-setup-approval-unavailable");
+    const catalogKey = projectCatalogKey(task.project);
+    const projectCatalog = await getItem<Record<string, unknown>>(dependencies, catalogKey);
+    if (projectCatalog?.entityType !== "PROJECT_CATALOG" || projectCatalog.name !== task.project
+      || projectCatalog.latestRevision !== latestProject.definition.revision) return reject("current-project-latest-revision-unavailable");
+    const policy = E2EPolicySchema.parse(latestProject.definition.e2e);
+    const pinnedPolicy = E2EPolicySchema.parse(project.definition.e2e);
+    if (canonicalJson(policy) !== canonicalJson(pinnedPolicy)
+      || canonicalJson(parseRuntimeBinding(latestProject.runtimeBinding)) !== canonicalJson(parseRuntimeBinding(project.runtimeBinding))) {
+      return reject("current-project-policy-or-runtime-changed");
+    }
+    stage = "creator-project-access";
+    const creator = await getItem<DeveloperRecord>(dependencies, { pk: `DEVELOPER#${task.developerId}`, sk: "META" });
+    if (creator === undefined || creator.revoked || dependencies.developer === undefined) return reject("current-creator-identity-unavailable");
+    let creatorAccess: Awaited<ReturnType<typeof checkProjectAccess>>;
+    try {
+      creatorAccess = await checkProjectAccess({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+        developer: dependencies.developer, now: Date.now },
+      { developerId: task.developerId, ...(creator.slackUserId === undefined ? {} : { slackUserId: creator.slackUserId }) }, task.project);
+    } catch { return reject("current-creator-project-access-unavailable"); }
+    const creatorMembershipKey = { pk: `MEMBER#${task.developerId}`, sk: `PROJECT#${task.project}` };
+    const creatorMembership = await getItem<Record<string, unknown>>(dependencies, creatorMembershipKey);
+    const creatorAuthority = await workflowE2ECreatorAuthorityProof(dependencies, task, creatorMembership, creatorAccess);
+    if (creatorAuthority === undefined || canonicalJson(admission.creatorAuthority) !== canonicalJson(creatorAuthority)) {
+      return reject("creator-membership-proof-changed-or-unavailable");
+    }
+    stage = "candidate-source-operation";
+    const sourceOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
+      .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "IMPLEMENT")
+      .map((item) => item as unknown as OperationRecord)
+      .filter((item) => item.candidateSourceRef?.candidateDigest === candidate.digest)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    const sourceOperation = sourceOperations[0];
+    if (!sourceOperation) return reject("candidate-source-operation-missing");
+    stage = "candidate-source-export";
+    const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, sourceOperation, candidate);
+    if (!sourceExport || sourceExport.repositories.length !== 1) return reject("candidate-source-export-missing-or-ambiguous");
+    const repository = sourceExport.repositories[0]!;
+    const snapshot: E2ESourceSnapshot = { candidate, commitSha: repository.commitSha, treeSha: repository.treeSha, treeComplete: true,
+      treePaths: repository.treePaths, sources: repository.sources.map((source) => ({ path: source.path, sha256: source.sha256,
+        kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") })) };
+    stage = "current-feature-runtime";
+    const featureRow = await getItem<Record<string, unknown>>(dependencies, e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId));
+    const runtimeBinding = parseRuntimeBinding(project.runtimeBinding);
+    const parsedFeatureRow = featureRow === undefined || typeof featureRow.pk !== "string" || typeof featureRow.sk !== "string"
+      ? undefined : E2EFeatureVerifierRecordSchema.safeParse(Object.fromEntries(Object.entries(featureRow).filter(([key]) => key !== "pk" && key !== "sk")));
+    if (parsedFeatureRow === undefined || !parsedFeatureRow.success) return reject("current-feature-runtime-schema-invalid");
+    const admittedRuntime = admitE2EFeatureVerifier(featureRow, { runtimeCatalogId: catalogId, profileId: policy.defaultSandboxProfileId,
+      binding: runtimeBinding, scope: E2E_FEATURE_PROCESS_RESPONSE_SCOPE, now: Date.now() });
+    if (!admittedRuntime) {
+      const record = parsedFeatureRow.data;
+      const expectedKey = e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId);
+      if (featureRow?.pk !== expectedKey.pk || featureRow.sk !== expectedKey.sk) return reject("current-feature-runtime-storage-key-mismatch");
+      if (record.state !== "READY") return reject("current-feature-runtime-not-ready");
+      if (record.runtimeCatalogId !== catalogId || record.profileId !== policy.defaultSandboxProfileId) return reject("current-feature-runtime-catalog-or-profile-mismatch");
+      if (record.bindingDigest !== projectSetupBindingDigest(runtimeBinding) || canonicalJson(record.binding) !== canonicalJson(runtimeBinding)) return reject("current-feature-runtime-binding-mismatch");
+      if (!record.supportedFeatureScopes.includes(E2E_FEATURE_PROCESS_RESPONSE_SCOPE)) return reject("current-feature-runtime-scope-mismatch");
+      if (Date.parse(record.qualifiedAt) > Date.now() || Date.parse(record.expiresAt) <= Date.now()) return reject("current-feature-runtime-freshness-mismatch");
+      return reject("current-feature-runtime-admission-mismatch");
+    }
+    const planDigest = createHash("sha256").update(canonicalJson({
+      domain: "workflow-feature-e2e-approved-plan/v1", taskId: task.taskId, artifactId: artifact.id, artifactSha256: artifact.sha256,
+      graphDigest: approval.graphDigest, graphRunId: approval.runId, workflowRevision: approval.workflowRevision, actorId: approval.actorId,
+    })).digest("hex");
+    stage = "current-admission-derivation";
+    const currentAdmission = deriveE2EFeatureExecutionAdmission({ intent: approved.plan.e2e, snapshot, artifactId: artifact.id,
+      artifactSha256: artifact.sha256, planDigest, policy, runtimeCatalogId: catalogId, runtimeBinding,
+      featureVerifier: featureRow, now: Date.now() });
+    const binding = admission.portableApprovalBinding as { semanticApproval?: { artifactId?: unknown; digest?: unknown }; planDigest?: unknown } | undefined;
+    const semantic = binding?.semanticApproval;
+    if (semantic?.artifactId !== artifact.id || semantic.digest !== artifact.sha256 || binding?.planDigest !== planDigest) return reject("canonical-approval-binding-mismatch");
+    const approvalRecord = { artifactId: artifact.id, artifactDigest: artifact.sha256, graphDigest: approval.graphDigest,
+      runId: approval.runId, workflowRevision: approval.workflowRevision, actorId: approval.actorId };
+    const authorityMatches = workflowE2ECurrentAuthorityMatches({
+      admission: { candidateDigest: candidate.digest, intent: admission.intent, policy: admission.policy, runtime: admission.runtime,
+        portableApprovalBinding: admission.portableApprovalBinding, creatorAuthority: admission.creatorAuthority, approval: approvalRecord },
+      current: { candidateDigest: candidate.digest, intent: approved.plan.e2e, policy, runtime: currentAdmission.runtime,
+        portableApprovalBinding: currentAdmission.portableApprovalBinding, creatorAuthority, approval: approvalRecord, approvedDecision: true,
+        creatorHasProjectAccess: true, now: Date.now() },
+    }) && canonicalJson(admission.plan) === canonicalJson(currentAdmission.plan)
+      && canonicalJson(admission.bundle) === canonicalJson(currentAdmission.bundle)
+      && sameE2ESourceSnapshot(admittedSnapshot, snapshot);
+    if (!authorityMatches) return reject("current-admission-runtime-plan-or-source-mismatch");
+    const key = e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId);
+    const feature = parsedFeatureRow.data;
+    const authorityChecks: Array<Record<string, unknown>> = [
+      { ConditionCheck: { TableName: dependencies.tableName, Key: catalogKey,
+        ConditionExpression: "entityType = :entity AND #name = :name AND latestRevision = :revision",
+        ExpressionAttributeNames: { "#name": "name" },
+        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": task.project, ":revision": latestProject.definition.revision } } },
+      { ConditionCheck: { TableName: dependencies.tableName, Key: projectKey(task.project, latestProject.definition.revision),
+        ConditionExpression: "entityType = :entity AND registeredBy = :registeredBy AND #definition.#e2e = :policy AND runtimeBinding = :binding AND setupApproval = :setupApproval",
+        ExpressionAttributeNames: { "#definition": "definition", "#e2e": "e2e" },
+        ExpressionAttributeValues: { ":entity": "PROJECT", ":registeredBy": latestProject.registeredBy, ":policy": policy,
+          ":binding": latestProject.runtimeBinding, ":setupApproval": latestProject.setupApproval } } },
+      { ConditionCheck: { TableName: dependencies.tableName, Key: { pk: `DEVELOPER#${task.developerId}`, sk: "META" },
+        ConditionExpression: "developerId = :developerId AND revoked = :notRevoked",
+        ExpressionAttributeValues: { ":developerId": task.developerId, ":notRevoked": false } } },
+      { ConditionCheck: { TableName: dependencies.tableName, Key: key,
+        ConditionExpression: "entityType = :entity AND #state = :ready AND runtimeCatalogId = :catalog AND catalogRevision = :catalogRevision AND profileId = :profile AND bindingDigest = :bindingDigest AND binding = :binding AND manifestDigest = :manifestDigest AND runnerEnvironmentDigest = :environmentDigest AND runnerEnvironment = :environment AND runnerToolchainDigest = :toolchainDigest AND runnerToolchain = :toolchain AND generation = :generation AND transportCorrelationId = :correlation AND supportedFeatureScopes = :scopes AND qualifiedAt = :qualifiedAt AND expiresAt = :expiresAt",
+        ExpressionAttributeNames: { "#state": "state" },
+        ExpressionAttributeValues: { ":entity": "E2E_FEATURE_VERIFIER", ":ready": "READY", ":catalog": feature.runtimeCatalogId,
+          ":catalogRevision": feature.catalogRevision, ":profile": feature.profileId, ":bindingDigest": feature.bindingDigest, ":binding": feature.binding,
+          ":manifestDigest": feature.manifestDigest, ":environmentDigest": feature.runnerEnvironmentDigest, ":environment": feature.runnerEnvironment,
+          ":toolchainDigest": feature.runnerToolchainDigest, ":toolchain": feature.runnerToolchain, ":generation": feature.generation,
+          ":correlation": feature.transportCorrelationId, ":scopes": feature.supportedFeatureScopes, ":qualifiedAt": feature.qualifiedAt, ":expiresAt": feature.expiresAt } } },
+    ];
+    if (creatorAuthority.kind === "direct-membership") {
+      authorityChecks.push({ ConditionCheck: { TableName: dependencies.tableName, Key: creatorMembershipKey,
+      ConditionExpression: "entityType = :entity AND ownerKey = :ownerKey AND projectName = :project AND #role = :role AND grantId = :grantId",
+      ExpressionAttributeNames: { "#role": "role" },
+      ExpressionAttributeValues: { ":entity": "MEMBERSHIP", ":ownerKey": task.developerId, ":project": task.project,
+        ":role": creatorAuthority.role, ":grantId": creatorAuthority.grantId } } });
+    }
+    if (creatorAccess.access === "channel") {
+      const teamId = dependencies.developer.slackTeamId;
+      if (teamId === undefined || creatorAccess.channelIds.length === 0) return reject("current-channel-access-proof-unavailable");
+      for (const channelId of creatorAccess.channelIds) {
+        const bindingKey: { pk: string; sk: string } = { pk: `SLACK_BINDING#${teamId}`, sk: `CHANNEL#${channelId}` };
+        const binding: Record<string, unknown> | undefined = await getItem<Record<string, unknown>>(dependencies, bindingKey);
+        if (binding?.teamId !== teamId || binding.channelId !== channelId || binding.projectName !== task.project
+          || typeof binding.updatedAt !== "string" || binding.updatedAt.length === 0) return reject("current-channel-binding-unavailable");
+        authorityChecks.push({ ConditionCheck: { TableName: dependencies.tableName, Key: bindingKey,
+          ConditionExpression: "teamId = :teamId AND channelId = :channelId AND projectName = :projectName AND updatedAt = :updatedAt",
+          ExpressionAttributeValues: { ":teamId": teamId, ":channelId": channelId, ":projectName": task.project, ":updatedAt": binding.updatedAt } } });
+      }
+    }
+    if (diagnostic !== undefined) diagnostic.authorityChecks = authorityChecks;
+    return true;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message.replace(/[^A-Za-z0-9 _./:-]/gu, "?").slice(0, 120) : "unknown-error";
+    return reject(`current-authority-loader-exception:${stage}:${detail || "empty-error"}`);
+  }
+}
+
+async function workflowE2ECreatorAuthorityProof(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord,
+  membership: Record<string, unknown> | undefined,
+  access: Awaited<ReturnType<typeof checkProjectAccess>>,
+): Promise<({ kind: "direct-membership"; developerId: string; project: string; role: "developer" | "administrator"; grantId: string }
+  | { kind: "channel-access"; developerId: string; project: string; teamId: string; channelIds: string[]; bindings: Array<{ channelId: string; updatedAt: string }> }) | undefined> {
+  if (membership?.entityType === "MEMBERSHIP" && membership.ownerKey === task.developerId && membership.projectName === task.project
+    && (membership.role === "developer" || membership.role === "administrator") && typeof membership.grantId === "string"
+    && /^[0-9a-f-]{36}$/iu.test(membership.grantId)) {
+    return { kind: "direct-membership", developerId: task.developerId, project: task.project, role: membership.role, grantId: membership.grantId };
+  }
+  if (access.access !== "channel" || dependencies.developer?.slackTeamId === undefined || access.channelIds.length === 0) return undefined;
+  const teamId = dependencies.developer.slackTeamId;
+  const channelIds = [...new Set(access.channelIds)].sort();
+  const bindings: Array<{ channelId: string; updatedAt: string }> = [];
+  for (const channelId of channelIds) {
+    const row = await getItem<Record<string, unknown>>(dependencies, { pk: `SLACK_BINDING#${teamId}`, sk: `CHANNEL#${channelId}` });
+    if (row?.teamId !== teamId || row.channelId !== channelId || row.projectName !== task.project
+      || typeof row.updatedAt !== "string" || row.updatedAt.length === 0) return undefined;
+    bindings.push({ channelId, updatedAt: row.updatedAt });
+  }
+  return { kind: "channel-access", developerId: task.developerId, project: task.project, teamId, channelIds, bindings };
+}
+
+function sameE2ESourceSnapshot(left: E2ESourceSnapshot, right: E2ESourceSnapshot): boolean {
+  if (canonicalJson(left.candidate) !== canonicalJson(right.candidate) || left.commitSha !== right.commitSha || left.treeSha !== right.treeSha
+    || left.treeComplete !== right.treeComplete || canonicalJson(left.treePaths) !== canonicalJson(right.treePaths)
+    || left.sources.length !== right.sources.length) return false;
+  const rightByPath = new Map(right.sources.map((source) => [source.path, source]));
+  return left.sources.every((source) => {
+    const actual = rightByPath.get(source.path);
+    return actual !== undefined && source.sha256 === actual.sha256 && source.kind === actual.kind
+      && Buffer.from(source.bytes).equals(Buffer.from(actual.bytes));
+  });
 }
 
 /** Builds task projections only after reloading and independently qualifying the stored current CHECKS evidence. */
 async function workflowE2EPresentation(
-  dependencies: Pick<AwsBrokerDependencies, "documentClient" | "tableName" | "s3" | "artifactBucketName">,
+  dependencies: AwsBrokerDependencies,
   task: DeveloperTaskRecord,
   operations: readonly unknown[],
   actor: "owner" | "viewer",
@@ -6262,9 +6486,39 @@ async function workflowE2EPresentation(
   return undefined;
 }
 
+/** Reloads the exact current CHECKS evidence for publication and returns its final-effect fences. */
+async function workflowE2EPublicationChecks(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord,
+  operations: readonly unknown[],
+): Promise<TransactItems | undefined> {
+  if (task.workflow?.e2e?.required !== true) return [];
+  const candidate = CandidateManifestSchema.safeParse(task.workflow.candidate);
+  const roundId = task.workflow.e2e.currentRoundId;
+  if (!candidate.success || roundId === undefined || task.closedAt !== undefined) return undefined;
+  const candidates = operations.flatMap((raw) => {
+    if (typeof raw !== "object" || raw === null || !("id" in raw) || typeof raw.id !== "string") return [];
+    return [raw.id];
+  });
+  const checks: OperationRecord[] = [];
+  for (const id of candidates) {
+    const operation = await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, id));
+    if (operation?.entityType === "OPERATION" && operation.kind === "task" && operation.workflowMode === "CHECKS"
+      && operation.workflowE2EAdmission?.taskId === task.taskId && operation.workflowE2EAdmission.roundId === roundId
+      && operation.workflowE2EAdmission.candidateDigest === candidate.data.digest && operation.workflowE2EEvidenceRef !== undefined) checks.push(operation);
+  }
+  checks.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const operation = checks[0];
+  if (operation === undefined) return undefined;
+  const diagnostic: WorkflowE2EVerificationDiagnostic = {};
+  if (await verifyWorkflowE2EEvidence(dependencies, operation, task, candidate.data, undefined, diagnostic) !== "PASS"
+    || diagnostic.authorityChecks === undefined || diagnostic.authorityChecks.length === 0) return undefined;
+  return diagnostic.authorityChecks;
+}
+
 /** Shared loader for authenticated task detail, page, and notifier projections. */
 export async function loadWorkflowE2EPresentation(
-  dependencies: Pick<AwsBrokerDependencies, "documentClient" | "tableName" | "s3" | "artifactBucketName">,
+  dependencies: AwsBrokerDependencies,
   task: DeveloperTaskRecord,
   operations: readonly unknown[],
   actor: "owner" | "viewer" = "viewer",
@@ -8112,6 +8366,8 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     const routeDependencies = developerTaskRouteDependencies({
       documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
       now: Date.now, tasks: developerTaskActions(dependencies), refreshTaskFeedback: (taskId) => refreshTaskFeedbackForOwnerDecision(dependencies, taskId),
+      workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
+      workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
     }, caller, undefined, null);
     const expected = { workflowRevision: item.workflowRevision, candidateDigest: item.candidateDigest };
     // A fix for the pull requests already open is pushed to them by the same start, which sees they exist.
@@ -8205,6 +8461,19 @@ async function startWorkflowE2EChecksDispatch(
     intent: approved.plan.e2e, snapshot, artifactId: artifact.id, artifactSha256: artifact.sha256, planDigest,
     policy, runtimeCatalogId: catalogId, runtimeBinding: project.runtimeBinding, featureVerifier: featureRecord, now: Date.now(),
   });
+  const creatorRecord = await getItem<DeveloperRecord>(dependencies, { pk: `DEVELOPER#${task.developerId}`, sk: "META" });
+  if (creatorRecord === undefined || creatorRecord.revoked || dependencies.developer === undefined) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the original creator identity is unavailable for this E2E round");
+  }
+  let creatorAccess: Awaited<ReturnType<typeof checkProjectAccess>>;
+  try {
+    creatorAccess = await checkProjectAccess({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+      developer: dependencies.developer, now: Date.now },
+    { developerId: task.developerId, ...(creatorRecord.slackUserId === undefined ? {} : { slackUserId: creatorRecord.slackUserId }) }, task.project);
+  } catch { throw agentXError("RUNTIME_UNAVAILABLE", "the original creator's current project access is unavailable"); }
+  const creatorMembership = await getItem<Record<string, unknown>>(dependencies, { pk: `MEMBER#${task.developerId}`, sk: `PROJECT#${task.project}` });
+  const creatorAuthority = await workflowE2ECreatorAuthorityProof(dependencies, task, creatorMembership, creatorAccess);
+  if (creatorAuthority === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the creator has no versioned direct or locally bound channel access proof for this E2E round");
   const workspace = await routeDependencies.actions.workspace(task.workspaceId);
   const operationId = randomUUID();
   const fence = workspace.fence + 1;
@@ -8222,7 +8491,7 @@ async function startWorkflowE2EChecksDispatch(
     candidateDigest: candidate.digest, sourceSnapshot: { ...snapshot, sources: snapshot.sources.map((source) => ({ path: source.path,
       sha256: source.sha256, kind: source.kind, bytesBase64: Buffer.from(source.bytes).toString("base64") })) },
     intent: approved.plan.e2e, policy, runtime: featureAdmission.runtime, plan: featureAdmission.plan, bundle: featureAdmission.bundle,
-    selectionInput: storedSelectionInput, portableApprovalBinding: featureAdmission.portableApprovalBinding,
+    selectionInput: storedSelectionInput, portableApprovalBinding: featureAdmission.portableApprovalBinding, creatorAuthority,
     round: built.round, groupAdmissions: built.groupAdmissions,
   };
   const admissionBytes = Buffer.from(canonicalJson(admissionObject), "utf8");
@@ -8586,6 +8855,7 @@ async function completedWorkflowItems(
   let evidenceJob: { artifactId: string; artifactSha256: string } | undefined;
   /** The record of the comments the planner answered, committed with the plan it answered them in. */
   let recordedReplies: ReturnType<typeof plannerRepliesItem> | undefined;
+  let e2eAuthorityChecks: Array<Record<string, unknown>> = [];
   if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") {
     const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
     const dependencyBinding = operation.workflowDependencies;
@@ -8694,14 +8964,21 @@ async function completedWorkflowItems(
             verificationFailure = "the current candidate-bound E2E round or its private evidence is missing";
             throw new Error(verificationFailure);
           }
-          const qualification = await verifyWorkflowE2EEvidence(dependencies, operation, task, candidate);
+          const e2eDiagnostic: WorkflowE2EVerificationDiagnostic = {};
+          const qualification = await verifyWorkflowE2EEvidence(dependencies, operation, task, candidate, undefined, e2eDiagnostic);
+          e2eAuthorityChecks = e2eDiagnostic.authorityChecks ?? [];
+          if (e2eAuthorityChecks.length === 0) {
+            verificationFailure = "current E2E authority snapshot could not be fenced at terminal persistence";
+            throw new Error(verificationFailure);
+          }
           if (qualification !== "PASS") {
             if (qualification === "FAILED" && operation.workflowE2EAdmission !== undefined && operation.workflowE2EEvidenceRef !== undefined) {
               failedE2ERound = { status: "FAILED", candidateDigest: candidate.digest, roundId: operation.workflowE2EAdmission.roundId,
                 groupRunIds: [...operation.workflowE2EAdmission.groupRunIds], admissionSha256: operation.workflowE2EAdmission.admissionRef.sha256,
                 evidenceSha256: operation.workflowE2EEvidenceRef.sha256 };
             }
-            verificationFailure = qualification === "FAILED" ? "one or more admitted E2E groups failed" : "admitted E2E evidence is incomplete or unknown";
+            verificationFailure = qualification === "FAILED" ? "one or more admitted E2E groups failed"
+              : `admitted E2E evidence is incomplete or unknown${e2eDiagnostic.reason === undefined ? "" : ` (${e2eDiagnostic.reason})`}`;
             throw new Error(verificationFailure);
           }
           const admittedE2E = task.workflow.e2e;
@@ -8830,6 +9107,22 @@ async function completedWorkflowItems(
         if (task.workflow.stage !== "REVIEW" || task.workflow.candidate?.digest !== candidate.digest) {
           throw new Error("review result is stale, incomplete, or came from another operation");
         }
+        if (task.workflow.e2e?.required === true) {
+          const currentRoundId = task.workflow.e2e.currentRoundId;
+          const checksOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
+            .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "CHECKS")
+            .map((item) => item as unknown as OperationRecord)
+            .filter((item) => item.workflowE2EAdmission?.candidateDigest === candidate.digest
+              && item.workflowE2EAdmission.roundId === currentRoundId && item.workflowE2EEvidenceRef !== undefined)
+            .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+          const checksOperation = checksOperations[0];
+          const e2eDiagnostic: WorkflowE2EVerificationDiagnostic = {};
+          if (checksOperation === undefined || await verifyWorkflowE2EEvidence(dependencies, checksOperation, task, candidate, undefined, e2eDiagnostic) !== "PASS") {
+            throw new Error("current E2E evidence is not independently qualified for review");
+          }
+          e2eAuthorityChecks = e2eDiagnostic.authorityChecks ?? [];
+          if (e2eAuthorityChecks.length === 0) throw new Error("current E2E authority snapshot could not be fenced at review persistence");
+        }
         // Validate every report's complete contract and provenance before deciding that a role is missing.
         for (const review of reviews) {
           if (review === null || typeof review !== "object" || (review as Record<string, unknown>).operationId !== operation.id) {
@@ -8938,10 +9231,25 @@ async function completedWorkflowItems(
       : [];
   // A saved plan forgets the reasons an earlier answer was unreadable; an unreadable answer keeps its own for Retry planning.
   const forget = planUnreadable === null && task.planUnreadable !== undefined;
+  if (operation.kind === "task" && operation.workflowMode === "CHECKS" && task.workflow.e2e?.required === true
+    && operation.workflowE2EAdmission !== undefined && operation.workflowE2EEvidenceRef !== undefined
+    && next.e2e !== undefined && task.workflow.candidate !== undefined) {
+    const rawOperations = await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#");
+    const presentation = await workflowE2EPresentation(dependencies, task, rawOperations, "viewer");
+    const display = presentation === undefined ? undefined : createWorkflowE2EDisplayObject({ ownerKey: task.ownerKey, workspaceId: task.workspaceId,
+      view: presentation.shared, current: { candidateDigest: task.workflow.candidate.digest, roundId: operation.workflowE2EAdmission.roundId,
+        groupRunIds: [...operation.workflowE2EAdmission.groupRunIds],
+        admissionSha256: operation.workflowE2EAdmission.admissionRef.sha256, evidenceSha256: operation.workflowE2EEvidenceRef.sha256 } });
+    if (display !== undefined) {
+      await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: display.ref.key, Body: display.bytes,
+        ContentType: "application/json", Metadata: { sha256: display.ref.sha256 } }));
+      next = WorkflowSnapshotSchema.parse({ ...next, e2e: { ...next.e2e, displayRef: display.ref } });
+    }
+  }
   const graphApproval = graphCancelTarget?.workflowDependencies?.approval;
   const graphCancelCondition = graphCancelTarget?.workflowDependencies === undefined ? "" :
     " AND workflow.workflowDependenciesOperationId = :graphOperationId AND workflow.workflowDependenciesApproval.graphDigest = :graphDigest AND workflow.workflowDependenciesApproval.runId = :graphRunId AND workflow.workflowDependenciesApproval.artifactDigest = :graphArtifactDigest AND workflow.workflowDependenciesApproval.workflowRevision = :graphApprovalRevision AND workflow.workflowDependenciesApproval.actorId = :graphActorId";
-  return [{ Update: {
+  return [...e2eAuthorityChecks, { Update: {
     TableName: dependencies.tableName,
     Key: taskKey(task.taskId),
     // A stored plan quoted the replies fed so far; the next plan's window starts after them.
@@ -10075,7 +10383,7 @@ function workspaceItem(workspace: WorkspaceInstance) {
 }
 
 function membershipRecord(ownerKey: string, projectName: string, role: MembershipRecord["role"]): MembershipRecord {
-  return { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey, projectName, role };
+  return { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey, projectName, role, grantId: randomUUID() };
 }
 
 function githubRepositoryFullName(repositoryUrl: string): string {

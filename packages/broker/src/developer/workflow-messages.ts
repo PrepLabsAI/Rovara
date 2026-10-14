@@ -452,6 +452,11 @@ function verifyBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof
   if (workflow.blockReason === WORKFLOW_HISTORY_REWRITTEN_MESSAGE) {
     return { text: `The code is written, but I couldn't run the checks. ${plainBlockReason(workflow.blockReason)}`, buttons: [exits.close] };
   }
+  if (workflow.e2e?.required === true && workflow.e2e.currentRoundId !== undefined
+    && workflow.blockReason?.startsWith("admitted E2E evidence is incomplete or unknown") === true) {
+    return { text: "The required E2E evidence is incomplete or unavailable. Some required runtime checks may not have run. Nothing was sent to GitHub.",
+      buttons: [...exits.retryChecks(), exits.close] };
+  }
   // Review only: no check runs, so the way on is coding again, or a check the owner chooses when the project has one.
   if (workflowIsReviewOnly(workflow.checkPolicy)) {
     const reason = REVIEW_ONLY_VERIFY_REASONS[workflow.blockReason ?? ""] ?? plainBlockReason(workflow.blockReason);

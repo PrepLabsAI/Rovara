@@ -20,6 +20,7 @@ import { createAgentXMcpServer } from "../../packages/mcp/src/index.js";
 import { StrictSlackWeb } from "../support/strict-slack.js";
 import { call, createBroker, issuer, loadSlackBroker } from "../support/slack-broker.js";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
+import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { beforeAll, vi } from "vitest";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/github-app.js";
 import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
@@ -46,6 +47,8 @@ import { deriveProjectSetupSourceSmoke } from "../../packages/broker/src/e2e/pro
 import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/src/e2e/feature-plan-intent.js";
 import { e2eFeatureVerifierKey, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "../../packages/broker/src/aws/project-setup-runtime-catalog.js";
+import { readWorkflowE2ENotifierProjection } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
+import { renderE2ESlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
 import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies.js";
 import { persistOriginalEvidencePrimary, persistOriginalMapPrimary } from "../support/p0-evidence-capture.js";
@@ -219,14 +222,29 @@ describe("P0 normal project onboarding journey", () => {
     const ownerSessionId = randomUUID();
     const ungrantedDeveloperId = ownerKeyForSubject(issuer, "ungranted-viewer");
     const ungrantedSessionId = randomUUID();
+    const taskViewerSlackId = "U0P0TASKVIEW";
+    const taskViewerDeveloperId = developerIdForSlackUser(taskViewerSlackId);
+    const taskViewerSessionId = randomUUID();
     const localBaseTreeReads: Array<{ repositoryUrl: string; commitSha: string; treeSha: string }> = [];
     const broker = createBroker({ s3, developer: {
       issuer, env: "staging", methods: { slack: true, oidc: true }, slackTeamId: "T0P0NATIVE", signInTableName: "state",
       workflowDependenciesEnabled: true,
       channelMembers: async () => ({ ok: true, memberOf: ["C0P0NATIVE"] }),
+      taskPeopleConfiguration: { peopleChangesEnabled: true },
+      taskPersonProof: async (request) => ({ ok: true, user: { id: request.slackUserId, teamId: "T0P0NATIVE",
+        name: request.slackUserId === taskViewerSlackId ? "Task Viewer" : "Task Owner" }, memberOf: request.channelIds }),
+      taskPeopleDisplayRead: async (request) => request.operation === "proof"
+        ? { operation: "proof", admission: { version: 1, slackCallsUsed: 1 }, result: { ok: true,
+          user: { id: request.request.slackUserId, teamId: "T0P0NATIVE", name: request.request.slackUserId === taskViewerSlackId ? "Task Viewer" : "Task Owner" },
+          memberOf: request.request.channelIds } }
+        : { operation: "directory", admission: { version: 1, slackCallsUsed: 1 }, result: { ok: true, users: ["U0P0OWNER", taskViewerSlackId].map((id) => ({
+          id, teamId: "T0P0NATIVE", name: id === taskViewerSlackId ? "Task Viewer" : "Task Owner", memberOf: request.request.channelIds,
+        })) } },
       verifyAccessToken: async (authorization) => authorization === "Bearer synthetic-ungranted-session"
         ? ({ iss: issuer, aud: "agentx-developer", env: "staging", sub: ungrantedDeveloperId, sid: ungrantedSessionId, amr: "oidc", groups: [] })
-        : ({ iss: issuer, aud: "agentx-developer", env: "staging", sub: ownerDeveloperId, sid: ownerSessionId, amr: "oidc", groups: ["admins"] }),
+        : authorization === "Bearer synthetic-task-viewer-session"
+          ? ({ iss: issuer, aud: "agentx-developer", env: "staging", sub: taskViewerDeveloperId, sid: taskViewerSessionId, amr: "slack", groups: [] })
+          : ({ iss: issuer, aud: "agentx-developer", env: "staging", sub: ownerDeveloperId, sid: ownerSessionId, amr: "oidc", groups: ["admins"] }),
     }, turnRecordsTableName: "turns", extra: {
       projectSetupSource: sourcePort, projectSetupRuntimeCatalogId: runtimeCatalogId, e2eFeatureRuntimeCatalogId: featureRuntimeCatalogId,
       githubPullRequests: { reconcilePullRequest: async (input: { repositoryUrl: string; headBranch: string; baseBranch: string; title: string; body?: string }) => {
@@ -266,11 +284,16 @@ describe("P0 normal project onboarding journey", () => {
     broker.db.set({ pk: `SESSION#${ownerSessionId}`, sk: "META", sessionId: ownerSessionId, developerId: ownerDeveloperId, amr: "oidc",
       startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 60_000,
       reviewExpiresAt: Math.floor(Date.now() / 1000) + 60_000, slackUserId: "U0P0OWNER" });
-    broker.db.set({ pk: `DEVELOPER#${ownerDeveloperId}`, sk: "META", developerId: ownerDeveloperId, provider: "oidc", displayName: "Owner", firstSignInAt: "fixture", lastSignInAt: "fixture", revoked: false, slackUserId: "U0P0OWNER" });
+    broker.db.set({ pk: `DEVELOPER#${ownerDeveloperId}`, sk: "META", developerId: ownerDeveloperId, provider: "oidc", issuer, subject: "owner",
+      displayName: "Owner", firstSignInAt: "fixture", lastSignInAt: "fixture", revoked: false, slackUserId: "U0P0OWNER" });
     broker.db.set({ pk: `SESSION#${ungrantedSessionId}`, sk: "META", sessionId: ungrantedSessionId, developerId: ungrantedDeveloperId, amr: "oidc",
       startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 60_000,
       reviewExpiresAt: Math.floor(Date.now() / 1000) + 60_000, slackUserId: "U0P0VIEWER" });
     broker.db.set({ pk: `DEVELOPER#${ungrantedDeveloperId}`, sk: "META", developerId: ungrantedDeveloperId, provider: "oidc", displayName: "Unjoined viewer", firstSignInAt: "fixture", lastSignInAt: "fixture", revoked: false, slackUserId: "U0P0VIEWER" });
+    broker.db.set({ pk: `SESSION#${taskViewerSessionId}`, sk: "META", sessionId: taskViewerSessionId, developerId: taskViewerDeveloperId, amr: "slack",
+      startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 60_000,
+      reviewExpiresAt: Math.floor(Date.now() / 1000) + 60_000, slackUserId: taskViewerSlackId });
+    broker.db.set({ pk: `DEVELOPER#${taskViewerDeveloperId}`, sk: "META", developerId: taskViewerDeveloperId, provider: "slack", displayName: "Task Viewer", firstSignInAt: "fixture", lastSignInAt: "fixture", revoked: false, slackUserId: taskViewerSlackId });
     const localRunnerEnvironment = { ci: true as const, trustNoticeShown: false as const, os: `${process.platform} ${osRelease()}`, arch: process.arch, runtime: `node ${process.version}` };
     broker.db.set({ ...runtimeCatalogKey, schemaVersion: 1, entityType: "PROJECT_SETUP_RUNTIME", runtimeCatalogId, catalogRevision: 1,
       bindingDigest: projectSetupBindingDigest(runtimeBinding), binding: runtimeBinding, manifestDigest: hash(Buffer.from("fixture-runtime-manifest")),
@@ -528,7 +551,7 @@ describe("P0 normal project onboarding journey", () => {
       user: { subject: "owner", admin: true }, body: { projectName: "ordinary-orders" } });
     expect(channelBinding.status, JSON.stringify(channelBinding.body)).toBe(200);
     broker.db.set({ pk: `MEMBER#${ownerDeveloperId}`, sk: "PROJECT#ordinary-orders", entityType: "MEMBERSHIP", ownerKey: ownerDeveloperId,
-      projectName: "ordinary-orders", role: "developer", grantedBy: { issuer, subject: "owner" }, grantedAt: new Date().toISOString() });
+      projectName: "ordinary-orders", role: "developer", grantId: randomUUID(), grantedBy: { issuer, subject: "owner" }, grantedAt: new Date().toISOString() });
     const featureStart = await call(broker.handler, { method: "POST", path: "/v1/dev/tasks", headers: { authorization: "Bearer synthetic-owner-session" },
       body: { requestId: randomUUID(), project: "ordinary-orders", instructions: "Add an orders list using the approved source context", client: "native-p0-journey", workflow: true, workflowPath: "QUICK" } });
     expect(featureStart.status, JSON.stringify(featureStart.body)).toBe(200);
@@ -550,7 +573,20 @@ describe("P0 normal project onboarding journey", () => {
       post: async (input) => { const posted = strictSlack.post(input); notifierPosts.push(input); return { ts: posted.ts }; },
       update: async (input) => strictSlack.update(input), now: Date.now, log: (entry) => notifierLogs.push(entry), deliveryFailed: () => undefined,
       workflowE2EBlocks: async (task, operations) => {
-        notifierE2EBlocks = (await loadWorkflowE2EPresentation({ documentClient: broker.db as never, tableName: "state", s3: s3 as never, artifactBucketName: "artifacts" }, task, operations, "viewer"))?.slackBlocks;
+        void operations;
+        const progress = task.workflow?.e2e;
+        const candidateDigest = task.workflow?.candidate?.digest;
+        const ref = progress?.displayRef;
+        if (candidateDigest === undefined || progress?.currentRoundId === undefined || ref === undefined) return undefined;
+        const view = await readWorkflowE2ENotifierProjection({ ref, ownerKey: task.ownerKey, workspaceId: task.workspaceId,
+          current: { candidateDigest, roundId: progress.currentRoundId, groupRunIds: progress.currentGroupRunIds,
+            admissionSha256: ref.admissionSha256, evidenceSha256: ref.evidenceSha256 },
+          readPrivateObject: async (key, maxBytes) => {
+            if (maxBytes > 262_144 || !/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/u.test(key)) return undefined;
+            const bytes = objects.get(key);
+            return bytes !== undefined && bytes.byteLength <= maxBytes ? bytes : undefined;
+          } });
+        notifierE2EBlocks = view === undefined ? undefined : renderE2ESlackBlocks(view);
         return notifierE2EBlocks;
       },
     });
@@ -945,6 +981,23 @@ describe("P0 normal project onboarding journey", () => {
     const rawE2EEvidence = typeof evidenceRef?.key === "string" ? evidenceRef.key : undefined;
     const e2eEvidence: unknown = rawE2EEvidence === undefined ? undefined : JSON.parse(objects.get(rawE2EEvidence)?.toString("utf8") ?? "null") as unknown;
     const e2eEvidenceRecord = e2eEvidence && typeof e2eEvidence === "object" && !Array.isArray(e2eEvidence) ? e2eEvidence as Record<string, unknown> : undefined;
+    const admissionReference = completedChecksOperation?.workflowE2EAdmission as { admissionRef?: { key?: string; sha256?: string; byteLength?: number } } | undefined;
+    const admissionKey = admissionReference?.admissionRef?.key;
+    const admissionPrimary = typeof admissionKey === "string" ? await persistOriginalMapPrimary({ root, kind: "feature-checks-admission",
+      key: admissionKey, objects, producer: "broker stored immutable CHECKS admission before test-scope teardown",
+      sourceCandidateDigest: workerCandidate.digest }) : undefined;
+    const evidencePrimary = rawE2EEvidence === undefined ? undefined : await persistOriginalMapPrimary({ root, kind: "feature-checks-evidence",
+      key: rawE2EEvidence, objects, producer: "broker stored immutable CHECKS evidence before test-scope teardown",
+      sourceCandidateDigest: workerCandidate.digest });
+    const admissionText = typeof admissionKey === "string" ? objects.get(admissionKey)?.toString("utf8") : undefined;
+    const storedAdmission = admissionText === undefined ? undefined : JSON.parse(admissionText) as Record<string, unknown>;
+    const planDiagnostic = storedAdmission?.plan && typeof storedAdmission.plan === "object" ? storedAdmission.plan as Record<string, unknown> : undefined;
+    await writeFile(join(root, "feature-checks-verifier-inputs.json"), `${JSON.stringify({ admissionPrimary, evidencePrimary,
+      planCompleteness: planDiagnostic === undefined ? undefined : { criteria: planDiagnostic.criteria, unavailableCriteria: planDiagnostic.unavailableCriteria,
+        groups: Array.isArray(planDiagnostic.groups) ? planDiagnostic.groups.map((group) => recordOf(group) && ({ groupId: recordOf(group)?.groupId,
+          expectedCaseIds: recordOf(group)?.expectedCaseIds })) : planDiagnostic.groups },
+      groupCollections: Array.isArray(e2eEvidenceRecord?.groupRuns) ? (e2eEvidenceRecord.groupRuns as unknown[]).map((group) => ({
+        groupId: recordOf(group)?.groupId, collection: recordOf(group)?.collection })) : [] }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     const groupRuns: unknown[] = Array.isArray(e2eEvidenceRecord?.groupRuns) ? e2eEvidenceRecord.groupRuns as unknown[] : [];
     const groupCollections = groupRuns.map((group) => group && typeof group === "object" && !Array.isArray(group)
       ? (group as Record<string, unknown>).collection : undefined);
@@ -980,7 +1033,7 @@ describe("P0 normal project onboarding journey", () => {
       expect(workflowButtons).toHaveLength(1);
       expect(recordOf(workflowButtons[0])?.text).toEqual({ type: "plain_text", text: "Send back to coding" });
       expect(JSON.stringify(failedRoundPost?.blocks)).toContain("FAILED");
-      const ownerFailedRoundProjection = await loadWorkflowE2EPresentation({ documentClient: broker.db as never, tableName: "state", s3: s3 as never, artifactBucketName: "artifacts" },
+      const ownerFailedRoundProjection = await loadWorkflowE2EPresentation(broker.brokerInput as never,
         broker.db.get(`DEVTASK#${featureTaskId}`, "META") as never,
         broker.db.find((item) => item.pk === `WORKSPACE#${featureWorkspaceId}` && item.entityType === "OPERATION"), "owner");
       expect(ownerFailedRoundProjection?.shared.actions, "E2E action proposals remain advisory and do not replace normal workflow controls").toEqual([]);
@@ -1144,7 +1197,7 @@ describe("P0 normal project onboarding journey", () => {
       expect(e2ePresentation?.mcp?.view).toBeDefined();
       const storedFeatureRecord = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as never;
       const storedFeatureOperations = broker.db.find((item) => item.pk === `WORKSPACE#${featureWorkspaceId}` && item.entityType === "OPERATION");
-      const notifierProjection = await loadWorkflowE2EPresentation({ documentClient: broker.db as never, tableName: "state", s3: s3 as never, artifactBucketName: "artifacts" },
+      const notifierProjection = await loadWorkflowE2EPresentation(broker.brokerInput as never,
         storedFeatureRecord, storedFeatureOperations, "viewer");
       expect(notifierProjection?.slackBlocks).toEqual(e2ePresentation?.slackBlocks);
       const storedAfterPass = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { workflow: { revision: number }; share: { sharedAt: string; threadTs: string } };
@@ -1267,9 +1320,10 @@ describe("P0 normal project onboarding journey", () => {
       .toEqual(["CRITIC", "SECURITY"]);
 
     const recoveryResponse = await broker.handler({ source: "agentx.workflow-dispatch-recovery" });
+    const publishDispatchRows = broker.db.find((item) => item.pk === "WORKFLOW_DISPATCH" && item.taskId === featureTaskId);
     const publishOutbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === featureWorkspaceId
       && (item.invocation as { kind?: string } | undefined)?.kind === "publish").at(-1);
-    expect(publishOutbox, JSON.stringify({ recoveryResponse: recoveryResponse.body, workflow: finalTask.workflow }))
+    expect(publishOutbox, JSON.stringify({ recoveryResponse: recoveryResponse.body, workflow: finalTask.workflow, publishDispatchRows }))
       .toBeDefined();
     const publishInvocation = WorkerInvocationSchema.parse(publishOutbox!.invocation);
     expect(publishInvocation.kind).toBe("publish");
@@ -1359,6 +1413,39 @@ describe("P0 normal project onboarding journey", () => {
     expect(finalPublishedTask.workflow.state).toBe("WAITING");
     expect(finalPublishedTask.workflow.pullRequests).toContainEqual(expect.objectContaining({ number: 1, headSha: localRemoteHead,
       headTreeSha: git(localBareRemote, "rev-parse", `${localRemoteHead}^{tree}`), state: "UNKNOWN" }));
+
+    // A restored role does not restore the immutable creator proof captured by this round.
+    const creatorMembershipKey = { pk: `MEMBER#${ownerDeveloperId}`, sk: "PROJECT#ordinary-orders" };
+    const admittedCreatorMembership = broker.db.get(creatorMembershipKey.pk, creatorMembershipKey.sk);
+    expect(admittedCreatorMembership?.grantId).toMatch(/^[0-9a-f-]{36}$/iu);
+    const creatorAuthorityOutboxCount = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === featureWorkspaceId).length;
+    const oldChecksOperation = broker.db.find((item) => item.pk === `WORKSPACE#${featureWorkspaceId}` && item.workflowMode === "CHECKS")
+      .at(-1);
+    const oldRoundAdmission = oldChecksOperation?.workflowE2EAdmission as { groupRunIds?: string[]; admissionRef?: { sha256?: string } } | undefined;
+    expect(oldRoundAdmission?.admissionRef?.sha256).toMatch(/^[0-9a-f]{64}$/u);
+    broker.db.delete(creatorMembershipKey.pk, creatorMembershipKey.sk);
+    const revokedCreatorRead = await call(broker.handler, { method: "GET", path: `/v1/dev/tasks/${featureTaskId}`,
+      headers: { authorization: "Bearer synthetic-owner-session" } });
+    const revokedCreatorView = (revokedCreatorRead.body as { task?: { e2ePresentation?: { shared?: { e2e?: { status?: string; expectedGroups?: number;
+      receivedGroups?: number; qualifiedCriteria?: number; requiredCriteria?: number } } } } }).task?.e2ePresentation?.shared?.e2e;
+    broker.db.set({ ...admittedCreatorMembership!, grantId: randomUUID(), grantedAt: new Date().toISOString() });
+    const regrantedCreatorRead = await call(broker.handler, { method: "GET", path: `/v1/dev/tasks/${featureTaskId}`,
+      headers: { authorization: "Bearer synthetic-owner-session" } });
+    const regrantedCreatorView = (regrantedCreatorRead.body as { task?: { e2ePresentation?: { shared?: { e2e?: { status?: string; expectedGroups?: number;
+      receivedGroups?: number; qualifiedCriteria?: number; requiredCriteria?: number } } } } }).task?.e2ePresentation?.shared?.e2e;
+    await writeFile(join(root, "creator-revocation-regrant-old-round.json"), `${JSON.stringify({ admissionSha256: oldRoundAdmission?.admissionRef?.sha256,
+      oldGrantId: admittedCreatorMembership?.grantId, newGrantId: broker.db.get(creatorMembershipKey.pk, creatorMembershipKey.sk)?.grantId,
+      revokedHttp: revokedCreatorRead, revokedView: revokedCreatorView, regrantedHttp: regrantedCreatorRead, regrantedView: regrantedCreatorView,
+      outboxCountBefore: creatorAuthorityOutboxCount,
+      outboxCountAfter: broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === featureWorkspaceId).length }, null, 2)}\n`,
+      { mode: 0o600, flag: "wx" });
+    expect(revokedCreatorRead.status).toBe(200);
+    expect(revokedCreatorView, JSON.stringify(revokedCreatorRead.body)).toMatchObject({ status: "UNKNOWN", expectedGroups: oldRoundAdmission?.groupRunIds?.length,
+      receivedGroups: 0, qualifiedCriteria: 0 });
+    expect(regrantedCreatorRead.status).toBe(200);
+    expect(regrantedCreatorView, JSON.stringify(regrantedCreatorRead.body)).toMatchObject({ status: "UNKNOWN", expectedGroups: oldRoundAdmission?.groupRunIds?.length,
+      receivedGroups: 0, qualifiedCriteria: 0 });
+    expect(broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === featureWorkspaceId)).toHaveLength(creatorAuthorityOutboxCount);
 
     // A separate, normally approved task preserves the browser obligation end to end. Its
     // portable groups execute, while the unsupported required navigation criterion blocks
@@ -1543,7 +1630,7 @@ describe("P0 normal project onboarding journey", () => {
     expect(browserOwnerRead.status).toBe(200);
     expect((browserOwnerRead.body.task as DeveloperTaskView).e2ePresentation?.shared.e2e)
       .toMatchObject({ status: "UNKNOWN", expectedGroups: 2, receivedGroups: 2, executedCases: 6, requiredCriteria: 7, qualifiedCriteria: 6, unavailableCriteria: 1 });
-    const browserViewerProjection = await loadWorkflowE2EPresentation({ documentClient: broker.db as never, tableName: "state", s3: s3 as never, artifactBucketName: "artifacts" },
+    const browserViewerProjection = await loadWorkflowE2EPresentation(broker.brokerInput as never,
       broker.db.get(`DEVTASK#${browserTaskId}`, "META") as never,
       broker.db.find((item) => item.pk === `WORKSPACE#${browserWorkspaceId}` && item.entityType === "OPERATION"), "viewer");
     expect(browserViewerProjection?.shared.e2e)
@@ -1563,6 +1650,8 @@ describe("P0 normal project onboarding journey", () => {
     expect(browserNotice.batchItemFailures).toEqual([]);
     const browserNoticePost = notifierPosts.at(-1);
     expect(JSON.stringify(browserNoticePost)).toContain("E2E UNKNOWN");
+    expect(browserNoticePost?.text).toContain("required E2E evidence is incomplete or unavailable");
+    expect(browserNoticePost?.text).not.toContain("Something went wrong on AgentX's side");
     expect(JSON.stringify(browserNoticePost)).not.toContain("agentx_workflow_send_back");
     const browserViewerRead = await call(broker.handler, { method: "GET", path: `/v1/dev/tasks/${browserTaskId}`,
       headers: { authorization: "Bearer synthetic-ungranted-session" } });
@@ -1580,6 +1669,52 @@ describe("P0 normal project onboarding journey", () => {
     expect((broker.db.get(`DEVTASK#${browserTaskId}`, "META") as { workflow: { stage: string; state: string } }).workflow)
       .toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
     expect(browserViewerProjection?.shared.e2e.status).toBe("UNKNOWN");
+    const ownerPageApiCall = async (method: string, path: string, headers: Record<string, string>, body?: unknown) => {
+      const response = await broker.handler({ version: "2.0", routeKey: "ANY /review/{proxy+}", rawPath: path, rawQueryString: "", headers,
+        ...(body === undefined ? {} : { body: JSON.stringify(body) }), requestContext: { requestId: randomUUID(), http: { method } } });
+      return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
+    };
+    const ownerPeopleRead = await call(broker.handler, { method: "GET", path: `/v1/dev/tasks/${browserTaskId}/people`,
+      headers: { authorization: "Bearer synthetic-owner-session" } });
+    expect(ownerPeopleRead.status, JSON.stringify(ownerPeopleRead.body)).toBe(200);
+    const ownerPeopleView = ownerPeopleRead.body.view as { revision: number; people: Array<{ personId: string; name: string; role: string }> };
+    const taskViewer = ownerPeopleView.people.find((person) => person.name === "Task Viewer");
+    expect(taskViewer, "the current task directory registers the eligible viewer before Owner approval").toBeDefined();
+    const ownerPageCookie = `__Host-agentx_review_session=${ownerSessionId}`;
+    const ownerPageState = await ownerPageApiCall("GET", `/review/${browserTaskId}/task/api/state`, { cookie: ownerPageCookie });
+    expect(ownerPageState.status, JSON.stringify(ownerPageState.body)).toBe(200);
+    const peopleCsrf = String(ownerPageState.body.csrf);
+    expect(peopleCsrf).toMatch(/^[A-Za-z0-9_-]{32,64}$/);
+    const peopleRequestId = randomUUID();
+    const peopleApiHeaders = { cookie: `${ownerPageCookie}; __Host-agentx_review_csrf=${peopleCsrf}`, origin: issuer,
+      "x-agentx-csrf": peopleCsrf, "content-type": "application/json" };
+    const peopleProposal = await ownerPageApiCall("POST", `/review/${browserTaskId}/task/api/people/role`, peopleApiHeaders,
+      { requestId: peopleRequestId, expectedPeopleRevision: ownerPeopleView.revision, personId: taskViewer!.personId, role: "viewer" });
+    expect(peopleProposal.status, JSON.stringify(peopleProposal.body)).toBe(202);
+    const peopleConfirmation = await ownerPageApiCall("POST", `/review/${browserTaskId}/task/api/people/requests/${peopleRequestId}/confirm`,
+      peopleApiHeaders, { requestId: peopleRequestId });
+    expect(peopleConfirmation.status, JSON.stringify(peopleConfirmation.body)).toBe(200);
+    expect(peopleConfirmation.body.status).toBe("COMMITTED");
+    expect((peopleConfirmation.body.view as { people: Array<{ personId: string; role: string }> }).people)
+      .toEqual(expect.arrayContaining([expect.objectContaining({ personId: taskViewer!.personId, role: "viewer" })]));
+    const authorizedViewerRead = await ownerPageApiCall("GET", `/review/${browserTaskId}/task/api/state`, {
+      cookie: `__Host-agentx_review_session=${taskViewerSessionId}` });
+    expect(authorizedViewerRead.status, JSON.stringify(authorizedViewerRead.body)).toBe(200);
+    expect(authorizedViewerRead.body).toMatchObject({ canRead: true, canDecide: false, canManagePeople: false });
+    const authorizedViewerSendBack = await call(broker.handler, { method: "POST", path: `/v1/dev/tasks/${browserTaskId}/workflow/send-back`,
+      headers: { authorization: "Bearer synthetic-task-viewer-session" }, body: { requestId: randomUUID(), expectedRevision: browserWorkflow.revision,
+        instructions: "A current task viewer may read but cannot send work back." } });
+    expect(authorizedViewerSendBack.status, JSON.stringify(authorizedViewerSendBack.body)).toBe(404);
+    const viewerAccessPrimary = await persistOriginalEvidencePrimary({ root, kind: "task-people-approved-viewer-read-and-command-denial",
+      key: `/review/${browserTaskId}/task/api/state viewer read and workflow SendBack`, bytes: JSON.stringify({ ownerPeopleRead, ownerPageState,
+        peopleProposal, peopleConfirmation, authorizedViewerRead, authorizedViewerSendBack }),
+      producer: "normal Owner People proposal and CSRF-protected confirmation followed by authenticated role-aware task page and workflow routes",
+      sourceCandidateDigest: browserAdmission!.candidateDigest });
+    await writeFile(join(root, "task-viewer-authorization-receipt.json"), `${JSON.stringify({ taskId: browserTaskId,
+      personId: taskViewer?.personId, peopleRevisionBefore: ownerPeopleView.revision, proposal: peopleProposal,
+      confirmation: peopleConfirmation, viewerReadStatus: authorizedViewerRead.status, viewerCanRead: authorizedViewerRead.body.canRead,
+      viewerCanDecide: authorizedViewerRead.body.canDecide, viewerSendBackStatus: authorizedViewerSendBack.status,
+      primary: viewerAccessPrimary }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     const browserNegativePrimary = await persistOriginalEvidencePrimary({ root, kind: "browser-required-current-round-unknown",
       key: `/v1/dev/tasks/${browserTaskId}`, bytes: JSON.stringify({ http: browserOwnerRead, workflow: browserWorkflow,
         viewerHttp: browserViewerRead, viewerSendBack: browserViewerSendBack, ownerSendBack: browserOwnerSendBack, browserShare, browserNotice,

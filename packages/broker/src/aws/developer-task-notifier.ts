@@ -23,7 +23,8 @@ import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
 import { runTaskCanvasCloseout, type CanvasCloseoutStore, type TaskCanvasCloseoutTask } from "./developer-task-closeout.js";
 import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createTaskPlanCanvas, deleteTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
-import { loadWorkflowE2EPresentation } from "./broker.js";
+import { readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
+import { renderE2ESlackBlocks } from "../e2e-presentation.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
@@ -1753,9 +1754,20 @@ function createAwsNotifierHandler() {
     })),
     peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true",
     workflowE2EBlocks: async (task, operations) => {
-      const presentation = await loadWorkflowE2EPresentation({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), s3,
-        artifactBucketName: requiredEnvironment("ARTIFACT_BUCKET_NAME") }, task, operations, "viewer");
-      return presentation?.slackBlocks;
+      void operations;
+      const progress = task.workflow?.e2e;
+      const candidateDigest = task.workflow?.candidate?.digest;
+      const ref = progress?.displayRef;
+      if (candidateDigest === undefined || progress?.currentRoundId === undefined || ref === undefined) return undefined;
+      const view = await readWorkflowE2ENotifierProjection({ ref, ownerKey: task.ownerKey, workspaceId: task.workspaceId, current: { candidateDigest, roundId: progress.currentRoundId,
+        groupRunIds: progress.currentGroupRunIds, admissionSha256: ref.admissionSha256, evidenceSha256: ref.evidenceSha256 },
+      readPrivateObject: async (key, maxBytes) => {
+        if (maxBytes > 262_144 || !/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/u.test(key)) return undefined;
+        const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
+        const bytes = response.Body === undefined ? undefined : Buffer.from(await response.Body.transformToByteArray());
+        return bytes !== undefined && bytes.byteLength <= maxBytes ? bytes : undefined;
+      } });
+      return view === undefined ? undefined : renderE2ESlackBlocks(view);
     },
   });
 }

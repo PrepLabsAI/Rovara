@@ -1,6 +1,7 @@
 // packages/broker/src/aws/admin-actions.ts
 // Spec 025 E8, E9, E19: the admin actions 25e's change tools apply that no admin command had. Each
 // is called only by a confirmed change (Task 7) or by the CLI's own change path (Tasks 14, 15).
+import { randomUUID } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand } from "@aws-sdk/lib-dynamodb";
 import { SLACK_OIDC_ISSUER, SlackUserIdSchema, agentXError, type EndDeveloperSessionsRequest, type EndDeveloperSessionsResponse } from "@agentx/contracts";
 import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, WORKSPACE_LIMITS_KEY, isWholeLimit } from "../developer/limits.js";
@@ -94,7 +95,8 @@ export async function grantProjectAccess(deps: AdminActionDependencies, admin: {
   try {
     await deps.documentClient.send(new PutCommand({
       TableName: deps.tableName,
-      Item: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}`, entityType: "MEMBERSHIP", ownerKey: developerId, projectName: project, role: "developer", grantedBy: admin, grantedAt: new Date(deps.now()).toISOString() },
+      Item: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}`, entityType: "MEMBERSHIP", ownerKey: developerId, projectName: project, role: "developer",
+        grantId: randomUUID(), grantedBy: admin, grantedAt: new Date(deps.now()).toISOString() },
       ConditionExpression: "attribute_not_exists(pk)",
     }));
   } catch (error) {

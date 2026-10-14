@@ -244,6 +244,8 @@ export interface DeveloperTaskRouteDependencies {
   inviteTaskPerson?(input: TaskPersonInviteClaimRequest): Promise<TaskPersonInviteOutcome>;
   /** Loads E2E presentation from the current server-owned CHECKS operation and its immutable evidence references. */
   workflowE2EPresentation?(input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }): Promise<DeveloperTaskView["e2ePresentation"] | undefined>;
+  /** Atomic conditions for current managed-E2E authority, attached to publication admission. */
+  workflowE2EPublicationChecks?(input: { task: DeveloperTaskRecord; operations: readonly unknown[] }): Promise<TransactItems | undefined>;
 }
 
 function taskPeopleEffectsDependencies(deps: DeveloperTaskRouteDependencies) {
@@ -3445,6 +3447,16 @@ export async function startTaskWorkflowPublicationFromSystem(
   if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== expected.workflowRevision
     || !(ownerRetry ? workflowPublicationRetryable(workflow) : workflow.stage === "PULL_REQUEST" && workflow.state === "READY")
     || workflow.candidate === undefined || workflow.candidate.digest !== expected.candidateDigest) return "STALE";
+  let currentE2EChecks: TransactItems = [];
+  if (workflow.e2e?.required === true) {
+    if (deps.workflowE2EPresentation === undefined) return "STALE";
+    const operations = await deps.actions.operations(task.workspaceId);
+    const presentation = await deps.workflowE2EPresentation({ task, operations, actor: "owner" });
+    if (presentation?.shared.e2e.status !== "PASS") return "STALE";
+    if (deps.workflowE2EPublicationChecks === undefined) return "STALE";
+    currentE2EChecks = await deps.workflowE2EPublicationChecks({ task, operations }) ?? [];
+    if (currentE2EChecks.length === 0) return "STALE";
+  }
   const dispatchAccess = origin.ownerAccess ?? await systemTaskAccess(deps, task);
   const workspace = await deps.actions.workspace(task.workspaceId);
   if (workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
@@ -3486,6 +3498,7 @@ export async function startTaskWorkflowPublicationFromSystem(
       requestId, repository: repository.repositoryId, title, body, draft: true,
     }, (operation) => [
       taskItem,
+      ...currentE2EChecks,
       putNew(turnTable(deps), aiToolTurn({
         party: origin.ownerActor === undefined ? partyOfTask(task) : partyOfTaskActor(task, origin.ownerActor), turnId: randomUUID(), action: "pull_request", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: ownerRetry ? "Retry opening the pull request" : "Open the draft pull request",
@@ -3506,7 +3519,7 @@ export async function startTaskWorkflowPublicationFromSystem(
   // (still running, or just finished) needs the task ready to record its pull request.
   if (accepted.duplicate && workflow.state === "BLOCKED") {
     try {
-      await deps.actions.transact([taskItem, ...(dispatchAccess === undefined ? [] : [taskAccessFence(deps.tableName, taskId, dispatchAccess.peopleRevision)])]);
+      await deps.actions.transact([taskItem, ...currentE2EChecks, ...(dispatchAccess === undefined ? [] : [taskAccessFence(deps.tableName, taskId, dispatchAccess.peopleRevision)])]);
     } catch (error) {
       if (!isConditional(error)) throw error;
     }

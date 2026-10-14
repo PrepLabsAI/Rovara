@@ -28,6 +28,24 @@ describe("strict upstream E2E report adapter", () => {
     if (parsed.kind === "parsed") expect(parsed.report.run.results[0]?.attempts[0]?.durationMs).toBe(0.5);
   });
 
+  it("accepts only the pinned runner's bounded optional VCS metadata", () => {
+    const valid = actualReport();
+    (valid.run as Record<string, unknown>).vcs = { commit: "a".repeat(40), branch: "main", dirty: false };
+    const parsed = parseE2EReport(Buffer.from(JSON.stringify(valid)));
+    expect(parsed.kind).toBe("parsed");
+    if (parsed.kind === "parsed") expect(parsed.report.run.vcs).toEqual({ commit: "a".repeat(40), branch: "main", dirty: false });
+
+    for (const vcs of [
+      { commit: "not-a-commit" },
+      { commit: "a".repeat(40), dirty: "false" },
+      { commit: "a".repeat(40), extra: true },
+    ]) {
+      const invalid = actualReport();
+      (invalid.run as Record<string, unknown>).vcs = vcs;
+      expect(parseE2EReport(Buffer.from(JSON.stringify(invalid)))).toMatchObject({ kind: "unavailable" });
+    }
+  });
+
   it("never qualifies without independently supplied capture and assertion receipts", () => {
     const parsed = parseE2EReport(Buffer.from(JSON.stringify(actualReport())));
     expect(qualifyE2EReport({ parsed, expected: null, capture: null, receipts: [] }).status).toBe("UNKNOWN");

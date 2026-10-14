@@ -160,7 +160,11 @@ export const E2EQualifiedRoundSchema = z.object({ candidateDigest: digest, contr
 export const E2EFailedRoundSchema = z.object({ status: z.literal("FAILED"), candidateDigest: digest, roundId: z.string().uuid(),
   groupRunIds: z.array(z.string().uuid()).min(1).max(4), admissionSha256: digest, evidenceSha256: digest }).strict();
 export type E2EFailedRound = z.infer<typeof E2EFailedRoundSchema>;
-export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentRoundId: z.string().uuid().optional(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64), qualifiedRound: E2EQualifiedRoundSchema.optional(), failedRound: E2EFailedRoundSchema.optional() }).strict();
+/** Bounded notifier display cache. It is never qualification or action authority. */
+export const E2EWorkflowDisplayRefSchema = z.object({ schemaVersion: z.literal(1), key: z.string().regex(/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/),
+  sha256: digest, byteLength: positiveInt.max(262_144), candidateDigest: digest, roundId: z.string().uuid(), groupRunIds: z.array(z.string().uuid()).min(1).max(4), admissionSha256: digest, evidenceSha256: digest }).strict();
+export type E2EWorkflowDisplayRef = z.infer<typeof E2EWorkflowDisplayRefSchema>;
+export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentRoundId: z.string().uuid().optional(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64), qualifiedRound: E2EQualifiedRoundSchema.optional(), failedRound: E2EFailedRoundSchema.optional(), displayRef: E2EWorkflowDisplayRefSchema.optional() }).strict();
 export type E2EWorkflowProgress = z.infer<typeof E2EWorkflowProgressSchema>;
 export type E2EQualifiedRound = z.infer<typeof E2EQualifiedRoundSchema>;
 

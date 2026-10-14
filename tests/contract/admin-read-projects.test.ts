@@ -2,6 +2,7 @@
 import { describe, expect, it } from "vitest";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { registerRevision } from "../support/developer-task-broker.js";
+import { projectKey } from "../../packages/broker/src/aws/project-records.js";
 
 describe("GET /v1/admin/projects (FR-038, FR-030)", () => {
   it("lists a project with its latest revision, repositories, mode, connectors and task policy", async () => {
@@ -19,10 +20,13 @@ describe("GET /v1/admin/projects (FR-038, FR-030)", () => {
 
   it("writes the catalog row with the registration, and keeps its first registration time", async () => {
     const { db, handler } = await createAdminReadBroker();
-    const first = db.get("PROJECT_CATALOG", "PROJECT#payments") as { firstRegisteredAt: string };
-    expect(first).toMatchObject({ entityType: "PROJECT_CATALOG", name: "payments" });
+    const first = db.get("PROJECT_CATALOG", "PROJECT#payments") as { firstRegisteredAt: string; latestRevision: number };
+    expect(first).toMatchObject({ entityType: "PROJECT_CATALOG", name: "payments", latestRevision: 1 });
     await registerRevision(handler, 2, {});
-    expect(db.get("PROJECT_CATALOG", "PROJECT#payments")).toMatchObject({ firstRegisteredAt: first.firstRegisteredAt });
+    expect(db.get("PROJECT_CATALOG", "PROJECT#payments")).toMatchObject({ firstRegisteredAt: first.firstRegisteredAt, latestRevision: 2 });
+    db.delete(projectKey("payments", 1).pk, projectKey("payments", 1).sk);
+    await expect(registerRevision(handler, 1, {})).rejects.toThrow("PROJECT_REVISION_MISMATCH");
+    expect(db.get("PROJECT_CATALOG", "PROJECT#payments")).toMatchObject({ firstRegisteredAt: first.firstRegisteredAt, latestRevision: 2 });
   });
 
   it("still finds a project registered before the catalog, through its binding or the admin's membership (A3)", async () => {
