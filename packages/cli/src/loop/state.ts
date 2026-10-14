@@ -5,6 +5,7 @@ import { appendFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ArtifactSchema } from "./definitions.js";
+import { LoopEnrollmentSchema, type LoopEnrollment } from "./enrollment.js";
 
 const RepoSlug = () => z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/, "owner/name");
 export const RepoSlugSchema = RepoSlug();
@@ -45,6 +46,10 @@ export const WorkItemStateSchema = z.object({
   reviews: z.string().max(20_000).optional(),
   /** Quick (#356): the last checks report, for the pull request's description. */
   checks: z.string().max(20_000).optional(),
+  /** The exact committed candidate qualified by the last local check round. */
+  checksCandidate: z.object({ branch: z.string(), commitSha: z.string().regex(/^[a-f0-9]{40}$/u), treeSha: z.string().regex(/^[a-f0-9]{40}$/u), baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/u) }).strict().optional(),
+  /** The exact committed candidate inspected by the last independent review round. */
+  reviewsCandidate: z.object({ branch: z.string(), commitSha: z.string().regex(/^[a-f0-9]{40}$/u), treeSha: z.string().regex(/^[a-f0-9]{40}$/u), baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/u) }).strict().optional(),
   /** #359, Contribute: the success criteria the brief set, as they are compared (brief.ts). */
   criteria: z.array(z.string().max(1_000)).max(30).optional(),
   /**
@@ -116,6 +121,23 @@ export class LoopStore {
   sessionDir(repo: string, issue: number, target?: string): string { return join(this.itemDir(repo, issue, target), "session"); }
   logPath(): string { return join(this.root, "daemon.log"); }
   pidPath(): string { return join(this.root, "daemon.pid"); }
+  enrollmentPath(): string { return join(this.root, "enrollments.json"); }
+
+  /** Host-owned lane enrollment receipts live beside loop state, outside repository configuration. */
+  async enrollments(): Promise<LoopEnrollment[]> {
+    return (await readJson(this.enrollmentPath(), z.array(LoopEnrollmentSchema))) ?? [];
+  }
+
+  async saveEnrollment(enrollment: LoopEnrollment): Promise<void> {
+    const parsed = LoopEnrollmentSchema.parse(enrollment);
+    const records = await this.enrollments();
+    if (parsed.kind === "standalone-local" && records.some((record) => record.kind === "registered" &&
+        (record.repositoryId === parsed.repositoryId || record.repository.toLowerCase() === parsed.project.toLowerCase()))) {
+      throw new Error(`a registered native binding already exists for ${parsed.project}; standalone enrollment cannot replace it`);
+    }
+    if (records.some((record) => record.enrollmentId === parsed.enrollmentId)) return;
+    await writeJson(this.enrollmentPath(), [...records, parsed]);
+  }
 
   async item(repo: string, issue: number, target?: string): Promise<WorkItemState | undefined> {
     return readJson(join(this.itemDir(repo, issue, target), "state.json"), WorkItemStateSchema);

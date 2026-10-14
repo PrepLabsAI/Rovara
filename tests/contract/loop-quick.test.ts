@@ -34,6 +34,7 @@ async function setUp(options: { checks?: boolean[] } = {}) {
   await mkdir(join(checkout, ".rovara"), { recursive: true });
   await writeFile(join(checkout, ".rovara", "loop.yaml"), ["version: 1", "collaborators: [maya, sam]", "checks:", "  - name: tests", "    run: npm test", ""].join("\n"));
   const world = new LoopWorld();
+  const candidate = { branch: "rovara/42", commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "c".repeat(40) };
   world.titles.set(ISSUE, "Retry payments on 503");
   const store = new LoopStore(join(root, "home", ".rovara", "loop"));
   await store.saveRepos([{ repo: world.repo, path: checkout }]);
@@ -49,6 +50,8 @@ async function setUp(options: { checks?: boolean[] } = {}) {
     store, exec: world.exec, github: new GitHub(world.exec), harness: new AgentHarness(world.exec),
     cliCommand: ["/usr/local/bin/node", "/opt/rovara/cli.js"], now: () => new Date(world.clock), log: () => undefined, checkRun,
     reviewerRun: async () => ({ ok: true, text: NO_FINDINGS }),
+    captureCandidate: async () => candidate,
+    resolvePublicationContext: async () => ({ kind: "unmanaged-local" }),
   });
   await daemon.poll();
   const worktree = () => join(store.itemDir(world.repo, ISSUE), "worktree");
@@ -218,8 +221,8 @@ describe("the Quick loop end to end (#356)", () => {
     expect(pull).toMatchObject({ head: "rovara/42", base: "mainline", title: "Retry payments on 503" });
     expect(pull.body).toContain("Closes #42.");
     expect(pull.body).toContain("Approved: the plan by @maya.");
-    // The loop committed its checks report as evidence before it published.
-    expect(h.world.loopCommits).toEqual(["docs/rovara/42/evidence/checks.md, docs/rovara/42/evidence/reviews.md: chore(rovara): evidence for #42"]);
+    // Check and review reports remain outside the committed candidate.
+    expect(h.world.loopCommits).toEqual([]);
     expect(pull.body).toContain("## Plan");
     expect(pull.body).toContain("- ✅ **tests**");
     expect(pull.body).toContain("## Reviews\n\n### Code review: passed\n\n### Security review: passed");

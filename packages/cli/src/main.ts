@@ -78,6 +78,7 @@ import type { SigninServices } from "./signin/commands.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
 import { CLI_VERSION, RELEASE_VERSION } from "./version.js";
 import { registerLoopCommands } from "./loop/cli.js";
+import { recordRegisteredLoopEnrollment } from "./loop/enrollment-cli.js";
 import type { Exec } from "./loop/exec.js";
 
 interface GlobalOptions {
@@ -503,6 +504,15 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         definition,
         runtimeBinding,
       }, services.fetchImplementation);
+      try {
+        const enrollment = await recordRegisteredLoopEnrollment({
+          home, env: globals.env, controlPlaneUrl: settings.controlPlaneUrl, definition, response: result,
+          ...(dependencies.loop?.exec === undefined ? {} : { exec: dependencies.loop.exec }),
+        });
+        if (!enrollment.recorded) services.stderr.write(`Warning: native project registration succeeded, but local Rovara enrollment is on hold (${enrollment.reasonCode}); register it from its source checkout or reconnect there before publication.\n`);
+      } catch (error) {
+        services.stderr.write(`Warning: native project registration succeeded, but local Rovara enrollment could not be saved (${(error as Error).message}); publication will remain on hold.\n`);
+      }
       services.stdout.write(formatSuccess(result, globals.json));
       for (const warning of registrationWarnings(result, definition)) services.stderr.write(`Warning: ${warning}\n`);
     });
@@ -907,7 +917,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     });
 
   registerSetupCommands(program, dependencies.setup ?? realSetupContext({
-    parameterStore, fetch: services.fetchImplementation, tokenStore: services.tokenStore, stdout: services.stdout, stderr: services.stderr,
+    parameterStore, fetch: services.fetchImplementation, tokenStore: services.tokenStore, stdout: services.stdout, stderr: services.stderr, home,
   }));
 
   const envCommand = program.command("env").description("AgentX environments in this AWS account and region");

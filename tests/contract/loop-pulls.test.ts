@@ -107,7 +107,8 @@ describe("per-PR loops (#358)", () => {
     const webPr = web.world.pullRequests[0]!;
     expect(webPr).toMatchObject({ number: 601, head: "rovara/acme-payments-42", base: "main", title: "Retry payments on 503" });
     expect(webPr.body).toMatch(/^Part of acme\/payments#42\./u);
-    expect(h.world.loopCommits).toContain("docs/rovara/acme-payments-42/evidence/checks.md, docs/rovara/acme-payments-42/evidence/reviews.md: chore(rovara): evidence for acme/payments#42");
+    // Per-target reports stay outside the candidate qualified for publication.
+    expect(h.world.loopCommits).toEqual([]);
     const posted = h.world.posted(LOOP_ISSUE);
     expect(posted.some((body) => body.includes(`**${WEB}**: Opened pull request ${WEB}#601: ${webPr.url}`))).toBe(true);
     expect(posted.some((body) => body.includes(`**${HOME}**: Opened pull request ${HOME}#501`))).toBe(true);

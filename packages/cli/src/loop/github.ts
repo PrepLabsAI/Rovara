@@ -29,6 +29,13 @@ export class GitHub {
     return (await run(this.exec, "gh", ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], { cwd: path })).trim();
   }
 
+  /** The stable repository identity GitHub reports for the repository at an already resolved owner/name. */
+  async repositoryId(repo: string): Promise<number> {
+    const value = Number((await run(this.exec, "gh", ["api", `repos/${repo}`, "--jq", ".id"])).trim());
+    if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`GitHub returned no stable repository ID for ${repo}`);
+    return value;
+  }
+
   /**
    * The repository's default branch, as GitHub says: a clone's origin/HEAD is set when it was cloned and is not
    * updated when the default branch changes, so a worktree or pull request based on it can aim at a stale branch.

@@ -29,6 +29,8 @@ export interface PublishInput {
   /** #359: what the planning document is called in the description: "Plan", or "Contribution". */
   planHeading?: string;
   pullRequest: { number: number; url: string } | undefined;
+  /** Host-owned candidate/enrollment/evidence check, awaited immediately before every push. */
+  beforePush: () => Promise<void>;
 }
 
 export interface Published { pullRequest: { number: number; url: string }; created: boolean }
@@ -44,6 +46,7 @@ function approvalLine(input: PublishInput): string {
 }
 
 export async function publish(exec: Exec, input: PublishInput): Promise<Published> {
+  await input.beforePush();
   await run(exec, "git", ["-C", input.worktree, "push", "--quiet", "--set-upstream", "origin", input.branch]);
   if (input.pullRequest !== undefined) return { pullRequest: input.pullRequest, created: false };
   // A pull request opened before a restart lost it from the state is found, never opened twice.

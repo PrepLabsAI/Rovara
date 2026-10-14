@@ -140,6 +140,7 @@ const CHANGE_STEPS = [
   { id: "reviews", actor: "code", label: "reviewing", action: "reviews" },
   { id: "review-blocked", actor: "human", label: "review-blocked", approvable: true },
   { id: "publish", actor: "code", label: "publishing", action: "publish" },
+  { id: "publication-blocked", actor: "human", label: "publication-blocked" },
 ] as const;
 const CHANGE_EDGES = [
   { from: "code", to: "checks", on: "done" },
@@ -151,6 +152,8 @@ const CHANGE_EDGES = [
   // A person accepts the findings and publishes, or says what to do.
   { from: "review-blocked", to: "publish", on: "approved" },
   { from: "review-blocked", to: "code", on: "reply" },
+  { from: "publish", to: "publication-blocked", on: "blocked" },
+  { from: "publication-blocked", to: "publish", on: "reply" },
 ] as const;
 
 /**

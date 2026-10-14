@@ -25,6 +25,8 @@ export interface CognitoAdmin {
 }
 
 export interface SetupServices {
+  /** Host home directory for writing native loop-enrollment receipts after successful registration. */
+  loopHome?: string;
   tokenStore: TokenStore;
   cognito: CognitoAdmin;
   login: (options: LoginOptions) => Promise<StoredTokens>;

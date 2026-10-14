@@ -2,7 +2,8 @@
 // daemon in the background, `run` is the daemon in the foreground, `do` starts a Do loop on an issue,
 // `check` evaluates an item without running anything, and `mcp` is the agent's tool server.
 import { spawn } from "node:child_process";
-import { access, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Command } from "commander";
@@ -16,6 +17,7 @@ import { createLoopMcpServer } from "./mcp.js";
 import { ARTIFACT_SECTIONS } from "./instructions.js";
 import { artifactDigest, missingSections, readArtifact } from "./exit-checks.js";
 import { artifactPath } from "./naming.js";
+import { createStandaloneEnrollment, resolveLoopEnrollment, resolveRegisteredPublication, type PublicationJoinTransport } from "./enrollment.js";
 import type { Artifact, LoopDefinition } from "./definitions.js";
 import type { WorkItemState } from "./state.js";
 import { LoopStore, RepoSlugSchema } from "./state.js";
@@ -28,6 +30,8 @@ export interface LoopCommandContext {
   exec?: Exec;
   /** How to run this CLI again: [node, path to the CLI]. */
   cliCommand?: readonly string[];
+  /** Authenticated host-owned adapter to the current native evidence producer; absent means HOLD. */
+  publicationJoin?: PublicationJoinTransport;
 }
 
 const POLL_SECONDS = 30;
@@ -64,9 +68,11 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
   const cliCommand = context.cliCommand ?? [process.execPath, process.argv[1] ?? ""];
   const say = (line: string) => { context.stdout.write(`${line}\n`); };
   const repoAt = async (path: string | undefined) => {
-    const full = resolve(path ?? process.cwd());
+    const full = await realpath(resolve(path ?? process.cwd()));
     return { path: full, repo: await github.repoAt(full) };
   };
+  const hostId = `${hostname()}:${process.platform}:${process.arch}`;
+  const uid = process.getuid?.() ?? 0;
 
   /** #358: each per-PR loop of an item: its repository, step, pull request and agent. */
   const pullLines = async (repo: string, issue: number): Promise<string[]> => {
@@ -100,6 +106,22 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
       const repos = (await store.repos()).filter((entry) => entry.repo !== found.repo);
       await store.saveRepos([...repos, found]);
       say(`Added ${found.repo} (${found.path}). Comments from now on are read; start the daemon with rovara loop start.`);
+    });
+
+  loop.command("enroll").description("enroll one added repository in a host-scoped local publication lane")
+    .argument("<repo>", "the added repository, owner/name")
+    .requiredOption("--standalone-local", "explicitly enroll this repository in a local-only namespace")
+    .action(async (repo: string) => {
+      const found = (await store.repos()).find((entry) => entry.repo.toLowerCase() === repo.toLowerCase());
+      if (found === undefined) throw new Error(`${repo} is not added to rovara loop on this computer; run rovara loop add in its checkout first`);
+      const actualRepo = await github.repoAt(found.path);
+      if (actualRepo.toLowerCase() !== found.repo.toLowerCase()) throw new Error("the added checkout now identifies as a different GitHub repository; publication remains on hold");
+      const enrollment = createStandaloneEnrollment({
+        hostId, uid, account: await github.login(), project: actualRepo, repositoryId: await github.repositoryId(actualRepo),
+        checkoutPath: await realpath(found.path), now: new Date(),
+      });
+      await store.saveEnrollment(enrollment);
+      say(`Enrolled ${actualRepo} in ${enrollment.namespace}. This local receipt applies only to this host, account, project and repository.`);
     });
 
   loop.command("remove").description("stop reading a repository's issues")
@@ -159,6 +181,36 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
       const daemon = new LoopDaemon({
         store, exec, github, harness: new AgentHarness(exec), cliCommand, now: () => new Date(),
         log: (line) => { context.stderr.write(`${new Date().toISOString()} ${line}\n`); },
+        resolvePublicationContext: async (input) => {
+          try {
+            const records = await store.enrollments();
+            const source = (await store.repos()).find((entry) => entry.repo.toLowerCase() === input.issueRepo.toLowerCase());
+            if (source === undefined) return { kind: "hold", reasonCode: "source_checkout_unavailable" };
+            const actualRepo = await github.repoAt(source.path);
+            if (actualRepo.toLowerCase() !== source.repo.toLowerCase()) return { kind: "hold", reasonCode: "identity_changed" };
+            const observation = {
+              hostId, uid, account: await github.login(), repo: actualRepo, repositoryId: await github.repositoryId(actualRepo),
+              checkoutPath: await realpath(source.path),
+            };
+            const resolution = resolveLoopEnrollment(records, observation);
+            if (resolution.kind === "hold") return resolution;
+            if (resolution.kind === "unmanaged-local") return { kind: "unmanaged-local" };
+            if (input.targetRepo !== input.issueRepo || input.destinationRepo !== input.issueRepo) {
+              return { kind: "hold", reasonCode: "registered_target_join_unavailable" };
+            }
+            const joined = await resolveRegisteredPublication({
+              enrollment: resolution.enrollment,
+              subject: {
+                projectName: resolution.project, projectRevision: resolution.projectRevision, repositoryId: resolution.repositoryId,
+                commitSha: input.candidate.commitSha, treeSha: input.candidate.treeSha, baseCommitSha: input.candidate.baseCommitSha,
+              },
+              taskRef: resolution.enrollment.taskRef, transport: context.publicationJoin, now: Date.now(),
+            });
+            return joined.kind === "ready" ? { kind: "registered-ready" } : { kind: "hold", reasonCode: joined.reasonCode };
+          } catch {
+            return { kind: "hold", reasonCode: "provenance_resolution_failed" };
+          }
+        },
       });
       let stopping = false;
       const stop = () => { stopping = true; };

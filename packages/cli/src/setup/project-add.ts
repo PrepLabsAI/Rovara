@@ -16,6 +16,7 @@ import { listCredentials } from "../admin/credential.js";
 import { cliRuntimeBinding, registerProject } from "../admin/register.js";
 import { readJsonResponse, serverError } from "../admin/http.js";
 import { loadProjectConfig } from "../config.js";
+import { recordRegisteredLoopEnrollment } from "../loop/enrollment-cli.js";
 import type { StackOutputs } from "../deploy/parameters.js";
 import type { Prompter } from "../init/prompts.js";
 import {
@@ -123,7 +124,7 @@ export async function writeProjectFile(configDir: string, definition: ProjectDef
 
 export async function registerRevision(input: {
   env: string; session: AdminSession; definition: ProjectDefinition;
-  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir">;
+  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome">;
   setupApproval?: StoredSetupDecision;
 }): Promise<{ revision: number; preflight: ConnectorPreflight[]; warnings: string[]; file: string }> {
   const foundation = environmentStackName(input.env, "foundation");
@@ -131,6 +132,14 @@ export async function registerRevision(input: {
   const result = (await registerProject({ controlPlaneUrl: input.session.controlPlaneUrl, accessToken: input.session.accessToken, definition: input.definition, runtimeBinding, ...(input.setupApproval === undefined ? {} : { setupApproval: input.setupApproval }) }, input.services.fetch)) as Record<string, unknown>;
   const preflight = RegistrationPreflightSchema.safeParse(result.preflight);
   const warnings = Array.isArray(result.warnings) ? result.warnings.filter((entry): entry is string => typeof entry === "string") : [];
+  if (input.services.loopHome !== undefined) {
+    try {
+      const enrollment = await recordRegisteredLoopEnrollment({ home: input.services.loopHome, env: input.env, controlPlaneUrl: input.session.controlPlaneUrl, definition: input.definition, response: result });
+      if (!enrollment.recorded) warnings.push(`local Rovara enrollment is on hold (${enrollment.reasonCode}); publication stays held until registration is confirmed from its source checkout`);
+    } catch (error) {
+      warnings.push(`local Rovara enrollment could not be saved (${(error as Error).message}); publication stays held`);
+    }
+  }
   // Written only after the control plane accepted the revision, so the file never names a revision
   // that is not registered.
   const file = await writeProjectFile(input.services.configDir, input.definition, { env: input.env, binding: runtimeBinding });

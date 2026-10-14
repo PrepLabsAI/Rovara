@@ -1,0 +1,34 @@
+import { run, type Exec } from "./exec.js";
+
+export interface CandidateSnapshot {
+  branch: string;
+  commitSha: string;
+  treeSha: string;
+  baseCommitSha: string;
+}
+
+export class CandidateHoldError extends Error {
+  constructor(readonly reasonCode: string) { super(`publication held: ${reasonCode}`); }
+}
+
+/** Captures the exact committed candidate and refuses a dirty tracked tree or unexpected branch. */
+export async function captureCandidate(exec: Exec, worktree: string, expectedBranch: string, baseRef: string): Promise<CandidateSnapshot> {
+  const [branch, commitSha, treeSha, baseCommitSha, trackedChanges] = await Promise.all([
+    run(exec, "git", ["-C", worktree, "symbolic-ref", "--quiet", "--short", "HEAD"]),
+    run(exec, "git", ["-C", worktree, "rev-parse", "--verify", "HEAD"]),
+    run(exec, "git", ["-C", worktree, "rev-parse", "--verify", "HEAD^{tree}"]),
+    run(exec, "git", ["-C", worktree, "rev-parse", "--verify", baseRef]),
+    run(exec, "git", ["-C", worktree, "status", "--porcelain", "--untracked-files=no"]),
+  ]);
+  if (branch !== expectedBranch) throw new CandidateHoldError("candidate_branch_changed");
+  if (trackedChanges !== "") throw new CandidateHoldError("candidate_tracked_changes");
+  if (!/^[a-f0-9]{40}$/u.test(commitSha) || !/^[a-f0-9]{40}$/u.test(treeSha) || !/^[a-f0-9]{40}$/u.test(baseCommitSha)) {
+    throw new CandidateHoldError("candidate_identity_invalid");
+  }
+  return { branch, commitSha, treeSha, baseCommitSha };
+}
+
+export function sameCandidate(left: CandidateSnapshot | undefined, right: CandidateSnapshot | undefined): boolean {
+  return left !== undefined && right !== undefined && left.branch === right.branch && left.commitSha === right.commitSha &&
+    left.treeSha === right.treeSha && left.baseCommitSha === right.baseCommitSha;
+}

@@ -15,6 +15,7 @@ import { AgentHarness } from "../../packages/cli/src/loop/harness.js";
 import { createLoopMcpServer } from "../../packages/cli/src/loop/mcp.js";
 import { artifactPath, docsDir, evidencePath, tmuxSessionName } from "../../packages/cli/src/loop/naming.js";
 import type { ReviewerInput, ReviewerRun } from "../../packages/cli/src/loop/reviews.js";
+import { createStandaloneEnrollment, resolveLoopEnrollment } from "../../packages/cli/src/loop/enrollment.js";
 import { LoopStore } from "../../packages/cli/src/loop/state.js";
 import { LoopWorld, routeWorlds } from "./loop-fakes.js";
 
@@ -56,6 +57,17 @@ export async function createLoopHarness(dirs: string[], options: {
   const store = new LoopStore(join(root, "home", ".rovara", "loop"));
   await store.saveRepos([{ repo: world.repo, path: checkout }, ...[...others].map(([repo, other]) => ({ repo, path: other.checkout }))]);
   const exec = others.size === 0 ? world.exec : routeWorlds(world, [...others.values()].map((other) => other.world));
+  // Synthetic contract fixture only: prove the positive local lane through the same trusted receipt resolver used by
+  // the CLI. This does not model a real host identity, GitHub repository ID, native task, or live source binding.
+  const hostId = "synthetic-loop-test-host";
+  const localEnrollments = new Map<string, ReturnType<typeof createStandaloneEnrollment>>();
+  for (const [index, repo] of [world.repo, ...others.keys()].entries()) {
+    const checkoutPath = repo === world.repo ? checkout : others.get(repo)!.checkout;
+    localEnrollments.set(repo, createStandaloneEnrollment({
+      hostId, uid: 501, account: world.developer, project: repo, repositoryId: 40_000 + index, checkoutPath,
+      now: new Date(world.clock),
+    }));
+  }
   const outcomes = [...(options.checks ?? [])];
   /** Each check run, as "<command> @ <directory>". */
   const checkRuns: string[] = [];
@@ -74,6 +86,17 @@ export async function createLoopHarness(dirs: string[], options: {
   const daemon = new LoopDaemon({
     store, exec, github: new GitHub(exec), harness: new AgentHarness(exec),
     cliCommand: ["/usr/local/bin/node", "/opt/rovara/cli.js"], now: () => new Date(world.clock), log: () => undefined, checkRun, reviewerRun,
+    // Synthetic Git identity is stable for existing loop contracts; production uses candidate.ts Git observations.
+    captureCandidate: async ({ branch }) => ({ branch, commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "c".repeat(40) }),
+    resolvePublicationContext: async ({ targetRepo }) => {
+      const enrollment = localEnrollments.get(targetRepo);
+      if (enrollment === undefined) return { kind: "hold", reasonCode: "provenance_unknown" };
+      const resolution = resolveLoopEnrollment([enrollment], {
+        hostId, uid: 501, account: world.developer, repo: targetRepo,
+        repositoryId: enrollment.repositoryId, checkoutPath: enrollment.checkoutPath,
+      });
+      return resolution.kind === "unmanaged-local" ? resolution : { kind: "hold", reasonCode: "registered_lane_fixture_not_supported" };
+    },
   });
   await daemon.poll();
   const worktree = () => join(store.itemDir(world.repo, LOOP_ISSUE), "worktree");
