@@ -44,7 +44,7 @@ if ! "$node22" node_modules/typescript/bin/tsc -b --force --pretty false; then
   exit 1
 fi
 if [ "$journey" = 'tests/e2e/p0-native-journey.test.ts' ] || [ "$journey" = 'tests/e2e/p0-native-journey-5b.test.ts' ]; then
-  P0_NATIVE_LAUNCHER_RECEIPT="$evidence/p0-native-launcher-preflight.json" \
+  P0_NATIVE_LAUNCHER_RECEIPT="$evidence_real.launcher-preflight.json" \
     "$node22" --input-type=module -e '
       import { createHash } from "node:crypto";
       import { execFileSync } from "node:child_process";
