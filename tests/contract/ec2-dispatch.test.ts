@@ -94,7 +94,7 @@ describe("ec2-ebs delivery", () => {
     const readiness = [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 300 }];
     function taskRecord(payload: Record<string, unknown>): Ec2OutboxRecord {
       const record = recordFor();
-      let invocation = {
+      const invocation = {
         ...record.invocation,
         kind: "task",
         payload: { conversationId: randomUUID(), prompt: "test it", ...payload },
@@ -368,9 +368,9 @@ describe("ec2-ebs delivery", () => {
           },
           repository: "demo", title: "t", headBranch: `agentx/${operationId}`, repositoryGrant: "g", ...payload,
         },
-      } as WorkerInvocation;
+      };
       const context = workflowPublicationContext(invocation);
-      if (context !== undefined) invocation.payload.publicationContextDigest = workflowPublicationContextDigest(context);
+      if (context !== undefined && invocation.kind === "publish") invocation.payload.publicationContextDigest = workflowPublicationContextDigest(context);
       return { ...record, invocation };
     }
     const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;

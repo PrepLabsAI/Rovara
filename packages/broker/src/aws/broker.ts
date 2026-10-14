@@ -4174,7 +4174,7 @@ async function acceptPullRequest(
   if (publicationContext !== undefined && invocation.kind === "publish") {
     const publicationContextDigest = workflowPublicationContextDigest(publicationContext);
     invocation.payload.publicationContextDigest = publicationContextDigest;
-    operation.publication!.publicationContextDigest = publicationContextDigest;
+    operation.publication.publicationContextDigest = publicationContextDigest;
   }
   const outbox = outboxRecord(workspace, invocation);
   try {

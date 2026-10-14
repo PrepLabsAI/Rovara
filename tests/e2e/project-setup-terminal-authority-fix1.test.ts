@@ -817,7 +817,9 @@ describe("P0 setup proposal broker authority", () => {
     };
     const connectorRegistration = await call(broker.handler, { method: "POST", path: "/v1/admin/projects", user: { subject: "owner", admin: true }, body: { definition: connectorRevision, runtimeBinding, setupApproval } });
     expect(connectorRegistration.status, JSON.stringify(connectorRegistration.body)).toBe(201);
-    expect(broker.db.get("PROJECT#ordinary-orders", "REV#000000000002")).toMatchObject({ definition: connectorRevision, setupApproval: expect.objectContaining(setupApproval) });
+    const registeredConnectorRevision = broker.db.get("PROJECT#ordinary-orders", "REV#000000000002") as { definition: unknown; setupApproval: typeof setupApproval } | undefined;
+    expect(registeredConnectorRevision?.definition).toEqual(connectorRevision);
+    expect(registeredConnectorRevision?.setupApproval).toEqual({ ...setupApproval, candidateDigest: candidate.digest });
 
     const changedPolicy = { ...definition, revision: 3, e2e: { ...(response.body.policy as Record<string, unknown>), policyRevision: 2 } };
     const changedPolicyResponse = await call(broker.handler, { method: "POST", path: "/v1/admin/projects", user: { subject: "owner", admin: true }, body: { definition: changedPolicy, runtimeBinding, setupApproval } });

@@ -8,7 +8,7 @@ import {
 
 const sha = (character: string) => character.repeat(40);
 
-function publishInvocation(): WorkerInvocation {
+function publishInvocation(): Extract<WorkerInvocation, { kind: "publish" }> {
   return {
     protocolVersion: 1,
     kind: "publish",
@@ -28,7 +28,7 @@ function publishInvocation(): WorkerInvocation {
       candidateTreeSha: sha("a"),
       workflowBaseCommit: sha("b"),
     },
-  } as unknown as WorkerInvocation;
+  } as unknown as Extract<WorkerInvocation, { kind: "publish" }>;
 }
 
 describe("workflow publication context", () => {
@@ -52,7 +52,7 @@ describe("workflow publication context", () => {
       workflowBaseCommit: sha("b"),
     });
     expect(workflowPublicationContextDigest(context!)).toMatch(/^[a-f0-9]{64}$/u);
-    expect(workflowPublicationContext({ ...invocation, kind: "task" } as WorkerInvocation)).toBeUndefined();
+    expect(workflowPublicationContext({ ...invocation, kind: "task" } as unknown as WorkerInvocation)).toBeUndefined();
   });
 
   it("changes the digest for every signed publication selector", () => {
@@ -78,7 +78,8 @@ describe("workflow publication context", () => {
 
   it("rejects partial workflow bindings instead of treating them as ordinary publish", () => {
     const invocation = publishInvocation();
-    const payload = { ...invocation.payload, publicationMode: undefined };
-    expect(() => workflowPublicationContext({ ...invocation, payload } as WorkerInvocation)).toThrow(/incomplete/u);
+    const incomplete = { ...invocation, payload: { ...invocation.payload } };
+    delete incomplete.payload.publicationMode;
+    expect(() => workflowPublicationContext(incomplete)).toThrow(/incomplete/u);
   });
 });

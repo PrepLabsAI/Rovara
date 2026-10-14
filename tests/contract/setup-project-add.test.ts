@@ -273,7 +273,8 @@ describe("agentx project add (FR-040)", () => {
     await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: () => undefined,
       services: services(plane, repositories), flags: {}, e2eSetup: { proposal, policy, snapshot } });
     const approvalRequest = plane.requests.find((request) => request.path === "/v1/admin/projects/setup-approvals")?.body as { projectName: string; proposalRef: string; proposalSha256: string; decision: "approve" };
-    expect(approvalRequest).toMatchObject({ projectName: "payments-api", decision: "approve", proposalSha256: expect.any(String) });
+    expect(approvalRequest).toMatchObject({ projectName: "payments-api", decision: "approve" });
+    expect(typeof approvalRequest.proposalSha256).toBe("string");
     const originalDecision = { proposalRef: approvalRequest.proposalRef, proposalSha256: approvalRequest.proposalSha256, decision: approvalRequest.decision };
     const sidecar = JSON.parse(await readFile(join(configDir, "payments-api.yaml.setup-approval.json"), "utf8")) as Record<string, unknown>;
     expect(sidecar).toMatchObject({ schemaVersion: 1, env: "staging", controlPlaneUrl: CONTROL_PLANE, projectName: "payments-api", repositoryUrl: "https://github.com/acme/payments-api.git", setupApproval: originalDecision });

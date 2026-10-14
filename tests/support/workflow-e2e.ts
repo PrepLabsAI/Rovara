@@ -60,7 +60,7 @@ import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-act
 import { createEc2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js";
 import { guardTaskDispatch, type TaskDispatchGuard } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { failActiveOperation, failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
-import type { DurableOutboxRecord } from "../../packages/broker/src/aws/lambda.js";
+import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import type { CheckTaskPerson } from "../../packages/broker/src/developer/task-people.js";
 import { runPlanEvidenceJob, type PlanEvidenceRunOutcome } from "../../packages/broker/src/aws/plan-evidence-handler.js";
 import type { PlanEvidenceEvent } from "../../packages/broker/src/developer/plan-evidence-jobs.js";
@@ -538,8 +538,16 @@ export async function createWorkflowE2E(options: {
     invocation: Extract<WorkerInvocation, { kind: "publish" }>,
     callbacks: ReturnType<typeof createWorkerCallbackSinks>,
   ): Promise<void> => {
-    const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === invocation.operationId)[0];
-    if (outbox === undefined) throw new Error(`publication ${invocation.operationId} has no broker outbox`);
+    const outboxItem = db.find((item) => item.entityType === "OUTBOX" && item.operationId === invocation.operationId)[0];
+    if (outboxItem === undefined) throw new Error(`publication ${invocation.operationId} has no broker outbox`);
+    const outboxInvocation = WorkerInvocationSchema.safeParse(outboxItem.invocation);
+    if (outboxItem.deploymentMode !== "ec2-ebs" || typeof outboxItem.id !== "string" || typeof outboxItem.status !== "string"
+      || typeof outboxItem.operationId !== "string" || typeof outboxItem.workspaceId !== "string" || !outboxInvocation.success
+      || outboxInvocation.data.kind !== "publish" || outboxInvocation.data.operationId !== outboxItem.operationId
+      || outboxInvocation.data.workspaceId !== outboxItem.workspaceId) {
+      throw new Error(`publication ${invocation.operationId} does not have a valid EC2 worker outbox`);
+    }
+    const outbox: Ec2OutboxRecord = outboxItem as unknown as Ec2OutboxRecord;
     const workerKeys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
     const journal = new OperationJournal(join(root, `.agentx-worker-journal-${invocation.operationId}`));
     let pushToken: string | undefined;
@@ -575,11 +583,12 @@ export async function createWorkflowE2E(options: {
               const rewritten = [...args];
               rewritten[remoteIndex] = localBareRemote;
               const stdout = execFileSync("git", ["-c", "protocol.file.allow=always", ...rewritten], {
-                cwd: runOptions.cwd, env: runOptions.env, encoding: "utf8", timeout: runOptions.timeout, maxBuffer: runOptions.maxBuffer,
+                cwd: runOptions.cwd, ...(runOptions.env === undefined ? {} : { env: runOptions.env }),
+                encoding: "utf8", timeout: runOptions.timeout, maxBuffer: runOptions.maxBuffer,
               });
               const [commit, branch] = refspec.split(":refs/heads/");
               const tree = execFileSync("git", ["--git-dir", localBareRemote, "rev-parse", `${commit}^{tree}`], { encoding: "utf8" }).trim();
-              const parents = execFileSync("git", ["--git-dir", localBareRemote, "show", "-s", "--format=%P", commit], { encoding: "utf8" }).trim().split(" ").filter(Boolean);
+              const parents = execFileSync("git", ["--git-dir", localBareRemote, "show", "-s", "--format=%P", commit!], { encoding: "utf8" }).trim().split(" ").filter(Boolean);
               github.push(pushToken, branch!, commit!, tree, parents);
               return { stdout, stderr: "" };
             },
@@ -609,7 +618,7 @@ export async function createWorkflowE2E(options: {
       guardTaskDispatch: async (record) => guardTaskDispatch({ documentClient: db, tableName: "state" }, record),
       progress: async () => undefined,
     });
-    await deliver(outbox as unknown as DurableOutboxRecord, invocation);
+    await deliver(outbox, invocation);
     await terminal;
   };
 

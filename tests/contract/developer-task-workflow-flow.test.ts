@@ -966,7 +966,8 @@ describe("native developer task workflow", () => {
     const manual = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/pull-requests`, { requestId: randomUUID(), title: "Fix retry" });
     expect(manual.body.error).toMatchObject({ code: "CONFIG_INVALID", message: "AgentX opens the draft pull request for this task itself once checks and reviews pass" });
     const publication = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.kind === "publish") as { id?: string; publication?: { headBranch?: string; draft?: boolean; expectedTreeSha?: string; admittedPinnedRevision?: number; admittedLatestRevision?: number; admittedMaterialDigest?: string } } | undefined;
-    expect(publication?.publication).toMatchObject({ draft: true, expectedTreeSha: "b".repeat(40), admittedPinnedRevision: 1, admittedLatestRevision: 1, admittedMaterialDigest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(publication?.publication).toMatchObject({ draft: true, expectedTreeSha: "b".repeat(40), admittedPinnedRevision: 1, admittedLatestRevision: 1 });
+    expect(publication?.publication?.admittedMaterialDigest).toMatch(/^[a-f0-9]{64}$/u);
     harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "PULL_REQUEST#demo#000000000042", entityType: "PULL_REQUEST", workspaceId,
       repository: "demo", repositoryUrl: "https://github.com/example/demo.git", number: 42, url: "https://github.com/example/demo/pull/42", state: "open", headBranch: publication?.publication?.headBranch,
       baseBranch: "main", expectedHeadCommit: "d".repeat(40), title: "Fix retry", body: "", createdByOperationId: String(publication?.id), updatedAt: new Date().toISOString() });

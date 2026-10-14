@@ -6,7 +6,7 @@ export const nativeP0Files = [
 
 export const sharedVitestSettings = {
   coverage: { enabled: false },
-  globalSetup: ["tests/support/test-temp-dir.ts"],
+  globalSetup: ["tests/support/test-temp-dir.ts"] as string[],
   passWithNoTests: false,
   testTimeout: 60_000,
 } as const;
