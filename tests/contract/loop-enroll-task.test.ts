@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm } from "node:fs/promises";
 import { arch, hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -53,7 +53,7 @@ function git(repo: string, ...args: string[]): string {
 
 describe("registered task selection through the normal loop enrollment command", () => {
   it("does not store a selector when the authenticated task read is unavailable", async () => {
-    const root = await mkdtemp(join(tmpdir(), "rovara-task-bind-"));
+    const root = await realpath(await mkdtemp(join(tmpdir(), "rovara-task-bind-")));
     dirs.push(root);
     const home = join(root, "home");
     const checkout = join(root, "checkout");
