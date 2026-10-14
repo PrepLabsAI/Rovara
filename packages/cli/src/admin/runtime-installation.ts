@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { Ec2RuntimeBindingSchema, RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema, canonicalJson } from "@agentx/contracts";
+import { z } from "zod";
 import { adminResponseBody } from "./http.js";
 
 type Auth = Readonly<{ controlPlaneUrl: string; accessToken: string }>;
 type Fetcher = typeof fetch;
+const RuntimeInstallChallengeResponseEnvelopeSchema = z.object({ requestId: z.string().min(1).max(256) }).passthrough();
 
 async function post(auth: Auth, path: string, body: unknown, fetchImplementation: Fetcher): Promise<unknown> {
   const response = await fetchImplementation(`${auth.controlPlaneUrl.replace(/\/$/, "")}${path}`, {
@@ -25,7 +27,9 @@ export async function requestRuntimeInstallChallenge(input: Auth & {
     binding, endpoint: input.endpoint, generation: input.generation,
     transportCorrelationId: input.transportCorrelationId, profileId: input.profileId,
   }, fetchImplementation);
-  const challenge = RuntimeInstallChallengeSchema.parse(value);
+  const envelope = RuntimeInstallChallengeResponseEnvelopeSchema.parse(value);
+  const challengePayload = Object.fromEntries(Object.entries(envelope).filter(([key]) => key !== "requestId"));
+  const challenge = RuntimeInstallChallengeSchema.parse(challengePayload);
   const destination = resolve(input.outputFile);
   await writeFile(destination, `${canonicalJson(challenge)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
   return { challengeId: challenge.challengeId, outputFile: destination, expiresAt: challenge.expiresAt };
