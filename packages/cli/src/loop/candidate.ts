@@ -20,12 +20,12 @@ export async function captureCandidate(exec: Exec, worktree: string, expectedBra
     run(exec, "git", ["-C", worktree, "rev-parse", "--verify", baseRef]),
     run(exec, "git", ["-C", worktree, "status", "--porcelain", "--untracked-files=no"]),
   ]);
-  if (branch !== expectedBranch) throw new CandidateHoldError("candidate_branch_changed");
+  if (branch.trim() !== expectedBranch) throw new CandidateHoldError("candidate_branch_changed");
   if (trackedChanges !== "") throw new CandidateHoldError("candidate_tracked_changes");
-  if (!/^[a-f0-9]{40}$/u.test(commitSha) || !/^[a-f0-9]{40}$/u.test(treeSha) || !/^[a-f0-9]{40}$/u.test(baseCommitSha)) {
+  if (!/^[a-f0-9]{40}$/u.test(commitSha.trim()) || !/^[a-f0-9]{40}$/u.test(treeSha.trim()) || !/^[a-f0-9]{40}$/u.test(baseCommitSha.trim())) {
     throw new CandidateHoldError("candidate_identity_invalid");
   }
-  return { branch, commitSha, treeSha, baseCommitSha };
+  return { branch: branch.trim(), commitSha: commitSha.trim(), treeSha: treeSha.trim(), baseCommitSha: baseCommitSha.trim() };
 }
 
 export function sameCandidate(left: CandidateSnapshot | undefined, right: CandidateSnapshot | undefined): boolean {

@@ -3,10 +3,31 @@ import { realpath } from "node:fs/promises";
 import { arch, hostname } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { ProjectDefinitionSchema, type ProjectDefinition } from "@agentx/contracts";
+import { developerAccessToken } from "../developer/session.js";
 import { GitHub } from "./github.js";
-import { createRegisteredEnrollment, createRegisteredPendingEnrollment } from "./enrollment.js";
+import { createRegisteredEnrollment, createRegisteredPendingEnrollment, PublicationJoinRequestSchema, type PublicationJoinTransport } from "./enrollment.js";
 import { realExec, type Exec } from "./exec.js";
 import { LoopStore } from "./state.js";
+import type { TokenStore } from "../token-store.js";
+
+/** The publication join uses the existing developer sign-in and its control-plane access token. */
+export function createDeveloperPublicationJoinTransport(input: { home: string; env: string | (() => string); tokenStore: TokenStore; fetch: typeof fetch }): PublicationJoinTransport {
+  return {
+    async load(request) {
+      const parsed = PublicationJoinRequestSchema.parse(request);
+      const env = typeof input.env === "function" ? input.env() : input.env;
+      const session = await developerAccessToken({ home: input.home, tokenStore: input.tokenStore, fetch: input.fetch }, env);
+      const baseUrl = session.entry.url.replace(/\/$/u, "");
+      const response = await input.fetch(`${baseUrl}/v1/dev/tasks/${encodeURIComponent(parsed.taskRef)}/e2e-publication-context`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${session.accessToken}`, "content-type": "application/json" },
+        body: JSON.stringify(parsed),
+      });
+      if (!response.ok) throw new Error(`publication context request refused with HTTP ${response.status}`);
+      return response.json();
+    },
+  };
+}
 
 /**
  * Record a host-owned native enrollment only from the server's successful registration response and a fresh local

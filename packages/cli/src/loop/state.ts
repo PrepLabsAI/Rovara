@@ -141,6 +141,20 @@ export class LoopStore {
     await writeJson(this.enrollmentPath(), [...records, parsed]);
   }
 
+  /** Store only the selected task identity after the host has validated its current publication subject. */
+  async bindTaskRef(enrollmentId: string, taskRef: string): Promise<void> {
+    const records = await this.enrollments();
+    let found = false;
+    const updated = records.map((record) => {
+      if (record.enrollmentId !== enrollmentId) return record;
+      if (record.kind !== "registered") throw new Error("task binding requires a validated registered enrollment");
+      found = true;
+      return LoopEnrollmentSchema.parse({ ...record, taskRef });
+    });
+    if (!found) throw new Error("registered enrollment disappeared before task binding");
+    await writeJson(this.enrollmentPath(), updated);
+  }
+
   /** Persist the server-declared binding before local source reconciliation can succeed or fail. */
   async savePendingEnrollment(pending: RegisteredPendingEnrollment): Promise<RegisteredPendingEnrollment> {
     const parsed = LoopEnrollmentSchema.parse(pending);

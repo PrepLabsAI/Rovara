@@ -16,9 +16,9 @@ const standalone: LoopEnrollment = {
   checkoutPath: "/work/payments", commonGitDir: "/work/payments/.git", enrolledAt: "2026-10-14T10:00:00.000Z",
 };
 const registered: LoopEnrollment = {
-  schemaVersion: 1, kind: "registered", enrollmentId: "native-1", namespace: "https://agentx.example/env-a",
+  schemaVersion: 1, kind: "registered", enrollmentId: "11111111-2222-4333-8444-555555555555", namespace: "https://agentx.example/env-a",
   hostId: "host-a", uid: 501, account: "maya", project: "payments-service", projectRevision: 4,
-  repository: "acme/payments", repositoryId: 1234, checkoutPath: "/work/payments", commonGitDir: "/work/payments/.git", sourceBindingRef: "binding-1",
+  repository: "acme/payments", repositoryId: 1234, checkoutPath: "/work/payments", commonGitDir: "/work/payments/.git", sourceBindingRef: `cli-source:v1:${"a".repeat(64)}`,
   enrolledAt: "2026-10-14T10:00:00.000Z",
 };
 const pending: LoopEnrollment = {
@@ -96,6 +96,8 @@ describe("registered CLI publication context", () => {
   it("requires a server join and holds if the native task reference is missing", async () => {
     await expect(resolveRegisteredPublication({ enrollment: registered, subject, taskRef: undefined, transport: undefined, now: Date.parse("2026-10-14T10:01:00.000Z") }))
       .resolves.toEqual({ kind: "hold", reasonCode: "task_binding_missing" });
+    await expect(resolveRegisteredPublication({ enrollment: registered, subject, taskRef: "task-1", transport: { load: async () => ({ status: "READY" }) }, now: Date.parse("2026-10-14T10:01:00.000Z") }))
+      .resolves.toEqual({ kind: "hold", reasonCode: "task_binding_invalid" });
   });
 
   it("accepts only a fresh server READY bound to the exact observed subject", async () => {
@@ -103,15 +105,15 @@ describe("registered CLI publication context", () => {
       schemaVersion: 1, status: "READY", subject, candidateDigest: "d".repeat(64), contractDigest: "e".repeat(64),
       policyDigest: "f".repeat(64), planDigest: "1".repeat(64), roundId: "round-1", evidenceSetDigest: "2".repeat(64), checkedAt: "2026-10-14T10:01:00.000Z",
     }) };
-    await expect(resolveRegisteredPublication({ enrollment: registered, subject, taskRef: "task-1", transport, now: Date.parse("2026-10-14T10:01:10.000Z") }))
+    await expect(resolveRegisteredPublication({ enrollment: registered, subject, taskRef: "11111111-2222-4333-8444-555555555555", transport, now: Date.parse("2026-10-14T10:01:10.000Z") }))
       .resolves.toMatchObject({ kind: "ready", subject, response: { candidateDigest: "d".repeat(64) } });
-    await expect(resolveRegisteredPublication({ enrollment: registered, subject: { ...subject, treeSha: "3".repeat(40) }, taskRef: "task-1", transport, now: Date.parse("2026-10-14T10:01:10.000Z") }))
+    await expect(resolveRegisteredPublication({ enrollment: registered, subject: { ...subject, treeSha: "3".repeat(40) }, taskRef: "11111111-2222-4333-8444-555555555555", transport, now: Date.parse("2026-10-14T10:01:10.000Z") }))
       .resolves.toMatchObject({ kind: "hold", reasonCode: "subject_mismatch" });
   });
 
   it("holds server UNKNOWN, stale READY, and malformed responses", async () => {
     const run = (response: unknown, now = Date.parse("2026-10-14T10:01:00.000Z")) => resolveRegisteredPublication({
-      enrollment: registered, subject, taskRef: "task-1", transport: { load: async () => response }, now,
+      enrollment: registered, subject, taskRef: "11111111-2222-4333-8444-555555555555", transport: { load: async () => response }, now,
     });
     await expect(run({ schemaVersion: 1, status: "UNKNOWN", subject, reasonCode: "missing_evidence", checkedAt: "2026-10-14T10:00:59.000Z" }))
       .resolves.toMatchObject({ kind: "hold", reasonCode: "missing_evidence" });

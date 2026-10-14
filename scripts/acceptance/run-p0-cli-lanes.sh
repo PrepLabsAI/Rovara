@@ -32,7 +32,7 @@ cat >"$EVIDENCE/$STAMP-loop-publication-context.meta" <<EOF
 node=$NODE
 node_version=$($NODE --version)
 exec_path=$($NODE -p 'process.execPath')
-argv=[$NODE,node_modules/vitest/vitest.mjs,run,tests/contract/loop-cli.test.ts,tests/contract/loop-codex.test.ts,tests/contract/loop-contribute.test.ts,tests/contract/loop-daemon.test.ts,tests/contract/loop-enrollment-cli.test.ts,tests/contract/loop-full.test.ts,tests/contract/loop-publication-context.test.ts,tests/contract/loop-publication.test.ts,tests/contract/loop-pulls.test.ts,tests/contract/loop-quick.test.ts,tests/contract/loop-review.test.ts,tests/contract/loop-reviews.test.ts,tests/contract/loop-runtime.test.ts,--reporter=verbose]
+argv=[$NODE,node_modules/vitest/vitest.mjs,run,tests/contract/loop-cli.test.ts,tests/contract/loop-codex.test.ts,tests/contract/loop-contribute.test.ts,tests/contract/loop-enroll-task.test.ts,tests/contract/loop-daemon.test.ts,tests/contract/loop-enrollment-cli.test.ts,tests/contract/loop-full.test.ts,tests/contract/loop-publication-context.test.ts,tests/contract/loop-publication-join-client.test.ts,tests/contract/loop-publication.test.ts,tests/contract/loop-pulls.test.ts,tests/contract/loop-quick.test.ts,tests/contract/loop-review.test.ts,tests/contract/loop-reviews.test.ts,tests/contract/loop-runtime.test.ts,--reporter=verbose]
 tmpdir=$TMP_REAL
 tmpdir_owner=$TMP_OWNER
 cwd=$ROOT
@@ -40,8 +40,9 @@ EOF
 cd "$ROOT"
 set +e
 "$NODE" node_modules/vitest/vitest.mjs run \
-  tests/contract/loop-cli.test.ts tests/contract/loop-codex.test.ts tests/contract/loop-contribute.test.ts \
+  tests/contract/loop-cli.test.ts tests/contract/loop-codex.test.ts tests/contract/loop-contribute.test.ts tests/contract/loop-enroll-task.test.ts \
   tests/contract/loop-daemon.test.ts tests/contract/loop-enrollment-cli.test.ts tests/contract/loop-full.test.ts tests/contract/loop-publication-context.test.ts \
+  tests/contract/loop-publication-join-client.test.ts \
   tests/contract/loop-publication.test.ts tests/contract/loop-pulls.test.ts tests/contract/loop-quick.test.ts \
   tests/contract/loop-review.test.ts tests/contract/loop-reviews.test.ts tests/contract/loop-runtime.test.ts \
   --reporter=verbose >"$LOG" 2>&1

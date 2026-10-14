@@ -78,7 +78,7 @@ import type { SigninServices } from "./signin/commands.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
 import { CLI_VERSION, RELEASE_VERSION } from "./version.js";
 import { registerLoopCommands } from "./loop/cli.js";
-import { recordRegisteredLoopEnrollment } from "./loop/enrollment-cli.js";
+import { createDeveloperPublicationJoinTransport, recordRegisteredLoopEnrollment } from "./loop/enrollment-cli.js";
 import type { Exec } from "./loop/exec.js";
 
 interface GlobalOptions {
@@ -452,6 +452,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   registerLoopCommands(program, {
     home, version: CLI_VERSION, stdout: services.stdout, stderr: services.stderr,
+    publicationJoin: createDeveloperPublicationJoinTransport({ home, env: () => globalOptions(program).env, tokenStore: services.tokenStore, fetch: services.fetchImplementation }),
     ...(dependencies.loop?.exec === undefined ? {} : { exec: dependencies.loop.exec }),
     ...(dependencies.loop?.cliCommand === undefined ? {} : { cliCommand: dependencies.loop.cliCommand }),
   });

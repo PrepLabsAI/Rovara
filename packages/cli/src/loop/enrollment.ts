@@ -4,6 +4,8 @@ import { z } from "zod";
 const ShaSchema = z.string().regex(/^[a-f0-9]{40}$/u);
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 const RepoSlugSchema = z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/u, "owner/name");
+const TaskRefSchema = z.string().uuid();
+const SourceBindingRefSchema = z.string().regex(/^cli-source:v1:[a-f0-9]{64}$/u);
 export const StandaloneEnrollmentSchema = z.object({
   schemaVersion: z.literal(1), kind: z.literal("standalone-local"), enrollmentId: z.string().uuid(),
   namespace: z.string().min(1).max(512), hostId: z.string().min(1).max(255), uid: z.number().int().nonnegative(),
@@ -16,7 +18,7 @@ export const RegisteredEnrollmentSchema = z.object({
   namespace: z.string().min(1).max(512), hostId: z.string().min(1).max(255), uid: z.number().int().nonnegative(),
   account: z.string().min(1).max(100), project: z.string().min(1).max(100), projectRevision: z.number().int().positive(),
   repository: RepoSlugSchema, repositoryId: z.number().int().positive(), checkoutPath: z.string().min(1).max(2_000), commonGitDir: z.string().min(1).max(2_000).optional(),
-  sourceBindingRef: z.string().min(1).max(512), taskRef: z.string().min(1).max(512).optional(), enrolledAt: z.string().datetime(),
+  sourceBindingRef: SourceBindingRefSchema, taskRef: TaskRefSchema.optional(), enrolledAt: z.string().datetime(),
 }).strict();
 
 const RegisteredPendingSourceSchema = z.object({
@@ -148,18 +150,19 @@ export const PublicationSubjectSchema = z.object({
 export type PublicationSubject = z.infer<typeof PublicationSubjectSchema>;
 
 const PublicationReadySchema = z.object({
-  schemaVersion: z.literal(1), status: z.literal("READY"), subject: PublicationSubjectSchema,
+  schemaVersion: z.literal(1), status: z.literal("READY"), requestId: z.string().min(1).max(200).optional(), subject: PublicationSubjectSchema,
   candidateDigest: DigestSchema, contractDigest: DigestSchema, policyDigest: DigestSchema, planDigest: DigestSchema,
   roundId: z.string().min(1).max(512), evidenceSetDigest: DigestSchema, checkedAt: z.string().datetime(),
 }).strict();
 const PublicationUnknownSchema = z.object({
-  schemaVersion: z.literal(1), status: z.literal("UNKNOWN"), subject: PublicationSubjectSchema.optional(),
+  schemaVersion: z.literal(1), status: z.literal("UNKNOWN"), requestId: z.string().min(1).max(200).optional(), subject: PublicationSubjectSchema.optional(),
   reasonCode: z.string().min(1).max(100), checkedAt: z.string().datetime(),
 }).strict();
 export const PublicationJoinResponseSchema = z.discriminatedUnion("status", [PublicationReadySchema, PublicationUnknownSchema]);
 export type PublicationJoinResponse = z.infer<typeof PublicationJoinResponseSchema>;
 
-export interface PublicationJoinRequest { taskRef: string; subject: PublicationSubject; sourceBindingRef: string }
+export const PublicationJoinRequestSchema = z.object({ taskRef: TaskRefSchema, subject: PublicationSubjectSchema, sourceBindingRef: SourceBindingRefSchema }).strict();
+export type PublicationJoinRequest = z.infer<typeof PublicationJoinRequestSchema>;
 export interface PublicationJoinTransport { load(request: PublicationJoinRequest): Promise<unknown> }
 export type RegisteredPublicationResolution =
   | { kind: "ready"; response: z.infer<typeof PublicationReadySchema>; subject: PublicationSubject }
@@ -170,6 +173,8 @@ export async function resolveRegisteredPublication(input: {
   transport: PublicationJoinTransport | undefined; now: number; maxAgeMs?: number;
 }): Promise<RegisteredPublicationResolution> {
   if (input.taskRef === undefined || input.taskRef.length === 0) return { kind: "hold", reasonCode: "task_binding_missing" };
+  if (!TaskRefSchema.safeParse(input.taskRef).success) return { kind: "hold", reasonCode: "task_binding_invalid" };
+  if (!RegisteredEnrollmentSchema.safeParse(input.enrollment).success) return { kind: "hold", reasonCode: "source_binding_invalid" };
   if (input.transport === undefined) return { kind: "hold", reasonCode: "native_join_unavailable" };
   let raw: unknown;
   try {

@@ -17,7 +17,8 @@ import { createLoopMcpServer } from "./mcp.js";
 import { ARTIFACT_SECTIONS } from "./instructions.js";
 import { artifactDigest, missingSections, readArtifact } from "./exit-checks.js";
 import { artifactPath } from "./naming.js";
-import { createStandaloneEnrollment, resolvePublicationScopes, resolveRegisteredPublication, type PublicationJoinTransport } from "./enrollment.js";
+import { createStandaloneEnrollment, resolveLoopEnrollment, resolvePublicationScopes, resolveRegisteredPublication, type PublicationJoinTransport } from "./enrollment.js";
+import { captureCandidate, sameCandidate } from "./candidate.js";
 import type { Artifact, LoopDefinition } from "./definitions.js";
 import type { WorkItemState } from "./state.js";
 import { LoopStore, RepoSlugSchema } from "./state.js";
@@ -108,17 +109,72 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
       say(`Added ${found.repo} (${found.path}). Comments from now on are read; start the daemon with rovara loop start.`);
     });
 
-  loop.command("enroll").description("enroll one added repository in a host-scoped local publication lane")
+  loop.command("enroll").description("enroll a local-only repository or bind a registered repository to a validated task")
     .argument("<repo>", "the added repository, owner/name")
-    .requiredOption("--standalone-local", "explicitly enroll this repository in a local-only namespace")
-    .action(async (repo: string) => {
+    .option("--standalone-local", "explicitly enroll this repository in a local-only namespace")
+    .option("--task <task-id>", "task UUID selected from a normal Developer task response; validated by the server")
+    .option("--issue <number>", "existing loop issue number for task binding")
+    .option("--target <repo>", "target repository for the existing issue child")
+    .action(async (repo: string, options: { standaloneLocal?: boolean; task?: string; issue?: string; target?: string }) => {
+      if (options.standaloneLocal === (options.task !== undefined) || (options.task === undefined && (options.issue !== undefined || options.target !== undefined)) ||
+          (options.task !== undefined && options.issue === undefined)) {
+        throw new Error("choose either --standalone-local or --task <UUID> --issue <number> [--target <repo>]");
+      }
       const found = (await store.repos()).find((entry) => entry.repo.toLowerCase() === repo.toLowerCase());
       if (found === undefined) throw new Error(`${repo} is not added to rovara loop on this computer; run rovara loop add in its checkout first`);
       const actualRepo = await github.repoAt(found.path);
       if (actualRepo.toLowerCase() !== found.repo.toLowerCase()) throw new Error("the added checkout now identifies as a different GitHub repository; publication remains on hold");
+      const checkoutPath = await realpath(found.path);
+      const account = await github.login();
+      const repositoryId = await github.repositoryId(actualRepo);
+      const commonGitDir = await github.commonGitDir(found.path);
+      if (options.task !== undefined) {
+        const issue = Number(options.issue);
+        if (!Number.isSafeInteger(issue) || issue <= 0) throw new Error("--issue must be an existing issue number");
+        const item = await store.item(found.repo, issue, options.target);
+        if (item === undefined) throw new Error("the selected loop issue/target child does not exist on this computer; publication remains on hold");
+        const targetRepo = item.target ?? item.repo;
+        if (options.target !== undefined && options.target.toLowerCase() !== targetRepo.toLowerCase()) throw new Error("the selected target does not match the existing loop child; publication remains on hold");
+        if (targetRepo.toLowerCase() !== found.repo.toLowerCase()) throw new Error("registered cross-target task binding is not available; publication remains on hold");
+        if (item.worktree === undefined) throw new Error("the selected loop item has no retained worktree; publication remains on hold");
+        const records = await store.enrollments();
+        const observation = { hostId, uid, account, repo: actualRepo, repositoryId, checkoutPath, commonGitDir };
+        const enrollmentResolution = resolveLoopEnrollment(records, observation);
+        if (enrollmentResolution.kind !== "registered") throw new Error(`registered task binding is on hold (${enrollmentResolution.kind === "hold" ? enrollmentResolution.reasonCode : "standalone_enrollment"})`);
+        const baseRef = item.upstream?.ref ?? `origin/${item.upstream?.branch ?? await github.defaultBranch(targetRepo)}`;
+        const candidate = await captureCandidate(exec, item.worktree.path, item.worktree.branch, baseRef);
+        if (!sameCandidate(item.checksCandidate, candidate) || !sameCandidate(item.reviewsCandidate, candidate)) {
+          throw new Error("the current Git candidate does not match both retained checks and review evidence; publication remains on hold");
+        }
+        const joined = await resolveRegisteredPublication({
+          enrollment: enrollmentResolution.enrollment,
+          subject: { projectName: enrollmentResolution.project, projectRevision: enrollmentResolution.projectRevision,
+            repositoryId: enrollmentResolution.repositoryId, commitSha: candidate.commitSha, treeSha: candidate.treeSha, baseCommitSha: candidate.baseCommitSha },
+          taskRef: options.task, transport: context.publicationJoin, now: Date.now(),
+        });
+        if (joined.kind !== "ready") throw new Error(`task binding is on hold (${joined.reasonCode}); no task reference was stored`);
+        const [latestCandidate, latestRepo, latestId, latestAccount, latestCheckout, latestCommonGitDir, latestRecords, latestItem] = await Promise.all([
+          captureCandidate(exec, item.worktree.path, item.worktree.branch, baseRef), github.repoAt(found.path), github.repositoryId(actualRepo), github.login(),
+          realpath(found.path), github.commonGitDir(found.path), store.enrollments(), store.item(found.repo, issue, options.target),
+        ]);
+        const latestResolution = resolveLoopEnrollment(latestRecords, { hostId, uid, account: latestAccount, repo: latestRepo, repositoryId: latestId, checkoutPath: latestCheckout, commonGitDir: latestCommonGitDir });
+        if (!sameCandidate(candidate, latestCandidate) || latestRepo.toLowerCase() !== found.repo.toLowerCase() || latestResolution.kind !== "registered" ||
+            latestResolution.enrollment.enrollmentId !== enrollmentResolution.enrollment.enrollmentId ||
+            latestResolution.enrollment.projectRevision !== enrollmentResolution.projectRevision ||
+            latestResolution.enrollment.sourceBindingRef !== enrollmentResolution.enrollment.sourceBindingRef || latestItem === undefined ||
+            latestItem.repo !== item.repo || latestItem.issue !== item.issue || latestItem.target !== item.target ||
+            latestItem.upstream?.repo !== item.upstream?.repo || latestItem.upstream?.branch !== item.upstream?.branch || latestItem.upstream?.ref !== item.upstream?.ref ||
+            latestItem.worktree?.path !== item.worktree.path || latestItem.worktree.branch !== item.worktree.branch ||
+            !sameCandidate(latestItem.checksCandidate, candidate) || !sameCandidate(latestItem.reviewsCandidate, candidate)) {
+          throw new Error("the host binding or Git candidate changed during task validation; no task reference was stored");
+        }
+        await store.bindTaskRef(enrollmentResolution.enrollment.enrollmentId, options.task);
+        say(`Bound task ${options.task} to the validated registered source candidate for ${found.repo}#${issue}. The server join is repeated before each publication attempt.`);
+        return;
+      }
       const enrollment = createStandaloneEnrollment({
-        hostId, uid, account: await github.login(), project: actualRepo, repositoryId: await github.repositoryId(actualRepo),
-        checkoutPath: await realpath(found.path), commonGitDir: await github.commonGitDir(found.path), now: new Date(),
+        hostId, uid, account, project: actualRepo, repositoryId,
+        checkoutPath, commonGitDir, now: new Date(),
       });
       await store.saveEnrollment(enrollment);
       say(`Enrolled ${actualRepo} in ${enrollment.namespace}. This local receipt applies only to this host, account, project and repository.`);
