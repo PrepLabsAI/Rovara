@@ -9404,7 +9404,7 @@ async function completedWorkflowItems(
     && next.e2e !== undefined && task.workflow.candidate !== undefined) {
     const rawOperations = await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#");
     const presentation = await workflowE2EPresentation(dependencies, task, rawOperations, "viewer");
-    const display = presentation === undefined ? undefined : createWorkflowE2EDisplayObject({ ownerKey: task.ownerKey, workspaceId: task.workspaceId,
+    const display = presentation === undefined ? undefined : createWorkflowE2EDisplayObject({ ownerKey: task.ownerKey, workspaceId: task.workspaceId, capturedAt: new Date(now).toISOString(),
       view: presentation.shared, current: { candidateDigest: task.workflow.candidate.digest, roundId: operation.workflowE2EAdmission.roundId,
         groupRunIds: [...operation.workflowE2EAdmission.groupRunIds],
         admissionSha256: operation.workflowE2EAdmission.admissionRef.sha256, evidenceSha256: operation.workflowE2EEvidenceRef.sha256 } });

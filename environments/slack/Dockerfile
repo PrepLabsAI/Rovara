@@ -7,6 +7,7 @@ WORKDIR /opt/agentx
 COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
 COPY packages/model-runtime/package.json packages/model-runtime/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/verifier/package.json packages/verifier/package.json
 COPY packages/gateway/package.json packages/gateway/package.json
 COPY packages/mcp/package.json packages/mcp/package.json
 COPY packages/worker/package.json packages/worker/package.json
@@ -14,6 +15,7 @@ COPY packages/cli/package.json packages/cli/package.json
 COPY packages/orchestrator/package.json packages/orchestrator/package.json
 COPY packages/broker/package.json packages/broker/package.json
 COPY packages/slack-service/package.json packages/slack-service/package.json
+COPY upstream/e2e-0.20.0.tgz upstream/e2e-0.20.0.tgz
 COPY infra/package.json infra/package.json
 RUN npm ci --ignore-scripts
 

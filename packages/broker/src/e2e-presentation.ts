@@ -37,6 +37,15 @@ export function renderE2EUnavailableSlackBlock(taskPageUrl?: string): E2ESlackBl
   return { type: "section", text: { type: "mrkdwn", text: `*Required E2E status: UNKNOWN*\nManifest/results unavailable. ${taskLink}` } };
 }
 
+/** Renders a hashed notification snapshot without implying that it is current readiness. */
+export function renderE2ENotifierSlackBlocks(view: E2ESharedView, capturedAt: string, taskPageUrl?: string): E2ESlackBlock[] {
+  const taskLink = taskPageUrl === undefined ? "Open the task for current status." : `<${slackBounded(taskPageUrl, 1800)}|Open the task for current status.>`;
+  return [
+    { type: "section", text: { type: "mrkdwn", text: `*Captured E2E observation: ${view.e2e.status}*\n${slackBounded(view.e2e.label, 140)}\nCaptured ${slackBounded(capturedAt, 40)}. Current readiness is UNKNOWN; it was not rechecked in this notification. ${taskLink}` } },
+    { type: "section", text: { type: "mrkdwn", text: `Captured cases ${view.e2e.executedCases} · criteria ${view.e2e.qualifiedCriteria}/${view.e2e.requiredCriteria} · required unavailable ${view.e2e.unavailableCriteria}` } },
+  ];
+}
+
 /** Renders the same bounded facts for a page without adding controls or executable actions. */
 export function renderE2EPageHtml(view: E2ESharedView): string {
   const { setup, e2e } = view;

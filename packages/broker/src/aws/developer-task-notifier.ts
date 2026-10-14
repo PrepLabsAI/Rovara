@@ -24,7 +24,7 @@ import { parseSlackSecrets } from "./slack-ingress.js";
 import { runTaskCanvasCloseout, type CanvasCloseoutStore, type TaskCanvasCloseoutTask } from "./developer-task-closeout.js";
 import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createTaskPlanCanvas, deleteTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
 import { readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
-import { renderE2ESlackBlocks, renderE2EUnavailableSlackBlock } from "../e2e-presentation.js";
+import { renderE2ENotifierSlackBlocks, renderE2EUnavailableSlackBlock } from "../e2e-presentation.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
@@ -612,9 +612,13 @@ interface Reply {
 
 /** The trusted AgentX task page, when the notifier knows its base and it is a plain https origin. */
 function taskPageUrl(deps: NotifierDependencies, taskId: string): string | undefined {
-  if (deps.reviewUrlBase === undefined) return undefined;
+  return taskPageUrlFromBase(deps.reviewUrlBase, taskId);
+}
+
+function taskPageUrlFromBase(reviewUrlBase: string | undefined, taskId: string): string | undefined {
+  if (reviewUrlBase === undefined) return undefined;
   try {
-    const base = new URL(deps.reviewUrlBase);
+    const base = new URL(reviewUrlBase);
     if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) return undefined;
     return new URL(`/review/${encodeURIComponent(taskId)}/task`, base).href;
   } catch {
@@ -1716,6 +1720,7 @@ function createAwsNotifierHandler() {
     },
     now: () => new Date().toISOString(),
   });
+  const reviewUrlBase = process.env.CONTROL_PLANE_URL;
   return createNotifierHandler({
     documentClient,
     tableName: requiredEnvironment("STATE_TABLE_NAME"),
@@ -1738,7 +1743,7 @@ function createAwsNotifierHandler() {
       await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl(), ReceiptHandle: receiptHandle, VisibilityTimeout: seconds }));
     },
     post: slack.post,
-    ...(process.env.CONTROL_PLANE_URL === undefined ? {} : { reviewUrlBase: process.env.CONTROL_PLANE_URL }),
+    ...(reviewUrlBase === undefined ? {} : { reviewUrlBase }),
     async readArtifact(key) {
       const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
       if (response.Body === undefined) throw new Error("workflow plan artifact has no body");
@@ -1772,7 +1777,7 @@ function createAwsNotifierHandler() {
         const bytes = response.Body === undefined ? undefined : Buffer.from(await response.Body.transformToByteArray());
         return bytes !== undefined && bytes.byteLength <= maxBytes ? bytes : undefined;
       } });
-      return view === undefined ? undefined : renderE2ESlackBlocks(view);
+      return view === undefined ? undefined : renderE2ENotifierSlackBlocks(view.view, view.capturedAt, taskPageUrlFromBase(reviewUrlBase, task.taskId));
     },
   });
 }

@@ -4,7 +4,7 @@ This record describes the local, synthetic acceptance journey for the managed na
 
 ## Journey and evidence
 
-The retained contained journey exercises normal project setup, canonical feature proposal and approval, implementation, protected candidate export, multi-group native CHECKS, current-round qualification, review, and exact-head local publication. It also covers a required browser criterion remaining `UNKNOWN`, ordinary-check failure and Owner SendBack, a fresh candidate and round, authenticated task enrollment and native-proof import through the CLI, authority revocation/restoration with explicit retry, cancellation and late-result rejection, and setup/workspace domain separation.
+The retained contained journey exercises normal project setup, canonical feature proposal and approval, implementation, protected candidate export, multi-group native CHECKS, current-round qualification, review, and exact-head local publication. It also covers a required browser criterion remaining `UNKNOWN`, ordinary-check failure and Owner SendBack, a fresh candidate and round, authenticated task enrollment and native-proof import through the CLI, authority revocation/restoration with explicit retry, cancellation and late-result rejection, and setup/workspace domain separation. Ordinary-check results and required E2E qualification are separate: ordinary PASS does not erase a required E2E FAIL or UNKNOWN, and neither status alone proves publication readiness.
 
 The latest author run passed 8/8 tests. Its original evidence is outside the checkout at:
 
@@ -16,7 +16,7 @@ The causal defect/fix journey preserves the browser-required `UNKNOWN` control s
 
 ## Limits and outstanding verification
 
-The run is author evidence for the current working source. Final acceptance remains pending the committed-source build guard, complete final source gates, an independent whole-branch review of the frozen commit, and the parent acceptance rerun against that exact commit. External identity-provider revocation races and any live endpoint, customer, payment, or production outcome remain unverified. Earlier failed and unavailable runs remain diagnostics and are not replaced by this passing run.
+This run is author evidence for its recorded source snapshot, not for later follow-up commits. Final acceptance remains pending the committed-source build guard, complete final source gates, an independent whole-branch review of the frozen commit, and the parent acceptance rerun against that exact commit. External identity-provider revocation races and any live endpoint, customer, payment, or production outcome remain unverified. Earlier failed and unavailable runs remain diagnostics and are not replaced by this passing run.
 
 ## Objective integrity
 
