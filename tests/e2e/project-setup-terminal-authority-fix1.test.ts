@@ -448,21 +448,27 @@ describe("P0 normal project onboarding journey", () => {
       const retryTerminalPath = `/operations/${retriedOperationId}/result`;
       const retryResultAccepted = () => brokerRouteObservations.some(({ path, status, body }) =>
         path.endsWith(retryTerminalPath) && status === 200 && body.accepted === true);
+      const retryTerminalObservation = () => brokerRouteObservations.filter(({ path }) => path.endsWith(retryTerminalPath)).at(-1);
       const retryWorkerAccepted = () => workerPosts.slice(retryWorkerPostStart).some(({ status, body }) => {
         const response = JSON.parse(body) as { accepted?: unknown; operationId?: unknown };
         return status === 200 && response.accepted === true && response.operationId === retriedOperationId;
       });
       expect(retryWorkerAccepted(), JSON.stringify({ retryDispatch, retryWorkerPosts: workerPosts.slice(retryWorkerPostStart),
         retryOutbox: { status: retryOutbox.status, operationId: retryInvocation.operationId } })).toBe(true);
-      while (Date.now() < retryDeadline && ((await journal.get(retriedOperationId))?.status !== "SUCCEEDED" || !retryResultAccepted())) {
+      while (Date.now() < retryDeadline) {
+        const currentRetryJournal = await journal.get(retriedOperationId);
+        if (currentRetryJournal?.status === "FAILED" || currentRetryJournal?.status === "CANCELLED" || currentRetryJournal?.status === "INTERRUPTED") break;
+        const currentTerminalObservation = retryTerminalObservation();
+        if (currentTerminalObservation !== undefined && !(currentTerminalObservation.status === 200 && currentTerminalObservation.body.accepted === true)) break;
+        if (currentRetryJournal?.status === "SUCCEEDED" && retryResultAccepted()) break;
         await new Promise((resolveWait) => setTimeout(resolveWait, 25));
       }
       const retryJournal = await journal.get(retriedOperationId);
-      const retryTerminalObservation = brokerRouteObservations.filter(({ path }) => path.endsWith(retryTerminalPath)).at(-1);
+      const retryTerminal = retryTerminalObservation();
       expect({ workerAccepted: retryWorkerAccepted(), journalStatus: retryJournal?.status,
-        brokerStatus: retryTerminalObservation?.status, brokerAccepted: retryTerminalObservation?.body.accepted },
+        brokerStatus: retryTerminal?.status, brokerAccepted: retryTerminal?.body.accepted },
       JSON.stringify({ retryDispatch, retryWorkerPosts: workerPosts.slice(retryWorkerPostStart), retryJournal,
-        retryTerminalObservation, execution: broker.db.get(`PROJECT_SETUP#${retriedExecutionId}`, "EXECUTION"),
+        retryTerminalObservation: retryTerminal, execution: broker.db.get(`PROJECT_SETUP#${retriedExecutionId}`, "EXECUTION"),
         operation: broker.db.get(`PROJECT_SETUP#${retriedExecutionId}`, `OPERATION#${retriedOperationId}`) }))
         .toEqual({ workerAccepted: true, journalStatus: "SUCCEEDED", brokerStatus: 200, brokerAccepted: true });
       expect(broker.db.get(`PROJECT_SETUP#${retriedExecutionId}`, "EXECUTION")).toMatchObject({ state: "SUCCEEDED", result: { qualification: "PASS", cleanupConfirmed: true } });
