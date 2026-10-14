@@ -12,19 +12,24 @@ export interface E2ESlackBlock {
 export function renderE2ESlackBlocks(view: E2ESharedView): E2ESlackBlock[] {
   const { setup, e2e } = view;
   const lines = [
-    `*E2E checks: ${slack(view.e2e.status)} — ${slack(e2e.label)}*`,
+    `*E2E checks: ${e2e.status} — ${slackBounded(e2e.label, 900)}*`,
     `Groups received: ${e2e.receivedGroups}/${e2e.expectedGroups} · Cases executed: ${e2e.executedCases}`,
     `Criteria qualified: ${e2e.qualifiedCriteria}/${e2e.requiredCriteria} · Required unavailable: ${e2e.unavailableCriteria} · Optional unavailable: ${e2e.optionalUnavailableCriteria}`,
-    `Setup: ${slack(setup.status)} · Selected targets: ${slack(list(setup.selectedTargetIds))}`,
-    `Blocking inputs: ${slack(list(setup.blockingInputIds))} · Mock-substitutable: ${slack(list(setup.mockSubstitutableInputIds))}`,
-    `Declared mock IDs: ${slack(list(e2e.mockedComponentIds))} · ${e2e.observedMockedComponentIds.length} observed consumption IDs: ${slack(list(e2e.observedMockedComponentIds))}`,
-    `Required unexercised criteria: ${slack(list(e2e.requiredUnexercisedCriteriaIds))} · Behaviors: ${slack(list(e2e.unexercisedBehaviors))}`,
-    `Current plan digest: ${slack(e2e.executionPlanDigest ?? "unavailable")} · Policy: ${e2e.policyPresence} · Phase: ${slack(e2e.workflowPhase ?? "unknown")}`,
-    `Owner action proposals (read-only): ${slack(list(view.actions))}`,
+    `Setup: ${setup.status}`,
+    `Selected targets: ${slackList(setup.selectedTargetIds)}`,
+    `Blocking inputs: ${slackList(setup.blockingInputIds)}`,
+    `Mock-substitutable inputs: ${slackList(setup.mockSubstitutableInputIds)}`,
+    `Declared mock IDs: ${slackList(e2e.mockedComponentIds)}`,
+    `Observed mock consumption IDs (${e2e.observedMockedComponentIds.length}): ${slackList(e2e.observedMockedComponentIds)}`,
+    `Required unexercised criteria: ${slackList(e2e.requiredUnexercisedCriteriaIds)}`,
+    `Unexercised behaviors: ${slackList(e2e.unexercisedBehaviors)}`,
+    `Current plan digest: ${slackBounded(e2e.executionPlanDigest ?? "unavailable", 900)}`,
+    `Policy: ${e2e.policyPresence} · Phase: ${slackBounded(e2e.workflowPhase ?? "unknown", 500)}`,
+    `Owner action proposals (read-only): ${slackList(view.actions)}`,
   ];
   return [
-    { type: "section", text: { type: "mrkdwn", text: lines.join("\n") } },
-    { type: "context", text: { type: "mrkdwn", text: slack(SCOPE_NOTE) } },
+    ...lines.map((text) => ({ type: "section" as const, text: { type: "mrkdwn" as const, text } })),
+    { type: "context", text: { type: "mrkdwn", text: slackBounded(SCOPE_NOTE, 900) } },
   ];
 }
 
@@ -60,14 +65,29 @@ export function renderE2EMcpProjection(view: E2ESharedView): { scope: string; vi
 }
 
 function list(values: readonly string[]): string {
-  if (values.length === 0) return "none";
+  if (values.length === 0) return "none (total 0)";
   const shown = values.slice(0, LIST_LIMIT);
   const remainder = values.length - shown.length;
   return `${shown.join(", ")}${remainder > 0 ? `, and ${remainder} more (total ${values.length})` : ` (total ${values.length})`}`;
 }
 
-function slack(value: string): string {
-  return value.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;").replace(/[*_~`]/gu, "\\$&");
+function slackList(values: readonly string[]): string {
+  if (values.length === 0) return "none (total 0)";
+  const shown = values.slice(0, 3).map((value) => slackBounded(value, 96));
+  const omitted = values.length - shown.length;
+  return `total ${values.length}: ${shown.join(", ")}${omitted > 0 ? `; +${omitted} omitted (shortened)` : ""}`;
+}
+
+function slackBounded(value: string, limit: number): string {
+  const suffix = "… (shortened)";
+  let escaped = "";
+  let shortened = false;
+  for (const char of value.replace(/[\r\n]+/gu, " ")) {
+    const part = char === "&" ? "&amp;" : char === "<" ? "&lt;" : char === ">" ? "&gt;" : /[*_~`]/u.test(char) ? `\\${char}` : char;
+    if (escaped.length + part.length + suffix.length > limit) { shortened = true; break; }
+    escaped += part;
+  }
+  return shortened ? `${escaped}${suffix}` : escaped;
 }
 
 function html(value: string): string {

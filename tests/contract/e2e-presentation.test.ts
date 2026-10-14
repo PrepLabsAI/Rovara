@@ -24,11 +24,27 @@ describe("E2E presentation adapters", () => {
       expect(surface).toContain("connect-runtime");
       expect(surface).toContain("mock");
     }
-    expect(slack).toContain("0 observed");
+    expect(slack).toContain("Observed mock consumption IDs (0)");
     expect(html).toContain("Observed mock consumption IDs (0)");
     expect(mcp.view).toEqual(view);
     expect(JSON.stringify(mcp)).toContain("\"observedMockedComponentIds\":[]");
     expect(mcp.scope).toContain("does not establish app, native");
+  });
+
+  it("bounds Slack section sizes after escaping contract-maximal lists and long text", () => {
+    const oversized: E2ESharedView = {
+      ...view,
+      setup: { ...view.setup, selectedTargetIds: Array.from({ length: 12 }, (_, i) => `${"<target&".repeat(20)}-${i}`), blockingInputIds: Array.from({ length: 128 }, (_, i) => `${"input&".repeat(20)}-${i}`), mockSubstitutableInputIds: Array.from({ length: 128 }, (_, i) => `${"mock&".repeat(20)}-${i}`) },
+      e2e: { ...view.e2e, label: "PASS ".repeat(500), mockedComponentIds: Array.from({ length: 200 }, (_, i) => `${"component&".repeat(20)}-${i}`), observedMockedComponentIds: Array.from({ length: 200 }, (_, i) => `${"observed&".repeat(20)}-${i}`), requiredUnexercisedCriteriaIds: Array.from({ length: 64 }, (_, i) => `${"criterion&".repeat(20)}-${i}`), unexercisedBehaviors: Array.from({ length: 256 }, (_, i) => `${"behavior&".repeat(30)}-${i}`) },
+    };
+    const blocks = renderE2ESlackBlocks(oversized);
+    expect(blocks.length).toBeLessThanOrEqual(50);
+    expect(blocks.every((block) => block.text.text.length <= 3000)).toBe(true);
+    const text = blocks.map((block) => block.text.text).join("\n");
+    expect(text).toContain("PASS");
+    expect(text).toContain("total 200");
+    expect(text).toContain("shortened");
+    expect(text).toContain("does not establish app, native");
   });
 
   it("renders FAILED and viewer projections without turning proposals into controls", () => {
@@ -50,7 +66,7 @@ describe("E2E presentation adapters", () => {
     expect(slack).toContain("1/3");
     expect(slack).toContain("&lt;script&gt;");
     expect(slack).toContain("&lt;@U123&gt;");
-    expect(slackBlocks[0]!.text.text).toContain("\\*bold\\*");
+    expect(slackBlocks.map((block) => block.text.text).join("\n")).toContain("\\*bold\\*");
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<script>alert");
     expect(renderE2EMcpProjection(partial).view).toEqual(partial);
