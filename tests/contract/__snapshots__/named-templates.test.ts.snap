@@ -2268,8 +2268,10 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Ref": "AdminValues",
             },
             "AGENTX_ALARM_PREFIX": "agentx-staging-",
+            "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID": "agentx-staging-e2e-mock-runtime-v1",
             "AGENTX_ENV": "staging",
             "AGENTX_METRICS_NAMESPACE": "AgentX/staging",
+            "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-staging-project-setup-runtime-v1",
             "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED": {
               "Ref": "WorkflowDependenciesEnabled",
             },
@@ -4682,6 +4684,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
         "Environment": {
           "Variables": {
+            "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-staging-project-setup-runtime-v1",
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
             },

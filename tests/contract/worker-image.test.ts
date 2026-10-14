@@ -49,12 +49,18 @@ describe("the worker image", () => {
 
   it("is started by the EC2 boot script without overriding its entrypoint (#170, characterization)", () => {
     const boot = readFileSync("packages/worker/ec2/boot.sh", "utf8");
-    const run = boot.split("\n").find((line) => line.startsWith("ExecStart=$docker run ")) ?? "";
-    expect(run).not.toBe("");
-    expect(run).not.toContain("--entrypoint");
-    expect(run).not.toContain("--init");
-    // The image is the last argument: no command after it replaces CMD either.
-    expect(run.trimEnd().endsWith("$AGENTX_WORKER_IMAGE")).toBe(true);
+    const unit = boot.slice(boot.indexOf('cat >"/etc/systemd/system/$WORKER_UNIT" <<EOF'), boot.indexOf("EOF\n}", boot.indexOf('cat >"/etc/systemd/system/$WORKER_UNIT" <<EOF')));
+    const launcher = /cat >\/usr\/local\/libexec\/agentx-worker-start <<'LAUNCHER'\n([\s\S]*?)\nLAUNCHER/.exec(boot)?.[1] ?? "";
+    expect(unit).toContain("ExecStart=/usr/local/libexec/agentx-worker-start");
+    expect(launcher).not.toBe("");
+    expect(launcher).toContain('[[ "$worker_image" =~ ^[a-zA-Z0-9./:_-]+@sha256:[a-f0-9]{64}$ ]]');
+    expect(launcher).toContain('args=(run --rm --name "$WORKER_CONTAINER" --network host --env-file "$WORKER_ENV_FILE" --volume "$MOUNT_PATH:$MOUNT_PATH")');
+    expect(launcher).not.toContain("--entrypoint");
+    expect(launcher).not.toContain("--init");
+    // The generated launcher uses the pinned image as the final docker run argument and leaves
+    // its image ENTRYPOINT (tini) and CMD (the worker) in effect.
+    expect(launcher).toMatch(/args\+=\([^\n]*"\$worker_image"\)\nexec "\$docker" "\$\{args\[@\]\}"/);
+    expect(launcher.trimEnd().endsWith('exec "$docker" "${args[@]}"')).toBe(true);
   });
 
   it("runs as the node user", () => {

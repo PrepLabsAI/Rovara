@@ -30,6 +30,26 @@ function workflowDependencyEnvironmentEntries(template: TemplateJson) {
   return Object.entries(template.Resources ?? {}).filter(([id, resource]) => id.startsWith("Broker") && resource.Type === "AWS::Lambda::Function");
 }
 
+function runtimeCatalogEnvironmentEntries(template: TemplateJson) {
+  const brokers = workflowDependencyEnvironmentEntries(template);
+  const dispatchers = Object.entries(template.Resources ?? {}).filter(([id, resource]) => id.startsWith("Dispatcher") && resource.Type === "AWS::Lambda::Function");
+  expect(brokers, "one Broker owns both runtime catalog IDs").toHaveLength(1);
+  expect(dispatchers, "one Dispatcher owns the project setup catalog ID").toHaveLength(1);
+  const brokerVariables = brokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
+  const dispatcherVariables = dispatchers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
+  return { broker: brokerVariables.Variables, dispatcher: dispatcherVariables.Variables };
+}
+
+function expectRuntimeCatalogEnvironment(template: TemplateJson, prefix: string) {
+  const { broker, dispatcher } = runtimeCatalogEnvironmentEntries(template);
+  const setupId = `${prefix}-project-setup-runtime-v1`;
+  const featureId = `${prefix}-e2e-mock-runtime-v1`;
+  expect(broker.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID).toBe(setupId);
+  expect(broker.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID).toBe(featureId);
+  expect(dispatcher.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID).toBe(setupId);
+  expect(dispatcher).not.toHaveProperty("AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID");
+}
+
 function appControlPlane(env: string): TemplateJson {
   const stacks = buildAgentXApp({ agentxEnv: env }).node.children.filter((child): child is Stack => Stack.isStack(child));
   const stack = stacks.find((candidate) => candidate.stackName === `agentx-${env}-control-plane`);
@@ -56,6 +76,12 @@ function parentRemainderDigest(template: TemplateJson): string {
   for (const [id] of workflowDependencyEnvironmentEntries(remainder)) {
     const brokerVariables = resources[id]!.Properties!.Environment as { Variables: Record<string, unknown> };
     delete brokerVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED;
+    delete brokerVariables.Variables.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID;
+    delete brokerVariables.Variables.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID;
+  }
+  for (const [, resource] of Object.entries(resources).filter(([id, resource]) => id.startsWith("Dispatcher") && resource.Type === "AWS::Lambda::Function")) {
+    const dispatcherVariables = resource.Properties!.Environment as { Variables: Record<string, unknown> };
+    delete dispatcherVariables.Variables.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID;
   }
   const establishedAssetHashNormalization = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
   return createHash("sha256").update(establishedAssetHashNormalization).digest("hex");
@@ -103,6 +129,9 @@ describe("the named TEST proof-only installation gate", () => {
     const named = realAppControlPlane("agentxlivetest123");
     const foreign = realAppControlPlane("staging");
     const legacy = realAppControlPlane();
+    expectRuntimeCatalogEnvironment(named, "agentx-agentxlivetest123");
+    expectRuntimeCatalogEnvironment(foreign, "agentx-staging");
+    expectRuntimeCatalogEnvironment(legacy, "agentx-production");
 
     for (const [label, template] of [["staging", foreign], ["legacy", legacy]] as const) {
       expect(template.Parameters?.TaskPersonProofEnabled, `${label} has no proof-only parameter`).toBeUndefined();

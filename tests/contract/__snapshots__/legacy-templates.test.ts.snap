@@ -450,6 +450,8 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "ADMIN_VALUES": {
               "Ref": "AdminValues",
             },
+            "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID": "agentx-production-e2e-mock-runtime-v1",
+            "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-production-project-setup-runtime-v1",
             "ARTIFACT_BUCKET_NAME": {
               "Ref": "Artifacts82DD59A1",
             },
@@ -1238,6 +1240,7 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         },
         "Environment": {
           "Variables": {
+            "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-production-project-setup-runtime-v1",
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
             },
