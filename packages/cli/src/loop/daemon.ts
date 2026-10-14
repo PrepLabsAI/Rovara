@@ -57,7 +57,7 @@ export interface DaemonDeps {
   captureCandidate?: (input: { worktree: string; branch: string; baseRef: string }) => Promise<CandidateSnapshot>;
   /** Host-owned enrollment and current-evidence resolver; an absent resolver holds publication. */
   resolvePublicationContext?: (input: {
-    issueRepo: string; targetRepo: string; destinationRepo: string; worktree: string; candidate: CandidateSnapshot;
+    issueRepo: string; issue: number; targetRepo: string; destinationRepo: string; upstream?: { repo: string; branch: string }; worktree: string; candidate: CandidateSnapshot;
   }) => Promise<{ kind: "unmanaged-local" | "registered-ready" } | { kind: "hold"; reasonCode: string }>;
 }
 
@@ -571,7 +571,8 @@ export class LoopDaemon {
         if (!sameCandidate(candidate, fresh)) throw new PublicationHoldError("the candidate changed after qualification and before push");
         const resolver = this.deps.resolvePublicationContext;
         if (resolver === undefined) throw new PublicationHoldError("the host enrollment and evidence resolver is unavailable");
-        const admission = await resolver({ issueRepo: item.repo, targetRepo: item.target ?? item.repo, destinationRepo: repo, worktree: item.worktree!.path, candidate: fresh });
+        const admission = await resolver({ issueRepo: item.repo, issue: item.issue, targetRepo: item.target ?? item.repo, destinationRepo: repo,
+          ...(upstream === undefined ? {} : { upstream: { repo: upstream.repo, branch: upstream.branch } }), worktree: item.worktree!.path, candidate: fresh });
         if (admission.kind === "hold") throw new PublicationHoldError(admission.reasonCode);
       },
     });

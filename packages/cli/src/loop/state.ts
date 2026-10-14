@@ -5,7 +5,7 @@ import { appendFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ArtifactSchema } from "./definitions.js";
-import { LoopEnrollmentSchema, type LoopEnrollment } from "./enrollment.js";
+import { LoopEnrollmentSchema, type LoopEnrollment, type RegisteredEnrollment, type RegisteredPendingEnrollment } from "./enrollment.js";
 
 const RepoSlug = () => z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/, "owner/name");
 export const RepoSlugSchema = RepoSlug();
@@ -131,12 +131,41 @@ export class LoopStore {
   async saveEnrollment(enrollment: LoopEnrollment): Promise<void> {
     const parsed = LoopEnrollmentSchema.parse(enrollment);
     const records = await this.enrollments();
-    if (parsed.kind === "standalone-local" && records.some((record) => record.kind === "registered" &&
-        (record.repositoryId === parsed.repositoryId || record.repository.toLowerCase() === parsed.project.toLowerCase()))) {
+    if (parsed.kind === "standalone-local" && records.some((record) =>
+      (record.kind === "registered" && (record.repositoryId === parsed.repositoryId || record.repository.toLowerCase() === parsed.project.toLowerCase() ||
+        record.checkoutPath === parsed.checkoutPath || (record.commonGitDir !== undefined && record.commonGitDir === parsed.commonGitDir))) ||
+      (record.kind === "registered-pending" && record.sources.some((source) => source.repository?.toLowerCase() === parsed.project.toLowerCase())))) {
       throw new Error(`a registered native binding already exists for ${parsed.project}; standalone enrollment cannot replace it`);
     }
     if (records.some((record) => record.enrollmentId === parsed.enrollmentId)) return;
     await writeJson(this.enrollmentPath(), [...records, parsed]);
+  }
+
+  /** Persist the server-declared binding before local source reconciliation can succeed or fail. */
+  async savePendingEnrollment(pending: RegisteredPendingEnrollment): Promise<RegisteredPendingEnrollment> {
+    const parsed = LoopEnrollmentSchema.parse(pending);
+    if (parsed.kind !== "registered-pending") throw new Error("pending enrollment has the wrong kind");
+    const records = await this.enrollments();
+    const prior = records.filter((record) => record.kind === "registered-pending" && record.namespace === parsed.namespace && record.project === parsed.project);
+    const sources = new Map<string, RegisteredPendingEnrollment["sources"][number]>();
+    for (const item of prior) if (item.kind === "registered-pending") for (const source of item.sources) sources.set(source.repository?.toLowerCase() ?? source.repositoryUrl.toLowerCase(), source);
+    for (const source of parsed.sources) sources.set(source.repository?.toLowerCase() ?? source.repositoryUrl.toLowerCase(), source);
+    const combined = { ...parsed, sources: [...sources.values()] };
+    await writeJson(this.enrollmentPath(), [...records.filter((record) => !prior.includes(record)), combined]);
+    return combined;
+  }
+
+  /** Confirm one source after fresh host/GitHub validation, leaving every other registered source pending. */
+  async promotePendingEnrollment(pendingId: string, repository: string, enrollment: RegisteredEnrollment): Promise<void> {
+    const records = await this.enrollments();
+    const updated: LoopEnrollment[] = [];
+    for (const record of records) {
+      if (record.kind !== "registered-pending" || record.enrollmentId !== pendingId) { updated.push(record); continue; }
+      const sources = record.sources.filter((source) => source.repository?.toLowerCase() !== repository.toLowerCase());
+      if (sources.length > 0) updated.push({ ...record, sources });
+    }
+    updated.push(LoopEnrollmentSchema.parse(enrollment));
+    await writeJson(this.enrollmentPath(), updated);
   }
 
   async item(repo: string, issue: number, target?: string): Promise<WorkItemState | undefined> {

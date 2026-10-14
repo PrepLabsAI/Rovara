@@ -1,4 +1,5 @@
 // rovara loop (#355): GitHub, through the developer's own `gh` login. The loop stores no token.
+import { resolve } from "node:path";
 import { run, type Exec } from "./exec.js";
 import { LOOP_COMMENT_MARKER } from "./naming.js";
 
@@ -34,6 +35,12 @@ export class GitHub {
     const value = Number((await run(this.exec, "gh", ["api", `repos/${repo}`, "--jq", ".id"])).trim());
     if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`GitHub returned no stable repository ID for ${repo}`);
     return value;
+  }
+
+  /** Canonical Git common directory, stable when the checkout's origin URL is changed to a fork. */
+  async commonGitDir(path: string): Promise<string> {
+    const common = (await run(this.exec, "git", ["-C", path, "rev-parse", "--git-common-dir"])).trim();
+    return resolve(path, common);
   }
 
   /**

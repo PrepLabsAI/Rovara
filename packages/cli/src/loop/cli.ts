@@ -17,7 +17,7 @@ import { createLoopMcpServer } from "./mcp.js";
 import { ARTIFACT_SECTIONS } from "./instructions.js";
 import { artifactDigest, missingSections, readArtifact } from "./exit-checks.js";
 import { artifactPath } from "./naming.js";
-import { createStandaloneEnrollment, resolveLoopEnrollment, resolveRegisteredPublication, type PublicationJoinTransport } from "./enrollment.js";
+import { createStandaloneEnrollment, resolvePublicationScopes, resolveRegisteredPublication, type PublicationJoinTransport } from "./enrollment.js";
 import type { Artifact, LoopDefinition } from "./definitions.js";
 import type { WorkItemState } from "./state.js";
 import { LoopStore, RepoSlugSchema } from "./state.js";
@@ -103,7 +103,7 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
     .action(async (path: string | undefined) => {
       const found = await repoAt(path);
       await readLoopConfig(found.path);
-      const repos = (await store.repos()).filter((entry) => entry.repo !== found.repo);
+      const repos = (await store.repos()).filter((entry) => entry.repo !== found.repo && entry.path !== found.path);
       await store.saveRepos([...repos, found]);
       say(`Added ${found.repo} (${found.path}). Comments from now on are read; start the daemon with rovara loop start.`);
     });
@@ -118,7 +118,7 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
       if (actualRepo.toLowerCase() !== found.repo.toLowerCase()) throw new Error("the added checkout now identifies as a different GitHub repository; publication remains on hold");
       const enrollment = createStandaloneEnrollment({
         hostId, uid, account: await github.login(), project: actualRepo, repositoryId: await github.repositoryId(actualRepo),
-        checkoutPath: await realpath(found.path), now: new Date(),
+        checkoutPath: await realpath(found.path), commonGitDir: await github.commonGitDir(found.path), now: new Date(),
       });
       await store.saveEnrollment(enrollment);
       say(`Enrolled ${actualRepo} in ${enrollment.namespace}. This local receipt applies only to this host, account, project and repository.`);
@@ -184,18 +184,34 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
         resolvePublicationContext: async (input) => {
           try {
             const records = await store.enrollments();
-            const source = (await store.repos()).find((entry) => entry.repo.toLowerCase() === input.issueRepo.toLowerCase());
-            if (source === undefined) return { kind: "hold", reasonCode: "source_checkout_unavailable" };
-            const actualRepo = await github.repoAt(source.path);
-            if (actualRepo.toLowerCase() !== source.repo.toLowerCase()) return { kind: "hold", reasonCode: "identity_changed" };
-            const observation = {
-              hostId, uid, account: await github.login(), repo: actualRepo, repositoryId: await github.repositoryId(actualRepo),
-              checkoutPath: await realpath(source.path),
+            const repos = await store.repos();
+            const source = repos.find((entry) => entry.repo.toLowerCase() === input.issueRepo.toLowerCase());
+            const target = repos.find((entry) => entry.repo.toLowerCase() === input.targetRepo.toLowerCase());
+            if (source === undefined || target === undefined) return { kind: "hold", reasonCode: "source_or_target_checkout_unavailable" };
+            const observe = async (entry: typeof source) => {
+              const actualRepo = await github.repoAt(entry.path);
+              if (actualRepo.toLowerCase() !== entry.repo.toLowerCase()) throw new Error("repository identity changed");
+              return {
+                hostId, uid, account: await github.login(), repo: actualRepo, repositoryId: await github.repositoryId(actualRepo),
+                checkoutPath: await realpath(entry.path), commonGitDir: await github.commonGitDir(entry.path),
+              };
             };
-            const resolution = resolveLoopEnrollment(records, observation);
+            const [sourceObservation, targetObservation] = await Promise.all([observe(source), observe(target)]);
+            let upstreamRepo: string | undefined;
+            if (input.upstream !== undefined) {
+              const upstreamPull = await github.pullRequest(input.issueRepo, input.issue);
+              if (upstreamPull === undefined || !upstreamPull.open || upstreamPull.headRepo.toLowerCase() !== input.upstream.repo.toLowerCase() || upstreamPull.headRef !== input.upstream.branch) {
+                return { kind: "hold", reasonCode: "destination_binding_unknown" };
+              }
+              upstreamRepo = upstreamPull.headRepo;
+            }
+            const resolution = resolvePublicationScopes({
+              records, source: sourceObservation, target: targetObservation,
+              destinationRepo: input.destinationRepo, ...(upstreamRepo === undefined ? {} : { upstreamRepo }),
+            });
             if (resolution.kind === "hold") return resolution;
             if (resolution.kind === "unmanaged-local") return { kind: "unmanaged-local" };
-            if (input.targetRepo !== input.issueRepo || input.destinationRepo !== input.issueRepo) {
+            if (input.targetRepo !== input.issueRepo || input.destinationRepo !== input.targetRepo || input.upstream !== undefined) {
               return { kind: "hold", reasonCode: "registered_target_join_unavailable" };
             }
             const joined = await resolveRegisteredPublication({
