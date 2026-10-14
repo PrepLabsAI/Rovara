@@ -115,10 +115,19 @@ describe("init prerequisites", () => {
   });
 
   it("refuses insufficient EC2 quota before creating anything", async () => {
-    for (const quota of [0, NaN]) {
+    for (const quota of [0, 1, NaN]) {
       await expect(run(sampleAnswers(), passingChecks({ ec2Quota: async () => quota })))
-        .rejects.toThrow(/vCPU quota.*at least 1/);
+        .rejects.toThrow(/vCPU quota.*at least 2.*m6g\.large/);
     }
+  });
+
+  it("accepts exactly the two vCPUs required by an m6g.large worker", async () => {
+    const found: PrerequisiteCheck[] = [];
+    await checkAccount({
+      region: "us-east-1", write: () => undefined, onCheck: (check) => found.push(check),
+      checks: passingChecks({ ec2Quota: async () => 2 }),
+    });
+    expect(found[0]).toEqual({ label: "EC2 vCPU quota", ok: true, detail: "EC2 Standard on-demand vCPU quota is 2 in us-east-1" });
   });
 
   it("refuses up front when the region has too few Elastic IPs left for the NAT gateways", async () => {
@@ -536,9 +545,9 @@ describe("the prerequisite checklist (spec 040 FR-023)", () => {
   it("reports a failed check with the same words the error lists", async () => {
     const reported: PrerequisiteCheck[] = [];
     const { done } = run(passingChecks({ ec2Quota: async () => 0 }), (check) => { reported.push(check); });
-    await expect(done).rejects.toThrow("EC2 Standard on-demand vCPU quota in us-east-1 must be at least 1");
+    await expect(done).rejects.toThrow("EC2 Standard on-demand vCPU quota in us-east-1 must be at least 2 for an m6g.large worker");
     expect(reported.find((check) => check.label === "EC2 vCPU quota")).toEqual({
-      label: "EC2 vCPU quota", ok: false, detail: "EC2 Standard on-demand vCPU quota in us-east-1 must be at least 1 for an m6g.medium worker; request an increase in Service Quotas",
+      label: "EC2 vCPU quota", ok: false, detail: "EC2 Standard on-demand vCPU quota in us-east-1 must be at least 2 for an m6g.large worker; request an increase in Service Quotas",
     });
   });
 });
@@ -647,7 +656,7 @@ describe("spec 048 FR-018: the account checks", () => {
     await expect(checkAccount({
       region: "us-east-1", write: () => undefined, onCheck: (check) => found.push(check),
       checks: passingChecks({ ec2Quota: async () => 0, elasticIps: async () => ({ quota: 5, allocated: 5 }) }),
-    })).rejects.toThrow(/^CONFIG_INVALID: init cannot start; nothing was created:\n- EC2 Standard on-demand vCPU quota in us-east-1 must be at least 1[\s\S]*\n- this environment needs 2 Elastic IPs/);
+    })).rejects.toThrow(/^CONFIG_INVALID: init cannot start; nothing was created:\n- EC2 Standard on-demand vCPU quota in us-east-1 must be at least 2 for an m6g.large worker[\s\S]*\n- this environment needs 2 Elastic IPs/);
     expect(found.map((check) => [check.label, check.ok])).toEqual([["EC2 vCPU quota", false], ["Elastic IPs", false]]);
   });
 

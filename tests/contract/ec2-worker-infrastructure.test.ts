@@ -93,12 +93,12 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
     expect(JSON.stringify(legacy.map((t) => t.toJSON()))).toContain(WORKSPACE_SESSION_STATE_INDEX.name);
   });
 
-  it("launches arm64 Amazon Linux 2023 m6g.medium with IMDSv2 at one hop and an encrypted root volume", () => {
+  it("launches arm64 Amazon Linux 2023 m6g.large with IMDSv2 at one hop and an encrypted root volume", () => {
     const [[, template]] = ofType(foundation, "AWS::EC2::LaunchTemplate") as [[string, Resource]];
     const data = (template.Properties.LaunchTemplateData ?? {}) as Record<string, unknown>;
     expect(template.Properties.LaunchTemplateName).toBe("agentx-staging-worker");
     expect(data.ImageId).toBe(`resolve:ssm:${EC2_WORKER_AMI_PARAMETER}`);
-    expect(data.InstanceType).toBe("m6g.medium");
+    expect(data.InstanceType).toBe("m6g.large");
     expect(data.MetadataOptions).toEqual({
       HttpEndpoint: "enabled", HttpTokens: "required", HttpPutResponseHopLimit: 1, InstanceMetadataTags: "disabled",
     });

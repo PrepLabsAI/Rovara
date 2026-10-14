@@ -8,15 +8,17 @@ import { listPricesPerMillion } from "@agentx/model-runtime/catalog";
 import type { InitAnswers } from "./install-state.js";
 import type { ModelRole } from "./prerequisites.js";
 
-export const PRICES_CHECKED = "September 2026";
+export const PRICES_CHECKED = "September 2026 (m6g.large EC2 checked October 2026)";
 const HOURS_PER_MONTH = 730;
 
-// Checked against the AWS pricing pages for PRICES_CHECKED (us-east-1 list prices):
+// Checked against AWS pricing sources using the per-item dates in PRICES_CHECKED (us-east-1 list prices):
 // - NAT Gateway: https://aws.amazon.com/vpc/pricing/ ($0.045 per NAT Gateway-hour).
 // - Fargate arm64: https://aws.amazon.com/fargate/pricing/ (Linux/ARM: $0.0000089944 per vCPU-second,
 //   $0.0000009889 per GB-second, i.e. $0.03238 per vCPU-hour and $0.00356 per GB-hour).
 // - EBS gp3: https://aws.amazon.com/ebs/pricing/ ($0.08 per GB-month baseline storage).
-// EC2 m6g.medium on-demand ($0.0385/hour) is AWS's long-standing Graviton2 list price; Bedrock's
+// EC2 m6g.large on-demand ($0.077/hour) is the current us-east-1 Linux shared-tenancy Price List
+// API rate (SKU RSV572JURZ29ZMTS, effective 2026-10-01; readback is retained with the live runtime
+// acceptance evidence). Bedrock's
 // current per-model on-demand tables render client-side and could not be scraped directly, so the
 // model prices below are corroborated from AWS's own worked examples and documentation instead of
 // the live pricing widget (see ORCHESTRATOR_PER_TURN, CLASSIFIER_PER_CHECK and WORKER_PER_SESSION).
@@ -27,7 +29,7 @@ const PRICES = {
   natGatewayHour: 0.045,
   fargateArmVcpuHour: 0.03238,
   fargateArmGbHour: 0.00356,
-  m6gMediumHour: 0.0385,
+  m6gLargeHour: 0.077,
   gp3GbMonth: 0.08,
   workspaceGiB: 20,
   ec2WorkerRootVolumeGiB: 30,
@@ -116,7 +118,7 @@ export function estimateMonthlyCost(models: InitAnswers["models"], usage = STATE
   const lines: CostLine[] = [
     priced("Two NAT gateways", 2 * PRICES.natGatewayHour * HOURS_PER_MONTH, `2 x $${PRICES.natGatewayHour}/hour, plus $0.045 per GB processed`),
     priced("The Slack connection (Fargate, 0.5 vCPU, 1 GB, arm64)", (0.5 * PRICES.fargateArmVcpuHour + 1 * PRICES.fargateArmGbHour) * HOURS_PER_MONTH, "one task, always on"),
-    priced("Coding machines (m6g.medium)", PRICES.m6gMediumHour * usage.workerInstanceHoursPerMonth, `${usage.workerInstanceHoursPerMonth} machine-hours at $${PRICES.m6gMediumHour}/hour`),
+    priced("Coding machines (m6g.large)", PRICES.m6gLargeHour * usage.workerInstanceHoursPerMonth, `${usage.workerInstanceHoursPerMonth} machine-hours at $${PRICES.m6gLargeHour}/hour`),
     priced(
       `Coding machine disks (${PRICES.ec2WorkerRootVolumeGiB} GiB gp3)`,
       usage.workerInstanceHoursPerMonth * PRICES.ec2WorkerRootVolumeGiB * (PRICES.gp3GbMonth / HOURS_PER_MONTH),

@@ -6791,7 +6791,7 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
           },
           "ImageId": "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
           "InstanceInitiatedShutdownBehavior": "terminate",
-          "InstanceType": "m6g.medium",
+          "InstanceType": "m6g.large",
           "MetadataOptions": {
             "HttpEndpoint": "enabled",
             "HttpPutResponseHopLimit": 1,

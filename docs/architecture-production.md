@@ -161,7 +161,7 @@ owns only the ECS service, and receives those values as parameters from the rele
 - Two public NAT subnets and two private worker subnets, with a NAT gateway in each AZ.
 - A free S3 gateway endpoint and VPC flow logs retained for 30 days.
 - A rotating customer-managed KMS key retained for workspace recovery safety.
-- The EC2 worker foundation: the `m6g.medium` arm64 launch template, the worker instance role and
+- The EC2 worker foundation: the `m6g.large` arm64 launch template, the worker instance role and
   profile, and the worker, dispatcher and session-manager security groups.
 
 `AgentXProductionRuntime` holds the EC2 worker settings as SSM parameters:

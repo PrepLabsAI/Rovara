@@ -320,7 +320,7 @@ describe("production foundation and worker settings", () => {
     expect(Object.values(template.toJSON().Resources as Record<string, { Type: string }>).filter((resource) => resource.Type.startsWith("AWS::Bedrock"))).toEqual([]);
     expect(json).not.toContain("AWS::Bedrock");
     template.hasResourceProperties("AWS::EC2::LaunchTemplate", {
-      LaunchTemplateData: Match.objectLike({ InstanceType: "m6g.medium" }),
+      LaunchTemplateData: Match.objectLike({ InstanceType: "m6g.large" }),
     });
     expect(json).toContain("alias/agentx/production-workspaces");
     expect(json).toContain('"RetentionInDays":30');
