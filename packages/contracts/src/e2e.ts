@@ -179,6 +179,12 @@ export const E2EWorkflowAdmissionRefSchema = z.object({
 export type E2EWorkflowAdmissionRef = z.infer<typeof E2EWorkflowAdmissionRefSchema>;
 export const E2EWorkflowEvidenceRefSchema = z.object({ key: z.string().regex(/^workflow-e2e-evidence\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest, byteLength: positiveInt.max(24 * 1024 * 1024) }).strict();
 export type E2EWorkflowEvidenceRef = z.infer<typeof E2EWorkflowEvidenceRefSchema>;
+export const E2EWorkflowGroupEvidenceRefSchema = z.object({
+  groupRunId: z.string().uuid(),
+  evidenceRef: z.object({ key: z.string().regex(/^workflow-e2e-group-evidence\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest,
+    byteLength: positiveInt.max(24 * 1024 * 1024) }).strict(),
+}).strict();
+export type E2EWorkflowGroupEvidenceRef = z.infer<typeof E2EWorkflowGroupEvidenceRefSchema>;
 
 const CommandRecipeSchema = z.object({ program: id(256), args: z.array(z.string().max(8192)).max(256), cwd: recipeWorkingDirectory, timeoutMs: positiveInt.max(300_000), env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/), z.string().max(4096)).refine((env) => Object.keys(env).length <= 64 && !Object.keys(env).some((key) => /^(PATH|HOME|AWS_|AGENTX_|PI_|GIT_)/i.test(key) || /(TOKEN|SECRET|PASSWORD|API_KEY)$/i.test(key)) && !Object.values(env).some((value) => redactText(value) !== value), "environment must contain only non-secret allowlisted literals") }).strict().superRefine((command, context) => {
   if (/(^|[/\\])(?:sh|bash|zsh|cmd|powershell|pwsh)(\.exe)?$/i.test(command.program) || command.args.some((arg) => /(^|\s)(?:\||&&|;|>|<|\$\(|`)/.test(arg))) context.addIssue({ code: "custom", message: "shell wrappers and shell-interpreted arguments are forbidden" });

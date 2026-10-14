@@ -10,6 +10,7 @@ import {
 import { collectE2EActualCliRun, compileE2EScenarios, e2ePrivateTransferMaxBytes, e2eSnapshotSourceDigest, runE2EActualCli } from "@agentx/verifier";
 
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+const MAX_CONCURRENT_E2E_GROUPS = 2;
 
 type Admission = {
   schemaVersion: "workflow-e2e-admission/v1"; taskId: string; operationId: string; operationFence: number; workflowRevision: number;
@@ -22,7 +23,7 @@ type Admission = {
 export async function executeWorkflowE2EChecks(input: {
   invocation: Extract<WorkerInvocation, { kind: "task" }>;
   readAdmission: (offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
-  saveEvidence: (bytes: Uint8Array, sha256: string, maxBytes: number) => Promise<{ key: string; sha256: string }>;
+  saveEvidence: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
   sourceRoot: string; evidenceRoot: string; deadlineAt?: number;
 }): Promise<{ evidenceRef: { key: string; sha256: string }; candidateDigest: string; roundId: string; processStatus: "SUCCEEDED" | "FAILED" }> {
   const { invocation } = input;
@@ -75,9 +76,9 @@ export async function executeWorkflowE2EChecks(input: {
   if (!Number.isFinite(deadline) || deadline <= Date.now() || (input.deadlineAt !== undefined && deadline > input.deadlineAt)) throw new Error("native E2E round deadline is invalid or expired");
   const evidenceDirectory = join(resolve(input.evidenceRoot), `workflow-e2e-${round.roundId}`);
   await mkdir(evidenceDirectory, { recursive: false, mode: 0o700 });
-  const groupRuns: Array<Record<string, unknown>> = [];
   const controller = new AbortController();
-  for (const [index, group] of plan.groups.entries()) {
+  const runGroup = async (group: (typeof plan.groups)[number], index: number): Promise<Record<string, unknown>> => {
+    try {
     const groupAdmission = admission.groupAdmissions[index];
     if (!groupAdmission || canonicalJson(groupAdmission.group) !== canonicalJson(group)) throw new Error("native E2E group order differs from immutable admission");
     const binding = E2ERunBindingSchema.parse(groupAdmission.binding);
@@ -104,12 +105,31 @@ export async function executeWorkflowE2EChecks(input: {
       usage: { discoveredResults: actual.selected + actual.filtered, maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 },
       limits: { maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 },
     });
-    groupRuns.push({ group, binding, selection, hostRequestIds: [...hostRequestIds], collection: collection.qualification ?? { status: "UNKNOWN", reason: collection.unavailableReason ?? "collection unavailable" },
+    const groupRun = { group, binding, selection, hostRequestIds: [...hostRequestIds], collection: collection.qualification ?? { status: "UNKNOWN", reason: collection.unavailableReason ?? "collection unavailable" },
       actual: { launchId: actual.launchId, runnerToolchain: actual.runnerToolchain, launchConfigDigest: actual.launchConfigDigest, fixedAssetDigests: actual.fixedAssetDigests,
         publicList: actual.publicList, selected: actual.selected, filtered: actual.filtered, rawReportBase64: Buffer.from(actual.rawReportBytes).toString("base64"),
         runStartCaptureBase64: Buffer.from(actual.runStartCaptureBytes).toString("base64"), assertionReceipts: actual.assertionReceipts,
         declaredMockComponentIds: actual.declaredMockComponentIds, candidateCaptures: actual.candidateCaptures, listProcess: actual.listProcess,
-        runProcess: actual.runProcess, cleanupConfirmed: actual.cleanupConfirmed, cleanupServerListening: actual.cleanupServerListening } });
+        runProcess: actual.runProcess, cleanupConfirmed: actual.cleanupConfirmed, cleanupServerListening: actual.cleanupServerListening } };
+    const groupEvidence = Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-group-evidence/v1", admissionSha256: reference.admissionRef.sha256,
+      taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
+      candidateDigest: admission.candidateDigest, round, groupRun }), "utf8");
+    const groupLimit = e2ePrivateTransferMaxBytes(group.expectedCases.length, 1);
+    if (groupEvidence.byteLength > groupLimit) throw new Error("native E2E group evidence exceeds its admitted group-derived ceiling");
+    await input.saveEvidence(groupEvidence, sha(groupEvidence), groupLimit, binding.runId);
+    return groupRun;
+    } catch (error) {
+      controller.abort(error);
+      throw error;
+    }
+  };
+  const groupRuns: Array<Record<string, unknown>> = [];
+  for (let offset = 0; offset < plan.groups.length; offset += MAX_CONCURRENT_E2E_GROUPS) {
+    const batch = plan.groups.slice(offset, offset + MAX_CONCURRENT_E2E_GROUPS);
+    const groupResults = await Promise.allSettled(batch.map((group, index) => runGroup(group, offset + index)));
+    const failedGroup = groupResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failedGroup) throw failedGroup.reason;
+    groupRuns.push(...groupResults.map((result) => (result as PromiseFulfilledResult<Record<string, unknown>>).value));
   }
   const evidence = Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-evidence/v1", admissionSha256: reference.admissionRef.sha256,
     taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,

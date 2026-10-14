@@ -201,6 +201,7 @@ import {
   type E2EWorkflowAdmissionRef,
   E2EWorkflowAdmissionRefSchema,
   E2EWorkflowEvidenceRefSchema,
+  E2EWorkflowGroupEvidenceRefSchema,
   type E2ESetupProposal,
   ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey,
@@ -409,7 +410,7 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getRepositoryIdentity" | "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
   /** Trusted server-side source capture used only by normal project setup discovery. */
   projectSetupSource?: { capture: (input: { repositoryUrl: string; ref: string }) => Promise<E2ESourceSnapshot> };
   /** Server-selected catalog namespace for an already configured setup verifier. */
@@ -897,6 +898,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
           workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+          registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : url => dependencies.githubPullRequests.getRepositoryIdentity!(url),
           refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
       }
       // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
@@ -1075,6 +1077,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
           workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+          registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : url => dependencies.githubPullRequests.getRepositoryIdentity!(url),
           refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url), request.requestId);
       }
 
@@ -5506,49 +5509,67 @@ const WORKFLOW_E2E_ADMISSION_MAX_BYTES = 24 * 1024 * 1024;
 
 async function handleWorkflowE2EEvidenceUpload(dependencies: AwsBrokerDependencies, operation: OperationRecord, rawBody: unknown): Promise<unknown> {
   const body = z.discriminatedUnion("stage", [
-    z.object({ stage: z.literal("init"), totalBytes: z.number().int().positive().max(WORKFLOW_E2E_ADMISSION_MAX_BYTES), chunkCount: z.number().int().positive(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
-    z.object({ stage: z.literal("chunk"), uploadId: z.string().uuid(), index: z.number().int().nonnegative(), bytesBase64: z.string().min(1).max(Math.ceil(WORKFLOW_E2E_TRANSFER_CHUNK_BYTES * 4 / 3) + 8), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
-    z.object({ stage: z.literal("finalize"), uploadId: z.string().uuid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+    z.object({ stage: z.literal("init"), groupRunId: z.string().uuid().optional(), totalBytes: z.number().int().positive().max(WORKFLOW_E2E_ADMISSION_MAX_BYTES), chunkCount: z.number().int().positive(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+    z.object({ stage: z.literal("chunk"), groupRunId: z.string().uuid().optional(), uploadId: z.string().uuid(), index: z.number().int().nonnegative(), bytesBase64: z.string().min(1).max(Math.ceil(WORKFLOW_E2E_TRANSFER_CHUNK_BYTES * 4 / 3) + 8), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+    z.object({ stage: z.literal("finalize"), groupRunId: z.string().uuid().optional(), uploadId: z.string().uuid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
   ]).parse(rawBody);
   const admissionRef = operation.workflowE2EAdmission;
   if (admissionRef === undefined || operation.workflowMode !== "CHECKS") throw agentXError("CALLBACK_FORBIDDEN", "E2E evidence has no server-assigned admission");
   const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, admissionRef.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
   if (admissionText === undefined || Buffer.byteLength(admissionText) !== admissionRef.admissionRef.byteLength
     || createHash("sha256").update(admissionText).digest("hex") !== admissionRef.admissionRef.sha256) throw agentXError("STALE_FENCE", "E2E admission object is unavailable or changed");
-  const admission = JSON.parse(admissionText) as { round?: { groupBindings?: Array<{ expectedCases?: unknown[] }> }; taskId?: string; operationId?: string; operationFence?: number; workflowRevision?: number; candidateDigest?: string };
+  const admission = JSON.parse(admissionText) as { round?: { groupBindings?: Array<{ runId?: string; expectedCases?: unknown[] }> }; plan?: { groups?: unknown[] };
+    taskId?: string; operationId?: string; operationFence?: number; workflowRevision?: number; candidateDigest?: string };
   const groups = admission.round?.groupBindings;
   const caseCount = groups?.reduce((sum, group) => sum + (group.expectedCases?.length ?? 0), 0) ?? 0;
   if (!Array.isArray(groups) || groups.length !== admissionRef.groupRunIds.length || caseCount < 1
     || admission.taskId !== admissionRef.taskId || admission.operationId !== operation.id || admission.operationFence !== operation.fence
     || admission.workflowRevision !== admissionRef.workflowRevision || admission.candidateDigest !== admissionRef.candidateDigest) throw agentXError("STALE_FENCE", "E2E admission no longer matches its operation");
   const maxBytes = Math.min(WORKFLOW_E2E_ADMISSION_MAX_BYTES, e2ePrivateTransferMaxBytes(caseCount, groups.length));
-  const key = { pk: `WORKSPACE#${operation.workspaceId}`, sk: `WORKFLOW_E2E_UPLOAD#${operation.id}` };
+  const groupRunId = body.groupRunId;
+  const admittedGroupIndex = groupRunId === undefined ? -1 : admissionRef.groupRunIds.indexOf(groupRunId);
+  if (groupRunId !== undefined && admittedGroupIndex < 0) throw agentXError("CALLBACK_FORBIDDEN", "E2E group upload is outside the immutable admission");
+  const selectedGroup = groupRunId === undefined ? undefined : groups[admittedGroupIndex];
+  const selectedGroupCaseCount = selectedGroup?.expectedCases?.length ?? 0;
+  const transferLimit = groupRunId === undefined ? maxBytes : Math.min(WORKFLOW_E2E_ADMISSION_MAX_BYTES, e2ePrivateTransferMaxBytes(selectedGroupCaseCount, 1));
+  const key = { pk: `WORKSPACE#${operation.workspaceId}`, sk: `WORKFLOW_E2E_UPLOAD#${operation.id}${groupRunId === undefined ? "" : `#${groupRunId}`}` };
   if (body.stage === "init") {
-    if (body.chunkCount !== Math.ceil(body.totalBytes / WORKFLOW_E2E_TRANSFER_CHUNK_BYTES) || body.totalBytes > maxBytes) throw agentXError("CONFIG_INVALID", "E2E evidence exceeds its admission-derived transfer bound");
+    if (body.chunkCount !== Math.ceil(body.totalBytes / WORKFLOW_E2E_TRANSFER_CHUNK_BYTES) || body.totalBytes > transferLimit) throw agentXError("CONFIG_INVALID", "E2E evidence exceeds its admission-derived transfer bound");
     const existing = await getItem<Record<string, unknown>>(dependencies, key);
     if (existing) {
+      if (groupRunId !== undefined && existing.status === "COMPLETE" && existing.entityType === "WORKFLOW_E2E_EVIDENCE_UPLOAD"
+        && existing.operationId === operation.id && existing.groupRunId === groupRunId && existing.fence === operation.fence
+        && existing.admissionSha256 === admissionRef.admissionRef.sha256 && existing.sha256 === body.sha256
+        && existing.totalBytes === body.totalBytes && existing.chunkCount === body.chunkCount && typeof existing.uploadId === "string") {
+        const groupEvidenceRef = E2EWorkflowGroupEvidenceRefSchema.safeParse(existing.groupEvidenceRef);
+        if (!groupEvidenceRef.success || groupEvidenceRef.data.groupRunId !== groupRunId || groupEvidenceRef.data.evidenceRef.sha256 !== body.sha256) {
+          throw agentXError("CALLBACK_FORBIDDEN", "completed group upload does not match its accepted content reference");
+        }
+        return { uploadId: existing.uploadId, groupRunId, complete: true, evidenceRef: groupEvidenceRef.data.evidenceRef,
+          chunkBytes: WORKFLOW_E2E_TRANSFER_CHUNK_BYTES, chunkCount: body.chunkCount };
+      }
       if (existing.entityType !== "WORKFLOW_E2E_EVIDENCE_UPLOAD" || existing.status !== "OPEN" || existing.operationId !== operation.id
-        || existing.fence !== operation.fence || existing.admissionSha256 !== admissionRef.admissionRef.sha256 || existing.totalBytes !== body.totalBytes
+        || existing.groupRunId !== groupRunId || existing.fence !== operation.fence || existing.admissionSha256 !== admissionRef.admissionRef.sha256 || existing.totalBytes !== body.totalBytes
         || existing.chunkCount !== body.chunkCount || existing.sha256 !== body.sha256 || typeof existing.uploadId !== "string") throw agentXError("CALLBACK_FORBIDDEN", "CHECKS already owns a different evidence upload");
-      return { uploadId: existing.uploadId, chunkBytes: WORKFLOW_E2E_TRANSFER_CHUNK_BYTES, chunkCount: body.chunkCount };
+      return { uploadId: existing.uploadId, ...(groupRunId === undefined ? {} : { groupRunId }), chunkBytes: WORKFLOW_E2E_TRANSFER_CHUNK_BYTES, chunkCount: body.chunkCount };
     }
     const uploadId = randomUUID();
     await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: { ...key, entityType: "WORKFLOW_E2E_EVIDENCE_UPLOAD", schemaVersion: 1,
-      operationId: operation.id, fence: operation.fence, admissionSha256: admissionRef.admissionRef.sha256, uploadId, totalBytes: body.totalBytes,
+      operationId: operation.id, ...(groupRunId === undefined ? {} : { groupRunId }), fence: operation.fence, admissionSha256: admissionRef.admissionRef.sha256, uploadId, totalBytes: body.totalBytes,
       chunkCount: body.chunkCount, sha256: body.sha256, nextChunkIndex: 0, status: "OPEN", createdAt: new Date().toISOString() },
       ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
-    return { uploadId, chunkBytes: WORKFLOW_E2E_TRANSFER_CHUNK_BYTES, chunkCount: body.chunkCount };
+    return { uploadId, ...(groupRunId === undefined ? {} : { groupRunId }), chunkBytes: WORKFLOW_E2E_TRANSFER_CHUNK_BYTES, chunkCount: body.chunkCount };
   }
   const upload = await getItem<Record<string, unknown>>(dependencies, key);
   if (!upload || upload.entityType !== "WORKFLOW_E2E_EVIDENCE_UPLOAD" || upload.operationId !== operation.id || upload.fence !== operation.fence
-    || upload.admissionSha256 !== admissionRef.admissionRef.sha256 || upload.status !== "OPEN" || upload.uploadId !== body.uploadId) throw agentXError("STALE_FENCE", "CHECKS evidence upload is no longer current");
+    || upload.groupRunId !== groupRunId || upload.admissionSha256 !== admissionRef.admissionRef.sha256 || upload.status !== "OPEN" || upload.uploadId !== body.uploadId) throw agentXError("STALE_FENCE", "CHECKS evidence upload is no longer current");
   if (body.stage === "chunk") {
     const index = Number(upload.nextChunkIndex);
     if (body.index !== index || body.index >= Number(upload.chunkCount)) throw agentXError("CALLBACK_FORBIDDEN", "E2E evidence chunks must be uploaded once in order");
     const bytes = Buffer.from(body.bytesBase64, "base64");
     const expected = body.index === Number(upload.chunkCount) - 1 ? Number(upload.totalBytes) - body.index * WORKFLOW_E2E_TRANSFER_CHUNK_BYTES : WORKFLOW_E2E_TRANSFER_CHUNK_BYTES;
     if (bytes.byteLength !== expected || bytes.toString("base64") !== body.bytesBase64 || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "E2E evidence chunk bytes or digest are invalid");
-    const chunkKey = `workflow-e2e-staging/${operation.workspaceId}/${operation.id}/${body.uploadId}/${body.index}.chunk`;
+    const chunkKey = `workflow-e2e-staging/${operation.workspaceId}/${operation.id}/${groupRunId ?? "aggregate"}/${body.uploadId}/${body.index}.chunk`;
     await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: chunkKey, Body: bytes, ContentType: "application/octet-stream", Metadata: { sha256: body.sha256 }, IfNoneMatch: "*" }));
     await dependencies.documentClient.send(new UpdateCommand({ TableName: dependencies.tableName, Key: key, UpdateExpression: "SET nextChunkIndex = :next",
       ConditionExpression: "#status = :open AND nextChunkIndex = :index AND operationId = :operation AND fence = :fence AND admissionSha256 = :admission",
@@ -5559,18 +5580,99 @@ async function handleWorkflowE2EEvidenceUpload(dependencies: AwsBrokerDependenci
   const chunks: Buffer[] = [];
   const chunkKeys: string[] = [];
   for (let index = 0; index < Number(upload.chunkCount); index += 1) {
-    const chunkKey = `workflow-e2e-staging/${operation.workspaceId}/${operation.id}/${body.uploadId}/${index}.chunk`;
+    const chunkKey = `workflow-e2e-staging/${operation.workspaceId}/${operation.id}/${groupRunId ?? "aggregate"}/${body.uploadId}/${index}.chunk`;
     const chunk = await readSetupChunk(dependencies, chunkKey);
     if (!chunk) throw agentXError("RUNTIME_UNAVAILABLE", "an owned E2E evidence chunk is missing");
     chunks.push(chunk); chunkKeys.push(chunkKey);
   }
   const bytes = Buffer.concat(chunks);
-  if (bytes.byteLength !== Number(upload.totalBytes) || bytes.byteLength > maxBytes || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "assembled E2E evidence failed its bound or digest");
+  if (bytes.byteLength !== Number(upload.totalBytes) || bytes.byteLength > transferLimit || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "assembled E2E evidence failed its bound or digest");
+  if (groupRunId !== undefined) {
+    const decoded = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+    const expectedBinding = groups[admittedGroupIndex];
+    const groupResult = decoded.groupRun as Record<string, unknown> | undefined;
+    if (decoded.schemaVersion !== "workflow-e2e-group-evidence/v1" || decoded.admissionSha256 !== admissionRef.admissionRef.sha256
+      || decoded.taskId !== admissionRef.taskId || decoded.operationId !== operation.id || decoded.operationFence !== operation.fence
+      || decoded.workflowRevision !== admissionRef.workflowRevision || decoded.candidateDigest !== admissionRef.candidateDigest
+      || canonicalJson(decoded.round) !== canonicalJson(admission.round) || expectedBinding?.runId !== groupRunId
+      || !groupResult || canonicalJson(groupResult.binding) !== canonicalJson(expectedBinding)
+      || canonicalJson(groupResult.group) !== canonicalJson(admission.plan?.groups?.[admittedGroupIndex])) {
+      throw agentXError("CALLBACK_FORBIDDEN", "E2E group evidence is outside its exact admitted run binding");
+    }
+    const groupRef = E2EWorkflowGroupEvidenceRefSchema.parse({ groupRunId,
+      evidenceRef: { key: `workflow-e2e-group-evidence/sha256/${body.sha256}.json`, sha256: body.sha256, byteLength: bytes.byteLength } });
+    const existingObject = await readStoredText(dependencies.s3, dependencies.artifactBucketName, groupRef.evidenceRef.key, transferLimit);
+    if (existingObject !== undefined && (Buffer.byteLength(existingObject) !== bytes.byteLength
+      || createHash("sha256").update(existingObject).digest("hex") !== body.sha256 || existingObject !== bytes.toString("utf8"))) {
+      throw agentXError("CALLBACK_FORBIDDEN", "content-addressed E2E group evidence conflicts with an existing object");
+    }
+    if (existingObject === undefined) await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName,
+      Key: groupRef.evidenceRef.key, Body: bytes, ContentType: "application/json", Metadata: { sha256: body.sha256, operation: operation.id, groupRunId }, IfNoneMatch: "*" }));
+    const storedGroupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, groupRef.evidenceRef.key, transferLimit);
+    if (storedGroupText === undefined || Buffer.byteLength(storedGroupText) !== bytes.byteLength
+      || createHash("sha256").update(storedGroupText).digest("hex") !== body.sha256 || storedGroupText !== bytes.toString("utf8")) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "stored E2E group evidence could not be read back exactly");
+    }
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: { TableName: dependencies.tableName, Key: key, UpdateExpression: "SET #status = :complete, groupEvidenceRef = :ref",
+        ConditionExpression: "#status = :open AND nextChunkIndex = chunkCount AND uploadId = :upload AND groupRunId = :run AND operationId = :operation AND fence = :fence AND admissionSha256 = :admission",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":complete": "COMPLETE", ":open": "OPEN", ":ref": groupRef,
+          ":upload": body.uploadId, ":run": groupRunId, ":operation": operation.id, ":fence": operation.fence, ":admission": admissionRef.admissionRef.sha256 } } },
+      { Update: { TableName: dependencies.tableName, Key: operationKey(operation.workspaceId, operation.id),
+        UpdateExpression: "SET workflowE2EGroupEvidenceRefs = list_append(if_not_exists(workflowE2EGroupEvidenceRefs, :emptyRefs), :refs), workflowE2EGroupRunIds = list_append(if_not_exists(workflowE2EGroupRunIds, :emptyIds), :runIds)",
+        ConditionExpression: "#status = :running AND fence = :fence AND workflowMode = :checks AND workflowE2EAdmission.admissionRef.sha256 = :admission AND (attribute_not_exists(workflowE2EGroupRunIds) OR NOT contains(workflowE2EGroupRunIds, :run))",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":emptyRefs": [], ":refs": [groupRef], ":emptyIds": [], ":runIds": [groupRunId],
+          ":run": groupRunId, ":running": "RUNNING", ":fence": operation.fence, ":checks": "CHECKS", ":admission": admissionRef.admissionRef.sha256 } } },
+    ] }));
+    for (const chunkKey of chunkKeys) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: chunkKey }));
+    return { key: groupRef.evidenceRef.key, sha256: groupRef.evidenceRef.sha256, groupRunId };
+  }
   const evidenceRef = E2EWorkflowEvidenceRefSchema.parse({ key: `workflow-e2e-evidence/sha256/${body.sha256}.json`, sha256: body.sha256, byteLength: bytes.byteLength });
   const decoded = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
   if (decoded.schemaVersion !== "workflow-e2e-evidence/v1" || decoded.admissionSha256 !== admissionRef.admissionRef.sha256
     || decoded.taskId !== admissionRef.taskId || decoded.operationId !== operation.id || decoded.operationFence !== operation.fence
     || decoded.workflowRevision !== admissionRef.workflowRevision || decoded.candidateDigest !== admissionRef.candidateDigest) throw agentXError("CALLBACK_FORBIDDEN", "E2E evidence is outside its admitted CHECKS operation");
+  const aggregateGroups = decoded.groupRuns;
+  const currentOperation = await getItem<OperationRecord>(dependencies, operationKey(operation.workspaceId, operation.id));
+  const acceptedGroupRefs = currentOperation?.workflowE2EGroupEvidenceRefs ?? [];
+  const acceptedGroupIds = currentOperation?.workflowE2EGroupRunIds ?? [];
+  if (!Array.isArray(aggregateGroups) || aggregateGroups.length !== admissionRef.groupRunIds.length
+    || acceptedGroupRefs.length !== admissionRef.groupRunIds.length || acceptedGroupIds.length !== admissionRef.groupRunIds.length
+    || canonicalJson([...acceptedGroupIds].sort()) !== canonicalJson([...admissionRef.groupRunIds].sort())) {
+    throw agentXError("STALE_FENCE", "CHECKS aggregate is missing one or more separately accepted admitted group results");
+  }
+  const acceptedReferenceIds = acceptedGroupRefs.map((raw) => E2EWorkflowGroupEvidenceRefSchema.parse(raw).groupRunId);
+  if (new Set(acceptedReferenceIds).size !== admissionRef.groupRunIds.length
+    || canonicalJson([...acceptedReferenceIds].sort()) !== canonicalJson([...admissionRef.groupRunIds].sort())) {
+    throw agentXError("CALLBACK_FORBIDDEN", "accepted group evidence references do not cover the immutable admission exactly once");
+  }
+  const aggregateByRun = new Map(aggregateGroups.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw agentXError("CONFIG_INVALID", "CHECKS aggregate group result is malformed");
+    const run = raw as Record<string, unknown>;
+    const binding = run.binding as Record<string, unknown> | undefined;
+    if (typeof binding?.runId !== "string") throw agentXError("CONFIG_INVALID", "CHECKS aggregate group binding is malformed");
+    return [binding.runId, run] as const;
+  }));
+  if (aggregateByRun.size !== admissionRef.groupRunIds.length) throw agentXError("CALLBACK_FORBIDDEN", "CHECKS aggregate contains duplicate or foreign group runs");
+  for (const accepted of acceptedGroupRefs) {
+    const reference = E2EWorkflowGroupEvidenceRefSchema.parse(accepted);
+    if (!admissionRef.groupRunIds.includes(reference.groupRunId)
+      || reference.evidenceRef.key !== `workflow-e2e-group-evidence/sha256/${reference.evidenceRef.sha256}.json`) {
+      throw agentXError("CALLBACK_FORBIDDEN", "accepted group evidence reference is outside the immutable admission");
+    }
+    const groupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.evidenceRef.key,
+      Math.min(maxBytes, e2ePrivateTransferMaxBytes(groups[admissionRef.groupRunIds.indexOf(reference.groupRunId)]?.expectedCases?.length ?? 0, 1)));
+    if (groupText === undefined || Buffer.byteLength(groupText) !== reference.evidenceRef.byteLength
+      || createHash("sha256").update(groupText).digest("hex") !== reference.evidenceRef.sha256) throw agentXError("STALE_FENCE", "an accepted E2E group result is unavailable or changed");
+    const groupEnvelope = JSON.parse(groupText) as Record<string, unknown>;
+    const aggregateGroup = aggregateByRun.get(reference.groupRunId);
+    if (groupEnvelope.schemaVersion !== "workflow-e2e-group-evidence/v1" || groupEnvelope.admissionSha256 !== admissionRef.admissionRef.sha256
+      || groupEnvelope.taskId !== admissionRef.taskId || groupEnvelope.operationId !== operation.id || groupEnvelope.operationFence !== operation.fence
+      || groupEnvelope.workflowRevision !== admissionRef.workflowRevision || groupEnvelope.candidateDigest !== admissionRef.candidateDigest
+      || canonicalJson(groupEnvelope.round) !== canonicalJson(admission.round) || canonicalJson(groupEnvelope.groupRun) !== canonicalJson(aggregateGroup)) {
+      throw agentXError("CALLBACK_FORBIDDEN", "CHECKS aggregate differs from a separately accepted group result");
+    }
+  }
   await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: evidenceRef.key, Body: bytes, ContentType: "application/json", Metadata: { sha256: body.sha256, operation: operation.id }, IfNoneMatch: "*" }));
   await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
     { Update: { TableName: dependencies.tableName, Key: key, UpdateExpression: "SET #status = :complete, evidenceRef = :ref", ConditionExpression: "#status = :open AND nextChunkIndex = chunkCount AND uploadId = :upload AND operationId = :operation AND fence = :fence AND admissionSha256 = :admission",
@@ -6129,20 +6231,28 @@ async function verifyWorkflowE2EEvidence(
     if (workflow === undefined) return unavailable("workflow-missing");
     const reference = operation.workflowE2EAdmission;
     const evidenceRef = operation.workflowE2EEvidenceRef;
+    const groupEvidenceRefs = operation.workflowE2EGroupEvidenceRefs ?? [];
+    const groupEvidenceRunIds = operation.workflowE2EGroupRunIds ?? [];
     const staleProjection = projection?.allowStaleProjection === true;
-    if (!reference || !evidenceRef || reference.taskId !== task.taskId || reference.candidateDigest !== candidate.digest
+    if (!reference || reference.taskId !== task.taskId || reference.candidateDigest !== candidate.digest
       || (!staleProjection && (workflow.e2e?.currentRoundId !== reference.roundId
         || canonicalJson(workflow.e2e.currentGroupRunIds) !== canonicalJson(reference.groupRunIds)))) return unavailable("current-admission-reference-mismatch");
     const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
-    const evidenceText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
-    if (admissionText === undefined || evidenceText === undefined || createHash("sha256").update(admissionText).digest("hex") !== reference.admissionRef.sha256
-      || Buffer.byteLength(admissionText) !== reference.admissionRef.byteLength || evidenceRef.key !== `workflow-e2e-evidence/sha256/${evidenceRef.sha256}.json`
-      || createHash("sha256").update(evidenceText).digest("hex") !== evidenceRef.sha256 || Buffer.byteLength(evidenceText) !== evidenceRef.byteLength) return unavailable("admission-or-evidence-reference-integrity");
+    const evidenceText = evidenceRef === undefined ? undefined
+      : await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
+    if (admissionText === undefined || createHash("sha256").update(admissionText).digest("hex") !== reference.admissionRef.sha256
+      || Buffer.byteLength(admissionText) !== reference.admissionRef.byteLength
+      || evidenceRef !== undefined && (evidenceText === undefined || evidenceRef.key !== `workflow-e2e-evidence/sha256/${evidenceRef.sha256}.json`
+        || createHash("sha256").update(evidenceText).digest("hex") !== evidenceRef.sha256 || Buffer.byteLength(evidenceText) !== evidenceRef.byteLength)) {
+      return unavailable("admission-or-evidence-reference-integrity");
+    }
     const admission = JSON.parse(admissionText) as Record<string, unknown>;
-    const evidence = JSON.parse(evidenceText) as Record<string, unknown>;
-    if (admission.schemaVersion !== "workflow-e2e-admission/v1" || evidence.schemaVersion !== "workflow-e2e-evidence/v1"
+    const evidence = evidenceText === undefined ? undefined : JSON.parse(evidenceText) as Record<string, unknown>;
+    if (admission.schemaVersion !== "workflow-e2e-admission/v1" || evidence !== undefined && (evidence.schemaVersion !== "workflow-e2e-evidence/v1"
       || evidence.admissionSha256 !== reference.admissionRef.sha256 || evidence.taskId !== task.taskId || evidence.operationId !== operation.id
-      || evidence.operationFence !== operation.fence || evidence.workflowRevision !== reference.workflowRevision || evidence.candidateDigest !== candidate.digest) return unavailable("admission-or-evidence-subject-binding");
+      || evidence.operationFence !== operation.fence || evidence.workflowRevision !== reference.workflowRevision || evidence.candidateDigest !== candidate.digest)) {
+      return unavailable("admission-or-evidence-subject-binding");
+    }
     const sourceRecord = admission.sourceSnapshot as Record<string, unknown>;
     if (!sourceRecord || !Array.isArray(sourceRecord.sources)) return unavailable("admitted-source-snapshot-shape");
     const snapshot = { ...sourceRecord, sources: sourceRecord.sources.map((raw) => {
@@ -6163,27 +6273,74 @@ async function verifyWorkflowE2EEvidence(
     const runnerEnvironment = ProjectSetupRunnerEnvironmentSchema.parse(runtime.runnerEnvironment);
     const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse(runtime.runnerToolchain);
     const groupAdmissions = admission.groupAdmissions as Array<Record<string, unknown>>;
-    const groupRuns = evidence.groupRuns as Array<Record<string, unknown>>;
+    const aggregateGroupRuns = evidence?.groupRuns;
     if (admission.taskId !== task.taskId || admission.operationId !== operation.id || admission.operationFence !== operation.fence
       || admission.workflowRevision !== reference.workflowRevision || admission.candidateDigest !== candidate.digest
       || round.roundId !== reference.roundId || round.taskId !== task.taskId || round.operationId !== operation.id || round.operationFence !== operation.fence
       || round.workflowRevision !== reference.workflowRevision || plan.groups.length === 0 || plan.groups.length !== groupAdmissions.length
-      || plan.groups.length !== groupRuns.length || plan.groups.length !== reference.groupRunIds.length
+      || plan.groups.length !== reference.groupRunIds.length
       || canonicalJson(plan) !== canonicalJson(admission.plan) || bundle.bundleDigest !== e2eScenarioBundleDigest(bundle)) return unavailable("current-plan-round-or-group-binding");
+    if (evidence !== undefined && (!Array.isArray(aggregateGroupRuns) || aggregateGroupRuns.length !== reference.groupRunIds.length)) return unavailable("aggregate-group-results-incomplete");
+    if (groupEvidenceRefs.length !== groupEvidenceRunIds.length
+      || canonicalJson(groupEvidenceRefs.map((raw) => E2EWorkflowGroupEvidenceRefSchema.parse(raw).groupRunId)) !== canonicalJson(groupEvidenceRunIds)
+      || new Set(groupEvidenceRunIds).size !== groupEvidenceRunIds.length
+      || groupEvidenceRunIds.some((runId) => !reference.groupRunIds.includes(runId))) return unavailable("accepted-group-reference-list-invalid");
+    if (evidence === undefined && groupEvidenceRefs.length === 0) return unavailable("group-results-not-yet-accepted");
+    const aggregateByRun = new Map<string, Record<string, unknown>>();
+    if (Array.isArray(aggregateGroupRuns)) {
+      for (const raw of aggregateGroupRuns) {
+        if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return unavailable("aggregate-group-result-shape");
+        const run = raw as Record<string, unknown>;
+        const binding = run.binding as Record<string, unknown> | undefined;
+        if (typeof binding?.runId !== "string" || aggregateByRun.has(binding.runId)) return unavailable("aggregate-group-result-identity");
+        aggregateByRun.set(binding.runId, run);
+      }
+    }
+    const groupRunsById = new Map<string, Record<string, unknown>>();
+    for (const raw of groupEvidenceRefs) {
+      const parsedRef = E2EWorkflowGroupEvidenceRefSchema.safeParse(raw);
+      if (!parsedRef.success) return unavailable("accepted-group-reference-schema");
+      const { groupRunId, evidenceRef: storedGroupRef } = parsedRef.data;
+      const index = reference.groupRunIds.indexOf(groupRunId);
+      if (index < 0 || groupRunsById.has(groupRunId) || storedGroupRef.key !== `workflow-e2e-group-evidence/sha256/${storedGroupRef.sha256}.json`) {
+        return unavailable("accepted-group-reference-subject");
+      }
+      const expectedCaseCount = groupAdmissions[index]?.expectedCases;
+      if (!Array.isArray(expectedCaseCount)) return unavailable("admitted-group-case-count");
+      const groupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, storedGroupRef.key,
+        Math.min(WORKFLOW_E2E_ADMISSION_MAX_BYTES, e2ePrivateTransferMaxBytes(expectedCaseCount.length, 1)));
+      if (groupText === undefined || Buffer.byteLength(groupText) !== storedGroupRef.byteLength
+        || createHash("sha256").update(groupText).digest("hex") !== storedGroupRef.sha256) return unavailable("accepted-group-evidence-integrity");
+      const envelope = JSON.parse(groupText) as Record<string, unknown>;
+      const groupRun = envelope.groupRun as Record<string, unknown> | undefined;
+      if (!groupRun || envelope.schemaVersion !== "workflow-e2e-group-evidence/v1" || envelope.admissionSha256 !== reference.admissionRef.sha256
+        || envelope.taskId !== task.taskId || envelope.operationId !== operation.id || envelope.operationFence !== operation.fence
+        || envelope.workflowRevision !== reference.workflowRevision || envelope.candidateDigest !== candidate.digest
+        || canonicalJson(envelope.round) !== canonicalJson(round) || canonicalJson(groupRun.binding) !== canonicalJson(round.groupBindings[index])
+        || canonicalJson(groupRun.group) !== canonicalJson(plan.groups[index])) return unavailable("accepted-group-evidence-subject");
+      const aggregateRun = aggregateByRun.get(groupRunId);
+      if (evidence !== undefined && (aggregateRun === undefined || canonicalJson(aggregateRun) !== canonicalJson(groupRun))) return unavailable("aggregate-group-evidence-mismatch");
+      groupRunsById.set(groupRunId, groupRun);
+    }
+    if (evidence !== undefined && (groupEvidenceRefs.length !== reference.groupRunIds.length
+      || canonicalJson([...groupRunsById.keys()].sort()) !== canonicalJson([...reference.groupRunIds].sort())
+      || canonicalJson([...aggregateByRun.keys()].sort()) !== canonicalJson([...reference.groupRunIds].sort()))) return unavailable("aggregate-does-not-cover-accepted-groups");
     const semantic = (admission.portableApprovalBinding as { semanticApproval?: { digest?: unknown } } | undefined)?.semanticApproval?.digest;
     if (typeof semantic !== "string" || !/^[a-f0-9]{64}$/u.test(semantic)) return unavailable("semantic-approval-binding");
     const semanticApprovalDigests = new Map(bundle.scenarios.map((scenario) => [scenario.scenarioId, semantic]));
     const qualifications: Array<"PASS" | "FAILED" | "UNKNOWN"> = [];
     for (const [index, group] of plan.groups.entries()) {
-      const admitted = groupAdmissions[index]; const run = groupRuns[index];
-      if (!admitted || !run || canonicalJson(admitted.group) !== canonicalJson(group) || canonicalJson(run.group) !== canonicalJson(group)) return unavailable("admitted-group-identity");
+      const admitted = groupAdmissions[index]; const run = groupRunsById.get(reference.groupRunIds[index]!);
+      if (!admitted || canonicalJson(admitted.group) !== canonicalJson(group)) return unavailable("admitted-group-identity");
       const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput, executionPlan: plan, group } as never);
       if (admitted.expectedConfigDigest !== compiled.expectedConfigDigest || admitted.compiledInventoryDigest !== compiled.inventory.digest
         || admitted.selectionPacketPath !== compiled.selectionPacketPath || canonicalJson(admitted.expectedCases) !== canonicalJson(compiled.expectedCases)) return unavailable("compiled-group-expectations");
       const binding = E2ERunBindingSchema.parse(admitted.binding);
       if (binding.runId !== reference.groupRunIds[index] || binding.taskId !== task.taskId || binding.operationId !== operation.id
         || binding.operationFence !== operation.fence || binding.workflowRevision !== reference.workflowRevision || binding.candidateDigest !== candidate.digest
-        || binding.roundId !== reference.roundId || canonicalJson(round.groupBindings[index]) !== canonicalJson(binding) || canonicalJson(run.binding) !== canonicalJson(binding)) return unavailable("group-run-binding");
+        || binding.roundId !== reference.roundId || canonicalJson(round.groupBindings[index]) !== canonicalJson(binding)) return unavailable("group-run-binding");
+      if (run === undefined) { qualifications.push("UNKNOWN"); continue; }
+      if (canonicalJson(run.group) !== canonicalJson(group) || canonicalJson(run.binding) !== canonicalJson(binding)) return unavailable("group-run-result-binding");
       const selection = JSON.parse(compiled.files.get(compiled.selectionPacketPath) ?? "null") as unknown;
       if (canonicalJson(run.selection) !== canonicalJson(selection) || !Array.isArray(run.hostRequestIds)) return unavailable("compiled-selection-or-host-request-list");
       const hostRequestIds = new Map<string, string>();
@@ -6456,8 +6613,9 @@ async function workflowE2EPresentation(
     const admission = operation?.workflowE2EAdmission;
     if (operation === undefined || operation.kind !== "task" || operation.workflowMode !== "CHECKS" || admission === undefined
       || admission.taskId !== task.taskId || admission.roundId !== presentationRoundId
-      || admission.candidateDigest !== candidateResult.data.digest || operation.workflowE2EEvidenceRef === undefined) continue;
-    if (staleFailure && (failedRound.admissionSha256 !== admission.admissionRef.sha256
+      || admission.candidateDigest !== candidateResult.data.digest
+      || operation.workflowE2EEvidenceRef === undefined && (operation.workflowE2EGroupEvidenceRefs?.length ?? 0) === 0) continue;
+    if (staleFailure && (operation.workflowE2EEvidenceRef === undefined || failedRound.admissionSha256 !== admission.admissionRef.sha256
       || failedRound.evidenceSha256 !== operation.workflowE2EEvidenceRef.sha256
       || canonicalJson(failedRound.groupRunIds) !== canonicalJson(admission.groupRunIds))) continue;
     const projection: { plan?: unknown; round?: unknown; results: unknown[]; allowStaleProjection: boolean } = { results: [], allowStaleProjection: staleFailure };

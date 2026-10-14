@@ -76,6 +76,8 @@ export interface GitHubWebhookRepositoryScope {
   fullName: string;
 }
 
+export interface GitHubRepositoryIdentity { repositoryId: number; fullName: string }
+
 /** A repository the App can reach: its installation, and the owner as GitHub spells it. */
 interface InstalledRepository {
   owner: string;
@@ -140,6 +142,27 @@ export class GitHubAppCredentialProvider {
     const record = body as Record<string, unknown>;
     return Number.isSafeInteger(record.id) && record.id === scope.repositoryId
       && typeof record.full_name === "string" && record.full_name.toLowerCase() === expectedFullName;
+  }
+
+  /** Reads the immutable GitHub numeric identity for a server-registered repository URL. */
+  async getRepositoryIdentity(repositoryUrl: string): Promise<GitHubRepositoryIdentity | undefined> {
+    const parsed = parseGitHubRepository(repositoryUrl);
+    const expectedFullName = `${parsed.owner}/${parsed.name}`;
+    const installed = await this.installed(parsed);
+    const token = await this.createInstallationToken(installed, { contents: "read" });
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(installed.owner)}/${encodeURIComponent(installed.name)}`,
+      { headers: githubHeaders(token), signal: AbortSignal.timeout(5_000), redirect: "error" },
+    );
+    if (response.status === 404) return undefined;
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub repository lookup failed with HTTP ${response.status}`);
+    const body: unknown = await response.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid repository response");
+    const record = body as Record<string, unknown>;
+    if (!Number.isSafeInteger(record.id) || typeof record.full_name !== "string" || record.full_name.toLowerCase() !== expectedFullName.toLowerCase()) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid repository identity");
+    }
+    return { repositoryId: record.id as number, fullName: record.full_name };
   }
 
   async issueCredentials(

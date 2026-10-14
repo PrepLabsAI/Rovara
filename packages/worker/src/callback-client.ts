@@ -87,7 +87,7 @@ export function createWorkerCallbackSinks(input: {
   codeBuildSink: CodeBuildSink;
   candidateSourceExportSink: (source: CommittedCandidateSourceExport) => Promise<void>;
   workflowE2EAdmissionReader: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
-  workflowE2EEvidenceSink: (bytes: Uint8Array, sha256: string, maxBytes: number) => Promise<{ key: string; sha256: string }>;
+  workflowE2EEvidenceSink: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
   feedbackBundleReader: FeedbackBundleReader;
   authorizeFeedbackApproval: FeedbackApprovalAuthorizer;
   /** #341: the task owner's ChatGPT access token, for a task that runs on their plan (unparsed; see chatgpt-token.ts). */
@@ -152,22 +152,30 @@ export function createWorkerCallbackSinks(input: {
       || record.offset !== offset || typeof record.chunkBase64 !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "native E2E admission chunk does not match its signed reference");
     return { totalBytes: record.totalBytes, chunkBase64: record.chunkBase64, sha256: record.sha256 };
   };
-  const workflowE2EEvidenceSink = async (bytes: Uint8Array, sha256: string, maxBytes: number) => {
+  const workflowE2EEvidenceSink = async (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => {
     if (bytes.byteLength <= 0 || bytes.byteLength > maxBytes) throw agentXError("CONFIG_INVALID", "native E2E evidence exceeds its admitted limit");
     const chunkBytes = 64 * 1024;
     const chunkCount = Math.ceil(bytes.byteLength / chunkBytes);
-    const initialized = await postForResult("e2e-evidence", { stage: "init", totalBytes: bytes.byteLength, chunkCount, sha256 });
+    const groupBinding = groupRunId === undefined ? {} : { groupRunId };
+    const initialized = await postForResult("e2e-evidence", { stage: "init", ...groupBinding, totalBytes: bytes.byteLength, chunkCount, sha256 });
     if (!initialized || typeof initialized !== "object" || typeof (initialized as { uploadId?: unknown }).uploadId !== "string"
-      || (initialized as { chunkBytes?: unknown }).chunkBytes !== chunkBytes || (initialized as { chunkCount?: unknown }).chunkCount !== chunkCount) {
+      || (initialized as { chunkBytes?: unknown }).chunkBytes !== chunkBytes || (initialized as { chunkCount?: unknown }).chunkCount !== chunkCount
+      || groupRunId !== undefined && (initialized as { groupRunId?: unknown }).groupRunId !== groupRunId) {
       throw agentXError("RUNTIME_UNAVAILABLE", "native E2E evidence upload initialization is invalid");
+    }
+    const initRecord = initialized as { complete?: unknown; groupRunId?: unknown; evidenceRef?: { key?: unknown; sha256?: unknown } };
+    if (initRecord.complete === true) {
+      if (groupRunId === undefined || initRecord.groupRunId !== groupRunId || initRecord.evidenceRef?.sha256 !== sha256
+        || typeof initRecord.evidenceRef.key !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "completed native E2E group upload does not match this run");
+      return { key: initRecord.evidenceRef.key, sha256 };
     }
     const uploadId = (initialized as { uploadId: string }).uploadId;
     for (let index = 0; index < chunkCount; index += 1) {
       const chunk = Buffer.from(bytes).subarray(index * chunkBytes, Math.min((index + 1) * chunkBytes, bytes.byteLength));
-      await postForResult("e2e-evidence", { stage: "chunk", uploadId, index, bytesBase64: chunk.toString("base64"),
+      await postForResult("e2e-evidence", { stage: "chunk", ...groupBinding, uploadId, index, bytesBase64: chunk.toString("base64"),
         sha256: createHash("sha256").update(chunk).digest("hex") });
     }
-    const finalized = await postForResult("e2e-evidence", { stage: "finalize", uploadId, sha256 });
+    const finalized = await postForResult("e2e-evidence", { stage: "finalize", ...groupBinding, uploadId, sha256 });
     if (!finalized || typeof finalized !== "object" || typeof (finalized as { key?: unknown }).key !== "string"
       || (finalized as { sha256?: unknown }).sha256 !== sha256) throw agentXError("RUNTIME_UNAVAILABLE", "native E2E evidence finalization is invalid");
     return { key: (finalized as { key: string }).key, sha256 };

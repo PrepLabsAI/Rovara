@@ -3,7 +3,7 @@ import { z } from "zod";
 import { WorkflowFeedbackApprovalBindingSchema } from "./task-workflow.js";
 import { WorkflowDependencyInvocationSchema } from "./workflow-dependencies.js";
 import { SlackRequesterSchema } from "./slack.js";
-import { E2EWorkflowAdmissionRefSchema, E2EWorkflowEvidenceRefSchema } from "./e2e.js";
+import { E2EWorkflowAdmissionRefSchema, E2EWorkflowEvidenceRefSchema, E2EWorkflowGroupEvidenceRefSchema } from "./e2e.js";
 
 /** Spec 025 FR-022: an operation a developer started from an AI tool. */
 export const DeveloperRequesterSchema = z
@@ -214,6 +214,9 @@ export const OperationSchema = z
     workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW", "CHECKS", "FEEDBACK_REVIEW"]).optional(),
     workflowE2EAdmission: E2EWorkflowAdmissionRefSchema.optional(),
     workflowE2EEvidenceRef: E2EWorkflowEvidenceRefSchema.optional(),
+    /** Immutable evidence objects accepted for individual admitted groups; never a qualification signal by itself. */
+    workflowE2EGroupEvidenceRefs: z.array(E2EWorkflowGroupEvidenceRefSchema).max(4).optional(),
+    workflowE2EGroupRunIds: z.array(z.string().uuid()).max(4).optional(),
     workflowFeedbackReview: z.object({ taskId: z.string().uuid(), workflowRevision: z.number().int().positive(), candidateDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
     workflowFeedbackApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
     workflowDependencies: WorkflowDependencyInvocationSchema.optional(),

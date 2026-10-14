@@ -70,7 +70,7 @@ export async function runTaskInvocation(
     artifactSink: ArtifactSink;
     feedbackBundleReader?: FeedbackBundleReader;
     workflowE2EAdmissionReader?: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
-    workflowE2EEvidenceSink?: (bytes: Uint8Array, sha256: string, maxBytes: number) => Promise<{ key: string; sha256: string }>;
+    workflowE2EEvidenceSink?: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
     workflowE2EEvidenceRoot?: string;
     /** Fixed worker installation root that contains the pinned public E2E CLI package. */
     workflowE2ERuntimeRoot?: string;

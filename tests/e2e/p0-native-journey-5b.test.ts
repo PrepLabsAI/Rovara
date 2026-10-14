@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomUUID, sign as cryptoSign } from "node:crypto";
-import { release as osRelease } from "node:os";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { arch, hostname, release as osRelease } from "node:os";
+import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -14,8 +14,15 @@ import { scriptedPrompter } from "../support/init-fakes.js";
 import {
   canonicalJson, canonicalPlanJson, createCandidateManifest, WorkerInvocationSchema, parsePlanDocument, readCanonicalPlan,
   planDocumentMarkdown, portableOperationId, WorkflowSnapshotSchema, workflowSendBackOffered, sendBackProblems,
-  type DeveloperTaskView, type E2EPolicy, type E2ESourceSnapshot,
+  ProjectDefinitionSchema, type DeveloperTaskView, type E2EPolicy, type E2ESourceSnapshot,
 } from "@agentx/contracts";
+import { executeCli } from "../../packages/cli/src/main.js";
+import { developerTokenKey, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";
+import { realExec, type Exec } from "../../packages/cli/src/loop/exec.js";
+import { captureCandidate } from "../../packages/cli/src/loop/candidate.js";
+import { recordRegisteredLoopEnrollment } from "../../packages/cli/src/loop/enrollment-cli.js";
+import { LoopStore } from "../../packages/cli/src/loop/state.js";
+import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 import { createAgentXMcpServer } from "../../packages/mcp/src/index.js";
 import { StrictSlackWeb } from "../support/strict-slack.js";
 import { call, createBroker, issuer, loadSlackBroker } from "../support/slack-broker.js";
@@ -89,7 +96,22 @@ describe("P0 normal project onboarding journey", () => {
   it("discovers and presents source-backed setup from ordinary addProject without injected setup authority", async () => {
     const evidenceRoot = process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR;
     expect(evidenceRoot, "CONTAINED_FOUNDATION_EVIDENCE_DIR must be pre-created outside the fresh TMPDIR").toBeDefined();
+    const evidenceRootPath = resolve(evidenceRoot!);
+    const evidenceRootStat = await lstat(evidenceRootPath);
+    expect(evidenceRootStat.isDirectory() && !evidenceRootStat.isSymbolicLink(), "the launch-provided evidence root must be an owned real directory").toBe(true);
+    expect(evidenceRootStat.uid).toBe(process.getuid?.());
+    expect(evidenceRootStat.mode & 0o077).toBe(0);
+    expect(await realpath(evidenceRootPath)).toBe(evidenceRootPath);
+    expect(basename(dirname(evidenceRootPath))).toBe("AgentX-e2e-p0-20261012-evidence");
+    expect(dirname(dirname(evidenceRootPath)), "the evidence collection must be a sibling of this source checkout").toBe(dirname(resolve(process.cwd())));
+    expect(await readdir(evidenceRootPath), "evidence root must be fresh and empty before the journey begins").toEqual([]);
     const root = resolve(evidenceRoot!, "native-journey", `5a-normal-discovery-${randomUUID()}`);
+    await mkdir(dirname(root), { recursive: true, mode: 0o700 });
+    await mkdir(root, { recursive: false, mode: 0o700 });
+    await writeFile(join(root, "actual-journey-evidence-root.json"), `${JSON.stringify({ path: root,
+      evidenceRoot: evidenceRootPath, sourceCheckout: resolve(process.cwd()), parent: dirname(dirname(evidenceRootPath)),
+      ownerUid: evidenceRootStat.uid, mode: evidenceRootStat.mode & 0o777, createdBeforeCandidateOrModelExecution: true }, null, 2)}\n`,
+    { mode: 0o600, flag: "wx" });
     const repositoryRoot = join(root, "selected-repository");
     const projectConfig = join(root, "project-config");
     await mkdir(join(repositoryRoot, "src"), { recursive: true });
@@ -99,6 +121,7 @@ describe("P0 normal project onboarding journey", () => {
     await mkdir(join(repositoryRoot, "android", "app"), { recursive: true });
     await mkdir(join(repositoryRoot, "ios"), { recursive: true });
     await mkdir(join(repositoryRoot, "desktop"), { recursive: true });
+    await mkdir(join(repositoryRoot, ".rovara"), { recursive: true });
     await mkdir(projectConfig, { recursive: true, mode: 0o700 });
     const sourceApiFixture = {
       schemaVersion: "source-backed-api-fixtures/v1", operationId: "listOrders", method: "GET", path: "/orders", inputField: "mode",
@@ -121,6 +144,7 @@ describe("P0 normal project onboarding journey", () => {
     };
     const sourceFiles = {
       ".gitignore": ".agentx/\nagent-sessions/\n",
+      ".rovara/loop.yaml": "version: 1\ncollaborators:\n  - maya\nharness:\n  name: codex\n  args: []\nchecks:\n  - name: orders regression\n    run: npm test\nreviews:\n  enabled: true\n  harness: codex\n  security: true\n  maxRounds: 3\n  timeoutSeconds: 900\n",
       "package.json": JSON.stringify({ name: "ordinary-orders", type: "module", exports: { ".": "./src/index.mjs" }, scripts: { build: "node --check src/index.mjs", test: "node --test" } }, null, 2) + "\n",
       "package-lock.json": JSON.stringify({ name: "ordinary-orders", lockfileVersion: 3, packages: { "": { name: "ordinary-orders" } } }, null, 2) + "\n",
       "openapi.json": JSON.stringify(sourceApiSchema, null, 2) + "\n",
@@ -202,7 +226,7 @@ describe("P0 normal project onboarding journey", () => {
       if (typed.constructor.name === "DeleteObjectCommand") { objects.delete(input.Key); return {}; }
       if (input.Body !== undefined) { objects.set(input.Key, Buffer.from(input.Body)); return {}; }
       const bytes = objects.get(input.Key);
-      if (bytes === undefined) return {};
+      if (bytes === undefined) throw Object.assign(new Error("The specified key does not exist."), { name: "NoSuchKey" });
       if (input.Range !== undefined) {
         const match = /^bytes=(\d+)-(\d+)$/.exec(input.Range);
         if (!match) throw new Error("invalid bounded setup range");
@@ -260,6 +284,8 @@ describe("P0 normal project onboarding journey", () => {
         return { number, url: "https://github.com/acme/ordinary-orders/pull/1", state: "open", headBranch: pr.headBranch, baseBranch: pr.baseBranch,
           headCommit, title: pr.title, body: pr.body };
       }, updatePullRequest: vi.fn(), verifyWebhookRepository: vi.fn(),
+        getRepositoryIdentity: async (repositoryUrl: string) => repositoryUrl === "https://github.com/acme/ordinary-orders.git"
+          ? { repositoryId: 740001, fullName: "acme/ordinary-orders" } : undefined,
         getPullRequestFeedback: async (repositoryUrl: string, number: number) => {
           const pr = localPullRequests.get(number);
           if (repositoryUrl !== "https://github.com/acme/ordinary-orders.git" || pr === undefined) throw new Error("strict local feedback adapter refuses unknown pull request");
@@ -552,8 +578,18 @@ describe("P0 normal project onboarding journey", () => {
     expect(channelBinding.status, JSON.stringify(channelBinding.body)).toBe(200);
     broker.db.set({ pk: `MEMBER#${ownerDeveloperId}`, sk: "PROJECT#ordinary-orders", entityType: "MEMBERSHIP", ownerKey: ownerDeveloperId,
       projectName: "ordinary-orders", role: "developer", grantId: randomUUID(), grantedBy: { issuer, subject: "owner" }, grantedAt: new Date().toISOString() });
-    const featureStart = await call(broker.handler, { method: "POST", path: "/v1/dev/tasks", headers: { authorization: "Bearer synthetic-owner-session" },
-      body: { requestId: randomUUID(), project: "ordinary-orders", instructions: "Add an orders list using the approved source context", client: "native-p0-journey", workflow: true, workflowPath: "QUICK" } });
+    const featureStartRequest = { requestId: randomUUID(), project: "ordinary-orders", instructions: "Add an orders list using the approved source context",
+      client: "native-p0-journey", workflow: true, workflowPath: "QUICK" };
+    const featureStartRequestBytes = Buffer.from(JSON.stringify(featureStartRequest), "utf8");
+    const featureStartResponseRaw = await broker.handler({ version: "2.0", rawPath: "/v1/dev/tasks", rawQueryString: "",
+      headers: { authorization: "Bearer synthetic-owner-session", "content-type": "application/json" }, body: featureStartRequestBytes.toString("utf8"),
+      requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    const featureStartResponseBytes = Buffer.from(featureStartResponseRaw.body, "utf8");
+    const featureStartRequestPrimary = await persistOriginalEvidencePrimary({ root, kind: "ordinary-task-start-http-request", key: "/v1/dev/tasks",
+      bytes: featureStartRequestBytes, producer: "exact ordinary developer task start request body", sourceCandidateDigest: proposalCandidateDigest as string });
+    const featureStartResponsePrimary = await persistOriginalEvidencePrimary({ root, kind: "ordinary-task-start-http-response", key: "/v1/dev/tasks",
+      bytes: featureStartResponseBytes, producer: "exact normal task producer response body before parsing", sourceCandidateDigest: proposalCandidateDigest as string });
+    const featureStart = { status: featureStartResponseRaw.statusCode, body: JSON.parse(featureStartResponseBytes.toString("utf8")) as Record<string, unknown> };
     expect(featureStart.status, JSON.stringify(featureStart.body)).toBe(200);
     const featureTaskId = String((featureStart.body.task as { taskId: string }).taskId);
     const featureTask = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { workspaceId: string; workflow: { revision: number; artifacts: Array<{ type: string; sha256: string; objectKey: string }> } };
@@ -786,13 +822,83 @@ describe("P0 normal project onboarding journey", () => {
     }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     expect(implementInvocation).toMatchObject({ kind: "task", payload: { workflowMode: "IMPLEMENT" } });
     const callbackRequests: Array<{ path: string; request: unknown; status: number; response: unknown }> = [];
+    let checksOperationId: string | undefined;
+    const groupUploadInitRequests = new Map<string, Record<string, unknown>>();
+    const duplicateGroupInitResponses: Array<{ groupRunId: string; status: number; body: Record<string, unknown> }> = [];
+    const conflictingGroupInitResponses: Array<{ groupRunId: string; status: number; body: Record<string, unknown>; storedRunIds: string[] }> = [];
+    const partialGroupTaskResponses: Array<{ groupRunId: string; statusCode: number; path: string; body: Record<string, unknown>; primary: unknown }> = [];
+    const reverseGroupFinalizeOrder: string[] = [];
+    const concurrentGroupFinalizeOrder: string[] = [];
+    const concurrentGroupFinalizeArrivals: string[] = [];
+    let groupFinalizeMode: "reverse" | "concurrent" = "reverse";
+    let capturePartialGroupView = true;
+    let reverseGroupRunIds: string[] = [];
+    let releaseFirstGroupFinalize: () => void = () => undefined;
+    const firstGroupFinalizeRelease = new Promise<void>((resolveRelease) => { releaseFirstGroupFinalize = resolveRelease; });
+    let releaseConcurrentGroupFinalizes: () => void = () => undefined;
+    const concurrentGroupFinalizeRelease = new Promise<void>((resolveRelease) => { releaseConcurrentGroupFinalizes = resolveRelease; });
     const workerFetch: typeof fetch = async (url, init) => {
       const parsed = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url);
       const requestBody = typeof init?.body === "string" ? JSON.parse(init.body) as unknown : undefined;
+      const finalizeGroupRunId = recordOf(requestBody)?.stage === "finalize" ? recordOf(requestBody)?.groupRunId : undefined;
+      const currentGroupFinalize = checksOperationId !== undefined && parsed.pathname.includes(`/operations/${checksOperationId}/`)
+        && parsed.pathname.endsWith("/e2e-evidence") && typeof finalizeGroupRunId === "string" && reverseGroupRunIds.length === 2;
+      if (currentGroupFinalize && groupFinalizeMode === "reverse" && finalizeGroupRunId === reverseGroupRunIds[0]) {
+        await firstGroupFinalizeRelease;
+      } else if (currentGroupFinalize && groupFinalizeMode === "concurrent") {
+        concurrentGroupFinalizeArrivals.push(finalizeGroupRunId);
+        if (concurrentGroupFinalizeArrivals.length === 2) releaseConcurrentGroupFinalizes();
+        await concurrentGroupFinalizeRelease;
+      }
       const response = await call(broker.handler, { method: init?.method ?? "GET", path: parsed.pathname,
         headers: Object.fromEntries(new Headers(init?.headers).entries()),
         ...(requestBody === undefined ? {} : { body: requestBody }) });
       callbackRequests.push({ path: parsed.pathname, request: requestBody, status: response.status, response: response.body });
+      if (checksOperationId !== undefined && parsed.pathname.includes(`/operations/${checksOperationId}/`) && parsed.pathname.endsWith("/e2e-evidence")
+        && requestBody && typeof requestBody === "object" && !Array.isArray(requestBody)) {
+        const upload = requestBody as Record<string, unknown>;
+        if (upload.stage === "init" && typeof upload.groupRunId === "string") groupUploadInitRequests.set(upload.groupRunId, upload);
+        if (upload.stage === "finalize" && typeof upload.groupRunId === "string" && response.status < 400) {
+          const acceptedOperation = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${checksOperationId}`) as {
+            workflowE2EGroupRunIds?: string[];
+          } | undefined;
+          if (groupFinalizeMode === "reverse") reverseGroupFinalizeOrder.splice(0, reverseGroupFinalizeOrder.length, ...(acceptedOperation?.workflowE2EGroupRunIds ?? []));
+          else concurrentGroupFinalizeOrder.splice(0, concurrentGroupFinalizeOrder.length, ...(acceptedOperation?.workflowE2EGroupRunIds ?? []));
+          if (upload.groupRunId === reverseGroupRunIds[1]) releaseFirstGroupFinalize();
+          if (capturePartialGroupView && partialGroupTaskResponses.length === 0) {
+            const taskPath = `/v1/dev/tasks/${featureTaskId}`;
+            const taskResponse = await broker.handler({ version: "2.0", rawPath: taskPath, rawQueryString: "",
+              headers: { authorization: "Bearer synthetic-owner-session" },
+              requestContext: { requestId: randomUUID(), http: { method: "GET" } } });
+            const taskBytes = Buffer.from(taskResponse.body, "utf8");
+            const taskBody = JSON.parse(taskBytes.toString("utf8")) as Record<string, unknown>;
+            const taskPrimary = await persistOriginalEvidencePrimary({ root, kind: "partial-current-group-task-detail-http-response",
+              key: taskPath, bytes: taskBytes, producer: "actual authenticated task-detail route after first accepted group and before second group delivery",
+              sourceCandidateDigest: workerCandidate.digest });
+            const task = recordOf(taskBody.task);
+            const presentation = recordOf(task?.e2ePresentation);
+            const shared = recordOf(presentation?.shared);
+            const e2e = recordOf(shared?.e2e);
+            expect(taskResponse.statusCode).toBe(200);
+            expect(e2e, JSON.stringify(taskBody)).toMatchObject({ status: "UNKNOWN", expectedGroups: 2, receivedGroups: 1 });
+            partialGroupTaskResponses.push({ groupRunId: upload.groupRunId, statusCode: taskResponse.statusCode, path: taskPath,
+              body: taskBody, primary: taskPrimary });
+          }
+          const groupInitRequest = groupUploadInitRequests.get(upload.groupRunId);
+          if (groupInitRequest === undefined) throw new Error("group finalize had no original server-bound init request");
+          const duplicate = await call(broker.handler, { method: "POST", path: parsed.pathname,
+            headers: Object.fromEntries(new Headers(init?.headers).entries()), body: groupInitRequest });
+          duplicateGroupInitResponses.push({ groupRunId: upload.groupRunId, status: duplicate.status, body: duplicate.body });
+          const conflictDigest = groupInitRequest.sha256 === "f".repeat(64) ? "e".repeat(64) : "f".repeat(64);
+          const conflict = await call(broker.handler, { method: "POST", path: parsed.pathname,
+            headers: Object.fromEntries(new Headers(init?.headers).entries()), body: { ...groupInitRequest, sha256: conflictDigest } });
+          const afterConflict = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${checksOperationId}`) as {
+            workflowE2EGroupRunIds?: string[];
+          } | undefined;
+          conflictingGroupInitResponses.push({ groupRunId: upload.groupRunId, status: conflict.status, body: conflict.body,
+            storedRunIds: afterConflict?.workflowE2EGroupRunIds ?? [] });
+        }
+      }
       if (response.status >= 400) {
         await writeFile(join(root, "worker-callback-rejection.json"), `${JSON.stringify({ path: parsed.pathname, status: response.status,
           request: requestBody, response: response.body, localBaseTreeReads }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
@@ -916,6 +1022,8 @@ describe("P0 normal project onboarding journey", () => {
       && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS")[0];
     expect(checksOutbox, "the server-created CHECKS operation must have its ordinary durable worker outbox").toBeDefined();
     const checksInvocation = WorkerInvocationSchema.parse(checksOutbox!.invocation);
+    checksOperationId = checksInvocation.operationId;
+    reverseGroupRunIds = [...(checksInvocation.payload.workflowE2EAdmission?.groupRunIds ?? [])];
     const checkCallbacks = createWorkerCallbackSinks({ controlPlaneUrl: "https://cp.example.test", invocation: checksInvocation, fetchImplementation: workerFetch });
     const checksWorkerState = createWorkerServerState(journal, {
       execute: async (invocation) => runTaskInvocation(invocation, {
@@ -974,6 +1082,29 @@ describe("P0 normal project onboarding journey", () => {
     const completedChecksOperation = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${checksInvocation.operationId}`);
     expect(completedChecksOperation?.status, JSON.stringify({ checksInvocation, checksDispatchResult, journal: await journal.get(checksInvocation.operationId), completedChecksOperation }))
       .toBe("SUCCEEDED");
+    const storedGroupEvidenceRefs = (completedChecksOperation?.workflowE2EGroupEvidenceRefs ?? []) as Array<{
+      groupRunId: string; evidenceRef: { key: string; sha256: string; byteLength: number };
+    }>;
+    const expectedGroupRunIds = (checksInvocation.payload as { workflowE2EAdmission?: { groupRunIds?: string[] } }).workflowE2EAdmission?.groupRunIds ?? [];
+    expect(storedGroupEvidenceRefs.map(({ groupRunId }) => groupRunId).sort()).toEqual([...expectedGroupRunIds].sort());
+    expect(reverseGroupFinalizeOrder, "actual independent group finalization must complete in the opposite order without changing admitted IDs")
+      .toEqual([...expectedGroupRunIds].reverse());
+    expect(duplicateGroupInitResponses).toHaveLength(expectedGroupRunIds.length);
+    expect(duplicateGroupInitResponses.every((item) => item.status === 200
+      && item.body.complete === true && item.body.groupRunId === item.groupRunId)).toBe(true);
+    expect(conflictingGroupInitResponses).toHaveLength(expectedGroupRunIds.length);
+    expect(conflictingGroupInitResponses.every((item) => item.status >= 400 && item.storedRunIds.filter((runId) => runId === item.groupRunId).length === 1)).toBe(true);
+    const groupEvidencePrimaries = await Promise.all(storedGroupEvidenceRefs.map(async ({ groupRunId, evidenceRef }) => {
+      const primary = await persistOriginalMapPrimary({ root, kind: `feature-checks-group-${groupRunId}`, key: evidenceRef.key,
+        objects, producer: "default worker group finalize stored one content-addressed immutable group envelope before aggregate CHECKS completion",
+        sourceCandidateDigest: workerCandidate.digest });
+      expect(primary.sha256).toBe(evidenceRef.sha256);
+      expect(primary.byteLength).toBe(evidenceRef.byteLength);
+      return primary;
+    }));
+    await writeFile(join(root, "feature-checks-group-acceptance.json"), `${JSON.stringify({ operationId: checksInvocation.operationId,
+      groupRunIds: expectedGroupRunIds, acceptedGroupEvidenceRefs: storedGroupEvidenceRefs, groupEvidencePrimaries,
+      reverseGroupFinalizeOrder, duplicateGroupInitResponses, conflictingGroupInitResponses, partialGroupTaskResponses }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     const ordinaryCheckResult = (completedChecksOperation?.result as { checks?: { checks?: Array<{ exitCode: number; status: string }> } } | undefined)?.checks?.checks;
     expect(ordinaryCheckResult, "ordinary project checks must pass independently of the E2E regression").toEqual(
       expect.arrayContaining([expect.objectContaining({ exitCode: 0, after: "passed", class: "passing" })]));
@@ -1127,6 +1258,14 @@ describe("P0 normal project onboarding journey", () => {
         && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS").at(-1);
       expect(retryChecksOutbox, "the fixed candidate must receive a fresh server-admitted E2E round").toBeDefined();
       const retryChecksInvocation = WorkerInvocationSchema.parse(retryChecksOutbox!.invocation);
+      checksOperationId = retryChecksInvocation.operationId;
+      reverseGroupRunIds = [...(retryChecksInvocation.payload.workflowE2EAdmission?.groupRunIds ?? [])];
+      groupFinalizeMode = "concurrent";
+      capturePartialGroupView = false;
+      groupUploadInitRequests.clear();
+      duplicateGroupInitResponses.splice(0);
+      conflictingGroupInitResponses.splice(0);
+      partialGroupTaskResponses.splice(0);
       const retryChecksCallbacks = createWorkerCallbackSinks({ controlPlaneUrl: "https://cp.example.test", invocation: retryChecksInvocation, fetchImplementation: workerFetch });
       const retryChecksJournal = new OperationJournal(join(root, "retry-checks-worker-journal"));
       const retryChecksWorkerState = createWorkerServerState(retryChecksJournal, {
@@ -1158,7 +1297,10 @@ describe("P0 normal project onboarding journey", () => {
         await broker.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `OUTBOX#${id}`, sk: "OUTBOX" }, UpdateExpression: "SET #status = :queued",
           ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":queued": "QUEUED" } }));
       } });
-      expect((await retryChecksPublisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(retryChecksOutbox!) } }] as never })).published).toBe(1);
+      const retryPublisherResult = await retryChecksPublisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(retryChecksOutbox!) } }] as never });
+      await writeFile(join(root, "retry-checks-outbox-publish-diagnostic.json"), `${JSON.stringify({ retryChecksOutbox,
+        publisherResult: retryPublisherResult, marshalledImage: marshall(retryChecksOutbox!), }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      expect(retryPublisherResult.published, JSON.stringify({ retryChecksOutbox, retryPublisherResult })).toBe(1);
       const retryQueued = broker.db.get(String(retryChecksOutbox!.pk), String(retryChecksOutbox!.sk))!;
       const retryDispatchResult = await retryChecksDispatcher({ Records: [{ messageId: String(retryChecksOutbox!.id), body: JSON.stringify(retryQueued) }] });
       expect(retryDispatchResult.batchItemFailures).toEqual([]);
@@ -1171,6 +1313,30 @@ describe("P0 normal project onboarding journey", () => {
       expect(retryChecksOperation?.status, JSON.stringify({ retryChecksInvocation, retryDispatchResult, journal: await retryChecksJournal.get(retryChecksInvocation.operationId), retryChecksOperation })).toBe("SUCCEEDED");
       const retryChecksAdmission = recordOf(retryChecksInvocation.payload)?.workflowE2EAdmission as { roundId: string; groupRunIds: string[] } | undefined;
       expect(retryChecksAdmission).toBeDefined();
+      expect(concurrentGroupFinalizeArrivals.slice().sort()).toEqual([...retryChecksAdmission!.groupRunIds].sort());
+      const retryAcceptedGroupIds = retryChecksOperation?.workflowE2EGroupRunIds ?? [];
+      expect([...retryAcceptedGroupIds].sort()).toEqual([...retryChecksAdmission!.groupRunIds].sort());
+      expect(new Set(retryAcceptedGroupIds).size).toBe(retryChecksAdmission!.groupRunIds.length);
+      expect(concurrentGroupFinalizeOrder.slice().sort()).toEqual([...retryChecksAdmission!.groupRunIds].sort());
+      const retryGroupEvidenceRefs = (retryChecksOperation?.workflowE2EGroupEvidenceRefs ?? []) as Array<{
+        groupRunId: string; evidenceRef: { key: string; sha256: string; byteLength: number };
+      }>;
+      const retryGroupEvidencePrimaries = await Promise.all(retryGroupEvidenceRefs.map(async ({ groupRunId, evidenceRef }) => {
+        const primary = await persistOriginalMapPrimary({ root, kind: `retry-feature-checks-group-${groupRunId}`, key: evidenceRef.key,
+          objects, producer: "default worker and broker concurrently accepted a distinct immutable group result under one admitted CHECKS round",
+          sourceCandidateDigest: retryResult.workflowCandidateSourceExport!.candidate.digest });
+        expect(primary.sha256).toBe(evidenceRef.sha256);
+        expect(primary.byteLength).toBe(evidenceRef.byteLength);
+        return primary;
+      }));
+      const retryReviewOutboxes = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === featureWorkspaceId
+        && (item.invocation as { kind?: string; payload?: { workflowMode?: string } } | undefined)?.kind === "task"
+        && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "REVIEW");
+      expect(retryReviewOutboxes).toHaveLength(1);
+      await writeFile(join(root, "retry-feature-checks-concurrent-groups.json"), `${JSON.stringify({ operationId: retryChecksInvocation.operationId,
+        admissionGroupRunIds: retryChecksAdmission!.groupRunIds, simultaneousFinalizeArrivals: concurrentGroupFinalizeArrivals,
+        acceptedGroupRunIds: retryAcceptedGroupIds, acceptedGroupEvidenceRefs: retryGroupEvidenceRefs, evidencePrimaries: retryGroupEvidencePrimaries,
+        reviewOutboxCount: retryReviewOutboxes.length }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
       const retryEvidenceRef = retryChecksOperation?.workflowE2EEvidenceRef as { key?: string } | undefined;
       const retryEvidenceRaw = typeof retryEvidenceRef?.key === "string" ? objects.get(retryEvidenceRef.key)?.toString("utf8") : undefined;
       const retryEvidence = retryEvidenceRaw === undefined ? undefined : JSON.parse(retryEvidenceRaw) as { groupRuns?: Array<{ collection?: { status?: string } }> };
@@ -1397,7 +1563,9 @@ describe("P0 normal project onboarding journey", () => {
       await new Promise((resolveWait) => setTimeout(resolveWait, 25));
     }
     const publishOperation = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${publishInvocation.operationId}`);
-    const finalPublishedTask = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { workflow: { stage: string; state: string;
+    const finalPublishedTask = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { startingRevision: number; workflow: { stage: string; state: string;
+      candidate: { digest: string; repositories: Array<{ repositoryId: string; commitSha: string; treeSha: string; baseCommitSha?: string }> };
+      reviewBase?: Array<{ repositoryId: string; baseCommitSha: string }>;
       pullRequests?: Array<{ headSha?: string; headTreeSha?: string; number?: number; state?: string }> } };
     const publishPayload = publishInvocation.payload as unknown as { headBranch: string; candidateCommitSha: string; candidateTreeSha: string };
     const localRemoteHead = git(localBareRemote, "rev-parse", `refs/heads/${publishPayload.headBranch}^{commit}`);
@@ -1413,6 +1581,181 @@ describe("P0 normal project onboarding journey", () => {
     expect(finalPublishedTask.workflow.state).toBe("WAITING");
     expect(finalPublishedTask.workflow.pullRequests).toContainEqual(expect.objectContaining({ number: 1, headSha: localRemoteHead,
       headTreeSha: git(localBareRemote, "rev-parse", `${localRemoteHead}^{tree}`), state: "UNKNOWN" }));
+    const publishedCandidateRepository = finalPublishedTask.workflow.candidate.repositories.find((repository) => repository.repositoryId === "ordinary-orders")!;
+    const publishedBaseCommit = publishedCandidateRepository.baseCommitSha
+      ?? finalPublishedTask.workflow.reviewBase?.find((item) => item.repositoryId === publishedCandidateRepository.repositoryId)?.baseCommitSha;
+    expect(publishedBaseCommit, "current published candidate must retain its approved base binding").toBeDefined();
+    git(workerRepository, "update-ref", "refs/remotes/origin/main", publishedBaseCommit!);
+    const publicationJoinSubject = { projectName: "ordinary-orders", projectRevision: finalPublishedTask.startingRevision, repositoryId: 740001,
+      commitSha: publishedCandidateRepository.commitSha, treeSha: publishedCandidateRepository.treeSha, baseCommitSha: publishedBaseCommit! };
+    const publicationJoinRequest = { taskRef: featureTaskId, subject: publicationJoinSubject,
+      sourceBindingRef: `cli-source:v1:${hash(Buffer.from("synthetic-host-source-binding"))}` };
+    const joinRoutePath = `/v1/dev/tasks/${featureTaskId}/e2e-publication-context`;
+    const captureJoin = async (label: string, input: unknown) => {
+      const requestBytes = Buffer.from(JSON.stringify(input), "utf8");
+      const requestPrimary = await persistOriginalEvidencePrimary({ root, kind: `publication-context-${label}-request`, key: joinRoutePath,
+        bytes: requestBytes, producer: "actual test HTTP request body sent to authenticated broker handler", sourceCandidateDigest: finalPublishedTask.workflow.candidate.digest });
+      const response = await broker.handler({ version: "2.0", rawPath: joinRoutePath, rawQueryString: "", headers: {
+        authorization: "Bearer synthetic-owner-session", "content-type": "application/json" }, body: requestBytes.toString("utf8"),
+        requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+      const responseBytes = Buffer.from(response.body, "utf8");
+      const responsePrimary = await persistOriginalEvidencePrimary({ root, kind: `publication-context-${label}-response`, key: joinRoutePath,
+        bytes: responseBytes, producer: "exact broker HTTP response body bytes before parsing or assertions", sourceCandidateDigest: finalPublishedTask.workflow.candidate.digest });
+      return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown>, requestPrimary, responsePrimary,
+        responseSha256: hash(responseBytes), responseByteLength: responseBytes.byteLength };
+    };
+    const publicationJoinSubjectForCli = publicationJoinSubject;
+    const mismatchedJoin = await captureJoin("candidate-mismatch", { ...publicationJoinRequest,
+      subject: { ...publicationJoinSubject, commitSha: "0".repeat(40) } });
+    const joinBeforeInvalid = { operationCount: broker.db.find((row) => row.entityType === "OPERATION").length,
+      outboxCount: broker.db.find((row) => row.entityType === "OUTBOX").length };
+    const malformedJoin = await captureJoin("malformed-locator", { ...publicationJoinRequest, sourceBindingRef: "untrusted" });
+    const joinAfterInvalid = { operationCount: broker.db.find((row) => row.entityType === "OPERATION").length,
+      outboxCount: broker.db.find((row) => row.entityType === "OUTBOX").length };
+    const cliHome = join(root, "actual-cli-home");
+    await mkdir(cliHome, { recursive: true, mode: 0o700 });
+    const cliIssuer = "https://identity.control.example/";
+    const cliControlPlane = "https://cp.example.test";
+    await saveDeveloperEnvironment(cliHome, "staging", { url: cliControlPlane, issuer: cliIssuer,
+      tokenEndpoint: `${cliControlPlane}/token`, revocationEndpoint: `${cliControlPlane}/revoke` });
+    const cliTokenStore = new InMemoryTokenStore();
+    await cliTokenStore.set(developerTokenKey(cliIssuer), { accessToken: "synthetic-owner-session", expiresAt: Date.now() + 60 * 60_000 });
+    const registrationResponse = adminResults.find(({ path, status }) => path === "/v1/admin/projects" && status === 201)?.body;
+    expect(registrationResponse, "the native host receipt must use the successful ordinary project registration response").toBeDefined();
+    const registeredDefinition = ProjectDefinitionSchema.parse((registered?.definition as unknown));
+    const ghExec: Exec = async (command, args, options) => {
+      if (command !== "gh") return realExec(command, args, options);
+      if (args[0] === "repo" && args[1] === "view") return { code: 0, stdout: "acme/ordinary-orders\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "user") return { code: 0, stdout: "maya\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "repos/acme/ordinary-orders" && args.at(-1) === ".id") return { code: 0, stdout: "740001\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "repos/acme/ordinary-orders" && args.at(-1) === ".default_branch") return { code: 0, stdout: "main\n", stderr: "" };
+      return { code: 1, stdout: "", stderr: `unexpected GitHub identity lookup: ${args.join(" ")}` };
+    };
+    const recordedHostEnrollment = await recordRegisteredLoopEnrollment({ home: cliHome, env: "staging", controlPlaneUrl: cliControlPlane,
+      definition: registeredDefinition, response: registrationResponse, cwd: workerRepository, exec: ghExec });
+    expect(recordedHostEnrollment, "native enrollment is derived from the real successful registration and current GitHub identity").toEqual({ recorded: true, repository: "acme/ordinary-orders" });
+    const cliLoopStore = new LoopStore(join(cliHome, ".rovara", "loop"));
+    await cliLoopStore.saveRepos([{ repo: "acme/ordinary-orders", path: workerRepository }]);
+    const cliCandidateBranch = git(workerRepository, "symbolic-ref", "--short", "HEAD");
+    const capturedCliCandidate = await captureCandidate(realExec, workerRepository, cliCandidateBranch, publishedBaseCommit!);
+    expect(capturedCliCandidate).toMatchObject({ commitSha: publicationJoinSubjectForCli.commitSha, treeSha: publicationJoinSubjectForCli.treeSha,
+      baseCommitSha: publicationJoinSubjectForCli.baseCommitSha });
+    const issueNumber = 42;
+    await cliLoopStore.saveItem({ version: 1, repo: "acme/ordinary-orders", issue: issueNumber, loop: "quick", step: "publish",
+      startedBy: "maya", instruction: "Verify the published, reviewed candidate", startedAt: new Date().toISOString(), stepEnteredAt: new Date().toISOString(),
+      worktree: { path: workerRepository, branch: cliCandidateBranch },
+      checksCandidate: capturedCliCandidate, reviewsCandidate: capturedCliCandidate });
+    const cliJoinRequests: Array<{ url: string; requestBytes: string; responseStatus: number; responseBytes: string }> = [];
+    const cliFetch: typeof fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+      const method = init?.method ?? "GET";
+      if (url.origin !== cliControlPlane || !url.pathname.startsWith("/v1/dev/tasks/")) return new Response("unexpected CLI network request", { status: 599 });
+      const requestBytes = typeof init?.body === "string" ? Buffer.from(init.body, "utf8") : Buffer.alloc(0);
+      const response = await broker.handler({ version: "2.0", rawPath: url.pathname, rawQueryString: url.search.slice(1),
+        headers: Object.fromEntries(new Headers(init?.headers).entries()), ...(requestBytes.byteLength === 0 ? {} : { body: requestBytes.toString("utf8") }),
+        requestContext: { requestId: randomUUID(), http: { method } } });
+      const responseBytes = Buffer.from(response.body, "utf8");
+      if (url.pathname.endsWith("/e2e-publication-context")) {
+        const requestOrdinal = cliJoinRequests.length + 1;
+        const requestPrimary = await persistOriginalEvidencePrimary({ root, kind: "actual-cli-publication-join-http-request", key: `${url.pathname}#${requestOrdinal}`,
+          bytes: requestBytes, producer: "exact authenticated CLI POST body sent to the broker", sourceCandidateDigest: finalPublishedTask.workflow.candidate.digest });
+        const responsePrimary = await persistOriginalEvidencePrimary({ root, kind: "actual-cli-publication-join-http-response", key: `${url.pathname}#${requestOrdinal}`,
+          bytes: responseBytes, producer: "exact broker response body returned to the actual CLI transport", sourceCandidateDigest: finalPublishedTask.workflow.candidate.digest });
+        cliJoinRequests.push({ url: url.href, requestBytes: requestBytes.toString("utf8"), responseStatus: response.statusCode,
+          responseBytes: responseBytes.toString("utf8"), requestPrimary, responsePrimary } as never);
+      }
+      return new Response(responseBytes, { status: response.statusCode, headers: { "content-type": "application/json" } });
+    };
+    const cliOutput: string[] = [];
+    const cliExit = await executeCli(["--env", "staging", "loop", "enroll", "acme/ordinary-orders", "--task", featureTaskId,
+      "--issue", String(issueNumber)], { environments: { home: cliHome }, tokenStore: cliTokenStore, fetchImplementation: cliFetch, loop: { exec: ghExec },
+      stdout: { write: (value) => cliOutput.push(value) }, stderr: { write: (value) => cliOutput.push(value) } });
+    const joinedEnrollment = (await cliLoopStore.enrollments()).find((entry) => entry.kind === "registered");
+    expect(cliExit, cliOutput.join("\\n")).toBe(0);
+    expect(cliJoinRequests).toHaveLength(1);
+    expect(JSON.parse(cliJoinRequests[0]!.requestBytes)).toMatchObject({ taskRef: featureTaskId, subject: publicationJoinSubjectForCli,
+      sourceBindingRef: expect.stringMatching(/^cli-source:v1:[a-f0-9]{64}$/u) });
+    expect(JSON.parse(cliJoinRequests[0]!.responseBytes)).toMatchObject({ status: "READY", subject: publicationJoinSubjectForCli,
+      candidateDigest: finalPublishedTask.workflow.candidate.digest });
+    expect(joinedEnrollment?.kind).toBe("registered");
+    expect((joinedEnrollment as { taskRef?: string } | undefined)?.taskRef).toBe(featureTaskId);
+    const localIssueLabels = new Set<string>();
+    const daemonExec: Exec = async (command, args, options) => {
+      if (command === "git" && args.includes("push")) {
+        const worktreeArgument = args.indexOf("-C");
+        if (worktreeArgument < 0 || args[worktreeArgument + 1] !== workerRepository || args.at(-1) !== cliCandidateBranch) {
+          throw new Error("loop fixture refuses an unowned Git publication");
+        }
+        const remoteIndex = args.indexOf("origin");
+        if (remoteIndex < 0) throw new Error("loop fixture requires the registered origin remote");
+        const rewritten = [...args]; rewritten[remoteIndex] = localBareRemote;
+        return realExec(command, rewritten, options);
+      }
+      if (command !== "gh") return realExec(command, args, options);
+      if (args[0] === "repo" && args[1] === "view") return { code: 0, stdout: "acme/ordinary-orders\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "user") return { code: 0, stdout: "maya\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "repos/acme/ordinary-orders" && args.at(-1) === ".id") return { code: 0, stdout: "740001\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "repos/acme/ordinary-orders" && args.at(-1) === ".default_branch") return { code: 0, stdout: "main\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "--paginate") return { code: 0, stdout: "", stderr: "" };
+      if (args[0] === "api" && args[1] === "repos/acme/ordinary-orders/issues/42" && args.at(-1) === ".state") return { code: 0, stdout: "open\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "repos/acme/ordinary-orders/issues/42" && args.at(-1) === ".title") return { code: 0, stdout: "Ordinary orders task\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "repos/acme/ordinary-orders/issues/42/labels" && args.length === 4 && args[2] === "--jq" && args[3] === ".[].name") {
+        return { code: 0, stdout: [...localIssueLabels].join("\n"), stderr: "" };
+      }
+      if (args[0] === "api" && args[1] === "-X" && args[2] === "POST" && args[3] === "repos/acme/ordinary-orders/issues/42/comments" && args[4] === "--input" && args[5] === "-") {
+        const body = JSON.parse(options?.input ?? "{}") as { body?: unknown };
+        if (typeof body.body !== "string" || body.body.length > 20_000) throw new Error("loop fixture refuses an invalid bounded issue comment");
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "api" && args[1] === "-X" && args[2] === "POST" && args[3] === "repos/acme/ordinary-orders/issues/42/labels" && args[4] === "--input" && args[5] === "-") {
+        const body = JSON.parse(options?.input ?? "{}") as { labels?: unknown };
+        if (!Array.isArray(body.labels) || body.labels.some((label) => typeof label !== "string" || !label.startsWith("rovara:"))) {
+          throw new Error("loop fixture refuses an unregistered issue label");
+        }
+        for (const label of body.labels) localIssueLabels.add(label);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      if (args[0] === "label" && args[1] === "create") return { code: 0, stdout: "", stderr: "" };
+      if (args[0] === "pr" && args[1] === "list" && args.includes("--head")) {
+        const found = [...localPullRequests.entries()].find(([, pr]) => pr.headBranch === args[args.indexOf("--head") + 1]);
+        return { code: 0, stdout: found === undefined ? "" : `${found[0]} https://github.com/acme/ordinary-orders/pull/${found[0]}\n`, stderr: "" };
+      }
+      if (args[0] === "pr" && args[1] === "create") {
+        if (args[args.indexOf("--repo") + 1] !== "acme/ordinary-orders") throw new Error("loop fixture refuses a pull request outside the registered repository");
+        const headBranch = args[args.indexOf("--head") + 1]!;
+        const baseBranch = args[args.indexOf("--base") + 1]!;
+        const number = 1;
+        localPullRequests.set(number, { headBranch, baseBranch, title: "Ordinary orders task", body: options?.input ?? "" });
+        return { code: 0, stdout: "https://github.com/acme/ordinary-orders/pull/1\n", stderr: "" };
+      }
+      return { code: 1, stdout: "", stderr: `unexpected loop daemon GitHub command: ${args.join(" ")}` };
+    };
+    const daemonOutput: string[] = [];
+    const daemonRun = executeCli(["--env", "staging", "loop", "run"], { environments: { home: cliHome }, tokenStore: cliTokenStore,
+      fetchImplementation: cliFetch, loop: { exec: daemonExec }, stdout: { write: (value) => daemonOutput.push(value) }, stderr: { write: (value) => daemonOutput.push(value) } });
+    let daemonItem: Awaited<ReturnType<typeof cliLoopStore.item>> | undefined;
+    for (let index = 0; index < 400; index += 1) {
+      daemonItem = await cliLoopStore.item("acme/ordinary-orders", issueNumber);
+      if (daemonItem?.pullRequest?.number === 1) break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    process.emit("SIGTERM");
+    const daemonExit = await daemonRun;
+    expect(daemonExit, daemonOutput.join(" ")).toBe(0);
+    expect(daemonItem?.pullRequest?.number, daemonOutput.join(" ")).toBe(1);
+    expect(cliJoinRequests, "the actual enrolled loop publication boundary must rejoin current server evidence").toHaveLength(2);
+    expect(JSON.parse(cliJoinRequests[1]!.requestBytes)).toMatchObject({ taskRef: featureTaskId, subject: publicationJoinSubjectForCli,
+      sourceBindingRef: expect.stringMatching(/^cli-source:v1:[a-f0-9]{64}$/u) });
+    expect(JSON.parse(cliJoinRequests[1]!.responseBytes)).toMatchObject({ status: "READY", subject: publicationJoinSubjectForCli,
+      candidateDigest: finalPublishedTask.workflow.candidate.digest });
+    await writeFile(join(root, "publication-context-join.json"), `${JSON.stringify({ taskStart: { status: featureStart.status, request: featureStartRequestPrimary,
+      response: featureStartResponsePrimary, taskId: featureTaskId }, nativeRegistration: { response: registrationResponse, hostEnrollment: recordedHostEnrollment },
+      actualCli: { exitCode: cliExit, output: cliOutput.join(""), joinRequests: cliJoinRequests, joinedEnrollment,
+        daemonExit, daemonOutput: daemonOutput.join(""), daemonItem }, responses: { candidateMismatch: mismatchedJoin, malformedLocator: malformedJoin },
+      noSideEffects: { before: joinBeforeInvalid, after: joinAfterInvalid } }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    expect(mismatchedJoin.body).toMatchObject({ status: "UNKNOWN", reasonCode: "candidate_commit_tree_or_base_mismatch" });
+    expect(malformedJoin.body).toMatchObject({ status: "UNKNOWN", reasonCode: "invalid_or_mismatched_task_selector" });
+    expect(joinAfterInvalid).toEqual(joinBeforeInvalid);
 
     // A restored role does not restore the immutable creator proof captured by this round.
     const creatorMembershipKey = { pk: `MEMBER#${ownerDeveloperId}`, sk: "PROJECT#ordinary-orders" };
