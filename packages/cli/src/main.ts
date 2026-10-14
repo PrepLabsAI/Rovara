@@ -1044,7 +1044,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         status: "manual-required",
         reason: "deployment does not run a live installation qualification; use a dedicated Linux ARM64 verifier host",
         hostCommand: "docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/verifier/dist/install-qualification-cli.js --challenge-file /mnt/agentx-runtime/evidence/runtime-install-challenge.json --evidence-root /mnt/agentx-runtime/evidence --out /mnt/agentx-runtime/evidence/runtime-install-proposal.json",
-        registrationCommand: `agentx --env ${result.env} admin runtime-installation register --proposal-file /mnt/workspace/.agentx-runtime/evidence/runtime-install-proposal.json`,
+        registrationCommand: `agentx --env ${result.env} admin runtime-installation register --proposal-file ./runtime-install-proposal.json`,
         instructions: "docs/runtime-installation.md",
       } as const : undefined;
       if (globals.json) {
@@ -1063,7 +1063,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         lines.push(
           "The portable runtime is not live-qualified by deployment; use a dedicated Linux ARM64 verifier host.",
           `On that host: ${runtimeQualification!.hostCommand}`,
-          `Then register: ${runtimeQualification!.registrationCommand}`,
+          "Copy the proposal back to this operator machine through the approved existing transfer process, then run:",
+          `  ${runtimeQualification!.registrationCommand}`,
           `See ${runtimeQualification!.instructions} for challenge issuance and the administrator trust boundary.`,
         );
       }
