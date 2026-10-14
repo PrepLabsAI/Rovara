@@ -64,6 +64,7 @@ describe("workflow E2E cancellation", () => {
         workspaceId: targetInvocation.workspaceId, fence: 2, projectRevision: 1,
         callbackCapability: "d".repeat(32), payload: { targetOperationId },
       });
+      if (cancelInvocation.kind !== "cancel") throw new Error("cancel fixture did not parse as a cancel invocation");
       const journal = new OperationJournal(root);
       await journal.accept(targetInvocation);
       await journal.transition(targetOperationId, "RUNNING");

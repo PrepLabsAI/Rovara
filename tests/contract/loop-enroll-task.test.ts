@@ -31,7 +31,7 @@ async function serve(handler: (request: Request) => Response | Promise<Response>
         if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
       }
       const result = await handler(new Request(`http://127.0.0.1${request.url ?? "/"}`, {
-        method: request.method, headers, ...(body.length === 0 ? {} : { body }),
+        method: request.method ?? "GET", headers, ...(body.length === 0 ? {} : { body }),
       }));
       response.writeHead(result.status, Object.fromEntries(result.headers.entries()));
       response.end(await result.text());

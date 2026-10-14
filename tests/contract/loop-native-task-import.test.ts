@@ -48,7 +48,7 @@ async function serve(handler: (request: Request) => Response | Promise<Response>
       });
       const headers = new Headers();
       for (const [name, value] of Object.entries(request.headers)) if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
-      const result = await handler(new Request(`http://127.0.0.1${request.url ?? "/"}`, { method: request.method, headers, ...(body.length === 0 ? {} : { body }) }));
+      const result = await handler(new Request(`http://127.0.0.1${request.url ?? "/"}`, { method: request.method ?? "GET", headers, ...(body.length === 0 ? {} : { body }) }));
       response.writeHead(result.status, Object.fromEntries(result.headers.entries()));
       response.end(await result.text());
     })().catch((error: unknown) => { response.statusCode = 500; response.end(error instanceof Error ? error.message : "fixture failed"); });

@@ -43,7 +43,7 @@ async function serve(handler: (request: Request) => Response | Promise<Response>
         if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
       }
       const webRequest = new Request(`http://127.0.0.1${request.url ?? "/"}`, {
-        method: request.method, headers, ...(body.length === 0 ? {} : { body }),
+        method: request.method ?? "GET", headers, ...(body.length === 0 ? {} : { body }),
       });
       const result = await handler(webRequest);
       response.writeHead(result.status, Object.fromEntries(result.headers.entries()));
@@ -64,7 +64,8 @@ describe("the authenticated registered publication join client", () => {
   it("sends the frozen subject and opaque host binding through the CLI developer session", async () => {
     let received: { path?: string; authorization?: string; body?: unknown } = {};
     const baseUrl = await serve(async (request) => {
-      received = { path: new URL(request.url).pathname, authorization: request.headers.get("authorization") ?? undefined, body: await request.json() };
+      const authorization = request.headers.get("authorization");
+      received = { path: new URL(request.url).pathname, ...(authorization === null ? {} : { authorization }), body: await request.json() };
       await new Promise((resolve) => setTimeout(resolve, 55));
       return Response.json({ schemaVersion: 1, status: "READY", requestId: "response-1", subject, candidateDigest: "d".repeat(64), contractDigest: "e".repeat(64), policyDigest: "f".repeat(64), planDigest: "1".repeat(64), roundId: "round-current", evidenceSetDigest: "2".repeat(64), checkedAt: new Date().toISOString() });
     });

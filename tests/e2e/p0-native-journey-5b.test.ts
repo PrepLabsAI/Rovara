@@ -1341,7 +1341,11 @@ describe("P0 normal project onboarding journey", () => {
       const retryChecksAdmission = recordOf(retryChecksInvocation.payload)?.workflowE2EAdmission as { roundId: string; groupRunIds: string[] } | undefined;
       expect(retryChecksAdmission).toBeDefined();
       expect(concurrentGroupFinalizeArrivals.slice().sort()).toEqual([...retryChecksAdmission!.groupRunIds].sort());
-      const retryAcceptedGroupIds = retryChecksOperation?.workflowE2EGroupRunIds ?? [];
+      const retryAcceptedGroupIdsValue: unknown = retryChecksOperation?.workflowE2EGroupRunIds;
+      if (!Array.isArray(retryAcceptedGroupIdsValue) || !retryAcceptedGroupIdsValue.every((value: unknown) => typeof value === "string")) {
+        throw new Error("accepted group IDs were not stored as a string list");
+      }
+      const retryAcceptedGroupIds = retryAcceptedGroupIdsValue as string[];
       expect([...retryAcceptedGroupIds].sort()).toEqual([...retryChecksAdmission!.groupRunIds].sort());
       expect(new Set(retryAcceptedGroupIds).size).toBe(retryChecksAdmission!.groupRunIds.length);
       expect(concurrentGroupFinalizeOrder.slice().sort()).toEqual([...retryChecksAdmission!.groupRunIds].sort());
@@ -1854,6 +1858,7 @@ describe("P0 normal project onboarding journey", () => {
     expect((await collisionJournal.get(implementInvocation.operationId))?.status).toBe("SUCCEEDED");
     const setupInvocationRecord = WorkerInvocationSchema.parse(outboxRow.invocation);
     expect(setupInvocationRecord.kind).toBe("project-setup-smoke");
+    if (setupInvocationRecord.kind !== "project-setup-smoke") throw new Error("setup outbox row did not contain a setup invocation");
     const setupPayload = setupInvocationRecord.payload;
     const setupCollisionCapability = issueProjectSetupCapability(String(broker.brokerInput.callbackSigningKey), {
       domain: "PROJECT_SETUP", setupExecutionId: setupPayload.setupExecutionId, subjectId: setupPayload.subjectId,
@@ -2216,6 +2221,7 @@ describe("P0 normal project onboarding journey", () => {
       sourceCandidateDigest: browserAdmission!.candidateDigest });
     expect(browserRetry.status, browserRetry.rawBody).toBe(200);
     const queuedRetryWorkflow = (browserRetry.body.task as DeveloperTaskView).workflow;
+    if (queuedRetryWorkflow === undefined) throw new Error("Owner retry response omitted the task workflow");
     expect(queuedRetryWorkflow).toMatchObject({ stage: "VERIFY", state: "WAITING", revision: browserWorkflow.revision + 1 });
     expect(queuedRetryWorkflow?.e2e?.currentRoundId).toBeUndefined();
     const retryDispatchRow = broker.db.find((item) => item.entityType === "WORKFLOW_DISPATCH" && item.taskId === browserTaskId
@@ -2357,6 +2363,7 @@ describe("P0 normal project onboarding journey", () => {
     }
     const cancelledRetryOperation = broker.db.get(`WORKSPACE#${browserWorkspaceId}`, `OPERATION#${cancelledRetryInvocation.operationId}`);
     await Promise.race([liveCancelObserverFinished, new Promise<void>((_resolve, reject) => setTimeout(() => reject(new Error("the owned-container cancel observer did not finish before its bounded wait")), 5_000))]);
+    if (liveCancelAttempt === undefined) throw new Error("live cancel observer completed without a result");
     await writeFile(join(root, "browser-required-live-cancel-state.json"), `${JSON.stringify({ liveCancelAttempt,
       cancelledRetryOperation, cancellationObserved: browserChecksCancellation.isCancelled(cancelledRetryInvocation.operationId),
       journal: await browserChecksJournal.list(), cancelOutboxes: broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
