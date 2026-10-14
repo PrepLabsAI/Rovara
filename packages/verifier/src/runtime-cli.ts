@@ -4,6 +4,7 @@ import { mkdir, open, readFile, realpath, rmdir, symlink } from "node:fs/promise
 import { spawn } from "node:child_process";
 import { list as upstreamList } from "e2e/runner";
 import { isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { canonicalJson, ProjectSetupRunnerToolchainSchema, type E2ESourceSnapshot, type ProjectSetupRunnerToolchain } from "@agentx/contracts";
 import { compareE2EPublicList, type E2ESelectionPacket } from "./selection.js";
 import { createE2ERuntimeAssets, createE2ERuntimeLaunchId, parseE2EFirstPartyCapture, type E2EFirstPartyCaptureResult } from "./runtime-assets.js";
@@ -15,6 +16,10 @@ import { runContainedCandidate } from "./contained-candidate.js";
 import { CONTAINED_RUNTIME_PROFILE } from "./container-envelope.js";
 
 const MAX_OUTPUT = 4 * 1024 * 1024;
+// This module is installed under <runtime-root>/packages/verifier/{src,dist}; derive the packaged
+// root from its own location so unsupported test hosts never mistake a mounted candidate for the
+// worker installation when no portable runtime profile exists.
+const PACKAGED_RUNTIME_ROOT = resolve(fileURLToPath(new URL("../../../", import.meta.url)));
 const INSTALL_QUALIFICATION_SOURCE_SHA256 = "a7b170213977472347a52646b1d7980a312fa68d08fc52cbbfb48c0b0571b7cd";
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
@@ -88,8 +93,9 @@ export async function runE2EActualCli(input: E2EActualCliInput): Promise<E2EActu
 }
 
 /** Links dependencies from the installed worker package root, never from a mounted candidate checkout. */
-export async function linkInstalledRuntimeDependencies(project: string, sourceRoot: string): Promise<string> {
-  const installedRuntimeRoot = CONTAINED_RUNTIME_PROFILE?.installedRuntimeRoot ?? resolve(sourceRoot);
+export async function linkInstalledRuntimeDependencies(project: string, _sourceRoot: string): Promise<string> {
+  void _sourceRoot;
+  const installedRuntimeRoot = CONTAINED_RUNTIME_PROFILE?.installedRuntimeRoot ?? PACKAGED_RUNTIME_ROOT;
   const dependencyRoot = join(installedRuntimeRoot, "node_modules");
   const info = await import("node:fs/promises").then(({ lstat }) => lstat(dependencyRoot));
   if (!info.isDirectory() || info.isSymbolicLink() || await realpath(dependencyRoot) !== dependencyRoot) throw new Error("installed runner dependencies are unavailable at the fixed runtime root");
@@ -106,7 +112,7 @@ export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput
   const snapshot = validateE2ECompiledRuntimeAdmission(input.compiled, input.snapshot);
   if (input.hostProbeInputs !== undefined) validateInstallQualificationProbeInputs(input.compiled, snapshot, input.hostRequestIds, input.hostProbeInputs);
   const evidenceDirectory = resolve(input.evidenceDirectory);
-  const installedRuntimeRoot = CONTAINED_RUNTIME_PROFILE?.installedRuntimeRoot ?? resolve(input.sourceRoot);
+  const installedRuntimeRoot = CONTAINED_RUNTIME_PROFILE?.installedRuntimeRoot ?? PACKAGED_RUNTIME_ROOT;
   if (!isAbsolute(installedRuntimeRoot)) throw new Error("installed runner root must be an absolute trusted runtime path");
   if (await realpath(evidenceDirectory) !== evidenceDirectory) throw new Error("acceptance evidence directory must be canonical");
   const evidenceInfo = await import("node:fs/promises").then(({ lstat }) => lstat(evidenceDirectory));
