@@ -300,7 +300,7 @@ async function setupRequest(session: AdminSession, fetchImplementation: typeof f
     const responseCode = status === 401 ? "AUTH_REQUIRED" : status === 403 ? "FORBIDDEN" : parsedCode.success ? parsedCode.data : fallback;
     throw agentXError(responseCode, `${path} failed with HTTP ${status}${message ? `: ${message}` : ""}`);
   }
-  if (result === undefined || typeof result !== "object" || Array.isArray(result)) throw agentXError("RUNTIME_UNAVAILABLE", `${path} returned an invalid response`);
+  if (result === undefined || result === null || typeof result !== "object" || Array.isArray(result)) throw agentXError("CONFIG_INVALID", `${path} returned a malformed successful response`);
   return result as Record<string, unknown>;
 }
 
@@ -388,15 +388,23 @@ export async function addProject(input: {
       repositoryUrl: source.cloneUrl, ref: source.defaultBranch,
     }, 65_000);
   } catch (error) {
-    // The proposal route is exploratory. Only its explicit unavailable response and fetch-level
-    // connectivity errors can degrade to ordinary setup; authorization and malformed evidence
-    // remain hard failures. Never include provider text in the user-facing reason.
-    if (!(error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE")
+    // This route is optional exploration, so unusable discovery can be quarantined while ordinary
+    // setup proceeds. Authentication and authorization remain hard failures. Never expose provider
+    // text or accept malformed discovery as E2E policy.
+    if (error instanceof AgentXError && (error.code === "AUTH_REQUIRED" || error.code === "FORBIDDEN")) throw error;
+    if (!(error instanceof AgentXError)
       && !(error instanceof TypeError)
       && !(error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError"))) throw error;
-    setupDiscoveryNotice = "Testing exploration not done: source capture exceeded its time or size bound, or the discovery service was unavailable; E2E evidence remains unknown.";
+    setupDiscoveryNotice = error instanceof AgentXError && error.code === "CONFIG_INVALID"
+      ? "Testing exploration not done: source-backed proposal was malformed or unbound; E2E evidence remains unknown."
+      : "Testing exploration not done: source capture exceeded its time or size bound, or the discovery service was unavailable; E2E evidence remains unknown.";
   }
-  if (setupProposalResponse !== undefined) trustedSetup = validateSetupProposalResponse(setupProposalResponse);
+  if (setupProposalResponse !== undefined) {
+    try { trustedSetup = validateSetupProposalResponse(setupProposalResponse); }
+    catch {
+      setupDiscoveryNotice = "Testing exploration not done: source-backed proposal was malformed or unbound; E2E evidence remains unknown.";
+    }
+  }
   let setupProposal = trustedSetup?.proposal;
   const e2ePolicy = trustedSetup?.policy;
   let setupApproval: StoredSetupDecision | undefined;

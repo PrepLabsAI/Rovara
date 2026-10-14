@@ -199,7 +199,7 @@ describe("agentx project add (FR-040)", () => {
     expect(lines.join("\n")).toContain("Registered project payments-api");
   });
 
-  it("fails closed when the discovery route returns malformed proposal evidence", async () => {
+  it("quarantines malformed proposal evidence and completes ordinary project setup", async () => {
     const plane = fakeControlPlane();
     const base = services(plane);
     const malformed = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
@@ -207,9 +207,56 @@ describe("agentx project add (FR-040)", () => {
       if (path === "/v1/admin/projects/setup-proposals") return new Response(JSON.stringify({ proposal: {} }), { status: 200, headers: { "content-type": "application/json" } });
       return plane.fetch(url, init);
     }) as typeof fetch };
-    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: malformed,
-      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } })).rejects.toThrow();
-    expect(plane.registered).toEqual([]);
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([true]), write: (line) => lines.push(line), services: malformed,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } });
+    const registration = plane.registered[0] as { definition: { e2e?: unknown }; setupApproval?: unknown };
+    expect(registration.definition.e2e).toBeUndefined();
+    expect(registration.setupApproval).toBeUndefined();
+    expect(plane.requests.some((request) => request.path === "/v1/admin/projects/setup-approvals")).toBe(false);
+    expect(lines.join("\n")).toContain("Testing exploration not done: source-backed proposal was malformed or unbound; E2E evidence remains unknown.");
+  });
+
+  it("quarantines an unbound proposal digest without registering its policy", async () => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const unbound = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const response = await plane.fetch(url, init);
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path !== "/v1/admin/projects/setup-proposals" || !response.ok) return response;
+      const body = await response.json() as Record<string, unknown>;
+      return new Response(JSON.stringify({ ...body, candidateDigest: "f".repeat(64) }), { status: response.status, headers: { "content-type": "application/json" } });
+    }) as typeof fetch };
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: (line) => lines.push(line), services: unbound, flags: {} });
+    const registration = plane.registered[0] as { definition: { e2e?: unknown }; setupApproval?: unknown };
+    expect(registration.definition.e2e).toBeUndefined();
+    expect(registration.setupApproval).toBeUndefined();
+    expect(plane.requests.some((request) => request.path === "/v1/admin/projects/setup-approvals")).toBe(false);
+    expect(lines.join("\n")).toContain("Testing exploration not done: source-backed proposal was malformed or unbound; E2E evidence remains unknown.");
+  });
+
+  it.each([
+    ["invalid JSON", "{"],
+    ["null", "null"],
+    ["array", "[]"],
+    ["primitive", "42"],
+  ])("quarantines an HTTP-200 %s discovery response and completes ordinary project setup", async (_label, responseText) => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const malformed = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path === "/v1/admin/projects/setup-proposals") return new Response(responseText, { status: 200, headers: { "content-type": "application/json" } });
+      return plane.fetch(url, init);
+    }) as typeof fetch };
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([true]), write: (line) => lines.push(line), services: malformed,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } });
+    const registration = plane.registered[0] as { definition: { e2e?: unknown }; setupApproval?: unknown };
+    expect(registration.definition.e2e).toBeUndefined();
+    expect(registration.setupApproval).toBeUndefined();
+    expect(plane.requests.some((request) => request.path === "/v1/admin/projects/setup-approvals")).toBe(false);
+    expect(lines.join("\n")).toContain("Testing exploration not done: source-backed proposal was malformed or unbound; E2E evidence remains unknown.");
   });
 
   it("does not carry a declined setup decision into a later non-E2E connector revision", async () => {
