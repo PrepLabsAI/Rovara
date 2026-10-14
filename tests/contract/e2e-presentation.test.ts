@@ -19,16 +19,17 @@ describe("E2E presentation adapters", () => {
       expect(surface).toContain("Checks passed with mocks");
       expect(surface).toContain("8");
       expect(surface).toContain("4/4");
-      expect(surface).toContain("auth-mock");
-      expect(surface).toContain("native-auth");
-      expect(surface).toContain("connect-runtime");
       expect(surface).toContain("mock");
     }
-    expect(slack).toContain("Observed mock consumption IDs (0)");
+    expect(html).toContain("auth-mock");
+    expect(html).toContain("native-auth");
+    expect(html).toContain("connect-runtime");
+    expect(slack).toContain("Mocks 1 declared · 0 independently observed");
+    expect(slack).toContain("0 independently observed");
     expect(html).toContain("Observed mock consumption IDs (0)");
     expect(mcp.view).toEqual(view);
     expect(JSON.stringify(mcp)).toContain("\"observedMockedComponentIds\":[]");
-    expect(mcp.scope).toContain("does not establish app, native");
+    expect(mcp.scope).toContain("Browser, native, live-service");
   });
 
   it("bounds Slack section sizes after escaping contract-maximal lists and long text", () => {
@@ -39,12 +40,21 @@ describe("E2E presentation adapters", () => {
     };
     const blocks = renderE2ESlackBlocks(oversized);
     expect(blocks.length).toBeLessThanOrEqual(50);
-    expect(blocks.every((block) => block.text.text.length <= 3000)).toBe(true);
-    const text = blocks.map((block) => block.text.text).join("\n");
+    expect(blocks.every((block) => block.type === "context"
+      ? block.elements.length === 1 && block.elements[0]!.text.length <= 3000
+      : block.text.text.length <= 3000)).toBe(true);
+    const text = blocks.map((block) => block.type === "context" ? block.elements.map((element) => element.text).join("\n") : block.text.text).join("\n");
     expect(text).toContain("PASS");
-    expect(text).toContain("total 200");
+    expect(text).toContain("Mocks 200 declared · 200 independently observed");
     expect(text).toContain("shortened");
-    expect(text).toContain("does not establish app, native");
+    expect(text).toContain("Browser, native, live-service");
+    const contextBlock = blocks.at(-1);
+    expect(contextBlock?.type).toBe("context");
+    if (contextBlock?.type === "context") {
+      expect(contextBlock.elements).toHaveLength(1);
+      expect(contextBlock.elements[0]?.type).toBe("mrkdwn");
+      expect(contextBlock.elements[0]?.text).toContain("Browser, native, live-service");
+    }
   });
 
   it("renders FAILED and viewer projections without turning proposals into controls", () => {
@@ -52,7 +62,7 @@ describe("E2E presentation adapters", () => {
     const slack = JSON.stringify(renderE2ESlackBlocks(failed));
     const html = renderE2EPageHtml(failed);
     expect(slack).toContain("FAILED");
-    expect(slack).toContain("Owner action proposals (read-only): none");
+    expect(slack).toContain("advisory owner proposals 0");
     expect(html).toContain("Checks failed");
     expect(html).not.toContain("<button");
   });
@@ -64,9 +74,10 @@ describe("E2E presentation adapters", () => {
     const html = renderE2EPageHtml(partial);
     expect(slack).toContain("UNKNOWN");
     expect(slack).toContain("1/3");
-    expect(slack).toContain("&lt;script&gt;");
-    expect(slack).toContain("&lt;@U123&gt;");
-    expect(slackBlocks.map((block) => block.text.text).join("\n")).toContain("\\*bold\\*");
+    expect(slack).toContain("&lt;incomplete&gt;");
+    expect(slack).not.toContain("Checks <incomplete>");
+    expect(slack).not.toContain("<script>alert");
+    expect(slack).not.toContain("<@U123>");
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<script>alert");
     expect(renderE2EMcpProjection(partial).view).toEqual(partial);

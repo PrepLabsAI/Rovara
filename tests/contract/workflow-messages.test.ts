@@ -111,6 +111,20 @@ const BATCH_B_COPY: Record<string, string> = {
 };
 
 describe("workflow Slack messages", () => {
+  it("offers the ordinary Owner SendBack control for a current failed E2E round even when ordinary checks passed", () => {
+    const roundId = "33333333-3333-4333-8333-333333333333";
+    const failed = snapshot("VERIFY", "BLOCKED", {
+      checkPolicy,
+      e2e: { contractDigest: "1".repeat(64), policyDigest: "2".repeat(64), bundleDigest: "3".repeat(64),
+        executionPlanDigest: "4".repeat(64), required: true, currentRoundId: roundId, currentGroupRunIds: [roundId], resultRefs: [],
+        failedRound: { status: "FAILED", candidateDigest: candidate.digest, roundId, groupRunIds: [roundId], admissionSha256: "5".repeat(64), evidenceSha256: "6".repeat(64) } },
+    });
+    const message = workflowMessage({ taskId, workflow: failed })!;
+    expect(message.text).toContain("required end-to-end verification failed");
+    expect(buttonsOf(message.blocks).map((button) => button.action_id)).toContain("agentx_workflow_send_back");
+    expect(() => new StrictSlackWeb({ briefLimit: 1_200 }).post({ channel: "C0123456789", threadTs: "1695500000.000001", ...message })).not.toThrow();
+  });
+
   it("renders every stage and state as brief, jargon-free text with blocks Slack accepts", () => {
     const slack = new StrictSlackWeb({ briefLimit: 1_200 });
     for (const stage of WorkflowStageSchema.options) for (const state of WorkflowStateSchema.options) {

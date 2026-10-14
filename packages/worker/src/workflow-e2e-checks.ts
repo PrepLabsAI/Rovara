@@ -1,0 +1,122 @@
+import { createHash, randomUUID } from "node:crypto";
+import { mkdir, realpath } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import {
+  E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2EScenarioBundleSchema,
+  ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
+  canonicalJson, e2eScenarioBundleDigest, selectE2EExecutionPlan, verifyE2ESourceSnapshot,
+  type E2ESourceSnapshot, type WorkerInvocation,
+} from "@agentx/contracts";
+import { collectE2EActualCliRun, compileE2EScenarios, e2ePrivateTransferMaxBytes, e2eSnapshotSourceDigest, runE2EActualCli } from "@agentx/verifier";
+
+const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+
+type Admission = {
+  schemaVersion: "workflow-e2e-admission/v1"; taskId: string; operationId: string; operationFence: number; workflowRevision: number;
+  candidateDigest: string; sourceSnapshot: Omit<E2ESourceSnapshot, "sources"> & { sources: Array<{ path: string; sha256: string; kind: "blob"; bytesBase64: string }> };
+  intent: unknown; policy: unknown; runtime: Record<string, unknown>; plan: unknown; bundle: unknown; selectionInput: Record<string, unknown>;
+  portableApprovalBinding: unknown; round: unknown; groupAdmissions: Array<Record<string, unknown>>;
+};
+
+/** Executes only the exact immutable admission named by the server-created CHECKS invocation. */
+export async function executeWorkflowE2EChecks(input: {
+  invocation: Extract<WorkerInvocation, { kind: "task" }>;
+  readAdmission: (offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
+  saveEvidence: (bytes: Uint8Array, sha256: string, maxBytes: number) => Promise<{ key: string; sha256: string }>;
+  sourceRoot: string; evidenceRoot: string; deadlineAt?: number;
+}): Promise<{ evidenceRef: { key: string; sha256: string }; candidateDigest: string; roundId: string; processStatus: "SUCCEEDED" | "FAILED" }> {
+  const { invocation } = input;
+  const reference = invocation.payload.workflowE2EAdmission;
+  if (invocation.payload.workflowMode !== "CHECKS" || reference === undefined) throw new Error("native E2E checks require a broker-assigned CHECKS admission");
+  const chunks: Buffer[] = [];
+  let totalBytes = -1;
+  let declaredDigest = "";
+  for (let offset = 0; totalBytes < 0 || offset < totalBytes; offset += 64 * 1024) {
+    const piece = await input.readAdmission(offset);
+    if (totalBytes < 0) { totalBytes = piece.totalBytes; declaredDigest = piece.sha256; }
+    const bytes = Buffer.from(piece.chunkBase64, "base64");
+    if (piece.totalBytes !== totalBytes || piece.sha256 !== declaredDigest || bytes.byteLength === 0 || bytes.byteLength > 64 * 1024
+      || bytes.toString("base64") !== piece.chunkBase64 || offset + bytes.byteLength > totalBytes) throw new Error("native E2E admission chunks are inconsistent");
+    chunks.push(bytes);
+  }
+  const admissionBytes = Buffer.concat(chunks);
+  if (admissionBytes.byteLength !== reference.admissionRef.byteLength || declaredDigest !== reference.admissionRef.sha256
+    || sha(admissionBytes) !== reference.admissionRef.sha256) throw new Error("native E2E admission content address is invalid");
+  const admission = JSON.parse(admissionBytes.toString("utf8")) as Admission;
+  if (admission.schemaVersion !== "workflow-e2e-admission/v1" || admission.taskId !== reference.taskId
+    || admission.operationId !== invocation.operationId || admission.operationFence !== invocation.fence
+    || admission.workflowRevision !== reference.workflowRevision || admission.candidateDigest !== reference.candidateDigest
+    || admission.round === null || typeof admission.round !== "object") throw new Error("native E2E admission does not match the signed CHECKS invocation");
+  const snapshot: E2ESourceSnapshot = { ...admission.sourceSnapshot, sources: admission.sourceSnapshot.sources.map((source) => ({
+    path: source.path, sha256: source.sha256, kind: source.kind, bytes: Buffer.from(source.bytesBase64, "base64"),
+  })) };
+  verifyE2ESourceSnapshot(snapshot, snapshot.candidate);
+  if (snapshot.candidate.digest !== admission.candidateDigest) throw new Error("native E2E source snapshot differs from its admitted candidate");
+  E2EPolicySchema.parse(admission.policy);
+  const selectionInput = { ...admission.selectionInput, sourceSnapshot: snapshot };
+  const plan = selectE2EExecutionPlan(selectionInput as never);
+  const bundle = E2EScenarioBundleSchema.parse(admission.bundle);
+  const round = E2ERoundSchema.parse(admission.round);
+  const runtime = admission.runtime;
+  const runnerEnvironment = ProjectSetupRunnerEnvironmentSchema.parse(runtime.runnerEnvironment);
+  const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse(runtime.runnerToolchain);
+  if (sha(canonicalJson(runnerToolchain)) !== runtime.runnerToolchainDigest || round.taskId !== admission.taskId
+    || round.operationId !== invocation.operationId || round.operationFence !== invocation.fence
+    || round.workflowRevision !== reference.workflowRevision
+    || round.roundId !== reference.roundId || round.groupBindings.length !== plan.groups.length
+    || plan.groups.length !== admission.groupAdmissions.length || plan.groups.length !== reference.groupRunIds.length) {
+    throw new Error("native E2E round does not match the admitted CHECKS context");
+  }
+  if (canonicalJson(plan) !== canonicalJson(admission.plan) || bundle.planDigest !== admission.selectionInput.planDigest
+    || bundle.bundleDigest !== e2eScenarioBundleDigest(bundle)) {
+    throw new Error("native E2E plan or scenario bundle changed after admission");
+  }
+  const deadline = Date.parse(round.deadlineAt);
+  if (!Number.isFinite(deadline) || deadline <= Date.now() || (input.deadlineAt !== undefined && deadline > input.deadlineAt)) throw new Error("native E2E round deadline is invalid or expired");
+  const evidenceDirectory = join(resolve(input.evidenceRoot), `workflow-e2e-${round.roundId}`);
+  await mkdir(evidenceDirectory, { recursive: false, mode: 0o700 });
+  const groupRuns: Array<Record<string, unknown>> = [];
+  const controller = new AbortController();
+  for (const [index, group] of plan.groups.entries()) {
+    const groupAdmission = admission.groupAdmissions[index];
+    if (!groupAdmission || canonicalJson(groupAdmission.group) !== canonicalJson(group)) throw new Error("native E2E group order differs from immutable admission");
+    const binding = E2ERunBindingSchema.parse(groupAdmission.binding);
+    if (binding.runId !== reference.groupRunIds[index] || binding.taskId !== admission.taskId || binding.operationId !== invocation.operationId
+      || binding.operationFence !== invocation.fence || binding.workflowRevision !== reference.workflowRevision
+      || binding.roundId !== reference.roundId || binding.candidateDigest !== admission.candidateDigest
+      || canonicalJson(round.groupBindings[index]) !== canonicalJson(binding)) throw new Error("native E2E group binding differs from the signed operation");
+    const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput: selectionInput as never, executionPlan: plan, group });
+    if (compiled.expectedConfigDigest !== groupAdmission.expectedConfigDigest || compiled.inventory.digest !== groupAdmission.compiledInventoryDigest
+      || compiled.selectionPacketPath !== groupAdmission.selectionPacketPath || canonicalJson(compiled.expectedCases) !== canonicalJson(groupAdmission.expectedCases)) {
+      throw new Error("native E2E compiler output differs from the immutable group admission");
+    }
+    const selection = JSON.parse(compiled.files.get(groupAdmission.selectionPacketPath) ?? "null") as Parameters<typeof runE2EActualCli>[0]["selection"];
+    const hostRequestIds = new Map([...compiled.hostRequestPayloads.keys()].map((caseId) => [caseId, randomUUID()]));
+    const groupEvidenceDirectory = join(evidenceDirectory, group.groupId);
+    await mkdir(groupEvidenceDirectory, { mode: 0o700 });
+    const actual = await runE2EActualCli({ compiled, snapshot, selection, runnerToolchain, hostRequestIds,
+      sourceRoot: await realpath(resolve(input.sourceRoot)), evidenceDirectory: groupEvidenceDirectory, deadlineAt: deadline, signal: controller.signal });
+    const collection = collectE2EActualCliRun({ actual, compiled, selection,
+      sourceDigest: e2eSnapshotSourceDigest(compiled, snapshot.sources.map(({ path, sha256: digest }) => ({ path, sha256: digest }))),
+      binding, round, semanticApprovalDigests: new Map(bundle.scenarios.map((scenario) => [scenario.scenarioId,
+        (admission.portableApprovalBinding as { semanticApproval?: { digest?: string } }).semanticApproval?.digest ?? "0".repeat(64)])),
+      hostRequestIds, declaredMockComponentIds: actual.declaredMockComponentIds, environment: runnerEnvironment,
+      usage: { discoveredResults: actual.selected + actual.filtered, maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 },
+      limits: { maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 },
+    });
+    groupRuns.push({ group, binding, selection, hostRequestIds: [...hostRequestIds], collection: collection.qualification ?? { status: "UNKNOWN", reason: collection.unavailableReason ?? "collection unavailable" },
+      actual: { launchId: actual.launchId, runnerToolchain: actual.runnerToolchain, launchConfigDigest: actual.launchConfigDigest, fixedAssetDigests: actual.fixedAssetDigests,
+        publicList: actual.publicList, selected: actual.selected, filtered: actual.filtered, rawReportBase64: Buffer.from(actual.rawReportBytes).toString("base64"),
+        runStartCaptureBase64: Buffer.from(actual.runStartCaptureBytes).toString("base64"), assertionReceipts: actual.assertionReceipts,
+        declaredMockComponentIds: actual.declaredMockComponentIds, candidateCaptures: actual.candidateCaptures, listProcess: actual.listProcess,
+        runProcess: actual.runProcess, cleanupConfirmed: actual.cleanupConfirmed, cleanupServerListening: actual.cleanupServerListening } });
+  }
+  const evidence = Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-evidence/v1", admissionSha256: reference.admissionRef.sha256,
+    taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
+    candidateDigest: admission.candidateDigest, round, groupRuns }), "utf8");
+  const byteLimit = e2ePrivateTransferMaxBytes(round.groupBindings.reduce((total, binding) => total + binding.expectedCases.length, 0), round.groupBindings.length);
+  if (evidence.byteLength > byteLimit) throw new Error("native E2E evidence exceeds its stored group-derived ceiling");
+  const evidenceRef = await input.saveEvidence(evidence, sha(evidence), byteLimit);
+  const processStatus = groupRuns.every((run) => (run.actual as { runProcess?: { status?: number } }).runProcess?.status === 0) ? "SUCCEEDED" : "FAILED";
+  return { evidenceRef, candidateDigest: admission.candidateDigest, roundId: round.roundId, processStatus };
+}

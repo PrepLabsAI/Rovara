@@ -1,35 +1,33 @@
 import type { E2ESharedView } from "../../contracts/src/e2e-view.js";
 
 const LIST_LIMIT = 8;
-const SCOPE_NOTE = "E2E projection status describes only the supplied DTO scope; it does not establish app, native, live, browser, auth, or internal-callable completion.";
+const SCOPE_NOTE = "Portable source and mock checks are scoped evidence. Browser, native, live-service, authentication, and internal-callable behavior remain unverified unless separately qualified.";
 
 export interface E2ESlackBlock {
-  type: "section" | "context";
+  type: "section";
   text: { type: "mrkdwn"; text: string };
 }
 
+export interface E2ESlackContextBlock {
+  type: "context";
+  elements: Array<{ type: "mrkdwn"; text: string }>;
+}
+
 /** Renders a bounded, read-only Slack summary. Proposals are labels; this adapter executes nothing. */
-export function renderE2ESlackBlocks(view: E2ESharedView): E2ESlackBlock[] {
+export function renderE2ESlackBlocks(view: E2ESharedView): Array<E2ESlackBlock | E2ESlackContextBlock> {
   const { setup, e2e } = view;
   const lines = [
-    `*E2E checks: ${e2e.status} — ${slackBounded(e2e.label, 900)}*`,
-    `Groups received: ${e2e.receivedGroups}/${e2e.expectedGroups} · Cases executed: ${e2e.executedCases}`,
-    `Criteria qualified: ${e2e.qualifiedCriteria}/${e2e.requiredCriteria} · Required unavailable: ${e2e.unavailableCriteria} · Optional unavailable: ${e2e.optionalUnavailableCriteria}`,
-    `Setup: ${setup.status}`,
-    `Selected targets: ${slackList(setup.selectedTargetIds)}`,
-    `Blocking inputs: ${slackList(setup.blockingInputIds)}`,
-    `Mock-substitutable inputs: ${slackList(setup.mockSubstitutableInputIds)}`,
-    `Declared mock IDs: ${slackList(e2e.mockedComponentIds)}`,
-    `Observed mock consumption IDs (${e2e.observedMockedComponentIds.length}): ${slackList(e2e.observedMockedComponentIds)}`,
-    `Required unexercised criteria: ${slackList(e2e.requiredUnexercisedCriteriaIds)}`,
-    `Unexercised behaviors: ${slackList(e2e.unexercisedBehaviors)}`,
-    `Current plan digest: ${slackBounded(e2e.executionPlanDigest ?? "unavailable", 900)}`,
-    `Policy: ${e2e.policyPresence} · Phase: ${slackBounded(e2e.workflowPhase ?? "unknown", 500)}`,
-    `Owner action proposals (read-only): ${slackList(view.actions)}`,
+    `*E2E ${e2e.status}: ${slackBounded(e2e.label, 140)}*`,
+    `Groups ${e2e.receivedGroups}/${e2e.expectedGroups} · cases ${e2e.executedCases} · criteria ${e2e.qualifiedCriteria}/${e2e.requiredCriteria}`,
+    `Required unavailable ${e2e.unavailableCriteria} · optional unavailable ${e2e.optionalUnavailableCriteria} · unmet required ${e2e.requiredUnexercisedCriteriaIds.length}`,
+    `Setup ${setup.status} · selected targets ${setup.selectedTargetIds.length} · blocking inputs ${setup.blockingInputIds.length} · mockable ${setup.mockSubstitutableInputIds.length}`,
+    `Mocks ${e2e.mockedComponentIds.length} declared · ${e2e.observedMockedComponentIds.length} independently observed · ${e2e.unexercisedBehaviors.length} unexercised`,
+    `Policy ${e2e.policyPresence} · phase ${slackBounded(e2e.workflowPhase ?? "unknown", 120)} · advisory owner proposals ${view.actions.length}`,
+    `Plan digest ${slackBounded(e2e.executionPlanDigest ?? "unavailable", 160)}`,
   ];
   return [
     ...lines.map((text) => ({ type: "section" as const, text: { type: "mrkdwn" as const, text } })),
-    { type: "context", text: { type: "mrkdwn", text: slackBounded(SCOPE_NOTE, 900) } },
+    { type: "context", elements: [{ type: "mrkdwn", text: slackBounded(SCOPE_NOTE, 900) }] },
   ];
 }
 
@@ -49,7 +47,7 @@ export function renderE2EPageHtml(view: E2ESharedView): string {
     ["Mock-substitutable inputs", list(setup.mockSubstitutableInputIds)],
     ["Declared mock IDs", list(e2e.mockedComponentIds)],
     [`Observed mock consumption IDs (${e2e.observedMockedComponentIds.length})`, list(e2e.observedMockedComponentIds)],
-    ["Required unexercised criteria", list(e2e.requiredUnexercisedCriteriaIds)],
+    ["Unmet or unqualified required criteria", list(e2e.requiredUnexercisedCriteriaIds)],
     ["Unexercised behaviors", list(e2e.unexercisedBehaviors)],
     ["Current plan digest", e2e.executionPlanDigest ?? "unavailable"],
     ["Policy", e2e.policyPresence],
@@ -69,13 +67,6 @@ function list(values: readonly string[]): string {
   const shown = values.slice(0, LIST_LIMIT);
   const remainder = values.length - shown.length;
   return `${shown.join(", ")}${remainder > 0 ? `, and ${remainder} more (total ${values.length})` : ` (total ${values.length})`}`;
-}
-
-function slackList(values: readonly string[]): string {
-  if (values.length === 0) return "none (total 0)";
-  const shown = values.slice(0, 3).map((value) => slackBounded(value, 96));
-  const omitted = values.length - shown.length;
-  return `total ${values.length}: ${shown.join(", ")}${omitted > 0 ? `; +${omitted} omitted (shortened)` : ""}`;
 }
 
 function slackBounded(value: string, limit: number): string {

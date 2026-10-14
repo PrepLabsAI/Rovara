@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { promisify } from "node:util";
-import { AgentXError, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, agentXError } from "@agentx/contracts";
+import { AgentXError, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, agentXError, createCandidateManifest, isSafeE2ESourcePath, type CandidateManifest } from "@agentx/contracts";
 import { assertNoEmbeddedRepositories, gitHardenedEnvironment } from "../git.js";
 
 const execFile = promisify(execFileCallback);
@@ -20,6 +21,88 @@ export interface CandidateRepositoryIdentity {
   commitSha: string;
   treeSha: string;
   baseCommitSha?: string;
+}
+
+/** A first-party export of committed Git objects. It is sent through the private candidate-export
+ * callback, separately from the model-visible terminal result. */
+export interface CommittedCandidateSourceExport {
+  schemaVersion: "workflow-candidate-source/v1";
+  candidate: CandidateManifest;
+  repositories: Array<{
+    repositoryId: string;
+    commitSha: string;
+    treeSha: string;
+    baseCommitSha?: string;
+    treeComplete: true;
+    treePaths: string[];
+    sources: Array<{ path: string; sha256: string; bytesBase64: string; kind: "blob" }>;
+  }>;
+}
+
+const MAX_CANDIDATE_SOURCE_COUNT = 512;
+const MAX_CANDIDATE_SOURCE_BYTES = 4 * 1024 * 1024;
+const MAX_CANDIDATE_SOURCE_FILE_BYTES = 512 * 1024;
+
+/**
+ * Reads source from the exact committed HEAD objects. A temporary-index tree is deliberately not
+ * accepted here: callers must first commit the final candidate and then bind this export to the
+ * independently captured candidate identities.
+ */
+export async function readCommittedCandidateSourceExport(
+  inputs: readonly CandidateRepositoryInput[],
+  identities: readonly CandidateRepositoryIdentity[],
+): Promise<CommittedCandidateSourceExport> {
+  if (inputs.length === 0 || inputs.length !== identities.length || inputs.length > 32) {
+    throw new Error("committed candidate source inputs are incomplete");
+  }
+  const repositories: CommittedCandidateSourceExport["repositories"] = [];
+  let totalSourceBytes = 0;
+  for (const input of [...inputs].sort((left, right) => left.repositoryId.localeCompare(right.repositoryId))) {
+    const identity = identities.find((entry) => entry.repositoryId === input.repositoryId);
+    if (!identity || !/^[a-f0-9]{40}$/.test(identity.commitSha) || !/^[a-f0-9]{40}$/.test(identity.treeSha)) {
+      throw new Error("committed candidate source identity is invalid");
+    }
+    const directory = resolve(input.directory);
+    const env = await gitHardenedEnvironment(directory);
+    const commit = (await execFile("git", ["-C", directory, "rev-parse", "--verify", "HEAD^{commit}"], { env, encoding: "utf8" })).stdout.trim();
+    const tree = (await execFile("git", ["-C", directory, "rev-parse", "--verify", "HEAD^{tree}"], { env, encoding: "utf8" })).stdout.trim();
+    if (commit !== identity.commitSha || tree !== identity.treeSha || (input.baseCommitSha !== undefined && identity.baseCommitSha !== input.baseCommitSha)) {
+      throw new Error("committed source does not match the final candidate identity");
+    }
+    const listing = (await execFile("git", ["-C", directory, "ls-tree", "-rz", "-r", "--full-tree", commit], { env, encoding: "buffer" })).stdout as unknown as Buffer;
+    const treePaths: string[] = [];
+    const sources: CommittedCandidateSourceExport["repositories"][number]["sources"] = [];
+    for (const record of listing.toString("binary").split("\0").filter(Boolean)) {
+      const tab = record.indexOf("\t");
+      if (tab < 0) throw new Error("committed Git tree entry is malformed");
+      const metadata = record.slice(0, tab).split(" ");
+      const pathBytes = Buffer.from(record.slice(tab + 1), "binary");
+      const path = pathBytes.toString("utf8");
+      if (!Buffer.from(path, "utf8").equals(pathBytes) || path.length === 0 || path.length > 1024 || path.startsWith("/") || path.includes("\\") || path.includes("\0")) {
+        throw new Error("committed Git tree path is not safely representable");
+      }
+      treePaths.push(path);
+      // The complete tree inventory retains excluded paths, while only runner-safe regular blobs
+      // are materialized. In particular, never promote credential-like paths into callback bytes.
+      if (metadata[1] !== "blob" || (metadata[0] !== "100644" && metadata[0] !== "100755") || !isSafeE2ESourcePath(path)) continue;
+      if (sources.length >= MAX_CANDIDATE_SOURCE_COUNT) throw new Error("committed candidate has too many source blobs for the accepted snapshot bound");
+      const oid = metadata[2];
+      if (!oid || !/^[a-f0-9]{40,64}$/.test(oid)) throw new Error("committed Git blob identity is malformed");
+      const sizeText = (await execFile("git", ["-C", directory, "cat-file", "-s", oid], { env, encoding: "utf8" })).stdout.trim();
+      const byteLength = Number(sizeText);
+      if (!Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > MAX_CANDIDATE_SOURCE_FILE_BYTES) continue;
+      totalSourceBytes += byteLength;
+      if (totalSourceBytes > MAX_CANDIDATE_SOURCE_BYTES) throw new Error("committed candidate source exceeds the accepted aggregate byte bound");
+      const bytes = (await execFile("git", ["-C", directory, "cat-file", "blob", oid], { env, encoding: "buffer", maxBuffer: MAX_CANDIDATE_SOURCE_FILE_BYTES + 1 })).stdout as unknown as Buffer;
+      if (bytes.byteLength !== byteLength) throw new Error("committed Git blob size changed while reading");
+      sources.push({ path, sha256: createHash("sha256").update(bytes).digest("hex"), bytesBase64: bytes.toString("base64"), kind: "blob" });
+    }
+    if (new Set(treePaths).size !== treePaths.length) throw new Error("committed Git tree contains duplicate paths");
+    repositories.push({ repositoryId: input.repositoryId, commitSha: identity.commitSha, treeSha: identity.treeSha,
+      ...(identity.baseCommitSha === undefined ? {} : { baseCommitSha: identity.baseCommitSha }), treeComplete: true, treePaths, sources });
+  }
+  const candidate = createCandidateManifest(identities);
+  return { schemaVersion: "workflow-candidate-source/v1", candidate, repositories };
 }
 
 /**

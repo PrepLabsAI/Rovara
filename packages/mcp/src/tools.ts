@@ -4,7 +4,7 @@
 import {
   DEFAULT_DEVELOPER_TASK_POLICY, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
   DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, WORKFLOW_BLOCK_REASONS, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, WORKFLOW_REVIEW_FAILURE_REASONS,
-  inertName, openReviewFindings, workflowIsReviewOnly, workflowKeepPullRequestsOffered, type DeveloperTaskView,
+  E2ESharedViewSchema, inertName, openReviewFindings, workflowIsReviewOnly, workflowKeepPullRequestsOffered, type DeveloperTaskView,
   TaskPeopleRoleSchema,
 } from "@agentx/contracts";
 import { z } from "zod";
@@ -100,6 +100,7 @@ const TaskShape = {
       review_digest: z.string().optional(), review_complete: z.boolean().optional(),
     }).optional().describe("the latest review of the pull request's feedback; read a PENDING one with agentx_get_pr_feedback"),
   }).optional(),
+  e2e_presentation: z.object({ scope: z.string().max(2_000), view: E2ESharedViewSchema }).strict().optional(),
   /** Only on start, continue and wait, which may wait (R21). */
   timed_out: z.boolean().optional(),
   /** A wait that stopped early because checking on the task failed; not a timeout. */
@@ -148,6 +149,7 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
     ...(task.artifacts === undefined ? {} : { artifacts: task.artifacts }),
     ...(task.pullRequests === undefined ? {} : { pull_requests: task.pullRequests }),
     ...(task.unpublished === undefined ? {} : { unpublished: task.unpublished }),
+    ...(task.e2ePresentation === undefined ? {} : { e2e_presentation: task.e2ePresentation.mcp }),
     ...(task.workflow === undefined ? {} : {
       workflow: {
         stage: task.workflow.stage, state: task.workflow.state, revision: task.workflow.revision,

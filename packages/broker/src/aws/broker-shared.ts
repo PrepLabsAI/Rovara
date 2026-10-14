@@ -270,7 +270,7 @@ export interface WorkflowDispatchRecord {
   taskId: string;
   workflowRevision: number;
   /** UPDATE: an approved fix's checks and reviews passed, and it is pushed to the pull requests already open. */
-  kind: "REVIEW" | "PUBLISH" | "UPDATE";
+  kind: "CHECKS" | "REVIEW" | "PUBLISH" | "UPDATE";
   candidateDigest: string;
   createdAt: string;
   /** Failed runs so far; the row is retried with backoff and gives up (blocking the task) at the cap. */

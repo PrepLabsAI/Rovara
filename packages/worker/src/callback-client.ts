@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CodeBuildCheckResultSchema,
   WorkflowFeedbackBundleRefSchema,
@@ -8,11 +9,13 @@ import {
   type WorkerInvocation,
   type WorkflowFeedbackApprovalBinding,
   type WorkflowFeedbackTaskChecks,
+  type E2EWorkflowAdmissionRef,
 } from "@agentx/contracts";
 import type { ArtifactSink } from "./artifacts.js";
 import type { EventBatchSink } from "./events.js";
 import type { WorkerTerminalResult } from "./server.js";
 import type { CodeBuildSink } from "./codebuild.js";
+import type { CommittedCandidateSourceExport } from "./verification/candidate.js";
 
 export type TerminalResultSink = (result: WorkerTerminalResult) => Promise<void>;
 
@@ -82,6 +85,9 @@ export function createWorkerCallbackSinks(input: {
   pullRequestSink: PullRequestSink;
   pullRequestUpdateSink: PullRequestUpdateSink;
   codeBuildSink: CodeBuildSink;
+  candidateSourceExportSink: (source: CommittedCandidateSourceExport) => Promise<void>;
+  workflowE2EAdmissionReader: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
+  workflowE2EEvidenceSink: (bytes: Uint8Array, sha256: string, maxBytes: number) => Promise<{ key: string; sha256: string }>;
   feedbackBundleReader: FeedbackBundleReader;
   authorizeFeedbackApproval: FeedbackApprovalAuthorizer;
   /** #341: the task owner's ChatGPT access token, for a task that runs on their plan (unparsed; see chatgpt-token.ts). */
@@ -118,6 +124,53 @@ export function createWorkerCallbackSinks(input: {
       throw agentXError("RUNTIME_UNAVAILABLE", `worker callback ${path} failed with HTTP ${response.status}`);
     }
     return response.json();
+  };
+  const candidateSourceExportSink = async (source: CommittedCandidateSourceExport): Promise<void> => {
+    const bytes = Buffer.from(JSON.stringify(source), "utf8");
+    const chunkBytes = 64 * 1024;
+    const chunkCount = Math.ceil(bytes.byteLength / chunkBytes);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const initialized = await postForResult("candidate-export", { stage: "init", schemaVersion: "workflow-candidate-export-upload/v1",
+      totalBytes: bytes.byteLength, chunkCount, sha256 });
+    if (!initialized || typeof initialized !== "object" || typeof (initialized as { uploadId?: unknown }).uploadId !== "string"
+      || (initialized as { chunkBytes?: unknown }).chunkBytes !== chunkBytes || (initialized as { chunkCount?: unknown }).chunkCount !== chunkCount) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "candidate source upload initialization is invalid");
+    }
+    const uploadId = (initialized as { uploadId: string }).uploadId;
+    for (let index = 0; index < chunkCount; index += 1) {
+      const chunk = bytes.subarray(index * chunkBytes, Math.min((index + 1) * chunkBytes, bytes.byteLength));
+      await postForResult("candidate-export", { stage: "chunk", schemaVersion: "workflow-candidate-export-chunk/v1", uploadId, index,
+        bytesBase64: chunk.toString("base64"), sha256: createHash("sha256").update(chunk).digest("hex") });
+    }
+    await postForResult("candidate-export", { stage: "finalize", schemaVersion: "workflow-candidate-export-finalize/v1", uploadId, sha256 });
+  };
+  const workflowE2EAdmissionReader = async (reference: E2EWorkflowAdmissionRef, offset: number) => {
+    const value = await postForResult("e2e-admission", { stage: "read", offset, sha256: reference.admissionRef.sha256 });
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw agentXError("RUNTIME_UNAVAILABLE", "native E2E admission response is invalid");
+    const record = value as Record<string, unknown>;
+    if (record.totalBytes !== reference.admissionRef.byteLength || record.sha256 !== reference.admissionRef.sha256
+      || record.offset !== offset || typeof record.chunkBase64 !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "native E2E admission chunk does not match its signed reference");
+    return { totalBytes: record.totalBytes, chunkBase64: record.chunkBase64, sha256: record.sha256 };
+  };
+  const workflowE2EEvidenceSink = async (bytes: Uint8Array, sha256: string, maxBytes: number) => {
+    if (bytes.byteLength <= 0 || bytes.byteLength > maxBytes) throw agentXError("CONFIG_INVALID", "native E2E evidence exceeds its admitted limit");
+    const chunkBytes = 64 * 1024;
+    const chunkCount = Math.ceil(bytes.byteLength / chunkBytes);
+    const initialized = await postForResult("e2e-evidence", { stage: "init", totalBytes: bytes.byteLength, chunkCount, sha256 });
+    if (!initialized || typeof initialized !== "object" || typeof (initialized as { uploadId?: unknown }).uploadId !== "string"
+      || (initialized as { chunkBytes?: unknown }).chunkBytes !== chunkBytes || (initialized as { chunkCount?: unknown }).chunkCount !== chunkCount) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "native E2E evidence upload initialization is invalid");
+    }
+    const uploadId = (initialized as { uploadId: string }).uploadId;
+    for (let index = 0; index < chunkCount; index += 1) {
+      const chunk = Buffer.from(bytes).subarray(index * chunkBytes, Math.min((index + 1) * chunkBytes, bytes.byteLength));
+      await postForResult("e2e-evidence", { stage: "chunk", uploadId, index, bytesBase64: chunk.toString("base64"),
+        sha256: createHash("sha256").update(chunk).digest("hex") });
+    }
+    const finalized = await postForResult("e2e-evidence", { stage: "finalize", uploadId, sha256 });
+    if (!finalized || typeof finalized !== "object" || typeof (finalized as { key?: unknown }).key !== "string"
+      || (finalized as { sha256?: unknown }).sha256 !== sha256) throw agentXError("RUNTIME_UNAVAILABLE", "native E2E evidence finalization is invalid");
+    return { key: (finalized as { key: string }).key, sha256 };
   };
   return {
     eventSink: async (events) => post("events", { events }),
@@ -201,5 +254,8 @@ export function createWorkerCallbackSinks(input: {
       );
       return CodeBuildCheckResultSchema.parse(build);
     },
+    candidateSourceExportSink,
+    workflowE2EAdmissionReader,
+    workflowE2EEvidenceSink,
   };
 }

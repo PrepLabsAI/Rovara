@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, WorkItemProgressV1Schema, WorkflowDependencyResultSchema, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, parsePlanDocument, redactText, reportStatus, taskGraphDigest, taskGraphOrder, validateTaskGraph, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkItemProgressV1, type WorkflowDependencyResult, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation } from "@agentx/contracts";
+import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, WorkItemProgressV1Schema, WorkflowDependencyResultSchema, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, parsePlanDocument, redactText, reportStatus, taskGraphDigest, taskGraphOrder, validateTaskGraph, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkItemProgressV1, type WorkflowDependencyResult, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
@@ -28,7 +28,7 @@ import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
 import type { FeedbackApprovalAuthorizer, FeedbackBundleReader } from "./callback-client.js";
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
-import { candidateUnchangedSinceBase, readCandidateRepositories, type CandidateRepositoryInput } from "./verification/candidate.js";
+import { candidateUnchangedSinceBase, readCandidateRepositories, readCommittedCandidateSourceExport, type CandidateRepositoryInput, type CommittedCandidateSourceExport } from "./verification/candidate.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
@@ -40,6 +40,7 @@ import {
   type TaskUsageOutcome,
 } from "./usage.js";
 import { assertWorkflowDependencyResumeTree, executeSerialWorkflowDependencies } from "./workflow-dependencies.js";
+import { executeWorkflowE2EChecks } from "./workflow-e2e-checks.js";
 
 export interface TaskInvocationResult {
   /** The broker-issued conversation ID, which stays the same for every turn of one conversation. */
@@ -51,6 +52,8 @@ export interface TaskInvocationResult {
   workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW";
   /** Worker-reported Git object identities; the broker recomputes and stores the canonical digest. */
   workflowCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
+  /** Fixed worker export, uploaded on its separate capability before the model-visible terminal result. */
+  workflowCandidateSourceExport?: CommittedCandidateSourceExport;
   /** Repository identities captured when the final successful check round ended. */
   workflowCheckCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
   workflowReviews?: WorkflowReviewReport[];
@@ -66,6 +69,11 @@ export async function runTaskInvocation(
     eventSink: EventBatchSink;
     artifactSink: ArtifactSink;
     feedbackBundleReader?: FeedbackBundleReader;
+    workflowE2EAdmissionReader?: (reference: E2EWorkflowAdmissionRef, offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
+    workflowE2EEvidenceSink?: (bytes: Uint8Array, sha256: string, maxBytes: number) => Promise<{ key: string; sha256: string }>;
+    workflowE2EEvidenceRoot?: string;
+    /** Fixed worker installation root that contains the pinned public E2E CLI package. */
+    workflowE2ERuntimeRoot?: string;
     authorizeFeedbackApproval?: FeedbackApprovalAuthorizer;
     piAdapter?: PiSessionAdapter;
     cancellationController?: WorkerCancellationController;
@@ -174,6 +182,10 @@ export async function runTaskInvocation(
   // A verification retry has no model and no coding tools. It snapshots the candidate, runs only
   // the owner-selected project checks, then snapshots again so the broker can reject a changed tree.
   if (invocation.payload.workflowMode === "CHECKS") {
+    if (invocation.payload.workflowE2EAdmission !== undefined && (dependencies.workflowE2EAdmissionReader === undefined
+      || dependencies.workflowE2EEvidenceSink === undefined || dependencies.workflowE2EEvidenceRoot === undefined)) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "the admitted E2E CHECKS runtime or evidence directory is unavailable");
+    }
     const readiness = invocation.payload.readiness ?? [];
     if (readiness.length === 0) throw agentXError("CONFIG_INVALID", "verification retry requires at least one selected project check");
     const events = new EventBatcher(dependencies.eventSink);
@@ -185,6 +197,9 @@ export async function runTaskInvocation(
     const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
     try {
       await events.append("lifecycle", { status: "RUNNING", conversationId: invocation.payload.conversationId, conversation: { started: true, reopened: true } });
+      // The broker authorizes the private admission read only after the operation is durably
+      // RUNNING. Flush this transition before the first protected CHECKS callback.
+      await events.flush();
       await events.append("progress", { message: "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
       const runners = dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
@@ -213,16 +228,28 @@ export async function runTaskInvocation(
       const candidateAfter = await readCandidateRepositories(repositories);
       await dependencies.artifactSink({ name: "checks.json", mediaType: "application/json", content: checksArtifactContent(checks) });
       const compact = compactCheckReport(checks);
+      let workflowE2EEvidence: Awaited<ReturnType<typeof executeWorkflowE2EChecks>> | undefined;
+      if (invocation.payload.workflowE2EAdmission !== undefined) {
+        workflowE2EEvidence = await executeWorkflowE2EChecks({
+          invocation,
+          readAdmission: (offset) => dependencies.workflowE2EAdmissionReader!(invocation.payload.workflowE2EAdmission!, offset),
+          saveEvidence: dependencies.workflowE2EEvidenceSink!,
+          sourceRoot: dependencies.workflowE2ERuntimeRoot ?? process.cwd(),
+          evidenceRoot: dependencies.workflowE2EEvidenceRoot!,
+        });
+      }
       await events.append("result", {
         status: "SUCCEEDED", conversationId: invocation.payload.conversationId, workflowMode: "CHECKS", checks: compact,
         workflowCandidateRepositories: candidateBefore,
         workflowCheckCandidateRepositories: candidateAfter,
+        ...(workflowE2EEvidence === undefined ? {} : { workflowE2EEvidenceRef: workflowE2EEvidence.evidenceRef }),
       });
       await events.flush();
       return {
         conversationId: invocation.payload.conversationId, reopened: true, workflowMode: "CHECKS", checks: compact,
         workflowCandidateRepositories: candidateBefore,
         workflowCheckCandidateRepositories: candidateAfter,
+        ...(workflowE2EEvidence === undefined ? {} : { workflowE2EEvidenceRef: workflowE2EEvidence.evidenceRef }),
       };
     } catch (error) {
       await events.append("error", { message: redactText(error instanceof Error ? error.message : "verification retry failed") }).catch(() => undefined);
@@ -714,6 +741,16 @@ export async function runTaskInvocation(
       const workflowCandidateRepositories = invocation.payload.workflowMode === "IMPLEMENT"
         ? await readCandidateRepositories(workflowRepositories)
         : undefined;
+      let workflowCandidateSourceExport: CommittedCandidateSourceExport | undefined;
+      if (workflowCandidateRepositories !== undefined) {
+        try {
+          workflowCandidateSourceExport = await readCommittedCandidateSourceExport(workflowRepositories, workflowCandidateRepositories);
+        } catch {
+          // The ordinary candidate identity may include an uncommitted index tree. That is valid for
+          // existing workflow checks, but it cannot be promoted to a committed source export.
+          // The broker keeps required E2E verification UNKNOWN when this first-party export is absent.
+        }
+      }
       // A coding run that left the code as the task started has nothing to check or publish: the owner is told so.
       if (workflowCandidateRepositories !== undefined && await candidateUnchangedSinceBase(workflowRepositories, workflowCandidateRepositories)) {
         throw agentXError("CONFIG_INVALID", WORKFLOW_NO_CODE_CHANGE_MESSAGE);
@@ -750,6 +787,7 @@ export async function runTaskInvocation(
       taskResult = {
         conversationId, reopened: registered !== undefined, checks,
         ...(workflowCandidateRepositories === undefined ? {} : { workflowCandidateRepositories }),
+        ...(workflowCandidateSourceExport === undefined ? {} : { workflowCandidateSourceExport }),
         ...(workflowDependenciesResult === undefined ? {} : { workflowDependenciesResult }),
         ...(workflowCandidateRepositories === undefined || reportedChecksCandidate === undefined ? {} : { workflowCheckCandidateRepositories: reportedChecksCandidate }),
       };

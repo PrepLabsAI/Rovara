@@ -121,6 +121,29 @@ describe("tool errors (FR-049, ruling F3)", () => {
 });
 
 describe("ordered work approval digest (Spec059)", () => {
+  it("carries the broker's shared E2E view into agentx_get_task", async () => {
+    const shared = {
+      schemaVersion: 1 as const,
+      setup: { status: "unavailable" as const, selectedTargetIds: [], executionPlanDigest: null, blockingInputIds: [], mockSubstitutableInputIds: [] },
+      e2e: {
+        status: "UNKNOWN" as const, label: "Checks incomplete", executionPlanDigest: "a".repeat(64),
+        expectedGroups: 2, receivedGroups: 0, executedCases: 0, qualifiedCriteria: 0,
+        requiredCriteria: 6, unavailableCriteria: 6, optionalUnavailableCriteria: 0,
+        mockedComponentIds: ["api-schema"], observedMockedComponentIds: [], unexercisedBehaviors: [],
+        policyPresence: "present" as const, workflowPhase: "IMPLEMENT", requiredUnexercisedCriteriaIds: ["browser-nav"],
+      },
+      actions: [],
+    };
+    const task = view("RUNNING", { e2ePresentation: {
+      shared, slackBlocks: [], pageHtml: "", mcp: { scope: "Portable source and mock checks", view: shared },
+    } });
+    const result = await (await connect({ getTask: async () => task })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+    expect(result.structuredContent).toMatchObject({ e2e_presentation: {
+      scope: "Portable source and mock checks",
+      view: { e2e: { status: "UNKNOWN", expectedGroups: 2, receivedGroups: 0, requiredCriteria: 6, requiredUnexercisedCriteriaIds: ["browser-nav"] } },
+    } });
+  });
+
   it("carries the canonical digest from the actual broker task view into agentx_get_task", async () => {
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getCommitTree: async () => "a".repeat(40) } } });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {

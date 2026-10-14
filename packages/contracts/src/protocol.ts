@@ -3,7 +3,7 @@ import { WORKFLOW_PLAN_MAX_BYTES, WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckPro
 import { ProjectCommandSchema, StoredProjectDefinitionSchema } from "./project.js";
 import { ModelSelectionSchema, type ModelSelection } from "./models.js";
 import { WorkflowDependencyInvocationSchema } from "./workflow-dependencies.js";
-import { E2EFeaturePlanIntentSchema } from "./e2e.js";
+import { E2EFeaturePlanIntentSchema, E2EWorkflowAdmissionRefSchema } from "./e2e.js";
 
 export const AGENTX_PROTOCOL_VERSION = 1 as const;
 
@@ -14,7 +14,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "model.chatgpt", "task.workflowDependencies"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -124,6 +124,8 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         planFormat: z.literal("structured").optional(),
         workflowFeedbackReview: z.object({ taskId: z.string().uuid(), workflowRevision: z.number().int().positive(), candidateDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
         workflowFeedbackApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
+        /** Server-assigned immutable native E2E round; the worker must reload it through its signed callback capability. */
+        workflowE2EAdmission: E2EWorkflowAdmissionRefSchema.optional(),
         /** One approved same-repository dependency graph, sent only to workers advertising task.workflowDependencies. */
         workflowDependencies: WorkflowDependencyInvocationSchema.optional(),
         /**
@@ -188,6 +190,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         if (payload.workflowDependencies !== undefined && payload.workflowMode !== "IMPLEMENT") {
           context.addIssue({ code: "custom", path: ["workflowDependencies"], message: "a work breakdown requires implementation mode" });
         }
+        if (payload.workflowE2EAdmission !== undefined && payload.workflowMode !== "CHECKS") {
+          context.addIssue({ code: "custom", path: ["workflowE2EAdmission"], message: "a trusted E2E admission requires its separate CHECKS operation" });
+        }
       }),
   }).strict(),
   InvocationBaseSchema.extend({
@@ -223,6 +228,8 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * "publish.candidateTree"; never dropped for an older one.
          */
         candidateTreeSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+        /** The exact committed HEAD whose tree was checked and reviewed. */
+        candidateCommitSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
         /**
          * The base commit the broker pinned for the task in this repository: the published commit's only parent, in
          * place of the commit the workspace's (agent-writable) preparation manifest records. Only with candidateTreeSha.
@@ -249,6 +256,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         }
         if (value.workflowBaseCommit !== undefined && value.candidateTreeSha === undefined) {
           context.addIssue({ code: "custom", message: "workflowBaseCommit is allowed only with candidateTreeSha" });
+        }
+        if (value.candidateCommitSha !== undefined && value.candidateTreeSha === undefined) {
+          context.addIssue({ code: "custom", message: "candidateCommitSha is allowed only with candidateTreeSha" });
         }
       }),
   }).strict(),

@@ -8,6 +8,7 @@ import { DeveloperShareModeSchema } from "./project.js";
 import { sharedNoticeKey, slackThreadSubject, type SlackThread } from "./slack.js";
 import { WORKFLOW_PLAN_MAX_BYTES, WorkflowSnapshotViewSchema } from "./task-workflow.js";
 import { WorkflowPathSchema } from "./task-workflow.js";
+import { E2ESharedViewSchema } from "./e2e-view.js";
 
 export const DEVELOPER_TASK_OWNER_ISSUER = "agentx-developer-task";
 export const DEVELOPER_INSTRUCTIONS_MAX_BYTES = 65_536;
@@ -280,6 +281,7 @@ export const DeveloperTaskViewSchema = z.object({
     planContent: z.string().max(WORKFLOW_PLAN_MAX_BYTES).optional(),
     workBreakdownDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   }).optional(),
+  e2ePresentation: z.object({ shared: E2ESharedViewSchema, slackBlocks: z.array(z.unknown()).max(16), pageHtml: z.string().max(65_536), mcp: z.object({ scope: z.string().max(2_000), view: E2ESharedViewSchema }).strict() }).strict().optional(),
   failure: DeveloperTaskFailureSchema.optional(),
   startingRevision: z.number().int().positive(),
   client: z.string(),

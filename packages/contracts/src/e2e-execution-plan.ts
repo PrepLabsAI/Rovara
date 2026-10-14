@@ -206,7 +206,8 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
         const autoWitness = descriptor?.fixture === undefined && descriptor?.fixtureProfile === "openapi-auto-witness/v1" && operationFixture?.responses.length;
         const variantSetValid = Boolean(autoWitness || operationFixture && successVariant && refusalVariant && invalidVariant
           && successVariant.status >= 200 && successVariant.status < 300 && mockData && fixture && validateE2EOpenApiFixtureResponse({ descriptor: fixture, method: mockData.method, path: mockData.path, status: successVariant.status, body: successVariant.body })
-          && refusalVariant.status >= 400 && refusalVariant.status < 500
+          && refusalVariant.status >= 400 && refusalVariant.status < 500 && mockData && fixture
+          && validateE2EOpenApiFixtureResponse({ descriptor: fixture, method: mockData.method, path: mockData.path, status: refusalVariant.status, body: refusalVariant.body })
           && invalidVariant.status >= 200 && invalidVariant.status < 300
           && mockData && fixture && !validateE2EOpenApiFixtureResponse({ descriptor: fixture, method: mockData.method, path: mockData.path, status: invalidVariant.status, body: invalidVariant.body }));
         if (!edge || !descriptor || descriptor.kind !== "api" || !schemaPath || fixture === undefined || !(mockFixture?.success || autoWitness) || !variantSetValid || descriptor.sourceRefs.length !== 1 || descriptor.sourceRefs[0]?.path !== schemaPath || descriptor.sourceRefs[0]?.sha256 !== source?.sha256) {

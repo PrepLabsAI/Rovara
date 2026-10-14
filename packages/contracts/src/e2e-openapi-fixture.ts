@@ -302,7 +302,10 @@ export function createE2EOpenApiFixtureDescriptor(bytes: Uint8Array): E2EOpenApi
       }
       const responses: E2EOpenApiFixtureDescriptor["operations"][number]["responses"] = [];
       for (const [statusText, responseValue] of Object.entries(rawOperation.responses)) {
-        if (!/^2\d\d$/.test(statusText) || !object(responseValue)
+        // Supported source-backed fixtures may include an explicitly declared 4xx refusal
+        // response. Keep every other response class unavailable; callers still validate the
+        // exact selected status and body against this parsed schema.
+        if (!/^(?:2|4)\d\d$/.test(statusText) || !object(responseValue)
           || Object.keys(responseValue).some((key) => !["description", "content"].includes(key))
           || !object(responseValue.content) || Object.keys(responseValue.content).length !== 1 || !object(responseValue.content["application/json"])) return undefined;
         const content = responseValue.content["application/json"];

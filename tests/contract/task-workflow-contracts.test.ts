@@ -37,6 +37,29 @@ const plan = {
 };
 
 describe("native task workflow contracts", () => {
+  it("advances required E2E to review only with a candidate and current-round-bound trusted aggregate", () => {
+    const candidate = createCandidateManifest([{ repositoryId: "payments", commitSha: "a".repeat(40), treeSha: "1".repeat(40), baseCommitSha: "b".repeat(40) }]);
+    const roundId = "11111111-1111-4111-8111-111111111111";
+    const groupRunIds = ["22222222-2222-4222-8222-222222222222"];
+    const e2e = { contractDigest: "c".repeat(64), policyDigest: "d".repeat(64), bundleDigest: "e".repeat(64),
+      executionPlanDigest: "f".repeat(64), required: true, currentRoundId: roundId, currentGroupRunIds: groupRunIds, resultRefs: [] };
+    const current = workflowContracts.WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z" }),
+      stage: "VERIFY", state: "BLOCKED", e2e });
+    const checks = { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: "2026-10-05T12:01:00.000Z",
+      results: [{ checkId: "unit", status: "PASS" as const }] };
+    const qualification = { candidateDigest: candidate.digest, contractDigest: e2e.contractDigest, policyDigest: e2e.policyDigest,
+      bundleDigest: e2e.bundleDigest, executionPlanDigest: e2e.executionPlanDigest, roundId, groupRunIds,
+      admissionSha256: "a".repeat(64), evidenceSha256: "b".repeat(64) };
+
+    const ordinaryOnly = workflowContracts.recordWorkflowVerification(current, { candidate, checks, now: "2026-10-05T12:02:00.000Z" });
+    expect(ordinaryOnly).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+    expect(ordinaryOnly.e2e?.qualifiedRound).toBeUndefined();
+
+    const qualified = workflowContracts.recordWorkflowVerification(current, { candidate, checks, now: "2026-10-05T12:02:00.000Z", e2eQualification: qualification });
+    expect(qualified).toMatchObject({ stage: "REVIEW", state: "WAITING", e2e: { qualifiedRound: qualification } });
+    expect(() => workflowContracts.WorkflowSnapshotSchema.parse({ ...qualified, e2e: { ...qualified.e2e!, qualifiedRound: { ...qualification, roundId: "33333333-3333-4333-8333-333333333333" } } })).toThrow(/current candidate, contract, plan, and round/);
+  });
+
   it("requires an explicit Quick or Full choice when creating a workflow task", () => {
     const request = { requestId: "a1ec6b71-2494-4cbd-92a9-6eecab01676b", project: "payments", instructions: "Fix retry handling", workflow: true };
     expect(StartDeveloperTaskRequestSchema.safeParse(request).success).toBe(false);
@@ -834,6 +857,25 @@ describe("sending blocked work back to coding (Task 16)", () => {
     expect(workflowContracts.workflowSendBackOffered(mixed)).toBe(true);
     expect(workflowContracts.sendBackProblems(mixed)).toEqual([{ source: "check", text: "lint failed" }]);
     expect(workflowContracts.WORKFLOW_BLOCK_REASONS.checksBroken).toBe("the checks couldn't run");
+  });
+
+  it("offers Send Back from a broker-bound current E2E failure even when ordinary checks passed", () => {
+    const roundId = "11111111-1111-4111-8111-111111111111";
+    const runId = "22222222-2222-4222-8222-222222222222";
+    const failed = WorkflowSnapshotSchema.parse({ ...ready(), stage: "VERIFY", state: "BLOCKED", blockReason: "opaque diagnostic text", reviews: [],
+      e2e: { contractDigest: "a".repeat(64), policyDigest: "b".repeat(64), bundleDigest: "c".repeat(64), executionPlanDigest: "d".repeat(64), required: true,
+        currentRoundId: roundId, currentGroupRunIds: [runId], resultRefs: [], failedRound: { status: "FAILED", candidateDigest: candidate.digest,
+          roundId, groupRunIds: [runId], admissionSha256: "e".repeat(64), evidenceSha256: "f".repeat(64) } },
+      verification: { candidateDigest: candidate.digest, producer: "agentx-worker-checks", environmentId: "w", recordedAt: "2026-10-05T12:01:00.000Z",
+        results: [{ checkId: "unit", status: "PASS" }] } });
+    expect(workflowContracts.workflowSendBackOffered(failed)).toBe(true);
+    expect(workflowContracts.sendBackProblems(failed)).toEqual([{ source: "check", text: `required E2E verification failed for the current round (${runId})` }]);
+    const stale = WorkflowSnapshotSchema.parse({ ...failed, e2e: { ...failed.e2e!, currentRoundId: "33333333-3333-4333-8333-333333333333" } });
+    expect(workflowContracts.workflowSendBackOffered(stale)).toBe(false);
+    expect(workflowContracts.sendBackProblems(stale)).toEqual([]);
+    const proseOnly = WorkflowSnapshotSchema.parse({ ...failed, e2e: { ...failed.e2e!, failedRound: undefined } });
+    expect(workflowContracts.workflowSendBackOffered(proseOnly)).toBe(false);
+    expect(workflowContracts.sendBackProblems(proseOnly)).toEqual([]);
   });
 
   it("counts only evidence about the current code: older checks and reviews neither offer a send-back nor reach the coder", () => {

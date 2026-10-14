@@ -5,6 +5,7 @@ import type { WorkflowVerificationResults } from "./task-workflow.js";
 import { redactText } from "./redaction.js";
 import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "./e2e-case-identity.js";
 import { copyBoundedE2EJsonArrayItems } from "./e2e-safe-data.js";
+import { E2ECallableSelectorSchema } from "./e2e-portable.js";
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const id = (max = 120) => z.string().trim().min(1).max(max);
@@ -153,8 +154,27 @@ export const E2EPolicySchema = z.object({ schemaVersion: z.literal(1), policyRev
 });
 export type E2EPolicy = z.infer<typeof E2EPolicySchema>;
 export function e2ePolicyDigest(policy: E2EPolicy): string { const copied = safeJsonInput.parse(policy); return createHash("sha256").update(canonicalJson(E2EPolicySchema.parse(copied))).digest("hex"); }
-export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64) }).strict();
+export const E2EQualifiedRoundSchema = z.object({ candidateDigest: digest, contractDigest: digest, policyDigest: digest, bundleDigest: digest,
+  executionPlanDigest: digest, roundId: z.string().uuid(), groupRunIds: z.array(z.string().uuid()).min(1).max(4),
+  admissionSha256: digest, evidenceSha256: digest }).strict();
+export const E2EFailedRoundSchema = z.object({ status: z.literal("FAILED"), candidateDigest: digest, roundId: z.string().uuid(),
+  groupRunIds: z.array(z.string().uuid()).min(1).max(4), admissionSha256: digest, evidenceSha256: digest }).strict();
+export type E2EFailedRound = z.infer<typeof E2EFailedRoundSchema>;
+export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentRoundId: z.string().uuid().optional(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64), qualifiedRound: E2EQualifiedRoundSchema.optional(), failedRound: E2EFailedRoundSchema.optional() }).strict();
 export type E2EWorkflowProgress = z.infer<typeof E2EWorkflowProgressSchema>;
+export type E2EQualifiedRound = z.infer<typeof E2EQualifiedRoundSchema>;
+
+/** Server-assigned admission object reference for a separate native CHECKS operation. */
+export const E2EWorkflowAdmissionRefSchema = z.object({
+  schemaVersion: z.literal(1), taskId: z.string().uuid(), workflowRevision: positiveInt,
+  candidateDigest: digest, roundId: z.string().uuid(), groupRunIds: z.array(z.string().uuid()).min(1).max(4).refine((values) => new Set(values).size === values.length), admissionRef: z.object({
+    key: z.string().regex(/^workflow-e2e-admissions\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest,
+    byteLength: positiveInt.max(24 * 1024 * 1024),
+  }).strict(),
+}).strict();
+export type E2EWorkflowAdmissionRef = z.infer<typeof E2EWorkflowAdmissionRefSchema>;
+export const E2EWorkflowEvidenceRefSchema = z.object({ key: z.string().regex(/^workflow-e2e-evidence\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest, byteLength: positiveInt.max(24 * 1024 * 1024) }).strict();
+export type E2EWorkflowEvidenceRef = z.infer<typeof E2EWorkflowEvidenceRefSchema>;
 
 const CommandRecipeSchema = z.object({ program: id(256), args: z.array(z.string().max(8192)).max(256), cwd: recipeWorkingDirectory, timeoutMs: positiveInt.max(300_000), env: z.record(z.string().regex(/^[A-Za-z_][A-Za-z0-9_]{0,127}$/), z.string().max(4096)).refine((env) => Object.keys(env).length <= 64 && !Object.keys(env).some((key) => /^(PATH|HOME|AWS_|AGENTX_|PI_|GIT_)/i.test(key) || /(TOKEN|SECRET|PASSWORD|API_KEY)$/i.test(key)) && !Object.values(env).some((value) => redactText(value) !== value), "environment must contain only non-secret allowlisted literals") }).strict().superRefine((command, context) => {
   if (/(^|[/\\])(?:sh|bash|zsh|cmd|powershell|pwsh)(\.exe)?$/i.test(command.program) || command.args.some((arg) => /(^|\s)(?:\||&&|;|>|<|\$\(|`)/.test(arg))) context.addIssue({ code: "custom", message: "shell wrappers and shell-interpreted arguments are forbidden" });
@@ -189,6 +209,19 @@ export type E2EScenario = z.infer<typeof E2EScenarioSchema>;
 export const E2EFeaturePlanIntentSchema = z.object({
   schemaVersion: z.literal(1),
   requestedTargetIds: ids(12),
+  // The model may propose a callable selector, but the broker treats it only as an
+  // untrusted candidate: the canonical plan approval binds it, then the protected
+  // candidate source inventory must independently prove the package export and callable.
+  portableOperationRefs: z.array(z.object({
+    operationId: id(120), applicationId: id(120), requestedTargetIds: ids(12),
+    packageExportSubpath: z.string().regex(/^(?:\.|\.\/[A-Za-z0-9_./-]{1,160})$/),
+    moduleSpecifier: z.string().regex(/^\.\.?\/[A-Za-z0-9_./-]{1,512}$/),
+    callableSelector: E2ECallableSelectorSchema,
+  }).strict()).max(32).optional(),
+  // Owner-approved feature intent may select a source-held API fixture descriptor. The
+  // broker re-reads and validates both source refs; this is selection, never mock authority.
+  mockFixtureRefs: z.array(z.object({ componentId: id(120), requestedTargetId: id(80), operationId: id(120),
+    sourcePath: sourceRelativePath, sourceSha256: digest }).strict()).max(200).optional(),
   accountContextRefs: z.array(z.object({
     applicationId: id(120), profileId: id(120), sourcePath: sourceRelativePath, sourceSha256: digest,
   }).strict()).max(32),
@@ -208,6 +241,30 @@ export const E2EFeaturePlanIntentSchema = z.object({
   if (new Set(accounts).size !== accounts.length) context.addIssue({ code: "custom", path: ["accountContextRefs"], message: "account context references must be unique by application and profile" });
   const deltas = intent.semanticExportDeltas.map((item) => `${item.applicationId}\0${item.operationId}`);
   if (new Set(deltas).size !== deltas.length) context.addIssue({ code: "custom", path: ["semanticExportDeltas"], message: "semantic export deltas must be unique by operation" });
+  const operationRefs = intent.portableOperationRefs ?? [];
+  if (new Set(operationRefs.map((item) => `${item.applicationId}\0${item.operationId}`)).size !== operationRefs.length) {
+    context.addIssue({ code: "custom", path: ["portableOperationRefs"], message: "portable operation references must be unique by application and operation" });
+  }
+  const mockRefs = intent.mockFixtureRefs ?? [];
+  if (new Set(mockRefs.map((item) => `${item.requestedTargetId}\0${item.componentId}`)).size !== mockRefs.length) {
+    context.addIssue({ code: "custom", path: ["mockFixtureRefs"], message: "source-backed mock selections must be unique by target and component" });
+  }
+  if (mockRefs.some((item) => !requested.has(item.requestedTargetId))) {
+    context.addIssue({ code: "custom", path: ["mockFixtureRefs"], message: "source-backed mock selections must bind a requested target" });
+  }
+  for (const [index, operation] of operationRefs.entries()) {
+    if (operation.requestedTargetIds.length === 0 || operation.requestedTargetIds.some((targetId) => !requested.has(targetId))) {
+      context.addIssue({ code: "custom", path: ["portableOperationRefs", index, "requestedTargetIds"], message: "portable operation targets must be selected by the feature plan" });
+    }
+  }
+  for (const [index, scenario] of intent.scenarios.entries()) {
+    const step = scenario.steps[0];
+    if (step?.kind !== "invoke-contract") continue;
+    const operation = operationRefs.find((item) => item.operationId === step.operationId);
+    if (!operation || scenario.requestedTargetIds.some((targetId) => !operation.requestedTargetIds.includes(targetId))) {
+      context.addIssue({ code: "custom", path: ["scenarios", index, "steps"], message: "portable invocation must reference a proposed operation bound to every requested scenario target" });
+    }
+  }
 });
 export type E2EFeaturePlanIntent = z.infer<typeof E2EFeaturePlanIntentSchema>;
 export const E2EScenarioBundleSchema = safeJsonSchema(z.object({ schemaVersion: z.literal(1), planDigest: digest, bundleDigest: digest, templateVersion: id(80), scenarios: z.array(E2EScenarioSchema).max(32) }).strict().superRefine((bundle, context) => {
@@ -290,6 +347,23 @@ export const E2EExecutionPlanSchema = safeJsonSchema(z.object({ schemaVersion: z
 }));
 export type E2EExecutionPlan = z.infer<typeof E2EExecutionPlanSchema>;
 export function e2eExecutionPlanDigest(plan: E2EExecutionPlan): string { const content = Object.fromEntries(Object.entries(safeJsonInput.parse(plan) as E2EExecutionPlan).filter(([key]) => key !== "digest")); return createHash("sha256").update(canonicalJson(content)).digest("hex"); }
+
+/** True only when every required criterion in the approved plan has executable, group-bound cases. */
+export function e2ePlanHasCompleteRequiredCriteria(plan: E2EExecutionPlan): boolean {
+  const unavailable = new Set(plan.unavailableCriteria.map((item) => item.criterionId));
+  const cases = new Map<string, E2EExpectedCase[]>();
+  for (const group of plan.groups) for (const expected of group.expectedCases) {
+    const entries = cases.get(expected.caseId) ?? [];
+    entries.push(expected);
+    cases.set(expected.caseId, entries);
+  }
+  return plan.criteria.filter((criterion) => criterion.required).every((criterion) => !unavailable.has(criterion.criterionId)
+    && criterion.expectedCaseIds.length > 0 && criterion.expectedCaseIds.every((caseId) => {
+      const matches = cases.get(caseId) ?? [];
+      return matches.length === 1 && matches[0]?.criterionId === criterion.criterionId
+        && matches[0]?.scenarioId === criterion.scenarioId && matches[0]?.requestedTargetId === criterion.requestedTargetId;
+    }));
+}
 
 export const E2EExpectedCaseManifestSchema = E2EExpectedCaseSchema;
 export const E2ERunBindingSchema = z.object({ schemaVersion: z.literal(1), runId: z.string().uuid(), roundId: z.string().uuid(), taskId: id(120), operationId: id(120), operationFence: positiveInt, workflowRevision: positiveInt, groupId: id(80), executionPlanDigest: digest, executionMode: E2EExecutionModeSchema, mockManifestDigest: digest, authorizationRevision: id(120), candidateDigest: digest, planDigest: digest, policyDigest: digest, bundleDigest: digest, appBuildDigest: digest, environmentDigest: digest, runtimeManifestDigest: digest, modelRouteRevision: id(120).nullable(), expectedCases: z.array(E2EExpectedCaseSchema).max(64), admittedAt: timestamp, deadlineAt: timestamp }).strict().superRefine((binding, context) => {

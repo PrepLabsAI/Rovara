@@ -45,6 +45,7 @@ export interface OperationRecord extends Operation {
   /** #342: the Slack thread a ChatGPT task was asked from, where a fallback is told; absent for a developer task (its own thread). */
   chatgptThread?: { teamId: string; channelId: string; threadTs: string };
   workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | undefined;
+  candidateSourceRef?: { key: string; sha256: string; byteLength: number; candidateDigest: string };
   workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } | undefined;
   /** A PR feedback review started by a broker that gives the critic only the owner's notes for its round (absent: an earlier release's run). */
   feedbackNotesScoped?: true;
@@ -62,6 +63,7 @@ export interface OperationRecord extends Operation {
      * when GitHub says the pushed commit has this tree, and always as a draft.
      */
     expectedTreeSha?: string;
+    expectedCommitSha?: string;
     /** The checked candidate the tree belongs to (a workflow publication only). */
     candidateDigest?: string;
     /** The base commit the broker pinned for the task: the pushed commit's only parent (a workflow publication only). */
@@ -91,7 +93,7 @@ export interface CallbackClaims {
   workspaceId: string;
   operationId: string;
   fence: number;
-  actions: Array<"events" | "artifacts" | "result" | "feedback-bundles" | "feedback-approval" | "pull-request" | "pull-request-update" | "codebuild" | "chatgpt-token" | "chatgpt-status">;
+  actions: Array<"events" | "artifacts" | "result" | "candidate-export" | "e2e-admission" | "e2e-evidence" | "feedback-bundles" | "feedback-approval" | "pull-request" | "pull-request-update" | "codebuild" | "chatgpt-token" | "chatgpt-status">;
   expiresAt: number;
 }
 
@@ -192,6 +194,8 @@ export function issueCapability(
   allowFeedbackBundles = false,
   allowFeedbackApproval = false,
   allowChatGptToken = false,
+  allowCandidateExport = false,
+  allowWorkflowE2E = false,
 ): string {
   const claims: CallbackClaims = {
     workspaceId,
@@ -201,6 +205,8 @@ export function issueCapability(
       "artifacts",
       "events",
       "result",
+      ...(allowCandidateExport ? ["candidate-export" as const] : []),
+      ...(allowWorkflowE2E ? ["e2e-admission" as const, "e2e-evidence" as const] : []),
       ...(allowFeedbackBundles ? ["feedback-bundles" as const] : []),
       ...(allowFeedbackApproval ? ["feedback-approval" as const] : []),
       // #341: only a task that runs on its owner's ChatGPT plan may ask for the owner's access token.

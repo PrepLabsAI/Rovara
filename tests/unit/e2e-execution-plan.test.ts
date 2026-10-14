@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createCandidateManifest, e2eExecutionPlanDigest, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
+import { createCandidateManifest, e2eExecutionPlanDigest, e2ePlanHasCompleteRequiredCriteria, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { effectiveContractTargetId, portableE2EUpstreamTestId, PORTABLE_E2E_TEST_PATH, selectE2EExecutionPlan as selectRawE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
 import { withTestPortableApproval } from "../e2e-test-approval.js";
 import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
@@ -39,6 +39,15 @@ describe("safe E2E execution plan selection", () => {
     expect(plan.groups.flatMap((group) => group.expectedCases.map((item) => [item.requestedTargetId, item.targetId]))).toEqual([[ web.targetId, expect.stringMatching(/^contract-/) ]]);
     expect(plan.criteria.every((criterion) => criterion.required)).toBe(true);
     expect(plan.unavailableCriteria.map((item) => item.criterionId)).toContain(plan.criteria.find((item) => item.requestedTargetId === api.targetId)?.criterionId);
+    expect(e2ePlanHasCompleteRequiredCriteria(plan), "an unavailable required target must hold the whole approved criterion set").toBe(false);
+    const portableOnly = selectE2EExecutionPlan({ ...input, scenarios: [{ ...scenario, requestedTargetIds: [web.targetId] }], mockableComponents: [] });
+    expect(e2ePlanHasCompleteRequiredCriteria(portableOnly)).toBe(true);
+    const browserPlan = selectE2EExecutionPlan({ ...input, policy: { ...policy, baselineScenarioIds: [] }, scenarios: [{ ...scenario, scenarioId: "required-browser-navigation",
+      requirementId: "orders-browser-navigation", requestedTargetIds: [web.targetId],
+      steps: [{ kind: "navigate", path: "/orders" }], assertions: [{ kind: "visible", testId: "orders-list", equals: true }] }] });
+    expect(browserPlan.criteria).toMatchObject([{ scenarioId: "required-browser-navigation", required: true, expectedCaseIds: [] }]);
+    expect(browserPlan.unavailableCriteria.map((item) => item.criterionId)).toContain(browserPlan.criteria[0]?.criterionId);
+    expect(e2ePlanHasCompleteRequiredCriteria(browserPlan), "required browser navigation cannot disappear when only portable groups execute").toBe(false);
     expect(plan.groups.flatMap((group) => group.expectedCases).every((item) => item.agentId === "default" && item.upstreamTestId.startsWith(`${PORTABLE_E2E_TEST_PATH}::case-`))).toBe(true);
     expect(portableE2EUpstreamTestId(["feature", "web", "contract-web", "a".repeat(64)])).toBe(portableE2EUpstreamTestId(["feature", "web", "contract-web", "a".repeat(64)]));
     expect(e2eExecutionPlanDigest({ ...plan, digest: "0".repeat(64) })).toBe(plan.digest);

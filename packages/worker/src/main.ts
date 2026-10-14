@@ -14,6 +14,7 @@ import { resolveTaskSessionModel } from "./task-model.js";
 import { chatGptTokenSource } from "./chatgpt-token.js";
 import { createDefaultProjectSetupExecutor } from "./project-setup-executor.js";
 import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
+import { postWorkerTerminalResult } from "./terminal-callback.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
@@ -61,6 +62,10 @@ const state = createWorkerServerState(
           model: session.model,
           ...(session.piAdapter === undefined ? {} : { piAdapter: session.piAdapter }),
           ...callbacks,
+          ...(invocation.payload.workflowE2EAdmission === undefined ? {} : {
+            workflowE2EEvidenceRoot: requiredEnvironment("CONTAINED_FOUNDATION_EVIDENCE_DIR"),
+            workflowE2ERuntimeRoot: process.cwd(),
+          }),
           cancellationController,
         });
       }
@@ -114,7 +119,7 @@ const state = createWorkerServerState(
         controlPlaneUrl: requiredEnvironment("AGENTX_CONTROL_PLANE_URL"),
         invocation,
       });
-      await callbacks.terminalSink(result);
+      await postWorkerTerminalResult(callbacks, result, invocation);
     },
   },
   invokeAuthentication,

@@ -55,6 +55,7 @@ import {
   type StartDeveloperTaskRequest,
   type WorkspaceInstance,
   type WorkflowSnapshot,
+  WorkflowSnapshotSchema,
   type TaskComment,
   type TaskSuggestion,
   type WorkflowStage,
@@ -80,6 +81,9 @@ import {
   type WorkflowReviewFinding,
   type WorkflowCheckPolicy,
   WorkflowDecisionRequestSchema,
+  E2EPolicySchema,
+  e2ePolicyDigest,
+  e2eScenarioBundleDigest,
   WorkflowFeedbackNoteSchema,
   WorkflowFeedbackBundleSchema,
   WorkflowFeedbackReviewReportSchema,
@@ -117,10 +121,12 @@ import {
   WORKFLOW_KEEP_PULL_REQUESTS_NOTE,
   returnWorkflowToImplementation,
   sendBackProblems,
+  workflowSendBackOffered,
   WORKFLOW_REGRESSION_INSTRUCTION,
   type WorkflowSendBackProblem,
   type WorkflowDependencyInvocation,
   type E2EFeaturePlanIntent,
+  type E2EWorkflowAdmissionRef,
   workflowDependencyAttemptTerminalProgress,
   WorkflowResolveFindingsInputSchema,
   TaskPeopleRoleRequestSchema,
@@ -236,6 +242,8 @@ export interface DeveloperTaskRouteDependencies {
   resolveTaskPickerPerson?(taskId: string, slackUserId: string): Promise<{ personId: string; developerId: string; slackUserId: string; channelMember: boolean }>;
   taskPeopleChannel?(taskId: string): Promise<{ teamId: string; channelId: string; threadTs: string }>;
   inviteTaskPerson?(input: TaskPersonInviteClaimRequest): Promise<TaskPersonInviteOutcome>;
+  /** Loads E2E presentation from the current server-owned CHECKS operation and its immutable evidence references. */
+  workflowE2EPresentation?(input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }): Promise<DeveloperTaskView["e2ePresentation"] | undefined>;
 }
 
 function taskPeopleEffectsDependencies(deps: DeveloperTaskRouteDependencies) {
@@ -1037,7 +1045,7 @@ async function workspaceReads(deps: DeveloperTaskRouteDependencies, task: Develo
 export async function taskView(
   deps: DeveloperTaskRouteDependencies,
   task: DeveloperTaskRecord,
-  options: { events: number; details: boolean; loaded?: WorkspaceReads },
+  options: { events: number; details: boolean; loaded?: WorkspaceReads; actor?: "owner" | "viewer" },
 ): Promise<DeveloperTaskView> {
   const [{ workspace, operations }, pointer] = await Promise.all([
     options.loaded ?? workspaceReads(deps, task),
@@ -1095,12 +1103,18 @@ export async function taskView(
       else workflow = { ...workflow, state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.documentUnverified };
     }
   }
+  let e2ePresentation: DeveloperTaskView["e2ePresentation"];
+  if (options.details && task.workflow?.e2e?.required === true && deps.workflowE2EPresentation !== undefined) {
+    try { e2ePresentation = await deps.workflowE2EPresentation({ task, operations, actor: options.actor ?? "owner" }); }
+    catch (error) { log(deps, { event: "developer.task_e2e_view_unavailable", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }); }
+  }
   return {
     taskId: task.taskId,
     title: task.title,
     project: task.project,
     status: derived.status,
     ...(workflow === undefined ? {} : { workflow }),
+    ...(e2ePresentation === undefined ? {} : { e2ePresentation }),
     ...(derived.failure === undefined ? {} : { failure: derived.failure }),
     startingRevision: task.startingRevision,
     client: task.client,
@@ -1717,6 +1731,20 @@ export async function decideTaskWorkflow(
   const decisionRequest: WorkflowDecisionRequest = included.length === 0 && request.includedCommentIds === undefined
     ? boundDecisionRequest : { ...boundDecisionRequest, includedCommentIds: included.map((comment) => comment.commentId) };
   let next = transition(decisionRequest, decisions, workBreakdownDigest);
+  // A required feature-E2E obligation begins only when the Owner approves the canonical plan bytes that contain it.
+  // The digests below identify the approved intent and its policy/bundle; candidate-specific execution-plan identity is
+  // bound later by the server-created CHECKS admission and round.
+  if (request.decision === "APPROVE" && documentType === "plan" && loaded?.format === "structured" && loaded.plan.e2e !== undefined) {
+    const pinnedProject = await deps.actions.projectRevision(task.project, task.startingRevision);
+    if (pinnedProject?.definition.e2e === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the approved feature E2E intent has no pinned project policy");
+    const intent = loaded.plan.e2e;
+    const policy = E2EPolicySchema.parse(pinnedProject.definition.e2e);
+    const bundleBody = { schemaVersion: 1 as const, planDigest: decided!.sha256, templateVersion: "trusted-e2e/v1", scenarios: intent.scenarios, bundleDigest: "0".repeat(64) };
+    const bundleDigest = e2eScenarioBundleDigest(bundleBody);
+    const intentDigest = createHash("sha256").update(canonicalJson({ domain: "workflow-e2e-approved-intent/v1", artifactDigest: decided!.sha256, intent })).digest("hex");
+    next = WorkflowSnapshotSchema.parse({ ...next, e2e: { contractDigest: decided!.sha256, policyDigest: e2ePolicyDigest(policy),
+      bundleDigest, executionPlanDigest: intentDigest, required: true, currentGroupRunIds: [], resultRefs: [] } });
+  }
   const receivedAt = iso(deps);
   if (request.decision === "REJECT") {
     await deps.actions.transact([{ Update: {
@@ -2197,6 +2225,9 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
   }
   if (request.expectedRevision === undefined) throw agentXError("CONFIG_INVALID", "refresh the task and include its current revision before sending it back to coding");
   if (request.expectedRevision !== workflow.revision) throw agentXError("IDEMPOTENCY_CONFLICT", "this send-back is out of date; refresh the task and try again");
+  if (!workflowSendBackOffered(workflow)) {
+    throw agentXError("CONFIG_INVALID", "there is no current failed check or review finding to send back to coding");
+  }
   const receivedAt = iso(deps);
   let returned: WorkflowSnapshot;
   try {
@@ -2562,6 +2593,60 @@ export async function startTaskWorkflowReviewFromSystem(
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
 
+/** Starts a separate server-admitted native CHECKS operation from VERIFY/WAITING. */
+export async function startTaskWorkflowE2EChecksFromSystem(
+  deps: DeveloperTaskRouteDependencies,
+  taskId: string,
+  expected: { workflowRevision: number; candidateDigest: string },
+  admission: E2EWorkflowAdmissionRef,
+  operationId: string,
+  actor?: DeveloperCaller,
+): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined
+    || workflow.revision !== expected.workflowRevision || workflow.stage !== "VERIFY" || workflow.state !== "WAITING"
+    || workflow.e2e?.required !== true || workflow.candidate?.digest !== expected.candidateDigest
+    || admission.taskId !== taskId || admission.candidateDigest !== expected.candidateDigest
+    || admission.workflowRevision !== workflow.revision + 1 || admission.roundId.length === 0
+    || admission.groupRunIds.length === 0 || new Set(admission.groupRunIds).size !== admission.groupRunIds.length) return "STALE";
+  const dispatchAccess = await systemTaskAccess(deps, task);
+  const workspace = await deps.actions.workspace(task.workspaceId);
+  if (workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
+  const receivedAt = iso(deps);
+  const { qualifiedRound: _previousQualification, failedRound: _previousFailure, ...unqualifiedE2E } = workflow.e2e;
+  void _previousQualification;
+  void _previousFailure;
+  const next: WorkflowSnapshot = WorkflowSnapshotSchema.parse({
+    ...workflow,
+    revision: workflow.revision + 1,
+    state: "RUNNING",
+    stage: "VERIFY",
+    e2e: { ...unqualifiedE2E, currentRoundId: admission.roundId, currentGroupRunIds: admission.groupRunIds },
+    updatedAt: receivedAt,
+  });
+  const requestId = workflowRequestId("agentx-auto-e2e-checks", taskId, expected.workflowRevision, expected.candidateDigest);
+  const accepted = await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, {
+    requestId, conversationId: task.conversationId,
+    prompt: "Run the broker-admitted E2E verification groups for this exact candidate. Do not edit files or expand the admitted scenarios.",
+  }, (operation) => [
+    { Update: {
+      TableName: deps.tableName, Key: taskKey(taskId),
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.candidate.digest = :candidate AND workflow.e2e.required = :required AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+      ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":verify": "VERIFY", ":waiting": "WAITING", ":candidate": expected.candidateDigest, ":required": true },
+    } },
+    putNew(turnTable(deps), aiToolTurn({
+      party: actor === undefined ? partyOfTask(task) : partyOfTaskActor(task, actor), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
+      receivedAt, finishedAt: iso(deps), request: "Run admitted E2E verification", response: `Broker-admitted E2E CHECKS started as operation ${operation.id}.`, operationId: operation.id,
+    })),
+    ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+  ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission,
+    readiness: workflowSelectedChecks(workflow.checkPolicy).map((check) => check.command), ...taskBaseOption(task, next) });
+  return accepted.duplicate ? "DUPLICATE" : "STARTED";
+}
+
 /** The task's page, which the draft pull request's description links to. */
 export function taskPageUrl(issuer: string, taskId: string): string {
   return new URL(`/review/${encodeURIComponent(taskId)}/task`, new URL(issuer).origin).href;
@@ -2673,6 +2758,9 @@ const cutReason = (reason: string): string => {
 export async function getTaskPageState(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskPageState> {
   const { access, capabilities } = await coherentPageAccess(deps, caller, taskId);
   const { task } = access;
+  const taskViewRecord = task.workflow?.e2e?.required === true
+    ? await taskView(deps, task, { events: 0, details: true, actor: "viewer" })
+    : undefined;
   const workflow = task.workflow;
   const documents = TASK_PAGE_DOCUMENTS.flatMap(({ type, anchor }) => {
     const latest = (workflow?.artifacts ?? []).filter((artifact) => artifact.type === type).reduce((most, artifact) => Math.max(most, artifact.version), 0);
@@ -2687,6 +2775,7 @@ export async function getTaskPageState(deps: DeveloperTaskRouteDependencies, cal
     canComment: permissions.canComment, canSuggest: permissions.canSuggest, canDecide: permissions.canDecide,
     canAsk: permissions.canAsk && await commentAnswersAvailable(deps, task),
     canManagePeople: capabilities.canManagePeople, canTakeOwnership: capabilities.canTakeOwnership,
+    ...(taskViewRecord?.e2ePresentation === undefined ? {} : { e2ePresentation: taskViewRecord.e2ePresentation }),
   };
 }
 
@@ -3403,7 +3492,7 @@ export async function startTaskWorkflowPublicationFromSystem(
         response: `AgentX is opening a draft pull request on ${repository.repositoryId} as operation ${operation.id}.`, operationId: operation.id,
       })),
       ...(dispatchAccess === undefined ? [] : [taskAccessFence(deps.tableName, taskId, dispatchAccess.peopleRevision)]),
-    ], { workflowCandidate: { repositoryId: repository.repositoryId, treeSha: repository.treeSha, candidateDigest: expected.candidateDigest,
+    ], { workflowCandidate: { repositoryId: repository.repositoryId, treeSha: repository.treeSha, commitSha: repository.commitSha, candidateDigest: expected.candidateDigest,
       ...(baseCommitSha === undefined ? {} : { baseCommitSha }) } });
   } catch (error) {
     // The task moved on (or closed) between the read and the commit: nothing was started, and nothing is due.

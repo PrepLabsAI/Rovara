@@ -86,7 +86,7 @@ async function workflowAtVerification(harness: Harness, structured?: PlanDocumen
   const digest = structured === undefined ? createHash("sha256").update(plan).digest("hex") : seedStructured(harness, taskId, "plan", structured);
   await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, { requestId: randomUUID(), expectedRevision: taskWorkflow(harness, taskId).revision, decision: "APPROVE", reason: "Approved", artifactDigest: digest });
   const implementation = operations(harness, workspaceId).find((item) => item.workflowMode === "IMPLEMENT")!;
-  const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
+  const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
   const finishImplementation = () => harness.finish(workspaceId, String(implementation.id), "SUCCEEDED", { result: { workflowCandidateRepositories: candidate.repositories, workflowCheckCandidateRepositories: candidate.repositories, checks: passingChecks() } });
   return { taskId, workspaceId, candidate, plan, digest, finishImplementation };
 }
@@ -1134,16 +1134,9 @@ describe("native developer task workflow", () => {
 
   it("starts both reviews automatically once the selected checks pass, bound to the exact checked code", async () => {
     const harness = await createDeveloperTaskBroker();
-    const proposedE2EIntent = {
-      schemaVersion: 1 as const,
-      requestedTargetIds: ["payments-web"],
-      accountContextRefs: [{ applicationId: "payments", profileId: "synthetic", sourcePath: "package.json", sourceSha256: "a".repeat(64) }],
-      scenarios: [{ scenarioId: "retry-flow", requirementId: "retry-timeout", requestedTargetIds: ["payments-web"], required: true,
-        accountProfileId: "synthetic", minimumEvidence: "source" as const, requiredRealComponentIds: [],
-        steps: [{ kind: "navigate" as const, path: "/payments" }], assertions: [{ kind: "visible" as const, testId: "retry-status", equals: true }] }],
-      semanticExportDeltas: [],
-    };
-    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness, planDocument({ e2e: proposedE2EIntent }));
+    // This is the ordinary non-E2E review-start control. Required browser/source-interface intent now uses the
+    // dedicated normal-route acceptance, where unsupported criteria remain UNKNOWN and hold review admission.
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness, planDocument());
     await finishImplementation();
     const workflow = taskWorkflow(harness, taskId);
     expect(workflow).toMatchObject({ stage: "REVIEW", state: "RUNNING", candidate: { digest: candidate.digest } });
@@ -1155,7 +1148,6 @@ describe("native developer task workflow", () => {
     const approvedPlan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)!;
     expect(payload.workflowReviewPlan?.sha256).toBe(approvedPlan.sha256);
     expect(payload.workflowReviewPlan?.markdown).toContain("Retry failed payments");
-    expect(payload.workflowReviewPlan?.e2eIntent).toEqual(proposedE2EIntent);
     expect(Buffer.byteLength(payload.workflowReviewPlan!.markdown, "utf8")).toBeLessThanOrEqual(32_768);
     expect(payload.prompt).not.toContain(payload.workflowReviewPlan!.markdown);
     // Reviewers are told which checks ran on the checked code.
@@ -2979,7 +2971,7 @@ describe("checks AgentX proposes in the coding plan", () => {
 describe("review-only verification when no check applies", () => {
   const EMPTY_POLICY = { required: [], optional: [], selectedOptionalIds: [] };
   const NO_CHECKS = { status: "not_verified", notVerifiedReason: "no_checks", source: "none", preambleVersion: "1", preambleSha256: "c".repeat(64), checks: [], extraTry: "not_needed", agentClaim: "success" };
-  const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
+  const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
   /** A Quick task coding after the owner approved `plan`; `policy` is the stored check policy (undefined: none stored). */
   async function coding(harness: Harness, plan: string | { answer: string }, policy: Record<string, unknown> | undefined) {
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK" });
@@ -4511,7 +4503,8 @@ describe("pushing an approved PR feedback fix to the same pull request (item 7)"
     await harness.finish(workspaceId, publish.id, "SUCCEEDED", { result: { repository: "demo", number: 42, url: PR_URL, headBranch: p.headBranch, baseBranch: "main", commit: "d".repeat(40), checks: [], reconciled: false } });
     expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "WAIT_FOR_MERGE", pullRequests: [{ number: 42, headSha: "d".repeat(40), headTreeSha: "b".repeat(40) }] });
     // The owner approved PR feedback and the fix was coded and checked (tree c, same base): its reviews are due.
-    const fix = createCandidateManifest([{ repositoryId: "demo", commitSha: "9".repeat(40), treeSha: FIX_TREE, baseCommitSha: "e".repeat(40) }]);
+    // The synthetic candidate is the exact immutable commit the simulated update pushes; the broker now binds both.
+    const fix = createCandidateManifest([{ repositoryId: "demo", commitSha: PUSHED, treeSha: FIX_TREE, baseCommitSha: "e".repeat(40) }]);
     const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
     const opened = record.workflow;
     const now = new Date().toISOString();

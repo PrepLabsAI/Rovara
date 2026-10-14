@@ -392,7 +392,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
     const task = h.db.get(`DEVTASK#${h.taskId}`, "META") as Parameters<typeof developerTaskIdentity>[0];
     const accepted = await h.actions.acceptPullRequest(developerTaskIdentity(task), h.workspaceId, { requestId: randomUUID(), repository: "demo", title: "AgentX: fix", draft: true },
-      () => [], { workflowCandidate: { repositoryId: "demo", treeSha: "b".repeat(40), candidateDigest } });
+      () => [], { workflowCandidate: { repositoryId: "demo", commitSha: "c".repeat(40), treeSha: "b".repeat(40), candidateDigest } });
     await h.finish(h.workspaceId, accepted.operation.id, "FAILED", { error: "GitHub refused the push" });
     await h.pump();
     const failed = h.posts.at(-1)!;
@@ -403,7 +403,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     }), expect.objectContaining({ action_id: "agentx_workflow_close" })] }));
     // The workspace no longer holds the checked code: said in plain words, with no retry that would fail the same way.
     const changed = await h.actions.acceptPullRequest(developerTaskIdentity(task), h.workspaceId, { requestId: randomUUID(), repository: "demo", title: "AgentX: fix", draft: true },
-      () => [], { workflowCandidate: { repositoryId: "demo", treeSha: "b".repeat(40), candidateDigest } });
+      () => [], { workflowCandidate: { repositoryId: "demo", commitSha: "c".repeat(40), treeSha: "b".repeat(40), candidateDigest } });
     await h.finish(h.workspaceId, changed.operation.id, "FAILED", { error: "CONFIG_INVALID: the code changed after its checks and reviews; AgentX did not publish it" });
     await h.pump();
     const changedPost = h.posts.at(-1)!;
@@ -448,7 +448,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
     const task = h.db.get(`DEVTASK#${h.taskId}`, "META") as Parameters<typeof developerTaskIdentity>[0];
     const accepted = await h.actions.acceptPullRequest(developerTaskIdentity(task), h.workspaceId, { requestId: randomUUID(), repository: "demo", title: "AgentX: fix", draft: true },
-      () => [], { workflowCandidate: { repositoryId: "demo", treeSha: "b".repeat(40), candidateDigest } });
+      () => [], { workflowCandidate: { repositoryId: "demo", commitSha: "c".repeat(40), treeSha: "b".repeat(40), candidateDigest } });
     await setWorkflow({ revision: 9, stage: "PULL_REQUEST", state: "BLOCKED", blockReason: WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE });
     await h.finish(h.workspaceId, accepted.operation.id, "FAILED", { error: "the pull request is not the checked code" });
     await h.handle({ Records: h.stream.take().map((record) => ({ ...record, eventSource: "aws:dynamodb" })) });
@@ -481,7 +481,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
     const task = h.db.get(`DEVTASK#${h.taskId}`, "META") as Parameters<typeof developerTaskIdentity>[0];
     const accepted = await h.actions.acceptPullRequest(developerTaskIdentity(task), h.workspaceId, { requestId: randomUUID(), repository: "demo", title: "AgentX: fix", draft: true },
-      () => [], { workflowCandidate: { repositoryId: "demo", treeSha: "b".repeat(40), candidateDigest } });
+      () => [], { workflowCandidate: { repositoryId: "demo", commitSha: "c".repeat(40), treeSha: "b".repeat(40), candidateDigest } });
     const before = h.posts.length;
     // The broker refused the publication's callback and blocked the task; then the worker's own failure arrived.
     await setWorkflow({ revision: 9, stage: "PULL_REQUEST", state: "BLOCKED", blockReason: WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE });

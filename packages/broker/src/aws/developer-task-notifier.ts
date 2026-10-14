@@ -23,6 +23,7 @@ import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
 import { runTaskCanvasCloseout, type CanvasCloseoutStore, type TaskCanvasCloseoutTask } from "./developer-task-closeout.js";
 import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createTaskPlanCanvas, deleteTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
+import { loadWorkflowE2EPresentation } from "./broker.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
@@ -53,6 +54,8 @@ export interface NotifierDependencies {
   /** One `SlackDeliveryFailed` count (spec 015 FR-045's alarm sums it). */
   deliveryFailed(): void;
   peopleChangesEnabled?: boolean;
+  /** Revalidates the current CHECKS admission and evidence before adding a read-only Slack projection. */
+  workflowE2EBlocks?(task: DeveloperTaskRecord, operations: readonly unknown[]): Promise<unknown[] | undefined>;
 }
 
 /** The start message is still being posted: a reply waits for its thread (C9). */
@@ -823,7 +826,14 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
   }
   const message = workflowMessage(context);
   if (message === undefined) return undefined;
-  return { ...message, sameAs: reopened ? `reopened:${workflow.revision}` : workflowMessageKey(workflow), ...(approval === undefined ? {} : { approval }) };
+  const e2eBlocks = workflow.e2e?.required === true && deps.workflowE2EBlocks !== undefined
+    ? await deps.workflowE2EBlocks(task, await operationsOf(deps, task.workspaceId)).catch((error: unknown) => {
+      deps.log({ event: "developer_notifier.e2e_projection_unavailable", taskId: task.taskId, error: errorName(error) });
+      return undefined;
+    })
+    : undefined;
+  const blocks = e2eBlocks === undefined ? message.blocks : [...(message.blocks ?? []), ...e2eBlocks].slice(0, 50);
+  return { ...message, ...(blocks === undefined ? {} : { blocks }), sameAs: reopened ? `reopened:${workflow.revision}` : workflowMessageKey(workflow), ...(approval === undefined ? {} : { approval }) };
 }
 
 async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice): Promise<Reply | undefined> {
@@ -1742,6 +1752,11 @@ function createAwsNotifierHandler() {
       component: "developer-task-notifier", event: "metric", SlackDeliveryFailed: 1,
     })),
     peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true",
+    workflowE2EBlocks: async (task, operations) => {
+      const presentation = await loadWorkflowE2EPresentation({ documentClient, tableName: requiredEnvironment("STATE_TABLE_NAME"), s3,
+        artifactBucketName: requiredEnvironment("ARTIFACT_BUCKET_NAME") }, task, operations, "viewer");
+      return presentation?.slackBlocks;
+    },
   });
 }
 

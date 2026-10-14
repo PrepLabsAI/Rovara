@@ -402,6 +402,12 @@ function reviewBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof
 
 function verifyBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof exitButtons>): { text: string; buttons: Button[] } {
   const { workflow } = context;
+  const e2eFailure = sendBackProblems(workflow).some((problem) => problem.source === "check"
+    && problem.text.startsWith("required E2E verification failed for the current round"));
+  if (e2eFailure && workflowSendBackOffered(workflow)) {
+    return { text: "The required end-to-end verification failed for the current code. Send it back to coding, or close the task.",
+      buttons: [...exits.sendBack(), exits.close] };
+  }
   const verification = workflow.candidate !== undefined && workflow.verification?.candidateDigest === workflow.candidate.digest ? workflow.verification : undefined;
   const results = verification?.results ?? [];
   const failed = results.filter((result) => result.status === "FAILED");
