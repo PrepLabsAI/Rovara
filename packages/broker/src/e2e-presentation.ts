@@ -31,6 +31,12 @@ export function renderE2ESlackBlocks(view: E2ESharedView): Array<E2ESlackBlock |
   ];
 }
 
+/** A fail-closed notifier fallback when its bounded display projection is missing or stale. */
+export function renderE2EUnavailableSlackBlock(taskPageUrl?: string): E2ESlackBlock {
+  const taskLink = taskPageUrl === undefined ? "Open the task for details." : `<${slackBounded(taskPageUrl, 1800)}|Open the task for details.>`;
+  return { type: "section", text: { type: "mrkdwn", text: `*Required E2E status: UNKNOWN*\nManifest/results unavailable. ${taskLink}` } };
+}
+
 /** Renders the same bounded facts for a page without adding controls or executable actions. */
 export function renderE2EPageHtml(view: E2ESharedView): string {
   const { setup, e2e } = view;

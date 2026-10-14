@@ -3465,7 +3465,7 @@ export async function startTaskWorkflowPublicationFromSystem(
   // Every repository has its pull request: an approved fix whose checks and reviews passed is pushed to them instead.
   if (repository === undefined) {
     return workflow.state === "READY" && workflowPullRequestUpdateDue(workflow)
-      ? startTaskWorkflowPullRequestUpdate(deps, task, { ...workflow, candidate: workflow.candidate }, expected, dispatchAccess, origin.ownerActor)
+      ? startTaskWorkflowPullRequestUpdate(deps, task, { ...workflow, candidate: workflow.candidate }, expected, currentE2EChecks, dispatchAccess, origin.ownerActor)
       : "STALE";
   }
   const attempt = 1 + await deps.actions.failedPublications(task.workspaceId, { repositoryId: repository.repositoryId, candidateDigest: expected.candidateDigest, treeSha: repository.treeSha });
@@ -3543,9 +3543,11 @@ async function startTaskWorkflowPullRequestUpdate(
   task: DeveloperTaskRecord,
   workflow: WorkflowSnapshot & { candidate: NonNullable<WorkflowSnapshot["candidate"]> },
   expected: { workflowRevision: number; candidateDigest: string },
+  currentE2EChecks: TransactItems,
   ownerAccess?: Pick<TaskAccess, "peopleRevision">,
   ownerActor?: DeveloperCaller,
 ): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  if (workflow.e2e?.required === true && currentE2EChecks.length === 0) return "STALE";
   const pullRequest = nextWorkflowPullRequestUpdate(workflow);
   const repository = workflow.candidate.repositories.find((entry) => entry.repositoryId === pullRequest?.repositoryId);
   const baseCommitSha = workflow.reviewBase?.find((entry) => entry.repositoryId === repository?.repositoryId)?.baseCommitSha;
@@ -3560,6 +3562,7 @@ async function startTaskWorkflowPullRequestUpdate(
     try {
       await deps.actions.transact([{ Update: { TableName: deps.tableName, Key: taskKey(task.taskId), UpdateExpression: "SET workflow = :workflow, updatedAt = :now", ...unchanged,
         ExpressionAttributeValues: { ":workflow": blockWorkflowPullRequestUpdate(workflow, { numbers: [pullRequest.number], cause, now }), ":now": now, ...at } } },
+      ...currentE2EChecks,
       ...(ownerAccess === undefined ? [] : [taskAccessFence(deps.tableName, task.taskId, ownerAccess.peopleRevision)])]);
     } catch (error) {
       if (!isConditional(error)) throw error;
@@ -3582,6 +3585,7 @@ async function startTaskWorkflowPullRequestUpdate(
         request: "Push the approved fix to the pull request",
         response: `AgentX is pushing the approved fix to pull request #${pullRequest.number} on ${repository.repositoryId} as operation ${operation.id}.`, operationId: operation.id,
       })),
+      ...currentE2EChecks,
       ...(ownerAccess === undefined ? [] : [taskAccessFence(deps.tableName, task.taskId, ownerAccess.peopleRevision)]),
     ], { candidateDigest: expected.candidateDigest, treeSha: repository.treeSha, baseCommitSha, expectedHeadCommit: pullRequest.headSha });
   } catch (error) {

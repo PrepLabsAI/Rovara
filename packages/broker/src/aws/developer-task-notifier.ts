@@ -24,7 +24,7 @@ import { parseSlackSecrets } from "./slack-ingress.js";
 import { runTaskCanvasCloseout, type CanvasCloseoutStore, type TaskCanvasCloseoutTask } from "./developer-task-closeout.js";
 import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createTaskPlanCanvas, deleteTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
 import { readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
-import { renderE2ESlackBlocks } from "../e2e-presentation.js";
+import { renderE2ESlackBlocks, renderE2EUnavailableSlackBlock } from "../e2e-presentation.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
@@ -833,7 +833,12 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
       return undefined;
     })
     : undefined;
-  const blocks = e2eBlocks === undefined ? message.blocks : [...(message.blocks ?? []), ...e2eBlocks].slice(0, 50);
+  const unavailableE2E = workflow.e2e?.required === true && e2eBlocks === undefined
+    ? [renderE2EUnavailableSlackBlock(context.taskPageUrl)]
+    : [];
+  const blocks = e2eBlocks === undefined
+    ? [...(message.blocks ?? []), ...unavailableE2E].slice(0, 50)
+    : [...(message.blocks ?? []), ...e2eBlocks].slice(0, 50);
   return { ...message, ...(blocks === undefined ? {} : { blocks }), sameAs: reopened ? `reopened:${workflow.revision}` : workflowMessageKey(workflow), ...(approval === undefined ? {} : { approval }) };
 }
 
