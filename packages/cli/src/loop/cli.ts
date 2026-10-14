@@ -90,7 +90,7 @@ export function createLoopPublicationContextResolver(input: {
       if (input.publicationJoin?.loadTask === undefined || resolution.enrollment.nativeEvidence === undefined) return { kind: "hold" as const, reasonCode: "native_task_evidence_missing" };
       const rawTask = await input.publicationJoin.loadTask(resolution.enrollment.taskRef!, resolution.enrollment.namespace, resolution.project);
       const currentEvidence = importNativeTaskEvidence({ rawTask, taskRef: resolution.enrollment.taskRef!, subject,
-        candidateRepo: request.targetRepo, join: joined.response, now: new Date() });
+        logicalRepositoryName: resolution.enrollment.logicalRepositoryName, join: joined.response, now: new Date() });
       if (!sameNativeTaskEvidenceReceipt(resolution.enrollment.nativeEvidence, currentEvidence)) return { kind: "hold" as const, reasonCode: "native_task_evidence_changed" };
       const [latestRecords, latestSourceObservation, latestTargetObservation] = await Promise.all([
         input.store.enrollments(), observe(source), observe(target),
@@ -227,7 +227,7 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
         const nativeEvidence = importNativeTaskEvidence({ rawTask, taskRef: options.task,
           subject: { projectName: enrollmentResolution.project, projectRevision: enrollmentResolution.projectRevision,
             repositoryId: enrollmentResolution.repositoryId, commitSha: candidate.commitSha, treeSha: candidate.treeSha, baseCommitSha: candidate.baseCommitSha },
-          candidateRepo: actualRepo, join: joined.response, now: new Date() });
+          logicalRepositoryName: enrollmentResolution.enrollment.logicalRepositoryName, join: joined.response, now: new Date() });
         const [latestCandidate, latestRepo, latestId, latestAccount, latestCheckout, latestCommonGitDir, latestRecords, latestItem] = await Promise.all([
           captureCandidate(exec, item.worktree.path, item.worktree.branch, baseRef), github.repoAt(found.path), github.repositoryId(actualRepo), github.login(),
           realpath(found.path), github.commonGitDir(found.path), store.enrollments(), store.item(found.repo, issue, options.target),

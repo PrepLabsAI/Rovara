@@ -103,11 +103,11 @@ export async function recordRegisteredLoopEnrollment(input: {
   const checkoutPath = cwd;
   const sourceBindingRef = `cli-source:v1:${createHash("sha256").update(JSON.stringify([
     parsed.registeredBy, namespace, projectDefinition.name, projectDefinition.revision,
-    repository, repositoryId, matches[0]!.url, checkoutPath, commonGitDir,
+    repository, repositoryId, matches[0]!.name, matches[0]!.url, checkoutPath, commonGitDir,
   ])).digest("hex")}`;
   const receipt = createRegisteredEnrollment({
     namespace, hostId, uid, account, project: projectDefinition.name, projectRevision: projectDefinition.revision,
-    repository, repositoryId, checkoutPath, commonGitDir, sourceBindingRef, now: input.now ?? new Date(),
+    repository, repositoryId, logicalRepositoryName: matches[0]!.name, checkoutPath, commonGitDir, sourceBindingRef, now: input.now ?? new Date(),
   });
   await store.promotePendingEnrollment(savedPending.enrollmentId, repository, receipt);
   return { recorded: true, repository };

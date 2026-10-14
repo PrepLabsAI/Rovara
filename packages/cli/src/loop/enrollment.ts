@@ -19,7 +19,8 @@ export const RegisteredEnrollmentSchema = z.object({
   schemaVersion: z.literal(1), kind: z.literal("registered"), enrollmentId: z.string().uuid(),
   namespace: z.string().min(1).max(512), hostId: z.string().min(1).max(255), uid: z.number().int().nonnegative(),
   account: z.string().min(1).max(100), project: z.string().min(1).max(100), projectRevision: z.number().int().positive(),
-  repository: RepoSlugSchema, repositoryId: z.number().int().positive(), checkoutPath: z.string().min(1).max(2_000), commonGitDir: z.string().min(1).max(2_000).optional(),
+  repository: RepoSlugSchema, repositoryId: z.number().int().positive(), logicalRepositoryName: z.string().min(1).max(100).optional(),
+  checkoutPath: z.string().min(1).max(2_000), commonGitDir: z.string().min(1).max(2_000).optional(),
   sourceBindingRef: SourceBindingRefSchema, taskRef: TaskRefSchema.optional(), nativeEvidence: z.lazy(() => NativeTaskEvidenceReceiptSchema).optional(), enrolledAt: z.string().datetime(),
 }).strict();
 
@@ -224,7 +225,7 @@ function sameSubject(left: PublicationSubject, right: PublicationSubject): boole
 
 /** Validate native workflow evidence from the authenticated task read against the fresh join and this host's Git observation. */
 export function importNativeTaskEvidence(input: {
-  rawTask: unknown; taskRef: string; subject: PublicationSubject; candidateRepo: string;
+  rawTask: unknown; taskRef: string; subject: PublicationSubject; logicalRepositoryName: string | undefined;
   join: Extract<PublicationJoinResponse, { status: "READY" }>; now: Date; maxEvidenceAgeMs?: number; maxJoinAgeMs?: number;
 }): NativeTaskEvidenceReceipt {
   const response = DeveloperTaskResponseSchema.parse(input.rawTask);
@@ -238,8 +239,8 @@ export function importNativeTaskEvidence(input: {
   if (workflow.state !== "READY" || !["REVIEW", "PULL_REQUEST", "WAIT_FOR_MERGE"].includes(workflow.stage)) return hold("workflow_not_currently_publishable");
   const manifest = workflow.candidate;
   if (manifest === undefined || manifest.digest !== input.join.candidateDigest) return hold("candidate_digest_mismatch");
-  const expectedRepo = input.candidateRepo.split("/").at(-1)?.toLowerCase();
-  const repositories = manifest.repositories.filter((entry) => entry.repositoryId.toLowerCase() === expectedRepo);
+  if (input.logicalRepositoryName === undefined) return hold("registered_repository_mapping_missing");
+  const repositories = manifest.repositories.filter((entry) => entry.repositoryId === input.logicalRepositoryName);
   if (manifest.repositories.length !== 1 || repositories.length !== 1) return hold("candidate_repository_mismatch");
   const repository = repositories[0]!;
   if (repository.commitSha !== input.subject.commitSha || repository.treeSha !== input.subject.treeSha || repository.baseCommitSha !== input.subject.baseCommitSha ||

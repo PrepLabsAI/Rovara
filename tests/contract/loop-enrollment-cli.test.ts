@@ -38,8 +38,33 @@ describe("native CLI loop enrollment producer", () => {
     const result = await recordRegisteredLoopEnrollment({ home: h.home, env: "prod", controlPlaneUrl: "https://agentx.example", definition, response, cwd: h.cwd, exec: h.exec, now: new Date("2026-10-14T10:00:00.000Z") });
     expect(result).toEqual({ recorded: true, repository: "acme/payments" });
     const [receipt] = await h.store.enrollments();
-    expect(receipt).toMatchObject({ kind: "registered", project: "payments", projectRevision: 1, repository: "acme/payments", repositoryId: 1234, account: "maya" });
+    expect(receipt).toMatchObject({ kind: "registered", project: "payments", projectRevision: 1, repository: "acme/payments", repositoryId: 1234, logicalRepositoryName: "payments", account: "maya" });
     expect(receipt?.kind === "registered" ? receipt.sourceBindingRef : "").toMatch(/^cli-source:v1:[a-f0-9]{64}$/u);
+  });
+
+  it("retains a registered logical repository alias independently of its GitHub slug", async () => {
+    const h = await fixture();
+    const aliased = ProjectDefinitionSchema.parse({ ...definition, repositories: [
+      { ...definition.repositories[0]!, name: "api", path: "repo/api" },
+    ] });
+    const result = await recordRegisteredLoopEnrollment({ home: h.home, env: "prod", controlPlaneUrl: "https://agentx.example", definition: aliased,
+      response: { project: { registeredBy: "owner-1", definition: aliased } }, cwd: h.cwd, exec: h.exec, now: new Date("2026-10-14T10:00:00.000Z") });
+    expect(result).toEqual({ recorded: true, repository: "acme/payments" });
+    const [receipt] = await h.store.enrollments();
+    expect(receipt).toMatchObject({ kind: "registered", repository: "acme/payments", logicalRepositoryName: "api" });
+  });
+
+  it("keeps duplicate URL mappings pending instead of choosing a logical repository name", async () => {
+    const h = await fixture();
+    const ambiguous = ProjectDefinitionSchema.parse({ ...definition, repositories: [
+      definition.repositories[0]!, { ...definition.repositories[0]!, name: "api", path: "repo/api" },
+    ] });
+    const result = await recordRegisteredLoopEnrollment({ home: h.home, env: "prod", controlPlaneUrl: "https://agentx.example", definition: ambiguous,
+      response: { project: { registeredBy: "owner-1", definition: ambiguous } }, cwd: h.cwd, exec: h.exec });
+    expect(result).toEqual({ recorded: false, reasonCode: "registered_source_mismatch" });
+    const records = await h.store.enrollments();
+    expect(records).toHaveLength(1);
+    expect(records[0]?.kind).toBe("registered-pending");
   });
 
   it("does not mint a receipt when the server response or current source does not match", async () => {
