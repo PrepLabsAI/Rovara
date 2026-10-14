@@ -48,7 +48,7 @@ export interface PublicationObservation {
 export type EnrollmentResolution =
   | { kind: "unmanaged-local"; enrollmentId: string; namespace: string; repositoryId: number }
   | { kind: "registered"; enrollment: RegisteredEnrollment; project: string; projectRevision: number; repositoryId: number }
-  | { kind: "hold"; reasonCode: "provenance_unknown" | "identity_changed" | "enrollment_conflict" | "native_enrollment_pending" | "registered_target_join_unavailable" };
+  | { kind: "hold"; reasonCode: "provenance_unknown" | "identity_changed" | "enrollment_conflict" | "native_enrollment_pending" | "registered_target_join_unavailable" | "destination_binding_unknown" };
 
 /** An explicit CLI enrollment receipt is scoped to one actual host, account, project and GitHub repository ID. */
 export function createStandaloneEnrollment(input: Omit<StandaloneEnrollment, "schemaVersion" | "kind" | "enrollmentId" | "namespace" | "enrolledAt"> & { now: Date }): StandaloneEnrollment {
@@ -113,7 +113,7 @@ export function resolveLoopEnrollment(records: readonly LoopEnrollment[], observ
 /** Resolve source and changed target independently before allowing a local-only lane. */
 export function resolvePublicationScopes(input: {
   records: readonly LoopEnrollment[]; source: PublicationObservation; target: PublicationObservation;
-  destinationRepo: string; upstreamRepo?: string;
+  destinationRepo: string; destination?: PublicationObservation; upstreamRepo?: string;
 }): EnrollmentResolution {
   const source = resolveLoopEnrollment(input.records, input.source);
   if (source.kind === "hold") return source;
@@ -122,6 +122,15 @@ export function resolvePublicationScopes(input: {
   const destinationMapped = input.destinationRepo.toLowerCase() === input.target.repo.toLowerCase() ||
     (input.upstreamRepo !== undefined && input.destinationRepo.toLowerCase() === input.upstreamRepo.toLowerCase());
   if (!destinationMapped) return { kind: "hold", reasonCode: "identity_changed" };
+  const destinationIsTarget = input.destinationRepo.toLowerCase() === input.target.repo.toLowerCase();
+  if (!destinationIsTarget) {
+    if (input.destination === undefined || input.destination.repo.toLowerCase() !== input.destinationRepo.toLowerCase()) {
+      return { kind: "hold", reasonCode: "destination_binding_unknown" };
+    }
+    const destination = resolveLoopEnrollment(input.records, input.destination);
+    if (destination.kind === "hold") return destination;
+    if (destination.kind === "registered") return { kind: "hold", reasonCode: "registered_target_join_unavailable" };
+  }
   if (source.kind === "registered" || target.kind === "registered") {
     if (source.kind !== "registered" || target.kind !== "registered" || source.repositoryId !== target.repositoryId ||
         input.source.repo.toLowerCase() !== input.target.repo.toLowerCase() || input.destinationRepo.toLowerCase() !== input.target.repo.toLowerCase()) {

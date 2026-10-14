@@ -65,6 +65,30 @@ describe("registered CLI publication context", () => {
       .toMatchObject({ kind: "hold", reasonCode: "identity_changed" });
   });
 
+  it("resolves an upstream publication destination before admitting the standalone lane", () => {
+    const destination = { ...host, repo: "fork/payments", repositoryId: 9012, checkoutPath: "/work/fork-payments", commonGitDir: "/work/fork-payments/.git" };
+    const destinationStandalone: LoopEnrollment = {
+      ...standalone, enrollmentId: "destination-local", namespace: "local:host-a:maya:9012", project: "fork/payments",
+      repositoryId: 9012, checkoutPath: destination.checkoutPath, commonGitDir: destination.commonGitDir,
+    };
+    const destinationRegistered: LoopEnrollment = {
+      ...registered, enrollmentId: "destination-native", repository: "fork/payments", repositoryId: 9012,
+      checkoutPath: destination.checkoutPath, commonGitDir: destination.commonGitDir,
+    };
+    const destinationPending: LoopEnrollment = {
+      ...pending, enrollmentId: "destination-pending", sources: [{ name: "fork-payments", repository: "fork/payments", repositoryUrl: "https://github.com/fork/payments.git" }],
+    };
+    const scope = { source: host, target: host, destinationRepo: "fork/payments", upstreamRepo: "fork/payments", destination };
+    expect(resolvePublicationScopes({ records: [standalone], ...scope }))
+      .toMatchObject({ kind: "hold", reasonCode: "provenance_unknown" });
+    expect(resolvePublicationScopes({ records: [standalone, destinationRegistered], ...scope }))
+      .toMatchObject({ kind: "hold", reasonCode: "registered_target_join_unavailable" });
+    expect(resolvePublicationScopes({ records: [standalone, destinationPending], ...scope }))
+      .toMatchObject({ kind: "hold", reasonCode: "native_enrollment_pending" });
+    expect(resolvePublicationScopes({ records: [standalone, destinationStandalone], ...scope }))
+      .toMatchObject({ kind: "unmanaged-local" });
+  });
+
   it("keeps a successful native registration pending when source reconciliation fails", () => {
     expect(resolveLoopEnrollment([standalone, pending], host)).toEqual({ kind: "hold", reasonCode: "native_enrollment_pending" });
   });

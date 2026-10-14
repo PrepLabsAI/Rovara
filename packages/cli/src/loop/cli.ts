@@ -198,16 +198,23 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
             };
             const [sourceObservation, targetObservation] = await Promise.all([observe(source), observe(target)]);
             let upstreamRepo: string | undefined;
+            let destinationObservation: Awaited<ReturnType<typeof observe>> | undefined;
             if (input.upstream !== undefined) {
               const upstreamPull = await github.pullRequest(input.issueRepo, input.issue);
               if (upstreamPull === undefined || !upstreamPull.open || upstreamPull.headRepo.toLowerCase() !== input.upstream.repo.toLowerCase() || upstreamPull.headRef !== input.upstream.branch) {
                 return { kind: "hold", reasonCode: "destination_binding_unknown" };
               }
               upstreamRepo = upstreamPull.headRepo;
+              if (upstreamRepo.toLowerCase() !== input.targetRepo.toLowerCase()) {
+                const destination = repos.find((entry) => entry.repo.toLowerCase() === upstreamRepo!.toLowerCase());
+                if (destination === undefined) return { kind: "hold", reasonCode: "destination_binding_unknown" };
+                destinationObservation = await observe(destination);
+              }
             }
             const resolution = resolvePublicationScopes({
               records, source: sourceObservation, target: targetObservation,
               destinationRepo: input.destinationRepo, ...(upstreamRepo === undefined ? {} : { upstreamRepo }),
+              ...(destinationObservation === undefined ? {} : { destination: destinationObservation }),
             });
             if (resolution.kind === "hold") return resolution;
             if (resolution.kind === "unmanaged-local") return { kind: "unmanaged-local" };
