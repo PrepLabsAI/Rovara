@@ -707,6 +707,15 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
+    // The setup worker authenticates this one source read with its short-lived project-setup
+    // capability, which the broker verifies. Keep the API Gateway exception limited to this GET;
+    // the generic internal callback route remains POST-only.
+    new apigwv2.CfnRoute(this, "ProjectSetupExecutionReadRoute", {
+      apiId: api.ref,
+      routeKey: "GET /v1/internal/project-setups/{setupExecutionId}/execution",
+      target: `integrations/${integration.ref}`,
+      authorizationType: "NONE",
+    });
     // GitHub signs webhook bodies itself; the broker verifies its HMAC and linked repository scope.
     new apigwv2.CfnRoute(this, "GithubWebhookRoute", {
       apiId: api.ref,

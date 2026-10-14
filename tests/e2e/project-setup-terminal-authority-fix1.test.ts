@@ -29,6 +29,7 @@ import { marshall } from "@aws-sdk/util-dynamodb";
 import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
 import { deriveProjectSetupSourceSmoke } from "../../packages/broker/src/e2e/project-setup-source-smoke.js";
 import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "../../packages/broker/src/aws/project-setup-runtime-catalog.js";
+import { issueProjectSetupCapability, type ProjectSetupCallbackClaims } from "../../packages/broker/src/aws/project-setup-capability.js";
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
 import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies.js";
 import { persistOriginalEvidencePrimary, persistOriginalMapPrimary } from "../support/p0-evidence-capture.js";
@@ -51,7 +52,7 @@ const gitBlob = (cwd: string, revision: string, path: string): Buffer | undefine
 };
 
 describe("P0 normal project onboarding journey", () => {
-  it.each(["unchanged", "admin-revocation", "runtime-generation", "runtime-correlation", "runtime-catalog-revision"] as const)(
+  it.each(["unchanged", "admin-revocation", "runtime-generation", "runtime-correlation", "runtime-catalog-revision", "worker-failure"] as const)(
     "rejects setup terminal qualification after current authority changes: %s", async (authorityMutation) => {
     const evidenceRoot = process.env.P0_SETUP_EVIDENCE_DIR ?? process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR;
     expect(evidenceRoot, "provide P0_SETUP_EVIDENCE_DIR or CONTAINED_FOUNDATION_EVIDENCE_DIR outside the fresh TMPDIR").toBeDefined();
@@ -311,7 +312,7 @@ describe("P0 normal project onboarding journey", () => {
         expect(currentMember?.role).toBe("administrator");
         broker.db.set({ ...currentMember!, role: "viewer" });
         await writeFile(join(root, "revocation-before-terminal.json"), JSON.stringify({ ownerKey: executionRow.ownerKey, previousRole: currentMember?.role, currentRole: "viewer" }), { flag: "wx" });
-      } else if (!terminalMutationApplied && authorityMutation !== "unchanged") {
+      } else if (!terminalMutationApplied && ["runtime-generation", "runtime-correlation", "runtime-catalog-revision"].includes(authorityMutation)) {
         terminalMutationApplied = true;
         const currentRuntime = broker.db.get(runtimeCatalogKey.pk, runtimeCatalogKey.sk)!;
         const replacementRuntime = authorityMutation === "runtime-generation"
@@ -322,6 +323,54 @@ describe("P0 normal project onboarding journey", () => {
         broker.db.set(replacementRuntime);
         await writeFile(join(root, `${authorityMutation}-before-terminal.json`), JSON.stringify({ oldRuntime: currentRuntime, currentRuntime: replacementRuntime,
           execution: broker.db.get(`PROJECT_SETUP#${setupExecutionId}`, "EXECUTION") }), { flag: "wx" });
+      }
+      if (authorityMutation === "worker-failure") {
+        const callbackPath = `/v1/internal/project-setups/${setupExecutionId}/operations/${invocation.operationId}/result`;
+        const callbackCapability = (outboxRow.invocation as { callbackCapability: string }).callbackCapability;
+        const executionReadPath = `/v1/internal/project-setups/${setupExecutionId}/execution`;
+        const capabilityClaims = JSON.parse(Buffer.from(callbackCapability.split(".")[1]!, "base64url").toString("utf8")) as ProjectSetupCallbackClaims;
+        const noReadCapability = await call(broker.handler, { method: "GET", path: executionReadPath });
+        expect([403, 409], "the exact GET route requires its source-read capability").toContain(noReadCapability.status);
+        const expiredReadCapability = issueProjectSetupCapability(broker.brokerInput.callbackSigningKey,
+          { ...capabilityClaims, expiresAt: Math.floor(Date.now() / 1_000) - 1 });
+        const expiredRead = await call(broker.handler, { method: "GET", path: executionReadPath,
+          headers: { "x-agentx-callback-capability": expiredReadCapability } });
+        expect([403, 409], "an expired source-read capability is rejected").toContain(expiredRead.status);
+        const wrongActionCapability = issueProjectSetupCapability(broker.brokerInput.callbackSigningKey,
+          { ...capabilityClaims, actions: ["result"] });
+        const wrongActionRead = await call(broker.handler, { method: "GET", path: executionReadPath,
+          headers: { "x-agentx-callback-capability": wrongActionCapability } });
+        expect([403, 409], "a result-only capability cannot read the source execution").toContain(wrongActionRead.status);
+        const wrongSetupRead = await call(broker.handler, { method: "GET", path: `/v1/internal/project-setups/${randomUUID()}/execution`,
+          headers: { "x-agentx-callback-capability": callbackCapability } });
+        expect([403, 409], "a capability cannot cross setup executions").toContain(wrongSetupRead.status);
+        const authorizedRead = await call(broker.handler, { method: "GET", path: executionReadPath,
+          headers: { "x-agentx-callback-capability": callbackCapability } });
+        expect(authorizedRead.status).toBe(200);
+        const invalidSentinelBodies = [
+          { processStatus: "SUCCEEDED", qualification: "UNKNOWN", cleanupConfirmed: false },
+          { processStatus: "FAILED", qualification: "PASS", cleanupConfirmed: false },
+          { processStatus: "FAILED", qualification: "UNKNOWN", cleanupConfirmed: true },
+          { processStatus: "FAILED", qualification: "UNKNOWN", cleanupConfirmed: false,
+            evidenceRef: { key: `project-setup-evidence/sha256/${"a".repeat(64)}.json`, sha256: "a".repeat(64) } },
+        ];
+        for (const fields of invalidSentinelBodies) {
+          const rejected = await call(broker.handler, { method: "POST", path: callbackPath,
+            headers: { "x-agentx-callback-capability": callbackCapability },
+            body: { domain: "project-setup-source-interface/v1", setupExecutionId, operationId: invocation.operationId,
+              candidateDigest: "0".repeat(64), ...fields } });
+          expect([403, 409], "the zero digest can park only a minimal failed worker callback").toContain(rejected.status);
+          expect(broker.db.get(`PROJECT_SETUP#${setupExecutionId}`, "EXECUTION")).toMatchObject({ state: "DISPATCHING" });
+        }
+        const wrongNonzeroDigest = await call(broker.handler, { method: "POST", path: callbackPath,
+          headers: { "x-agentx-callback-capability": callbackCapability },
+          body: { domain: "project-setup-source-interface/v1", setupExecutionId, operationId: invocation.operationId,
+            candidateDigest: "f".repeat(64), processStatus: "FAILED", qualification: "UNKNOWN", cleanupConfirmed: false } });
+        expect([403, 409], "a nonzero but wrong candidate digest must remain rejected").toContain(wrongNonzeroDigest.status);
+        const failedWorkerResult = { ...result, status: "FAILED" as const, error: "worker execution failed", result: undefined };
+        await postProjectSetupTerminalResult({ controlPlaneUrl: "http://setup-broker.invalid", invocation,
+          result: failedWorkerResult, fetchImplementation: brokerFetch });
+        return;
       }
       await postProjectSetupTerminalResult({ controlPlaneUrl: "http://setup-broker.invalid", invocation, result, fetchImplementation: brokerFetch });
     }, retrySleep: async () => undefined }, { publicKey: workerKeys.publicKey, workspaceId, generation: 1 });
@@ -371,6 +420,84 @@ describe("P0 normal project onboarding journey", () => {
     for (let index = 0; index < 200 && terminalStatus === undefined; index += 1) await new Promise((resolveWait) => setTimeout(resolveWait, 25));
     for (let index = 0; index < 600 && brokerRouteObservations.every(({ path }) => !path.endsWith(`/operations/${actualInvocation.operationId}/result`)); index += 1) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    if (authorityMutation === "worker-failure") {
+      const terminalObservation = brokerRouteObservations.filter(({ path }) => path.endsWith(`/operations/${actualInvocation.operationId}/result`)).at(-1);
+      expect(terminalObservation?.status, JSON.stringify({ brokerRouteObservations, workerPosts, terminalStatus })).toBe(200);
+      expect(terminalObservation?.body).toMatchObject({ accepted: true, parked: true, qualification: "UNKNOWN" });
+      expect(broker.db.get(`PROJECT_SETUP#${setupExecutionId}`, "EXECUTION")).toMatchObject({ state: "PARKED",
+        result: { parkReason: "worker-failure-without-candidate", qualification: "UNKNOWN", cleanupConfirmed: false } });
+      const failedExecutionKey = `PROJECT_SETUP#${setupExecutionId}`;
+      const failedOperationKey = `OPERATION#${actualInvocation.operationId}`;
+      const failedExecution = broker.db.get(failedExecutionKey, "EXECUTION")!;
+      const failedOperation = broker.db.get(failedExecutionKey, failedOperationKey)!;
+      expect(failedExecution).toMatchObject({ result: { candidateDigest: snapshot.candidate.digest,
+        reportedCandidateDigest: "0".repeat(64) } });
+      expect(failedOperation).toMatchObject({ status: "PARKED" });
+
+      const retryPath = `/v1/admin/projects/setup-executions/${setupExecutionId}/retry`;
+      const dispatchExecution = { ...failedExecution };
+      delete dispatchExecution.result;
+      delete dispatchExecution.completedAt;
+      const dispatchOperation = { ...failedOperation };
+      delete dispatchOperation.result;
+      const unexpiredExecution = { ...dispatchExecution, state: "DISPATCHING", deadlineAt: new Date(Date.now() + 60_000).toISOString() };
+      broker.db.set(unexpiredExecution);
+      broker.db.set({ ...dispatchOperation, status: "DELIVERED" });
+      const unexpiredRetry = await call(broker.handler, { method: "POST", path: retryPath,
+        user: { subject: "owner", admin: true }, body: { requestId: randomUUID() } });
+      expect([409, 503], "an unexpired dispatch cannot be retried").toContain(unexpiredRetry.status);
+
+      const expiredExecution = { ...unexpiredExecution, deadlineAt: new Date(Date.now() - 1_000).toISOString() };
+      broker.db.set(expiredExecution);
+      const foreignExpiredRetry = await call(broker.handler, { method: "POST", path: retryPath,
+        user: { subject: "another-owner", admin: true }, body: { requestId: randomUUID() } });
+      expect([403, 409], "an expired dispatch still belongs to its original project creator").toContain(foreignExpiredRetry.status);
+
+      const originalProject = broker.db.find((item) => item.entityType === "PROJECT"
+        && (item.definition as { name?: string } | undefined)?.name === failedExecution.projectName)[0]!;
+      broker.db.set({ ...originalProject, runtimeBinding: { ...(originalProject.runtimeBinding as Record<string, unknown>), volumeSizeGiB: 22 } });
+      const changedBindingRetry = await call(broker.handler, { method: "POST", path: retryPath,
+        user: { subject: "owner", admin: true }, body: { requestId: randomUUID() } });
+      expect([409, 503], "an expired dispatch cannot bypass current binding approval").toContain(changedBindingRetry.status);
+      broker.db.set(originalProject);
+
+      const setupSessionKey = { pk: failedExecutionKey, sk: "SESSION" };
+      const currentSession = broker.db.get(setupSessionKey.pk, setupSessionKey.sk)!;
+      const stoppedSession: Record<string, unknown> = { ...currentSession, state: "STOPPED" };
+      delete stoppedSession.privateIp;
+      broker.db.set(stoppedSession);
+      const stoppedSessionRetry = await call(broker.handler, { method: "POST", path: retryPath,
+        user: { subject: "owner", admin: true }, body: { requestId: randomUUID() } });
+      expect([409, 503], "an expired dispatch still requires its exact READY runtime session").toContain(stoppedSessionRetry.status);
+      broker.db.set(currentSession);
+
+      const mismatchedOperation = { ...dispatchOperation, status: "DELIVERED", fence: Number(dispatchOperation.fence) + 1 };
+      broker.db.set(mismatchedOperation);
+      const staleFenceRetry = await call(broker.handler, { method: "POST", path: retryPath,
+        user: { subject: "owner", admin: true }, body: { requestId: randomUUID() } });
+      expect([409, 503], "the expired retry requires the exact operation fence").toContain(staleFenceRetry.status);
+      broker.db.set({ ...dispatchOperation, status: "DELIVERED" });
+
+      const expiredRetryRequestId = randomUUID();
+      const expiredRetry = await call(broker.handler, { method: "POST", path: retryPath,
+        user: { subject: "owner", admin: true }, body: { requestId: expiredRetryRequestId } });
+      expect(expiredRetry.status, JSON.stringify(expiredRetry.body)).toBe(202);
+      expect(broker.db.get(failedExecutionKey, "EXECUTION")).toMatchObject({ state: "PARKED", result: {
+        parkReason: "setup-deadline-expired", candidateDigest: snapshot.candidate.digest, cleanupConfirmed: false,
+      } });
+      expect(broker.db.get(failedExecutionKey, failedOperationKey)).toMatchObject({ status: "PARKED", result: {
+        parkReason: "setup-deadline-expired", candidateDigest: snapshot.candidate.digest,
+      } });
+      expect(broker.db.find((item) => item.entityType === "PROJECT_SETUP_RETRY"
+        && item.previousExecutionId === setupExecutionId && item.setupExecutionId === expiredRetry.body.setupExecutionId)[0]).toBeDefined();
+      const expiredDuplicate = await call(broker.handler, { method: "POST", path: retryPath,
+        user: { subject: "owner", admin: true }, body: { requestId: expiredRetryRequestId } });
+      expect(expiredDuplicate.status).toBe(202);
+      expect(expiredDuplicate.body).toMatchObject({ duplicate: true, setupExecutionId: expiredRetry.body.setupExecutionId,
+        operationId: expiredRetry.body.operationId });
+      expect(broker.db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "project-setup-smoke")).toHaveLength(2);
+      return;
     }
     if (authorityMutation !== "unchanged") {
       const terminalObservation = brokerRouteObservations.filter(({ path }) => path.endsWith(`/operations/${actualInvocation.operationId}/result`)).at(-1);

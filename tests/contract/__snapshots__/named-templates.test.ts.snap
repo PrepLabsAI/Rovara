@@ -6745,6 +6745,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::IAM::Policy",
     },
+    "ProjectSetupExecutionReadRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "GET /v1/internal/project-setups/{setupExecutionId}/execution",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
     "ProxyRoute": {
       "Properties": {
         "ApiId": {

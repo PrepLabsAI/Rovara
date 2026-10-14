@@ -2,6 +2,8 @@
 
 Deployment provisions the pinned worker image, Node 22.23.2, Docker, the private Docker socket, and the fixed runtime/evidence directories. It does not install or qualify the verifier on an operator host, and it does not register either runtime catalog. Standard catalog qualification remains a separate operator action on the actual Linux ARM64 worker supervisor.
 
+The qualification candidate runs with 2 vCPU and 4 GiB of container memory. The supervisor host must provide at least those CPU and memory resources in addition to the operating system and worker service; the default AWS worker profile is `m6g.large` (2 vCPU, 8 GiB RAM).
+
 An administrator issues a fresh challenge through the broker. The control plane derives the setup and feature catalog IDs from deployment configuration. The administrator supplies the intended EC2 binding, private worker endpoint, generation, transport correlation UUID, and fixed `linux-arm64-docker-v1` profile:
 
 ```sh
@@ -34,4 +36,4 @@ agentx --env <environment> admin runtime-installation register \
 
 Registration validates the fixed scenario identities, challenge-bound original request/response captures, complete pinned E2E report and run-start record, expected negative failure, candidate cleanup receipt, installed manifest, issuer attribution, and exact proposal approval digest. It stores immutable evidence and uses one conditional transaction to publish both distinct setup and feature catalog records while consuming the one-use challenge. A catalog record is evidence that the fixed qualification passed for its recorded manifest and environment; runtime admission still checks freshness and recomputes the installed manifest before execution.
 
-The endpoint and EC2 binding remain administrator-selected inputs. The broker does not independently discover the private host or verify the launch binding against cloud metadata. This is operator-managed qualification evidence, not hardware attestation. Darwin/Colima qualification is supported for local candidate testing only; the registrar rejects it for the standard Linux catalogs. Linux supervisor qualification has not yet been run, so standard production registration remains unverified.
+The endpoint and EC2 binding remain administrator-selected inputs. The broker does not independently discover the private host or verify the launch binding against cloud metadata. This is operator-managed qualification evidence, not hardware attestation. Darwin/Colima qualification is supported for local candidate testing only; the registrar rejects it for the standard Linux catalogs. Qualification must be observed on the actual Linux supervisor for the intended deployment; local or TEST qualification alone does not establish production qualification.

@@ -2057,7 +2057,18 @@ async function retryProjectSetupAsAdministrator(
   const executionKey = projectSetupExecutionKey(setupExecutionId);
   const raw = await getItem<Record<string, unknown>>(dependencies, executionKey);
   const parked = ProjectSetupExecutionSchema.safeParse(projectSetupDomainRecord(raw, executionKey, "PROJECT_SETUP_EXECUTION"));
-  if (!parked.success || parked.data.state !== "PARKED" || parked.data.result === undefined) throw agentXError("STALE_FENCE", "only an owned parked setup execution can be retried");
+  if (!parked.success) throw agentXError("STALE_FENCE", "only a current setup execution can be retried");
+  const expiredDispatch = parked.data.state === "DISPATCHING" && parked.data.result === undefined && Date.parse(parked.data.deadlineAt) <= Date.now();
+  const priorOperationKey = projectSetupOperationKey(setupExecutionId, parked.data.operationId);
+  const priorOperationResponse = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: priorOperationKey, ConsistentRead: true }));
+  const priorOperation = ProjectSetupOperationSchema.safeParse(projectSetupDomainRecord(priorOperationResponse.Item, priorOperationKey, "PROJECT_SETUP_OPERATION"));
+  const parkedRetry = parked.data.state === "PARKED" && parked.data.result !== undefined
+    && priorOperation.success && priorOperation.data.status === "PARKED";
+  const expiredDispatchRetry = expiredDispatch && priorOperation.success
+    && (priorOperation.data.status === "DISPATCHING" || priorOperation.data.status === "DELIVERED")
+    && priorOperation.data.setupExecutionId === setupExecutionId && priorOperation.data.operationId === parked.data.operationId
+    && priorOperation.data.fence === parked.data.fence && priorOperation.data.transportCorrelationId === parked.data.transportCorrelationId;
+  if (!parkedRetry && !expiredDispatchRetry) throw agentXError("STALE_FENCE", "only an owned parked setup execution or an expired matching dispatch can be retried");
   if (identity.ownerKey !== parked.data.ownerKey) throw agentXError("FORBIDDEN", "setup retry actor must be the original project creator");
   const project = await requireProject(dependencies, parked.data.projectName, parked.data.projectRevision);
   await requireAdministrator(dependencies, identity, parked.data.projectName);
@@ -2086,6 +2097,14 @@ async function retryProjectSetupAsAdministrator(
   if (!(await setupAdmissionMatchesExecution(dependencies, parked.data))) {
     throw agentXError("RUNTIME_UNAVAILABLE", "the immutable setup admission does not match its stored execution identity");
   }
+  const sessionKey = projectSetupSessionKey(setupExecutionId);
+  const sessionResponse = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: sessionKey, ConsistentRead: true }));
+  const session = ProjectSetupSessionSchema.safeParse(projectSetupDomainRecord(sessionResponse.Item, sessionKey, "PROJECT_SETUP_SESSION"));
+  if (!session.success || session.data.setupExecutionId !== setupExecutionId || session.data.subjectId !== parked.data.subjectId
+    || session.data.transportCorrelationId !== parked.data.transportCorrelationId || session.data.approvalRevision !== parked.data.approvalRevision
+    || session.data.bindingDigest !== parked.data.bindingDigest || session.data.generation !== parked.data.runtimeGeneration || session.data.state !== "READY") {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the exact approved setup session is no longer ready");
+  }
   const prior = await getItem<Record<string, unknown>>(dependencies, idempotencyKey);
   if (prior && prior.entityType === "PROJECT_SETUP_RETRY" && prior.previousExecutionId === setupExecutionId
     && prior.retryActorKey === identity.ownerKey && prior.originalCreatorKey === parked.data.ownerKey
@@ -2104,10 +2123,41 @@ async function retryProjectSetupAsAdministrator(
   const marker = { ...idempotencyKey, entityType: "PROJECT_SETUP_RETRY", previousExecutionId: setupExecutionId,
     setupExecutionId: nextExecution.setupExecutionId, operationId: nextOperation.operationId, retryActorKey: identity.ownerKey,
     originalCreatorKey: parked.data.ownerKey, createdAt: new Date().toISOString() };
+  const now = new Date().toISOString();
+  const terminalAuthorityChecks = projectSetupTerminalAuthorityChecks(dependencies.tableName, parked.data, runtime.data, session.data);
+  const parkResult = { domain: "project-setup-source-interface/v1", candidateDigest: parked.data.candidateDigest,
+    processStatus: "UNKNOWN", qualification: "UNKNOWN", cleanupConfirmed: false, parkReason: "setup-deadline-expired" };
+  const priorExecutionMutation = expiredDispatchRetry
+    ? { Update: { TableName: dependencies.tableName, Key: executionKey,
+        UpdateExpression: "SET #state = :parked, updatedAt = :now, completedAt = :now, #result = :result",
+        ConditionExpression: "#state = :dispatching AND operationId = :operationId AND subjectId = :subjectId AND fence = :fence AND approvalRevision = :approvalRevision AND transportCorrelationId = :correlation AND deadlineAt = :deadlineAt AND deadlineAt <= :now",
+        ExpressionAttributeNames: { "#state": "state", "#result": "result" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING", ":now": now, ":result": parkResult,
+          ":operationId": parked.data.operationId, ":subjectId": parked.data.subjectId, ":fence": parked.data.fence,
+          ":approvalRevision": parked.data.approvalRevision, ":correlation": parked.data.transportCorrelationId,
+          ":deadlineAt": parked.data.deadlineAt } } }
+    : { ConditionCheck: { TableName: dependencies.tableName, Key: executionKey,
+        ConditionExpression: "#state = :parked AND operationId = :operationId AND fence = :fence",
+        ExpressionAttributeNames: { "#state": "state" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":operationId": parked.data.operationId, ":fence": parked.data.fence } } };
+  const priorOperationMutation = expiredDispatchRetry
+    ? { Update: { TableName: dependencies.tableName, Key: priorOperationKey,
+        UpdateExpression: "SET #status = :parked, updatedAt = :now, #result = :result",
+        ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#status": "status", "#result": "result" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":now": now,
+          ":result": parkResult, ":setupExecutionId": setupExecutionId, ":operationId": parked.data.operationId,
+          ":fence": parked.data.fence, ":correlation": parked.data.transportCorrelationId } } }
+    : { ConditionCheck: { TableName: dependencies.tableName, Key: priorOperationKey,
+        ConditionExpression: "#status = :parked AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":setupExecutionId": setupExecutionId,
+          ":operationId": parked.data.operationId, ":fence": parked.data.fence, ":correlation": parked.data.transportCorrelationId } } };
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      { ConditionCheck: { TableName: dependencies.tableName, Key: executionKey, ConditionExpression: "#state = :parked AND operationId = :operationId AND fence = :fence",
-        ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":parked": "PARKED", ":operationId": parked.data.operationId, ":fence": parked.data.fence } } },
+      ...terminalAuthorityChecks,
+      priorExecutionMutation,
+      priorOperationMutation,
       ...rows.transactionItems,
       { Put: { TableName: dependencies.tableName, Item: marker, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } },
     ] }));
@@ -6072,7 +6122,36 @@ async function handleProjectSetupCallback(
   });
   if (!authorized) return { accepted: true, parked: true, qualification: "UNKNOWN" };
   const current = authorized.execution;
-  if (body.setupExecutionId !== current.setupExecutionId || body.operationId !== current.operationId || body.candidateDigest !== current.candidateDigest) {
+  if (body.setupExecutionId !== current.setupExecutionId || body.operationId !== current.operationId) {
+    throw agentXError("CALLBACK_FORBIDDEN", "project setup result does not match its immutable source execution");
+  }
+  if (body.candidateDigest === "0".repeat(64)) {
+    if ((body.processStatus !== "FAILED" && body.processStatus !== "UNKNOWN") || body.qualification !== "UNKNOWN"
+      || body.cleanupConfirmed !== false || body.evidenceRef !== undefined) {
+      throw agentXError("CALLBACK_FORBIDDEN", "an unbound worker failure may only report an unknown, unqualified terminal result");
+    }
+    const now = new Date().toISOString();
+    const parkedResult = { domain: body.domain, candidateDigest: current.candidateDigest, processStatus: "UNKNOWN", qualification: "UNKNOWN",
+      cleanupConfirmed: false, reportedCandidateDigest: body.candidateDigest, reportedProcessStatus: body.processStatus, reportedQualification: body.qualification,
+      reportedCleanupConfirmed: body.cleanupConfirmed, parkReason: "worker-failure-without-candidate" };
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session),
+      { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
+        UpdateExpression: "SET #state = :parked, updatedAt = :now, completedAt = :now, #result = :result",
+        ConditionExpression: "#state = :dispatching AND operationId = :operationId AND subjectId = :subjectId AND fence = :fence AND approvalRevision = :approvalRevision AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#state": "state", "#result": "result" }, ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING",
+          ":now": now, ":result": parkedResult, ":operationId": operationId, ":subjectId": current.subjectId, ":fence": current.fence,
+          ":approvalRevision": current.approvalRevision, ":correlation": current.transportCorrelationId } } },
+      { Update: { TableName: dependencies.tableName, Key: projectSetupOperationKey(setupExecutionId, operationId),
+        UpdateExpression: "SET #status = :parked, updatedAt = :now, #result = :result",
+        ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#status": "status", "#result": "result" }, ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING",
+          ":delivered": "DELIVERED", ":now": now, ":result": parkedResult, ":setupExecutionId": setupExecutionId,
+          ":operationId": operationId, ":fence": current.fence, ":correlation": current.transportCorrelationId } } },
+    ] }));
+    return { accepted: true, parked: true, qualification: "UNKNOWN" };
+  }
+  if (body.candidateDigest !== current.candidateDigest) {
     throw agentXError("CALLBACK_FORBIDDEN", "project setup result does not match its immutable source execution");
   }
   const verified = body.evidenceRef ? await verifyProjectSetupSmokeEvidence(dependencies, current, body.evidenceRef, authorized.runtime.runnerEnvironment, authorized.runtime.runnerToolchain) : undefined;
