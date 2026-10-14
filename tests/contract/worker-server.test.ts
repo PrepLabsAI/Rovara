@@ -14,6 +14,12 @@ import { WorkerOperationCancelledError } from "../../packages/worker/src/cancel.
 import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRuntime } from "../../packages/worker/src/project-setup-executor.js";
 import { describe, expect, it, vi } from "vitest";
 
+function hasProjectSetupSmokeFeature(body: unknown): boolean {
+  if (typeof body !== "object" || body === null || !("invocationFeatures" in body)
+    || !Array.isArray(body.invocationFeatures)) return true;
+  return body.invocationFeatures.includes("project.setupSmoke");
+}
+
 describe("worker HTTP contract", () => {
   it("composes real unavailable Linux readiness with healthy worker service and a refused setup invocation", async () => {
     const readiness = await inspectContainedRuntimeReadinessForHost("linux", "arm64");
@@ -31,11 +37,13 @@ describe("worker HTTP contract", () => {
       invocationFeatures: runtime.invocationFeatures,
       invocationFeatureDiagnostics: runtime.invocationFeatureDiagnostics,
     });
-    await expect((await handleWorkerRequest(new Request("http://worker/ping"), state)).json()).resolves.toMatchObject({
+    const pingResponse = await handleWorkerRequest(new Request("http://worker/ping"), state);
+    const pingBody: unknown = await pingResponse.json();
+    expect(pingBody).toMatchObject({
       status: "Healthy",
-      invocationFeatures: expect.not.arrayContaining(["project.setupSmoke"]),
       invocationFeatureDiagnostics: { "project.setupSmoke": readiness },
     });
+    expect(hasProjectSetupSmokeFeature(pingBody)).toBe(false);
     const invocation: WorkerInvocation = {
       protocolVersion: 1,
       operationId: randomUUID(),
@@ -61,11 +69,12 @@ describe("worker HTTP contract", () => {
     });
     const ping = await handleWorkerRequest(new Request("http://worker/ping"), state);
     expect(ping.status).toBe(200);
-    await expect(ping.json()).resolves.toMatchObject({
+    const pingBody: unknown = await ping.json();
+    expect(pingBody).toMatchObject({
       status: "Healthy",
-      invocationFeatures: expect.not.arrayContaining(["project.setupSmoke"]),
       invocationFeatureDiagnostics: { "project.setupSmoke": { status: "unavailable", reason: "pinned-contained-image-unavailable" } },
     });
+    expect(hasProjectSetupSmokeFeature(pingBody)).toBe(false);
   });
 
   it("journals before acknowledging and reports HealthyBusy during background execution", async () => {
