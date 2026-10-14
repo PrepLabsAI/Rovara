@@ -106,13 +106,14 @@ describe("normal CLI import of authenticated native task evidence", () => {
     const evidenceAt = stamp();
     let mode: "valid" | "same-name" | "missing-check" | "failed-check" | "missing-security" | "forged-producer" | "foreign-candidate" | "foreign-task" | "stale-round" | "stale-contract" | "future-time" | "stale-time" | "foreign-approval" | "foreign-repository-identity" = "valid";
     let calls: string[] = [];
+    const logicalRepositoryForMode = () => mode === "same-name" || mode === "foreign-repository-identity" ? "payments" : "api";
     const baseUrl = await serve(async (request) => {
       const path = new URL(request.url).pathname;
       calls.push(`${request.method} ${path}`);
       if (request.method === "POST" && path === "/v1/dev/tasks") return Response.json({ task: { taskId } });
       if (request.method === "POST" && path === `/v1/dev/tasks/${taskId}/e2e-publication-context`) {
         const body = await request.json() as { subject: { projectName: string; projectRevision: number; repositoryId: number; commitSha: string; treeSha: string; baseCommitSha: string } };
-        const current = taskView({ candidate, repositoryId: mode === "valid" ? "api" : "payments", at: evidenceAt });
+        const current = taskView({ candidate, repositoryId: logicalRepositoryForMode(), at: evidenceAt });
         const subject = body.subject;
         return Response.json({ schemaVersion: 1, status: "READY", requestId: "fixture-request", subject,
           candidateDigest: current.candidateDigest, contractDigest: current.artifactDigest, policyDigest: current.policyDigest,
@@ -120,10 +121,10 @@ describe("normal CLI import of authenticated native task evidence", () => {
       }
       if (request.method === "GET" && path === `/v1/dev/tasks/${taskId}`) {
         const taskCandidate = mode === "foreign-candidate" ? { ...candidate, commitSha: "0".repeat(40) } : candidate;
-        const current = taskView({ candidate: taskCandidate, at: evidenceAt, repositoryId: mode === "valid" ? "api" : "payments", mutate(workflow) {
+        const current = taskView({ candidate: taskCandidate, at: evidenceAt, repositoryId: logicalRepositoryForMode(), mutate(workflow) {
           const verification = workflow.verification as { producer: string; results: Array<{ checkId: string; status: string }>; recordedAt: string };
           const e2e = workflow.e2e as { currentRoundId: string; contractDigest: string; qualifiedRound: { contractDigest: string } };
-          if (mode === "missing-check") verification.results = [];
+          if (mode === "missing-check") verification.results = [{ checkId: "unselected-check", status: "PASS" }];
           if (mode === "failed-check") verification.results[0]!.status = "FAILED";
           if (mode === "forged-producer") verification.producer = "local-yaml";
           if (mode === "missing-security") workflow.reviews = (workflow.reviews as Array<{ role: string }>).filter((review) => review.role !== "SECURITY");
@@ -192,6 +193,7 @@ describe("normal CLI import of authenticated native task evidence", () => {
     calls = [];
     const missingMapping = await invoke();
     expect(missingMapping.exitCode, missingMapping.output).toBe(1);
+    expect(missingMapping.output).toContain("native task evidence registered_repository_mapping_missing");
     expect(missingMapping.enrollment).not.toHaveProperty("nativeEvidence");
     expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
 
@@ -200,6 +202,7 @@ describe("normal CLI import of authenticated native task evidence", () => {
     calls = [];
     const foreignRepository = await invoke();
     expect(foreignRepository.exitCode, foreignRepository.output).toBe(1);
+    expect(foreignRepository.output).toContain("native task evidence candidate_repository_mismatch");
     expect(foreignRepository.enrollment).toMatchObject({ nativeEvidence: { proofDigest: valid.enrollment?.kind === "registered" ? valid.enrollment.nativeEvidence?.proofDigest : undefined } });
     expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
 
@@ -217,12 +220,20 @@ describe("normal CLI import of authenticated native task evidence", () => {
     expect(changedRound.kind).toBe("hold");
     expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
 
-    for (const invalid of ["missing-check", "failed-check", "missing-security", "forged-producer", "foreign-candidate", "foreign-task", "stale-round", "stale-contract", "future-time", "stale-time", "foreign-approval"] as const) {
+    const expectedReason: Record<Exclude<typeof mode, "valid" | "same-name" | "foreign-repository-identity">, string> = {
+      "missing-check": "checks_incomplete_or_failed", "failed-check": "checks_incomplete_or_failed",
+      "missing-security": "reviews_missing_or_untrusted", "forged-producer": "checks_missing_or_untrusted",
+      "foreign-candidate": "candidate_digest_mismatch", "foreign-task": "task_identity_mismatch",
+      "stale-round": "e2e_round_binding_mismatch", "stale-contract": "e2e_round_binding_mismatch",
+      "future-time": "evidence_time_invalid", "stale-time": "evidence_time_invalid", "foreign-approval": "owner_approval_missing",
+    };
+    for (const invalid of Object.keys(expectedReason) as Array<keyof typeof expectedReason>) {
       await writeFile(store.enrollmentPath(), `${JSON.stringify([enrollment])}\n`);
       mode = invalid;
       calls = [];
       const next = await invoke();
       expect(next.exitCode, `${invalid}: ${next.output}`).toBe(1);
+      expect(next.output, invalid).toContain(`native task evidence ${expectedReason[invalid]}`);
       expect(next.enrollment).not.toHaveProperty("nativeEvidence");
       expect(calls).toEqual([`POST /v1/dev/tasks/${taskId}/e2e-publication-context`, `GET /v1/dev/tasks/${taskId}`]);
     }
