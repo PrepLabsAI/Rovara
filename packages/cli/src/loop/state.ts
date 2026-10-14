@@ -5,7 +5,7 @@ import { appendFile, mkdir, readFile, readdir, rename, writeFile } from "node:fs
 import { dirname, join } from "node:path";
 import { z } from "zod";
 import { ArtifactSchema } from "./definitions.js";
-import { LoopEnrollmentSchema, type LoopEnrollment, type RegisteredEnrollment, type RegisteredPendingEnrollment } from "./enrollment.js";
+import { LoopEnrollmentSchema, NativeTaskEvidenceReceiptSchema, type LoopEnrollment, type NativeTaskEvidenceReceipt, type RegisteredEnrollment, type RegisteredPendingEnrollment } from "./enrollment.js";
 
 const RepoSlug = () => z.string().regex(/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/, "owner/name");
 export const RepoSlugSchema = RepoSlug();
@@ -142,14 +142,16 @@ export class LoopStore {
   }
 
   /** Store only the selected task identity after the host has validated its current publication subject. */
-  async bindTaskRef(enrollmentId: string, taskRef: string): Promise<void> {
+  async bindTaskRef(enrollmentId: string, taskRef: string, nativeEvidence: NativeTaskEvidenceReceipt): Promise<void> {
+    const evidence = NativeTaskEvidenceReceiptSchema.parse(nativeEvidence);
+    if (evidence.taskRef !== taskRef) throw new Error("native evidence belongs to another task selector");
     const records = await this.enrollments();
     let found = false;
     const updated = records.map((record) => {
       if (record.enrollmentId !== enrollmentId) return record;
       if (record.kind !== "registered") throw new Error("task binding requires a validated registered enrollment");
       found = true;
-      return LoopEnrollmentSchema.parse({ ...record, taskRef });
+      return LoopEnrollmentSchema.parse({ ...record, taskRef, nativeEvidence: evidence });
     });
     if (!found) throw new Error("registered enrollment disappeared before task binding");
     await writeJson(this.enrollmentPath(), updated);

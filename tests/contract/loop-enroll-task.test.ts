@@ -52,7 +52,7 @@ function git(repo: string, ...args: string[]): string {
 }
 
 describe("registered task selection through the normal loop enrollment command", () => {
-  it("uses the actual Git candidate and authenticated join before storing the task selector", async () => {
+  it("does not store a selector when the authenticated task read is unavailable", async () => {
     const root = await mkdtemp(join(tmpdir(), "rovara-task-bind-"));
     dirs.push(root);
     const home = join(root, "home");
@@ -117,10 +117,11 @@ describe("registered task selection through the normal loop enrollment command",
       environments: { home }, tokenStore, fetchImplementation: fetch.bind(globalThis), loop: { exec: ghExec },
       stdout: { write: (value) => out.push(value) }, stderr: { write: (value) => out.push(value) },
     });
-    expect(exitCode, out.join("")).toBe(0);
+    expect(exitCode).toBe(1);
     expect(taskSelectorValidated).toBe(true);
-    expect(await store.enrollments()).toMatchObject([{ enrollmentId: enrollment.enrollmentId, taskRef: selectedTaskId }]);
-    expect(out.join("")).toContain("Bound task");
+    expect(await store.enrollments()).toMatchObject([{ enrollmentId: enrollment.enrollmentId }]);
+    expect(await store.enrollments()).not.toMatchObject([{ taskRef: selectedTaskId }]);
+    expect(out.join("")).toContain("native task read refused with HTTP 404");
   });
 });
 

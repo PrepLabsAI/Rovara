@@ -555,8 +555,13 @@ export class LoopDaemon {
     // #359: a follow-up pull request is opened where the pull request it builds on has its branch: maybe a fork.
     const repo = upstream?.repo ?? item.target ?? item.repo;
     const candidate = await this.candidateFor(item);
-    if (!sameCandidate(item.checksCandidate, candidate) || !sameCandidate(item.reviewsCandidate, candidate)) {
-      throw new PublicationHoldError("qualified checks and reviews do not match the current committed candidate");
+    const localQualified = sameCandidate(item.checksCandidate, candidate) && sameCandidate(item.reviewsCandidate, candidate);
+    if (!localQualified) {
+      const publicationResolver = this.deps.resolvePublicationContext;
+      if (publicationResolver === undefined) throw new PublicationHoldError("the host enrollment and evidence resolver is unavailable");
+      const initialAdmission = await publicationResolver({ issueRepo: item.repo, issue: item.issue, targetRepo: item.target ?? item.repo, destinationRepo: repo,
+        ...(upstream === undefined ? {} : { upstream: { repo: upstream.repo, branch: upstream.branch } }), worktree: item.worktree.path, candidate });
+      if (initialAdmission.kind !== "registered-ready") throw new PublicationHoldError(initialAdmission.kind === "hold" ? initialAdmission.reasonCode : "qualified checks and reviews do not match the current committed candidate");
     }
     const contribution = planArtifact(loopNamed(item.loop)) === "contribution";
     const published = await publish(this.deps.exec, {
@@ -574,6 +579,16 @@ export class LoopDaemon {
         const admission = await resolver({ issueRepo: item.repo, issue: item.issue, targetRepo: item.target ?? item.repo, destinationRepo: repo,
           ...(upstream === undefined ? {} : { upstream: { repo: upstream.repo, branch: upstream.branch } }), worktree: item.worktree!.path, candidate: fresh });
         if (admission.kind === "hold") throw new PublicationHoldError(admission.reasonCode);
+        const afterAdmission = await this.candidateFor(item);
+        const currentItem = await this.deps.store.item(item.repo, item.issue, item.target);
+        if (!sameCandidate(fresh, afterAdmission) || !sameCandidate(candidate, afterAdmission) || currentItem === undefined ||
+            currentItem.worktree?.path !== item.worktree!.path || currentItem.worktree.branch !== item.worktree!.branch || currentItem.target !== item.target ||
+            currentItem.upstream?.repo !== item.upstream?.repo || currentItem.upstream?.branch !== item.upstream?.branch || currentItem.upstream?.ref !== item.upstream?.ref) {
+          throw new PublicationHoldError("the candidate or loop binding changed during the current evidence check");
+        }
+        if (admission.kind !== "registered-ready" && (!sameCandidate(currentItem.checksCandidate, afterAdmission) || !sameCandidate(currentItem.reviewsCandidate, afterAdmission))) {
+          throw new PublicationHoldError("qualified checks and reviews no longer match the current committed candidate");
+        }
       },
     });
     const { number, url } = published.pullRequest;

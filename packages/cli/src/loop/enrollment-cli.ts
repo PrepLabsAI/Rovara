@@ -12,14 +12,18 @@ import type { TokenStore } from "../token-store.js";
 
 /** The publication join uses the existing developer sign-in and its control-plane access token. */
 export function createDeveloperPublicationJoinTransport(input: { home: string; env: string | (() => string); tokenStore: TokenStore; fetch: typeof fetch }): PublicationJoinTransport {
+  const sessionFor = async (projectName: string, expectedAuthorityNamespace: string) => {
+    const env = typeof input.env === "function" ? input.env() : input.env;
+    const session = await developerAccessToken({ home: input.home, tokenStore: input.tokenStore, fetch: input.fetch }, env);
+    const baseUrl = new URL(session.entry.url).href.replace(/\/$/u, "");
+    const actualAuthorityNamespace = `${baseUrl}/env/${session.env}/project/${projectName}`;
+    if (expectedAuthorityNamespace !== actualAuthorityNamespace) throw new Error("registered_authority_namespace_mismatch");
+    return { session, baseUrl };
+  };
   return {
     async load(request, expectedAuthorityNamespace) {
       const parsed = PublicationJoinRequestSchema.parse(request);
-      const env = typeof input.env === "function" ? input.env() : input.env;
-      const session = await developerAccessToken({ home: input.home, tokenStore: input.tokenStore, fetch: input.fetch }, env);
-      const baseUrl = new URL(session.entry.url).href.replace(/\/$/u, "");
-      const actualAuthorityNamespace = `${baseUrl}/env/${session.env}/project/${parsed.subject.projectName}`;
-      if (expectedAuthorityNamespace !== actualAuthorityNamespace) throw new Error("registered_authority_namespace_mismatch");
+      const { session, baseUrl } = await sessionFor(parsed.subject.projectName, expectedAuthorityNamespace);
       const response = await input.fetch(`${baseUrl}/v1/dev/tasks/${encodeURIComponent(parsed.taskRef)}/e2e-publication-context`, {
         method: "POST",
         headers: { authorization: `Bearer ${session.accessToken}`, "content-type": "application/json" },
@@ -27,6 +31,23 @@ export function createDeveloperPublicationJoinTransport(input: { home: string; e
       });
       if (!response.ok) throw new Error(`publication context request refused with HTTP ${response.status}`);
       return response.json();
+    },
+    async loadTask(taskRef, expectedAuthorityNamespace, projectName) {
+      const { session, baseUrl } = await sessionFor(projectName, expectedAuthorityNamespace);
+      if (!/^[0-9a-f-]{36}$/iu.test(taskRef)) throw new Error("task selector is invalid");
+      const response = await input.fetch(`${baseUrl}/v1/dev/tasks/${encodeURIComponent(taskRef)}`, {
+        method: "GET", headers: { authorization: `Bearer ${session.accessToken}` },
+      });
+      if (!response.ok) throw new Error(`native task read refused with HTTP ${response.status}`);
+      const text = await response.text();
+      if (Buffer.byteLength(text, "utf8") > 1_000_000) throw new Error("native task response exceeds the existing bounded view limit");
+      const raw: unknown = JSON.parse(text);
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw)) throw new Error("native task response is invalid");
+      const fields = raw as Record<string, unknown>;
+      if (Object.keys(fields).some((key) => key !== "task" && key !== "requestId") ||
+          (fields.requestId !== undefined && (typeof fields.requestId !== "string" || fields.requestId.length === 0 || fields.requestId.length > 200)) ||
+          fields.task === undefined) throw new Error("native task response envelope is invalid");
+      return { task: fields.task };
     },
   };
 }
