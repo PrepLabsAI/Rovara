@@ -10,7 +10,7 @@ import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
 import { verifyE2ESetupProposal } from "@agentx/broker/e2e/discovery";
 import {
-  ProjectDefinitionSchema, RegistrationPreflightSchema, E2EPolicySchema, E2ESetupProposalSchema, agentXError, canonicalJson, environmentStackName,
+  AgentXError, AgentXErrorCodeSchema, ProjectDefinitionSchema, RegistrationPreflightSchema, E2EPolicySchema, E2ESetupProposalSchema, agentXError, canonicalJson, environmentStackName,
   type ConnectorPreflight, type Ec2RuntimeBinding, type ProjectDefinition, type E2EPolicy, type E2ESetupProposal,
 } from "@agentx/contracts";
 import { listCredentials } from "../admin/credential.js";
@@ -134,6 +134,11 @@ export async function registerRevision(input: {
   const result = (await registerProject({ controlPlaneUrl: input.session.controlPlaneUrl, accessToken: input.session.accessToken, definition: input.definition, runtimeBinding, ...(input.setupApproval === undefined ? {} : { setupApproval: input.setupApproval }) }, input.services.fetch)) as Record<string, unknown>;
   const preflight = RegistrationPreflightSchema.safeParse(result.preflight);
   const warnings = Array.isArray(result.warnings) ? result.warnings.filter((entry): entry is string => typeof entry === "string") : [];
+  if (input.setupApproval?.decision === "approve" && input.definition.e2e !== undefined) {
+    if (result.setupRuntime === "QUEUED") warnings.push("E2E testing setup was queued; project registration is complete, but testing is not ready.");
+    else if (result.setupRuntime === "UNAVAILABLE") warnings.push("E2E testing setup is unavailable; project registration is complete, but testing is not ready.");
+    else warnings.push("E2E testing setup status is unknown; project registration is complete, but testing is not ready.");
+  }
   if (input.services.loopHome !== undefined) {
     try {
       const enrollment = await recordRegisteredLoopEnrollment({ home: input.services.loopHome, env: input.env, controlPlaneUrl: input.session.controlPlaneUrl, definition: input.definition, response: result });
@@ -282,14 +287,18 @@ export async function setupDecisionForRevision(input: { configDir: string; env: 
   return { proposalRef: storedDecision.proposalRef, proposalSha256: storedDecision.proposalSha256, decision: storedDecision.decision };
 }
 
-async function setupRequest(session: AdminSession, fetchImplementation: typeof fetch, path: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
+async function setupRequest(session: AdminSession, fetchImplementation: typeof fetch, path: string, body: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>> {
   const response = await fetchImplementation(`${session.controlPlaneUrl.replace(/\/$/, "")}${path}`, {
     method: "POST", headers: { authorization: `Bearer ${session.accessToken}`, "content-type": "application/json" }, body: JSON.stringify(body),
+    ...(timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
   });
   const { ok, status, body: result } = await readJsonResponse(response);
   if (!ok) {
     const { code, message } = serverError(result);
-    throw agentXError(code === "FORBIDDEN" ? "FORBIDDEN" : status >= 500 ? "RUNTIME_UNAVAILABLE" : "CONFIG_INVALID", `${path} failed with HTTP ${status}${message ? `: ${message}` : ""}`);
+    const parsedCode = AgentXErrorCodeSchema.safeParse(code);
+    const fallback = status >= 500 ? "RUNTIME_UNAVAILABLE" : "CONFIG_INVALID";
+    const responseCode = status === 401 ? "AUTH_REQUIRED" : status === 403 ? "FORBIDDEN" : parsedCode.success ? parsedCode.data : fallback;
+    throw agentXError(responseCode, `${path} failed with HTTP ${status}${message ? `: ${message}` : ""}`);
   }
   if (result === undefined || typeof result !== "object" || Array.isArray(result)) throw agentXError("RUNTIME_UNAVAILABLE", `${path} returned an invalid response`);
   return result as Record<string, unknown>;
@@ -371,14 +380,28 @@ export async function addProject(input: {
   const repoName = agentxRepositoryName(repository.name);
   const cwd = `repo/${repoName}`;
   const source = repository;
-  const setupProposalResponse = await setupRequest(input.session, input.services.fetch, "/v1/admin/projects/setup-proposals", {
-    repositoryUrl: source.cloneUrl, ref: source.defaultBranch,
-  });
-  const trustedSetup = validateSetupProposalResponse(setupProposalResponse);
-  let setupProposal = trustedSetup.proposal;
-  const e2ePolicy = trustedSetup.policy;
+  let trustedSetup: ReturnType<typeof validateSetupProposalResponse> | undefined;
+  let setupProposalResponse: Record<string, unknown> | undefined;
+  let setupDiscoveryNotice: string | undefined;
+  try {
+    setupProposalResponse = await setupRequest(input.session, input.services.fetch, "/v1/admin/projects/setup-proposals", {
+      repositoryUrl: source.cloneUrl, ref: source.defaultBranch,
+    }, 65_000);
+  } catch (error) {
+    // The proposal route is exploratory. Only its explicit unavailable response and fetch-level
+    // connectivity errors can degrade to ordinary setup; authorization and malformed evidence
+    // remain hard failures. Never include provider text in the user-facing reason.
+    if (!(error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE")
+      && !(error instanceof TypeError)
+      && !(error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError"))) throw error;
+    setupDiscoveryNotice = "Testing exploration not done: source capture exceeded its time or size bound, or the discovery service was unavailable; E2E evidence remains unknown.";
+  }
+  if (setupProposalResponse !== undefined) trustedSetup = validateSetupProposalResponse(setupProposalResponse);
+  let setupProposal = trustedSetup?.proposal;
+  const e2ePolicy = trustedSetup?.policy;
   let setupApproval: StoredSetupDecision | undefined;
   if (input.e2eSetup !== undefined) {
+    if (trustedSetup === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "locally supplied E2E setup evidence requires a fresh trusted server proposal");
     const candidateProposal = E2ESetupProposalSchema.parse(input.e2eSetup.proposal);
     const policy = E2EPolicySchema.parse(input.e2eSetup.policy);
     const snapshot = input.e2eSetup.snapshot;
@@ -409,7 +432,7 @@ export async function addProject(input: {
   // records the owner's approve/decline decision for that proposal.
   if (flags.setupCommand !== undefined) setup = typed(flags.setupCommand, SETUP_TIMEOUT);
   if (flags.testCommand !== undefined) readiness = typed(flags.testCommand, TEST_TIMEOUT);
-  if (setupProposal !== undefined && e2ePolicy !== undefined) {
+  if (setupProposal !== undefined && e2ePolicy !== undefined && trustedSetup !== undefined) {
     const targetSummary = setupProposal.targets.map((target) => target.kind + ":" + target.targetId).join(", ") || "no targets detected";
     const mockSummary = setupProposal.missingInputs.filter((item) => item.disposition === "mock-substitutable").map((item) => item.kind).join(", ") || "none detected";
     const blockerSummary = setupProposal.missingInputs.filter((item) => item.disposition === "blocking").map((item) => item.reason).join("; ") || "none";
@@ -442,7 +465,9 @@ export async function addProject(input: {
     ...(e2eAccepted && e2ePolicy !== undefined ? { e2e: e2ePolicy } : {}),
   });
   const registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services,
-    ...(setupApproval === undefined ? {} : { setupApproval, setupPolicy: e2ePolicy }) });
+    ...(setupApproval === undefined || e2ePolicy === undefined ? {} : { setupApproval, setupPolicy: e2ePolicy }) });
   input.write(`Registered project ${name}, revision 1, on EC2 workers. Its file is ${registered.file}.`);
+  if (setupDiscoveryNotice !== undefined) input.write(setupDiscoveryNotice);
+  for (const warning of registered.warnings) input.write(`Warning: ${warning}`);
   return { name, revision: 1, file: registered.file };
 }

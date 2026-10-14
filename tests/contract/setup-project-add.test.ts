@@ -106,6 +106,112 @@ describe("agentx project add (FR-040)", () => {
     expect(definition.readiness).toEqual([]);
   });
 
+  it("connects the project when bounded source testing exploration is unavailable, and keeps the missing evidence visible", async () => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const unavailable = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path === "/v1/admin/projects/setup-proposals") {
+        return new Response(JSON.stringify({ error: { code: "RUNTIME_UNAVAILABLE", message: "selected immutable source set exceeds 4 MiB" } }), { status: 503, headers: { "content-type": "application/json" } });
+      }
+      return plane.fetch(url, init);
+    }) as typeof fetch };
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([true]), write: (line) => lines.push(line), services: unavailable,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } });
+    const registration = plane.registered[0] as { definition: { setup: unknown[]; readiness: unknown[]; e2e?: unknown }; setupApproval?: unknown };
+    expect(registration.definition).toMatchObject({ setup: [{ executable: "npm", args: ["ci"] }], readiness: [{ executable: "npm", args: ["test"] }] });
+    expect(registration.definition.e2e).toBeUndefined();
+    expect(registration.setupApproval).toBeUndefined();
+    expect(plane.requests.some((request) => request.path === "/v1/admin/projects/setup-approvals")).toBe(false);
+    expect(lines.join("\n")).toContain("Testing exploration not done: source capture exceeded its time or size bound, or the discovery service was unavailable; E2E evidence remains unknown.");
+    expect(lines.findIndex((line) => line.startsWith("Registered project payments-api"))).toBeLessThan(lines.findIndex((line) => line.startsWith("Testing exploration not done:")));
+    expect(lines.join("\n")).toContain("Registered project payments-api");
+  });
+
+  it("does not treat setup-discovery authorization failures as an unavailable exploration", async () => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const forbidden = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path === "/v1/admin/projects/setup-proposals") {
+        return new Response(JSON.stringify({ error: { code: "FORBIDDEN", message: "administrator claim is required" } }), { status: 403, headers: { "content-type": "application/json" } });
+      }
+      return plane.fetch(url, init);
+    }) as typeof fetch };
+    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: forbidden,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } })).rejects.toThrow("FORBIDDEN");
+    expect(plane.registered).toEqual([]);
+  });
+
+  it("does not degrade an HTTP authentication failure with an untrusted error code", async () => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const unauthorized = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path === "/v1/admin/projects/setup-proposals") {
+        return new Response(JSON.stringify({ error: { code: "RUNTIME_UNAVAILABLE", message: "authentication required" } }), { status: 401, headers: { "content-type": "application/json" } });
+      }
+      return plane.fetch(url, init);
+    }) as typeof fetch };
+    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: unauthorized,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } })).rejects.toThrow("AUTH_REQUIRED");
+    expect(plane.registered).toEqual([]);
+  });
+
+  it("continues configured project setup after a source-capture transport error without exposing its raw text", async () => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const unavailable = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path === "/v1/admin/projects/setup-proposals") {
+        expect(init?.signal).toBeInstanceOf(AbortSignal);
+        throw new TypeError("transport included credential=private-value");
+      }
+      return plane.fetch(url, init);
+    }) as typeof fetch };
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([true]), write: (line) => lines.push(line), services: unavailable,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } });
+    expect(plane.registered).toHaveLength(1);
+    expect(lines.join("\n")).not.toContain("private-value");
+    expect(lines.join("\n")).toContain("E2E evidence remains unknown.");
+  });
+
+  it.each([
+    ["QUEUED", "Warning: E2E testing setup was queued; project registration is complete, but testing is not ready."],
+    ["UNAVAILABLE", "Warning: E2E testing setup is unavailable; project registration is complete, but testing is not ready."],
+  ])("reports a registered project separately from E2E setup execution (%s)", async (setupRuntime, notice) => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const setupUnavailable = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const response = await plane.fetch(url, init);
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path !== "/v1/admin/projects" || !response.ok) return response;
+      const body = await response.json() as Record<string, unknown>;
+      return new Response(JSON.stringify({ ...body, setupRuntime }), { status: response.status, headers: { "content-type": "application/json" } });
+    }) as typeof fetch };
+    const { proposal, policy, snapshot, repositories } = await sourceBackedSetup(Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } })));
+    const servicesWithRuntimeNotice = { ...setupUnavailable, repositories };
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: (line) => lines.push(line), services: servicesWithRuntimeNotice, flags: {}, e2eSetup: { proposal, policy, snapshot } });
+    expect(lines.join("\n")).toContain(notice);
+    expect(lines.join("\n")).toContain("Registered project payments-api");
+  });
+
+  it("fails closed when the discovery route returns malformed proposal evidence", async () => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const malformed = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path === "/v1/admin/projects/setup-proposals") return new Response(JSON.stringify({ proposal: {} }), { status: 200, headers: { "content-type": "application/json" } });
+      return plane.fetch(url, init);
+    }) as typeof fetch };
+    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: malformed,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } })).rejects.toThrow();
+    expect(plane.registered).toEqual([]);
+  });
+
   it("does not carry a declined setup decision into a later non-E2E connector revision", async () => {
     const plane = fakeControlPlane();
     await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", false]), write: () => undefined, services: services(plane), flags: {} });
