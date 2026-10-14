@@ -502,7 +502,6 @@ export async function inspectContainedRuntimeReadinessForHost(platform: string, 
   if (!profile) return evaluateContainedRuntimePrerequisites({ profileId: undefined, nodeVersion: process.version, privatePathsReady: false, pinnedImageReady: false });
   if (process.version !== "v22.23.2") return evaluateContainedRuntimePrerequisites({ profileId: profile.id, nodeVersion: process.version, privatePathsReady: false, pinnedImageReady: false });
 
-  let privatePathsReady = false;
   try {
     if (profile.platform === "linux") {
       const anchor = join(profile.stateRoot, "..");
@@ -525,7 +524,6 @@ export async function inspectContainedRuntimeReadinessForHost(platform: string, 
     const socket = await lstat(socketPath);
     if (!socket.isSocket() || socket.isSymbolicLink()) throw new Error("fixed Docker socket is unavailable");
     await access(socketPath, fsConstants.R_OK | fsConstants.W_OK);
-    privatePathsReady = true;
   } catch {
     return evaluateContainedRuntimePrerequisites({ profileId: profile.id, nodeVersion: process.version, privatePathsReady: false, pinnedImageReady: false });
   }
@@ -547,7 +545,7 @@ export async function inspectContainedRuntimeReadinessForHost(platform: string, 
       pinnedImageReady = image.RepoDigests?.includes(profile.image) === true && image.Os === "linux" && image.Architecture === "arm64";
     } catch { /* a malformed inspect result is unavailable */ }
   }
-  return evaluateContainedRuntimePrerequisites({ profileId: profile.id, nodeVersion: process.version, privatePathsReady, pinnedImageReady });
+  return evaluateContainedRuntimePrerequisites({ profileId: profile.id, nodeVersion: process.version, privatePathsReady: true, pinnedImageReady });
 }
 function inspectTargetMatchesError(stderr: string, target: string): boolean {
   const normalized = stderr.trim().replace(/\r/g, "");
@@ -938,7 +936,7 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
   }
   if (cleanup !== "confirmed") provisional = null;
   if (noteWindow() || aborted || timedOut || overflow) provisional = null;
-  const receipt = receiptFor(record, { exitCode, timedOut: timedOut || performance.now() >= deadline, aborted: aborted || signalAborted(signal), stdoutBytes, stderrBytes, aggregateBytes, overflow, cleanup, ...(diagnostic ? { diagnostic } : {}) });
+  const receipt = receiptFor(record, { exitCode, timedOut: timedOut || performance.now() >= deadline, aborted: aborted || signalAborted(signal), stdoutBytes, stderrBytes, aggregateBytes, overflow, cleanup, ...(requestWritten === undefined ? {} : { requestWritten }), ...(diagnostic ? { diagnostic } : {}) });
   if (cleanup === "confirmed" && durablePlanned && attemptedCreate) {
     // `finishRecord` persisted a candidate-process receipt before deleting its recovery enrollment.
   }

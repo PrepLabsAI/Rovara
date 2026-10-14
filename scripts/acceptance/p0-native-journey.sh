@@ -50,18 +50,34 @@ if [ "$native_profile" = all ]; then
   journey='profile:all'
 fi
 case "$journey" in
-  profile:all|tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts|tests/unit/e2e-feature-plan-intent.test.ts|tests/unit/e2e-execution-plan.test.ts|tests/unit/e2e-review-fix3.test.ts|tests/contract/e2e-feature-verifier-catalog.test.ts|tests/contract/task-workflow-invocation.test.ts|tests/contract/task-workflow-contracts.test.ts|tests/contract/admin-read-projects.test.ts|tests/contract/admin-actions.test.ts|tests/contract/workflow-e2e-current-authority.test.ts|tests/contract/workflow-e2e-notifier-projection.test.ts|tests/contract/developer-task-notifier.test.ts|tests/contract/workflow-e2e-cancellation.test.ts|tests/contract/loop-candidate-untracked.test.ts|tests/contract/verifier-image-closure.test.ts) ;;
+  profile:all|tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts|tests/e2e/runtime-installation-qualification.native.test.ts|tests/unit/e2e-feature-plan-intent.test.ts|tests/unit/e2e-execution-plan.test.ts|tests/unit/e2e-review-fix3.test.ts|tests/contract/e2e-feature-verifier-catalog.test.ts|tests/contract/task-workflow-invocation.test.ts|tests/contract/task-workflow-contracts.test.ts|tests/contract/admin-read-projects.test.ts|tests/contract/admin-actions.test.ts|tests/contract/workflow-e2e-current-authority.test.ts|tests/contract/workflow-e2e-notifier-projection.test.ts|tests/contract/developer-task-notifier.test.ts|tests/contract/workflow-e2e-cancellation.test.ts|tests/contract/loop-candidate-untracked.test.ts|tests/contract/verifier-image-closure.test.ts) ;;
   *) unavailable 'journey test path is outside the fixed P0 acceptance allowlist' ;;
 esac
 case "$journey" in
-  profile:all|tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts)
-    evidence=${CONTAINED_FOUNDATION_EVIDENCE_DIR:-}
+  profile:all|tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts|tests/e2e/runtime-installation-qualification.native.test.ts)
+    if [ "$journey" = 'tests/e2e/runtime-installation-qualification.native.test.ts' ]; then
+      evidence=${P0_RUNTIME_INSTALL_EVIDENCE_DIR:-}
+      [ -n "$evidence" ] || unavailable 'pre-create P0_RUNTIME_INSTALL_EVIDENCE_DIR as a separate fresh private root'
+    else
+      evidence=${CONTAINED_FOUNDATION_EVIDENCE_DIR:-}
+    fi
     [ -n "$evidence" ] && [ -d "$evidence" ] || unavailable 'pre-create CONTAINED_FOUNDATION_EVIDENCE_DIR outside the fresh TMPDIR'
     evidence_real=$(validate_evidence_root "$evidence")
+    if [ "$journey" = profile:all ]; then
+      runtime_evidence=${P0_RUNTIME_INSTALL_EVIDENCE_DIR:-}
+      [ -n "$runtime_evidence" ] || unavailable 'the full native P0 profile requires a separate P0_RUNTIME_INSTALL_EVIDENCE_DIR'
+      runtime_evidence_real=$(validate_evidence_root "$runtime_evidence")
+      [ "$runtime_evidence_real" != "$evidence_real" ] || unavailable 'runtime installation and contained evidence roots must be separate'
+    else
+      runtime_evidence_real=$evidence_real
+    fi
     setup_evidence=${P0_SETUP_EVIDENCE_DIR:-}
     if [ -n "$setup_evidence" ]; then
       setup_evidence_real=$(validate_evidence_root "$setup_evidence")
       [ "$setup_evidence_real" != "$evidence_real" ] || unavailable 'setup and contained evidence roots must be separate'
+      if [ "$journey" = profile:all ]; then
+        [ "$setup_evidence_real" != "$runtime_evidence_real" ] || unavailable 'setup and runtime installation evidence roots must be separate'
+      fi
     elif [ "$journey" = profile:all ]; then
       unavailable 'the full native P0 profile requires a separate P0_SETUP_EVIDENCE_DIR'
     fi
@@ -76,7 +92,7 @@ if ! "$node22" node_modules/typescript/bin/tsc -b --force --pretty false; then
   printf 'FAIL: own-source TypeScript emit did not complete\n' >&2
   exit 1
 fi
-if [ "$journey" = profile:all ] || [ "$journey" = 'tests/e2e/project-setup-terminal-authority-fix1.test.ts' ] || [ "$journey" = 'tests/e2e/p0-native-journey.test.ts' ] || [ "$journey" = 'tests/e2e/p0-native-journey-5b.test.ts' ]; then
+if [ "$journey" = profile:all ] || [ "$journey" = 'tests/e2e/project-setup-terminal-authority-fix1.test.ts' ] || [ "$journey" = 'tests/e2e/p0-native-journey.test.ts' ] || [ "$journey" = 'tests/e2e/p0-native-journey-5b.test.ts' ] || [ "$journey" = 'tests/e2e/runtime-installation-qualification.native.test.ts' ]; then
   P0_NATIVE_LAUNCHER_RECEIPT="$evidence_real.launcher-preflight.json" \
     "$node22" --input-type=module -e '
       import { createHash } from "node:crypto";
@@ -100,8 +116,9 @@ if [ "$journey" = profile:all ] || [ "$journey" = 'tests/e2e/project-setup-termi
         node: { execPath: process.execPath, version: process.version, platform: process.platform, arch: process.arch },
         buildArgv: ["node_modules/typescript/bin/tsc", "-b", "--force", "--pretty", "false"],
         verifier: { resolvedEntry: resolved, entrySha256: sha(entryBytes), runtimeCli: runtimePath, runtimeCliSha256: sha(runtimeBytes) },
-        evidenceRoot: realpathSync(process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR),
+        evidenceRoot: process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR ? realpathSync(process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR) : null,
         setupEvidenceRoot: process.env.P0_SETUP_EVIDENCE_DIR ? realpathSync(process.env.P0_SETUP_EVIDENCE_DIR) : null,
+        runtimeInstallEvidenceRoot: process.env.P0_RUNTIME_INSTALL_EVIDENCE_DIR ? realpathSync(process.env.P0_RUNTIME_INSTALL_EVIDENCE_DIR) : null,
         tmpDirectory: realpathSync(process.env.TMPDIR),
         dockerHost: process.env.DOCKER_HOST ?? null,
       };
@@ -112,7 +129,7 @@ case "$journey" in
   profile:all)
     exec "$node22" node_modules/vitest/vitest.mjs run --config vitest.native-p0.config.ts --reporter=dot
     ;;
-  tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts)
+  tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts|tests/e2e/runtime-installation-qualification.native.test.ts)
     exec "$node22" node_modules/vitest/vitest.mjs run --config vitest.native-p0.config.ts "$journey" --reporter=dot
     ;;
 esac

@@ -251,6 +251,7 @@ import { issueProjectSetupCapability } from "./project-setup-capability.js";
 import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke.js";
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission } from "../e2e/feature-plan-intent.js";
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
+import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
 import { workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
 import { createWorkflowE2EDisplayObject } from "./workflow-e2e-notifier-projection.js";
 import {
@@ -1103,6 +1104,23 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // Spec 025 phase 25d: the admin read routes (FR-038), each behind the admin claim (A2).
       const adminRead = await routeAdminRead(adminReads, identity, request, url);
       if (adminRead !== undefined) return json(adminRead, request.requestId);
+
+      if (request.method === "POST" && url.pathname === "/v1/admin/runtime-installation/challenges") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (!dependencies.projectSetupRuntimeCatalogId || !dependencies.e2eFeatureRuntimeCatalogId) throw agentXError("RUNTIME_UNAVAILABLE", "runtime installation catalogs are not configured in this deployment");
+        const runtimeDeps: RuntimeInstallationDependencies = { documentClient: dependencies.documentClient, s3: dependencies.s3,
+          tableName: dependencies.tableName, artifactBucketName: dependencies.artifactBucketName,
+          setupCatalogId: dependencies.projectSetupRuntimeCatalogId, featureCatalogId: dependencies.e2eFeatureRuntimeCatalogId };
+        return json(await issueRuntimeInstallChallenge(runtimeDeps, identity, body), request.requestId, 201);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/admin/runtime-installation/registrations") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (!dependencies.projectSetupRuntimeCatalogId || !dependencies.e2eFeatureRuntimeCatalogId) throw agentXError("RUNTIME_UNAVAILABLE", "runtime installation catalogs are not configured in this deployment");
+        const runtimeDeps: RuntimeInstallationDependencies = { documentClient: dependencies.documentClient, s3: dependencies.s3,
+          tableName: dependencies.tableName, artifactBucketName: dependencies.artifactBucketName,
+          setupCatalogId: dependencies.projectSetupRuntimeCatalogId, featureCatalogId: dependencies.e2eFeatureRuntimeCatalogId };
+        return json(await registerRuntimeInstallation(runtimeDeps, identity, body), request.requestId, 201);
+      }
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-proposals") {
         if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");

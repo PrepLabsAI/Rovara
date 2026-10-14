@@ -16,6 +16,10 @@ Choose whether to use the proposed setup. AgentX records that choice against the
 
 A mock can support a local check of an isolated behavior. Approving that substitution keeps it in the saved proposal; it does not produce a runtime PASS or prove the corresponding live source, browser workflow, or customer path. Required evidence that remains missing or `UNKNOWN` must remain visible and cannot be treated as a pass.
 
+If optional E2E discovery is unavailable or malformed, project onboarding can still complete; AgentX marks E2E discovery unavailable and keeps setup unresolved for a later retry. It does not turn partial discovery into an approved setup or runtime pass. A registered runtime catalog row is also not enough by itself: admission checks its scope, expiry, environment, installed manifest, and current worker readiness before execution.
+
+Standard setup and feature runtime catalogs require a separate administrator-issued challenge and Linux ARM64 host qualification. Deployment provisions the pinned worker image and runtime prerequisites, but it does not run that qualification or register the catalogs. See [standard runtime qualification](runtime-installation.md) for the complete administrator/host/administrator procedure and its current limits.
+
 ## Evidence status
 
 The [native P0 acceptance record](p0-native-journey-acceptance.md) summarizes the local synthetic journey, candidate-bound checks, evidence limits, and reproducible acceptance launcher. Its prior passing candidate does not qualify a later integrated commit; acceptance must be rerun against the exact candidate under review.
