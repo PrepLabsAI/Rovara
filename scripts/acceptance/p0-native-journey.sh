@@ -39,13 +39,22 @@ validate_evidence_root() {
   printf '%s' "$root_real"
 }
 
+native_profile=${P0_NATIVE_PROFILE:-}
+case "$native_profile" in
+  ''|all) ;;
+  *) unavailable 'P0_NATIVE_PROFILE must be all when set' ;;
+esac
 journey=${P0_NATIVE_JOURNEY_TEST:-tests/e2e/p0-native-journey.test.ts}
+if [ "$native_profile" = all ]; then
+  [ -z "${P0_NATIVE_JOURNEY_TEST:-}" ] || unavailable 'P0_NATIVE_PROFILE=all cannot be combined with P0_NATIVE_JOURNEY_TEST'
+  journey='profile:all'
+fi
 case "$journey" in
-  tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts|tests/unit/e2e-feature-plan-intent.test.ts|tests/unit/e2e-execution-plan.test.ts|tests/unit/e2e-review-fix3.test.ts|tests/contract/e2e-feature-verifier-catalog.test.ts|tests/contract/task-workflow-invocation.test.ts|tests/contract/task-workflow-contracts.test.ts|tests/contract/admin-read-projects.test.ts|tests/contract/admin-actions.test.ts|tests/contract/workflow-e2e-current-authority.test.ts|tests/contract/workflow-e2e-notifier-projection.test.ts|tests/contract/developer-task-notifier.test.ts|tests/contract/workflow-e2e-cancellation.test.ts|tests/contract/loop-candidate-untracked.test.ts|tests/contract/verifier-image-closure.test.ts) ;;
+  profile:all|tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts|tests/unit/e2e-feature-plan-intent.test.ts|tests/unit/e2e-execution-plan.test.ts|tests/unit/e2e-review-fix3.test.ts|tests/contract/e2e-feature-verifier-catalog.test.ts|tests/contract/task-workflow-invocation.test.ts|tests/contract/task-workflow-contracts.test.ts|tests/contract/admin-read-projects.test.ts|tests/contract/admin-actions.test.ts|tests/contract/workflow-e2e-current-authority.test.ts|tests/contract/workflow-e2e-notifier-projection.test.ts|tests/contract/developer-task-notifier.test.ts|tests/contract/workflow-e2e-cancellation.test.ts|tests/contract/loop-candidate-untracked.test.ts|tests/contract/verifier-image-closure.test.ts) ;;
   *) unavailable 'journey test path is outside the fixed P0 acceptance allowlist' ;;
 esac
 case "$journey" in
-  tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts)
+  profile:all|tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts)
     evidence=${CONTAINED_FOUNDATION_EVIDENCE_DIR:-}
     [ -n "$evidence" ] && [ -d "$evidence" ] || unavailable 'pre-create CONTAINED_FOUNDATION_EVIDENCE_DIR outside the fresh TMPDIR'
     evidence_real=$(validate_evidence_root "$evidence")
@@ -53,6 +62,8 @@ case "$journey" in
     if [ -n "$setup_evidence" ]; then
       setup_evidence_real=$(validate_evidence_root "$setup_evidence")
       [ "$setup_evidence_real" != "$evidence_real" ] || unavailable 'setup and contained evidence roots must be separate'
+    elif [ "$journey" = profile:all ]; then
+      unavailable 'the full native P0 profile requires a separate P0_SETUP_EVIDENCE_DIR'
     fi
     command -v docker >/dev/null 2>&1 || unavailable 'Docker CLI is unavailable'
     image='node@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9'
@@ -65,7 +76,7 @@ if ! "$node22" node_modules/typescript/bin/tsc -b --force --pretty false; then
   printf 'FAIL: own-source TypeScript emit did not complete\n' >&2
   exit 1
 fi
-if [ "$journey" = 'tests/e2e/p0-native-journey.test.ts' ] || [ "$journey" = 'tests/e2e/p0-native-journey-5b.test.ts' ]; then
+if [ "$journey" = profile:all ] || [ "$journey" = 'tests/e2e/project-setup-terminal-authority-fix1.test.ts' ] || [ "$journey" = 'tests/e2e/p0-native-journey.test.ts' ] || [ "$journey" = 'tests/e2e/p0-native-journey-5b.test.ts' ]; then
   P0_NATIVE_LAUNCHER_RECEIPT="$evidence_real.launcher-preflight.json" \
     "$node22" --input-type=module -e '
       import { createHash } from "node:crypto";
@@ -97,4 +108,12 @@ if [ "$journey" = 'tests/e2e/p0-native-journey.test.ts' ] || [ "$journey" = 'tes
       writeFileSync(process.env.P0_NATIVE_LAUNCHER_RECEIPT, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx", mode: 0o600 });
     '
 fi
+case "$journey" in
+  profile:all)
+    exec "$node22" node_modules/vitest/vitest.mjs run --config vitest.native-p0.config.ts --reporter=dot
+    ;;
+  tests/e2e/project-setup-terminal-authority-fix1.test.ts|tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts)
+    exec "$node22" node_modules/vitest/vitest.mjs run --config vitest.native-p0.config.ts "$journey" --reporter=dot
+    ;;
+esac
 exec "$node22" node_modules/vitest/vitest.mjs run "$journey" --reporter=dot

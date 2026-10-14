@@ -4,6 +4,8 @@ import {
   WorkerInvokeTokenClaimsSchema,
   type WorkerInvocation,
   type WorkerInvokeTokenClaims,
+  workflowPublicationContext,
+  workflowPublicationContextDigest,
 } from "@agentx/contracts";
 
 const MAX_TOKEN_LENGTH = 2_048;
@@ -134,5 +136,18 @@ export function invocationMatchesClaims(invocation: WorkerInvocation, claims: Wo
       && invocation.payload.approvalRevision === claims.setupApprovalRevision
       && invocation.payload.transportCorrelationId === claims.workspaceId;
   }
+  const invocationPublicationMode = invocation.kind === "publish" ? invocation.payload.publicationMode : undefined;
+  if (claims.publicationMode !== invocationPublicationMode) return false;
+  if (invocationPublicationMode !== undefined) {
+    if (invocation.kind !== "publish" || invocation.payload.candidateTreeSha === undefined) return false;
+    try {
+      const context = workflowPublicationContext(invocation);
+      if (context === undefined) return false;
+      const digest = workflowPublicationContextDigest(context);
+      if (claims.publicationContextDigest !== digest || invocation.payload.publicationContextDigest !== digest) return false;
+    } catch {
+      return false;
+    }
+  } else if (claims.publicationContextDigest !== undefined) return false;
   return invocation.kind !== "project-setup-smoke";
 }

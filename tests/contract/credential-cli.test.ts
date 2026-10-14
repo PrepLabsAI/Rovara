@@ -7,6 +7,7 @@ import { listCredentials, registerCredential } from "../../packages/cli/src/admi
 import { tokenStoreKey } from "../../packages/cli/src/auth.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
+import { LoopStore } from "../../packages/cli/src/loop/state.js";
 
 describe("credential administration client", () => {
   it("posts a validated registration with the bearer token and returns the server's entry", async () => {
@@ -59,21 +60,23 @@ describe("project registration from the command line", () => {
     const context = await administratorContext("agentx-cli-register-preflight-");
     const answer = { project: { definition: { name: "payments" } }, duplicate: false, warnings: ["w1"], preflight: { connectors: [] } };
     const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json(answer, { status: 201 }));
-    const { exitCode, stdout, stderr } = await runRegister(context, fetchImplementation);
+    const { exitCode, stdout, stderr, enrollments } = await runRegister(context, fetchImplementation);
     expect(exitCode).toBe(0);
     const [url, init] = fetchImplementation.mock.calls[0]!;
     expect(new URL(url as string).pathname).toBe("/v1/admin/projects");
     expect(JSON.parse(String(init?.body as string))).toMatchObject({ preflight: true });
     expect(JSON.parse(stdout)).toEqual({ ok: true, data: answer });
-    expect(stderr).toBe("Warning: w1\n");
+    expect(stderr).toBe("Warning: native project registration succeeded, but local Rovara enrollment is on hold (registration_response_unproven); register it from its source checkout or reconnect there before publication.\nWarning: w1\n");
+    expect(enrollments.some((entry) => entry.kind === "registered")).toBe(false);
   });
 
   it("says so when the control plane did not run preflight", async () => {
     const context = await administratorContext("agentx-cli-register-legacy-");
     const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ project: { definition: { name: "payments" } }, duplicate: false }, { status: 201 }));
-    const { exitCode, stderr } = await runRegister(context, fetchImplementation);
+    const { exitCode, stderr, enrollments } = await runRegister(context, fetchImplementation);
     expect(exitCode).toBe(0);
     expect(stderr).toContain("Warning: this control plane did not check connectors at registration; deploy the latest AgentX release to get the preflight report.\n");
+    expect(enrollments.some((entry) => entry.kind === "registered")).toBe(false);
   });
 });
 
@@ -84,10 +87,11 @@ describe("project registration without connectors", () => {
     delete plain.integrations;
     await writeFile(context.projectFile, JSON.stringify(plain), "utf8");
     const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ project: { definition: { name: "payments" } }, duplicate: false }, { status: 201 }));
-    const { exitCode, stderr } = await runRegister(context, fetchImplementation);
+    const { exitCode, stderr, enrollments } = await runRegister(context, fetchImplementation);
     expect(exitCode).toBe(0);
     expect(stderr).not.toContain("did not check connectors");
-    expect(stderr).toBe("");
+    expect(stderr).toBe("Warning: native project registration succeeded, but local Rovara enrollment is on hold (registration_response_unproven); register it from its source checkout or reconnect there before publication.\n");
+    expect(enrollments.some((entry) => entry.kind === "registered")).toBe(false);
   });
 });
 
@@ -153,7 +157,7 @@ const deployment = {
 };
 
 /** The deployment-file and token-store setup of cli-execution.test.ts, with a project file that approves a connector tool. */
-async function administratorContext(prefix: string): Promise<{ globals: string[]; projectFile: string; tokens: InMemoryTokenStore }> {
+async function administratorContext(prefix: string): Promise<{ globals: string[]; home: string; projectFile: string; tokens: InMemoryTokenStore }> {
   const directory = await mkdtemp(join(tmpdir(), prefix));
   const deploymentFile = join(directory, "deployment.yaml");
   await writeFile(deploymentFile, JSON.stringify(deployment), "utf8");
@@ -161,7 +165,7 @@ async function administratorContext(prefix: string): Promise<{ globals: string[]
   await writeFile(projectFile, JSON.stringify(projectDefinition()), "utf8");
   const tokens = new InMemoryTokenStore();
   await tokens.set(tokenStoreKey(deployment.auth), { accessToken: "access-secret", expiresAt: Date.now() + 60_000 });
-  return { tokens, projectFile, globals: ["--config-dir", directory, "--deployment-file", deploymentFile, "--allow-loopback"] };
+  return { tokens, home: directory, projectFile, globals: ["--config-dir", directory, "--deployment-file", deploymentFile, "--allow-loopback"] };
 }
 
 async function runRegister(context: Awaited<ReturnType<typeof administratorContext>>, fetchImplementation: typeof fetch) {
@@ -178,10 +182,11 @@ async function runRegister(context: Awaited<ReturnType<typeof administratorConte
   ], {
     fetchImplementation,
     tokenStore: context.tokens,
+    environments: { home: context.home },
     stdout: { write(text: string) { stdout += text; } },
     stderr: { write(text: string) { stderr += text; } },
   });
-  return { exitCode, stdout, stderr };
+  return { exitCode, stdout, stderr, enrollments: await new LoopStore(join(context.home, ".rovara", "loop")).enrollments() };
 }
 
 function projectDefinition(): ProjectDefinition {

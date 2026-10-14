@@ -28,6 +28,7 @@ import {
   DeveloperTaskCloseRequestSchema,
   DeveloperTaskStatusSchema,
   CandidateManifestSchema,
+  projectCatalogKey,
   type ProjectDefinition,
   PullRequestResultSchema,
   ShareDeveloperTaskRequestSchema,
@@ -3610,10 +3611,122 @@ export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot): stri
  * an owner approval names its digest and the text read back has that digest. Anything else (no plan, no approval of
  * it, a changed object) gives undefined, and the description falls back to the task's title.
  */
-async function approvedPlanForPullRequest(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<LoadedDocument | undefined> {
+async function approvedPlanForPullRequest(deps: Pick<DeveloperTaskRouteDependencies, "actions">, workflow: WorkflowSnapshot): Promise<LoadedDocument | undefined> {
   const plan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
   if (plan === undefined || !workflow.decisions.some((decision) => decision.decision === "APPROVE" && decision.artifactDigest === plan.sha256)) return undefined;
   return loadWorkflowDocument((objectKey, maxBytes) => deps.actions.readArtifact(objectKey, maxBytes), plan, {});
+}
+
+/** Selects a publication protocol from broker-validated task, plan and project state, never request fields. */
+export type WorkflowPublicationAuthority = {
+  mode: "COMMITTED_HEAD" | "CHECKED_TREE";
+  pinnedRevision: number;
+  latestRevision: number;
+  materialDigest: string;
+  workflowRevision: number;
+  planArtifact: { id: string; type: string; version: number; objectKey: string; sha256: string; format: "markdown" | "structured" };
+  ownerApproval: { requestId: string; workflowRevision: number; actorId: string; actorRole: "TASK_OWNER" | "PROJECT_ADMIN"; artifactDigest: string; workBreakdownDigest: string | null; at: string };
+  workflowAuthorityDigest: string;
+};
+
+type LoadedPublicationProject = NonNullable<Awaited<ReturnType<DeveloperTaskActions["latestProject"]>>>;
+
+function workflowPublicationMaterialDigest(pinned: LoadedPublicationProject, latest: LoadedPublicationProject): string {
+  const material = (project: LoadedPublicationProject) => ({
+    projectName: project.definition.name,
+    revision: project.definition.revision,
+    registeredBy: project.registeredBy,
+    definition: project.definition,
+    runtimeBinding: project.runtimeBinding,
+    setupApproval: project.setupApproval ?? null,
+  });
+  return createHash("sha256").update(canonicalJson({
+    domain: "workflow-publication-project-material/v1",
+    pinned: material(pinned),
+    latest: material(latest),
+  })).digest("hex");
+}
+
+async function workflowPublicationAuthority(
+  deps: Pick<DeveloperTaskRouteDependencies, "actions" | "tableName">,
+  task: DeveloperTaskRecord,
+  workflow: WorkflowSnapshot,
+  approvedPlan: LoadedDocument | undefined,
+  admittedWorkflowRevision = workflow.revision,
+): Promise<{ authority: WorkflowPublicationAuthority; conditions: TransactItems } | undefined> {
+  if (approvedPlan === undefined) return undefined;
+  const ownerDecision = workflow.decisions.filter((decision) => decision.decision === "APPROVE"
+    && decision.artifactDigest === approvedPlan.artifact.sha256).at(-1);
+  if (ownerDecision === undefined || ownerDecision.artifactDigest === undefined) return undefined;
+  if (task.startingRevision === undefined) return undefined;
+  const [pinned, latest] = await Promise.all([
+    deps.actions.projectRevision(task.project, task.startingRevision),
+    deps.actions.latestProject(task.project),
+  ]);
+  if (pinned === undefined || latest === undefined || pinned.definition.name !== task.project || latest.definition.name !== task.project
+    || pinned.definition.revision !== task.startingRevision || latest.definition.revision < pinned.definition.revision) return undefined;
+  const planArtifact = { id: approvedPlan.artifact.id, type: approvedPlan.artifact.type, version: approvedPlan.artifact.version,
+    objectKey: approvedPlan.artifact.objectKey, sha256: approvedPlan.artifact.sha256, format: approvedPlan.format };
+  const ownerApproval = { requestId: ownerDecision.requestId, workflowRevision: ownerDecision.workflowRevision, actorId: ownerDecision.actorId,
+    actorRole: ownerDecision.actorRole, artifactDigest: ownerDecision.artifactDigest,
+    workBreakdownDigest: ownerDecision.workBreakdownDigest ?? null, at: ownerDecision.at };
+  const materialDigest = workflowPublicationMaterialDigest(pinned, latest);
+  const workflowAuthorityDigest = createHash("sha256").update(canonicalJson({
+    domain: "workflow-publication-approved-authority/v1", workflowRevision: admittedWorkflowRevision,
+    planArtifact, ownerDecision, graphApproval: workflow.workflowDependenciesApproval ?? null, projectMaterialDigest: materialDigest,
+  })).digest("hex");
+  const authority: WorkflowPublicationAuthority = {
+    mode: workflow.e2e?.required === true ? "COMMITTED_HEAD" : "CHECKED_TREE",
+    pinnedRevision: pinned.definition.revision,
+    latestRevision: latest.definition.revision,
+    materialDigest,
+    workflowRevision: admittedWorkflowRevision,
+    planArtifact,
+    ownerApproval,
+    workflowAuthorityDigest,
+  };
+  const conditions: TransactItems = [{ ConditionCheck: { TableName: deps.tableName, Key: projectCatalogKey(task.project),
+    ConditionExpression: "latestRevision = :revision", ExpressionAttributeValues: { ":revision": latest.definition.revision } } }];
+  if (workflow.e2e?.required === true) return { authority, conditions };
+  // Only the original approved artifact bytes/hash and positively loaded, policy-free pinned/current records establish
+  // the pre-E2E legacy path. Structured plans must positively lack E2E intent; verified legacy Markdown stays opaque.
+  if (workflow.e2e !== undefined || approvedPlan === undefined
+    || (approvedPlan.format === "structured" && approvedPlan.plan.e2e !== undefined)
+    || task.startingRevision === undefined || approvedPlan.artifact.type !== "plan"
+    || !workflow.decisions.some((decision) => decision.decision === "APPROVE" && decision.artifactDigest === approvedPlan.artifact.sha256)) return undefined;
+  if (pinned.definition.e2e !== undefined || latest.definition.e2e !== undefined) return undefined;
+  return {
+    authority,
+    conditions,
+  };
+}
+
+/** Recollects current task/project material and policy before a worker receives workflow push credentials. */
+export async function currentWorkflowPublicationAuthorityForTask(
+  deps: Pick<DeveloperTaskRouteDependencies, "actions" | "tableName" | "workflowE2EPresentation" | "workflowE2EPublicationChecks">,
+  task: DeveloperTaskRecord,
+): Promise<WorkflowPublicationAuthority | undefined> {
+  const workflow = task.workflow;
+  if (task.closedAt !== undefined || workflow?.candidate === undefined) return undefined;
+  const approvedPlan = await approvedPlanForPullRequest(deps, workflow);
+  const selection = await workflowPublicationAuthority(deps, task, workflow, approvedPlan);
+  if (selection === undefined) return undefined;
+  if (selection.authority.mode === "COMMITTED_HEAD") {
+    if (deps.workflowE2EPresentation === undefined || deps.workflowE2EPublicationChecks === undefined) return undefined;
+    const operations = await deps.actions.operations(task.workspaceId);
+    const presentation = await deps.workflowE2EPresentation({ task, operations, actor: "owner" });
+    const checks = await deps.workflowE2EPublicationChecks({ task, operations });
+    if (presentation?.shared.e2e.status !== "PASS" || checks === undefined || checks.length === 0) return undefined;
+  }
+  return selection.authority;
+}
+
+/** Compatibility projection for callers that only need the selected protocol. */
+export async function currentWorkflowPublicationModeForTask(
+  deps: Pick<DeveloperTaskRouteDependencies, "actions" | "tableName" | "workflowE2EPresentation" | "workflowE2EPublicationChecks">,
+  task: DeveloperTaskRecord,
+): Promise<"COMMITTED_HEAD" | "CHECKED_TREE" | undefined> {
+  return (await currentWorkflowPublicationAuthorityForTask(deps, task))?.mode;
 }
 
 /**
@@ -3667,6 +3780,8 @@ export async function startTaskWorkflowPublicationFromSystem(
   if (attempt > 1 && !ownerRetry) return "STALE";
   const requestId = workflowRequestId("agentx-auto-publish", taskId, expected.workflowRevision, expected.candidateDigest, repository.repositoryId, attempt);
   const approvedPlan = await approvedPlanForPullRequest(deps, workflow);
+  const publication = await workflowPublicationAuthority(deps, task, workflow, approvedPlan, workflow.revision + (ownerRetry ? 1 : 0));
+  if (publication === undefined) return "STALE";
   const title = `AgentX: ${inertTaskTitle(task.title)}`.slice(0, 256);
   const body = workflowPullRequestBody(task, workflow, approvedPlan, origin.taskPageUrl);
   const receivedAt = iso(deps);
@@ -3694,14 +3809,20 @@ export async function startTaskWorkflowPublicationFromSystem(
     }, (operation) => [
       taskItem,
       ...currentE2EChecks,
+      ...publication.conditions,
       putNew(turnTable(deps), aiToolTurn({
         party: origin.ownerActor === undefined ? partyOfTask(task) : partyOfTaskActor(task, origin.ownerActor), turnId: randomUUID(), action: "pull_request", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: ownerRetry ? "Retry opening the pull request" : "Open the draft pull request",
         response: `AgentX is opening a draft pull request on ${repository.repositoryId} as operation ${operation.id}.`, operationId: operation.id,
       })),
       ...(dispatchAccess === undefined ? [] : [taskAccessFence(deps.tableName, taskId, dispatchAccess.peopleRevision)]),
-    ], { workflowCandidate: { repositoryId: repository.repositoryId, treeSha: repository.treeSha, commitSha: repository.commitSha, candidateDigest: expected.candidateDigest,
-      ...(baseCommitSha === undefined ? {} : { baseCommitSha }) } });
+    ], { workflowCandidate: { repositoryId: repository.repositoryId, treeSha: repository.treeSha,
+      ...(publication.authority.mode === "COMMITTED_HEAD" ? { commitSha: repository.commitSha } : {}), candidateDigest: expected.candidateDigest,
+      ...(baseCommitSha === undefined ? {} : { baseCommitSha }), publicationMode: publication.authority.mode,
+      admittedPinnedRevision: publication.authority.pinnedRevision, admittedLatestRevision: publication.authority.latestRevision,
+      admittedMaterialDigest: publication.authority.materialDigest, admittedWorkflowRevision: publication.authority.workflowRevision,
+      admittedPlanArtifact: publication.authority.planArtifact, admittedOwnerApproval: publication.authority.ownerApproval,
+      admittedWorkflowAuthorityDigest: publication.authority.workflowAuthorityDigest } });
   } catch (error) {
     // The task moved on (or closed) between the read and the commit: nothing was started, and nothing is due.
     if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY") {

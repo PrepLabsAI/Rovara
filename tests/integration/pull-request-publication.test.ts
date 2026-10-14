@@ -43,6 +43,19 @@ afterEach(async () => {
 });
 
 describe("pull request publication", () => {
+  it("refuses a candidate-tree publication without a broker-selected mode before credentials or push", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
+    const [candidate] = await readCandidateRepositories([{ repositoryId: "demo", directory: fixture.checkout }]);
+    const invocation = { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha } } as typeof fixture.invocation;
+    const credentialProvider = vi.fn(async () => ({}));
+    const pullRequestSink = vi.fn();
+    await expect(publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider, pullRequestSink }))
+      .rejects.toThrow(/checked workflow publication mode is missing/);
+    expect(credentialProvider).not.toHaveBeenCalled();
+    expect(pullRequestSink).not.toHaveBeenCalled();
+  });
+
   it("replays the workspace tree onto the latest base without inheriting stale publication commits", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.checkout, "ABOUT.md"), "old unpublished change\n", "utf8");
@@ -118,7 +131,7 @@ describe("pull request publication", () => {
     await git(fixture.seed, ["-c", "user.name=U", "-c", "user.email=u@example.test", "commit", "-m", "upstream moved"]);
     await git(fixture.seed, ["push", "origin", "main"]);
     const manifest = JSON.parse(await readFile(join(fixture.root, ".agentx/preparation-manifest.json"), "utf8")) as PreparationManifest;
-    const invocation = { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha } } as typeof fixture.invocation;
+    const invocation = { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha, publicationMode: "CHECKED_TREE" } } as typeof fixture.invocation;
     const result = await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}), pullRequestSink: async () => ({ number: 14, url: "https://github.com/example/demo/pull/14", reconciled: false }) });
     expect((await git(fixture.checkout, ["rev-parse", `${result.commit}^{tree}`])).trim()).toBe(candidate!.treeSha);
     expect((await git(fixture.checkout, ["rev-parse", `${result.commit}^`])).trim()).toBe(manifest.repositories[0]!.resolvedCommit);
@@ -134,7 +147,7 @@ describe("pull request publication", () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
     const [candidate] = await readCandidateRepositories([{ repositoryId: "demo", directory: fixture.checkout }]);
-    const invocation = { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha } } as typeof fixture.invocation;
+    const invocation = { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha, publicationMode: "CHECKED_TREE" } } as typeof fixture.invocation;
     const sink = async () => ({ number: 15, url: "https://github.com/example/demo/pull/15", reconciled: false });
     const first = await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}), pullRequestSink: sink });
     const again = await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}), pullRequestSink: sink });
@@ -619,7 +632,7 @@ describe("PR feedback review after publication moved HEAD", () => {
     const base = (await git(fixture.checkout, ["rev-parse", "HEAD"])).trim();
     const [candidate] = await readCandidateRepositories([{ repositoryId: "demo", directory: fixture.checkout, baseCommitSha: base }]);
     const preDigest = createCandidateManifest([candidate!]).digest;
-    const invocation = { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha } } as typeof fixture.invocation;
+    const invocation = { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha, publicationMode: "CHECKED_TREE" } } as typeof fixture.invocation;
     const result = await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}),
       pullRequestSink: async () => ({ number: 21, url: "https://github.com/example/demo/pull/21", reconciled: false }) });
     expect((await git(fixture.checkout, ["rev-parse", "HEAD"])).trim()).toBe(result.commit);
@@ -1139,7 +1152,7 @@ describe("the push token never meets code the agent or a project controls (final
   const sink = async () => ({ number: 21, url: "https://github.com/example/demo/pull/21", reconciled: false });
   async function checkedInvocation(fixture: Awaited<ReturnType<typeof createFixture>>, extra: Record<string, unknown> = {}) {
     const [candidate] = await readCandidateRepositories([{ repositoryId: "demo", directory: fixture.checkout }]);
-    return { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha, reportChecks: true, ...extra } } as typeof fixture.invocation;
+    return { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha, publicationMode: "CHECKED_TREE", reportChecks: true, ...extra } } as typeof fixture.invocation;
   }
   function withReadiness(invocation: Extract<WorkerInvocation, { kind: "publish" }>, readiness: Extract<WorkerInvocation, { kind: "publish" }>["payload"]["project"]["readiness"]): typeof invocation {
     const copy = structuredClone(invocation);

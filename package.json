@@ -21,7 +21,7 @@
     "test:contract": "vitest run tests/contract",
     "test:integration": "vitest run tests/integration",
     "test:e2e": "vitest run tests/e2e",
-    "acceptance:p0-native-journey": "sh scripts/acceptance/p0-native-journey.sh",
+    "acceptance:p0-native-journey": "P0_NATIVE_PROFILE=all sh scripts/acceptance/p0-native-journey.sh",
     "test:boot-script": "AGENTX_BOOT_SCRIPT_DOCKER=1 vitest run tests/live/ec2-boot-script.test.ts",
     "typecheck": "tsc -b --pretty false",
     "typecheck:all": "tsc -b --pretty false && node scripts/typecheck-baseline.ts check",

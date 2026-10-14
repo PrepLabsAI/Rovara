@@ -64,6 +64,18 @@ export interface OperationRecord extends Operation {
      */
     expectedTreeSha?: string;
     expectedCommitSha?: string;
+    /** Server-selected workflow publication protocol, signed into the worker invocation. */
+    publicationMode?: "COMMITTED_HEAD" | "CHECKED_TREE";
+    /** Digest of the exact immutable publication invocation tuple. */
+    publicationContextDigest?: string;
+    /** Current project authority snapshot admitted with this publication; reloaded before credentials and callback. */
+    admittedPinnedRevision?: number;
+    admittedLatestRevision?: number;
+    admittedMaterialDigest?: string;
+    admittedWorkflowRevision?: number;
+    admittedPlanArtifact?: { id: string; type: string; version: number; objectKey: string; sha256: string; format: "markdown" | "structured" };
+    admittedOwnerApproval?: { requestId: string; workflowRevision: number; actorId: string; actorRole: "TASK_OWNER" | "PROJECT_ADMIN"; artifactDigest: string; workBreakdownDigest: string | null; at: string };
+    admittedWorkflowAuthorityDigest?: string;
     /** The checked candidate the tree belongs to (a workflow publication only). */
     candidateDigest?: string;
     /** The base commit the broker pinned for the task: the pushed commit's only parent (a workflow publication only). */

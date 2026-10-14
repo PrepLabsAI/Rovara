@@ -274,10 +274,17 @@ export const WorkerInvokeTokenClaimsSchema = z
     setupExecutionId: z.string().uuid().optional(),
     setupSubjectId: z.string().uuid().optional(),
     setupApprovalRevision: z.number().int().positive().optional(),
+    /** Signed only for publish operations carrying a server-selected candidate publication mode. */
+    publicationMode: z.enum(["COMMITTED_HEAD", "CHECKED_TREE"]).optional(),
+    /** Signed binding for every immutable workflow publication selector carried by that invocation. */
+    publicationContextDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   })
   .strict().superRefine((claims, context) => {
     const hasSetup = claims.setupExecutionId !== undefined && claims.setupSubjectId !== undefined && claims.setupApprovalRevision !== undefined;
     if ((claims.purpose === "PROJECT_SETUP") !== hasSetup) context.addIssue({ code: "custom", path: ["setupExecutionId"], message: "setup purpose requires exact setup subject claims and workspace purpose forbids them" });
+    if ((claims.publicationMode === undefined) !== (claims.publicationContextDigest === undefined)) {
+      context.addIssue({ code: "custom", path: ["publicationContextDigest"], message: "workflow publication mode and context digest must be signed together" });
+    }
   });
 
 /** The HTTP authorization scheme of a worker invocation: `Authorization: AgentX-Invoke <token>`. */

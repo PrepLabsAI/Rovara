@@ -12,7 +12,7 @@ import { developerTaskIdentity } from "../../packages/broker/src/developer/task-
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
-import { captureWorkflowFeedbackNote, decideTaskWorkflow, getTaskDocumentView, inertTaskTitle, promptTagId, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowReviewFromSystem, threadNotesPromptSection, workflowPullRequestBody } from "../../packages/broker/src/aws/developer-tasks.js";
+import { captureWorkflowFeedbackNote, decideTaskWorkflow, getTaskDocumentView, inertTaskTitle, promptTagId, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, taskPageUrl, threadNotesPromptSection, workflowPullRequestBody } from "../../packages/broker/src/aws/developer-tasks.js";
 import { GATED_TASK_TURN_REFUSAL, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
 import { failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
 import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
@@ -23,6 +23,7 @@ import { attachEvidence, planEvidenceJobItem } from "../../packages/broker/src/d
 import { noticesFromStream } from "../../packages/broker/src/developer/notifications.js";
 import { DEV_ISSUER, MAYA, OMAR, createDeveloperTaskBroker, markThreadPosted, recordStream, teammate } from "../support/developer-task-broker.js";
 import type { Developer } from "../support/developer-task-broker.js";
+import { registerSlackProject } from "../support/slack-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 /** A prepare result as the worker sends it: where preparation checked out each repository. */
@@ -964,8 +965,8 @@ describe("native developer task workflow", () => {
     // AgentX opened the draft pull request itself once both reviews passed; a manual request is refused.
     const manual = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/pull-requests`, { requestId: randomUUID(), title: "Fix retry" });
     expect(manual.body.error).toMatchObject({ code: "CONFIG_INVALID", message: "AgentX opens the draft pull request for this task itself once checks and reviews pass" });
-    const publication = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.kind === "publish") as { id?: string; publication?: { headBranch?: string; draft?: boolean; expectedTreeSha?: string } } | undefined;
-    expect(publication?.publication).toMatchObject({ draft: true, expectedTreeSha: "b".repeat(40) });
+    const publication = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.kind === "publish") as { id?: string; publication?: { headBranch?: string; draft?: boolean; expectedTreeSha?: string; admittedPinnedRevision?: number; admittedLatestRevision?: number; admittedMaterialDigest?: string } } | undefined;
+    expect(publication?.publication).toMatchObject({ draft: true, expectedTreeSha: "b".repeat(40), admittedPinnedRevision: 1, admittedLatestRevision: 1, admittedMaterialDigest: expect.stringMatching(/^[a-f0-9]{64}$/) });
     harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "PULL_REQUEST#demo#000000000042", entityType: "PULL_REQUEST", workspaceId,
       repository: "demo", repositoryUrl: "https://github.com/example/demo.git", number: 42, url: "https://github.com/example/demo/pull/42", state: "open", headBranch: publication?.publication?.headBranch,
       baseBranch: "main", expectedHeadCommit: "d".repeat(40), title: "Fix retry", body: "", createdByOperationId: String(publication?.id), updatedAt: new Date().toISOString() });
@@ -999,8 +1000,11 @@ describe("native developer task workflow", () => {
     expect(body).toContain(`AgentX task: ${new URL(DEV_ISSUER).origin}/review/${taskId}/task`);
     expect(body).toContain("Opened as a draft by AgentX after the owner-approved plan, checks and reviews passed. Merge it on GitHub.");
     expect(dispatchRows(harness)).toEqual([]);
-    const invocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === publish?.id)[0]?.invocation as { payload: { candidateTreeSha?: string; repositoryGrant: string } };
+    expect(publish?.publication).toMatchObject({ publicationMode: "CHECKED_TREE" });
+    expect(publish?.publication).not.toHaveProperty("expectedCommitSha");
+    const invocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === publish?.id)[0]?.invocation as { payload: { candidateTreeSha?: string; publicationMode?: string; repositoryGrant: string } };
     expect(invocation.payload.candidateTreeSha).toBe("b".repeat(40));
+    expect(invocation.payload.publicationMode).toBe("CHECKED_TREE");
     expect(invocation.payload.repositoryGrant).toEqual(expect.any(String));
     // Only the publish step carries a repository grant; no coding, check or review run ever does.
     for (const op of operations(harness, workspaceId).filter((item) => item.kind === "task")) {
@@ -1015,6 +1019,103 @@ describe("native developer task workflow", () => {
     await harness.finish(workspaceId, publish!.id, "SUCCEEDED", { result: { repository: "demo", number: 42, url: "https://github.com/example/demo/pull/42", headBranch: p.headBranch, baseBranch: "main", commit: "d".repeat(40), checks: [], reconciled: false } });
     expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ number: 42, headSha: "d".repeat(40) }] });
     expect(dispatchRows(harness)).toEqual([]);
+  });
+
+  it("holds admitted publication before credentials and callback when latest project material changes", async () => {
+    const github = pullRequestGateway("b".repeat(40));
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: github } });
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    await passReviews(harness, workspaceId, candidate);
+    const publish = operations(harness, workspaceId).find((item) => item.kind === "publish") as { id: string; publication: Record<string, unknown> };
+    const invocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === publish.id)[0]!.invocation as { callbackCapability: string; payload: { repositoryGrant: string } };
+    const exchange = vi.spyOn(harness.brokerInput.repositoryGrants, "exchange");
+
+    // A newly registered current revision changes project material after this exact publication was admitted.
+    await registerSlackProject(harness.handler, { revision: 2 });
+
+    const credentialResponse = await harness.handler({ version: "2.0", rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${publish.id}/repository-credentials`, rawQueryString: "",
+      headers: { "x-agentx-repository-grant": invocation.payload.repositoryGrant },
+      body: JSON.stringify({ credentialRef: "github-app", repositoryUrl: "https://github.com/example/demo.git", access: "push" }),
+      requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    expect(credentialResponse.statusCode).not.toBe(200);
+    expect(JSON.parse(credentialResponse.body)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(exchange).not.toHaveBeenCalled();
+
+    const metadataResponse = await harness.handler({ version: "2.0", rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${publish.id}/pull-request`, rawQueryString: "",
+      headers: { "x-agentx-callback-capability": invocation.callbackCapability },
+      body: JSON.stringify({ repository: publish.publication.repository, repositoryUrl: publish.publication.repositoryUrl, headBranch: publish.publication.headBranch,
+        baseBranch: publish.publication.baseBranch, commit: "d".repeat(40), title: publish.publication.title }),
+      requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    expect(metadataResponse.statusCode).not.toBe(200);
+    expect(JSON.parse(metadataResponse.body)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(github.getBranchHead).not.toHaveBeenCalled();
+    expect(github.reconcilePullRequest).not.toHaveBeenCalled();
+    expect(taskWorkflow(harness, taskId).stage).toBe("PULL_REQUEST");
+  });
+
+  it("holds the same publication mode when its approved plan reference and Owner approval change", async () => {
+    const github = pullRequestGateway("b".repeat(40));
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: github } });
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    await passReviews(harness, workspaceId, candidate);
+    const publish = operations(harness, workspaceId).find((item) => item.kind === "publish") as { id: string; publication: Record<string, unknown> };
+    expect(publish.publication.publicationMode).toBe("CHECKED_TREE");
+    const invocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === publish.id)[0]!.invocation as { callbackCapability: string; payload: { repositoryGrant: string } };
+    const exchange = vi.spyOn(harness.brokerInput.repositoryGrants, "exchange");
+
+    // Model a new canonical plan object and matching Owner decision after this publication was admitted.
+    const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
+    const workflow = record.workflow;
+    const oldPlan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)!;
+    const oldApproval = workflow.decisions.filter((decision) => decision.decision === "APPROVE" && decision.artifactDigest === oldPlan.sha256).at(-1)!;
+    const planText = "# Plan\n\n1. Preserve the approved implementation but record its revised rationale.\n";
+    const planSha = createHash("sha256").update(planText, "utf8").digest("hex");
+    const planArtifact = { ...oldPlan, id: randomUUID(), version: oldPlan.version + 1, sha256: planSha,
+      objectKey: `workflow/${taskId}/plan-revision-${randomUUID()}.md`, createdAt: new Date().toISOString(), format: "markdown" as const };
+    harness.s3.objects.set(planArtifact.objectKey, planText);
+    const ownerApproval = { ...oldApproval, requestId: randomUUID(), workflowRevision: workflow.revision + 1, artifactDigest: planSha, at: new Date().toISOString() };
+    harness.db.set({ ...record, workflow: { ...workflow, revision: workflow.revision + 1, updatedAt: ownerApproval.at,
+      artifacts: workflow.artifacts.map((artifact) => artifact.id === oldPlan.id ? planArtifact : artifact), decisions: [...workflow.decisions, ownerApproval] } });
+
+    const credentialResponse = await harness.handler({ version: "2.0", rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${publish.id}/repository-credentials`, rawQueryString: "",
+      headers: { "x-agentx-repository-grant": invocation.payload.repositoryGrant },
+      body: JSON.stringify({ credentialRef: "github-app", repositoryUrl: "https://github.com/example/demo.git", access: "push" }),
+      requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    expect(credentialResponse.statusCode).not.toBe(200);
+    expect(JSON.parse(credentialResponse.body)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(exchange).not.toHaveBeenCalled();
+
+    const metadataResponse = await harness.handler({ version: "2.0", rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${publish.id}/pull-request`, rawQueryString: "",
+      headers: { "x-agentx-callback-capability": invocation.callbackCapability },
+      body: JSON.stringify({ repository: publish.publication.repository, repositoryUrl: publish.publication.repositoryUrl, headBranch: publish.publication.headBranch,
+        baseBranch: publish.publication.baseBranch, commit: "d".repeat(40), title: publish.publication.title }),
+      requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    expect(metadataResponse.statusCode).not.toBe(200);
+    expect(JSON.parse(metadataResponse.body)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(github.getBranchHead).not.toHaveBeenCalled();
+    expect(github.reconcilePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("treats a reused publication request with a changed candidate base as an idempotency conflict", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    await passReviews(harness, workspaceId, candidate);
+    const publicationCount = operations(harness, workspaceId).filter((item) => item.kind === "publish").length;
+    expect(publicationCount).toBe(1);
+
+    const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
+    const workflow = record.workflow;
+    const routeDeps = { documentClient: harness.db, tableName: "state", actions: harness.actions, now: () => Date.now() };
+    const expected = { workflowRevision: workflow.revision, candidateDigest: candidate.digest };
+    const origin = { taskPageUrl: taskPageUrl(DEV_ISSUER, taskId), ownerAccess: { peopleRevision: 1 } };
+    await expect(startTaskWorkflowPublicationFromSystem(routeDeps as never, taskId, expected, origin)).resolves.toBe("DUPLICATE");
+
+    harness.db.set({ ...record, workflow: { ...workflow, reviewBase: [{ repositoryId: "demo", baseCommitSha: "f".repeat(40) }] } });
+    await expect(startTaskWorkflowPublicationFromSystem(routeDeps as never, taskId, expected, origin)).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(operations(harness, workspaceId).filter((item) => item.kind === "publish")).toHaveLength(publicationCount);
   });
 
   for (const [name, tree, heads, opened] of [
@@ -2299,7 +2400,7 @@ describe("the draft pull request AgentX opens (final review)", () => {
   const routeDeps = (harness: Harness) => ({ documentClient: harness.db, tableName: "state", actions: harness.actions, log: () => undefined,
     checkAccess: async () => ({ revision: 1, policy: {} as never, access: "granted" as const, channelIds: [] }), projectChannelIds: async () => [], now: () => Date.now() });
 
-  it("describes only the owner-approved plan whose saved text still has its digest, else the task's title", async () => {
+  it("holds publication when the owner-approved plan bytes no longer match its digest", async () => {
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
     const plan = taskWorkflow(harness, taskId).artifacts.find((artifact) => artifact.type === "plan")!;
@@ -2311,9 +2412,8 @@ describe("the draft pull request AgentX opens (final review)", () => {
     const reviewPayload = (harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === review.id)[0]?.invocation as { payload: Record<string, unknown> }).payload;
     expect(reviewPayload).not.toHaveProperty("workflowReviewPlan");
     await passReviews(harness, workspaceId, candidate);
-    const body = String(publishOf(harness, workspaceId)[0]?.publication.body);
-    expect(body).not.toContain("Push straight to main.");
-    expect(body.split("\n")[0]).toBe("Fix the retry bug");
+    expect(publishOf(harness, workspaceId)).toEqual([]);
+    expect(dispatchRows(harness)).toEqual([]);
   });
 
   it("makes a Slack-written title inert in the pull request's title and description", () => {

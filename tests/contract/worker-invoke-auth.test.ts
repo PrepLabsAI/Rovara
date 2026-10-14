@@ -7,6 +7,9 @@ import {
   WORKER_INVOKE_AUTHORIZATION_SCHEME,
   workerInvokeToken,
   workerInvokeTokenPayload,
+  WorkerInvokeTokenClaimsSchema,
+  workflowPublicationContext,
+  workflowPublicationContextDigest,
   type WorkerInvocation,
   type WorkerInvokeTokenClaims,
 } from "../../packages/contracts/src/index.js";
@@ -16,6 +19,7 @@ import {
   handleWorkerRequest,
   invokeAuthenticationFromEnvironment,
   invokePublicKey,
+  verifyInvokeAuthorization,
   type InvokeAuthentication,
 } from "../../packages/worker/src/index.js";
 
@@ -50,6 +54,9 @@ function claimsFor(invocation: WorkerInvocation, overrides: Partial<WorkerInvoke
     fence: invocation.fence,
     expiresAt: NOW + 60,
     purpose: "WORKSPACE",
+    ...(invocation.kind === "publish" && invocation.payload.publicationMode !== undefined
+      ? { publicationMode: invocation.payload.publicationMode, publicationContextDigest: invocation.payload.publicationContextDigest }
+      : {}),
     ...overrides,
   };
 }
@@ -116,6 +123,97 @@ describe("an EC2 worker authenticating invocations", () => {
       await expect(refused.json()).resolves.toMatchObject({ reason: "invocation_mismatch" });
       expect(await journal.get(other.operationId)).toBeUndefined();
     }
+  });
+
+  it("requires a signed publication mode to match the candidate-tree invocation", async () => {
+    const { state, journal, execute } = await workerState(authentication);
+    const invocation = {
+      protocolVersion: 1 as const,
+      kind: "publish" as const,
+      operationId: randomUUID(),
+      workspaceId,
+      fence: 2,
+      projectRevision: 1,
+      callbackCapability: "c".repeat(64),
+      payload: {
+        mode: "create" as const,
+        project: { name: "demo", revision: 1, setup: [], readiness: [], orchestratorInstructions: "x",
+          repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }] },
+        repository: "demo", title: "test", headBranch: `agentx/${randomUUID()}`,
+        repositoryGrant: "grant", candidateTreeSha: "a".repeat(40),
+        candidateCommitSha: "b".repeat(40), workflowBaseCommit: "c".repeat(40),
+        publicationMode: "COMMITTED_HEAD" as const,
+      },
+    } as WorkerInvocation;
+    const context = workflowPublicationContext(invocation);
+    if (context === undefined || invocation.kind !== "publish") throw new Error("test publication context should be complete");
+    invocation.payload.publicationContextDigest = workflowPublicationContextDigest(context);
+    const positive = await workerState(authentication);
+    const validToken = `AgentX-Invoke ${tokenFor(claimsFor(invocation))}`;
+    const accepted = await handleWorkerRequest(post(invocation, validToken), positive.state);
+    expect(accepted.status).toBe(200);
+    await expect(accepted.json()).resolves.toMatchObject({ accepted: true, operationId: invocation.operationId });
+    expect(await positive.journal.get(invocation.operationId)).toBeDefined();
+
+    const signedFor = claimsFor(invocation, { publicationMode: "CHECKED_TREE" });
+    const token = tokenFor(signedFor);
+    expect(WorkerInvokeTokenClaimsSchema.safeParse(signedFor).success).toBe(true);
+    const [encodedPayload, encodedSignature] = token.split(".");
+    expect(token.length).toBeLessThan(2_048);
+    expect(WorkerInvokeTokenClaimsSchema.safeParse(JSON.parse(Buffer.from(encodedPayload!, "base64url").toString("utf8"))).success).toBe(true);
+    expect(encodedPayload).toMatch(/^[A-Za-z0-9_-]+$/u);
+    expect(encodedSignature).toMatch(/^[A-Za-z0-9_-]+$/u);
+    expect(verifyInvokeAuthorization(`AgentX-Invoke ${token}`, authentication)).toMatchObject({ ok: true });
+    const refused = await handleWorkerRequest(post(invocation, `AgentX-Invoke ${token}`), state);
+    expect(refused.status).toBe(401);
+    await expect(refused.json()).resolves.toMatchObject({ reason: "invocation_mismatch" });
+    expect(await journal.get(invocation.operationId)).toBeUndefined();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects same-token publication candidate and destination mutations before journaling", async () => {
+    const { state, journal, execute } = await workerState(authentication);
+    const original = {
+      protocolVersion: 1 as const,
+      kind: "publish" as const,
+      operationId: randomUUID(),
+      workspaceId,
+      fence: 4,
+      projectRevision: 2,
+      callbackCapability: "c".repeat(64),
+      payload: {
+        mode: "create" as const,
+        project: { name: "demo", revision: 2, setup: [], readiness: [], orchestratorInstructions: "x",
+          repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }] },
+        repository: "demo", title: "test", headBranch: `agentx/${randomUUID()}`,
+        repositoryGrant: "grant", candidateTreeSha: "a".repeat(40), candidateCommitSha: "b".repeat(40),
+        workflowBaseCommit: "c".repeat(40), publicationMode: "COMMITTED_HEAD" as const,
+      },
+    } as WorkerInvocation;
+    if (original.kind !== "publish") throw new Error("test invocation should publish");
+    const originalContext = workflowPublicationContext(original)!;
+    original.payload.publicationContextDigest = workflowPublicationContextDigest(originalContext);
+    const token = `AgentX-Invoke ${tokenFor(claimsFor(original))}`;
+    const wrongRepo = { ...original.payload.project.repositories[0]!, name: "other" };
+    const mutations: WorkerInvocation[] = [
+      { ...original, projectRevision: original.projectRevision + 1 },
+      { ...original, payload: { ...original.payload, repository: "other", project: { ...original.payload.project, repositories: [wrongRepo] } } },
+      { ...original, payload: { ...original.payload, project: { ...original.payload.project, repositories: [{ ...original.payload.project.repositories[0]!, url: "https://github.com/other/demo.git" }] } } },
+      { ...original, payload: { ...original.payload, project: { ...original.payload.project, repositories: [{ ...original.payload.project.repositories[0]!, path: "other/demo" }] } } },
+      { ...original, payload: { ...original.payload, project: { ...original.payload.project, repositories: [{ ...original.payload.project.repositories[0]!, defaultBranch: "trunk" }] } } },
+      { ...original, payload: { ...original.payload, headBranch: `agentx/${randomUUID()}` } },
+      { ...original, payload: { ...original.payload, candidateTreeSha: "d".repeat(40) } },
+      { ...original, payload: { ...original.payload, candidateCommitSha: "e".repeat(40) } },
+      { ...original, payload: { ...original.payload, workflowBaseCommit: "f".repeat(40) } },
+    ];
+    for (const [mutationIndex, changed] of mutations.entries()) {
+      const refused = await handleWorkerRequest(post(changed, token), state);
+      const response = await refused.json() as { reason?: string };
+      expect(refused.status, `mutation ${mutationIndex} returned ${JSON.stringify(response)}`).toBe(401);
+      expect(response).toMatchObject({ reason: "invocation_mismatch" });
+      expect(await journal.get(changed.operationId)).toBeUndefined();
+    }
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it("keeps /ping unauthenticated for health probes", async () => {

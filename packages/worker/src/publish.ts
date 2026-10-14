@@ -137,34 +137,47 @@ export async function publishWorkspace(
   };
   let commit: string;
   if (candidateTreeSha !== undefined) {
-    const candidateCommitSha = invocation.payload.candidateCommitSha;
-    if (candidateCommitSha === undefined) throw agentXError("CONFIG_INVALID", "the checked workflow commit is missing");
-    // A workflow publication: exactly the tree that passed its checks and reviews, on the task's own base: the base the
-    // broker pinned for the task when it sends one (never the agent-writable manifest's), else the commit preparation
-    // checked out. It is not replayed onto the latest base; GitHub shows any conflict on the pull request.
-    const pinnedBase = invocation.payload.workflowBaseCommit;
-    if (pinnedBase !== undefined) {
-      await git(["cat-file", "-e", `${pinnedBase}^{commit}`]).catch(() => {
-        throw agentXError("WORKSPACE_NOT_READY", "the task's base commit is missing from the workspace");
+    const publicationMode = invocation.payload.publicationMode;
+    if (publicationMode === undefined) throw agentXError("CONFIG_INVALID", "the checked workflow publication mode is missing");
+    if (publicationMode === "CHECKED_TREE") {
+      commit = await prepareCandidatePublicationCommit({
+        git,
+        preparationCommit: invocation.payload.workflowBaseCommit ?? manifestRepository.resolvedCommit,
+        headBranch: invocation.payload.headBranch,
+        title: invocation.payload.title,
+        candidateTreeSha,
+        retrying: retryingCommittedPublication,
       });
+    } else {
+      const candidateCommitSha = invocation.payload.candidateCommitSha;
+      if (candidateCommitSha === undefined) throw agentXError("CONFIG_INVALID", "the checked workflow commit is missing");
+      // A workflow publication: exactly the tree that passed its checks and reviews, on the task's own base: the base the
+      // broker pinned for the task when it sends one (never the agent-writable manifest's), else the commit preparation
+      // checked out. It is not replayed onto the latest base; GitHub shows any conflict on the pull request.
+      const pinnedBase = invocation.payload.workflowBaseCommit;
+      if (pinnedBase !== undefined) {
+        await git(["cat-file", "-e", `${pinnedBase}^{commit}`]).catch(() => {
+          throw agentXError("WORKSPACE_NOT_READY", "the task's base commit is missing from the workspace");
+        });
+      }
+      try {
+        await assertNoEmbeddedRepositories(git.directory, git.env);
+        await assertNoLfsFiles(git.directory, git.env);
+      } catch (error) {
+        if (error instanceof AgentXError) throw error;
+        throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
+      }
+      const workspaceTree = await temporaryIndexTree(git);
+      const candidateTree = (await git(["rev-parse", `${candidateCommitSha}^{tree}`])).trim();
+      const currentHead = (await git(["rev-parse", "HEAD"])).trim();
+      const currentTree = (await git(["rev-parse", "HEAD^{tree}"])).trim();
+      const baseIsAncestor = pinnedBase === undefined || await git(["merge-base", "--is-ancestor", pinnedBase, candidateCommitSha]).then(() => true, () => false);
+      if (status.trim() || currentHead !== candidateCommitSha || currentTree !== candidateTreeSha || candidateTree !== candidateTreeSha
+        || workspaceTree !== candidateTreeSha || !baseIsAncestor) {
+        throw agentXError("CONFIG_INVALID", WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE);
+      }
+      commit = candidateCommitSha;
     }
-    try {
-      await assertNoEmbeddedRepositories(git.directory, git.env);
-      await assertNoLfsFiles(git.directory, git.env);
-    } catch (error) {
-      if (error instanceof AgentXError) throw error;
-      throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
-    }
-    const workspaceTree = await temporaryIndexTree(git);
-    const candidateTree = (await git(["rev-parse", `${candidateCommitSha}^{tree}`])).trim();
-    const currentHead = (await git(["rev-parse", "HEAD"])).trim();
-    const currentTree = (await git(["rev-parse", "HEAD^{tree}"])).trim();
-    const baseIsAncestor = pinnedBase === undefined || await git(["merge-base", "--is-ancestor", pinnedBase, candidateCommitSha]).then(() => true, () => false);
-    if (status.trim() || currentHead !== candidateCommitSha || currentTree !== candidateTreeSha || candidateTree !== candidateTreeSha
-      || workspaceTree !== candidateTreeSha || !baseIsAncestor) {
-      throw agentXError("CONFIG_INVALID", WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE);
-    }
-    commit = candidateCommitSha;
   } else if (retryingCommittedPublication) {
     commit = (await git(["rev-parse", "HEAD"])).trim();
   } else if (mode === "revert") {
@@ -271,6 +284,43 @@ export async function publishWorkspace(
       ? { replacementFor: invocation.payload.targetPullRequestNumber }
       : {}),
   });
+}
+
+/** Legacy, server-selected checked-tree protocol: preserve the exact verified tree on the pinned base. */
+async function prepareCandidatePublicationCommit(input: {
+  git: RepositoryGit;
+  preparationCommit: string;
+  headBranch: string;
+  title: string;
+  candidateTreeSha: string;
+  retrying: boolean;
+}): Promise<string> {
+  await input.git(["cat-file", "-e", `${input.preparationCommit}^{commit}`]).catch(() => {
+    throw agentXError("WORKSPACE_NOT_READY", "the task's base commit is missing from the workspace");
+  });
+  try {
+    await assertNoEmbeddedRepositories(input.git.directory, input.git.env);
+    await assertNoLfsFiles(input.git.directory, input.git.env);
+  } catch (error) {
+    if (error instanceof AgentXError) throw error;
+    throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
+  }
+  const workspaceTree = await temporaryIndexTree(input.git);
+  if (workspaceTree !== input.candidateTreeSha) throw agentXError("CONFIG_INVALID", WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE);
+  if (input.retrying) {
+    const head = (await input.git(["rev-parse", "HEAD"])).trim();
+    const headTree = (await input.git(["rev-parse", "HEAD^{tree}"])).trim();
+    const parent = (await input.git(["rev-parse", "HEAD^"]).catch(() => "")).trim();
+    if (headTree === input.candidateTreeSha && parent === input.preparationCommit) return head;
+  }
+  const preparedTree = (await input.git(["rev-parse", `${input.preparationCommit}^{tree}`])).trim();
+  if (workspaceTree === preparedTree) throw agentXError("CONFIG_INVALID", "repository has no changes to publish");
+  const commit = (await input.git([
+    "-c", `user.name=${AGENTX_GIT_NAME}`, "-c", `user.email=${AGENTX_GIT_EMAIL}`,
+    "commit-tree", workspaceTree, "-p", input.preparationCommit, "-m", `AgentX: ${input.title}`,
+  ])).trim();
+  await input.git(["checkout", "--force", "-B", input.headBranch, commit]);
+  return commit;
 }
 
 /**

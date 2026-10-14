@@ -206,6 +206,8 @@ import {
   ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey,
   WorkerInvocationSchema,
+  workflowPublicationContext,
+  workflowPublicationContextDigest,
 } from "@agentx/contracts";
 import { compileE2EScenarios, collectE2EActualCliRun, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes } from "@agentx/verifier";
 import { renderE2EMcpProjection, renderE2EPageHtml, renderE2ESlackBlocks } from "../e2e-presentation.js";
@@ -265,7 +267,7 @@ import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from ".
 import { chatGptHostId } from "../chatgpt/oauth.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
@@ -4044,15 +4046,22 @@ async function acceptPullRequest(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { workflowCandidate?: { repositoryId: string; treeSha: string; commitSha: string; candidateDigest: string; baseCommitSha?: string } } = {},
+  options: { workflowCandidate?: { repositoryId: string; treeSha: string; commitSha?: string; candidateDigest: string; baseCommitSha?: string; publicationMode: "COMMITTED_HEAD" | "CHECKED_TREE"; admittedPinnedRevision: number; admittedLatestRevision: number; admittedMaterialDigest: string; admittedWorkflowRevision: number; admittedPlanArtifact: { id: string; type: string; version: number; objectKey: string; sha256: string; format: "markdown" | "structured" }; admittedOwnerApproval: { requestId: string; workflowRevision: number; actorId: string; actorRole: "TASK_OWNER" | "PROJECT_ADMIN"; artifactDigest: string; workBreakdownDigest: string | null; at: string }; admittedWorkflowAuthorityDigest: string } } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   const request = PullRequestRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
   const candidate = options.workflowCandidate;
   if (candidate !== undefined && (candidate.repositoryId !== request.repository || !/^[a-f0-9]{40}$/.test(candidate.treeSha)
-    || !/^[a-f0-9]{40}$/.test(candidate.commitSha)
-    || !/^[a-f0-9]{64}$/.test(candidate.candidateDigest) || (candidate.baseCommitSha !== undefined && !/^[a-f0-9]{40}$/.test(candidate.baseCommitSha)))) {
+    || (candidate.commitSha !== undefined && !/^[a-f0-9]{40}$/.test(candidate.commitSha))
+    || (candidate.publicationMode === "COMMITTED_HEAD" && candidate.commitSha === undefined)
+    || (candidate.publicationMode === "CHECKED_TREE" && candidate.commitSha !== undefined)
+    || !/^[a-f0-9]{64}$/.test(candidate.candidateDigest) || (candidate.baseCommitSha !== undefined && !/^[a-f0-9]{40}$/.test(candidate.baseCommitSha))
+    || candidate.admittedPinnedRevision !== workspace.projectRevision || candidate.admittedLatestRevision < candidate.admittedPinnedRevision
+    || !/^[a-f0-9]{64}$/.test(candidate.admittedMaterialDigest) || !Number.isInteger(candidate.admittedWorkflowRevision)
+    || candidate.admittedWorkflowRevision < 1 || candidate.admittedPlanArtifact.sha256.length !== 64
+    || candidate.admittedPlanArtifact.sha256 !== candidate.admittedOwnerApproval.artifactDigest
+    || !/^[a-f0-9]{64}$/.test(candidate.admittedWorkflowAuthorityDigest))) {
     throw agentXError("CONFIG_INVALID", "workflow publication does not match its checked candidate");
   }
   const requestHash = hashJson({
@@ -4060,7 +4069,8 @@ async function acceptPullRequest(
     title: request.title,
     ...(request.body === undefined ? {} : { body: request.body }),
     ...(request.draft === undefined ? {} : { draft: request.draft }),
-    ...(candidate === undefined ? {} : { candidateTreeSha: candidate.treeSha, candidateCommitSha: candidate.commitSha, candidateDigest: candidate.candidateDigest }),
+    ...(candidate === undefined ? {} : { candidateTreeSha: candidate.treeSha, ...(candidate.commitSha === undefined ? {} : { candidateCommitSha: candidate.commitSha }), ...(candidate.baseCommitSha === undefined ? {} : { candidateBaseCommitSha: candidate.baseCommitSha }), candidateDigest: candidate.candidateDigest, publicationMode: candidate.publicationMode, admittedPinnedRevision: candidate.admittedPinnedRevision, admittedLatestRevision: candidate.admittedLatestRevision, admittedMaterialDigest: candidate.admittedMaterialDigest,
+      admittedWorkflowRevision: candidate.admittedWorkflowRevision, admittedPlanArtifact: candidate.admittedPlanArtifact, admittedOwnerApproval: candidate.admittedOwnerApproval, admittedWorkflowAuthorityDigest: candidate.admittedWorkflowAuthorityDigest }),
   });
   const idempotencyKey = {
     pk: `IDEMPOTENCY#${identity.ownerKey}#${workspaceId}`,
@@ -4119,7 +4129,10 @@ async function acceptPullRequest(
     codeBuildGates: repository.codeBuildGates ?? [],
     ...(body === undefined ? {} : { body }),
     ...(draft === undefined ? {} : { draft }),
-    ...(candidate === undefined ? {} : { expectedTreeSha: candidate.treeSha, expectedCommitSha: candidate.commitSha, candidateDigest: candidate.candidateDigest }),
+    ...(candidate === undefined ? {} : { expectedTreeSha: candidate.treeSha, ...(candidate.commitSha === undefined ? {} : { expectedCommitSha: candidate.commitSha }), candidateDigest: candidate.candidateDigest, publicationMode: candidate.publicationMode,
+      admittedPinnedRevision: candidate.admittedPinnedRevision, admittedLatestRevision: candidate.admittedLatestRevision, admittedMaterialDigest: candidate.admittedMaterialDigest,
+      admittedWorkflowRevision: candidate.admittedWorkflowRevision, admittedPlanArtifact: candidate.admittedPlanArtifact, admittedOwnerApproval: candidate.admittedOwnerApproval,
+      admittedWorkflowAuthorityDigest: candidate.admittedWorkflowAuthorityDigest }),
     ...(candidate?.baseCommitSha === undefined ? {} : { expectedBaseCommit: candidate.baseCommitSha }),
   };
   const invocation: WorkerInvocation = {
@@ -4152,10 +4165,17 @@ async function acceptPullRequest(
       // The tree the checks and reviews passed on: the worker publishes exactly it, or refuses before pushing.
       ...(candidate === undefined ? {} : { candidateTreeSha: candidate.treeSha }),
       ...(candidate === undefined ? {} : { candidateCommitSha: candidate.commitSha }),
+      ...(candidate === undefined ? {} : { publicationMode: candidate.publicationMode }),
       // The task's pinned base, as the published commit's parent, in place of the workspace's own record of it.
       ...(candidate?.baseCommitSha === undefined ? {} : { workflowBaseCommit: candidate.baseCommitSha }),
     },
   };
+  const publicationContext = workflowPublicationContext(invocation);
+  if (publicationContext !== undefined && invocation.kind === "publish") {
+    const publicationContextDigest = workflowPublicationContextDigest(publicationContext);
+    invocation.payload.publicationContextDigest = publicationContextDigest;
+    operation.publication!.publicationContextDigest = publicationContextDigest;
+  }
   const outbox = outboxRecord(workspace, invocation);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
@@ -7360,6 +7380,8 @@ async function reconcilePullRequest(
   const expectedTree = expected.expectedTreeSha;
   const expectedCommit = expected.expectedCommitSha;
   const expectedBase = expected.expectedBaseCommit;
+  const publicationMode = expected.publicationMode;
+  if (expectedTree !== undefined) await assertCurrentWorkflowPublication(dependencies, operation);
   // The exact admitted commit may contain more than one owner-approved edit commit. Its ancestry must still contain
   // the pinned base, while the worker and GitHub head remain exactly the checked commit.
   const onPinnedBase = async (commit: string) => {
@@ -7380,15 +7402,16 @@ async function reconcilePullRequest(
     return false;
   };
   if (expectedTree !== undefined) {
-    if (expectedCommit === undefined || github.getCommitTree === undefined || github.getBranchHead === undefined || (expectedBase !== undefined && github.getCommitParents === undefined)) {
+    if (publicationMode === undefined || (publicationMode === "COMMITTED_HEAD" && expectedCommit === undefined)
+      || github.getCommitTree === undefined || github.getBranchHead === undefined || (expectedBase !== undefined && github.getCommitParents === undefined)) {
       throw agentXError("RUNTIME_UNAVAILABLE", "cannot verify the pushed tree");
     }
-    if (input.commit !== expectedCommit) {
+    if (publicationMode === "COMMITTED_HEAD" && input.commit !== expectedCommit) {
       await blockUncheckedPublication(dependencies, operation);
       throw agentXError("CALLBACK_FORBIDDEN", "the pushed commit is not the checked commit");
     }
     const head = await github.getBranchHead(expected.repositoryUrl, expected.headBranch);
-    if (head !== expectedCommit || await github.getCommitTree(expected.repositoryUrl, expectedCommit) !== expectedTree || !await onPinnedBase(expectedCommit)) {
+    if (head !== input.commit || await github.getCommitTree(expected.repositoryUrl, input.commit) !== expectedTree || !await onPinnedBase(input.commit)) {
       await blockUncheckedPublication(dependencies, operation);
       throw agentXError("CALLBACK_FORBIDDEN", "the pushed commit is not the checked code");
     }
@@ -10669,6 +10692,8 @@ async function exchangeRepositoryCredential(
   if (typeof input.repositoryUrl !== "string" || input.repositoryUrl.length > 2_048) {
     throw agentXError("CONFIG_INVALID", "repositoryUrl is invalid");
   }
+  const operation = await requireOperation(dependencies, workspaceId, operationId);
+  if (operation.kind === "publish") await assertCurrentWorkflowPublication(dependencies, operation);
   return dependencies.repositoryGrants.exchange(grant, {
     workspaceId,
     operationId,
@@ -10676,6 +10701,43 @@ async function exchangeRepositoryCredential(
     repositoryUrl: input.repositoryUrl,
     access,
   });
+}
+
+/** A stored mode is a selector, not continuing authority: reload the current task and project before issuing push credentials. */
+async function assertCurrentWorkflowPublication(dependencies: AwsBrokerDependencies, operation: OperationRecord): Promise<void> {
+  const publication = operation.publication;
+  if (publication?.expectedTreeSha === undefined) return;
+  const taskPointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
+  const task = taskPointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskPointer.taskId));
+  const workflow = task?.workflow;
+  const candidate = workflow?.candidate === undefined ? undefined : CandidateManifestSchema.safeParse(workflow.candidate);
+  const repository = candidate?.success ? candidate.data.repositories.find((item) => item.repositoryId === publication.repository) : undefined;
+  if (task === undefined || task.workspaceId !== operation.workspaceId || task.closedAt !== undefined || workflow?.stage !== "PULL_REQUEST"
+    || workflow.state !== "READY" || workflow.candidate?.digest !== publication.candidateDigest || repository === undefined
+    || repository.treeSha !== publication.expectedTreeSha
+    || (publication.publicationMode === "COMMITTED_HEAD" && (repository.commitSha !== publication.expectedCommitSha || publication.expectedCommitSha === undefined))
+    || (publication.publicationMode === "CHECKED_TREE" && publication.expectedCommitSha !== undefined)
+    || publication.publicationMode === undefined) {
+    throw agentXError("CALLBACK_FORBIDDEN", "workflow publication authority is stale");
+  }
+  const baseCommitSha = (workflow.reviewBase ?? task.preparedBase)?.find((item) => item.repositoryId === repository.repositoryId)?.baseCommitSha;
+  if (baseCommitSha !== publication.expectedBaseCommit) throw agentXError("CALLBACK_FORBIDDEN", "workflow publication base is stale");
+  const currentAuthority = await currentWorkflowPublicationAuthorityForTask({
+    actions: developerTaskActions(dependencies),
+    tableName: dependencies.tableName,
+    workflowE2EPresentation: (input) => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
+    workflowE2EPublicationChecks: (input) => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+  }, task);
+  if (currentAuthority === undefined || currentAuthority.mode !== publication.publicationMode
+    || currentAuthority.pinnedRevision !== publication.admittedPinnedRevision
+    || currentAuthority.latestRevision !== publication.admittedLatestRevision
+    || currentAuthority.materialDigest !== publication.admittedMaterialDigest
+    || currentAuthority.workflowRevision !== publication.admittedWorkflowRevision
+    || canonicalJson(currentAuthority.planArtifact) !== canonicalJson(publication.admittedPlanArtifact)
+    || canonicalJson(currentAuthority.ownerApproval) !== canonicalJson(publication.admittedOwnerApproval)
+    || currentAuthority.workflowAuthorityDigest !== publication.admittedWorkflowAuthorityDigest) {
+    throw agentXError("CALLBACK_FORBIDDEN", "workflow publication policy or admitted project material changed");
+  }
 }
 
 function verifyCapability(

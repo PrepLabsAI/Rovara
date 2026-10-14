@@ -2,8 +2,8 @@
 // broker's start-workflow event, the notifier posts to a strict Slack double, buttons and modals go through the
 // real interactivity handler, and a worker stub runs the real run-task on the scripted faux model against a real
 // git repository. GitHub is a fake that only accepts a push made with a push-scoped token.
-import { createHmac, generateKeyPairSync, randomUUID } from "node:crypto";
-import { execFile as execFileCallback } from "node:child_process";
+import { createHmac, generateKeyPairSync, randomUUID, sign as cryptoSign } from "node:crypto";
+import { execFile as execFileCallback, execFileSync } from "node:child_process";
 import { mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { promisify } from "node:util";
@@ -67,6 +67,10 @@ import type { PlanEvidenceEvent } from "../../packages/broker/src/developer/plan
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
 import { createDefaultPiSessionAdapter } from "../../packages/worker/src/pi-session.js";
 import { createRepositoryCredentialProvider } from "../../packages/worker/src/repository-credentials.js";
+import { createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/server.js";
+import { OperationJournal } from "../../packages/worker/src/journal.js";
+import { postWorkerTerminalResult } from "../../packages/worker/src/terminal-callback.js";
+import { publishWorkspace } from "../../packages/worker/src/publish.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import { workflowDependenciesConfigurationFromEnvironment } from "../../packages/broker/src/aws/workflow-dependencies-configuration.js";
@@ -269,6 +273,8 @@ export async function createWorkflowE2E(options: {
   workerCallbackResponse?: (request: { path: string; body: string; statusCode: number }) => number | undefined | Promise<number | undefined>;
   /** Runs project readiness commands in the real fixture repository. */
   realProjectCommands?: boolean;
+  /** Runs only the final workflow publication through the broker-signed worker server and production publisher. */
+  realPublication?: boolean;
   /** "unavailable": this Slack workspace cannot create a Canvas, so approval cards link the task page. */
   canvas?: "available" | "unavailable";
   /**
@@ -451,6 +457,12 @@ export async function createWorkflowE2E(options: {
   github.commits.set(baseCommit, await git(["rev-parse", "HEAD^{tree}"]));
   // The workspace is a clone: its remote-tracking branch holds the base, as preparation's checkout leaves it.
   await git(["update-ref", "refs/remotes/origin/main", baseCommit]);
+  const localBareRemote = join(root, ".agentx-e2e-publication.git");
+  if (options.realPublication === true) {
+    await execFile("git", ["init", "--bare", "--quiet", "--initial-branch=main", localBareRemote], { encoding: "utf8" });
+    await git(["-c", "protocol.file.allow=always", "push", localBareRemote, `${baseCommit}:refs/heads/main`]);
+    await git(["remote", "add", "origin", REPOSITORY_URL]);
+  }
   const now = new Date().toISOString();
   await mkdir(join(root, ".agentx"), { recursive: true });
   await writeFile(join(root, MANIFEST_PATH), JSON.stringify({
@@ -520,6 +532,86 @@ export async function createWorkflowE2E(options: {
     },
   };
   const cancellationController = new WorkerCancellationController();
+
+  /** The opt-in publisher exercises the broker-signed worker endpoint and the production hardened Git publisher. */
+  const publishThroughWorker = async (
+    invocation: Extract<WorkerInvocation, { kind: "publish" }>,
+    callbacks: ReturnType<typeof createWorkerCallbackSinks>,
+  ): Promise<void> => {
+    const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === invocation.operationId)[0];
+    if (outbox === undefined) throw new Error(`publication ${invocation.operationId} has no broker outbox`);
+    const workerKeys = generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+    const journal = new OperationJournal(join(root, `.agentx-worker-journal-${invocation.operationId}`));
+    let pushToken: string | undefined;
+    let resolveTerminal!: () => void;
+    let rejectTerminal!: (error: unknown) => void;
+    const terminal = new Promise<void>((resolvePromise, rejectPromise) => { resolveTerminal = resolvePromise; rejectTerminal = rejectPromise; });
+    const workerState = createWorkerServerState(journal, {
+      execute: async (received) => {
+        if (received.kind !== "publish") throw new Error("publication fixture received a non-publication invocation");
+        github.during = "publish";
+        try {
+          return await publishWorkspace({
+            rootPath: root,
+            invocation: received,
+            credentialProvider: async (repository) => {
+              const credential = await createRepositoryCredentialProvider({ controlPlaneUrl: CONTROL_PLANE_URL, invocation: received,
+                fetchImplementation: workerFetch(handler) })(repository);
+              pushToken = credential.token;
+              return credential;
+            },
+            pullRequestSink: callbacks.pullRequestSink,
+            codeBuildSink: callbacks.codeBuildSink,
+            stopWorkspaceProcesses: async () => ({ stopped: 0 }),
+            sweepWorkspaceContainers: async () => ({ removed: 0 }),
+            run: async (args, runOptions) => {
+              const remoteIndex = args.indexOf(REPOSITORY_URL);
+              if (remoteIndex < 0) throw new Error("publication fixture refused an unregistered push URL");
+              const refspec = args[remoteIndex + 1];
+              if (args[remoteIndex - 2] !== "push" || !refspec
+                || !/^[a-f0-9]{40}(?:[a-f0-9]{24})?:refs\/heads\/[A-Za-z0-9._/-]+$/u.test(refspec)) {
+                throw new Error("publication fixture refused a non-push or unbound refspec");
+              }
+              const rewritten = [...args];
+              rewritten[remoteIndex] = localBareRemote;
+              const stdout = execFileSync("git", ["-c", "protocol.file.allow=always", ...rewritten], {
+                cwd: runOptions.cwd, env: runOptions.env, encoding: "utf8", timeout: runOptions.timeout, maxBuffer: runOptions.maxBuffer,
+              });
+              const [commit, branch] = refspec.split(":refs/heads/");
+              const tree = execFileSync("git", ["--git-dir", localBareRemote, "rev-parse", `${commit}^{tree}`], { encoding: "utf8" }).trim();
+              const parents = execFileSync("git", ["--git-dir", localBareRemote, "show", "-s", "--format=%P", commit], { encoding: "utf8" }).trim().split(" ").filter(Boolean);
+              github.push(pushToken, branch!, commit!, tree, parents);
+              return { stdout, stderr: "" };
+            },
+          });
+        } finally { github.during = undefined; }
+      },
+    }, {
+      onTerminal: async (result, received) => {
+        try {
+          await postWorkerTerminalResult(callbacks, result, received);
+          if (result.status === "SUCCEEDED") resolveTerminal();
+          else rejectTerminal(new Error(result.error ?? `publication worker ended ${result.status}`));
+        } catch (error) { rejectTerminal(error); }
+      },
+      retrySleep: async () => undefined,
+    }, { publicKey: workerKeys.publicKey, workspaceId: invocation.workspaceId, generation: 1 });
+    const deliver = createEc2Delivery({
+      sessions: { ensureSession: async () => ({ ready: true as const, generation: 1, privateIp: "127.0.0.1" }) },
+      binding: async () => ({ deploymentMode: "ec2-ebs" }) as never,
+      sign: async (message) => cryptoSign("sha256", message, workerKeys.privateKey),
+      post: async (_url, init) => {
+        const response = await handleWorkerRequest(new Request("http://worker/invocations", { method: "POST",
+          headers: { authorization: init.authorization, "content-type": "application/json" }, body: init.body }), workerState);
+        return { status: response.status, body: await response.text() };
+      },
+      workerFeatures: async () => ((await (await handleWorkerRequest(new Request("http://worker/ping"), workerState)).json()) as { invocationFeatures: string[] }).invocationFeatures,
+      guardTaskDispatch: async (record) => guardTaskDispatch({ documentClient: db, tableName: "state" }, record),
+      progress: async () => undefined,
+    });
+    await deliver(outbox as unknown as DurableOutboxRecord, invocation);
+    await terminal;
+  };
 
   /** The worker's publication, simulated: the workspace tree, committed onto the base, checked out as the head branch and pushed with a push-scoped token. */
   const publish = async (invocation: Extract<WorkerInvocation, { kind: "publish" }>, callbacks: ReturnType<typeof createWorkerCallbackSinks>): Promise<unknown> => {
@@ -737,6 +829,10 @@ export async function createWorkflowE2E(options: {
       }
       return;
     }
+    if (options.realPublication === true && invocation.kind === "publish") {
+      await publishThroughWorker(invocation, callbacks);
+      return;
+    }
     await probeCredentials(invocation);
     if (invocation.kind === "prepare") {
       await callbacks.terminalSink({ operationId, status: "SUCCEEDED", result: { manifestPath: MANIFEST_PATH, projectName: "payments", projectRevision: invocation.projectRevision,
@@ -800,6 +896,8 @@ export async function createWorkflowE2E(options: {
    * Answers what the worker would receive, or undefined when the dispatcher failed the operation instead.
    */
   const deliverThroughDispatcher = async (invocation: WorkerInvocation, receiveCount = 1): Promise<WorkerInvocation | undefined> => {
+    // The opt-in production publisher dispatches this same outbox record through a real signed worker server below.
+    if (options.realPublication === true && invocation.kind === "publish") return invocation;
     const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === invocation.operationId)[0];
     if (outbox === undefined) throw new Error(`no outbox record for operation ${invocation.operationId}`);
     if (productionDispatcherDelivery !== undefined) {

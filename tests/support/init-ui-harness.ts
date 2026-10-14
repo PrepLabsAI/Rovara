@@ -22,7 +22,7 @@ import {
 import { fakeWizardOperator } from "./wizard-browser.js";
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "./fake-cloudformation.js";
 import { MemoryParameterStore } from "./memory-parameter-store.js";
-import { ADMIN_EMAIL, FOUNDATION_OUTPUTS, fakeAlerts, fakeControlPlane, fakeRepositories, fakeSlackChannels, setupServices, turn } from "./setup-fakes.js";
+import { ADMIN_EMAIL, FOUNDATION_OUTPUTS, bindSetupSourceProvider, fakeAlerts, fakeControlPlane, fakeRepositories, fakeSlackChannels, setupServices, turn } from "./setup-fakes.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -97,10 +97,12 @@ export async function harness() {
   // a day after T0.
   const projects = await tmp("agentx-init-ui-projects-");
   const plane = fakeControlPlane();
+  const projectRepositories = fakeRepositories({ "acme/payments-api": { files: { "go.mod": "module example.com/pay" } } });
+  bindSetupSourceProvider(plane, projectRepositories);
   plane.turns = [turn({ subject: "T0TEAM/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 86_400_000).toISOString() })];
   const setup = setupServices({
     fetch: plane.fetch,
-    repositories: fakeRepositories({ "acme/payments-api": { files: { "go.mod": "module example.com/pay" } } }),
+    repositories: projectRepositories,
     slackChannels: fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }]),
     alerts: fakeAlerts({ confirmAfterPolls: 0, budgetUsd: FIRST_RUN_BUDGET_USD }),
     stackOutputs: finishStackOutputs,

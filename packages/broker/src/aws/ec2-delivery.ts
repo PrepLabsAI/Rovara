@@ -5,6 +5,8 @@ import {
   modelSelectionFor,
   workerInvokeToken,
   workerInvokeTokenPayload,
+  workflowPublicationContext,
+  workflowPublicationContextDigest,
   type Ec2RuntimeBinding,
   type WorkerInvocation,
 } from "@agentx/contracts";
@@ -99,7 +101,10 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
       expiresAt: Math.floor((dependencies.now?.() ?? Date.now()) / 1_000) + TOKEN_LIFETIME_SECONDS,
       ...(invocation.kind === "project-setup-smoke" ? { purpose: "PROJECT_SETUP" as const,
         setupExecutionId: invocation.payload.setupExecutionId, setupSubjectId: invocation.payload.subjectId,
-        setupApprovalRevision: invocation.payload.approvalRevision } : { purpose: "WORKSPACE" as const }),
+        setupApprovalRevision: invocation.payload.approvalRevision } : { purpose: "WORKSPACE" as const,
+        ...(invocation.kind === "publish" && invocation.payload.publicationMode !== undefined
+          ? { publicationMode: invocation.payload.publicationMode,
+            publicationContextDigest: invocation.payload.publicationContextDigest } : {}) }),
     });
     const signature = await dependencies.sign(Buffer.from(payload, "ascii"));
     // Signing may cross an authority revocation boundary. Recheck setup approval immediately before
@@ -153,11 +158,13 @@ async function forWorker(
   const carriesCodeAnchors = invocation.kind === "task" && asksForCodeAnchors(invocation.payload.prompt);
   const carriesReportChecks = invocation.kind === "publish" && invocation.payload.reportChecks !== undefined;
   const carriesCandidateTree = invocation.kind === "publish" && invocation.payload.candidateTreeSha !== undefined;
+  const carriesPublicationMode = invocation.kind === "publish" && invocation.payload.publicationMode !== undefined;
+  const carriesPublicationContextDigest = invocation.kind === "publish" && invocation.payload.publicationContextDigest !== undefined;
   const carriesPublishBase = invocation.kind === "publish" && invocation.payload.workflowBaseCommit !== undefined;
   const carriesPullRequestUpdate = invocation.kind === "maintain" && invocation.payload.workflowCandidateTreeSha !== undefined;
   const carriesChatGpt = invocation.kind === "task" && invocation.payload.chatgpt !== undefined;
   const carriesProjectSetupSmoke = invocation.kind === "project-setup-smoke";
-  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesReportChecks && !carriesCandidateTree && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
+  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesReportChecks && !carriesCandidateTree && !carriesPublicationMode && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -194,6 +201,21 @@ async function forWorker(
   // The checked tree binds the publication to what passed checks and reviews, so it is never dropped either.
   if (carriesCandidateTree && !features.includes("publish.candidateTree")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "publishing the checked code needs a worker that publishes exactly the checked tree");
+  }
+  if (carriesPublicationMode && !features.includes("publish.mode")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "publishing a workflow candidate needs a worker that authenticates the broker-selected publication mode");
+  }
+  if (carriesPublicationMode && !features.includes("publish.contextDigest")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "publishing a workflow candidate needs a worker that authenticates its complete publication context");
+  }
+  if (carriesPublicationContextDigest !== carriesPublicationMode) {
+    throw agentXError("CONFIG_INVALID", "workflow publication context digest is missing or unexpected");
+  }
+  if (invocation.kind === "publish" && carriesPublicationMode) {
+    const context = workflowPublicationContext(invocation);
+    if (context === undefined || workflowPublicationContextDigest(context) !== invocation.payload.publicationContextDigest) {
+      throw agentXError("CONFIG_INVALID", "stored workflow publication context does not match its invocation");
+    }
   }
   // The pinned base is the published commit's parent, which the broker checks on GitHub, so it is never dropped either.
   if (carriesPublishBase && !features.includes("publish.workflowBase")) {

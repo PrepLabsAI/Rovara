@@ -797,5 +797,35 @@ describe("P0 setup proposal broker authority", () => {
     });
     expect(approved.status, JSON.stringify(approved.body)).toBe(200);
     expect(approved.body).toMatchObject({ decision: "approve", duplicate: false, proposalRef, proposalSha256 });
+
+    const setupApproval = { proposalRef: String(proposalRef), proposalSha256: String(proposalSha256), decision: "approve" as const };
+    const definition = {
+      name: "ordinary-orders", revision: 1,
+      repositories: [{ name: "ordinary-orders", url: "https://github.com/acme/ordinary-orders.git", path: "repo/ordinary-orders", defaultBranch: "main", credentialRef: "github-app" }],
+      setup: [], readiness: [], orchestratorInstructions: "Delegate work to the remote AgentX worker.", e2e: response.body.policy,
+    };
+    const runtimeBinding = ec2Binding(FOUNDATION_OUTPUTS, "agentx-staging-foundation");
+    const missingDecision = await call(broker.handler, { method: "POST", path: "/v1/admin/projects", user: { subject: "owner", admin: true }, body: { definition, runtimeBinding } });
+    expect(missingDecision.status).toBe(403);
+    expect(missingDecision.body.error).toMatchObject({ code: "FORBIDDEN" });
+
+    const firstRegistration = await call(broker.handler, { method: "POST", path: "/v1/admin/projects", user: { subject: "owner", admin: true }, body: { definition, runtimeBinding, setupApproval } });
+    expect(firstRegistration.status, JSON.stringify(firstRegistration.body)).toBe(201);
+    const connectorRevision = {
+      ...definition, revision: 2,
+      integrations: { connectors: [{ name: "github", type: "github", scopes: "all-repositories", tools: [{ name: "list_issues", access: "read" }] }] },
+    };
+    const connectorRegistration = await call(broker.handler, { method: "POST", path: "/v1/admin/projects", user: { subject: "owner", admin: true }, body: { definition: connectorRevision, runtimeBinding, setupApproval } });
+    expect(connectorRegistration.status, JSON.stringify(connectorRegistration.body)).toBe(201);
+    expect(broker.db.get("PROJECT#ordinary-orders", "REV#000000000002")).toMatchObject({ definition: connectorRevision, setupApproval: expect.objectContaining(setupApproval) });
+
+    const changedPolicy = { ...definition, revision: 3, e2e: { ...(response.body.policy as Record<string, unknown>), policyRevision: 2 } };
+    const changedPolicyResponse = await call(broker.handler, { method: "POST", path: "/v1/admin/projects", user: { subject: "owner", admin: true }, body: { definition: changedPolicy, runtimeBinding, setupApproval } });
+    expect(changedPolicyResponse.status).toBe(409);
+    expect(changedPolicyResponse.body.error).toMatchObject({ code: "PROJECT_REVISION_MISMATCH" });
+    const foreignReference = { ...setupApproval, proposalRef: `project-setup-proposals/${"f".repeat(64)}/${String(proposalSha256)}.json` };
+    const foreignReferenceResponse = await call(broker.handler, { method: "POST", path: "/v1/admin/projects", user: { subject: "owner", admin: true }, body: { definition: { ...definition, revision: 4 }, runtimeBinding, setupApproval: foreignReference } });
+    expect(foreignReferenceResponse.status).toBe(403);
+    expect(foreignReferenceResponse.body.error).toMatchObject({ code: "FORBIDDEN" });
   });
 });

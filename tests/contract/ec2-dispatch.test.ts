@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkerInvocationSchema, agentXError, taskGraphDigest, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
+import { WorkerInvocationSchema, agentXError, taskGraphDigest, workflowPublicationContext, workflowPublicationContextDigest, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { createDispatcherHandler, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
 import { guardTaskDispatch as coreGuardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
@@ -94,11 +94,13 @@ describe("ec2-ebs delivery", () => {
     const readiness = [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 300 }];
     function taskRecord(payload: Record<string, unknown>): Ec2OutboxRecord {
       const record = recordFor();
-      const invocation = {
+      let invocation = {
         ...record.invocation,
         kind: "task",
         payload: { conversationId: randomUUID(), prompt: "test it", ...payload },
       } as WorkerInvocation;
+      const context = workflowPublicationContext(invocation);
+      if (context !== undefined && invocation.kind === "publish") invocation.payload.publicationContextDigest = workflowPublicationContextDigest(context);
       return { ...record, invocation };
     }
     const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
@@ -355,7 +357,7 @@ describe("ec2-ebs delivery", () => {
     function publishRecord(payload: Record<string, unknown>): Ec2OutboxRecord {
       const record = recordFor();
       const operationId = record.invocation.operationId;
-      const invocation = {
+      const invocation: WorkerInvocation = {
         ...record.invocation,
         kind: "publish",
         payload: {
@@ -367,12 +369,14 @@ describe("ec2-ebs delivery", () => {
           repository: "demo", title: "t", headBranch: `agentx/${operationId}`, repositoryGrant: "g", ...payload,
         },
       } as WorkerInvocation;
+      const context = workflowPublicationContext(invocation);
+      if (context !== undefined) invocation.payload.publicationContextDigest = workflowPublicationContextDigest(context);
       return { ...record, invocation };
     }
     const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
 
     it("refuses a publication bound to a checked tree before POST unless the worker advertises it, and never drops the tree", async () => {
-      const record = publishRecord({ candidateTreeSha: "b".repeat(40) });
+      const record = publishRecord({ candidateTreeSha: "b".repeat(40), publicationMode: "CHECKED_TREE" });
       const refused = delivery({ workerFeatures: async () => ["publish.reportChecks"] });
       await expect(refused.deliver(record, record.invocation)).rejects.toThrow(/publishes exactly the checked tree/);
       expect(refused.post).not.toHaveBeenCalled();
@@ -380,9 +384,14 @@ describe("ec2-ebs delivery", () => {
       await expect(unprobed.deliver(record, record.invocation)).rejects.toThrow(/publishes exactly the checked tree/);
       expect(unprobed.post).not.toHaveBeenCalled();
 
-      const accepted = delivery({ workerFeatures: async () => ["publish.candidateTree"] });
+      const missingMode = delivery({ workerFeatures: async () => ["publish.candidateTree"] });
+      await expect(missingMode.deliver(record, record.invocation)).rejects.toThrow(/authenticates the broker-selected publication mode/);
+      expect(missingMode.post).not.toHaveBeenCalled();
+
+      const accepted = delivery({ workerFeatures: async () => ["publish.candidateTree", "publish.mode", "publish.contextDigest"] });
       expect(await accepted.deliver(record, record.invocation)).toBe("DELIVERED");
       expect(postedPayload(accepted.post).candidateTreeSha).toBe("b".repeat(40));
+      expect(postedPayload(accepted.post).publicationMode).toBe("CHECKED_TREE");
     });
 
     it("refuses a reviewed fix for a pull request before POST unless the worker advertises pushing it", async () => {
@@ -403,11 +412,11 @@ describe("ec2-ebs delivery", () => {
     });
 
     it("refuses a publication carrying the task's pinned base before POST unless the worker advertises it, and never drops it", async () => {
-      const record = publishRecord({ candidateTreeSha: "b".repeat(40), workflowBaseCommit: "c".repeat(40) });
-      const refused = delivery({ workerFeatures: async () => ["publish.candidateTree"] });
+      const record = publishRecord({ candidateTreeSha: "b".repeat(40), publicationMode: "CHECKED_TREE", workflowBaseCommit: "c".repeat(40) });
+      const refused = delivery({ workerFeatures: async () => ["publish.candidateTree", "publish.mode", "publish.contextDigest"] });
       await expect(refused.deliver(record, record.invocation)).rejects.toThrow(/task's pinned base commit/);
       expect(refused.post).not.toHaveBeenCalled();
-      const accepted = delivery({ workerFeatures: async () => ["publish.candidateTree", "publish.workflowBase"] });
+      const accepted = delivery({ workerFeatures: async () => ["publish.candidateTree", "publish.mode", "publish.contextDigest", "publish.workflowBase"] });
       expect(await accepted.deliver(record, record.invocation)).toBe("DELIVERED");
       expect(postedPayload(accepted.post).workflowBaseCommit).toBe("c".repeat(40));
     });

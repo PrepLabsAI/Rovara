@@ -14,7 +14,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -228,6 +228,10 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * "publish.candidateTree"; never dropped for an older one.
          */
         candidateTreeSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+        /** Server-selected behavior for publishing a workflow candidate; never supplied by a caller. */
+        publicationMode: z.enum(["COMMITTED_HEAD", "CHECKED_TREE"]).optional(),
+        /** Digest of the immutable workflow publication context, copied into the signed worker claims. */
+        publicationContextDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
         /** The exact committed HEAD whose tree was checked and reviewed. */
         candidateCommitSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
         /**
@@ -259,6 +263,18 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         }
         if (value.candidateCommitSha !== undefined && value.candidateTreeSha === undefined) {
           context.addIssue({ code: "custom", message: "candidateCommitSha is allowed only with candidateTreeSha" });
+        }
+        if ((value.candidateTreeSha === undefined) !== (value.publicationMode === undefined)) {
+          context.addIssue({ code: "custom", path: ["publicationMode"], message: "candidateTreeSha and publicationMode go together" });
+        }
+        if (value.publicationMode === "COMMITTED_HEAD" && value.candidateCommitSha === undefined) {
+          context.addIssue({ code: "custom", path: ["candidateCommitSha"], message: "committed-head publication requires the exact checked commit" });
+        }
+        if (value.publicationMode === "CHECKED_TREE" && value.candidateCommitSha !== undefined) {
+          context.addIssue({ code: "custom", path: ["candidateCommitSha"], message: "checked-tree publication cannot select a commit" });
+        }
+        if ((value.publicationMode === undefined) !== (value.publicationContextDigest === undefined)) {
+          context.addIssue({ code: "custom", path: ["publicationContextDigest"], message: "workflow publication mode and context digest must be present together" });
         }
       }),
   }).strict(),

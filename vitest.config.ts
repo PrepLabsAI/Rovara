@@ -1,12 +1,10 @@
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
+import { nativeP0Files, sharedVitestSettings } from "./tests/support/vitest-shared-config.js";
 
 export default defineConfig({
   test: {
-    coverage: { enabled: false },
-    globalSetup: ["tests/support/test-temp-dir.ts"],
+    ...sharedVitestSettings,
+    exclude: [...configDefaults.exclude, ...nativeP0Files],
     include: ["tests/**/*.test.ts", "packages/**/*.test.ts"],
-    passWithNoTests: false,
-    // CDK synth tests outgrow 10 s under a loaded full gate.
-    testTimeout: 60_000,
   },
 });

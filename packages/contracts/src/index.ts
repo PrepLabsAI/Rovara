@@ -55,3 +55,4 @@ export * from "./cli-distribution.js";
 export * from "./task-comments.js";
 export * from "./task-people.js";
 export * from "./e2e-openapi-fixture.js";
+export * from "./workflow-publication-context.js";
