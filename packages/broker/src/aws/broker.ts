@@ -1755,16 +1755,48 @@ async function registerProject(
     }
     return { catalog, newestRevision };
   };
+  const repairCatalogPointerFromHistory = async (): Promise<void> => {
+    // This is an index-only repair after the immutable revision has already been
+    // authenticated. It never rewrites project, membership, approval, or setup rows.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const snapshot = await readCatalogSnapshot();
+      const targetRevision = snapshot.newestRevision;
+      if (targetRevision < 1) throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is unavailable");
+      if (snapshot.catalog?.latestRevision === targetRevision) return;
+      const key = projectCatalogKey(definition.name);
+      try {
+        await dependencies.documentClient.send(new UpdateCommand({
+          TableName: dependencies.tableName,
+          Key: key,
+          UpdateExpression: "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+          ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)"
+            : snapshot.catalog.latestRevision === undefined
+              ? "entityType = :entity AND #name = :name AND attribute_not_exists(latestRevision)"
+              : "entityType = :entity AND #name = :name AND latestRevision = :observed AND latestRevision < :revision",
+          ExpressionAttributeNames: { "#name": "name" },
+          ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":revision": targetRevision,
+            ":now": new Date().toISOString(),
+            ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
+        }));
+        return;
+      } catch (error) {
+        if (!isConditional(error)) throw error;
+        if (attempt === 2) throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer could not be reconciled with immutable revision history");
+        const refreshed = await readCatalogSnapshot();
+        if (refreshed.newestRevision <= snapshot.newestRevision
+          && (refreshed.catalog?.latestRevision ?? 0) <= (snapshot.catalog?.latestRevision ?? 0)) {
+          throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer changed without revision history advancing");
+        }
+      }
+    }
+  };
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
     // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
     if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding) || !sameJsonContent(existing.setupApproval, setupApprovalBinding)) {
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
     }
-    const { catalog, newestRevision } = await readCatalogSnapshot();
-    if (catalog?.latestRevision === undefined || newestRevision !== catalog.latestRevision || catalog.latestRevision < definition.revision) {
-      throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer is unavailable or behind registered revision history");
-    }
+    await repairCatalogPointerFromHistory();
     // A revision stored before the static checks existed stays idempotent: report, never refuse.
     const preflight = checked?.preflight
       ?? (wantsPreflight ? await preflightConnectors(connectors(), definition, identity.ownerKey) : undefined);
@@ -1820,10 +1852,7 @@ async function registerProject(
           || !sameJsonContent(winner.setupApproval, setupApprovalBinding)) {
           throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
         }
-        const settled = await readCatalogSnapshot();
-        if (settled.catalog?.latestRevision === undefined || settled.catalog.latestRevision !== settled.newestRevision) {
-          throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer does not match immutable revision history");
-        }
+        await repairCatalogPointerFromHistory();
         return respond(withoutKeys(winner), true, preflight);
       }
       const refreshed = await readCatalogSnapshot();

@@ -599,7 +599,7 @@ describe("P0 normal project onboarding journey", () => {
     const featureStart = { status: featureStartResponseRaw.statusCode, body: JSON.parse(featureStartResponseBytes.toString("utf8")) as Record<string, unknown> };
     expect(featureStart.status, JSON.stringify(featureStart.body)).toBe(200);
     const featureTaskId = String((featureStart.body.task as { taskId: string }).taskId);
-    const featureTask = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { workspaceId: string; workflow: { revision: number; artifacts: Array<{ type: string; sha256: string; objectKey: string }> } };
+    const featureTask = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { workspaceId: string; startingRevision: number; workflow: { revision: number; artifacts: Array<{ type: string; sha256: string; objectKey: string }> } };
     const featureWorkspaceId = featureTask.workspaceId;
     const featureOperations = () => broker.db.find((item) => item.pk === `WORKSPACE#${featureWorkspaceId}` && item.entityType === "OPERATION");
     const shareResponse = await call(broker.handler, { method: "POST", path: `/v1/dev/tasks/${featureTaskId}/share`,
@@ -1884,6 +1884,13 @@ describe("P0 normal project onboarding journey", () => {
       approvalRevision: setupPayload.approvalRevision, fence: implementInvocation.fence,
       expiresAt: Math.floor(Date.now() / 1_000) + 60, actions: ["read-execution", "write-evidence", "result"],
     });
+    const registeredFeatureProject = broker.db.get(`PROJECT#ordinary-orders`, `REV#${String(featureTask.startingRevision).padStart(12, "0")}`) as {
+      definition: { repositories: Array<{ name: string; credentialRef: string; url: string }> };
+    } | undefined;
+    const implementationRepository = registeredFeatureProject?.definition.repositories.find((repository) => repository.name === "ordinary-orders");
+    if (implementationRepository === undefined) throw new Error("the current implementation's registered source repository is missing");
+    const implementationCredentialRequest = { credentialRef: implementationRepository.credentialRef,
+      repositoryUrl: implementationRepository.url, access: "clone" as const };
     const setupTokenBrokerAttempts: Array<{ path: string; requestBytes: string; status: number; responseBytes: string }> = [];
     const setupTokenAtWorkspaceRoute = async (path: string, headers: Record<string, string>, requestBody: unknown) => {
       const requestBytes = JSON.stringify(requestBody);
@@ -1907,9 +1914,9 @@ describe("P0 normal project onboarding journey", () => {
       `/v1/internal/workspaces/${featureWorkspaceId}/operations/${publishInvocation.operationId}/pull-request`,
       { "x-agentx-callback-capability": setupCollisionCapability }, {});
     const setupTokenAtRepositoryCredentials = await setupTokenAtWorkspaceRoute(
-      `/v1/internal/workspaces/${featureWorkspaceId}/operations/${publishInvocation.operationId}/repository-credentials`,
+      `/v1/internal/workspaces/${featureWorkspaceId}/operations/${implementInvocation.operationId}/repository-credentials`,
       { "x-agentx-repository-grant": setupCollisionCapability },
-      { credentialRef: "github-app", repositoryUrl: "https://github.com/acme/ordinary-orders", access: "push" });
+      implementationCredentialRequest);
     expect(setupTokenAtTaskResult.status, setupTokenAtTaskResult.responseBytes).toBe(409);
     expect(setupTokenAtPublicationCallback.status, setupTokenAtPublicationCallback.responseBytes).toBe(409);
     expect(setupTokenAtRepositoryCredentials.status, setupTokenAtRepositoryCredentials.responseBytes).toBe(403);
@@ -1957,6 +1964,7 @@ describe("P0 normal project onboarding journey", () => {
         taskModelRelabel: taskRelabelResponse.status, publicationCredentialRelabel: publicationRelabelResponse.status,
         taskResultCallback: setupTokenAtTaskResult.status, publicationCallback: setupTokenAtPublicationCallback.status,
         repositoryCredentialExchange: setupTokenAtRepositoryCredentials.status },
+      implementationCredentialRequest,
       brokerRequestAttempts: setupTokenBrokerAttempts, credentialResolverCalls: credentialResolver.mock.calls.length,
       executorCalls: collisionExecutor.mock.calls.map(([invocation]) => ({ kind: invocation.kind, operationId: invocation.operationId })),
       effectBoundary: "The genuine WORKSPACE task was accepted. Setup-purpose invocation could not reuse its current operation; setup-purpose tokens were rejected by actual task-result/publication callback and repository-credential routes before credential resolution, and could not be relabeled to task/model or publish/credential execution." }, null, 2)}\n`,

@@ -103,6 +103,7 @@ describe("registration preflight", () => {
     // Seed a revision registered before this check existed; re-submitting it stays idempotent.
     seedRegisteredRevision(db, githubConnector([long]));
     expect((await register(handler, githubConnector([long]))).body).toMatchObject({ duplicate: true });
+    expect(db.get("PROJECT_CATALOG", "PROJECT#payments")).toMatchObject({ latestRevision: 1 });
   });
 
   it("re-accepts an identical revision whose stored maps DynamoDB reads back in another key order", async () => {
@@ -137,6 +138,7 @@ describe("registration preflight", () => {
     expect(raced).toBe(true);
     expect(registered.status).toBe(201);
     expect(registered.body).toMatchObject({ duplicate: true, preflight: { connectors: [{ name: "github", status: "connected", offered: ["github__list_issues"], skipped: [] }] } });
+    expect(db.get("PROJECT_CATALOG", "PROJECT#payments")).toMatchObject({ latestRevision: 1 });
     expect(githubMcp.connect).toHaveBeenCalledTimes(1);
   });
 

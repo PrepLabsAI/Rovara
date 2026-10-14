@@ -331,10 +331,29 @@ describe("P0 normal project onboarding journey", () => {
       markFailed: async () => undefined, deliverEc2: delivery });
     const dispatchResult = await dispatch({ Records: [{ messageId: String(outboxRow.id), body: JSON.stringify(queuedOutbox) }] });
     expect(dispatchResult.batchItemFailures).toEqual([]);
-    expect(workerPosts.map(({ status, body }) => ({ status, accepted: (JSON.parse(body) as { accepted?: unknown }).accepted, state: (JSON.parse(body) as { status?: unknown }).status }))
-      .filter(({ accepted }) => accepted === true)).toEqual([{ status: 200, accepted: true, state: "ACCEPTED" }]);
     const actualInvocation = (outboxRow.invocation as { operationId: string });
-    for (let index = 0; index < 200 && terminalStatus === undefined; index += 1) await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    expect(workerPosts.map(({ status: httpStatus, body }) => ({ httpStatus, ...JSON.parse(body) as { accepted?: unknown; operationId?: string; status?: string } }))
+      .filter(({ accepted, operationId }) => accepted === true && operationId === actualInvocation.operationId)
+      .map(({ httpStatus, accepted, operationId, status }) => ({ status: httpStatus, accepted, operationId, state: status })))
+      .toEqual([{ status: 200, accepted: true, operationId: actualInvocation.operationId, state: "ACCEPTED" }]);
+    const admittedDeadline = Date.parse(String(executionRow.deadlineAt));
+    expect(Number.isFinite(admittedDeadline), "the accepted setup operation retains its admitted deadline").toBe(true);
+    const terminalAckObserved = async (): Promise<boolean> => {
+      const currentJournal = await journal.get(actualInvocation.operationId);
+      const operation = broker.db.get(`PROJECT_SETUP#${setupExecutionId}`, `OPERATION#${actualInvocation.operationId}`);
+      const resultAck = brokerRouteObservations.some(({ path, status }) => path.endsWith(`/operations/${actualInvocation.operationId}/result`) && status === 200);
+      return terminalStatus === "SUCCEEDED" && currentJournal?.status === "SUCCEEDED" && operation?.status === "SUCCEEDED" && resultAck;
+    };
+    for (let index = 0; index < 2_400 && Date.now() < admittedDeadline && !(await terminalAckObserved()); index += 1) {
+      const currentJournal = await journal.get(actualInvocation.operationId);
+      const operation = broker.db.get(`PROJECT_SETUP#${setupExecutionId}`, `OPERATION#${actualInvocation.operationId}`);
+      if (terminalStatus === "FAILED" || currentJournal?.status === "FAILED" || currentJournal?.status === "CANCELLED" || operation?.status === "FAILED") break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    expect(await terminalAckObserved(), JSON.stringify({ dispatchResult, guardObservations, workerPosts, brokerRouteObservations,
+      workerActive: workerState.activeOperations.has(actualInvocation.operationId), journal: await journal.get(actualInvocation.operationId),
+      operation: broker.db.get(`PROJECT_SETUP#${setupExecutionId}`, `OPERATION#${actualInvocation.operationId}`),
+      admittedDeadline: executionRow.deadlineAt })).toBe(true);
     const journalAtBoundary = await journal.get(actualInvocation.operationId);
     expect(journalAtBoundary?.acceptedAt, "worker journal acceptance is separate evidence from an empty dispatcher failure list").toBeDefined();
     expect(terminalStatus, JSON.stringify({ dispatchResult, guardObservations, workerPosts, brokerRouteObservations, workerActive: workerState.activeOperations.has(actualInvocation.operationId), journal: journalAtBoundary,

@@ -25,7 +25,8 @@ describe("GET /v1/admin/projects (FR-038, FR-030)", () => {
     await registerRevision(handler, 2, {});
     expect(db.get("PROJECT_CATALOG", "PROJECT#payments")).toMatchObject({ firstRegisteredAt: first.firstRegisteredAt, latestRevision: 2 });
     db.delete(projectKey("payments", 1).pk, projectKey("payments", 1).sk);
-    await expect(registerRevision(handler, 1, {})).rejects.toThrow("PROJECT_REVISION_MISMATCH");
+    await registerRevision(handler, 1, {});
+    expect(db.get(projectKey("payments", 1).pk, projectKey("payments", 1).sk)).toBeDefined();
     expect(db.get("PROJECT_CATALOG", "PROJECT#payments")).toMatchObject({ firstRegisteredAt: first.firstRegisteredAt, latestRevision: 2 });
   });
 

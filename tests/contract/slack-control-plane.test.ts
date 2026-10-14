@@ -1069,8 +1069,9 @@ describe("Slack thread workspaces", () => {
     if (legacyCatalog === undefined) throw new Error("legacy project catalog is missing");
     delete legacyCatalog.latestRevision;
     legacy.db.set(legacyCatalog);
-    // An exact duplicate cannot claim success while the legacy catalog pointer is unverified.
-    await registerRevision(legacy.handler, 10, false, [], 409);
+    // An exact immutable duplicate repairs only the catalog pointer from stored history.
+    await registerRevision(legacy.handler, 10);
+    expect(legacy.db.get("PROJECT_CATALOG", "PROJECT#payments")).toMatchObject({ latestRevision: 10 });
     await registerRevision(legacy.handler, 2);
     expect(legacy.db.get("PROJECT_CATALOG", "PROJECT#payments")).toMatchObject({ latestRevision: 10 });
   });
