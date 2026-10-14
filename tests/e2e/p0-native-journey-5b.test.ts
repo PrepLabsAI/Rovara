@@ -1537,7 +1537,8 @@ describe("P0 normal project onboarding journey", () => {
     const publishDispatchRows = broker.db.find((item) => item.pk === "WORKFLOW_DISPATCH" && item.taskId === featureTaskId);
     const publishOutbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === featureWorkspaceId
       && (item.invocation as { kind?: string } | undefined)?.kind === "publish").at(-1);
-    expect(publishOutbox, JSON.stringify({ recoveryResponse: recoveryResponse.body, workflow: finalTask.workflow, publishDispatchRows }))
+    expect(publishOutbox, JSON.stringify({ recoveryResponse: recoveryResponse.body, workflow: finalTask.workflow, publishDispatchRows,
+      dynamoRefusals: broker.db.refusals }))
       .toBeDefined();
     const publishInvocation = WorkerInvocationSchema.parse(publishOutbox!.invocation);
     expect(publishInvocation.kind).toBe("publish");

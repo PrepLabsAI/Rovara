@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdir, rm, writeFile } from "node:fs/promises";
-import { arch, hostname } from "node:os";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { arch, hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { canonicalJson } from "@agentx/contracts";
 import { afterEach, describe, expect, it } from "vitest";
@@ -19,6 +19,7 @@ import { LoopStore } from "../../packages/cli/src/loop/state.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 
 const servers: Server[] = [];
+const ownedTemporaryRoots: string[] = [];
 const taskId = "f4ac96d1-061c-4f10-9c4a-bdb0db1c2d07";
 const runId = "11111111-2222-4333-8444-555555555555";
 const ownerId = "a".repeat(64);
@@ -30,7 +31,11 @@ function git(repo: string, ...args: string[]): string {
 
 async function evidenceRoot(): Promise<string> {
   const base = process.env.CONTAINED_CLI_LANES_EVIDENCE_DIR;
-  if (base === undefined) throw new Error("CONTAINED_CLI_LANES_EVIDENCE_DIR is required");
+  if (base === undefined) {
+    const root = await realpath(await mkdtemp(join(tmpdir(), "agentx-cli-native-import-")));
+    ownedTemporaryRoots.push(root);
+    return root;
+  }
   const root = join(base, `native-import-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   await mkdir(root, { recursive: true });
   return root;
@@ -318,4 +323,5 @@ describe("normal CLI import of authenticated native task evidence", () => {
 
 afterEach(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
+  await Promise.all(ownedTemporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });

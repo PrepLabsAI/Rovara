@@ -3687,7 +3687,9 @@ async function workflowPublicationAuthority(
   };
   const conditions: TransactItems = [{ ConditionCheck: { TableName: deps.tableName, Key: projectCatalogKey(task.project),
     ConditionExpression: "latestRevision = :revision", ExpressionAttributeValues: { ":revision": latest.definition.revision } } }];
-  if (workflow.e2e?.required === true) return { authority, conditions };
+  // The required-E2E current-authority checks already include the stronger catalog condition
+  // for this same key. DynamoDB transactions cannot contain two operations on one item.
+  if (workflow.e2e?.required === true) return { authority, conditions: [] };
   // Only the original approved artifact bytes/hash and positively loaded, policy-free pinned/current records establish
   // the pre-E2E legacy path. Structured plans must positively lack E2E intent; verified legacy Markdown stays opaque.
   if (workflow.e2e !== undefined || approvedPlan === undefined

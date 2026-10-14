@@ -199,11 +199,12 @@ describe("private E2E worker session", () => {
     const session = await createE2EWorkerSession({ directory, capability: token, expectedByCase: new Map([["case", { payload: { caseId: "case" } }]]), handle: async (payload) => payload, signal: controller.signal, deadlineAt: Date.now() + 30 });
     try {
       await new Promise((resolve) => setTimeout(resolve, 40));
-      expect(session.readback()).toMatchObject({ socket: false, closed: true });
+      expect(session.readback()).toMatchObject({ closed: true });
       await expect(parsed(session.socketPath, { schemaVersion: "trusted-worker-observation/v1", kind: "register", capability: token, workerId: "a".repeat(24) })).rejects.toThrow();
       expect(await session.close()).toBe(true);
       expect(session.readback()).toMatchObject({ requestCount: 0, registeredWorkers: 0 });
-      expect(session.readback().socket).toBe(false);
+      expect(session.readback()).toMatchObject({ socket: false, aliasEntryPresent: false, privateSentinelPresent: false,
+        serverListening: false, cleanupConfirmed: true });
     } finally { await session.close(); await rm(directory, { recursive: true, force: true }); }
   });
 

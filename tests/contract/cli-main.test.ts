@@ -19,7 +19,7 @@ describe("AgentX executable command surface", () => {
     expect(subcommands(admin, "task")).toEqual(["share-mode"]);
 
     expect(subcommands(program, "signin")).toEqual(["show", "enable", "disable", "check"]);
-    expect(subcommands(program, "loop")).toEqual(["init", "add", "remove", "start", "stop", "status", "run", "do", "quick", "full", "review", "contribute", "check", "mcp"]);
+    expect(subcommands(program, "loop")).toEqual(["init", "add", "enroll", "remove", "start", "stop", "status", "run", "do", "quick", "full", "review", "contribute", "check", "mcp"]);
     expect(subcommands(program, "chatgpt")).toEqual(["connect", "status", "disconnect"]);
     expect(subcommands(program, "mcp")).toEqual(["install"]);
     expect(subcommands(program, "project")).toEqual(["add"]);

@@ -65,7 +65,7 @@ async function registerProjectAndBind(handler: Handler, integrations: boolean | 
   expect(bound.status).toBe(200);
 }
 
-async function registerRevision(handler: Handler, revision: number, integrations: boolean | Record<string, unknown> = false, extraRepositories: string[] = []): Promise<void> {
+async function registerRevision(handler: Handler, revision: number, integrations: boolean | Record<string, unknown> = false, extraRepositories: string[] = [], expectedStatus = 201): Promise<void> {
   const registered = await call(handler, {
     method: "POST",
     path: "/v1/admin/projects",
@@ -94,7 +94,7 @@ async function registerRevision(handler: Handler, revision: number, integrations
       },
     },
   });
-  expect(registered.status).toBe(201);
+  expect(registered.status).toBe(expectedStatus);
 }
 
 function startClose(handler: Handler, thread: string, slackUser: string, requestId = randomUUID(), discardUnpublished = false) {
@@ -1039,6 +1039,7 @@ describe("Slack thread workspaces", () => {
     // Revision keys are zero-padded, so revision 10 sorts after revision 2.
     await registerRevision(handler, 10);
     await registerRevision(handler, 2);
+    expect(db.get("PROJECT_CATALOG", "PROJECT#payments")).toMatchObject({ latestRevision: 10 });
     const second = await ensureWorkspace(handler, threadTwo, pratik);
     expect(second.body).toMatchObject({ created: true, orchestratorInstructions: "Delegate work (revision 10)." });
     expect(db.get(`WORKSPACE#${String(second.body.workspaceId)}`, "META")).toMatchObject({ projectRevision: 10 });
@@ -1061,6 +1062,17 @@ describe("Slack thread workspaces", () => {
     stored.projectRevision = 1;
     const third = await ensureWorkspace(handler, threadThree, bob);
     expect(db.get(`WORKSPACE#${String(third.body.workspaceId)}`, "META")).toMatchObject({ projectRevision: 10 });
+
+    const legacy = createBroker();
+    await registerRevision(legacy.handler, 10);
+    const legacyCatalog = legacy.db.get("PROJECT_CATALOG", "PROJECT#payments");
+    if (legacyCatalog === undefined) throw new Error("legacy project catalog is missing");
+    delete legacyCatalog.latestRevision;
+    legacy.db.set(legacyCatalog);
+    // An exact duplicate cannot claim success while the legacy catalog pointer is unverified.
+    await registerRevision(legacy.handler, 10, false, [], 409);
+    await registerRevision(legacy.handler, 2);
+    expect(legacy.db.get("PROJECT_CATALOG", "PROJECT#payments")).toMatchObject({ latestRevision: 10 });
   });
 
   it("declines new threads beyond the member and organization limits without blocking follow-ups", async () => {

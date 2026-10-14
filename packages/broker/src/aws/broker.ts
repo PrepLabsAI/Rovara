@@ -1734,11 +1734,36 @@ async function registerProject(
     };
   };
   const key = projectKey(definition.name, definition.revision);
+  const readCatalogSnapshot = async (): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number }> => {
+    const catalog = await getItem<{ entityType?: string; name?: string; latestRevision?: number }>(dependencies, projectCatalogKey(definition.name));
+    if (catalog !== undefined && (catalog.entityType !== "PROJECT_CATALOG" || catalog.name !== definition.name
+      || (catalog.latestRevision !== undefined && (!Number.isSafeInteger(catalog.latestRevision) || catalog.latestRevision < 1)))) {
+      throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is unavailable or invalid");
+    }
+    let newestRevision = 0;
+    try {
+      const newest = await requireLatestProject(dependencies, definition.name);
+      newestRevision = newest.definition.revision;
+      if (newest.definition.name !== definition.name || !Number.isSafeInteger(newestRevision) || newestRevision < 1) {
+        throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is invalid");
+      }
+    } catch (error) {
+      if (!(error instanceof AgentXError) || error.code !== "NOT_FOUND") throw error;
+    }
+    if (catalog?.latestRevision !== undefined && catalog.latestRevision > newestRevision) {
+      throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is ahead of registered revision history");
+    }
+    return { catalog, newestRevision };
+  };
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
     // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
     if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding) || !sameJsonContent(existing.setupApproval, setupApprovalBinding)) {
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
+    }
+    const { catalog, newestRevision } = await readCatalogSnapshot();
+    if (catalog?.latestRevision === undefined || newestRevision !== catalog.latestRevision || catalog.latestRevision < definition.revision) {
+      throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer is unavailable or behind registered revision history");
     }
     // A revision stored before the static checks existed stays idempotent: report, never refuse.
     const preflight = checked?.preflight
@@ -1761,31 +1786,55 @@ async function registerProject(
     ? await createProjectSetupAdmissionRows(dependencies, identity, record, setupApprovalBinding, setupRuntimeAdmission)
     : undefined;
   setupExecutionCreated = setupAdmissionRows !== undefined;
-  try {
-    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+  const maxRegistrationAttempts = 3;
+  for (let attempt = 0; attempt < maxRegistrationAttempts; attempt += 1) {
+    const snapshot = await readCatalogSnapshot();
+    const latestRevision = Math.max(definition.revision, snapshot.newestRevision);
+    const updateCatalog = snapshot.catalog?.latestRevision !== latestRevision;
+    try {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Put: { TableName: dependencies.tableName, Item: record, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: membership } },
       // Spec 025 A3: the admin project list reads this row instead of scanning the table.
-      { Update: {
+      ...(updateCatalog ? [{ Update: {
         TableName: dependencies.tableName,
         Key: projectCatalogKey(definition.name),
         UpdateExpression: "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
-        ConditionExpression: "attribute_not_exists(latestRevision) OR latestRevision < :revision",
+        ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)"
+          : snapshot.catalog.latestRevision === undefined ? "attribute_not_exists(latestRevision)"
+            : "latestRevision = :observed AND latestRevision < :revision",
         ExpressionAttributeNames: { "#name": "name" },
-        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":revision": definition.revision, ":now": now },
-      } },
+        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":revision": latestRevision, ":now": now,
+          ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
+      } }] : []),
       ...(setupAdmissionRows?.transactionItems ?? []),
-    ] }));
-  } catch (error) {
-    // A concurrent registration won; answer as a duplicate without contacting the vendor again.
-    if (isConditional(error)) {
+      ] }));
+      return respond(withoutKeys(record), false, preflight);
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      // A same-revision registration may have won concurrently. Validate the immutable record and
+      // catalog before returning duplicate success; otherwise retry only a catalog/history advance.
       const winner = await getItem<RegisteredProjectRecord>(dependencies, key);
-      if (winner !== undefined) return registerProject(dependencies, identity, value, preflight ? { preflight } : {});
-      throw agentXError("PROJECT_REVISION_MISMATCH", "a newer project revision was registered before this revision could be committed");
+      if (winner !== undefined) {
+        if (!sameJsonContent(winner.definition, definition) || !sameJsonContent(winner.runtimeBinding, runtimeBinding)
+          || !sameJsonContent(winner.setupApproval, setupApprovalBinding)) {
+          throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
+        }
+        const settled = await readCatalogSnapshot();
+        if (settled.catalog?.latestRevision === undefined || settled.catalog.latestRevision !== settled.newestRevision) {
+          throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer does not match immutable revision history");
+        }
+        return respond(withoutKeys(winner), true, preflight);
+      }
+      const refreshed = await readCatalogSnapshot();
+      const advanced = refreshed.newestRevision > snapshot.newestRevision
+        || (refreshed.catalog?.latestRevision ?? 0) > (snapshot.catalog?.latestRevision ?? 0);
+      if (!advanced || attempt + 1 === maxRegistrationAttempts) {
+        throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration could not commit against the current catalog");
+      }
     }
-    throw error;
   }
-  return respond(withoutKeys(record), false, preflight);
+  throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration exceeded its bounded catalog retries");
 }
 
 async function createProjectSetupAdmissionRows(
