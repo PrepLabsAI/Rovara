@@ -1345,7 +1345,7 @@ describe("P0 normal project onboarding journey", () => {
       if (!Array.isArray(retryAcceptedGroupIdsValue) || !retryAcceptedGroupIdsValue.every((value: unknown) => typeof value === "string")) {
         throw new Error("accepted group IDs were not stored as a string list");
       }
-      const retryAcceptedGroupIds = retryAcceptedGroupIdsValue as string[];
+      const retryAcceptedGroupIds = retryAcceptedGroupIdsValue;
       expect([...retryAcceptedGroupIds].sort()).toEqual([...retryChecksAdmission!.groupRunIds].sort());
       expect(new Set(retryAcceptedGroupIds).size).toBe(retryChecksAdmission!.groupRunIds.length);
       expect(concurrentGroupFinalizeOrder.slice().sort()).toEqual([...retryChecksAdmission!.groupRunIds].sort());
@@ -2271,7 +2271,8 @@ describe("P0 normal project onboarding journey", () => {
       sourceCandidateDigest: browserAdmission!.candidateDigest });
     expect(explicitAccessRetry.status, explicitAccessRetry.rawBody).toBe(200);
     // The old paused receipt stays immutable; explicit retry creates a distinct fresh CHECKS dispatch.
-    expect(broker.db.get(String(retryDispatchRow!.pk), String(retryDispatchRow!.sk))).toMatchObject({ taskAccessPausedAt: expect.any(String) });
+    const explicitlyRetriedOldDispatch = broker.db.get(String(retryDispatchRow!.pk), String(retryDispatchRow!.sk)) as { taskAccessPausedAt?: unknown } | undefined;
+    expect(typeof explicitlyRetriedOldDispatch?.taskAccessPausedAt).toBe("string");
     const explicitRetryWorkflow = (explicitAccessRetry.body.task as DeveloperTaskView).workflow;
     expect(explicitRetryWorkflow).toMatchObject({ stage: "VERIFY", state: "WAITING", revision: queuedRetryWorkflow.revision + 1 });
     const explicitRetryDispatch = broker.db.find((item) => item.entityType === "WORKFLOW_DISPATCH" && item.taskId === browserTaskId
@@ -2381,7 +2382,7 @@ describe("P0 normal project onboarding journey", () => {
     cleanupOutput = Buffer.alloc(0);
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
-        cleanupOutput = execFileSync("docker", ["--host", process.env.DOCKER_HOST!, "inspect", liveCancelAttempt!.runningContainer!.id],
+        cleanupOutput = execFileSync("docker", ["--host", process.env.DOCKER_HOST!, "inspect", liveCancelAttempt.runningContainer!.id],
           { encoding: "buffer", maxBuffer: 1024 * 1024 });
         containerStillPresent = true;
       } catch (error) {
@@ -2396,9 +2397,9 @@ describe("P0 normal project onboarding journey", () => {
       }
       await new Promise((resolveWait) => setTimeout(resolveWait, 100));
     }
-    await persistOriginalEvidencePrimary({ root, kind: "browser-required-owned-container-post-cancel-inspect", key: liveCancelAttempt!.runningContainer!.id,
+    await persistOriginalEvidencePrimary({ root, kind: "browser-required-owned-container-post-cancel-inspect", key: liveCancelAttempt.runningContainer!.id,
       bytes: cleanupOutput, producer: "original Docker inspect stdout or stderr after the admitted E2E cancel terminalized",
-      sourceCandidateDigest: liveCancelAttempt!.runningContainer!.sourceDigest });
+      sourceCandidateDigest: liveCancelAttempt.runningContainer!.sourceDigest });
     expect(containerStillPresent, "the exact owned container must be removed after cancellation cleanup").toBe(false);
     expect(cleanupExitCode).toBe(1);
     expect(cleanupOutput.toString("utf8")).toMatch(/no such (?:container|object)/iu);
