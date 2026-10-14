@@ -121,18 +121,12 @@ export async function createLoopHarness(dirs: string[], options: {
   const complete = (summary: string, target?: string) => completeOn(LOOP_ISSUE, summary, target);
   /** #359: the same, for a loop on another issue or pull request of the repository. */
   const completeOn = async (issue: number, summary: string, target?: string) => {
-    const server = createLoopMcpServer({ store, repo: world.repo, issue, version: "test", pollMs: 5, waitMs: 2_000, ...(target === undefined ? {} : { target }) });
+    const server = createLoopMcpServer({ store, repo: world.repo, issue, version: "test", pollMs: 5, waitMs: 2_000, sleep: async () => { await daemon.attend(); }, ...(target === undefined ? {} : { target }) });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     await server.connect(serverSide);
     const client = new Client({ name: "claude-code", version: "test" });
     await client.connect(clientSide);
     const call = client.callTool({ name: "loop_complete", arguments: { summary } });
-    let answered = false;
-    void call.finally(() => { answered = true; });
-    while (!answered) {
-      await daemon.attend();
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
     return ((await call) as { content: Array<{ text: string }> }).content[0]?.text ?? "";
   };
   /** A collaborator comments, and the daemon reads it. */

@@ -45,7 +45,7 @@ async function setUp(options: { collaborators?: string[] } = {}) {
   await daemon.poll();
   /** The agent's MCP tools, as Claude Code would call them. */
   const agent = async () => {
-    const server = createLoopMcpServer({ store, repo: world.repo, issue: ISSUE, version: "test", pollMs: 5, waitMs: 2_000 });
+    const server = createLoopMcpServer({ store, repo: world.repo, issue: ISSUE, version: "test", pollMs: 5, waitMs: 2_000, sleep: async () => { await daemon.attend(); } });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     await server.connect(serverSide);
     const client = new Client({ name: "claude-code", version: "test" });
@@ -57,12 +57,6 @@ async function setUp(options: { collaborators?: string[] } = {}) {
   const complete = async (summary: string) => {
     const client = await agent();
     const call = client.callTool({ name: "loop_complete", arguments: { summary } });
-    let answered = false;
-    void call.finally(() => { answered = true; });
-    while (!answered) {
-      await daemon.attend();
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
     return textOf(await call);
   };
   return { root, checkout, world, store, daemon, logs, agent, complete, textOf, converse, claudeHome };
