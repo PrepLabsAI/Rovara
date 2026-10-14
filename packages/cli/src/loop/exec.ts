@@ -34,7 +34,7 @@ export const realExec: Exec = (command, args, options = {}) => new Promise((reso
     // input stream. A failed non-empty write, or any other stdin error, is a
     // failed execution even if the child happened to exit successfully.
     const failedInput = stdinFailure !== undefined && !(input.length === 0 && stdinFailure.code === "EPIPE");
-    const failureText = stdinFailure === undefined ? "" : `stdin write failed (${stdinFailure.code ?? "unknown"})`;
+    const failureText = failedInput ? `stdin write failed (${stdinFailure?.code ?? "unknown"})` : "";
     finish({ code: failedInput && childCode === 0 ? 1 : childCode, stdout, stderr: [stderr, failureText].filter(Boolean).join("\n") });
   });
   child.stdin.end(input);
