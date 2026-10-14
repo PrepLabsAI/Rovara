@@ -437,11 +437,34 @@ describe("P0 normal project onboarding journey", () => {
       expect(retriedPrimary.sha256).toBe(retriedExecutionRef.sha256);
       const retryOutbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.operationId === retriedOperationId)[0]!;
       expect(retryOutbox).toBeDefined();
+      const retryWorkerPostStart = workerPosts.length;
       await publisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(retryOutbox) } }] as never });
       const queuedRetry = broker.db.get(String(retryOutbox.pk), String(retryOutbox.sk))!;
       const retryDispatch = await dispatch({ Records: [{ messageId: String(retryOutbox.id), body: JSON.stringify(queuedRetry) }] });
       expect(retryDispatch.batchItemFailures).toEqual([]);
-      for (let index = 0; index < 200 && (await journal.get(retriedOperationId))?.status !== "SUCCEEDED"; index += 1) await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      const retryInvocation = retryOutbox.invocation as { operationId?: unknown };
+      expect(retryInvocation.operationId).toBe(retriedOperationId);
+      const retryDeadline = Date.now() + originalTimeout;
+      const retryTerminalPath = `/operations/${retriedOperationId}/result`;
+      const retryResultAccepted = () => brokerRouteObservations.some(({ path, status, body }) =>
+        path.endsWith(retryTerminalPath) && status === 200 && body.accepted === true);
+      const retryWorkerAccepted = () => workerPosts.slice(retryWorkerPostStart).some(({ status, body }) => {
+        const response = JSON.parse(body) as { accepted?: unknown; operationId?: unknown };
+        return status === 200 && response.accepted === true && response.operationId === retriedOperationId;
+      });
+      expect(retryWorkerAccepted(), JSON.stringify({ retryDispatch, retryWorkerPosts: workerPosts.slice(retryWorkerPostStart),
+        retryOutbox: { status: retryOutbox.status, operationId: retryInvocation.operationId } })).toBe(true);
+      while (Date.now() < retryDeadline && ((await journal.get(retriedOperationId))?.status !== "SUCCEEDED" || !retryResultAccepted())) {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+      }
+      const retryJournal = await journal.get(retriedOperationId);
+      const retryTerminalObservation = brokerRouteObservations.filter(({ path }) => path.endsWith(retryTerminalPath)).at(-1);
+      expect({ workerAccepted: retryWorkerAccepted(), journalStatus: retryJournal?.status,
+        brokerStatus: retryTerminalObservation?.status, brokerAccepted: retryTerminalObservation?.body.accepted },
+      JSON.stringify({ retryDispatch, retryWorkerPosts: workerPosts.slice(retryWorkerPostStart), retryJournal,
+        retryTerminalObservation, execution: broker.db.get(`PROJECT_SETUP#${retriedExecutionId}`, "EXECUTION"),
+        operation: broker.db.get(`PROJECT_SETUP#${retriedExecutionId}`, `OPERATION#${retriedOperationId}`) }))
+        .toEqual({ workerAccepted: true, journalStatus: "SUCCEEDED", brokerStatus: 200, brokerAccepted: true });
       expect(broker.db.get(`PROJECT_SETUP#${retriedExecutionId}`, "EXECUTION")).toMatchObject({ state: "SUCCEEDED", result: { qualification: "PASS", cleanupConfirmed: true } });
       const retryEvidenceRef = (broker.db.get(`PROJECT_SETUP#${retriedExecutionId}`, `OPERATION#${retriedOperationId}`)?.result as { evidenceRef?: { key: string; sha256: string } }).evidenceRef!;
       const retryEvidencePrimary = await persistOriginalMapPrimary({ root, kind: "setup-retry-evidence", key: retryEvidenceRef.key, objects,
