@@ -391,7 +391,7 @@ agentx mcp install --client claude-code   # or codex, cursor
 
 After the install, `agentx --env <name> project add`, `channel add` and
 `connector add linear|jira|asana|mcp` add more, and `doctor`, `config`, `upgrade` and `destroy` run
-the environment. See [the install overview](docs/getting-started.md) for the full tour.
+the environment. See [the install overview](docs/getting-started.md) for the full tour and [E2E setup](docs/e2e-onboarding.md) for the connect, inspect and owner-decision flow.
 
 <br/>
 

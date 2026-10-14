@@ -84,7 +84,7 @@ export async function createLoopHarness(dirs: string[], options: {
     return typeof answer === "string" ? { ok: true, text: answer } : { ok: false, reason: answer.failed };
   };
   const daemon = new LoopDaemon({
-    store, exec, github: new GitHub(exec), harness: new AgentHarness(exec),
+    store, exec, github: new GitHub(exec), harness: new AgentHarness(exec, { claudeHome: join(root, "claude") }),
     cliCommand: ["/usr/local/bin/node", "/opt/rovara/cli.js"], now: () => new Date(world.clock), log: () => undefined, checkRun, reviewerRun,
     // Synthetic Git identity is stable for existing loop contracts; production uses candidate.ts Git observations.
     captureCandidate: async ({ branch }) => ({ branch, commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "c".repeat(40) }),

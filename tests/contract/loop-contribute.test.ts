@@ -116,7 +116,7 @@ describe("the Contribute loop on someone else's pull request (#359)", () => {
     await write(PROVED);
     expect(await claim("Proved both.")).toContain("Accepted");
     await h.runOwnSteps();
-    expect(h.world.calls).toContainEqual(["git", "-C", worktree, "diff", "refs/rovara/contribute/77...HEAD"]);
+    expect(h.world.calls).toContainEqual(["git", "-C", worktree, "diff", "refs/rovara/contribute/77...HEAD", "--", ".", ":(exclude)docs/rovara/77/evidence/checks.md", ":(exclude)docs/rovara/77/evidence/reviews.md"]);
 
     // Its own branch is pushed to this repository, and the follow-up opens in the fork, into the pull request's branch.
     expect(h.world.pushes).toEqual(["rovara/77"]);

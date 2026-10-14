@@ -1,6 +1,7 @@
 // rovara loop (#359): Codex as the agent, and as the critic. Codex runs interactively in tmux in its workspace-write
 // sandbox, with the loop's tools passed as -c overrides (nothing written to ~/.codex), and is resumed as the latest
 // session in its worktree. As a reviewer it runs headless in its read-only sandbox.
+import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Exec } from "../../packages/cli/src/loop/exec.js";
 import { AgentHarness, agentCommand, type SessionStart } from "../../packages/cli/src/loop/harness.js";
@@ -23,6 +24,7 @@ describe("the Codex harness (#359)", () => {
       "codex", "--sandbox", "workspace-write", "--cd", "/w/42", "--add-dir", "/checkouts/acme/payments/.git",
       "-c", 'mcp_servers.rovara-loop.command="/usr/local/bin/node"',
       "-c", 'mcp_servers.rovara-loop.args=["/opt/rovara/cli.js","loop","mcp","--repo","acme/payments","--issue","42"]',
+      "-c", 'mcp_servers.rovara-loop.default_tools_approval_mode="approve"',
       "--model", "gpt-5-codex", "--", "Your step now: write the plan.",
     ]);
     expect(agentCommand({ ...START, resume: true }).slice(0, 5)).toEqual(["codex", "resume", "--last", "--sandbox", "workspace-write"]);
@@ -42,6 +44,9 @@ describe("the Codex harness (#359)", () => {
     expect(await new AgentHarness(screen("Would you like to run the following command?\n  $ npm install")).waitingForApproval("s")).toBe(true);
     expect(await new AgentHarness(screen("Would you like to make the following edits?")).waitingForApproval("s")).toBe(true);
     expect(await new AgentHarness(screen("Working (12s)")).waitingForApproval("s")).toBe(false);
+    // #392: its approval for an MCP tool, and (#391) Claude Code's folder-trust dialog, are waiting too.
+    expect(await new AgentHarness(screen('Allow the rovara-loop MCP server to run tool "loop_complete"?')).waitingForApproval("s")).toBe(true);
+    expect(await new AgentHarness(screen("Quick safety check: Is this a project you created or one you trust?")).waitingForApproval("s")).toBe(true);
   });
 });
 
@@ -54,12 +59,19 @@ describe("the Quick loop on Codex (#359)", () => {
     const session = h.world.sessions.get(LOOP_SESSION)!;
     expect(session.agent).toBe("codex");
     expect(session.cwd).toBe(h.worktree());
-    expect(session.claude.slice(0, 6)).toEqual(["--sandbox", "workspace-write", "--cd", h.worktree(), "--add-dir", "/checkouts/acme/payments/.git"]);
+    // #392: a clone with its git directory beside it, which Codex may write, so it commits without asking.
+    const gitDir = join(h.store.itemDir(h.world.repo, 42), "git");
+    expect(session.claude.slice(0, 6)).toEqual(["--sandbox", "workspace-write", "--cd", h.worktree(), "--add-dir", gitDir]);
+    expect(h.world.clones).toEqual([["--quiet", "--no-checkout", `--separate-git-dir=${gitDir}`, h.checkout, h.worktree()]]);
+    expect(h.world.calls).toContainEqual(["git", "-C", h.worktree(), "remote", "set-url", "origin", "git@github.com:acme/payments.git"]);
+    expect(h.world.calls).toContainEqual(["git", "-C", h.worktree(), "checkout", "--quiet", "-b", "rovara/42", "origin/main"]);
+    expect(h.world.calls.some((call) => call.includes("worktree") && call.includes("add"))).toBe(false);
     expect(session.claude).toContain("mcp_servers.rovara-loop.args=[\"/opt/rovara/cli.js\",\"loop\",\"mcp\",\"--repo\",\"acme/payments\",\"--issue\",\"42\"]");
     expect(session.claude.slice(-4, -2)).toEqual(["--model", "gpt-5-codex"]);
     expect(session.claude.at(-1)).toContain("Your step now: write the plan:");
     const state = await h.state();
     expect(state?.session).toEqual({ harness: "codex", tmux: LOOP_SESSION });
+    expect(state?.worktree).toEqual({ path: h.worktree(), branch: "rovara/42", gitDir });
 
     // The same Quick path: plan, approval, code, checks, reviews (on Codex), one pull request.
     await h.write("plan", PLAN);

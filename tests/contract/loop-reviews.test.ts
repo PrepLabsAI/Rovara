@@ -3,7 +3,7 @@
 // the configured rounds (or a review that could not be read) a person decides. What collaborators say on the pull
 // request reaches the agent, like a reply on the issue.
 import { afterEach, describe, expect, it } from "vitest";
-import { createLoopHarness, LOOP_ISSUE, removeAll, type ReviewerAnswer } from "../support/loop-harness.js";
+import { createLoopHarness, LOOP_ISSUE, NO_FINDINGS, removeAll, type ReviewerAnswer } from "../support/loop-harness.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await removeAll(dirs); });
@@ -54,7 +54,8 @@ describe("the loop's reviews (#358)", () => {
       expect(run.prompt).toContain("Retry the payment call on a 503.");
       expect(run.prompt).toContain(h.world.diff);
     }
-    expect(h.world.calls).toContainEqual(["git", "-C", h.worktree(), "diff", "origin/main...HEAD"]);
+    // #393: the loop's own evidence is left out of what the reviewers judge.
+    expect(h.world.calls).toContainEqual(["git", "-C", h.worktree(), "diff", "origin/main...HEAD", "--", ".", ":(exclude)docs/rovara/42/evidence/checks.md", ":(exclude)docs/rovara/42/evidence/reviews.md"]);
 
     // The finding blocks: back to the agent, with it, and nothing pushed.
     expect(await h.step()).toBe("code");
@@ -193,5 +194,51 @@ describe("feedback on the loop's pull request (#358)", () => {
     expect(h.world.sessions.get("rovara-acme_payments-42")!.received).toHaveLength(received);
     expect(h.lastPosted()).toContain("@maya approved pull request #501. Merging it closes this issue, which ends the loop.");
     expect(h.world.posted(LOOP_ISSUE).filter((posted) => posted.includes("approved pull request"))).toHaveLength(1);
+  });
+});
+
+describe("what the reviews see, and what the pull request says (#393, #394)", () => {
+  it("tells the reviewers what a collaborator asked for, leaves the loop's evidence out, and keeps the description current", async () => {
+    const h = await atCode({ reviews: ["reviews:", "  maxRounds: 1"], critic: [NO_FINDINGS, UNUSED] });
+    await h.selfReview();
+    await h.complete("Coded the retry.");
+    await h.runOwnSteps();
+    expect(await h.step()).toBe("pr-open");
+    const pull = h.world.pullRequests[0]!;
+    // #394: an embedded plan's headings sit under the description's own.
+    expect(pull.body).toContain("## Plan\n\n### Summary");
+    expect(pull.body).not.toMatch(/\n## Summary/u);
+
+    // A collaborator asks for something on the pull request; the next round's reviewers are told, as part of the change.
+    h.world.say(pull.number, "sam", "Add a footer line to the docs.");
+    await h.daemon.poll();
+    await h.complete("Added the footer.");
+    await h.runOwnSteps();
+    const prompt = h.reviewerRuns.at(-1)!.prompt;
+    expect(prompt).toContain("What collaborators asked for after the plan was approved");
+    expect(prompt).toMatch(/- @sam \(.+\): Comment on pull request #501: Add a footer line to the docs\./u);
+    expect(prompt).toContain("The loop writes its own evidence");
+    expect((await h.state())?.requests).toHaveLength(1);
+
+    // It still blocked (the round limit is 1); a person publishes past it, and the description says so, now.
+    expect(await h.step()).toBe("review-blocked");
+    await h.comment("maya", "/rovara approve");
+    await h.runOwnSteps();
+    expect(h.world.descriptionUpdates).toBe(1);
+    expect(pull.body).toContain("@maya published this past reviews that still blocked it");
+    expect(pull.body).toContain("### Code review: 1 blocking finding");
+  });
+
+  it("says reviews that couldn't be run couldn't be run, not that they block", async () => {
+    const h = await atCode({ security: [{ failed: "codex exited 1: not signed in" }] });
+    await h.selfReview();
+    await h.complete("Coded.");
+    await h.runOwnSteps();
+    expect(await h.step()).toBe("review-blocked");
+    expect(h.lastPosted()).toContain("The reviews could not be run, so a person decides.");
+    expect(h.lastPosted()).not.toContain("still block");
+    await h.comment("maya", "/rovara approve");
+    await h.runOwnSteps();
+    expect(h.world.pullRequests[0]!.body).toContain("@maya published this past reviews that could not be run");
   });
 });

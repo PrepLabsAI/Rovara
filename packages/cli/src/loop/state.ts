@@ -41,7 +41,12 @@ export const WorkItemStateSchema = z.object({
     id: z.string().uuid().optional(),
   }).strict().optional(),
   /** The item's own git worktree and branch, once made. */
-  worktree: z.object({ path: z.string(), branch: z.string() }).strict().optional(),
+  worktree: z.object({
+    path: z.string(),
+    branch: z.string(),
+    /** #392: a Codex item's checkout is a clone whose git directory is here (Codex may write it), not a worktree. */
+    gitDir: z.string().optional(),
+  }).strict().optional(),
   /** A pointer to separately retained native task proof; it is never local check or review evidence. */
   nativeImport: NativeImportRouteSchema.optional(),
   /** What the agent said it did, at its last accepted claim. */
@@ -50,6 +55,12 @@ export const WorkItemStateSchema = z.object({
   approvals: z.partialRecord(ArtifactSchema, z.object({ digest: z.string().regex(/^[a-f0-9]{64}$/), by: z.string(), at: z.string() }).strict()).optional(),
   /** Full (#357): the phases declared away when the loop started, and by whom (the starter). */
   skipped: z.array(z.string()).max(10).optional(),
+  /** #393: what collaborators asked for after the plan was approved (replies, pull request feedback), for the reviewers. */
+  requests: z.array(z.object({ author: z.string(), text: z.string().max(2_000), at: z.string() }).strict()).max(30).optional(),
+  /** #394: a person published past reviews that blocked or couldn't run, and who; cleared when the reviews pass. */
+  reviewsAccepted: z.object({ by: z.string(), at: z.string(), unrun: z.boolean() }).strict().optional(),
+  /** #394: the last reviews blocked because they couldn't be run or read. */
+  reviewsUnrun: z.boolean().optional(),
   /** #358: review rounds in a row that still blocked; reset when the reviews pass or a person decides. */
   reviewRounds: z.number().int().min(0).optional(),
   /** #358: the last reviews report, for the pull request's description and the evidence. */
@@ -85,7 +96,12 @@ export const WorkItemStateSchema = z.object({
   /** #359, Review: rounds run so far. */
   rounds: z.number().int().min(0).optional(),
   /** Quick (#356): the pull request the loop opened. */
-  pullRequest: z.object({ number: z.number().int().positive(), url: z.string().url() }).strict().optional(),
+  pullRequest: z.object({
+    number: z.number().int().positive(),
+    url: z.string().url(),
+    /** #390: the repository it is in, when that is not the item's own (a per-PR loop's, or a follow-up in a fork). */
+    repo: RepoSlug().optional(),
+  }).strict().optional(),
 }).strict();
 export type WorkItemState = z.infer<typeof WorkItemStateSchema>;
 

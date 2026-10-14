@@ -50,6 +50,10 @@ reviews:            # the code and security reviews after the checks; see "Revie
 Comments from anyone else are never read as instructions. Comments the loop posts carry a hidden marker,
 so it never mistakes its own words for a command.
 
+The loop reads `.rovara/loop.yaml` from your checkout each time it polls. If the file can't be read (a typo, a field
+it doesn't know), each running loop's issue says so, once, with the reason; the loop stops reading that repository's
+issues until the file is fixed, then says so again and reads what was said meanwhile. Nothing needs restarting.
+
 ## The Do loop
 
 Comment on an issue (or a pull request):
@@ -87,7 +91,7 @@ or `rovara loop quick --issue 42 "…"` from the terminal.
 | **Reviews** | A code review and a security review of the change (see [Reviews](#reviews)). A blocking finding goes back to the agent | `rovara:reviewing` |
 | **Review blocked** | After `maxRounds` rounds that still block, or a review that couldn't be run or read, a person decides: `/rovara approve` publishes as it is, a reply goes back to the agent | `rovara:review-blocked` |
 | **Publish** | The loop itself, never the agent, pushes `rovara/<issue>` and opens a pull request that closes the issue, with the plan, the checks and the reviews in its description | `rovara:publishing` |
-| **Pull request open** | A reply on the issue, or on the pull request (see [Feedback on the pull request](#feedback-on-the-pull-request)), goes back to the agent; the loop runs the checks and reviews again and pushes to the same pull request. Merging closes the issue, which ends the loop | `rovara:pr-open` |
+| **Pull request open** | A reply on the issue, or on the pull request (see [Feedback on the pull request](#feedback-on-the-pull-request)), goes back to the agent; the loop runs the checks and reviews again, pushes to the same pull request, and rewrites its description to match: the checks, the reviews, and whether a person published past them. Merging closes the issue, which ends the loop | `rovara:pr-open` |
 
 **Nothing is pushed before the plan is approved, the checks pass and the reviews pass (or a person accepts them).** A push git refuses (someone else pushed
 to the branch) is said on the issue, and a reply tries again.
@@ -130,8 +134,10 @@ Quick and Full review a change three times before it's published:
 2. **A code review and a security review**, after the checks pass, each run headless and read-only in the agent's
    worktree: Claude Code (`claude -p`) in plan mode, with only file reading and `git diff`, `git log` and `git show`
    allowed; or, with `reviews.harness: codex`, Codex (`codex exec`) in its read-only sandbox. Each sees the approved
-   plan and the change from the default branch, and answers with findings in Rovara's own reviewer format, the same
-   as Rovara's hosted reviews. Set `reviews.harness` to the other agent, or `reviews.model` to another model, so the
+   plan, what collaborators asked for since it was approved (replies and pull request feedback: a change one of them
+   asked for isn't a deviation from the plan), and the change from the default branch, without the loop's own
+   evidence files, which it writes after the reviews. Each answers with findings in Rovara's own reviewer format, the
+   same as Rovara's hosted reviews. Set `reviews.harness` to the other agent, or `reviews.model` to another model, so the
    critic isn't the agent marking its own work.
 3. **The blocking rule.** A finding blocks when the change introduced it, and, for the code review, it isn't
    advisory (a remark about something the plan asks for, or about test coverage). A security finding is never
@@ -199,9 +205,11 @@ The Review loop reviews, and **changes no code**: it has no agent session, no br
 - **The brief.** It reviews against a collaborator's brief: the questions to answer, the angles to look at, the
   validations to check. `/rovara review` with nothing after it posts a template (`rovara:review-brief`) and waits;
   the next reply from a collaborator is the brief.
-- **Rounds.** Each round is a headless, read-only reviewer, on `reviews.harness` and `reviews.model`. It answers the
-  brief, and posts numbered findings (`rovara:reviewed`), numbered on across rounds. New commits on a pull request it
-  reviews, or a reply with more to look at, start the next round, which is told the earlier findings.
+- **Rounds.** Each round is a headless, read-only reviewer, on `reviews.harness` and `reviews.model`. It reads the
+  pull request's title and description, the issue's, and collaborators' comments as well as the code, answers the
+  brief, and posts numbered findings (`rovara:reviewed`). New commits on a pull request it reviews, or a reply with more
+  to look at, start the next round. A finding still there keeps its number ("Still there from earlier rounds: 1, 3");
+  only new ones are numbered on.
 - **Filing.** Nothing is filed by itself: `/rovara file 2` (or `/rovara file 2,4`) files those findings as issues,
   in the repository of the pull request each is about, once each.
 - **Ending.** `/rovara stop`, or closing the issue or pull request.
@@ -248,19 +256,28 @@ there. Detach with `Ctrl-b d`; it keeps working.
 - **Claude Code** starts in its **default permission mode**, so it asks before it edits files or runs commands. To
   let it work without asking, give it a permission mode in `harness.args`, for example
   `[--permission-mode, acceptEdits]`.
-- **Codex** (`harness.name: codex`) starts in its **workspace-write sandbox**: it edits the worktree and runs commands
-  there without network access, and asks before anything else. The loop also lets it write the checkout's git
-  directory, which a worktree commits to. `harness.args` adds Codex arguments, for example `[--model, gpt-5-codex]`.
-  Codex picks its own session ID, so the loop resumes it as the latest Codex session in the item's worktree, which
-  only that item uses.
+- **Codex** (`harness.name: codex`) starts in its **workspace-write sandbox**: it edits its checkout and runs
+  commands there without network access, and asks before anything else. Its sandbox lets nothing write a `.git`
+  directory, so a Codex item works in a local clone of your checkout whose git directory sits beside it
+  (`~/.rovara/loop/items/…/git`), which Codex may write, rather than a worktree: it commits without asking. The loop's
+  own tools never ask either. `harness.args` adds Codex arguments, for example `[--model, gpt-5-codex]`. Codex picks
+  its own session ID, so the loop resumes it as the latest Codex session in the item's checkout, which only that item
+  uses.
+- **A repository Claude Code hasn't opened before** asks, the first time, whether you trust the folder. The loop
+  counts that as waiting for you, says so on the issue after a minute, and never types into it (its default answer
+  is "No, exit"). Answer it in tmux, or open the repository with `claude` once beforehand.
 
 How much the agent may do without asking is your decision, per repository.
 
 When the agent has been waiting on a permission prompt for a minute, the loop says so on the issue, with the
 `tmux attach` command, so someone who only watches GitHub knows it needs them.
 
+While the agent shows a prompt or dialog, a reply for it is held, and given once the screen is clear, so nothing
+typed ever answers a prompt by accident.
+
 If its session ends while it's working, the loop resumes it, up to three times in a row; then it says so
-on the issue and waits for your next reply.
+on the issue and waits for your next reply. A session that ended before it began (Claude Code saved no conversation)
+is started again with its assignment, rather than resumed.
 
 ## Commands
 

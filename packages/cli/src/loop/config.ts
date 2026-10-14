@@ -23,7 +23,8 @@ export const LoopRepoConfigSchema = z.object({
      * Extra arguments for the agent, such as a permission mode or a model. Claude Code starts in its default mode, and
      * Codex in its workspace-write sandbox, otherwise.
      */
-    args: z.array(z.string().max(200)).max(20).default([]),
+    // #390: one argument can be a whole allow-list (`--allowedTools a,b,c,…`), so it may be long.
+    args: z.array(z.string().max(2_000)).max(40).default([]),
   }).strict().default({ name: "claude-code", args: [] }),
   /**
    * Quick (#356): the commands that prove a change, run by the loop in the item's worktree after the agent codes it,

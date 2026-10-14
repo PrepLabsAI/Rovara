@@ -7,6 +7,8 @@ export interface IssueComment { id: number; issue: number; author: string; body:
 /** #359: a pull request as the Review loop reviews it. */
 export interface PullRequestRef {
   repo: string; number: number; open: boolean; base: string; head: string; url: string;
+  /** #393: what its author says it is, for a reviewer. */
+  title: string; body: string;
   /** The repository and branch its head commit is on: this repository's, or a fork's. */
   headRepo: string; headRef: string;
 }
@@ -97,17 +99,18 @@ export class GitHub {
    * not a pull request.
    */
   async pullRequest(repo: string, number: number): Promise<PullRequestRef | undefined> {
-    const found = await this.exec("gh", ["api", `repos/${repo}/pulls/${number}`, "--jq", "{state, base: .base.ref, head: .head.sha, url: .html_url, headRepo: .head.repo.full_name, headRef: .head.ref}"]);
+    const found = await this.exec("gh", ["api", `repos/${repo}/pulls/${number}`, "--jq", "{state, base: .base.ref, head: .head.sha, url: .html_url, headRepo: .head.repo.full_name, headRef: .head.ref, title, body}"]);
     if (found.code !== 0) {
       if (/HTTP 404|Not Found/u.test(found.stderr)) return undefined;
       throw new Error(`gh could not read ${repo}#${number}: ${found.stderr.trim().split("\n").pop() ?? ""}`);
     }
-    const value = JSON.parse(found.stdout) as { state?: unknown; base?: unknown; head?: unknown; url?: unknown; headRepo?: unknown; headRef?: unknown };
+    const value = JSON.parse(found.stdout) as { state?: unknown; base?: unknown; head?: unknown; url?: unknown; headRepo?: unknown; headRef?: unknown; title?: unknown; body?: unknown };
     if (typeof value.base !== "string" || typeof value.head !== "string") return undefined;
     return {
       repo, number, open: value.state === "open", base: value.base, head: value.head, url: typeof value.url === "string" ? value.url : "",
       // A deleted fork has no repository; its branch can no longer take a follow-up.
       headRepo: typeof value.headRepo === "string" ? value.headRepo : "", headRef: typeof value.headRef === "string" ? value.headRef : "",
+      title: typeof value.title === "string" ? value.title : "", body: typeof value.body === "string" ? value.body : "",
     };
   }
 
@@ -121,6 +124,21 @@ export class GitHub {
       if (typeof value.repo === "string" && typeof value.number === "number") found.set(`${value.repo}#${value.number}`, { repo: value.repo, number: value.number });
     }
     return [...found.values()];
+  }
+
+  /** #393: an issue's (or pull request's) title and description. */
+  async issueText(repo: string, issue: number): Promise<{ title: string; body: string }> {
+    const value = JSON.parse(await run(this.exec, "gh", ["api", `repos/${repo}/issues/${issue}`, "--jq", "{title, body}"])) as { title?: unknown; body?: unknown };
+    return { title: typeof value.title === "string" ? value.title : "", body: typeof value.body === "string" ? value.body : "" };
+  }
+
+  /** #393: every comment on an issue or pull request's conversation, oldest first: who, and what. */
+  async issueComments(repo: string, issue: number): Promise<Array<{ author: string; body: string }>> {
+    const out = await run(this.exec, "gh", ["api", "--paginate", `repos/${repo}/issues/${issue}/comments?per_page=100`, "--jq", ".[] | {author: .user.login, body}"]);
+    return out.split("\n").filter((line) => line.trim() !== "").flatMap((line) => {
+      const value = JSON.parse(line) as { author?: unknown; body?: unknown };
+      return typeof value.author === "string" && typeof value.body === "string" ? [{ author: value.author, body: value.body }] : [];
+    });
   }
 
   /** #359: opens an issue, and answers its number. */

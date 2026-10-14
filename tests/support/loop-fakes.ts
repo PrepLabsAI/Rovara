@@ -42,10 +42,18 @@ export class LoopWorld {
   readonly pushes: string[] = [];
   readonly pullRequests: FakePullRequest[] = [];
   readonly titles = new Map<number, string>();
+  /** #393: issues' and pull requests' descriptions. */
+  readonly bodies = new Map<number, string>();
   /** The default branch GitHub names; the clone's origin/HEAD is never asked. */
   defaultBranch = "main";
   /** What the loop committed itself (its evidence), as "<path>: <message>". */
   readonly loopCommits: string[] = [];
+  /** #394: how many times the loop rewrote a pull request's description. */
+  descriptionUpdates = 0;
+  /** #390: GitHub API paths that fail (as GitHub's errors do) while they match. */
+  failPaths: RegExp[] = [];
+  /** #392: the clones made for Codex items, as their `git clone` arguments. */
+  readonly clones: string[][] = [];
   /** When set, the next push is refused (someone else pushed to the branch). */
   pushRefused = false;
   /** #358: inline review comments and submitted reviews on pull requests. */
@@ -122,6 +130,7 @@ export class LoopWorld {
     if (first !== "api") return fail(`unexpected gh ${args.join(" ")}`);
     const method = args[1] === "-X" ? args[2] : "GET";
     const path = args[1] === "-X" ? args[3] ?? "" : args[1] === "--paginate" ? args[2] ?? "" : args[1] ?? "";
+    if (this.failPaths.some((pattern) => pattern.test(path))) return fail("gh: Server Error (HTTP 502)");
     const comments = /^repos\/[^/]+\/[^/]+\/issues\/comments\?since=([^&]+)/.exec(path);
     if (comments !== null) {
       const since = decodeURIComponent(comments[1] ?? "");
@@ -135,6 +144,14 @@ export class LoopWorld {
         .map((comment) => JSON.stringify({ id: comment.id, pull_request_url: `https://api.github.com/repos/${this.repo}/pulls/${comment.pull}`, author: comment.author, body: comment.body, path: comment.path, line: comment.line, updated_at: comment.updated_at })).join("\n"));
     }
     const pull = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)$/u.exec(path);
+    // #394: the loop rewrites its pull request's description on every push.
+    if (pull !== null && method === "PATCH") {
+      const own = this.pullRequests.find((candidate) => candidate.number === Number(pull[1]));
+      if (own === undefined) return fail("gh: Not Found (HTTP 404)");
+      own.body = (JSON.parse(input) as { body: string }).body;
+      this.descriptionUpdates += 1;
+      return ok("{}");
+    }
     if (pull !== null) {
       const number = Number(pull[1]);
       const own = this.pullRequests.find((candidate) => candidate.number === number);
@@ -143,7 +160,7 @@ export class LoopWorld {
       const value = own === undefined
         ? { headRepo: this.repo, headRef: `feature-${number}`, ...theirs!, url: `https://github.com/${this.repo}/pull/${number}` }
         : { base: own.base, head: `head-${number}`, open: !this.closed.has(number), url: own.url, headRepo: this.repo, headRef: own.head };
-      return ok(JSON.stringify({ state: value.open ? "open" : "closed", base: value.base, head: value.head, url: value.url, headRepo: value.headRepo, headRef: value.headRef }));
+      return ok(JSON.stringify({ state: value.open ? "open" : "closed", base: value.base, head: value.head, url: value.url, headRepo: value.headRepo, headRef: value.headRef, title: this.titles.get(number) ?? `Pull request ${number}`, body: own?.body ?? this.bodies.get(number) ?? "" }));
     }
     const timeline = /^repos\/[^/]+\/[^/]+\/issues\/(\d+)\/timeline/u.exec(path);
     if (timeline !== null) return ok((this.links.get(Number(timeline[1])) ?? []).map((link) => JSON.stringify(link)).join("\n"));
@@ -154,6 +171,8 @@ export class LoopWorld {
       return ok(`${number}\n`);
     }
     const reviews = /^repos\/[^/]+\/[^/]+\/pulls\/(\d+)\/reviews/.exec(path);
+    // #390: GitHub answers 404 for the reviews of a pull request this repository doesn't have.
+    if (reviews !== null && !this.pullRequests.some((pull) => pull.number === Number(reviews[1])) && !this.openPulls.has(Number(reviews[1]))) return fail("gh: Not Found (HTTP 404)");
     if (reviews !== null) {
       return ok(this.reviews.filter((review) => review.pull === Number(reviews[1]))
         .map((review) => JSON.stringify({ id: review.id, author: review.author, state: review.state, body: review.body, submitted_at: review.submitted_at })).join("\n"));
@@ -165,6 +184,11 @@ export class LoopWorld {
     const labels = this.labels.get(number) ?? new Set<string>();
     this.labels.set(number, labels);
     if (rest === "" && method === "GET" && args.includes(".title")) return ok(`${this.titles.get(number) ?? `Issue ${number}`}\n`);
+    // #393: an issue's text, and its conversation, for a reviewer.
+    if (rest === "" && method === "GET" && args.includes("{title, body}")) return ok(JSON.stringify({ title: this.titles.get(number) ?? `Issue ${number}`, body: this.bodies.get(number) ?? "" }));
+    if (rest.startsWith("/comments?") && method === "GET") {
+      return ok(this.comments.filter((comment) => comment.issue === number).map((comment) => JSON.stringify({ author: comment.author, body: comment.body })).join("\n"));
+    }
     if (rest === "" && method === "GET") return ok(this.closed.has(number) ? "closed\n" : "open\n");
     if (rest === "/comments" && method === "POST") { this.say(number, this.developer, (JSON.parse(input) as { body: string }).body); return ok("{}"); }
     if (rest === "/labels" && method === "GET") return ok([...labels].join("\n"));
@@ -175,7 +199,11 @@ export class LoopWorld {
   }
 
   private async git(args: string[]): Promise<ExecResult> {
+    // #392: a Codex item's clone, with its git directory beside it.
+    if (args[0] === "clone") { await mkdir(args[args.length - 1] ?? "", { recursive: true }); this.clones.push(args.slice(1)); return ok(); }
     const sub = args[2];
+    if (sub === "remote" && args[3] === "get-url") return ok(`git@github.com:${this.repo}.git\n`);
+    if (sub === "remote" && args[3] === "set-url") return ok();
     if (sub === "fetch") { const ref = args.find((arg) => arg.startsWith("+pull/")); if (ref !== undefined) this.checkedOut.push(`fetch ${ref}`); return ok(); }
     if (sub === "checkout") { this.checkedOut.push(`${args[args.length - 1] ?? ""} @ ${args[1] ?? ""}`); return ok(); }
     // The loop's own evidence commit: something is always staged in this fake.

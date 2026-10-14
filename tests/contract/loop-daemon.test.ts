@@ -30,8 +30,15 @@ async function setUp(options: { collaborators?: string[] } = {}) {
   const store = new LoopStore(join(root, "home", ".rovara", "loop"));
   await store.saveRepos([{ repo: world.repo, path: checkout }]);
   const logs: string[] = [];
+  // Where Claude Code keeps its conversations, for these tests alone (#391).
+  const claudeHome = join(root, "claude");
+  /** Claude Code saved a conversation for session `id`, so it can be resumed. */
+  const converse = async (id: string) => {
+    await mkdir(join(claudeHome, "projects", "-w"), { recursive: true });
+    await writeFile(join(claudeHome, "projects", "-w", `${id}.jsonl`), "{}\n");
+  };
   const daemon = new LoopDaemon({
-    store, exec: world.exec, github: new GitHub(world.exec), harness: new AgentHarness(world.exec),
+    store, exec: world.exec, github: new GitHub(world.exec), harness: new AgentHarness(world.exec, { claudeHome }),
     cliCommand: ["/usr/local/bin/node", "/opt/rovara/cli.js"], now: () => new Date(world.clock), log: (line) => logs.push(line),
   });
   // The daemon's first read starts from now: nothing said before the repository was added is replayed.
@@ -58,7 +65,7 @@ async function setUp(options: { collaborators?: string[] } = {}) {
     }
     return textOf(await call);
   };
-  return { root, checkout, world, store, daemon, logs, agent, complete, textOf };
+  return { root, checkout, world, store, daemon, logs, agent, complete, textOf, converse, claudeHome };
 }
 
 describe("rovara loop's daemon, on the Do loop (#355)", () => {
@@ -118,7 +125,8 @@ describe("rovara loop's daemon, on the Do loop (#355)", () => {
     const h = await setUp();
     h.world.say(ISSUE, "maya", "/rovara do Fix the flaky retry test");
     await h.daemon.poll();
-    const id = h.world.sessions.get(SESSION)!.claude[1];
+    const id = h.world.sessions.get(SESSION)!.claude[1]!;
+    await h.converse(id);
     h.world.sessions.delete(SESSION);
     await h.daemon.attend();
     expect(h.world.started.at(-1)?.claude.slice(0, 2)).toEqual(["--resume", id]);
@@ -129,6 +137,44 @@ describe("rovara loop's daemon, on the Do loop (#355)", () => {
     for (let attempt = 0; attempt < 5; attempt += 1) await h.daemon.attend();
     expect(h.world.started.length).toBe(1 + 3);
     expect(h.world.posted(ISSUE).filter((body) => body.includes("ended 3 times in a row"))).toHaveLength(1);
+  });
+
+  it("starts a session that never began again, with its assignment, instead of resuming nothing (#391)", async () => {
+    const h = await setUp();
+    h.world.say(ISSUE, "maya", "/rovara do Fix the flaky retry test");
+    await h.daemon.poll();
+    const first = h.world.sessions.get(SESSION)!.claude;
+    const id = first[1]!;
+    // It stopped at Claude Code's folder-trust dialog and exited, so Claude Code saved no conversation.
+    h.world.sessions.delete(SESSION);
+    await h.daemon.attend();
+    const again = h.world.started.at(-1)!.claude;
+    expect(again.slice(0, 2)).toEqual(["--session-id", id]);
+    expect(again.at(-1)).toContain("Fix the flaky retry test");
+    expect(again.at(-1)).toContain("Your earlier session ended before it began, so this is your assignment again.");
+    // A reply that restarts it is given after the assignment.
+    h.world.sessions.delete(SESSION);
+    h.world.say(ISSUE, "maya", "Use the retry helper.");
+    await h.daemon.poll();
+    expect(h.world.started.at(-1)!.claude.at(-1)).toMatch(/Fix the flaky retry test[\s\S]*Since then:\nReply from @maya on the issue:\nUse the retry helper\./u);
+  });
+
+  it("holds a message while the agent shows a prompt or dialog, and gives it once the screen is clear (#391)", async () => {
+    const h = await setUp();
+    h.world.say(ISSUE, "maya", "/rovara do Fix the flaky retry test");
+    await h.daemon.poll();
+    const session = h.world.sessions.get(SESSION)!;
+    session.screen = " Quick safety check: Is this a project you created or one you trust?\n ❯ No, exit\n   Yes, I trust this folder";
+    h.world.say(ISSUE, "maya", "Also cover a timeout.");
+    await h.daemon.poll();
+    await h.daemon.attend();
+    expect(session.received).toEqual([]);
+    session.screen = "";
+    await h.daemon.attend();
+    expect(session.received).toHaveLength(1);
+    expect(session.received[0]).toContain("Also cover a timeout.");
+    await h.daemon.attend();
+    expect(session.received).toHaveLength(1);
   });
 
   it("ends when the issue is closed or a collaborator says /rovara stop: label removed, session ended", async () => {
