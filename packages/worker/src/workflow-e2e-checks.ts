@@ -24,16 +24,24 @@ export async function executeWorkflowE2EChecks(input: {
   invocation: Extract<WorkerInvocation, { kind: "task" }>;
   readAdmission: (offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>;
   saveEvidence: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
-  sourceRoot: string; evidenceRoot: string; deadlineAt?: number;
+  sourceRoot: string; evidenceRoot: string; deadlineAt?: number; signal?: AbortSignal;
+  /** Trusted local supervisor observation; it carries no evidence or qualification authority. */
+  onOwnedContainerRunning?: (receipt: Readonly<{ containerId: string; requestId: string; sourceDigest: string; observedAt: string; inspectBytes: Uint8Array }>) => Promise<void>;
 }): Promise<{ evidenceRef: { key: string; sha256: string }; candidateDigest: string; roundId: string; processStatus: "SUCCEEDED" | "FAILED" }> {
   const { invocation } = input;
   const reference = invocation.payload.workflowE2EAdmission;
   if (invocation.payload.workflowMode !== "CHECKS" || reference === undefined) throw new Error("native E2E checks require a broker-assigned CHECKS admission");
+  const throwIfCancelled = () => {
+    if (input.signal?.aborted) throw input.signal.reason instanceof Error ? input.signal.reason : new Error("native E2E checks were cancelled");
+  };
+  throwIfCancelled();
   const chunks: Buffer[] = [];
   let totalBytes = -1;
   let declaredDigest = "";
   for (let offset = 0; totalBytes < 0 || offset < totalBytes; offset += 64 * 1024) {
+    throwIfCancelled();
     const piece = await input.readAdmission(offset);
+    throwIfCancelled();
     if (totalBytes < 0) { totalBytes = piece.totalBytes; declaredDigest = piece.sha256; }
     const bytes = Buffer.from(piece.chunkBase64, "base64");
     if (piece.totalBytes !== totalBytes || piece.sha256 !== declaredDigest || bytes.byteLength === 0 || bytes.byteLength > 64 * 1024
@@ -77,6 +85,9 @@ export async function executeWorkflowE2EChecks(input: {
   const evidenceDirectory = join(resolve(input.evidenceRoot), `workflow-e2e-${round.roundId}`);
   await mkdir(evidenceDirectory, { recursive: false, mode: 0o700 });
   const controller = new AbortController();
+  const abortFromOperation = () => controller.abort(input.signal?.reason);
+  input.signal?.addEventListener("abort", abortFromOperation, { once: true });
+  if (input.signal?.aborted) abortFromOperation();
   const runGroup = async (group: (typeof plan.groups)[number], index: number): Promise<Record<string, unknown>> => {
     try {
     const groupAdmission = admission.groupAdmissions[index];
@@ -96,7 +107,8 @@ export async function executeWorkflowE2EChecks(input: {
     const groupEvidenceDirectory = join(evidenceDirectory, group.groupId);
     await mkdir(groupEvidenceDirectory, { mode: 0o700 });
     const actual = await runE2EActualCli({ compiled, snapshot, selection, runnerToolchain, hostRequestIds,
-      sourceRoot: await realpath(resolve(input.sourceRoot)), evidenceDirectory: groupEvidenceDirectory, deadlineAt: deadline, signal: controller.signal });
+      sourceRoot: await realpath(resolve(input.sourceRoot)), evidenceDirectory: groupEvidenceDirectory, deadlineAt: deadline, signal: controller.signal,
+      ...(input.onOwnedContainerRunning === undefined ? {} : { onOwnedContainerRunning: input.onOwnedContainerRunning }), });
     const collection = collectE2EActualCliRun({ actual, compiled, selection,
       sourceDigest: e2eSnapshotSourceDigest(compiled, snapshot.sources.map(({ path, sha256: digest }) => ({ path, sha256: digest }))),
       binding, round, semanticApprovalDigests: new Map(bundle.scenarios.map((scenario) => [scenario.scenarioId,
@@ -123,20 +135,29 @@ export async function executeWorkflowE2EChecks(input: {
       throw error;
     }
   };
-  const groupRuns: Array<Record<string, unknown>> = [];
-  for (let offset = 0; offset < plan.groups.length; offset += MAX_CONCURRENT_E2E_GROUPS) {
-    const batch = plan.groups.slice(offset, offset + MAX_CONCURRENT_E2E_GROUPS);
-    const groupResults = await Promise.allSettled(batch.map((group, index) => runGroup(group, offset + index)));
-    const failedGroup = groupResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
-    if (failedGroup) throw failedGroup.reason;
-    groupRuns.push(...groupResults.map((result) => (result as PromiseFulfilledResult<Record<string, unknown>>).value));
+  try {
+    const groupRuns: Array<Record<string, unknown>> = [];
+    for (let offset = 0; offset < plan.groups.length; offset += MAX_CONCURRENT_E2E_GROUPS) {
+      throwIfCancelled();
+      const batch = plan.groups.slice(offset, offset + MAX_CONCURRENT_E2E_GROUPS);
+      const groupResults = await Promise.allSettled(batch.map((group, index) => runGroup(group, offset + index)));
+      const failedGroup = groupResults.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failedGroup) throw failedGroup.reason;
+      groupRuns.push(...groupResults.map((result) => (result as PromiseFulfilledResult<Record<string, unknown>>).value));
+    }
+    throwIfCancelled();
+    const evidence = Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-evidence/v1", admissionSha256: reference.admissionRef.sha256,
+      taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
+      candidateDigest: admission.candidateDigest, round, groupRuns }), "utf8");
+    const byteLimit = e2ePrivateTransferMaxBytes(round.groupBindings.reduce((total, binding) => total + binding.expectedCases.length, 0), round.groupBindings.length);
+    if (evidence.byteLength > byteLimit) throw new Error("native E2E evidence exceeds its stored group-derived ceiling");
+    const evidenceRef = await input.saveEvidence(evidence, sha(evidence), byteLimit);
+    const processStatus = groupRuns.every((run) => (run.actual as { runProcess?: { status?: number } }).runProcess?.status === 0) ? "SUCCEEDED" : "FAILED";
+    return { evidenceRef, candidateDigest: admission.candidateDigest, roundId: round.roundId, processStatus };
+  } catch (error) {
+    controller.abort(error);
+    throw error;
+  } finally {
+    input.signal?.removeEventListener("abort", abortFromOperation);
   }
-  const evidence = Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-evidence/v1", admissionSha256: reference.admissionRef.sha256,
-    taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
-    candidateDigest: admission.candidateDigest, round, groupRuns }), "utf8");
-  const byteLimit = e2ePrivateTransferMaxBytes(round.groupBindings.reduce((total, binding) => total + binding.expectedCases.length, 0), round.groupBindings.length);
-  if (evidence.byteLength > byteLimit) throw new Error("native E2E evidence exceeds its stored group-derived ceiling");
-  const evidenceRef = await input.saveEvidence(evidence, sha(evidence), byteLimit);
-  const processStatus = groupRuns.every((run) => (run.actual as { runProcess?: { status?: number } }).runProcess?.status === 0) ? "SUCCEEDED" : "FAILED";
-  return { evidenceRef, candidateDigest: admission.candidateDigest, roundId: round.roundId, processStatus };
 }

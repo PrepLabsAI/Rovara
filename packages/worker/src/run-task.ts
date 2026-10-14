@@ -74,6 +74,8 @@ export async function runTaskInvocation(
     workflowE2EEvidenceRoot?: string;
     /** Fixed worker installation root that contains the pinned public E2E CLI package. */
     workflowE2ERuntimeRoot?: string;
+    /** Trusted host-only hook for observing the exact owned contained process; no invocation data can set it. */
+    workflowE2EOnOwnedContainerRunning?: (receipt: Readonly<{ containerId: string; requestId: string; sourceDigest: string; observedAt: string; inspectBytes: Uint8Array }>) => Promise<void>;
     authorizeFeedbackApproval?: FeedbackApprovalAuthorizer;
     piAdapter?: PiSessionAdapter;
     cancellationController?: WorkerCancellationController;
@@ -236,6 +238,8 @@ export async function runTaskInvocation(
           saveEvidence: dependencies.workflowE2EEvidenceSink!,
           sourceRoot: dependencies.workflowE2ERuntimeRoot ?? process.cwd(),
           evidenceRoot: dependencies.workflowE2EEvidenceRoot!,
+          signal: stop.signal,
+          ...(dependencies.workflowE2EOnOwnedContainerRunning === undefined ? {} : { onOwnedContainerRunning: dependencies.workflowE2EOnOwnedContainerRunning }),
         });
       }
       await events.append("result", {
@@ -254,6 +258,7 @@ export async function runTaskInvocation(
     } catch (error) {
       await events.append("error", { message: redactText(error instanceof Error ? error.message : "verification retry failed") }).catch(() => undefined);
       await events.flush().catch(() => undefined);
+      if (dependencies.cancellationController?.isCancelled(invocation.operationId)) throw new WorkerOperationCancelledError(invocation.operationId);
       throw error;
     } finally {
       unregister?.();

@@ -91,6 +91,7 @@ export type ContainerReceipt = Readonly<{
   stderrBytes: number;
   aggregateBytes: number;
   overflow: boolean;
+  requestWritten?: boolean;
   cleanup: "confirmed" | "pending" | "failed";
   diagnostic?: string;
 }>;
@@ -100,7 +101,7 @@ export type ReconciliationReceipt = Readonly<{ recordRef: string; plannedName: s
 type ContainerState = { Status?: string; Running?: boolean; OOMKilled?: boolean; Dead?: boolean; ExitCode?: number };
 type DockerInspect = { Id: string; Name?: string; State?: ContainerState; Config?: { Image?: string; User?: string; Env?: string[]; Labels?: Record<string, string>; OpenStdin?: boolean; Tty?: boolean; Entrypoint?: string[]; Cmd?: string[] }; HostConfig?: { NetworkMode?: string; ReadonlyRootfs?: boolean; Privileged?: boolean; PidMode?: string; IpcMode?: string; UTSMode?: string; PortBindings?: Record<string, unknown> | null; Devices?: unknown[]; CapAdd?: string[]; CapDrop?: string[]; SecurityOpt?: string[]; PidsLimit?: number; NanoCpus?: number; Memory?: number; MemorySwap?: number; Tmpfs?: Record<string, string> }; Mounts?: Array<{ Type?: string; Source?: string; Destination?: string; RW?: boolean }> };
 type ProcessResult = { stdout: Buffer; stderr: Buffer; code: number | null; aborted: boolean; timedOut: boolean; overflow: boolean; stdoutBytes: number; stderrBytes: number; aggregateBytes: number; inputWritten: boolean; requestWrite?: CaptureMoment; firstOutput?: CaptureMoment; lastOutput?: CaptureMoment; childClose?: CaptureMoment; error?: string };
-type InspectResult = { kind: "present"; info: DockerInspect } | { kind: "absent" } | { kind: "unknown"; diagnostic: string };
+type InspectResult = { kind: "present"; info: DockerInspect; rawBytes: Uint8Array } | { kind: "absent" } | { kind: "unknown"; diagnostic: string };
 type CleanupState = "confirmed" | "pending" | "failed";
 type DurableRecord = { schemaVersion: 1 | 2; recordRef: string; plannedName: string; nonce: string; sourceDigest: string; endpoint: string; image: string; containerId: string | null; cidfile: string; workspace: string | null; workspaceParent?: string | null; requestId: string; sourceBytes: number; phase: string; cleanup: CleanupState; entry?: string; exportName?: string; diagnostic?: string };
 
@@ -307,19 +308,23 @@ function parseCandidateResponse(stdout: Uint8Array, expectedWireId: string): { o
   return { output: outputCopy, stdoutSha256: sha(stdout), stdoutBytes: stdout.byteLength };
 }
 
-type RunOptions = { signal?: AbortSignal };
-function snapshotOptions(value: unknown): AbortSignal | undefined {
-  if (value === undefined) return undefined;
+type RunOptions = { signal?: AbortSignal; onOwnedContainerRunning?: (receipt: Readonly<{ containerId: string; requestId: string; sourceDigest: string;
+  observedAt: string; inspectBytes: Uint8Array }>) => Promise<void> };
+function snapshotOptions(value: unknown): RunOptions {
+  if (value === undefined) return {};
   if (!value || typeof value !== "object" || Array.isArray(value) || utilTypes.isProxy(value)) fail("execution options must be a plain data object");
   const rawKeys = Reflect.ownKeys(value);
-  if (rawKeys.some((key) => key !== "signal")) fail("execution options shape is invalid");
+  if (rawKeys.some((key) => key !== "signal" && key !== "onOwnedContainerRunning")) fail("execution options shape is invalid");
   const options = descriptorRecord(value, rawKeys as string[], "execution options");
-  if (!Object.hasOwn(options, "signal")) return undefined;
   const signal = options.signal;
-  if (signal === undefined) return undefined;
-  if (!signal || typeof signal !== "object" || utilTypes.isProxy(signal)) fail("execution signal must be a native AbortSignal");
-  try { Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get?.call(signal); } catch { fail("execution signal must be a native AbortSignal"); }
-  return signal as AbortSignal;
+  if (signal !== undefined) {
+    if (!signal || typeof signal !== "object" || utilTypes.isProxy(signal)) fail("execution signal must be a native AbortSignal");
+    try { Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get?.call(signal); } catch { fail("execution signal must be a native AbortSignal"); }
+  }
+  const onOwnedContainerRunning = options.onOwnedContainerRunning;
+  if (onOwnedContainerRunning !== undefined && typeof onOwnedContainerRunning !== "function") fail("owned container observer must be a host callback");
+  return { ...(signal === undefined ? {} : { signal: signal as AbortSignal }),
+    ...(onOwnedContainerRunning === undefined ? {} : { onOwnedContainerRunning: onOwnedContainerRunning as NonNullable<RunOptions["onOwnedContainerRunning"]> }) };
 }
 function signalAborted(signal?: AbortSignal): boolean { return signal ? Boolean(Object.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get?.call(signal)) : false; }
 function addAbortListener(signal: AbortSignal | undefined, listener: () => void): void {
@@ -344,7 +349,7 @@ function privateClientEnv(privateRoot: string): NodeJS.ProcessEnv {
 function boundedResult(stdout: Buffer[], stderr: Buffer[], code: number | null, aborted: boolean, timedOut: boolean, overflow: boolean, stdoutBytes: number, stderrBytes: number, aggregateBytes: number, inputWritten: boolean, error?: string, times: Pick<ProcessResult, "requestWrite" | "firstOutput" | "lastOutput" | "childClose"> = {}): ProcessResult {
   return { stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr), code, aborted, timedOut, overflow, stdoutBytes, stderrBytes, aggregateBytes, inputWritten, ...times, ...(error ? { error: safeDiagnostic(error) } : {}) };
 }
-function runProcess(args: string[], options: { env: NodeJS.ProcessEnv; cwd: string; input?: Uint8Array; deadline: number; signal?: AbortSignal; maxAggregateBytes?: number }): Promise<ProcessResult> {
+function runProcess(args: string[], options: { env: NodeJS.ProcessEnv; cwd: string; input?: Uint8Array; deadline: number; signal?: AbortSignal; maxAggregateBytes?: number; beforeInput?: () => Promise<void> }): Promise<ProcessResult> {
   const before = windowState(options.signal, options.deadline);
   if (before) return Promise.resolve(boundedResult([], [], null, before === "aborted", before === "deadline", false, 0, 0, 0, false));
   return new Promise((resolvePromise) => {
@@ -403,11 +408,19 @@ function runProcess(args: string[], options: { env: NodeJS.ProcessEnv; cwd: stri
       if (aggregateBytes > limit) { overflow = true; terminate(); }
     });
     child.once("spawn", () => {
-      const current = windowState(options.signal, options.deadline);
-      if (current) { if (current === "aborted") aborted = true; else timedOut = true; terminate(); return; }
-      inputWritten = true;
-      requestWrite = captureMoment();
-      child?.stdin?.end(options.input);
+      void (async () => {
+        const current = windowState(options.signal, options.deadline);
+        if (current) { if (current === "aborted") aborted = true; else timedOut = true; terminate(); return; }
+        await options.beforeInput?.();
+        const afterBarrier = windowState(options.signal, options.deadline);
+        if (afterBarrier) { if (afterBarrier === "aborted") aborted = true; else timedOut = true; terminate(); return; }
+        inputWritten = true;
+        requestWrite = captureMoment();
+        child?.stdin?.end(options.input);
+      })().catch((error: unknown) => {
+        spawnError = error instanceof Error ? safeDiagnostic(error.message) : "pre-request host barrier failed";
+        terminate();
+      });
     });
     child.stdin!.on("error", () => { /* a child that closes stdin early cannot produce an admitted response */ });
     child.once("error", (error) => { spawnError = error.message; });
@@ -483,7 +496,9 @@ async function inspectDocker(target: string, env: NodeJS.ProcessEnv, cwd: string
   if (result.code === 0) {
     try {
       const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(result.stdout));
-      if (Array.isArray(value) && value.length === 1 && plain(value[0]) && typeof value[0].Id === "string" && /^[a-f0-9]{64}$/.test(value[0].Id)) return { kind: "present", info: value[0] as DockerInspect };
+      if (Array.isArray(value) && value.length === 1 && plain(value[0]) && typeof value[0].Id === "string" && /^[a-f0-9]{64}$/.test(value[0].Id)) {
+        return { kind: "present", info: value[0] as DockerInspect, rawBytes: new Uint8Array(result.stdout) };
+      }
       return { kind: "unknown", diagnostic: "Docker inspect returned a malformed response" };
     } catch { return { kind: "unknown", diagnostic: "Docker inspect returned invalid JSON" }; }
   }
@@ -597,14 +612,15 @@ async function cleanupOwned(record: DurableRecord, env: NodeJS.ProcessEnv, cwd: 
   if (!isOwnedContainer(inspect.info.Config?.Labels, { nonce: record.nonce, sourceDigest: record.sourceDigest }) || inspect.info.Id !== record.containerId) return "failed";
   return "pending";
 }
-function receiptFor(record: DurableRecord, result: { exitCode: number | null; timedOut: boolean; aborted: boolean; stdoutBytes: number; stderrBytes: number; aggregateBytes: number; overflow: boolean; cleanup: CleanupState; diagnostic?: string }): ContainerReceipt {
+function receiptFor(record: DurableRecord, result: { exitCode: number | null; timedOut: boolean; aborted: boolean; stdoutBytes: number; stderrBytes: number; aggregateBytes: number; overflow: boolean; cleanup: CleanupState; requestWritten?: boolean; diagnostic?: string }): ContainerReceipt {
   return Object.freeze({
     scope: CANDIDATE_RESPONSE_SCOPE, adapterVersion: CANDIDATE_ADAPTER_VERSION, plannedName: record.plannedName, containerId: record.containerId,
     recordRef: record.recordRef, image: record.image, sourceDigest: record.sourceDigest, sourceBytes: record.sourceBytes,
     ...(record.entry ? { entry: record.entry } : {}), ...(record.exportName ? { exportName: record.exportName } : {}),
     owner: ownerLabels(record.nonce, record.sourceDigest), endpoint: record.endpoint, exitCode: result.exitCode, timedOut: result.timedOut,
     aborted: result.aborted, stdoutBytes: result.stdoutBytes, stderrBytes: result.stderrBytes, aggregateBytes: result.aggregateBytes,
-    overflow: result.overflow, cleanup: result.cleanup, ...(result.diagnostic ? { diagnostic: safeDiagnostic(result.diagnostic) } : {}),
+    overflow: result.overflow, cleanup: result.cleanup, ...(result.requestWritten === undefined ? {} : { requestWritten: result.requestWritten }),
+    ...(result.diagnostic ? { diagnostic: safeDiagnostic(result.diagnostic) } : {}),
   });
 }
 async function finishRecord(record: DurableRecord, result: Omit<Parameters<typeof receiptFor>[1], "cleanup">, cleanup: CleanupState): Promise<void> {
@@ -664,7 +680,8 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
   // All caller-controlled data is copied synchronously before the first await or filesystem effect.
   const packet = validateCandidatePacket(packetInput);
   const request = validateRequest(requestInput);
-  const signal = snapshotOptions(optionsInput);
+  const options = snapshotOptions(optionsInput);
+  const signal = options.signal;
   const startedAt = performance.now();
   const deadline = startedAt + MAX_DURATION_MS;
   const wireId = randomBytes(24).toString("hex");
@@ -684,6 +701,7 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
   let timedOut = false;
   let aborted = false;
   let overflow = false;
+  let requestWritten: boolean | undefined;
   let stdoutBytes = 0;
   let stderrBytes = 0;
   let aggregateBytes = 0;
@@ -792,7 +810,24 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
     if (noteWindow()) throw new Error(aborted ? "execution aborted after candidate materialization check" : "execution deadline elapsed after candidate materialization check");
     record.phase = "starting"; await writeRecord(record);
     if (noteWindow()) throw new Error(aborted ? "execution aborted before candidate process start" : "execution deadline elapsed before candidate process start");
-    const started = await runProcess(["start", "--attach", "--interactive", record.containerId], { env, cwd: workCwd, input: frame.bytes, deadline, ...(signal ? { signal } : {}), maxAggregateBytes: MAX_PROTOCOL_BYTES });
+    const candidateContainerId = record.containerId;
+    if (!candidateContainerId) fail("candidate container ID disappeared before start");
+    const startedProcess = runProcess(["start", "--attach", "--interactive", candidateContainerId], { env, cwd: workCwd, input: frame.bytes, deadline,
+      ...(signal ? { signal } : {}), maxAggregateBytes: MAX_PROTOCOL_BYTES,
+      ...(options.onOwnedContainerRunning === undefined ? {} : { beforeInput: async () => {
+        while (!noteWindow()) {
+          const live = await inspectDocker(candidateContainerId, env, workCwd, deadline, signal);
+          if (live.kind === "present" && live.info.Id === candidateContainerId
+            && isOwnedContainer(live.info.Config?.Labels, { nonce, sourceDigest: packet.sourceDigest })
+            && live.info.State?.Status === "running" && live.info.State.Running === true) {
+            await options.onOwnedContainerRunning?.(Object.freeze({ containerId: candidateContainerId, requestId: request.requestId, sourceDigest: packet.sourceDigest,
+              observedAt: new Date().toISOString(), inspectBytes: new Uint8Array(live.rawBytes) }));
+            return;
+          }
+          await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+        }
+      } }) });
+    const started = await startedProcess;
     exitCode = started.code;
     aborted ||= started.aborted;
     timedOut ||= started.timedOut;
@@ -800,6 +835,7 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
     stdoutBytes = started.stdoutBytes;
     stderrBytes = started.stderrBytes;
     aggregateBytes = started.aggregateBytes;
+    requestWritten = started.inputWritten;
     capturedStdout = copyNativeBytes(started.stdout);
     capturedStderr = copyNativeBytes(started.stderr);
     captureTimes = { ...(started.requestWrite ? { requestWriteAttempt: started.requestWrite } : {}), ...(started.firstOutput ? { firstOutput: started.firstOutput } : {}), ...(started.lastOutput ? { lastOutput: started.lastOutput } : {}) };
@@ -823,7 +859,8 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
       record.cleanup = "pending";
       await writeRecord(record).catch((error: unknown) => { diagnostic ??= error instanceof Error ? safeDiagnostic(error.message) : "could not persist cleanup enrollment"; });
       cleanup = await cleanupOwned(record, env, workCwd).catch((error: unknown) => { diagnostic ??= error instanceof Error ? safeDiagnostic(error.message) : "owned cleanup could not be confirmed"; return "pending" as const; });
-      await finishRecord(record, { exitCode, timedOut: timedOut || performance.now() >= deadline, aborted: aborted || signalAborted(signal), stdoutBytes, stderrBytes, aggregateBytes, overflow, ...(diagnostic ? { diagnostic } : {}) }, cleanup).catch((error: unknown) => { cleanup = "pending"; diagnostic ??= error instanceof Error ? safeDiagnostic(error.message) : "could not persist final cleanup receipt"; });
+      await finishRecord(record, { exitCode, timedOut: timedOut || performance.now() >= deadline, aborted: aborted || signalAborted(signal), stdoutBytes, stderrBytes, aggregateBytes, overflow,
+        ...(requestWritten === undefined ? {} : { requestWritten }), ...(diagnostic ? { diagnostic } : {}) }, cleanup).catch((error: unknown) => { cleanup = "pending"; diagnostic ??= error instanceof Error ? safeDiagnostic(error.message) : "could not persist final cleanup receipt"; });
       if (cleanup === "confirmed") captureTimes.cleanupConfirmed = captureMoment();
     } else if (workspace) {
       record.workspace = workspace;

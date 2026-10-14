@@ -8620,7 +8620,10 @@ async function startWorkflowE2EChecksDispatch(
     policy, runtimeCatalogId: catalogId, runtimeBinding: project.runtimeBinding, featureVerifier: featureRecord, now: Date.now(),
   });
   const creatorRecord = await getItem<DeveloperRecord>(dependencies, { pk: `DEVELOPER#${task.developerId}`, sk: "META" });
-  if (creatorRecord === undefined || creatorRecord.revoked || dependencies.developer === undefined) {
+  if (creatorRecord?.revoked === true) {
+    throw agentXError("TASK_ACCESS_DENIED", "the original task creator's account has been revoked");
+  }
+  if (creatorRecord === undefined || dependencies.developer === undefined) {
     throw agentXError("RUNTIME_UNAVAILABLE", "the original creator identity is unavailable for this E2E round");
   }
   let creatorAccess: Awaited<ReturnType<typeof checkProjectAccess>>;
@@ -8628,7 +8631,12 @@ async function startWorkflowE2EChecksDispatch(
     creatorAccess = await checkProjectAccess({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
       developer: dependencies.developer, now: Date.now },
     { developerId: task.developerId, ...(creatorRecord.slackUserId === undefined ? {} : { slackUserId: creatorRecord.slackUserId }) }, task.project);
-  } catch { throw agentXError("RUNTIME_UNAVAILABLE", "the original creator's current project access is unavailable"); }
+  } catch (error) {
+    if (error instanceof AgentXError && error.code === "PROJECT_ACCESS_DENIED") {
+      throw agentXError("TASK_ACCESS_DENIED", "the original creator no longer has current access to this task's project");
+    }
+    throw agentXError("RUNTIME_UNAVAILABLE", "the original creator's current project access is unavailable");
+  }
   const creatorMembership = await getItem<Record<string, unknown>>(dependencies, { pk: `MEMBER#${task.developerId}`, sk: `PROJECT#${task.project}` });
   const creatorAuthority = await workflowE2ECreatorAuthorityProof(dependencies, task, creatorMembership, creatorAccess);
   if (creatorAuthority === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the creator has no versioned direct or locally bound channel access proof for this E2E round");
@@ -8913,6 +8921,8 @@ async function completedWorkflowItems(
   plannerReplies?: PlannerReplies[],
   /** A cancel may terminalize only this exact current graph IMPLEMENT operation. */
   graphCancelTarget?: OperationRecord,
+  /** A cancel may terminalize only this exact current native E2E CHECKS round. */
+  e2eCancelTarget?: OperationRecord,
 ): Promise<TransactItems> {
   if (pointer === undefined) return [];
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
@@ -9407,12 +9417,15 @@ async function completedWorkflowItems(
   const graphApproval = graphCancelTarget?.workflowDependencies?.approval;
   const graphCancelCondition = graphCancelTarget?.workflowDependencies === undefined ? "" :
     " AND workflow.workflowDependenciesOperationId = :graphOperationId AND workflow.workflowDependenciesApproval.graphDigest = :graphDigest AND workflow.workflowDependenciesApproval.runId = :graphRunId AND workflow.workflowDependenciesApproval.artifactDigest = :graphArtifactDigest AND workflow.workflowDependenciesApproval.workflowRevision = :graphApprovalRevision AND workflow.workflowDependenciesApproval.actorId = :graphActorId";
+  const e2eCancelAdmission = e2eCancelTarget?.workflowE2EAdmission;
+  const e2eCancelCondition = e2eCancelAdmission === undefined ? ""
+    : " AND workflow.e2e.required = :e2eRequired AND workflow.e2e.currentRoundId = :e2eRoundId AND workflow.candidate.digest = :e2eCandidateDigest";
   return [...e2eAuthorityChecks, { Update: {
     TableName: dependencies.tableName,
     Key: taskKey(task.taskId),
     // A stored plan quoted the replies fed so far; the next plan's window starts after them.
     UpdateExpression: `SET workflow = :workflow, updatedAt = :now${planUnreadable === undefined || planUnreadable === null ? "" : ", planUnreadable = :unreadable"}${planUnreadable === null && task.threadNotesFedThrough !== undefined ? ", threadNotesFedFrom = :fedFrom" : ""}${forget ? " REMOVE planUnreadable" : ""}`,
-    ConditionExpression: `workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running${graphCancelCondition}`,
+    ConditionExpression: `workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running${graphCancelCondition}${e2eCancelCondition}`,
     ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
     ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": task.workflow.stage, ":running": "RUNNING",
       ...(planUnreadable === undefined || planUnreadable === null ? {} : { ":unreadable": planUnreadable }),
@@ -9424,7 +9437,9 @@ async function completedWorkflowItems(
         ":graphArtifactDigest": graphApproval.artifactDigest,
         ":graphApprovalRevision": graphApproval.workflowRevision,
         ":graphActorId": graphApproval.actorId,
-      }) },
+      }),
+      ...(e2eCancelAdmission === undefined ? {} : { ":e2eRequired": true, ":e2eRoundId": e2eCancelAdmission.roundId,
+        ":e2eCandidateDigest": e2eCancelAdmission.candidateDigest }) },
   } }, ...dispatch,
   ...(evidenceJob === undefined ? [] : [{ Put: { TableName: dependencies.tableName, Item: planEvidenceJobItem({ taskId: task.taskId, ...evidenceJob, now: Date.parse(now) }), ConditionExpression: "attribute_not_exists(pk)" } }]),
   ...(recordedReplies === undefined ? [] : [{ Put: recordedReplies }])];
@@ -9738,6 +9753,25 @@ async function cancelledGraphWorkflowItems(
   return completedWorkflowItems(dependencies, target, pointer, "CANCELLED", now, undefined, undefined, undefined, undefined, target);
 }
 
+/** Apply a native CHECKS cancellation only to the task's currently admitted round. */
+async function cancelledE2EWorkflowItems(
+  dependencies: AwsBrokerDependencies,
+  pointer: DeveloperTaskPointerRecord | undefined,
+  target: OperationRecord | undefined,
+  now: string,
+): Promise<TransactItems> {
+  const admission = target?.workflowE2EAdmission;
+  if (target === undefined || pointer === undefined || target.kind !== "task" || target.workflowMode !== "CHECKS"
+    || admission === undefined || admission.taskId !== pointer.taskId) return [];
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || task.workspaceId !== target.workspaceId || workflow === undefined
+    || workflow.stage !== "VERIFY" || workflow.state !== "RUNNING" || workflow.e2e?.required !== true
+    || workflow.candidate?.digest !== admission.candidateDigest || workflow.e2e.currentRoundId !== admission.roundId
+    || admission.workflowRevision !== workflow.revision) return [];
+  return completedWorkflowItems(dependencies, target, pointer, "CANCELLED", now, undefined, undefined, undefined, undefined, undefined, target);
+}
+
 async function recordTerminalResult(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
@@ -9791,8 +9825,13 @@ async function recordTerminalResult(
     : await currentGraphCancelTarget(dependencies, operation, cancelTargetOperation);
   const graphCancelBoundTarget = cancelTargetOperation?.kind === "task" && cancelTargetOperation.workflowMode === "IMPLEMENT"
     && cancelTargetOperation.workflowDependencies !== undefined ? cancelTargetOperation : undefined;
+  const e2eCancelBoundTarget = cancelTargetOperation?.kind === "task" && cancelTargetOperation.workflowMode === "CHECKS"
+    && cancelTargetOperation.workflowE2EAdmission !== undefined ? cancelTargetOperation : undefined;
   if (graphCancelBoundTarget !== undefined && graphCancelBoundTarget.fence !== operation.fence) {
     throw agentXError("STALE_FENCE", "cancel and graph target no longer share the current workspace fence");
+  }
+  if (e2eCancelBoundTarget !== undefined && (e2eCancelBoundTarget.fence !== operation.fence || e2eCancelBoundTarget.status !== "CANCEL_REQUESTED")) {
+    throw agentXError("STALE_FENCE", "cancel and E2E CHECKS target no longer share the current workspace fence");
   }
   const workspaceStatus =
     operation.kind === "prepare"
@@ -9887,10 +9926,13 @@ async function recordTerminalResult(
       inlineEvidence.length = 0;
       plannerReplies.length = 0;
       const workflow = await completedWorkflowItems(dependencies, operation, pointer, terminalStatus, now, result, error, inlineEvidence, plannerReplies);
+      const cancelledE2E = e2eCancelBoundTarget === undefined ? []
+        : await cancelledE2EWorkflowItems(dependencies, pointer, e2eCancelBoundTarget, now);
       const cancelledGraph = graphCancellation === undefined ? []
         : await cancelledGraphWorkflowItems(dependencies, pointer, graphCancellation.target, now);
-      recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed, ...workflow, ...cancelledGraph], workspaceUpdate, send);
-      evidenceJobs = [...workflow, ...cancelledGraph].flatMap((item) => {
+      recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now,
+        [...transactItems, ...completed, ...workflow, ...cancelledGraph, ...cancelledE2E], workspaceUpdate, send);
+      evidenceJobs = [...workflow, ...cancelledGraph, ...cancelledE2E].flatMap((item) => {
         const row = item.Put?.Item as Partial<PlanEvidenceJob> | undefined;
         return row?.pk === PLAN_EVIDENCE_PK && row.taskId !== undefined && row.artifactId !== undefined ? [planEvidenceEvent(row.taskId, row.artifactId)] : [];
       });

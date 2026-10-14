@@ -608,11 +608,84 @@ async function resumeAccessPausedWorkflowDispatch(
       throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another retry");
     }
     await authorizeTaskAction(deps, caller, access.task.taskId, "retry");
+    if (audit.kind === "CHECKS" && access.task.workflow?.e2e?.required === true) {
+      return { task: await taskView(deps, access.task, { events: 0, details: false }) };
+    }
   } else {
     const rowKey = { pk: WORKFLOW_DISPATCH_PK, sk: `${access.task.taskId}#${request.expectedRevision}` };
     const row = await get<WorkflowDispatchRecord & { taskAccessPausedAt?: string }>(deps, rowKey);
     if (row?.taskAccessPausedAt === undefined || row.candidateDigest !== request.candidateDigest) return undefined;
     const at = iso(deps);
+    const current = access.task.workflow;
+    if (row.kind === "CHECKS" && current?.e2e?.required === true) {
+      if (current.stage !== "VERIFY" || current.state !== "WAITING" || current.revision !== row.workflowRevision
+        || current.revision !== request.expectedRevision || current.candidate?.digest !== row.candidateDigest || current.checkPolicy === undefined) {
+        return undefined;
+      }
+      const { blockReason: _blockReason, verification: _oldVerification, reviews: _oldReviews, ...workflowBase } = current;
+      const { qualifiedRound: _qualifiedRound, failedRound: _failedRound, currentRoundId: _currentRoundId,
+        currentGroupRunIds: _currentGroupRunIds, displayRef: _displayRef, ...unqualifiedE2E } = current.e2e;
+      void _blockReason;
+      void _oldVerification;
+      void _oldReviews;
+      void _qualifiedRound;
+      void _failedRound;
+      void _currentRoundId;
+      void _currentGroupRunIds;
+      void _displayRef;
+      const selectedOptionalCheckIds = current.checkPolicy.selectedOptionalIds;
+      const selectedProposedCheckIds = keptProposedIds(current.checkPolicy);
+      const next = WorkflowSnapshotSchema.parse({
+        ...workflowBase,
+        revision: current.revision + 1,
+        stage: "VERIFY",
+        state: "WAITING",
+        e2e: { ...unqualifiedE2E, currentGroupRunIds: [] },
+        verificationRetries: [...(current.verificationRetries ?? []), {
+          requestId: request.requestId, actorId: access.actorId, selectedOptionalCheckIds, selectedProposedCheckIds, at,
+        }],
+        updatedAt: at,
+      });
+      const freshAudit: WorkflowAccessRetryAudit = { ...auditKey, entityType: "WORKFLOW_ACCESS_RETRY", actorId: access.actorId,
+        payloadHash, workflowRevision: next.revision, kind: "CHECKS", candidateDigest: row.candidateDigest, at };
+      try {
+        await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+          { ConditionCheck: {
+            TableName: deps.tableName, Key: rowKey,
+            ConditionExpression: "workflowRevision = :revision AND #kind = :kind AND candidateDigest = :candidate AND attribute_exists(taskAccessPausedAt)",
+            ExpressionAttributeNames: { "#kind": "kind" },
+            ExpressionAttributeValues: { ":revision": row.workflowRevision, ":kind": "CHECKS", ":candidate": row.candidateDigest },
+          } },
+          { Update: {
+            TableName: deps.tableName, Key: taskKey(access.task.taskId),
+            UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+            ConditionExpression: "workflow.revision = :revision AND workflow.candidate.digest = :candidate AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.e2e.required = :required AND attribute_not_exists(closedAt)",
+            ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+            ExpressionAttributeValues: { ":workflow": next, ":now": at, ":revision": current.revision, ":candidate": row.candidateDigest,
+              ":stage": "VERIFY", ":state": "WAITING", ":required": true },
+          } },
+          putNew(turnTable(deps), aiToolTurn({
+            party: partyOfTaskActor(access.task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
+            receivedAt: at, finishedAt: iso(deps), request: "Resume access-paused required verification.",
+            response: "The owner authorized a fresh verification admission after project access was restored.",
+          })),
+          workflowDispatchItem(deps.tableName, access.task.taskId, next.revision, "CHECKS", row.candidateDigest, at),
+          accessFence(deps, access),
+          { Put: { TableName: deps.tableName, Item: freshAudit, ConditionExpression: "attribute_not_exists(pk)" } },
+        ] }));
+      } catch (error) {
+        if (!isConditional(error)) throw error;
+        await authorizeTaskAction(deps, caller, access.task.taskId, "retry");
+        const historical = await get<WorkflowAccessRetryAudit>(deps, auditKey);
+        if (historical === undefined || historical.actorId !== access.actorId || historical.payloadHash !== payloadHash) {
+          throw agentXError("IDEMPOTENCY_CONFLICT", "this retry is out of date; refresh the task and try again");
+        }
+      }
+      const fresh = (await authorizeTaskAction(deps, caller, access.task.taskId, "retry")).task;
+      const view = await taskView(deps, fresh, { events: 0, details: false });
+      await syncIndex(deps, fresh, view.status, view.updatedAt);
+      return { task: view };
+    }
     audit = { ...auditKey, entityType: "WORKFLOW_ACCESS_RETRY", actorId: access.actorId, payloadHash,
       workflowRevision: row.workflowRevision, kind: row.kind, candidateDigest: row.candidateDigest, at };
     try {
@@ -2053,6 +2126,62 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       updatedAt: receivedAt,
     };
     const selectedReadiness = selected.map((check) => check.command);
+    // Required managed E2E retries must pass through the same server-owned admission
+    // dispatcher as the first VERIFY round. An ordinary CHECKS operation here would
+    // rerun project commands while leaving the canceled/failed native round stale.
+    if (workflow.e2e?.required === true) {
+      if (workflow.candidate === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the required E2E retry has no current candidate");
+      const { blockReason: _previousBlockReason, verification: _previousVerification, reviews: _previousReviews, ...retryBase } = workflow;
+      const { qualifiedRound: _qualifiedRound, failedRound: _failedRound, currentRoundId: _currentRoundId,
+        currentGroupRunIds: _currentGroupRunIds, displayRef: _displayRef, ...unqualifiedE2E } = workflow.e2e;
+      void _previousBlockReason;
+      void _previousVerification;
+      void _previousReviews;
+      void _qualifiedRound;
+      void _failedRound;
+      void _currentRoundId;
+      void _currentGroupRunIds;
+      void _displayRef;
+      const next = WorkflowSnapshotSchema.parse({
+        ...retryBase,
+        revision: workflow.revision + 1,
+        stage: "VERIFY",
+        state: "WAITING",
+        checkPolicy: { ...policy, selectedOptionalIds, selectedProposedIds },
+        e2e: { ...unqualifiedE2E, currentGroupRunIds: [] },
+        verificationRetries: [...(workflow.verificationRetries ?? []), {
+          requestId: request.requestId, actorId: access.actorId, selectedOptionalCheckIds: selectedOptionalIds,
+          selectedProposedCheckIds: selectedProposedIds, at: receivedAt,
+        }],
+        updatedAt: receivedAt,
+      });
+      try {
+        await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+          { Update: {
+            TableName: deps.tableName, Key: taskKey(taskId),
+            UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+            ConditionExpression: "workflow.revision = :revision AND workflow.#state = :state AND workflow.#stage = :stage AND workflow.e2e.required = :required AND attribute_not_exists(closedAt)",
+            ExpressionAttributeNames: { "#state": "state", "#stage": "stage" },
+            ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision,
+              ":state": workflow.state, ":stage": workflow.stage, ":required": true },
+          } },
+          putNew(turnTable(deps), aiToolTurn({
+            party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
+            receivedAt, finishedAt: iso(deps), request: request.instructions,
+            response: "The owner authorized a fresh verification round. AgentX is rechecking the current approved source and runtime before dispatch.",
+          })),
+          workflowDispatchItem(deps.tableName, taskId, next.revision, "CHECKS", workflow.candidate.digest, receivedAt),
+          accessFence(deps, access),
+        ] }));
+      } catch (error) {
+        if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "retry");
+        return busyOrClosing(deps, task, error);
+      }
+      const fresh = (await authorizeTaskAction(deps, caller, taskId, "retry")).task;
+      const view = await taskView(deps, fresh, { events: 0, details: false });
+      await syncIndex(deps, fresh, view.status, view.updatedAt);
+      return { task: view };
+    }
     try {
       await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, {
         requestId: request.requestId, conversationId: task.conversationId,

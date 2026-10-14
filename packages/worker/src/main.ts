@@ -15,6 +15,7 @@ import { chatGptTokenSource } from "./chatgpt-token.js";
 import { createDefaultProjectSetupExecutor } from "./project-setup-executor.js";
 import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
 import { postWorkerTerminalResult } from "./terminal-callback.js";
+import { executeWorkerCancelInvocation } from "./cancel-invocation.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
@@ -92,15 +93,7 @@ const state = createWorkerServerState(
         });
       }
       if (invocation.kind === "cancel") {
-        const result = await cancellationController.cancel(invocation.payload.targetOperationId);
-        await journal.transition(
-          invocation.payload.targetOperationId,
-          result.status,
-          result.status === "CANCELLED"
-            ? "operation cancelled by user"
-            : "cancellation could not confirm all processes stopped",
-        );
-        return result;
+        return executeWorkerCancelInvocation(invocation, cancellationController, journal);
       }
       if (invocation.kind === "close") {
         return inspectWorkspaceForClose(rootPath);

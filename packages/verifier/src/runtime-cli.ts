@@ -73,6 +73,8 @@ type E2EActualCliInput = Readonly<{
   evidenceDirectory: string;
   deadlineAt: number;
   signal: AbortSignal;
+  /** Host-only observer for a positively owned live candidate process; never sourced from app or invocation data. */
+  onOwnedContainerRunning?: (receipt: Readonly<{ containerId: string; requestId: string; sourceDigest: string; observedAt: string; inspectBytes: Uint8Array }>) => Promise<void>;
 }>;
 export async function runE2EActualCli(input: E2EActualCliInput): Promise<E2EActualCliRun> {
   return runE2EActualCliWithSessionFactory(input, createE2EWorkerSession);
@@ -166,9 +168,20 @@ export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput
     if (!packet || packet.status !== "ready" || !packet.packet) throw new Error(packet?.reason ?? "candidate adapter is unavailable");
     const packetPrimary = adapterPrimaryPaths.get(caseId);
     if (!packetPrimary) throw new Error("candidate adapter evidence primary was not pre-created");
-    const execution = await runContainedCandidate(packet.packet, { requestId: hostRequestId, input: expected && scenario.steps[0]?.kind === "invoke-contract" ? scenario.steps[0].input : null }, { signal: input.signal });
+    const execution = await runContainedCandidate(packet.packet, { requestId: hostRequestId, input: expected && scenario.steps[0]?.kind === "invoke-contract" ? scenario.steps[0].input : null }, {
+      signal: input.signal, ...(input.onOwnedContainerRunning === undefined ? {} : { onOwnedContainerRunning: input.onOwnedContainerRunning }),
+    });
     const observation = execution.observation;
-    if (!observation || execution.receipt.cleanup !== "confirmed") throw new Error("contained candidate observation or owned cleanup confirmation is unavailable");
+    if (!observation || execution.receipt.cleanup !== "confirmed") {
+      if (execution.receipt.aborted && execution.receipt.requestWritten === false && execution.receipt.cleanup === "confirmed") {
+        await writeOwnedFile(join(evidenceDirectory, `pre-request-abort-${sha(Buffer.from(hostRequestId)).slice(0, 20)}.json`),
+          `${JSON.stringify({ evidenceType: "contained-candidate-pre-request-abort/v1", requestId: hostRequestId,
+            phase: "owned-container-running-before-candidate-stdin", requestWritten: execution.receipt.requestWritten,
+            aborted: execution.receipt.aborted, cleanup: execution.receipt.cleanup, containerId: execution.receipt.containerId,
+            sourceDigest: execution.receipt.sourceDigest, recordRef: execution.receipt.recordRef }, null, 2)}\n`);
+      }
+      throw new Error("contained candidate observation or owned cleanup confirmation is unavailable");
+    }
     const rawFrame = observation.capture.stdoutFrame;
     const assertionRows = scenario.assertions.map((assertion, index) => {
       if (!("equals" in assertion)) throw new Error("external every-index oracle does not support this assertion variant");

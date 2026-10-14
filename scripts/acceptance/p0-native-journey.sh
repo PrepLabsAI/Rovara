@@ -23,7 +23,7 @@ tmp_real=$(cd "$tmp" && pwd -P)
 
 journey=${P0_NATIVE_JOURNEY_TEST:-tests/e2e/p0-native-journey.test.ts}
 case "$journey" in
-  tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts|tests/unit/e2e-feature-plan-intent.test.ts|tests/unit/e2e-execution-plan.test.ts|tests/unit/e2e-review-fix3.test.ts|tests/contract/e2e-feature-verifier-catalog.test.ts|tests/contract/task-workflow-invocation.test.ts|tests/contract/task-workflow-contracts.test.ts|tests/contract/admin-read-projects.test.ts|tests/contract/admin-actions.test.ts|tests/contract/workflow-e2e-current-authority.test.ts|tests/contract/workflow-e2e-notifier-projection.test.ts|tests/contract/developer-task-notifier.test.ts) ;;
+  tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts|tests/unit/e2e-feature-plan-intent.test.ts|tests/unit/e2e-execution-plan.test.ts|tests/unit/e2e-review-fix3.test.ts|tests/contract/e2e-feature-verifier-catalog.test.ts|tests/contract/task-workflow-invocation.test.ts|tests/contract/task-workflow-contracts.test.ts|tests/contract/admin-read-projects.test.ts|tests/contract/admin-actions.test.ts|tests/contract/workflow-e2e-current-authority.test.ts|tests/contract/workflow-e2e-notifier-projection.test.ts|tests/contract/developer-task-notifier.test.ts|tests/contract/workflow-e2e-cancellation.test.ts) ;;
   *) unavailable 'journey test path is outside the fixed P0 acceptance allowlist' ;;
 esac
 case "$journey" in
@@ -38,4 +38,40 @@ case "$journey" in
     case "$image_info" in *"$image"*' linux arm64'*) ;; *) unavailable 'local pinned Docker image identity or platform does not match' ;; esac
     ;;
 esac
+
+if ! "$node22" node_modules/typescript/bin/tsc -b --force --pretty false; then
+  printf 'FAIL: own-source TypeScript emit did not complete\n' >&2
+  exit 1
+fi
+if [ "$journey" = 'tests/e2e/p0-native-journey.test.ts' ] || [ "$journey" = 'tests/e2e/p0-native-journey-5b.test.ts' ]; then
+  P0_NATIVE_LAUNCHER_RECEIPT="$evidence/p0-native-launcher-preflight.json" \
+    "$node22" --input-type=module -e '
+      import { createHash } from "node:crypto";
+      import { execFileSync } from "node:child_process";
+      import { readFileSync, realpathSync, writeFileSync } from "node:fs";
+      import { resolve } from "node:path";
+      const expected = realpathSync(resolve("packages/verifier/dist/index.js"));
+      const resolved = realpathSync(new URL(import.meta.resolve("@agentx/verifier")));
+      const runtimePath = realpathSync(resolve("packages/verifier/dist/runtime-cli.js"));
+      const entryBytes = readFileSync(expected);
+      const runtimeBytes = readFileSync(runtimePath);
+      const runtimeExport = await import("@agentx/verifier");
+      if (resolved !== expected || typeof runtimeExport.runE2EActualCli !== "function" || !entryBytes.toString("utf8").includes("./runtime-cli.js")) {
+        throw new Error("resolved verifier entry/runtime does not come from the current checkout emitted dist");
+      }
+      const sha = (bytes) => createHash("sha256").update(bytes).digest("hex");
+      const receipt = {
+        schemaVersion: "p0-native-launcher-preflight/v1",
+        sourceRoot: realpathSync(process.cwd()),
+        sourceHead: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+        node: { execPath: process.execPath, version: process.version, platform: process.platform, arch: process.arch },
+        buildArgv: ["node_modules/typescript/bin/tsc", "-b", "--force", "--pretty", "false"],
+        verifier: { resolvedEntry: resolved, entrySha256: sha(entryBytes), runtimeCli: runtimePath, runtimeCliSha256: sha(runtimeBytes) },
+        evidenceRoot: realpathSync(process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR),
+        tmpDirectory: realpathSync(process.env.TMPDIR),
+        dockerHost: process.env.DOCKER_HOST ?? null,
+      };
+      writeFileSync(process.env.P0_NATIVE_LAUNCHER_RECEIPT, `${JSON.stringify(receipt, null, 2)}\n`, { flag: "wx", mode: 0o600 });
+    '
+fi
 exec "$node22" node_modules/vitest/vitest.mjs run "$journey" --reporter=dot

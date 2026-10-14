@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash, generateKeyPairSync, randomUUID, sign as cryptoSign } from "node:crypto";
-import { arch, hostname, release as osRelease } from "node:os";
+import { homedir, release as osRelease } from "node:os";
 import { lstat, mkdir, readFile, readdir, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -14,7 +14,8 @@ import { scriptedPrompter } from "../support/init-fakes.js";
 import {
   canonicalJson, canonicalPlanJson, createCandidateManifest, WorkerInvocationSchema, parsePlanDocument, readCanonicalPlan,
   planDocumentMarkdown, portableOperationId, WorkflowSnapshotSchema, workflowSendBackOffered, sendBackProblems,
-  ProjectDefinitionSchema, type DeveloperTaskView, type E2EPolicy, type E2ESourceSnapshot,
+  ProjectDefinitionSchema, workerInvokeToken, workerInvokeTokenPayload, type WorkerInvokeTokenClaims,
+  type DeveloperTaskView, type E2EPolicy, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { developerTokenKey, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";
@@ -38,7 +39,11 @@ import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-a
 import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
 import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { ProjectSetupSessionManager } from "../../packages/broker/src/aws/sessions.js";
+import { issueProjectSetupCapability } from "../../packages/broker/src/aws/project-setup-capability.js";
+
 import { OperationJournal } from "../../packages/worker/src/journal.js";
+import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
+import { executeWorkerCancelInvocation } from "../../packages/worker/src/cancel-invocation.js";
 import { createWorkerServerState, handleWorkerRequest } from "../../packages/worker/src/server.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
 import { createDefaultPiSessionAdapter } from "../../packages/worker/src/pi-session.js";
@@ -248,19 +253,21 @@ describe("P0 normal project onboarding journey", () => {
     const ungrantedSessionId = randomUUID();
     const taskViewerSlackId = "U0P0TASKVIEW";
     const taskViewerDeveloperId = developerIdForSlackUser(taskViewerSlackId);
+    let ownerChannelAccess = true;
     const taskViewerSessionId = randomUUID();
     const localBaseTreeReads: Array<{ repositoryUrl: string; commitSha: string; treeSha: string }> = [];
     const broker = createBroker({ s3, developer: {
       issuer, env: "staging", methods: { slack: true, oidc: true }, slackTeamId: "T0P0NATIVE", signInTableName: "state",
       workflowDependenciesEnabled: true,
-      channelMembers: async () => ({ ok: true, memberOf: ["C0P0NATIVE"] }),
+      channelMembers: async () => ({ ok: true, memberOf: ownerChannelAccess ? ["C0P0NATIVE"] : [] }),
       taskPeopleConfiguration: { peopleChangesEnabled: true },
       taskPersonProof: async (request) => ({ ok: true, user: { id: request.slackUserId, teamId: "T0P0NATIVE",
-        name: request.slackUserId === taskViewerSlackId ? "Task Viewer" : "Task Owner" }, memberOf: request.channelIds }),
+        name: request.slackUserId === taskViewerSlackId ? "Task Viewer" : "Task Owner" },
+        memberOf: request.slackUserId === "U0P0OWNER" && !ownerChannelAccess ? [] : request.channelIds }),
       taskPeopleDisplayRead: async (request) => request.operation === "proof"
         ? { operation: "proof", admission: { version: 1, slackCallsUsed: 1 }, result: { ok: true,
           user: { id: request.request.slackUserId, teamId: "T0P0NATIVE", name: request.request.slackUserId === taskViewerSlackId ? "Task Viewer" : "Task Owner" },
-          memberOf: request.request.channelIds } }
+          memberOf: request.request.slackUserId === "U0P0OWNER" && !ownerChannelAccess ? [] : request.request.channelIds } }
         : { operation: "directory", admission: { version: 1, slackCallsUsed: 1 }, result: { ok: true, users: ["U0P0OWNER", taskViewerSlackId].map((id) => ({
           id, teamId: "T0P0NATIVE", name: id === taskViewerSlackId ? "Task Viewer" : "Task Owner", memberOf: request.request.channelIds,
         })) } },
@@ -830,6 +837,8 @@ describe("P0 normal project onboarding journey", () => {
     const reverseGroupFinalizeOrder: string[] = [];
     const concurrentGroupFinalizeOrder: string[] = [];
     const concurrentGroupFinalizeArrivals: string[] = [];
+    const groupServiceReconstruction: Array<{ priorAcceptedGroupRunIds: string[]; immutableGroupEvidenceRef: unknown; exactObjectSha256: string; exactObjectByteLength: number }> = [];
+    let groupHandlerReconstructed = false;
     let groupFinalizeMode: "reverse" | "concurrent" = "reverse";
     let capturePartialGroupView = true;
     let reverseGroupRunIds: string[] = [];
@@ -860,11 +869,22 @@ describe("P0 normal project onboarding journey", () => {
         if (upload.stage === "init" && typeof upload.groupRunId === "string") groupUploadInitRequests.set(upload.groupRunId, upload);
         if (upload.stage === "finalize" && typeof upload.groupRunId === "string" && response.status < 400) {
           const acceptedOperation = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${checksOperationId}`) as {
-            workflowE2EGroupRunIds?: string[];
+            workflowE2EGroupRunIds?: string[]; workflowE2EGroupEvidenceRefs?: Array<{ groupRunId: string; evidenceRef: { key: string; sha256: string; byteLength: number } }>;
           } | undefined;
           if (groupFinalizeMode === "reverse") reverseGroupFinalizeOrder.splice(0, reverseGroupFinalizeOrder.length, ...(acceptedOperation?.workflowE2EGroupRunIds ?? []));
           else concurrentGroupFinalizeOrder.splice(0, concurrentGroupFinalizeOrder.length, ...(acceptedOperation?.workflowE2EGroupRunIds ?? []));
-          if (upload.groupRunId === reverseGroupRunIds[1]) releaseFirstGroupFinalize();
+          if (groupFinalizeMode === "reverse" && !groupHandlerReconstructed && acceptedOperation?.workflowE2EGroupRunIds?.length === 1) {
+            const acceptedRef = acceptedOperation.workflowE2EGroupEvidenceRefs?.[0];
+            const storedBytes = acceptedRef === undefined ? undefined : objects.get(acceptedRef.evidenceRef.key);
+            if (acceptedRef === undefined || storedBytes === undefined || hash(storedBytes) !== acceptedRef.evidenceRef.sha256
+              || storedBytes.byteLength !== acceptedRef.evidenceRef.byteLength) throw new Error("restart control could not read back the first immutable admitted group result");
+            const oldHandler = broker.handler;
+            broker.handler = (await loadSlackBroker()).createAwsBrokerHandler(broker.brokerInput as never);
+            if (broker.handler === oldHandler) throw new Error("restart control reused the old broker handler instead of reconstructing it");
+            groupHandlerReconstructed = true;
+            groupServiceReconstruction.push({ priorAcceptedGroupRunIds: [...acceptedOperation.workflowE2EGroupRunIds],
+              immutableGroupEvidenceRef: acceptedRef, exactObjectSha256: hash(storedBytes), exactObjectByteLength: storedBytes.byteLength });
+          }
           if (capturePartialGroupView && partialGroupTaskResponses.length === 0) {
             const taskPath = `/v1/dev/tasks/${featureTaskId}`;
             const taskResponse = await broker.handler({ version: "2.0", rawPath: taskPath, rawQueryString: "",
@@ -898,6 +918,7 @@ describe("P0 normal project onboarding journey", () => {
           conflictingGroupInitResponses.push({ groupRunId: upload.groupRunId, status: conflict.status, body: conflict.body,
             storedRunIds: afterConflict?.workflowE2EGroupRunIds ?? [] });
         }
+        if (groupFinalizeMode === "reverse" && upload.groupRunId === reverseGroupRunIds[1]) releaseFirstGroupFinalize();
       }
       if (response.status >= 400) {
         await writeFile(join(root, "worker-callback-rejection.json"), `${JSON.stringify({ path: parsed.pathname, status: response.status,
@@ -1023,7 +1044,8 @@ describe("P0 normal project onboarding journey", () => {
     expect(checksOutbox, "the server-created CHECKS operation must have its ordinary durable worker outbox").toBeDefined();
     const checksInvocation = WorkerInvocationSchema.parse(checksOutbox!.invocation);
     checksOperationId = checksInvocation.operationId;
-    reverseGroupRunIds = [...(checksInvocation.payload.workflowE2EAdmission?.groupRunIds ?? [])];
+    const initialGroupRunIds = recordOf(recordOf(checksInvocation.payload)?.workflowE2EAdmission)?.groupRunIds;
+    reverseGroupRunIds = Array.isArray(initialGroupRunIds) ? initialGroupRunIds.filter((id): id is string => typeof id === "string") : [];
     const checkCallbacks = createWorkerCallbackSinks({ controlPlaneUrl: "https://cp.example.test", invocation: checksInvocation, fetchImplementation: workerFetch });
     const checksWorkerState = createWorkerServerState(journal, {
       execute: async (invocation) => runTaskInvocation(invocation, {
@@ -1089,6 +1111,10 @@ describe("P0 normal project onboarding journey", () => {
     expect(storedGroupEvidenceRefs.map(({ groupRunId }) => groupRunId).sort()).toEqual([...expectedGroupRunIds].sort());
     expect(reverseGroupFinalizeOrder, "actual independent group finalization must complete in the opposite order without changing admitted IDs")
       .toEqual([...expectedGroupRunIds].reverse());
+    expect(groupServiceReconstruction, "the second original admitted group must complete through a reconstructed handler over the same durable store and immutable object store")
+      .toHaveLength(1);
+    expect(groupServiceReconstruction[0]?.priorAcceptedGroupRunIds).toHaveLength(1);
+    expect(storedGroupEvidenceRefs).toHaveLength(2);
     expect(duplicateGroupInitResponses).toHaveLength(expectedGroupRunIds.length);
     expect(duplicateGroupInitResponses.every((item) => item.status === 200
       && item.body.complete === true && item.body.groupRunId === item.groupRunId)).toBe(true);
@@ -1104,7 +1130,7 @@ describe("P0 normal project onboarding journey", () => {
     }));
     await writeFile(join(root, "feature-checks-group-acceptance.json"), `${JSON.stringify({ operationId: checksInvocation.operationId,
       groupRunIds: expectedGroupRunIds, acceptedGroupEvidenceRefs: storedGroupEvidenceRefs, groupEvidencePrimaries,
-      reverseGroupFinalizeOrder, duplicateGroupInitResponses, conflictingGroupInitResponses, partialGroupTaskResponses }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+      groupServiceReconstruction, reverseGroupFinalizeOrder, duplicateGroupInitResponses, conflictingGroupInitResponses, partialGroupTaskResponses }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     const ordinaryCheckResult = (completedChecksOperation?.result as { checks?: { checks?: Array<{ exitCode: number; status: string }> } } | undefined)?.checks?.checks;
     expect(ordinaryCheckResult, "ordinary project checks must pass independently of the E2E regression").toEqual(
       expect.arrayContaining([expect.objectContaining({ exitCode: 0, after: "passed", class: "passing" })]));
@@ -1259,7 +1285,8 @@ describe("P0 normal project onboarding journey", () => {
       expect(retryChecksOutbox, "the fixed candidate must receive a fresh server-admitted E2E round").toBeDefined();
       const retryChecksInvocation = WorkerInvocationSchema.parse(retryChecksOutbox!.invocation);
       checksOperationId = retryChecksInvocation.operationId;
-      reverseGroupRunIds = [...(retryChecksInvocation.payload.workflowE2EAdmission?.groupRunIds ?? [])];
+      const retryGroupRunIds = recordOf(recordOf(retryChecksInvocation.payload)?.workflowE2EAdmission)?.groupRunIds;
+      reverseGroupRunIds = Array.isArray(retryGroupRunIds) ? retryGroupRunIds.filter((id): id is string => typeof id === "string") : [];
       groupFinalizeMode = "concurrent";
       capturePartialGroupView = false;
       groupUploadInitRequests.clear();
@@ -1553,40 +1580,23 @@ describe("P0 normal project onboarding journey", () => {
       await broker.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `OUTBOX#${id}`, sk: "OUTBOX" },
         UpdateExpression: "SET #status = :queued", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":queued": "QUEUED" } }));
     } });
-    expect((await publishPublisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(publishOutbox!) } }] as never })).published).toBe(1);
-    const queuedPublish = broker.db.get(String(publishOutbox!.pk), String(publishOutbox!.sk))!;
-    const publishDispatch = await publishDispatcher({ Records: [{ messageId: String(publishOutbox!.id), body: JSON.stringify(queuedPublish) }] });
-    expect(publishDispatch.batchItemFailures).toEqual([]);
-    for (let index = 0; index < 800; index += 1) {
-      const operation = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${publishInvocation.operationId}`);
-      if (operation?.status === "SUCCEEDED" || operation?.status === "FAILED") break;
-      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
-    }
-    const publishOperation = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${publishInvocation.operationId}`);
-    const finalPublishedTask = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { startingRevision: number; workflow: { stage: string; state: string;
-      candidate: { digest: string; repositories: Array<{ repositoryId: string; commitSha: string; treeSha: string; baseCommitSha?: string }> };
-      reviewBase?: Array<{ repositoryId: string; baseCommitSha: string }>;
-      pullRequests?: Array<{ headSha?: string; headTreeSha?: string; number?: number; state?: string }> } };
     const publishPayload = publishInvocation.payload as unknown as { headBranch: string; candidateCommitSha: string; candidateTreeSha: string };
-    const localRemoteHead = git(localBareRemote, "rev-parse", `refs/heads/${publishPayload.headBranch}^{commit}`);
-    await writeFile(join(root, "local-publication-receipt.json"), `${JSON.stringify({ recoveryResponse: recoveryResponse.body,
-      publishInvocation, publishDispatch, journal: await publishJournal.get(publishInvocation.operationId), publishOperation,
-      push: localPushTargets, localBareRemote, localRemoteHead, workflow: finalPublishedTask.workflow }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
-    expect(publishOperation?.status, JSON.stringify({ publishOperation, journal: await publishJournal.get(publishInvocation.operationId), publishDispatch })).toBe("SUCCEEDED");
-    expect(localPushTargets).toHaveLength(1);
-    expect(localRemoteHead).toBe(localPushTargets[0]?.commit);
-    expect(localRemoteHead).toBe(publishPayload.candidateCommitSha);
-    expect(git(localBareRemote, "rev-parse", `${localRemoteHead}^{tree}`)).toBe(publishPayload.candidateTreeSha);
-    expect(finalPublishedTask.workflow.stage).toBe("WAIT_FOR_MERGE");
-    expect(finalPublishedTask.workflow.state).toBe("WAITING");
-    expect(finalPublishedTask.workflow.pullRequests).toContainEqual(expect.objectContaining({ number: 1, headSha: localRemoteHead,
-      headTreeSha: git(localBareRemote, "rev-parse", `${localRemoteHead}^{tree}`), state: "UNKNOWN" }));
-    const publishedCandidateRepository = finalPublishedTask.workflow.candidate.repositories.find((repository) => repository.repositoryId === "ordinary-orders")!;
+    const prePublishTask = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { startingRevision: number; workflow: { stage: string; state: string;
+      candidate: { digest: string; repositories: Array<{ repositoryId: string; commitSha: string; treeSha: string; baseCommitSha?: string }> };
+      reviewBase?: Array<{ repositoryId: string; baseCommitSha: string }>; pullRequests?: Array<{ headSha?: string; number?: number }> } };
+    expect(prePublishTask.workflow.stage).toBe("PULL_REQUEST");
+    expect(prePublishTask.workflow.state).toBe("READY");
+    // The normal enrolled loop joins and publishes the same reviewed candidate before native PUBLISH;
+    // native publication then reconciles that exact existing PR and branch.
+    git(workerRepository, "branch", "-m", publishPayload.headBranch);
+    const publishedCandidateRepository = prePublishTask.workflow.candidate.repositories.find((repository) => repository.repositoryId === "ordinary-orders")!;
     const publishedBaseCommit = publishedCandidateRepository.baseCommitSha
-      ?? finalPublishedTask.workflow.reviewBase?.find((item) => item.repositoryId === publishedCandidateRepository.repositoryId)?.baseCommitSha;
+      ?? prePublishTask.workflow.reviewBase?.find((item) => item.repositoryId === publishedCandidateRepository.repositoryId)?.baseCommitSha;
     expect(publishedBaseCommit, "current published candidate must retain its approved base binding").toBeDefined();
-    git(workerRepository, "update-ref", "refs/remotes/origin/main", publishedBaseCommit!);
-    const publicationJoinSubject = { projectName: "ordinary-orders", projectRevision: finalPublishedTask.startingRevision, repositoryId: 740001,
+    const hostBaseCommit = git(localBareRemote, "rev-parse", "refs/heads/main^{commit}");
+    expect(hostBaseCommit, "the host derives its base from the retained local origin branch").toBe(publishedBaseCommit);
+    git(workerRepository, "update-ref", "refs/remotes/origin/main", hostBaseCommit);
+    const publicationJoinSubject = { projectName: "ordinary-orders", projectRevision: prePublishTask.startingRevision, repositoryId: 740001,
       commitSha: publishedCandidateRepository.commitSha, treeSha: publishedCandidateRepository.treeSha, baseCommitSha: publishedBaseCommit! };
     const publicationJoinRequest = { taskRef: featureTaskId, subject: publicationJoinSubject,
       sourceBindingRef: `cli-source:v1:${hash(Buffer.from("synthetic-host-source-binding"))}` };
@@ -1594,13 +1604,13 @@ describe("P0 normal project onboarding journey", () => {
     const captureJoin = async (label: string, input: unknown) => {
       const requestBytes = Buffer.from(JSON.stringify(input), "utf8");
       const requestPrimary = await persistOriginalEvidencePrimary({ root, kind: `publication-context-${label}-request`, key: joinRoutePath,
-        bytes: requestBytes, producer: "actual test HTTP request body sent to authenticated broker handler", sourceCandidateDigest: finalPublishedTask.workflow.candidate.digest });
+        bytes: requestBytes, producer: "actual test HTTP request body sent to authenticated broker handler", sourceCandidateDigest: prePublishTask.workflow.candidate.digest });
       const response = await broker.handler({ version: "2.0", rawPath: joinRoutePath, rawQueryString: "", headers: {
         authorization: "Bearer synthetic-owner-session", "content-type": "application/json" }, body: requestBytes.toString("utf8"),
         requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
       const responseBytes = Buffer.from(response.body, "utf8");
       const responsePrimary = await persistOriginalEvidencePrimary({ root, kind: `publication-context-${label}-response`, key: joinRoutePath,
-        bytes: responseBytes, producer: "exact broker HTTP response body bytes before parsing or assertions", sourceCandidateDigest: finalPublishedTask.workflow.candidate.digest });
+        bytes: responseBytes, producer: "exact broker HTTP response body bytes before parsing or assertions", sourceCandidateDigest: prePublishTask.workflow.candidate.digest });
       return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown>, requestPrimary, responsePrimary,
         responseSha256: hash(responseBytes), responseByteLength: responseBytes.byteLength };
     };
@@ -1622,30 +1632,35 @@ describe("P0 normal project onboarding journey", () => {
     await cliTokenStore.set(developerTokenKey(cliIssuer), { accessToken: "synthetic-owner-session", expiresAt: Date.now() + 60 * 60_000 });
     const registrationResponse = adminResults.find(({ path, status }) => path === "/v1/admin/projects" && status === 201)?.body;
     expect(registrationResponse, "the native host receipt must use the successful ordinary project registration response").toBeDefined();
-    const registeredDefinition = ProjectDefinitionSchema.parse((registered?.definition as unknown));
+    const registeredDefinition = ProjectDefinitionSchema.parse(registered?.definition);
     const ghExec: Exec = async (command, args, options) => {
       if (command !== "gh") return realExec(command, args, options);
       if (args[0] === "repo" && args[1] === "view") return { code: 0, stdout: "acme/ordinary-orders\n", stderr: "" };
       if (args[0] === "api" && args[1] === "user") return { code: 0, stdout: "maya\n", stderr: "" };
       if (args[0] === "api" && args[1] === "repos/acme/ordinary-orders" && args.at(-1) === ".id") return { code: 0, stdout: "740001\n", stderr: "" };
       if (args[0] === "api" && args[1] === "repos/acme/ordinary-orders" && args.at(-1) === ".default_branch") return { code: 0, stdout: "main\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "repos/acme/ordinary-orders/issues/42" && args.at(-1) === ".state") return { code: 0, stdout: "open\n", stderr: "" };
+      if (args[0] === "api" && args[1] === "repos/acme/ordinary-orders/pulls/42") return { code: 1, stdout: "", stderr: "HTTP 404: Not Found" };
       return { code: 1, stdout: "", stderr: `unexpected GitHub identity lookup: ${args.join(" ")}` };
     };
     const recordedHostEnrollment = await recordRegisteredLoopEnrollment({ home: cliHome, env: "staging", controlPlaneUrl: cliControlPlane,
       definition: registeredDefinition, response: registrationResponse, cwd: workerRepository, exec: ghExec });
     expect(recordedHostEnrollment, "native enrollment is derived from the real successful registration and current GitHub identity").toEqual({ recorded: true, repository: "acme/ordinary-orders" });
     const cliLoopStore = new LoopStore(join(cliHome, ".rovara", "loop"));
-    await cliLoopStore.saveRepos([{ repo: "acme/ordinary-orders", path: workerRepository }]);
+    const loopAddOutput: string[] = [];
+    const loopAddExit = await executeCli(["--env", "staging", "loop", "add", workerRepository], {
+      environments: { home: cliHome }, tokenStore: cliTokenStore, loop: { exec: ghExec },
+      stdout: { write: (value) => loopAddOutput.push(value) }, stderr: { write: (value) => loopAddOutput.push(value) },
+    });
+    expect(loopAddExit, loopAddOutput.join(" ")).toBe(0);
+    expect(await cliLoopStore.repos()).toEqual([{ repo: "acme/ordinary-orders", path: workerRepository }]);
     const cliCandidateBranch = git(workerRepository, "symbolic-ref", "--short", "HEAD");
-    const capturedCliCandidate = await captureCandidate(realExec, workerRepository, cliCandidateBranch, publishedBaseCommit!);
+    const capturedCliCandidate = await captureCandidate(realExec, workerRepository, cliCandidateBranch, hostBaseCommit);
     expect(capturedCliCandidate).toMatchObject({ commitSha: publicationJoinSubjectForCli.commitSha, treeSha: publicationJoinSubjectForCli.treeSha,
       baseCommitSha: publicationJoinSubjectForCli.baseCommitSha });
     const issueNumber = 42;
-    await cliLoopStore.saveItem({ version: 1, repo: "acme/ordinary-orders", issue: issueNumber, loop: "quick", step: "publish",
-      startedBy: "maya", instruction: "Verify the published, reviewed candidate", startedAt: new Date().toISOString(), stepEnteredAt: new Date().toISOString(),
-      worktree: { path: workerRepository, branch: cliCandidateBranch },
-      checksCandidate: capturedCliCandidate, reviewsCandidate: capturedCliCandidate });
     const cliJoinRequests: Array<{ url: string; requestBytes: string; responseStatus: number; responseBytes: string }> = [];
+    const cliTaskReads: Array<{ url: string; requestPrimary: unknown; responsePrimary: unknown; responseStatus: number; responseSha256: string; responseByteLength: number }> = [];
     const cliFetch: typeof fetch = async (input, init) => {
       const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
       const method = init?.method ?? "GET";
@@ -1658,27 +1673,44 @@ describe("P0 normal project onboarding journey", () => {
       if (url.pathname.endsWith("/e2e-publication-context")) {
         const requestOrdinal = cliJoinRequests.length + 1;
         const requestPrimary = await persistOriginalEvidencePrimary({ root, kind: "actual-cli-publication-join-http-request", key: `${url.pathname}#${requestOrdinal}`,
-          bytes: requestBytes, producer: "exact authenticated CLI POST body sent to the broker", sourceCandidateDigest: finalPublishedTask.workflow.candidate.digest });
+          bytes: requestBytes, producer: "exact authenticated CLI POST body sent to the broker", sourceCandidateDigest: prePublishTask.workflow.candidate.digest });
         const responsePrimary = await persistOriginalEvidencePrimary({ root, kind: "actual-cli-publication-join-http-response", key: `${url.pathname}#${requestOrdinal}`,
-          bytes: responseBytes, producer: "exact broker response body returned to the actual CLI transport", sourceCandidateDigest: finalPublishedTask.workflow.candidate.digest });
+          bytes: responseBytes, producer: "exact broker response body returned to the actual CLI transport", sourceCandidateDigest: prePublishTask.workflow.candidate.digest });
         cliJoinRequests.push({ url: url.href, requestBytes: requestBytes.toString("utf8"), responseStatus: response.statusCode,
           responseBytes: responseBytes.toString("utf8"), requestPrimary, responsePrimary } as never);
+      }
+      if (method === "GET" && url.pathname === `/v1/dev/tasks/${featureTaskId}`) {
+        const readOrdinal = cliTaskReads.length + 1;
+        const requestPrimary = await persistOriginalEvidencePrimary({ root, kind: "actual-cli-native-task-read-http-request", key: `${url.pathname}#${readOrdinal}`,
+          bytes: requestBytes, producer: "exact authenticated CLI GET task request body bytes before broker handling", sourceCandidateDigest: prePublishTask.workflow.candidate.digest });
+        const responsePrimary = await persistOriginalEvidencePrimary({ root, kind: "actual-cli-native-task-read-http-response", key: `${url.pathname}#${readOrdinal}`,
+          bytes: responseBytes, producer: "exact authenticated broker task-view response body bytes before CLI parsing or assertions", sourceCandidateDigest: prePublishTask.workflow.candidate.digest });
+        cliTaskReads.push({ url: url.href, requestPrimary, responsePrimary, responseStatus: response.statusCode,
+          responseSha256: hash(responseBytes), responseByteLength: responseBytes.byteLength });
       }
       return new Response(responseBytes, { status: response.statusCode, headers: { "content-type": "application/json" } });
     };
     const cliOutput: string[] = [];
     const cliExit = await executeCli(["--env", "staging", "loop", "enroll", "acme/ordinary-orders", "--task", featureTaskId,
-      "--issue", String(issueNumber)], { environments: { home: cliHome }, tokenStore: cliTokenStore, fetchImplementation: cliFetch, loop: { exec: ghExec },
+      "--issue", String(issueNumber), "--worktree", workerRepository], { environments: { home: cliHome }, tokenStore: cliTokenStore, fetchImplementation: cliFetch, loop: { exec: ghExec },
       stdout: { write: (value) => cliOutput.push(value) }, stderr: { write: (value) => cliOutput.push(value) } });
     const joinedEnrollment = (await cliLoopStore.enrollments()).find((entry) => entry.kind === "registered");
+    const adoptedCliRoute = await cliLoopStore.item("acme/ordinary-orders", issueNumber);
     expect(cliExit, cliOutput.join("\\n")).toBe(0);
     expect(cliJoinRequests).toHaveLength(1);
-    expect(JSON.parse(cliJoinRequests[0]!.requestBytes)).toMatchObject({ taskRef: featureTaskId, subject: publicationJoinSubjectForCli,
-      sourceBindingRef: expect.stringMatching(/^cli-source:v1:[a-f0-9]{64}$/u) });
-    expect(JSON.parse(cliJoinRequests[0]!.responseBytes)).toMatchObject({ status: "READY", subject: publicationJoinSubjectForCli,
-      candidateDigest: finalPublishedTask.workflow.candidate.digest });
+    expect(cliTaskReads).toHaveLength(1);
+    expect(cliTaskReads[0]).toMatchObject({ responseStatus: 200 });
+    const firstJoinRequest = recordOf(JSON.parse(cliJoinRequests[0]!.requestBytes));
+    expect(firstJoinRequest).toMatchObject({ taskRef: featureTaskId, subject: publicationJoinSubjectForCli });
+    expect(firstJoinRequest?.sourceBindingRef).toMatch(/^cli-source:v1:[a-f0-9]{64}$/u);
+    expect(recordOf(JSON.parse(cliJoinRequests[0]!.responseBytes))).toMatchObject({ status: "READY", subject: publicationJoinSubjectForCli,
+      candidateDigest: prePublishTask.workflow.candidate.digest });
     expect(joinedEnrollment?.kind).toBe("registered");
     expect((joinedEnrollment as { taskRef?: string } | undefined)?.taskRef).toBe(featureTaskId);
+    expect(adoptedCliRoute).toMatchObject({ repo: "acme/ordinary-orders", issue: issueNumber, step: "publish",
+      worktree: { path: workerRepository, branch: cliCandidateBranch }, nativeImport: { taskRef: featureTaskId } });
+    expect(adoptedCliRoute).not.toHaveProperty("checksCandidate");
+    expect(adoptedCliRoute).not.toHaveProperty("reviewsCandidate");
     const localIssueLabels = new Set<string>();
     const daemonExec: Exec = async (command, args, options) => {
       if (command === "git" && args.includes("push")) {
@@ -1712,7 +1744,7 @@ describe("P0 normal project onboarding journey", () => {
         if (!Array.isArray(body.labels) || body.labels.some((label) => typeof label !== "string" || !label.startsWith("rovara:"))) {
           throw new Error("loop fixture refuses an unregistered issue label");
         }
-        for (const label of body.labels) localIssueLabels.add(label);
+        for (const label of body.labels.filter((candidate): candidate is string => typeof candidate === "string")) localIssueLabels.add(label);
         return { code: 0, stdout: "", stderr: "" };
       }
       if (args[0] === "label" && args[1] === "create") return { code: 0, stdout: "", stderr: "" };
@@ -1741,23 +1773,171 @@ describe("P0 normal project onboarding journey", () => {
     }
     process.emit("SIGTERM");
     const daemonExit = await daemonRun;
-    expect(daemonExit, daemonOutput.join(" ")).toBe(0);
-    expect(daemonItem?.pullRequest?.number, daemonOutput.join(" ")).toBe(1);
-    expect(cliJoinRequests, "the actual enrolled loop publication boundary must rejoin current server evidence").toHaveLength(2);
-    expect(JSON.parse(cliJoinRequests[1]!.requestBytes)).toMatchObject({ taskRef: featureTaskId, subject: publicationJoinSubjectForCli,
-      sourceBindingRef: expect.stringMatching(/^cli-source:v1:[a-f0-9]{64}$/u) });
-    expect(JSON.parse(cliJoinRequests[1]!.responseBytes)).toMatchObject({ status: "READY", subject: publicationJoinSubjectForCli,
-      candidateDigest: finalPublishedTask.workflow.candidate.digest });
     await writeFile(join(root, "publication-context-join.json"), `${JSON.stringify({ taskStart: { status: featureStart.status, request: featureStartRequestPrimary,
       response: featureStartResponsePrimary, taskId: featureTaskId }, nativeRegistration: { response: registrationResponse, hostEnrollment: recordedHostEnrollment },
       actualCli: { exitCode: cliExit, output: cliOutput.join(""), joinRequests: cliJoinRequests, joinedEnrollment,
-        daemonExit, daemonOutput: daemonOutput.join(""), daemonItem }, responses: { candidateMismatch: mismatchedJoin, malformedLocator: malformedJoin },
+        taskReads: cliTaskReads, daemonExit, daemonOutput: daemonOutput.join(""), daemonItem }, responses: { candidateMismatch: mismatchedJoin, malformedJoin: malformedJoin },
       noSideEffects: { before: joinBeforeInvalid, after: joinAfterInvalid } }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    expect(daemonExit, daemonOutput.join(" ")).toBe(0);
+    expect(daemonItem?.pullRequest?.number, daemonOutput.join(" ")).toBe(1);
+    expect(cliJoinRequests, "enrollment and both publication fences must rejoin current server evidence").toHaveLength(3);
+    expect(cliTaskReads, "each publication fence must reread the authenticated native task").toHaveLength(3);
+    const daemonJoinRequests = cliJoinRequests.slice(1);
+    for (const request of daemonJoinRequests) {
+      const parsedRequest = recordOf(JSON.parse(request.requestBytes));
+      expect(parsedRequest).toMatchObject({ taskRef: featureTaskId, subject: publicationJoinSubjectForCli });
+      expect(parsedRequest?.sourceBindingRef).toMatch(/^cli-source:v1:[a-f0-9]{64}$/u);
+      expect(recordOf(JSON.parse(request.responseBytes))).toMatchObject({ status: "READY", subject: publicationJoinSubjectForCli,
+        candidateDigest: prePublishTask.workflow.candidate.digest });
+    }
     expect(mismatchedJoin.body).toMatchObject({ status: "UNKNOWN", reasonCode: "candidate_commit_tree_or_base_mismatch" });
     expect(malformedJoin.body).toMatchObject({ status: "UNKNOWN", reasonCode: "invalid_or_mismatched_task_selector" });
     expect(joinAfterInvalid).toEqual(joinBeforeInvalid);
 
-    // A restored role does not restore the immutable creator proof captured by this round.
+    expect(localPullRequests.size, "the host loop creates exactly the intended local PR before native reconciliation").toBe(1);
+    expect([...localPullRequests.values()].map((pr) => pr.headBranch)).toEqual([publishPayload.headBranch]);
+
+    expect((await publishPublisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(publishOutbox!) } }] as never })).published).toBe(1);
+    const queuedPublish = broker.db.get(String(publishOutbox!.pk), String(publishOutbox!.sk))!;
+    const publishDispatch = await publishDispatcher({ Records: [{ messageId: String(publishOutbox!.id), body: JSON.stringify(queuedPublish) }] });
+    expect(publishDispatch.batchItemFailures).toEqual([]);
+    for (let index = 0; index < 800; index += 1) {
+      const operation = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${publishInvocation.operationId}`);
+      if (operation?.status === "SUCCEEDED" || operation?.status === "FAILED") break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    const publishOperation = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${publishInvocation.operationId}`);
+    const finalPublishedTask = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { startingRevision: number; workflow: { stage: string; state: string;
+      candidate: { digest: string; repositories: Array<{ repositoryId: string; commitSha: string; treeSha: string; baseCommitSha?: string }> };
+      reviewBase?: Array<{ repositoryId: string; baseCommitSha: string }>;
+      pullRequests?: Array<{ headSha?: string; headTreeSha?: string; number?: number; state?: string }> } };
+    const localRemoteHead = git(localBareRemote, "rev-parse", `refs/heads/${publishPayload.headBranch}^{commit}`);
+    await writeFile(join(root, "local-publication-receipt.json"), `${JSON.stringify({ recoveryResponse: recoveryResponse.body,
+      publishInvocation, publishDispatch, journal: await publishJournal.get(publishInvocation.operationId), publishOperation,
+      push: localPushTargets, localBareRemote, localRemoteHead, workflow: finalPublishedTask.workflow }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+    expect(publishOperation?.status, JSON.stringify({ publishOperation, journal: await publishJournal.get(publishInvocation.operationId), publishDispatch })).toBe("SUCCEEDED");
+    expect(localPushTargets).toHaveLength(1);
+    expect(localRemoteHead).toBe(localPushTargets[0]?.commit);
+    expect(localRemoteHead).toBe(publishPayload.candidateCommitSha);
+    expect(git(localBareRemote, "rev-parse", `${localRemoteHead}^{tree}`)).toBe(publishPayload.candidateTreeSha);
+    expect(finalPublishedTask.workflow.stage).toBe("WAIT_FOR_MERGE");
+    expect(finalPublishedTask.workflow.state).toBe("WAITING");
+    expect(finalPublishedTask.workflow.pullRequests).toContainEqual(expect.objectContaining({ number: 1, headSha: localRemoteHead,
+      headTreeSha: git(localBareRemote, "rev-parse", `${localRemoteHead}^{tree}`), state: "UNKNOWN" }));
+    expect(localPullRequests.size, "native publication must reconcile the host loop's existing PR").toBe(1);
+    expect([...localPullRequests.entries()]).toEqual([[1, expect.objectContaining({ headBranch: publishPayload.headBranch })]]);
+    const liveFeatureOperation = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${implementInvocation.operationId}`);
+    expect(liveFeatureOperation, "the collision control must use a real current operation under the real feature WORKSPACE key").toMatchObject({
+      workspaceId: featureWorkspaceId, id: implementInvocation.operationId, kind: "task", workflowMode: "IMPLEMENT",
+    });
+    const collisionJournal = new OperationJournal(join(root, "setup-workspace-domain-collision-journal"));
+    const collisionExecutor = vi.fn(async (invocation: ReturnType<typeof WorkerInvocationSchema.parse>) => ({ kind: invocation.kind }));
+    const collisionWorker = createWorkerServerState(collisionJournal, { invocationFeatures: ["project.setupSmoke"], execute: collisionExecutor }, {},
+      { publicKey: workerKeys.publicKey, workspaceId: featureWorkspaceId, generation: 1 });
+    const authorizationFor = (claims: WorkerInvokeTokenClaims): string => {
+      const payload = workerInvokeTokenPayload(claims);
+      return `AgentX-Invoke ${workerInvokeToken(payload, cryptoSign("sha256", Buffer.from(payload, "ascii"), workerKeys.privateKey))}`;
+    };
+    const workspaceClaims: WorkerInvokeTokenClaims = { workspaceId: featureWorkspaceId, generation: 1,
+      operationId: implementInvocation.operationId, fence: implementInvocation.fence, expiresAt: Math.floor(Date.now() / 1_000) + 60,
+      purpose: "WORKSPACE" };
+    const workspacePositiveResponse = await handleWorkerRequest(new Request("http://worker/invocations", { method: "POST",
+      headers: { authorization: authorizationFor(workspaceClaims), "content-type": "application/json" }, body: JSON.stringify(implementInvocation) }), collisionWorker);
+    const workspacePositiveBody = await workspacePositiveResponse.text();
+    await persistOriginalEvidencePrimary({ root, kind: "workspace-purpose-collision-positive-response", key: implementInvocation.operationId,
+      bytes: Buffer.from(workspacePositiveBody), producer: "actual worker HTTP response for the genuine current WORKSPACE implementation operation under the shared opaque correlation ID",
+      sourceCandidateDigest: workerCandidate.digest });
+    expect(workspacePositiveResponse.status, workspacePositiveBody).toBe(200);
+    for (let attempt = 0; attempt < 40 && (await collisionJournal.get(implementInvocation.operationId))?.status !== "SUCCEEDED"; attempt += 1) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 5));
+    }
+    expect((await collisionJournal.get(implementInvocation.operationId))?.status).toBe("SUCCEEDED");
+    const setupInvocationRecord = WorkerInvocationSchema.parse(outboxRow.invocation);
+    expect(setupInvocationRecord.kind).toBe("project-setup-smoke");
+    const setupPayload = setupInvocationRecord.payload;
+    const setupCollisionCapability = issueProjectSetupCapability(String(broker.brokerInput.callbackSigningKey), {
+      domain: "PROJECT_SETUP", setupExecutionId: setupPayload.setupExecutionId, subjectId: setupPayload.subjectId,
+      transportCorrelationId: featureWorkspaceId, operationId: implementInvocation.operationId,
+      approvalRevision: setupPayload.approvalRevision, fence: implementInvocation.fence,
+      expiresAt: Math.floor(Date.now() / 1_000) + 60, actions: ["read-execution", "write-evidence", "result"],
+    });
+    const setupTokenBrokerAttempts: Array<{ path: string; requestBytes: string; status: number; responseBytes: string }> = [];
+    const setupTokenAtWorkspaceRoute = async (path: string, headers: Record<string, string>, requestBody: unknown) => {
+      const requestBytes = JSON.stringify(requestBody);
+      const response = await broker.handler({ version: "2.0", rawPath: path, rawQueryString: "", headers,
+        body: requestBytes, requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+      const responseBytes = response.body;
+      setupTokenBrokerAttempts.push({ path, requestBytes, status: response.statusCode, responseBytes });
+      await persistOriginalEvidencePrimary({ root, kind: `setup-token-collision-${setupTokenBrokerAttempts.length}`, key: path,
+        bytes: Buffer.from(`${requestBytes}\n${responseBytes}`, "utf8"),
+        producer: "actual broker request JSON bytes followed by the original HTTP response bytes for setup-purpose capability presented at a real WORKSPACE operation route",
+        sourceCandidateDigest: workerCandidate.digest });
+      return { status: response.statusCode, responseBytes };
+    };
+    const credentialResolver = vi.spyOn(broker.brokerInput.repositoryGrants as unknown as {
+      resolveCredential: (...args: never[]) => Promise<unknown>;
+    }, "resolveCredential");
+    const setupTokenAtTaskResult = await setupTokenAtWorkspaceRoute(
+      `/v1/internal/workspaces/${featureWorkspaceId}/operations/${implementInvocation.operationId}/result`,
+      { "x-agentx-callback-capability": setupCollisionCapability }, {});
+    const setupTokenAtPublicationCallback = await setupTokenAtWorkspaceRoute(
+      `/v1/internal/workspaces/${featureWorkspaceId}/operations/${publishInvocation.operationId}/pull-request`,
+      { "x-agentx-callback-capability": setupCollisionCapability }, {});
+    const setupTokenAtRepositoryCredentials = await setupTokenAtWorkspaceRoute(
+      `/v1/internal/workspaces/${featureWorkspaceId}/operations/${publishInvocation.operationId}/repository-credentials`,
+      { "x-agentx-repository-grant": setupCollisionCapability },
+      { credentialRef: "github-app", repositoryUrl: "https://github.com/acme/ordinary-orders", access: "push" });
+    expect(setupTokenAtTaskResult.status, setupTokenAtTaskResult.responseBytes).toBe(409);
+    expect(setupTokenAtPublicationCallback.status, setupTokenAtPublicationCallback.responseBytes).toBe(409);
+    expect(setupTokenAtRepositoryCredentials.status, setupTokenAtRepositoryCredentials.responseBytes).toBe(403);
+    expect(JSON.parse(setupTokenAtTaskResult.responseBytes)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(JSON.parse(setupTokenAtPublicationCallback.responseBytes)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(JSON.parse(setupTokenAtRepositoryCredentials.responseBytes)).toMatchObject({ error: { code: "FORBIDDEN" } });
+    expect(credentialResolver).not.toHaveBeenCalled();
+    const setupPurposeClaims: WorkerInvokeTokenClaims = { workspaceId: featureWorkspaceId, generation: 1,
+      operationId: implementInvocation.operationId, fence: implementInvocation.fence, expiresAt: Math.floor(Date.now() / 1_000) + 60,
+      purpose: "PROJECT_SETUP", setupExecutionId: setupPayload.setupExecutionId, setupSubjectId: setupPayload.subjectId,
+      setupApprovalRevision: setupPayload.approvalRevision };
+    const setupCollisionInvocation = WorkerInvocationSchema.parse({ ...setupInvocationRecord, workspaceId: featureWorkspaceId,
+      operationId: implementInvocation.operationId, fence: implementInvocation.fence, callbackCapability: setupCollisionCapability,
+      payload: { ...setupPayload, transportCorrelationId: featureWorkspaceId } });
+    const setupCollisionResponse = await handleWorkerRequest(new Request("http://worker/invocations", { method: "POST",
+      headers: { authorization: authorizationFor(setupPurposeClaims), "content-type": "application/json" },
+      body: JSON.stringify(setupCollisionInvocation) }), collisionWorker);
+    const setupCollisionBody = await setupCollisionResponse.text();
+    await persistOriginalEvidencePrimary({ root, kind: "setup-purpose-same-workspace-operation-response", key: implementInvocation.operationId,
+      bytes: Buffer.from(setupCollisionBody), producer: "actual worker HTTP response for a PROJECT_SETUP purpose against the exact opaque ID and current WORKSPACE operation",
+      sourceCandidateDigest: workerCandidate.digest });
+    expect(setupCollisionResponse.status, setupCollisionBody).toBe(409);
+    const taskRelabelResponse = await handleWorkerRequest(new Request("http://worker/invocations", { method: "POST",
+      headers: { authorization: authorizationFor(setupPurposeClaims), "content-type": "application/json" }, body: JSON.stringify(implementInvocation) }), collisionWorker);
+    const taskRelabelBody = await taskRelabelResponse.text();
+    await persistOriginalEvidencePrimary({ root, kind: "setup-purpose-task-model-relabel-response", key: implementInvocation.operationId,
+      bytes: Buffer.from(taskRelabelBody), producer: "actual worker HTTP response when the setup-purpose signature is presented as the genuine task/model invocation",
+      sourceCandidateDigest: workerCandidate.digest });
+    expect(taskRelabelResponse.status, taskRelabelBody).toBe(401);
+    const publicationRelabel = WorkerInvocationSchema.parse({ ...publishInvocation, workspaceId: featureWorkspaceId,
+      operationId: implementInvocation.operationId, fence: implementInvocation.fence });
+    const publicationRelabelResponse = await handleWorkerRequest(new Request("http://worker/invocations", { method: "POST",
+      headers: { authorization: authorizationFor(setupPurposeClaims), "content-type": "application/json" }, body: JSON.stringify(publicationRelabel) }), collisionWorker);
+    const publicationRelabelBody = await publicationRelabelResponse.text();
+    await persistOriginalEvidencePrimary({ root, kind: "setup-purpose-publish-credential-relabel-response", key: implementInvocation.operationId,
+      bytes: Buffer.from(publicationRelabelBody), producer: "actual worker HTTP response when setup purpose is presented to the publication/credential invocation loader",
+      sourceCandidateDigest: workerCandidate.digest });
+    expect(publicationRelabelResponse.status, publicationRelabelBody).toBe(401);
+    expect(collisionExecutor).toHaveBeenCalledTimes(1);
+    expect((await collisionJournal.list()).map((entry) => entry.operationId)).toEqual([implementInvocation.operationId]);
+    await writeFile(join(root, "setup-workspace-domain-collision.json"), `${JSON.stringify({ workspaceId: featureWorkspaceId,
+      storedWorkspace: broker.db.get(`WORKSPACE#${featureWorkspaceId}`, "META"), liveFeatureOperation, taskId: featureTaskId,
+      setupExecutionId: setupPayload.setupExecutionId, setupPurpose: setupPurposeClaims, positiveWorkspaceOperation: implementInvocation.operationId,
+      responseStatuses: { workspacePositive: workspacePositiveResponse.status, setupPurposeSameOperation: setupCollisionResponse.status,
+        taskModelRelabel: taskRelabelResponse.status, publicationCredentialRelabel: publicationRelabelResponse.status,
+        taskResultCallback: setupTokenAtTaskResult.status, publicationCallback: setupTokenAtPublicationCallback.status,
+        repositoryCredentialExchange: setupTokenAtRepositoryCredentials.status },
+      brokerRequestAttempts: setupTokenBrokerAttempts, credentialResolverCalls: credentialResolver.mock.calls.length,
+      executorCalls: collisionExecutor.mock.calls.map(([invocation]) => ({ kind: invocation.kind, operationId: invocation.operationId })),
+      effectBoundary: "The genuine WORKSPACE task was accepted. Setup-purpose invocation could not reuse its current operation; setup-purpose tokens were rejected by actual task-result/publication callback and repository-credential routes before credential resolution, and could not be relabeled to task/model or publish/credential execution." }, null, 2)}\n`,
+      { mode: 0o600, flag: "wx" });
     const creatorMembershipKey = { pk: `MEMBER#${ownerDeveloperId}`, sk: "PROJECT#ordinary-orders" };
     const admittedCreatorMembership = broker.db.get(creatorMembershipKey.pk, creatorMembershipKey.sk);
     expect(admittedCreatorMembership?.grantId).toMatch(/^[0-9a-f-]{36}$/iu);
@@ -1900,13 +2080,22 @@ describe("P0 normal project onboarding journey", () => {
       dispatchRows: broker.db.find((item) => String(item.pk).startsWith("WORKFLOW_DISPATCH") || item.entityType === "WORKFLOW_DISPATCH") }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     expect(browserChecksOutbox, "the normal IMPLEMENT terminal must admit real CHECKS for the browser-required plan").toBeDefined();
     const browserChecksInvocation = WorkerInvocationSchema.parse(browserChecksOutbox!.invocation);
-    const browserChecksCallbacks = createWorkerCallbackSinks({ controlPlaneUrl: "https://cp.example.test", invocation: browserChecksInvocation, fetchImplementation: browserFetch });
     const browserChecksJournal = new OperationJournal(join(root, "browser-required-checks-journal"));
-    const browserChecksWorker = createWorkerServerState(browserChecksJournal, { execute: async (invocation) => runTaskInvocation(invocation, {
-      rootPath: browserWorkerRoot, model: FAUX_MODEL, eventSink: browserChecksCallbacks.eventSink, artifactSink: browserChecksCallbacks.artifactSink,
-      workflowE2EAdmissionReader: browserChecksCallbacks.workflowE2EAdmissionReader, workflowE2EEvidenceSink: browserChecksCallbacks.workflowE2EEvidenceSink,
-      workflowE2EEvidenceRoot: evidenceRootForWorker, workflowE2ERuntimeRoot: process.cwd(),
-    }) }, { onTerminal: async (result, invocation) => postWorkerTerminalResult(browserChecksCallbacks, result, invocation), retrySleep: async () => undefined },
+    const browserChecksCancellation = new WorkerCancellationController();
+    let cancelBrowserChecksOnRunning: ((receipt: { containerId: string; requestId: string; sourceDigest: string; observedAt: string; inspectBytes: Uint8Array }) => Promise<void>) | undefined;
+    const browserChecksWorker = createWorkerServerState(browserChecksJournal, { execute: async (invocation) => {
+      if (invocation.kind === "cancel") return executeWorkerCancelInvocation(invocation, browserChecksCancellation, browserChecksJournal);
+      const invocationCallbacks = createWorkerCallbackSinks({ controlPlaneUrl: "https://cp.example.test", invocation, fetchImplementation: browserFetch });
+      return runTaskInvocation(invocation, {
+        rootPath: browserWorkerRoot, model: FAUX_MODEL, eventSink: invocationCallbacks.eventSink, artifactSink: invocationCallbacks.artifactSink,
+        workflowE2EAdmissionReader: invocationCallbacks.workflowE2EAdmissionReader, workflowE2EEvidenceSink: invocationCallbacks.workflowE2EEvidenceSink,
+        workflowE2EEvidenceRoot: evidenceRootForWorker, workflowE2ERuntimeRoot: process.cwd(), cancellationController: browserChecksCancellation,
+        workflowE2EOnOwnedContainerRunning: async (receipt) => { await cancelBrowserChecksOnRunning?.(receipt); },
+      });
+    } }, { onTerminal: async (result, invocation) => {
+      const terminalCallbacks = createWorkerCallbackSinks({ controlPlaneUrl: "https://cp.example.test", invocation, fetchImplementation: browserFetch });
+      await postWorkerTerminalResult(terminalCallbacks, result, invocation);
+    }, retrySleep: async () => undefined },
     { publicKey: workerKeys.publicKey, workspaceId: browserWorkspaceId, generation: 1 });
     const browserChecksDelivery = createEc2Delivery({ sessions: { ensureSession: async () => ({ ready: true as const, generation: 1, privateIp: "127.0.0.1" }) },
       binding: async () => runtimeBinding, sign: async (message) => cryptoSign("sha256", message, workerKeys.privateKey),
@@ -2011,6 +2200,292 @@ describe("P0 normal project onboarding journey", () => {
     expect((browserOwnerSendBack.body as { error?: { code?: string } }).error?.code).toBe("CONFIG_INVALID");
     expect((broker.db.get(`DEVTASK#${browserTaskId}`, "META") as { workflow: { stage: string; state: string } }).workflow)
       .toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    const postBrowserOwnerAction = async (path: string, body: unknown) => {
+      const response = await broker.handler({ version: "2.0", rawPath: path, rawQueryString: "",
+        headers: { authorization: "Bearer synthetic-owner-session", "content-type": "application/json" }, body: JSON.stringify(body),
+        requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+      return { status: response.statusCode, rawBody: response.body, body: JSON.parse(response.body) as Record<string, unknown> };
+    };
+    const browserRetryRequestId = randomUUID();
+    const browserRetry = await postBrowserOwnerAction(`/v1/dev/tasks/${browserTaskId}/workflow/retry`, {
+      requestId: browserRetryRequestId, expectedRevision: browserWorkflow.revision,
+      instructions: "Retry the approved checks under a fresh current E2E admission.",
+    });
+    await persistOriginalEvidencePrimary({ root, kind: "browser-required-owner-retry-response", key: `/v1/dev/tasks/${browserTaskId}/workflow/retry`,
+      bytes: Buffer.from(browserRetry.rawBody, "utf8"), producer: "actual broker HTTP response to the authorized Owner retry route",
+      sourceCandidateDigest: browserAdmission!.candidateDigest });
+    expect(browserRetry.status, browserRetry.rawBody).toBe(200);
+    const queuedRetryWorkflow = (browserRetry.body.task as DeveloperTaskView).workflow;
+    expect(queuedRetryWorkflow).toMatchObject({ stage: "VERIFY", state: "WAITING", revision: browserWorkflow.revision + 1 });
+    expect(queuedRetryWorkflow?.e2e?.currentRoundId).toBeUndefined();
+    const retryDispatchRow = broker.db.find((item) => item.entityType === "WORKFLOW_DISPATCH" && item.taskId === browserTaskId
+      && item.workflowRevision === queuedRetryWorkflow?.revision && item.kind === "CHECKS")[0];
+    expect(retryDispatchRow, "required-E2E retry must queue the native VERIFY dispatcher, not an ordinary CHECKS task").toBeDefined();
+    const browserCreatorKey = { pk: `MEMBER#${ownerDeveloperId}`, sk: "PROJECT#ordinary-orders" };
+    const browserCreatorGrant = broker.db.get(browserCreatorKey.pk, browserCreatorKey.sk);
+    expect(browserCreatorGrant?.grantId).toMatch(/^[0-9a-f-]{36}$/iu);
+    const checkOutboxesBeforeAccessPause = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS").length;
+    broker.db.delete(browserCreatorKey.pk, browserCreatorKey.sk);
+    ownerChannelAccess = false;
+    const retryRecoveryResponse = await broker.handler({ source: "agentx.workflow-dispatch-recovery" });
+    const retryRecovery = JSON.parse(retryRecoveryResponse.body) as { attempted: number; dispatched: number };
+    expect(retryRecoveryResponse.statusCode).toBe(200);
+    const pausedRetryDispatch = broker.db.get(String(retryDispatchRow!.pk), String(retryDispatchRow!.sk)) as
+      (typeof retryDispatchRow & { taskAccessPausedAt?: string; dispatchDuePk?: string }) | undefined;
+    const pausedOutboxCount = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS").length;
+    await persistOriginalEvidencePrimary({ root, kind: "browser-required-access-pause-recovery-response", key: String(retryDispatchRow!.sk),
+      bytes: Buffer.from(retryRecoveryResponse.body, "utf8"), producer: "actual broker workflow-dispatch recovery response after creator access was revoked",
+      sourceCandidateDigest: browserAdmission!.candidateDigest });
+    expect(pausedRetryDispatch?.taskAccessPausedAt).toBeDefined();
+    expect(pausedRetryDispatch?.dispatchDuePk).toBeUndefined();
+    expect(pausedOutboxCount).toBe(checkOutboxesBeforeAccessPause);
+    broker.db.set({ ...browserCreatorGrant!, grantId: randomUUID(), grantedAt: new Date().toISOString() });
+    const restoredRecoveryResponse = await broker.handler({ source: "agentx.workflow-dispatch-recovery" });
+    expect(restoredRecoveryResponse.statusCode).toBe(200);
+    const stillPausedAfterRestore = broker.db.get(String(retryDispatchRow!.pk), String(retryDispatchRow!.sk)) as
+      (typeof retryDispatchRow & { taskAccessPausedAt?: string }) | undefined;
+    const restoredOutboxCount = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS").length;
+    await persistOriginalEvidencePrimary({ root, kind: "browser-required-restoration-no-auto-response", key: String(retryDispatchRow!.sk),
+      bytes: Buffer.from(restoredRecoveryResponse.body, "utf8"), producer: "actual broker recovery response after same creator was restored under a new grant",
+      sourceCandidateDigest: browserAdmission!.candidateDigest });
+    expect(stillPausedAfterRestore?.taskAccessPausedAt).toBeDefined();
+    expect(restoredOutboxCount).toBe(checkOutboxesBeforeAccessPause);
+    ownerChannelAccess = true;
+    const explicitAccessRetryRequestId = randomUUID();
+    const explicitAccessRetryBody = {
+      requestId: explicitAccessRetryRequestId, expectedRevision: queuedRetryWorkflow.revision, candidateDigest: browserAdmission!.candidateDigest,
+      instructions: "Explicitly resume the held E2E verification after current project access was restored.",
+    };
+    const explicitAccessRetry = await postBrowserOwnerAction(`/v1/dev/tasks/${browserTaskId}/workflow/retry`, explicitAccessRetryBody);
+    await persistOriginalEvidencePrimary({ root, kind: "browser-required-explicit-access-retry-response", key: `/v1/dev/tasks/${browserTaskId}/workflow/retry#${explicitAccessRetryRequestId}`,
+      bytes: Buffer.from(explicitAccessRetry.rawBody, "utf8"), producer: "actual authenticated Owner retry that alone resumes the access-paused native CHECKS dispatch",
+      sourceCandidateDigest: browserAdmission!.candidateDigest });
+    expect(explicitAccessRetry.status, explicitAccessRetry.rawBody).toBe(200);
+    // The old paused receipt stays immutable; explicit retry creates a distinct fresh CHECKS dispatch.
+    expect(broker.db.get(String(retryDispatchRow!.pk), String(retryDispatchRow!.sk))).toMatchObject({ taskAccessPausedAt: expect.any(String) });
+    const explicitRetryWorkflow = (explicitAccessRetry.body.task as DeveloperTaskView).workflow;
+    expect(explicitRetryWorkflow).toMatchObject({ stage: "VERIFY", state: "WAITING", revision: queuedRetryWorkflow.revision + 1 });
+    const explicitRetryDispatch = broker.db.find((item) => item.entityType === "WORKFLOW_DISPATCH" && item.taskId === browserTaskId
+      && item.workflowRevision === explicitRetryWorkflow?.revision && item.kind === "CHECKS")[0];
+    expect(explicitRetryDispatch).toBeDefined();
+    const duplicateAccessRetry = await postBrowserOwnerAction(`/v1/dev/tasks/${browserTaskId}/workflow/retry`, explicitAccessRetryBody);
+    await persistOriginalEvidencePrimary({ root, kind: "browser-required-explicit-access-retry-duplicate-response", key: `/v1/dev/tasks/${browserTaskId}/workflow/retry#${explicitAccessRetryRequestId}`,
+      bytes: Buffer.from(duplicateAccessRetry.rawBody, "utf8"), producer: "actual duplicate Owner retry response with the same request ID and payload",
+      sourceCandidateDigest: browserAdmission!.candidateDigest });
+    expect(duplicateAccessRetry.status, duplicateAccessRetry.rawBody).toBe(200);
+    const conflictingAccessRetry = await postBrowserOwnerAction(`/v1/dev/tasks/${browserTaskId}/workflow/retry`, {
+      ...explicitAccessRetryBody, instructions: "Reuse the same retry ID with a conflicting payload.",
+    });
+    expect(conflictingAccessRetry.status, conflictingAccessRetry.rawBody).toBe(409);
+    expect(broker.db.find((item) => item.entityType === "WORKFLOW_DISPATCH" && item.taskId === browserTaskId
+      && item.workflowRevision === explicitRetryWorkflow?.revision && item.kind === "CHECKS")).toHaveLength(1);
+    const explicitRetryRecoveryResponse = await broker.handler({ source: "agentx.workflow-dispatch-recovery" });
+    expect(explicitRetryRecoveryResponse.statusCode).toBe(200);
+    const explicitRetryRecovery = JSON.parse(explicitRetryRecoveryResponse.body) as { attempted: number; dispatched: number };
+    expect(explicitRetryRecovery.dispatched).toBeGreaterThanOrEqual(1);
+    const cancelledRetryOutbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS").at(-1);
+    expect(cancelledRetryOutbox).toBeDefined();
+    const cancelledRetryInvocation = WorkerInvocationSchema.parse(cancelledRetryOutbox!.invocation);
+    expect(cancelledRetryInvocation.operationId).not.toBe(browserChecksInvocation.operationId);
+    const cancelledRetryAdmission = recordOf(cancelledRetryInvocation.payload)?.workflowE2EAdmission as { roundId?: string; groupRunIds?: string[]; candidateDigest?: string } | undefined;
+    expect(cancelledRetryAdmission?.roundId).toBeDefined();
+    expect(cancelledRetryAdmission?.candidateDigest).toBeDefined();
+    expect(cancelledRetryAdmission?.roundId).not.toBe(browserAdmission?.roundId);
+    let liveCancelAttempt: { runningContainer?: { id: string; requestId: string; sourceDigest: string; observedAt: string; inspectSha256: string };
+      preRequestAbortObservedAt?: string;
+      preRequestReceiptSha256?: string;
+      cleanup?: { exitCode: number; stderrSha256: string }; response?: { status: number; rawBody: string }; dispatcher?: unknown; error?: string } | undefined;
+    let finishLiveCancelObserver!: () => void;
+    const liveCancelObserverFinished = new Promise<void>((resolveFinished) => { finishLiveCancelObserver = resolveFinished; });
+    cancelBrowserChecksOnRunning = async (ownedContainer: { containerId: string; requestId: string; sourceDigest: string; observedAt: string; inspectBytes: Uint8Array }) => {
+      if (liveCancelAttempt !== undefined) return;
+      liveCancelAttempt = {};
+      try {
+        const runningReceipt = Buffer.from(ownedContainer.inspectBytes);
+        await persistOriginalEvidencePrimary({ root, kind: "browser-required-owned-container-running-inspect", key: ownedContainer.containerId,
+          bytes: runningReceipt, producer: "original Docker inspect bytes captured by the fixed verifier observer at the running-state check before issuing the normal task cancel",
+          sourceCandidateDigest: cancelledRetryAdmission!.candidateDigest! });
+        const runningContainers = JSON.parse(runningReceipt.toString("utf8")) as Array<{ Id?: string; State?: { Running?: boolean; Status?: string }; Config?: { Labels?: Record<string, string> } }>;
+        const runningContainer = runningContainers[0];
+        const labels = runningContainer?.Config?.Labels ?? {};
+        liveCancelAttempt.runningContainer = { id: ownedContainer.containerId, requestId: ownedContainer.requestId,
+          sourceDigest: ownedContainer.sourceDigest, observedAt: ownedContainer.observedAt, inspectSha256: hash(runningReceipt) };
+        if (!runningContainer || runningContainer.State?.Running !== true || runningContainer.State.Status !== "running"
+          || labels["agentx.owner"] !== "contained-candidate-v1" || runningContainer.Id !== ownedContainer.containerId
+          || labels["agentx.source"] !== ownedContainer.sourceDigest)
+          throw new Error(`owned running inspect did not match callback identity: ${JSON.stringify({ id: runningContainer?.Id,
+            status: runningContainer?.State?.Status, running: runningContainer?.State?.Running, owner: labels["agentx.owner"],
+            source: labels["agentx.source"], receiptId: ownedContainer.containerId, receiptSource: ownedContainer.sourceDigest })}`);
+        const cancelResponse = await postBrowserOwnerAction(`/v1/dev/tasks/${browserTaskId}/cancel`, { requestId: randomUUID() });
+        liveCancelAttempt.response = { status: cancelResponse.status, rawBody: cancelResponse.rawBody };
+        await persistOriginalEvidencePrimary({ root, kind: "browser-required-live-cancel-response", key: `/v1/dev/tasks/${browserTaskId}/cancel`,
+          bytes: Buffer.from(cancelResponse.rawBody, "utf8"), producer: "actual broker HTTP response while a broker-owned candidate container was observed running",
+          sourceCandidateDigest: browserAdmission!.candidateDigest });
+        if (cancelResponse.status !== 200) throw new Error(`task cancel returned ${cancelResponse.status}`);
+        const cancelOutbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
+          && (item.invocation as { kind?: string; payload?: { targetOperationId?: string } } | undefined)?.kind === "cancel"
+          && (item.invocation as { payload?: { targetOperationId?: string } } | undefined)?.payload?.targetOperationId === cancelledRetryInvocation.operationId).at(-1);
+        if (cancelOutbox === undefined) throw new Error("the normal task cancel did not enqueue a signed cancel operation for the running CHECKS operation");
+        await browserChecksPublisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(cancelOutbox) } }] as never });
+        const queuedCancel = broker.db.get(String(cancelOutbox.pk), String(cancelOutbox.sk))!;
+        const dispatchedCancel = await browserChecksDispatcher({ Records: [{ messageId: String(cancelOutbox.id), body: JSON.stringify(queuedCancel) }] });
+        liveCancelAttempt.dispatcher = dispatchedCancel;
+        if (dispatchedCancel.batchItemFailures.length !== 0) throw new Error("worker cancel dispatch was not accepted");
+        for (let attempt = 0; attempt < 400 && !browserChecksCancellation.isCancelled(cancelledRetryInvocation.operationId); attempt += 1) {
+          await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+        }
+        if (!browserChecksCancellation.isCancelled(cancelledRetryInvocation.operationId)) throw new Error("cancel was not observed by the active CHECKS worker before releasing its candidate request barrier");
+        liveCancelAttempt.preRequestAbortObservedAt = new Date().toISOString();
+      } catch (error) {
+        liveCancelAttempt.error = error instanceof Error ? error.message : "live cancel failed";
+      } finally {
+        finishLiveCancelObserver();
+      }
+    };
+    await browserChecksPublisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(cancelledRetryOutbox!) } }] as never });
+    const queuedRetryOutbox = broker.db.get(String(cancelledRetryOutbox!.pk), String(cancelledRetryOutbox!.sk))!;
+    const cancelledRetryDispatch = await browserChecksDispatcher({ Records: [{ messageId: String(cancelledRetryOutbox!.id), body: JSON.stringify(queuedRetryOutbox) }] });
+    expect(cancelledRetryDispatch.batchItemFailures).toEqual([]);
+    for (let index = 0; index < 800; index += 1) {
+      const operation = broker.db.get(`WORKSPACE#${browserWorkspaceId}`, `OPERATION#${cancelledRetryInvocation.operationId}`);
+      if (operation?.status === "CANCELLED" || operation?.status === "INTERRUPTED" || operation?.status === "FAILED") break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    const cancelledRetryOperation = broker.db.get(`WORKSPACE#${browserWorkspaceId}`, `OPERATION#${cancelledRetryInvocation.operationId}`);
+    await Promise.race([liveCancelObserverFinished, new Promise<void>((_resolve, reject) => setTimeout(() => reject(new Error("the owned-container cancel observer did not finish before its bounded wait")), 5_000))]);
+    await writeFile(join(root, "browser-required-live-cancel-state.json"), `${JSON.stringify({ liveCancelAttempt,
+      cancelledRetryOperation, cancellationObserved: browserChecksCancellation.isCancelled(cancelledRetryInvocation.operationId),
+      journal: await browserChecksJournal.list(), cancelOutboxes: broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
+        && (item.invocation as { kind?: string; payload?: { targetOperationId?: string } } | undefined)?.kind === "cancel"
+        && (item.invocation as { payload?: { targetOperationId?: string } } | undefined)?.payload?.targetOperationId === cancelledRetryInvocation.operationId) }, null, 2)}\n`,
+    { mode: 0o600, flag: "wx" });
+    expect(liveCancelAttempt?.response?.status, JSON.stringify({ liveCancelAttempt, retryRecovery, cancelledRetryOperation })).toBe(200);
+    expect(liveCancelAttempt?.error).toBeUndefined();
+    expect(liveCancelAttempt?.preRequestAbortObservedAt, "the active worker abort must be observed before candidate stdin can be written").toBeDefined();
+    expect(cancelledRetryOperation?.status).toMatch(/^(CANCELLED|INTERRUPTED)$/);
+    expect(liveCancelAttempt?.runningContainer, "persisted original inspect must identify the exact owned running candidate before cancel").toBeDefined();
+    let containerStillPresent = false;
+    let cleanupExitCode = 0;
+    let cleanupOutput: Buffer;
+    cleanupOutput = Buffer.alloc(0);
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try {
+        cleanupOutput = execFileSync("docker", ["--host", process.env.DOCKER_HOST!, "inspect", liveCancelAttempt!.runningContainer!.id],
+          { encoding: "buffer", maxBuffer: 1024 * 1024 });
+        containerStillPresent = true;
+      } catch (error) {
+        const result = error as NodeJS.ErrnoException & { status?: number; stderr?: Buffer };
+        cleanupExitCode = result.status ?? -1;
+        cleanupOutput = Buffer.isBuffer(result.stderr) ? result.stderr : Buffer.from(result.message ?? "Docker inspect failed without stderr");
+        if (cleanupExitCode === 1 && /no such (?:container|object)/iu.test(cleanupOutput.toString("utf8"))) {
+          containerStillPresent = false;
+          break;
+        }
+        throw error;
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+    }
+    await persistOriginalEvidencePrimary({ root, kind: "browser-required-owned-container-post-cancel-inspect", key: liveCancelAttempt!.runningContainer!.id,
+      bytes: cleanupOutput, producer: "original Docker inspect stdout or stderr after the admitted E2E cancel terminalized",
+      sourceCandidateDigest: liveCancelAttempt!.runningContainer!.sourceDigest });
+    expect(containerStillPresent, "the exact owned container must be removed after cancellation cleanup").toBe(false);
+    expect(cleanupExitCode).toBe(1);
+    expect(cleanupOutput.toString("utf8")).toMatch(/no such (?:container|object)/iu);
+    liveCancelAttempt.cleanup = { exitCode: cleanupExitCode, stderrSha256: hash(cleanupOutput) };
+    const durableCandidateState = join(homedir(), ".local", "state", "agentx", "contained-candidate-v1");
+    const durableReceiptPaths = (await readdir(durableCandidateState)).filter((name) => name.endsWith(".receipt.json"));
+    const matchingDurableReceipts: { path: string; bytes: Buffer; value: { containerId?: string; aborted?: boolean; requestWritten?: boolean;
+      cleanup?: string; sourceDigest?: string; recordRef?: string } }[] = [];
+    for (const name of durableReceiptPaths) {
+      const path = join(durableCandidateState, name);
+      const bytes = await readFile(path);
+      const value = JSON.parse(bytes.toString("utf8")) as { containerId?: string; aborted?: boolean; requestWritten?: boolean;
+        cleanup?: string; sourceDigest?: string; recordRef?: string };
+      if (value.containerId === liveCancelAttempt.runningContainer!.id) matchingDurableReceipts.push({ path, bytes, value });
+    }
+    expect(matchingDurableReceipts).toHaveLength(1);
+    const durableAbortReceipt = matchingDurableReceipts[0]!;
+    expect(durableAbortReceipt.value).toMatchObject({ requestWritten: false, aborted: true, cleanup: "confirmed",
+      containerId: liveCancelAttempt.runningContainer!.id, sourceDigest: liveCancelAttempt.runningContainer!.sourceDigest });
+    await persistOriginalEvidencePrimary({ root, kind: "browser-required-pre-request-abort-receipt", key: liveCancelAttempt.runningContainer!.id,
+      bytes: durableAbortReceipt.bytes, producer: "original durable contained-candidate process receipt matched by exact owned container ID after the pre-stdin abort and cleanup",
+      sourceCandidateDigest: cancelledRetryAdmission!.candidateDigest! });
+    liveCancelAttempt.preRequestReceiptSha256 = hash(durableAbortReceipt.bytes);
+    const lateGroupBytes = Buffer.from("late evidence must remain bound to the cancelled E2E operation", "utf8");
+    const lateGroupRequest = { stage: "init", groupRunId: cancelledRetryAdmission!.groupRunIds![0], totalBytes: lateGroupBytes.byteLength,
+      chunkCount: 1, sha256: hash(lateGroupBytes) };
+    const lateGroupResponse = await broker.handler({ version: "2.0", routeKey: "POST /v1/internal/workspaces/{workspaceId}/operations/{operationId}/e2e-evidence",
+      rawPath: `/v1/internal/workspaces/${browserWorkspaceId}/operations/${cancelledRetryInvocation.operationId}/e2e-evidence`,
+      headers: { "content-type": "application/json", "x-agentx-callback-capability": cancelledRetryInvocation.callbackCapability },
+      body: JSON.stringify(lateGroupRequest), requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    await persistOriginalEvidencePrimary({ root, kind: "browser-required-late-cancelled-group-request", key: cancelledRetryInvocation.operationId,
+      bytes: Buffer.from(JSON.stringify(lateGroupRequest)), producer: "actual late group-evidence callback request with the original signed CHECKS capability",
+      sourceCandidateDigest: cancelledRetryAdmission!.candidateDigest! });
+    await persistOriginalEvidencePrimary({ root, kind: "browser-required-late-cancelled-group-response", key: cancelledRetryInvocation.operationId,
+      bytes: Buffer.from(lateGroupResponse.body, "utf8"), producer: "actual broker response to a late group-evidence callback after cancellation",
+      sourceCandidateDigest: cancelledRetryAdmission!.candidateDigest! });
+    expect(lateGroupResponse.statusCode).toBeGreaterThanOrEqual(400);
+    expect(broker.db.get(`WORKSPACE#${browserWorkspaceId}`, `WORKFLOW_E2E_UPLOAD#${cancelledRetryInvocation.operationId}#${cancelledRetryAdmission!.groupRunIds![0]}`))
+      .toBeUndefined();
+    expect(cancelledRetryAdmission?.groupRunIds).toHaveLength(2);
+    const workflowAfterLiveCancel = (broker.db.get(`DEVTASK#${browserTaskId}`, "META") as { workflow: { stage: string; state: string;
+      e2e?: { qualifiedRound?: unknown; currentRoundId?: string } } }).workflow;
+    expect(workflowAfterLiveCancel).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    expect(workflowAfterLiveCancel.e2e?.qualifiedRound).toBeUndefined();
+    expect(workflowAfterLiveCancel.e2e?.qualifiedRound).toBeUndefined();
+    const browserRetryAgainRequestId = randomUUID();
+    const browserRetryAgain = await postBrowserOwnerAction(`/v1/dev/tasks/${browserTaskId}/workflow/retry`, {
+      requestId: browserRetryAgainRequestId, expectedRevision: workflowAfterLiveCancel ? (broker.db.get(`DEVTASK#${browserTaskId}`, "META") as { workflow: { revision: number } }).workflow.revision : 0,
+      instructions: "Start a fresh round after the cancelled attempt; preserve the approved browser requirement.",
+    });
+    await persistOriginalEvidencePrimary({ root, kind: "browser-required-owner-retry-after-cancel-response", key: `/v1/dev/tasks/${browserTaskId}/workflow/retry`,
+      bytes: Buffer.from(browserRetryAgain.rawBody, "utf8"), producer: "actual Owner retry response after the running native E2E operation was cancelled",
+      sourceCandidateDigest: browserAdmission!.candidateDigest });
+    expect(browserRetryAgain.status, browserRetryAgain.rawBody).toBe(200);
+    expect((browserRetryAgain.body.task as DeveloperTaskView).workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+    cancelBrowserChecksOnRunning = undefined;
+    const successfulRetryRecoveryResponse = await broker.handler({ source: "agentx.workflow-dispatch-recovery" });
+    expect(successfulRetryRecoveryResponse.statusCode).toBe(200);
+    const successfulRetryOutbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
+      && (item.invocation as { kind?: string; payload?: { workflowMode?: string } } | undefined)?.kind === "task"
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS").at(-1);
+    expect(successfulRetryOutbox).toBeDefined();
+    const successfulRetryInvocation = WorkerInvocationSchema.parse(successfulRetryOutbox!.invocation);
+    const successfulRetryAdmission = recordOf(successfulRetryInvocation.payload)?.workflowE2EAdmission as { roundId?: string } | undefined;
+    expect(successfulRetryAdmission?.roundId).toBeDefined();
+    expect(successfulRetryAdmission?.roundId).not.toBe(cancelledRetryAdmission?.roundId);
+    await browserChecksPublisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(successfulRetryOutbox!) } }] as never });
+    const queuedSuccessfulRetry = broker.db.get(String(successfulRetryOutbox!.pk), String(successfulRetryOutbox!.sk))!;
+    const successfulRetryDispatch = await browserChecksDispatcher({ Records: [{ messageId: String(successfulRetryOutbox!.id), body: JSON.stringify(queuedSuccessfulRetry) }] });
+    expect(successfulRetryDispatch.batchItemFailures).toEqual([]);
+    for (let index = 0; index < 800; index += 1) {
+      const operation = broker.db.get(`WORKSPACE#${browserWorkspaceId}`, `OPERATION#${successfulRetryInvocation.operationId}`);
+      if (operation?.status === "SUCCEEDED" || operation?.status === "FAILED") break;
+      await new Promise((resolveWait) => setTimeout(resolveWait, 25));
+    }
+    const successfulRetryOperation = broker.db.get(`WORKSPACE#${browserWorkspaceId}`, `OPERATION#${successfulRetryInvocation.operationId}`);
+    const successfulRetryWorkflow = (broker.db.get(`DEVTASK#${browserTaskId}`, "META") as { workflow: { stage: string; state: string;
+      e2e?: { qualifiedRound?: unknown } } }).workflow;
+    expect(successfulRetryOperation?.status).toBe("SUCCEEDED");
+    expect(successfulRetryWorkflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    expect(successfulRetryWorkflow.e2e?.qualifiedRound).toBeUndefined();
+    expect(broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "REVIEW")).toHaveLength(0);
+    await writeFile(join(root, "browser-required-cancel-retry-receipt.json"), `${JSON.stringify({ taskId: browserTaskId,
+      firstRetryRequestId: browserRetryRequestId, firstRetryRevision: queuedRetryWorkflow?.revision, firstRetryDispatch: retryRecovery,
+      creatorGrantBeforePause: browserCreatorGrant?.grantId, creatorGrantAfterRestore: broker.db.get(browserCreatorKey.pk, browserCreatorKey.sk)?.grantId,
+      pausedRetryDispatch, pausedOutboxCount, stillPausedAfterRestore, restoredOutboxCount, explicitAccessRetryRequestId,
+      explicitAccessRetryStatus: explicitAccessRetry.status, explicitRetryRecovery,
+      cancelledOperationId: cancelledRetryInvocation.operationId, cancelledRoundId: cancelledRetryAdmission?.roundId,
+      cancelResponse: liveCancelAttempt?.response, cancelDispatch: liveCancelAttempt?.dispatcher, cancelError: liveCancelAttempt?.error,
+      preRequestAbortObservedAt: liveCancelAttempt?.preRequestAbortObservedAt, preRequestReceiptSha256: liveCancelAttempt?.preRequestReceiptSha256,
+      cancelledOperation: cancelledRetryOperation, retryAgainRequestId: browserRetryAgainRequestId,
+      successfulRetryOperationId: successfulRetryInvocation.operationId, successfulRetryRoundId: successfulRetryAdmission?.roundId,
+      successfulRetryDispatch, successfulRetryOperation, finalWorkflow: successfulRetryWorkflow }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     expect(browserViewerProjection?.shared.e2e.status).toBe("UNKNOWN");
     const ownerPageApiCall = async (method: string, path: string, headers: Record<string, string>, body?: unknown) => {
       const response = await broker.handler({ version: "2.0", routeKey: "ANY /review/{proxy+}", rawPath: path, rawQueryString: "", headers,
