@@ -159,9 +159,39 @@ describe("the named TEST proof-only installation gate", () => {
     const legacyVariables = legacyBrokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
     expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy has no workflow flag").toBeUndefined();
 
-    expect(parentRemainderDigest(named)).toBe("80dc8e7ce5dd33accdf00adf195b66a40c94f534bc9fa5ffbc39b959ce0b18e1");
-    expect(parentRemainderDigest(foreign)).toBe("9ea051a264736c3ce74ee99cba71fe580119087a5399344f455b9a7d2b6a8cc4");
-    expect(parentRemainderDigest(legacy)).toBe("59e51035978191661fbeb033626a3c12430cdcc80cf67575c799ad768aa132ec");
+    const digestCases = [
+      {
+        label: "named",
+        template: named,
+        withRoute: "fb2ed5726ab117b68d0c91cef2ae3d53a2a02587035789fd0cb761813f373714",
+        withoutRoute: "80dc8e7ce5dd33accdf00adf195b66a40c94f534bc9fa5ffbc39b959ce0b18e1",
+      },
+      {
+        label: "foreign",
+        template: foreign,
+        withRoute: "099fbac6b5c6e54e421093f0eb9ce9e877b5a952bae8681cfff7f3676ec724d6",
+        withoutRoute: "9ea051a264736c3ce74ee99cba71fe580119087a5399344f455b9a7d2b6a8cc4",
+      },
+      {
+        label: "legacy",
+        template: legacy,
+        withRoute: "90538bb14942947a38a426cbad433627680a1a44e41e5a3cce7a836a1953bc2b",
+        withoutRoute: "59e51035978191661fbeb033626a3c12430cdcc80cf67575c799ad768aa132ec",
+      },
+    ] as const;
+    for (const { label, template, withRoute, withoutRoute } of digestCases) {
+      expect(template.Resources?.ProjectSetupExecutionReadRoute, `${label} has the approved setup read route`).toMatchObject({
+        Type: "AWS::ApiGatewayV2::Route",
+        Properties: {
+          AuthorizationType: "NONE",
+          RouteKey: "GET /v1/internal/project-setups/{setupExecutionId}/execution",
+        },
+      });
+      expect(parentRemainderDigest(template), `${label} parent remainder with the route`).toBe(withRoute);
+      const priorRemainder = structuredClone(template);
+      delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;
+      expect(parentRemainderDigest(priorRemainder), `${label} parent remainder with only the approved route removed`).toBe(withoutRoute);
+    }
   });
 
   it("conditions the isolated proof resources on the switch, exact account and region", () => {
