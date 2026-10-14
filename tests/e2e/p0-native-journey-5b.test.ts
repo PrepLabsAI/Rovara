@@ -65,8 +65,13 @@ import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-
 import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies.js";
 import { persistOriginalEvidencePrimary, persistOriginalMapPrimary } from "../support/p0-evidence-capture.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
+import { observeInstalledRuntimeManifestForHost } from "@agentx/verifier";
 
-beforeAll(async () => { await loadSlackBroker(); });
+let installedRuntimeManifestDigest: string;
+beforeAll(async () => {
+  await loadSlackBroker();
+  installedRuntimeManifestDigest = (await observeInstalledRuntimeManifestForHost(process.platform, process.arch)).sha256;
+});
 afterEach(() => vi.unstubAllGlobals());
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
@@ -329,7 +334,7 @@ describe("P0 normal project onboarding journey", () => {
     broker.db.set({ pk: `DEVELOPER#${taskViewerDeveloperId}`, sk: "META", developerId: taskViewerDeveloperId, provider: "slack", displayName: "Task Viewer", firstSignInAt: "fixture", lastSignInAt: "fixture", revoked: false, slackUserId: taskViewerSlackId });
     const localRunnerEnvironment = { ci: true as const, trustNoticeShown: false as const, os: `${process.platform} ${osRelease()}`, arch: process.arch, runtime: `node ${process.version}` };
     broker.db.set({ ...runtimeCatalogKey, schemaVersion: 1, entityType: "PROJECT_SETUP_RUNTIME", runtimeCatalogId, catalogRevision: 1,
-      bindingDigest: projectSetupBindingDigest(runtimeBinding), binding: runtimeBinding, manifestDigest: hash(Buffer.from("fixture-runtime-manifest")),
+      bindingDigest: projectSetupBindingDigest(runtimeBinding), binding: runtimeBinding, manifestDigest: installedRuntimeManifestDigest,
       runnerEnvironment: localRunnerEnvironment, runnerEnvironmentDigest: hash(Buffer.from(canonicalJson(localRunnerEnvironment))),
       runnerToolchain: localRunnerToolchain, runnerToolchainDigest: hash(Buffer.from(canonicalJson(localRunnerToolchain))),
       endpoint: "http://127.0.0.1:8080", generation: 1, transportCorrelationId: randomUUID(), supportedSetupScopes: ["source-interface"],
@@ -385,7 +390,7 @@ describe("P0 normal project onboarding journey", () => {
       sk: e2eFeatureVerifierKey(featureRuntimeCatalogId, registeredE2EPolicy.defaultSandboxProfileId).sk,
       schemaVersion: 1, entityType: "E2E_FEATURE_VERIFIER", runtimeCatalogId: featureRuntimeCatalogId, catalogRevision: 1,
       profileId: registeredE2EPolicy.defaultSandboxProfileId, bindingDigest: projectSetupBindingDigest(runtimeBinding), binding: runtimeBinding,
-      manifestDigest: hash(Buffer.from("fixture-feature-runtime-manifest")), runnerEnvironmentDigest: hash(Buffer.from(canonicalJson(localRunnerEnvironment))),
+      manifestDigest: installedRuntimeManifestDigest, runnerEnvironmentDigest: hash(Buffer.from(canonicalJson(localRunnerEnvironment))),
       runnerEnvironment: localRunnerEnvironment, runnerToolchainDigest: hash(Buffer.from(canonicalJson(localRunnerToolchain))), runnerToolchain: localRunnerToolchain,
       endpoint: "http://127.0.0.1:8081", generation: 1, transportCorrelationId: randomUUID(), supportedFeatureScopes: [E2E_FEATURE_PROCESS_RESPONSE_SCOPE],
       state: "READY", qualifiedAt: new Date(Date.now() - 1_000).toISOString(), expiresAt: new Date(Date.now() + 60 * 60_000).toISOString() };

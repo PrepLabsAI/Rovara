@@ -32,8 +32,13 @@ import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntim
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
 import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies.js";
 import { persistOriginalEvidencePrimary, persistOriginalMapPrimary } from "../support/p0-evidence-capture.js";
+import { observeInstalledRuntimeManifestForHost } from "@agentx/verifier";
 
-beforeAll(async () => { await loadSlackBroker(); });
+let installedRuntimeManifestDigest: string;
+beforeAll(async () => {
+  await loadSlackBroker();
+  installedRuntimeManifestDigest = (await observeInstalledRuntimeManifestForHost(process.platform, process.arch)).sha256;
+});
 afterEach(() => vi.unstubAllGlobals());
 
 const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
@@ -166,7 +171,7 @@ describe("P0 normal project onboarding journey", () => {
     broker.db.set({ pk: `DEVELOPER#${ownerDeveloperId}`, sk: "META", developerId: ownerDeveloperId, provider: "oidc", displayName: "Owner", firstSignInAt: "fixture", lastSignInAt: "fixture", revoked: false });
     const localRunnerEnvironment = { ci: true as const, trustNoticeShown: false as const, os: `${process.platform} ${osRelease()}`, arch: process.arch, runtime: `node ${process.version}` };
     broker.db.set({ ...runtimeCatalogKey, schemaVersion: 1, entityType: "PROJECT_SETUP_RUNTIME", runtimeCatalogId, catalogRevision: 1,
-      bindingDigest: projectSetupBindingDigest(runtimeBinding), binding: runtimeBinding, manifestDigest: hash(Buffer.from("fixture-runtime-manifest")),
+      bindingDigest: projectSetupBindingDigest(runtimeBinding), binding: runtimeBinding, manifestDigest: installedRuntimeManifestDigest,
       runnerEnvironment: localRunnerEnvironment, runnerEnvironmentDigest: hash(Buffer.from(canonicalJson(localRunnerEnvironment))),
       runnerToolchain: localRunnerToolchain, runnerToolchainDigest: hash(Buffer.from(canonicalJson(localRunnerToolchain))),
       endpoint: "http://127.0.0.1:8080", generation: 1, transportCorrelationId: randomUUID(), supportedSetupScopes: ["source-interface"],
