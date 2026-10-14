@@ -12,8 +12,10 @@ import { createE2EWorkerSession } from "./runtime-session.js";
 import { createE2EAppAdapterPacket } from "./runtime-adapter.js";
 import { evaluateE2EAssertions } from "./runtime-assertions.js";
 import { runContainedCandidate } from "./contained-candidate.js";
+import { CONTAINED_RUNTIME_PROFILE } from "./container-envelope.js";
 
 const MAX_OUTPUT = 4 * 1024 * 1024;
+const INSTALL_QUALIFICATION_SOURCE_SHA256 = "a7b170213977472347a52646b1d7980a312fa68d08fc52cbbfb48c0b0571b7cd";
 const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 
 async function writeOwnedFile(path: string, bytes: Uint8Array | string): Promise<void> {
@@ -47,6 +49,8 @@ export type E2EActualCliRun = Readonly<{
   launchConfigDigest: string;
   fixedAssetDigests: Readonly<Record<string, string>>;
   publicList: unknown;
+  listStdoutBytes: Uint8Array;
+  listStderrBytes: Uint8Array;
   selected: number;
   filtered: number;
   rawReportBytes: Uint8Array;
@@ -69,6 +73,8 @@ type E2EActualCliInput = Readonly<{
   selection: E2ESelectionPacket;
   runnerToolchain: ProjectSetupRunnerToolchain;
   hostRequestIds: ReadonlyMap<string, string>;
+  /** Host-generated fresh challenge-bound probe payloads for the packaged installation qualifier. */
+  hostProbeInputs?: ReadonlyMap<string, unknown>;
   sourceRoot: string;
   evidenceDirectory: string;
   deadlineAt: number;
@@ -80,6 +86,16 @@ export async function runE2EActualCli(input: E2EActualCliInput): Promise<E2EActu
   return runE2EActualCliWithSessionFactory(input, createE2EWorkerSession);
 }
 
+/** Links dependencies from the installed worker package root, never from a mounted candidate checkout. */
+export async function linkInstalledRuntimeDependencies(project: string, sourceRoot: string): Promise<string> {
+  const installedRuntimeRoot = CONTAINED_RUNTIME_PROFILE?.installedRuntimeRoot ?? resolve(sourceRoot);
+  const dependencyRoot = join(installedRuntimeRoot, "node_modules");
+  const info = await import("node:fs/promises").then(({ lstat }) => lstat(dependencyRoot));
+  if (!info.isDirectory() || info.isSymbolicLink() || await realpath(dependencyRoot) !== dependencyRoot) throw new Error("installed runner dependencies are unavailable at the fixed runtime root");
+  await symlink(dependencyRoot, join(project, "node_modules"), "dir");
+  return dependencyRoot;
+}
+
 /** Trusted-host-only runner seam for proving cleanup-pending qualification; never receives app data. */
 export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput, sessionFactory: typeof createE2EWorkerSession): Promise<E2EActualCliRun> {
   const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse(input.runnerToolchain);
@@ -87,7 +103,10 @@ export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput
     || runnerToolchain.platform !== process.platform || runnerToolchain.arch !== process.arch
     || process.version !== "v22.23.2" || !isAbsolute(runnerToolchain.execPath)) throw new Error("actual E2E runner differs from its exact ready-registry Node toolchain identity");
   const snapshot = validateE2ECompiledRuntimeAdmission(input.compiled, input.snapshot);
+  if (input.hostProbeInputs !== undefined) validateInstallQualificationProbeInputs(input.compiled, snapshot, input.hostRequestIds, input.hostProbeInputs);
   const evidenceDirectory = resolve(input.evidenceDirectory);
+  const installedRuntimeRoot = CONTAINED_RUNTIME_PROFILE?.installedRuntimeRoot ?? resolve(input.sourceRoot);
+  if (!isAbsolute(installedRuntimeRoot)) throw new Error("installed runner root must be an absolute trusted runtime path");
   if (await realpath(evidenceDirectory) !== evidenceDirectory) throw new Error("acceptance evidence directory must be canonical");
   const evidenceInfo = await import("node:fs/promises").then(({ lstat }) => lstat(evidenceDirectory));
   if (!evidenceInfo.isDirectory() || evidenceInfo.isSymbolicLink() || (evidenceInfo.mode & 0o077) !== 0 || evidenceInfo.uid !== process.getuid?.()) throw new Error("acceptance evidence directory must be a fresh private owned directory");
@@ -99,7 +118,7 @@ export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput
   await mkdir(project, { mode: 0o700 });
   await mkdir(tmp, { mode: 0o700 });
   await mkdir(home, { mode: 0o700 });
-  await symlink(join(resolve(input.sourceRoot), "node_modules"), join(project, "node_modules"), "dir");
+  await linkInstalledRuntimeDependencies(project, input.sourceRoot);
   const capturePath = join(project, `run-start-${launchId}.jsonl`);
   const bridgePath = join(project, "worker-bridge.mjs");
   const assetPaths = { launchId, capturePath, workerBridgePath: bridgePath };
@@ -148,8 +167,8 @@ export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput
   const declaredMockComponentIds = [...new Set([...adapterPackets.values()].flatMap((packet) => packet.declaredMockComponentIds))].sort();
   const preExecution = { schemaVersion: "e2e-pre-execution-primary/v1", launchId, runnerToolchain, candidate: { candidateDigest: snapshot.candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, planDigest: input.compiled.bundle.planDigest, sourceSnapshot: snapshot.sources.map((item) => ({ path: item.path, sha256: item.sha256, byteLength: item.bytes.byteLength, kind: item.kind })) }, compiler: { inventory: input.compiled.inventory, files: [...input.compiled.files].map(([path, content]) => ({ path, sha256: sha(Buffer.from(content)), byteLength: Buffer.byteLength(content) })) }, runtime: { launchConfigDigest: assets.launchConfigDigest, fixedAssetDigests: assets.assetDigests }, selection: input.selection, requests: [...input.compiled.hostRequestPayloads].map(([caseId, payload]) => ({ caseId, payload, payloadSha256: sha(Buffer.from(canonicalJson(payload))), logicalRequestId: input.hostRequestIds.get(caseId) ?? null })), assertions: input.compiled.expectedCases.map((expected) => ({ caseId: expected.caseId, assertionDigests: expected.assertionDigests })), adapterPrimaries: [...adapterPrimaryPaths].map(([caseId, path]) => ({ caseId, path })), declaredMockComponentIds, observedConsumedMockComponentIds: [], harnessSource: harnessPrimary ? { path: harnessPrimary, sha256: harnessDigest } : null };
   await writeOwnedFile(join(evidenceDirectory, `pre-execution-${launchId}.json`), `${JSON.stringify(preExecution, null, 2)}\n`);
-  const cliPath = join(resolve(input.sourceRoot), "node_modules/e2e/dist/cli/bin.js");
-  const pkg = JSON.parse(await readFile(join(resolve(input.sourceRoot), "node_modules/e2e/package.json"), "utf8")) as { version?: unknown };
+  const cliPath = join(installedRuntimeRoot, "node_modules/e2e/dist/cli/bin.js");
+  const pkg = JSON.parse(await readFile(join(installedRuntimeRoot, "node_modules/e2e/package.json"), "utf8")) as { version?: unknown };
   if (pkg.version !== "0.20.0") throw new Error("installed e2e package does not match pinned 0.20.0");
   const capability = randomBytes(32).toString("hex");
   const sessionDirectory = await import("node:fs/promises").then(async ({ mkdtemp, chmod, realpath }) => { const dir = await mkdtemp("/tmp/e2es-"); await chmod(dir, 0o700); return realpath(dir); });
@@ -168,7 +187,7 @@ export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput
     if (!packet || packet.status !== "ready" || !packet.packet) throw new Error(packet?.reason ?? "candidate adapter is unavailable");
     const packetPrimary = adapterPrimaryPaths.get(caseId);
     if (!packetPrimary) throw new Error("candidate adapter evidence primary was not pre-created");
-    const execution = await runContainedCandidate(packet.packet, { requestId: hostRequestId, input: expected && scenario.steps[0]?.kind === "invoke-contract" ? scenario.steps[0].input : null }, {
+    const execution = await runContainedCandidate(packet.packet, { requestId: hostRequestId, input: input.hostProbeInputs?.has(caseId) ? input.hostProbeInputs.get(caseId) : expected && scenario.steps[0]?.kind === "invoke-contract" ? scenario.steps[0].input : null }, {
       signal: input.signal, ...(input.onOwnedContainerRunning === undefined ? {} : { onOwnedContainerRunning: input.onOwnedContainerRunning }),
     });
     const observation = execution.observation;
@@ -198,7 +217,7 @@ export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput
     captures.push(capture);
     return observation.output;
   } });
-  const env: NodeJS.ProcessEnv = { PATH: "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin", HOME: home, TMPDIR: tmp, CI: "1", E2E_TELEMETRY_DISABLED: "1", DO_NOT_TRACK: "1", AGENTX_E2E_SOCKET: session.socketPath, AGENTX_E2E_WORKER_CAPABILITY: capability, NODE_OPTIONS: `--import=${bridgePath}` };
+  const env: NodeJS.ProcessEnv = { PATH: CONTAINED_RUNTIME_PROFILE?.commandPath ?? "/usr/bin:/bin", HOME: home, TMPDIR: tmp, CI: "1", E2E_TELEMETRY_DISABLED: "1", DO_NOT_TRACK: "1", AGENTX_E2E_SOCKET: session.socketPath, AGENTX_E2E_WORKER_CAPABILITY: capability, NODE_OPTIONS: `--import=${bridgePath}` };
   const config = join(project, "runtime-config.mjs");
   const listArgs = [cliPath, "list", "--config", config, "--reporter", "json"];
   const runArgs = [cliPath, "run", "--config", config, "--reporter", "json", "--output", ".agentx-run-output", "--no-cache", "--workers", "1", "--retries", "0"];
@@ -245,9 +264,39 @@ export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput
     const receipt = { evidenceType: "actual-pinned-e2e-cli-runtime/v1", launchId, node: { ...runnerToolchain, argv: process.argv }, cli: { path: cliPath, version: pkg.version, listArgv: listArgs, runArgv: runArgs }, runtime: { launchConfigDigest: assets.launchConfigDigest, compilerConfigDigest: input.compiled.expectedConfigDigest, fixedAssetDigests: assets.assetDigests }, list: { status: list.status, signal: list.signal, stdoutSha256: sha(list.stdout), stderrSha256: sha(list.stderr), selected: selected.selected.length, filtered: selected.filtered.length }, publicList: publicListSnapshot, mockInventory: { groupManifestDigest: input.compiled.group.mockManifestDigest, declaredMockComponentIds, observedConsumedMockComponentIds: [] }, run: { status: execution.status, signal: execution.signal, timedOut: execution.timedOut, aborted: execution.aborted, startedAt: execution.startedAt, finishedAt: execution.finishedAt, stdoutSha256: sha(execution.stdout), stderrSha256: sha(execution.stderr), stdoutBytes: execution.stdout.byteLength, stderrBytes: execution.stderr.byteLength }, workerCleanup: { confirmed: cleanupConfirmed, serverListening: cleanupReadback.serverListening, socketPresent: cleanupReadback.socket, aliasEntryPresent: cleanupReadback.aliasEntryPresent, privateSentinelPresent: cleanupReadback.privateSentinelPresent, path: cleanupReadback.path, privatePath: cleanupReadback.privatePath, socketInode: cleanupReadback.inode, socketDevice: cleanupReadback.device, sentinelInode: cleanupReadback.sentinelInode, sentinelDevice: cleanupReadback.sentinelDevice, parentDevice: cleanupReadback.parentDevice, parentInode: cleanupReadback.parentInode, parentUid: cleanupReadback.parentUid }, runStartCapture: captureBytes.toString("utf8"), runStartCaptureStatus: runStartCapture.status, assertionReceipts: receiptRows, candidateCaptures: captures };
     await writeOwnedFile(join(evidenceDirectory, `actual-cli-receipt-${launchId}.json`), `${JSON.stringify(receipt, null, 2)}\n`);
     if (execution.signal || execution.timedOut || execution.aborted) throw new Error("actual pinned CLI run was interrupted before clean process completion");
-    return Object.freeze({ launchId, runnerToolchain, launchConfigDigest: assets.launchConfigDigest, fixedAssetDigests: assets.assetDigests, publicList: publicListSnapshot, selected: selected.selected.length, filtered: selected.filtered.length, rawReportBytes: new Uint8Array(execution.stdout), runStartCaptureBytes: new Uint8Array(captureBytes), runStartCapture, assertionReceipts: Object.freeze(receiptRows), declaredMockComponentIds: Object.freeze(declaredMockComponentIds), candidateCaptures: Object.freeze(captures), listProcess: Object.freeze({ status: list.status, signal: list.signal, startedAt: list.startedAt, finishedAt: list.finishedAt, stdoutSha256: sha(list.stdout), stderrSha256: sha(list.stderr) }), runProcess: Object.freeze({ status: execution.status, signal: execution.signal, timedOut: execution.timedOut, aborted: execution.aborted, startedAt: execution.startedAt, finishedAt: execution.finishedAt, stdoutSha256: sha(execution.stdout), stderrSha256: sha(execution.stderr), stdoutBytes: execution.stdout.byteLength, stderrBytes: execution.stderr.byteLength }), cleanupConfirmed, cleanupServerListening: cleanupReadback.serverListening, evidenceDirectory });
+    return Object.freeze({ launchId, runnerToolchain, launchConfigDigest: assets.launchConfigDigest, fixedAssetDigests: assets.assetDigests, publicList: publicListSnapshot, listStdoutBytes: new Uint8Array(list.stdout), listStderrBytes: new Uint8Array(list.stderr), selected: selected.selected.length, filtered: selected.filtered.length, rawReportBytes: new Uint8Array(execution.stdout), runStartCaptureBytes: new Uint8Array(captureBytes), runStartCapture, assertionReceipts: Object.freeze(receiptRows), declaredMockComponentIds: Object.freeze(declaredMockComponentIds), candidateCaptures: Object.freeze(captures), listProcess: Object.freeze({ status: list.status, signal: list.signal, startedAt: list.startedAt, finishedAt: list.finishedAt, stdoutSha256: sha(list.stdout), stderrSha256: sha(list.stderr) }), runProcess: Object.freeze({ status: execution.status, signal: execution.signal, timedOut: execution.timedOut, aborted: execution.aborted, startedAt: execution.startedAt, finishedAt: execution.finishedAt, stdoutSha256: sha(execution.stdout), stderrSha256: sha(execution.stderr), stdoutBytes: execution.stdout.byteLength, stderrBytes: execution.stderr.byteLength }), cleanupConfirmed, cleanupServerListening: cleanupReadback.serverListening, evidenceDirectory });
   } finally {
     const closed = await session.close();
     if (closed) await rmdir(sessionDirectory);
   }
+}
+
+/** The host-only override is sealed to the immutable packaged install fixture; it cannot alter ordinary runs. */
+function validateInstallQualificationProbeInputs(compiled: E2ECompiledSuite, snapshot: E2ESourceSnapshot, requestIds: ReadonlyMap<string, string>, probeInputs: ReadonlyMap<string, unknown>): void {
+  const repository = snapshot.candidate.repositories[0];
+  const manifest = snapshot.sources.find((source) => source.path === "apps/qualification/package.json");
+  const source = snapshot.sources.find((item) => item.path === "apps/qualification/src/rows.js");
+  if (snapshot.candidate.repositories.length !== 1 || repository?.repositoryId !== "agentx/runtime-install-qualification"
+    || repository.commitSha !== "a".repeat(40) || repository.treeSha !== "b".repeat(40)
+    || snapshot.treePaths.length !== 2 || !manifest || !source || manifest.kind !== "blob" || source.kind !== "blob"
+    || sha(source.bytes) !== INSTALL_QUALIFICATION_SOURCE_SHA256
+    || manifest.bytes.toString() !== JSON.stringify({ name: "runtime-install-qualification", exports: { "./rows": "./src/rows.js" } })) throw new Error("challenge-bound host probe inputs are permitted only for the immutable packaged runtime qualification candidate");
+  const expectedScenarios = ["runtime-source-interface", "runtime-feature-positive", "runtime-feature-negative"];
+  if (compiled.bundle.scenarios.length !== 3 || compiled.expectedCases.length !== 3 || probeInputs.size !== 3 || requestIds.size !== 3
+    || compiled.bundle.scenarios.some((scenario, index) => scenario.scenarioId !== expectedScenarios[index])) throw new Error("challenge-bound host probe inputs require the exact three-case installed qualification suite");
+  const challengeIds = new Set<string>();
+  for (const expectedCase of compiled.expectedCases) {
+    const value = probeInputs.get(expectedCase.caseId);
+    const requestId = requestIds.get(expectedCase.caseId);
+    const scenario = compiled.bundle.scenarios.find((item) => item.scenarioId === expectedCase.scenarioId);
+    if (!value || typeof value !== "object" || Array.isArray(value) || !scenario || typeof requestId !== "string") throw new Error("challenge-bound host probe input has no exact admitted case identity");
+    const payload = value as Record<string, unknown>;
+    const expectedProbe = expectedCase.scenarioId === expectedScenarios[0] ? "source-interface" : expectedCase.scenarioId === expectedScenarios[1] ? "positive" : "negative";
+    if (Object.keys(payload).sort().join(",") !== "qualificationChallengeDigest,qualificationChallengeId,qualificationProbe,qualificationRequestId"
+      || typeof payload.qualificationChallengeId !== "string" || !/^[0-9a-f-]{36}$/.test(payload.qualificationChallengeId)
+      || typeof payload.qualificationChallengeDigest !== "string" || !/^[a-f0-9]{64}$/.test(payload.qualificationChallengeDigest)
+      || payload.qualificationProbe !== expectedProbe || payload.qualificationRequestId !== requestId || !/^[0-9a-f-]{36}$/.test(requestId)) throw new Error("challenge-bound host probe input is malformed, stale, or not bound to its logical request identity");
+    challengeIds.add(payload.qualificationChallengeId);
+  }
+  if (challengeIds.size !== 1) throw new Error("all qualification probes must be bound to one fresh broker challenge");
 }

@@ -7,7 +7,7 @@ import {
   canonicalJson, e2eScenarioBundleDigest, selectE2EExecutionPlan, verifyE2ESourceSnapshot,
   type E2ESourceSnapshot, type WorkerInvocation,
 } from "@agentx/contracts";
-import { collectE2EActualCliRun, compileE2EScenarios, e2ePrivateTransferMaxBytes, e2eSnapshotSourceDigest, runE2EActualCli } from "@agentx/verifier";
+import { collectE2EActualCliRun, compileE2EScenarios, e2ePrivateTransferMaxBytes, e2eSnapshotSourceDigest, observeInstalledRuntimeManifestForHost, runE2EActualCli } from "@agentx/verifier";
 
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const MAX_CONCURRENT_E2E_GROUPS = 2;
@@ -69,6 +69,10 @@ export async function executeWorkflowE2EChecks(input: {
   const runtime = admission.runtime;
   const runnerEnvironment = ProjectSetupRunnerEnvironmentSchema.parse(runtime.runnerEnvironment);
   const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse(runtime.runnerToolchain);
+  const expectedManifestDigest = typeof runtime.manifestDigest === "string" ? runtime.manifestDigest : typeof runtime.runtimeManifestDigest === "string" ? runtime.runtimeManifestDigest : undefined;
+  if (!expectedManifestDigest || !/^[a-f0-9]{64}$/.test(expectedManifestDigest)) throw new Error("native E2E admission has no exact installed runtime manifest digest");
+  const installedManifest = await observeInstalledRuntimeManifestForHost(process.platform, process.arch);
+  if (installedManifest.sha256 !== expectedManifestDigest) throw new Error("installed native E2E runtime manifest differs from the admitted verifier runtime");
   if (sha(canonicalJson(runnerToolchain)) !== runtime.runnerToolchainDigest || round.taskId !== admission.taskId
     || round.operationId !== invocation.operationId || round.operationFence !== invocation.fence
     || round.workflowRevision !== reference.workflowRevision

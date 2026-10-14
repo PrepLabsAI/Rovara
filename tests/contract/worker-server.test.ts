@@ -3,6 +3,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkerInvocation } from "@agentx/contracts";
+import { inspectContainedRuntimeReadinessForHost } from "@agentx/verifier";
 import {
   type JournalStatus,
   OperationJournal,
@@ -10,9 +11,63 @@ import {
   handleWorkerRequest,
 } from "../../packages/worker/src/index.js";
 import { WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
+import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRuntime } from "../../packages/worker/src/project-setup-executor.js";
 import { describe, expect, it, vi } from "vitest";
 
 describe("worker HTTP contract", () => {
+  it("composes real unavailable Linux readiness with healthy worker service and a refused setup invocation", async () => {
+    const readiness = await inspectContainedRuntimeReadinessForHost("linux", "arm64");
+    expect(readiness.status).toBe("unavailable");
+    if (readiness.status !== "unavailable") return;
+    const root = await mkdtemp(join(tmpdir(), "agentx-setup-runtime-gate-"));
+    const journal = new OperationJournal(root);
+    const runtime = createReadinessGatedProjectSetupRuntime(readiness, () => createDefaultProjectSetupExecutor({
+      sourceRoot: "/mnt/workspace",
+      evidenceRoot: "/mnt/workspace/.agentx-runtime/evidence",
+      controlPlaneUrl: "https://control.example.test",
+    }));
+    const state = createWorkerServerState(journal, {
+      execute: (invocation) => invocation.kind === "project-setup-smoke" ? runtime.execute(invocation) : Promise.resolve(),
+      invocationFeatures: runtime.invocationFeatures,
+      invocationFeatureDiagnostics: runtime.invocationFeatureDiagnostics,
+    });
+    await expect((await handleWorkerRequest(new Request("http://worker/ping"), state)).json()).resolves.toMatchObject({
+      status: "Healthy",
+      invocationFeatures: expect.not.arrayContaining(["project.setupSmoke"]),
+      invocationFeatureDiagnostics: { "project.setupSmoke": readiness },
+    });
+    const invocation: WorkerInvocation = {
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      workspaceId: randomUUID(),
+      fence: 1,
+      projectRevision: 1,
+      callbackCapability: "setup-capability-".padEnd(32, "x"),
+      kind: "project-setup-smoke",
+      payload: { domain: "project-setup-source-interface/v1", setupExecutionId: randomUUID(), subjectId: randomUUID(), approvalRevision: 1,
+        transportCorrelationId: randomUUID(), executionRef: { key: `project-setup-executions/sha256/${"a".repeat(64)}.json`, sha256: "a".repeat(64), byteLength: 1 } },
+    };
+    await handleWorkerRequest(invocationRequest(invocation), state);
+    await vi.waitFor(async () => expect((await journal.get(invocation.operationId))?.status).toBe("FAILED"));
+    expect((await journal.get(invocation.operationId))?.error).toContain(`project.setupSmoke is unavailable: ${readiness.reason}`);
+  });
+
+  it("keeps ordinary worker health available and reports an unavailable optional setup feature", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-optional-feature-"));
+    const state = createWorkerServerState(new OperationJournal(root), {
+      execute: async () => undefined,
+      invocationFeatures: [],
+      invocationFeatureDiagnostics: { "project.setupSmoke": { status: "unavailable", reason: "pinned-contained-image-unavailable" } },
+    });
+    const ping = await handleWorkerRequest(new Request("http://worker/ping"), state);
+    expect(ping.status).toBe(200);
+    await expect(ping.json()).resolves.toMatchObject({
+      status: "Healthy",
+      invocationFeatures: expect.not.arrayContaining(["project.setupSmoke"]),
+      invocationFeatureDiagnostics: { "project.setupSmoke": { status: "unavailable", reason: "pinned-contained-image-unavailable" } },
+    });
+  });
+
   it("journals before acknowledging and reports HealthyBusy during background execution", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentx-journal-"));
     const journal = new OperationJournal(root);

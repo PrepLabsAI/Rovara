@@ -60,4 +60,14 @@ describe("the worker image", () => {
   it("runs as the node user", () => {
     expect(finalStage).toMatch(/\nUSER node\n/);
   });
+
+  it("ships the exact Node, Docker CLI, runner package, and verifier needed by contained setup smoke", () => {
+    expect(dockerfile).toContain("node:22.23.2-bookworm-slim@sha256:");
+    expect(finalStage).toContain("COPY --from=tools /usr/local/bin/docker /usr/local/bin/docker");
+    expect(finalStage).toContain("COPY --from=build /opt/agentx/node_modules ./node_modules");
+    expect(finalStage).toContain("COPY --from=build /opt/agentx/package-lock.json ./package-lock.json");
+    expect(finalStage).toContain("COPY --from=build /opt/agentx/packages/verifier ./packages/verifier");
+    expect(dockerfile).toContain("COPY upstream/e2e-0.20.0.tgz upstream/e2e-0.20.0.tgz");
+    expect(dockerfile).toContain("WORKDIR /opt/agentx");
+  });
 });

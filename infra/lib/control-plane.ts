@@ -79,6 +79,8 @@ export class ControlPlaneStack extends Stack {
   constructor(scope: Construct, id: string, props?: ControlPlaneStackProps) {
     super(scope, id, props);
     const naming = props?.naming ?? legacyNaming();
+    const projectSetupRuntimeCatalogId = `${naming.resourcePrefix}-project-setup-runtime-v1`;
+    const e2eFeatureRuntimeCatalogId = `${naming.resourcePrefix}-e2e-mock-runtime-v1`;
 
     const oidcIssuer = new CfnParameter(this, "OidcIssuer", { type: "String" });
     const oidcAudience = new CfnParameter(this, "OidcAudience", { type: "String" });
@@ -159,6 +161,8 @@ export class ControlPlaneStack extends Stack {
 
     const broker = packagedFunction(this, "Broker", "packages/broker/src/aws/broker.ts", {
       STATE_TABLE_NAME: state.tableName,
+      AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
+      AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID: e2eFeatureRuntimeCatalogId,
       ARTIFACT_BUCKET_NAME: artifacts.bucketName,
       OIDC_ISSUER: oidcIssuer.valueAsString,
       ADMIN_CLAIM: adminClaim.valueAsString,
@@ -279,6 +283,7 @@ export class ControlPlaneStack extends Stack {
       "packages/broker/src/aws/dispatcher.ts",
       {
         STATE_TABLE_NAME: state.tableName,
+        AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
         MAX_DISPATCH_ATTEMPTS: String(MAX_DISPATCH_ATTEMPTS),
       },
       Duration.seconds(60),

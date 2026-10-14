@@ -1,5 +1,60 @@
+import { homedir } from "node:os";
+import { resolve, join } from "node:path";
+
 export const CONTAINED_IMAGE = "node@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9";
-export const CONTAINED_SOCKET = "unix:///Users/abhishekgarg/.colima/default/docker.sock";
+
+export type ContainedRuntimeProfile = Readonly<{
+  id: "darwin-arm64-colima-v1" | "linux-arm64-docker-v1";
+  platform: "darwin" | "linux";
+  arch: "arm64";
+  dockerPath: string;
+  commandPath: string;
+  dockerHost: string;
+  socketEndpoint: string;
+  image: typeof CONTAINED_IMAGE;
+  stateRoot: string;
+  /** Absent on the established local profile, which keeps its working-directory anchor. */
+  candidateScratchRoot?: string;
+  /** Fixed location in the released worker image, not the mounted source checkout. */
+  installedRuntimeRoot: string;
+  /** Present on EC2 only; the boot script provisions it on the workspace EBS volume. */
+  evidenceRoot?: string;
+}>;
+
+/** Selects only code-pinned hosts. No environment variable or candidate field can select a profile. */
+export function containedRuntimeProfileForHost(platform: string, arch: string): ContainedRuntimeProfile | undefined {
+  if (platform === "darwin" && arch === "arm64") return Object.freeze({
+    id: "darwin-arm64-colima-v1",
+    platform,
+    arch,
+    dockerPath: "/opt/homebrew/bin/docker",
+    commandPath: "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    dockerHost: "unix:///Users/abhishekgarg/.colima/default/docker.sock",
+    socketEndpoint: "unix:///Users/abhishekgarg/.colima/default/docker.sock",
+    image: CONTAINED_IMAGE,
+    stateRoot: join(homedir(), ".local", "state", "agentx", "contained-candidate-v1"),
+    installedRuntimeRoot: resolve(process.cwd()),
+  });
+  if (platform === "linux" && arch === "arm64") return Object.freeze({
+    id: "linux-arm64-docker-v1",
+    platform,
+    arch,
+    dockerPath: "/usr/local/bin/docker",
+    commandPath: "/usr/local/bin:/usr/bin:/bin",
+    dockerHost: "unix:///var/run/docker.sock",
+    socketEndpoint: "unix:///var/run/docker.sock",
+    image: CONTAINED_IMAGE,
+    stateRoot: "/mnt/agentx-runtime/state",
+    candidateScratchRoot: "/mnt/agentx-runtime/candidates",
+    installedRuntimeRoot: "/opt/agentx",
+    evidenceRoot: "/mnt/agentx-runtime/evidence",
+  });
+  return undefined;
+}
+
+export const CONTAINED_RUNTIME_PROFILE = containedRuntimeProfileForHost(process.platform, process.arch);
+/** Empty only on unsupported hosts; the runtime readiness gate withholds the optional feature there. */
+export const CONTAINED_SOCKET = CONTAINED_RUNTIME_PROFILE?.dockerHost ?? "";
 
 export type CreateArgsInput = { name: string; cidfile: string; sourcePath: string; sourceDigest: string; nonce: string; entry: string; exportName?: string };
 

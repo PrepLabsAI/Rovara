@@ -1,16 +1,18 @@
 #!/bin/bash
-# Boots an AgentX EC2 worker (issue #81): mounts the workspace volume and runs the worker image.
-#
-# Runs once, as root, as the instance's user data. The provisioner prepends the configuration with
-# ec2WorkerBootScript (@agentx/contracts), which validates every value before it reaches this script,
-# and sends the result gzip-compressed (ec2WorkerUserData), which cloud-init unpacks (#229).
-# Steps that use the network retry with exponential backoff (retry). Any failure exits non-zero,
-# leaves the worker stopped and reports why on the worker's /ping port (report_boot_failure), so the
-# provisioner's health probe fails the session at once (#211); the probe's 10 minute timeout stays
-# the backstop for a boot that hangs or cannot report.
+# EC2 worker user data: mount the workspace EBS volume and start the worker (#81).
+# The provisioner validates the prepended configuration and gzip-compresses this script (#229).
+# Boot failures exit non-zero and report on /ping so the provisioner can stop the session (#211).
 set -euo pipefail
 
 readonly MOUNT_PATH=/mnt/workspace
+readonly RUNTIME_SOURCE=$MOUNT_PATH/.agentx-runtime
+readonly RUNTIME_ROOT=/mnt/agentx-runtime
+readonly CANDIDATE_SCRATCH_ROOT=$RUNTIME_ROOT/candidates
+readonly EVIDENCE_ROOT=$RUNTIME_ROOT/evidence
+readonly CONTAINED_STATE_ROOT=$RUNTIME_ROOT/state
+readonly CONTAINED_TMP_ROOT=$RUNTIME_ROOT/tmp
+readonly CONTAINED_IMAGE=node@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9
+CONTAINED_RUNTIME_AVAILABLE_BOOT=false
 readonly FILESYSTEM_LABEL=agentx-workspace
 # The node user of environments/base/Dockerfile, which the worker container runs as.
 readonly WORKER_UID=1000
@@ -55,11 +57,8 @@ try_seconds() {
 
 tries() { if (($1 == 1)); then printf '1 try'; else printf '%s tries' "$1"; fi; }
 
-# retry DESCRIPTION COMMAND...: runs COMMAND until it succeeds, up to RETRY_ATTEMPTS times, with
-# exponential backoff and jitter; then fails with "DESCRIPTION after N tries". DESCRIPTION is what
-# the provisioner shows the user, so it says what could not be done in plain words, never a secret.
-# set -e does not apply inside COMMAND (it runs as an until condition), so COMMAND must return its
-# own failure: chain with && or a pipeline, as the helpers below do.
+# retry DESCRIPTION COMMAND... retries with bounded exponential backoff, then fails with DESCRIPTION.
+# Commands run in an until condition, so they must return their own failures under set -e.
 retry() {
   local description=$1 attempt=1 delay wait
   shift
@@ -223,6 +222,28 @@ mount_workspace() {
   log "mounted $AGENTX_VOLUME_ID at $MOUNT_PATH"
 }
 
+runtime_unavailable() { log "verifier unavailable; setup smoke withheld"; }
+
+prepare_contained_runtime_directories() {
+  local path
+  [[ ! -L "$RUNTIME_SOURCE" ]] || { runtime_unavailable; return 0; }
+  if [[ ! -e "$RUNTIME_SOURCE" ]]; then
+    [[ "$AGENTX_EXPECT_NEW_VOLUME" == true ]] || { runtime_unavailable; return 0; }
+    install -d -o root -g root -m 0755 "$RUNTIME_SOURCE"
+    for path in candidates evidence state tmp; do
+      install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$RUNTIME_SOURCE/$path"
+    done
+  fi
+  [[ -d "$RUNTIME_SOURCE" && $(stat -c %u:%g:%a "$RUNTIME_SOURCE") == 0:0:755 ]] || { runtime_unavailable; return 0; }
+  for path in candidates evidence state tmp; do
+    [[ -d "$RUNTIME_SOURCE/$path" && ! -L "$RUNTIME_SOURCE/$path" && $(stat -c %u:%g:%a "$RUNTIME_SOURCE/$path") == "$WORKER_UID:$WORKER_GID:700" ]] || { runtime_unavailable; return 0; }
+  done
+  [[ ! -L "$RUNTIME_ROOT" ]] || { runtime_unavailable; return 0; }
+  install -d -o root -g root -m 0755 "$RUNTIME_ROOT"
+  mount --bind "$RUNTIME_SOURCE" "$RUNTIME_ROOT" && mountpoint -q "$RUNTIME_ROOT" || { runtime_unavailable; return 0; }
+  CONTAINED_RUNTIME_AVAILABLE_BOOT=true
+}
+
 # A failed try may leave stale mirror metadata behind (a DNS failure did, #211), so it is dropped
 # before the next try.
 install_docker_package() {
@@ -253,6 +274,17 @@ pull_worker_image() {
   retry "could not download the worker image" pull_image_once "$AGENTX_WORKER_IMAGE"
 }
 
+# This optional preload is bounded; failure leaves ordinary worker service available.
+pull_contained_image() {
+  local attempt
+  for ((attempt=1; attempt<=RETRY_ATTEMPTS && SECONDS<BOOT_DEADLINE; attempt++)); do
+    timeout "$(try_seconds 300)" docker pull "$CONTAINED_IMAGE" && return 0
+    ((attempt<RETRY_ATTEMPTS && SECONDS<BOOT_DEADLINE)) && sleep "$((1 << (attempt - 1)))"
+  done
+  log "optional verifier image unavailable; worker continues"
+  return 1
+}
+
 # Root-only, because the worker's environment is its configuration; none of it is secret today, but
 # the file should not become world-readable if that changes.
 write_worker_environment() {
@@ -274,6 +306,11 @@ AGENTX_INVOKE_PUBLIC_KEY=$AGENTX_INVOKE_PUBLIC_KEY
 AGENTX_WORKSPACE_ID=$AGENTX_WORKSPACE_ID
 AGENTX_SESSION_GENERATION=$AGENTX_SESSION_GENERATION
 EOF
+  if [[ "$CONTAINED_RUNTIME_AVAILABLE_BOOT" == true ]]; then
+    printf 'CONTAINED_FOUNDATION_EVIDENCE_DIR=%s\nTMPDIR=%s\n' "$EVIDENCE_ROOT" "$CONTAINED_TMP_ROOT" >>"$WORKER_ENV_FILE"
+  else
+    printf 'TMPDIR=/tmp\n' >>"$WORKER_ENV_FILE"
+  fi
 }
 
 # The container shares the host network, so the worker listens on the instance's port 8080 and
@@ -284,20 +321,24 @@ EOF
 # every container but its own (packages/worker/src/workspace-containers.ts), so this unit must stay
 # the only container the boot starts.
 write_worker_unit() {
-  local region=$1 instance_id=$2 docker docker_gid
+  local region=$1 instance_id=$2 docker docker_gid runtime_volume= runtime_mounts=
   docker=$(command -v docker)
   docker_gid=$(stat -c %g "$DOCKER_SOCKET")
+  if [[ "$CONTAINED_RUNTIME_AVAILABLE_BOOT" == true ]]; then
+    runtime_volume="--volume $RUNTIME_ROOT:$RUNTIME_ROOT"
+    runtime_mounts="$RUNTIME_ROOT"
+  fi
   cat >"/etc/systemd/system/$WORKER_UNIT" <<EOF
 [Unit]
 Description=AgentX worker for workspace $AGENTX_WORKSPACE_ID generation $AGENTX_SESSION_GENERATION
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
-RequiresMountsFor=$MOUNT_PATH
+RequiresMountsFor=$MOUNT_PATH $runtime_mounts
 
 [Service]
 ExecStartPre=-$docker rm --force $WORKER_CONTAINER
-ExecStart=$docker run --rm --name $WORKER_CONTAINER --network host --env-file $WORKER_ENV_FILE --volume $MOUNT_PATH:$MOUNT_PATH --volume $DOCKER_SOCKET:$DOCKER_SOCKET --group-add $docker_gid --log-driver awslogs --log-opt awslogs-region=$region --log-opt awslogs-group=$AGENTX_LOG_GROUP --log-opt awslogs-stream=$AGENTX_WORKSPACE_ID/$AGENTX_SESSION_GENERATION/$instance_id $AGENTX_WORKER_IMAGE
+ExecStart=$docker run --rm --name $WORKER_CONTAINER --network host --env-file $WORKER_ENV_FILE --volume $MOUNT_PATH:$MOUNT_PATH $runtime_volume --volume $DOCKER_SOCKET:$DOCKER_SOCKET --group-add $docker_gid --log-driver awslogs --log-opt awslogs-region=$region --log-opt awslogs-group=$AGENTX_LOG_GROUP --log-opt awslogs-stream=$AGENTX_WORKSPACE_ID/$AGENTX_SESSION_GENERATION/$instance_id $AGENTX_WORKER_IMAGE
 ExecStop=$docker stop $WORKER_CONTAINER
 Restart=always
 RestartSec=5
@@ -320,10 +361,12 @@ main() {
   BOOT_STEP="prepare the workspace volume"
   prepare_filesystem "$device"
   mount_workspace "$device"
+  prepare_contained_runtime_directories
   BOOT_STEP="set up Docker"
   ensure_docker
   BOOT_STEP="download the worker image"
   pull_worker_image "$region"
+  if [[ "$CONTAINED_RUNTIME_AVAILABLE_BOOT" == true ]]; then pull_contained_image || true; fi
   BOOT_STEP="start the worker"
   write_worker_environment "$region"
   write_worker_unit "$region" "$instance_id"

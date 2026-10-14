@@ -7,7 +7,7 @@ import {
   canonicalJson, e2eScenarioBundleDigest, selectE2EExecutionPlan,
   verifyE2ESourceSnapshot, E2ERunBindingSchema, E2ERoundSchema, type E2EPlanSelectionInput, type E2ESourceSnapshot,
 } from "@agentx/contracts";
-import { compileE2EScenarios, runE2EActualCli, collectE2EActualCliRun, e2eSnapshotSourceDigest } from "@agentx/verifier";
+import { compileE2EScenarios, runE2EActualCli, collectE2EActualCliRun, e2eSnapshotSourceDigest, observeInstalledRuntimeManifestForHost } from "@agentx/verifier";
 import type { WorkerInvocation } from "@agentx/contracts";
 
 const sha = (value: string | Uint8Array): string => createHash("sha256").update(value).digest("hex");
@@ -30,6 +30,7 @@ type SetupExecutionObject = {
   semanticApproval: { artifactId: string; digest: string };
   setupRunContext: { roundId: string; deadlineAt: string; runnerEnvironment: unknown; runnerToolchain: unknown; runnerToolchainDigest: string; plan: unknown; bundle: unknown; round: unknown;
     groupAdmissions: Array<{ group: unknown; binding: unknown; expectedConfigDigest: string; compiledInventoryDigest: string; expectedCases: unknown; selectionPacketPath: string }> };
+  runtime: { manifestDigest: string };
   evidenceByteLimit: number;
   unsupportedTargetIds: string[];
   notExecutedTargetIds: string[];
@@ -69,6 +70,8 @@ export async function executeProjectSetupSmoke(input: {
   const runnerEnvironment = ProjectSetupRunnerEnvironmentSchema.parse(execution.setupRunContext.runnerEnvironment);
   const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse(execution.setupRunContext.runnerToolchain);
   if (sha(canonicalJson(runnerToolchain)) !== execution.setupRunContext.runnerToolchainDigest) throw new Error("stored setup runner toolchain digest is invalid");
+  const installedManifest = await observeInstalledRuntimeManifestForHost(process.platform, process.arch);
+  if (installedManifest.sha256 !== execution.runtime.manifestDigest) throw new Error("installed setup runtime manifest differs from the admitted verifier runtime");
   const round = E2ERoundSchema.parse(execution.setupRunContext.round);
   if (round.groupBindings.length !== plan.groups.length || round.roundId !== execution.setupRunContext.roundId) throw new Error("stored setup round does not cover every compiled group");
   const evidenceRoot = resolve(input.evidenceRoot);

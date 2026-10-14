@@ -1,4 +1,5 @@
 import type { WorkerInvocation } from "@agentx/contracts";
+import { inspectContainedRuntimeReadiness, type ContainedRuntimeReadiness } from "@agentx/verifier";
 import { OperationJournal } from "./journal.js";
 import { prepareWorkspace, preparedBaseResult } from "./prepare.js";
 import { createWorkerCallbackSinks } from "./callback-client.js";
@@ -12,7 +13,7 @@ import { createWorkerServerState, startWorkerServer } from "./server.js";
 import { invokeAuthenticationFromEnvironment } from "./invoke-auth.js";
 import { resolveTaskSessionModel } from "./task-model.js";
 import { chatGptTokenSource } from "./chatgpt-token.js";
-import { createDefaultProjectSetupExecutor } from "./project-setup-executor.js";
+import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRuntime } from "./project-setup-executor.js";
 import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
 import { postWorkerTerminalResult } from "./terminal-callback.js";
 import { executeWorkerCancelInvocation } from "./cancel-invocation.js";
@@ -22,17 +23,25 @@ const port = Number.parseInt(process.env.PORT ?? "8080", 10);
 
 // Read first, so a partly configured EC2 boot fails before the port opens.
 const invokeAuthentication = invokeAuthenticationFromEnvironment();
+const containedRuntimeReadiness: ContainedRuntimeReadiness = await inspectContainedRuntimeReadiness().catch((): ContainedRuntimeReadiness => ({ status: "unavailable", reason: "private-runtime-paths-unavailable" }));
+if (containedRuntimeReadiness.status !== "ready") {
+  console.error(`project.setupSmoke unavailable: ${containedRuntimeReadiness.reason}`);
+}
+const projectSetupRuntime = createReadinessGatedProjectSetupRuntime(containedRuntimeReadiness, () => createDefaultProjectSetupExecutor({
+  sourceRoot: rootPath,
+  evidenceRoot: requiredEnvironment("CONTAINED_FOUNDATION_EVIDENCE_DIR"),
+  controlPlaneUrl: requiredEnvironment("AGENTX_CONTROL_PLANE_URL"),
+}));
 const journal = new OperationJournal(rootPath);
 const cancellationController = new WorkerCancellationController();
 const state = createWorkerServerState(
   journal,
   {
-    invocationFeatures: ["project.setupSmoke"],
+    invocationFeatures: projectSetupRuntime.invocationFeatures,
+    invocationFeatureDiagnostics: projectSetupRuntime.invocationFeatureDiagnostics,
     async execute(invocation: WorkerInvocation): Promise<unknown> {
       if (invocation.kind === "project-setup-smoke") {
-        const evidenceRoot = requiredEnvironment("CONTAINED_FOUNDATION_EVIDENCE_DIR");
-        const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");
-        return createDefaultProjectSetupExecutor({ sourceRoot: rootPath, evidenceRoot, controlPlaneUrl })(invocation);
+        return projectSetupRuntime.execute(invocation);
       }
       if (invocation.kind === "prepare") {
         const controlPlaneUrl = requiredEnvironment("AGENTX_CONTROL_PLANE_URL");

@@ -15,6 +15,8 @@ export interface WorkerExecutor {
   execute(invocation: WorkerInvocation): Promise<unknown>;
   /** Explicitly implemented invocation extensions; never inferred from parser acceptance alone. */
   invocationFeatures?: readonly WorkerInvocationFeature[];
+  /** Feature-specific optional runtime gates are reported independently of ordinary worker health. */
+  invocationFeatureDiagnostics?: Readonly<Record<string, unknown>>;
 }
 
 export interface WorkerTerminalResult {
@@ -42,6 +44,7 @@ export interface WorkerServerState {
   callbacks: WorkerServerCallbacks;
   activeOperations: Set<string>;
   invocationFeatures: readonly string[];
+  invocationFeatureDiagnostics?: Readonly<Record<string, unknown>>;
   /** Required by the deployed worker; injectable for in-process tests. */
   invokeAuthentication?: InvokeAuthentication;
 }
@@ -58,6 +61,7 @@ export function createWorkerServerState(
     callbacks,
     activeOperations: new Set(),
     invocationFeatures: [...WORKER_INVOCATION_FEATURES, ...(executor.invocationFeatures ?? [])],
+    ...(executor.invocationFeatureDiagnostics === undefined ? {} : { invocationFeatureDiagnostics: executor.invocationFeatureDiagnostics }),
     ...(invokeAuthentication === undefined ? {} : { invokeAuthentication }),
   };
 }
@@ -70,6 +74,7 @@ export async function handleWorkerRequest(request: Request, state: WorkerServerS
       activeOperations: state.activeOperations.size,
       // Spec 053: the optional invocation fields this build parses; the dispatcher sends one only when listed.
       [WORKER_PING_FEATURES_FIELD]: [...state.invocationFeatures],
+      ...(state.invocationFeatureDiagnostics === undefined ? {} : { invocationFeatureDiagnostics: state.invocationFeatureDiagnostics }),
     });
   }
   if (request.method === "POST" && url.pathname === "/invocations") {

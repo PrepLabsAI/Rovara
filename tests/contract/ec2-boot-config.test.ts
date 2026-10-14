@@ -123,7 +123,27 @@ describe("EC2 worker user data", () => {
     expect(bootScript).toContain(`printf '{"data-root": "%s"}\\n' "$DOCKER_DATA_ROOT" >/etc/docker/daemon.json`);
     // The daemon starts only after the workspace is mounted, so its data root is on the volume.
     expect(bootScript.indexOf("mount_workspace \"$device\"")).toBeLessThan(bootScript.indexOf("  ensure_docker\n"));
-    expect(bootScript).toContain("--volume $MOUNT_PATH:$MOUNT_PATH --volume $DOCKER_SOCKET:$DOCKER_SOCKET --group-add $docker_gid");
+    expect(bootScript).toContain("runtime_volume=\"--volume $RUNTIME_ROOT:$RUNTIME_ROOT\"");
+    expect(bootScript).toContain("runtime_mounts=\"$RUNTIME_ROOT\"");
+    expect(bootScript).toContain("--volume $MOUNT_PATH:$MOUNT_PATH $runtime_volume --volume $DOCKER_SOCKET:$DOCKER_SOCKET --group-add $docker_gid");
+  });
+
+  it("prepares fixed private EBS runtime paths and retries the pinned contained image before starting the worker", () => {
+    expect(bootScript).toContain('readonly RUNTIME_SOURCE=$MOUNT_PATH/.agentx-runtime');
+    expect(bootScript).toContain('readonly RUNTIME_ROOT=/mnt/agentx-runtime');
+    expect(bootScript).toContain('mount --bind "$RUNTIME_SOURCE" "$RUNTIME_ROOT"');
+    expect(bootScript).toContain('readonly CANDIDATE_SCRATCH_ROOT=$RUNTIME_ROOT/candidates');
+    expect(bootScript).toContain('readonly EVIDENCE_ROOT=$RUNTIME_ROOT/evidence');
+    expect(bootScript).toContain('readonly CONTAINED_STATE_ROOT=$RUNTIME_ROOT/state');
+    expect(bootScript).toContain('install -d -o "$WORKER_UID" -g "$WORKER_GID" -m 0700 "$RUNTIME_SOURCE/$path"');
+    expect(bootScript).toContain('verifier unavailable; setup smoke withheld');
+    expect(bootScript).toContain("printf 'CONTAINED_FOUNDATION_EVIDENCE_DIR=%s\\nTMPDIR=%s\\n'");
+    expect(bootScript).toContain("printf 'TMPDIR=/tmp\\n'");
+    expect(bootScript).toContain('docker pull "$CONTAINED_IMAGE"');
+    expect(bootScript).toContain('optional verifier image unavailable; worker continues');
+    expect(bootScript).toContain('pull_contained_image || true');
+    expect(bootScript.indexOf('prepare_contained_runtime_directories')).toBeLessThan(bootScript.indexOf('pull_worker_image "$region"'));
+    expect(bootScript.indexOf('pull_contained_image')).toBeLessThan(bootScript.indexOf('write_worker_unit "$region"'));
   });
 
   it("renders a script bash accepts", () => {

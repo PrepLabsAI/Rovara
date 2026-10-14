@@ -77,6 +77,7 @@ COPY --from=tools /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/li
 COPY --from=tools /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=tools /usr/local/bin/uvx /usr/local/bin/uvx
 WORKDIR /opt/agentx
+COPY --from=build /opt/agentx/package-lock.json ./package-lock.json
 COPY --from=build /opt/agentx/node_modules ./node_modules
 COPY --from=build /opt/agentx/packages/model-runtime ./packages/model-runtime
 COPY --from=build /opt/agentx/packages/contracts ./packages/contracts

@@ -1,16 +1,15 @@
 import { createHash, randomBytes } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, realpath, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
-import { homedir } from "node:os";
+import { access, chmod, lstat, mkdir, open, readFile, realpath, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { performance } from "node:perf_hooks";
 import { spawn } from "node:child_process";
 import { types as utilTypes } from "node:util";
-import { CONTAINED_IMAGE, CONTAINED_SOCKET, buildCreateArgs, isOwnedContainer } from "./container-envelope.js";
+import { CONTAINED_IMAGE, CONTAINED_RUNTIME_PROFILE, CONTAINED_SOCKET, buildCreateArgs, containedRuntimeProfileForHost, isOwnedContainer } from "./container-envelope.js";
+import { evaluateContainedRuntimePrerequisites, type ContainedRuntimeReadiness } from "./contained-runtime-readiness.js";
 import { FIXED_CANDIDATE_BOOTSTRAP } from "./fixed-candidate-bootstrap.js";
 
-export { CONTAINED_IMAGE, CONTAINED_SOCKET, buildCreateArgs, isOwnedContainer } from "./container-envelope.js";
-
+export { CONTAINED_IMAGE, CONTAINED_RUNTIME_PROFILE, CONTAINED_SOCKET, containedRuntimeProfileForHost, buildCreateArgs, isOwnedContainer } from "./container-envelope.js";
 export const CANDIDATE_RESPONSE_SCOPE = "contained-candidate-process-response/v1" as const;
 export const CANDIDATE_ADAPTER_VERSION = 1 as const;
 const MAX_INPUT_BYTES = 65_536;
@@ -20,9 +19,10 @@ const MAX_SOURCE_FILES = 128;
 const MAX_DURATION_MS = 60_000;
 const MAX_CLEANUP_MS = 60_000;
 const STOP_GRACE_SECONDS = 10;
-const DOCKER = "/opt/homebrew/bin/docker";
-const CLIENT_PATH = "/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin";
-const STATE_ROOT = join(homedir(), ".local", "state", "agentx", "contained-candidate-v1");
+const DOCKER = CONTAINED_RUNTIME_PROFILE?.dockerPath ?? "/usr/bin/false";
+const CLIENT_PATH = CONTAINED_RUNTIME_PROFILE?.commandPath ?? "/usr/bin:/bin";
+const STATE_ROOT = CONTAINED_RUNTIME_PROFILE?.stateRoot ?? "/__unsupported-contained-runtime__/state";
+const CANDIDATE_SCRATCH_ROOT = CONTAINED_RUNTIME_PROFILE?.candidateScratchRoot;
 const BYTE_VIEW_PROTOTYPE = Object.getPrototypeOf(Uint8Array.prototype) as object;
 const UINT8_ARRAY_PROTOTYPE = Uint8Array.prototype;
 const BUFFER_PROTOTYPE = Object.getPrototypeOf(Buffer.alloc(0)) as object;
@@ -103,7 +103,7 @@ type DockerInspect = { Id: string; Name?: string; State?: ContainerState; Config
 type ProcessResult = { stdout: Buffer; stderr: Buffer; code: number | null; aborted: boolean; timedOut: boolean; overflow: boolean; stdoutBytes: number; stderrBytes: number; aggregateBytes: number; inputWritten: boolean; requestWrite?: CaptureMoment; firstOutput?: CaptureMoment; lastOutput?: CaptureMoment; childClose?: CaptureMoment; error?: string };
 type InspectResult = { kind: "present"; info: DockerInspect; rawBytes: Uint8Array } | { kind: "absent" } | { kind: "unknown"; diagnostic: string };
 type CleanupState = "confirmed" | "pending" | "failed";
-type DurableRecord = { schemaVersion: 1 | 2; recordRef: string; plannedName: string; nonce: string; sourceDigest: string; endpoint: string; image: string; containerId: string | null; cidfile: string; workspace: string | null; workspaceParent?: string | null; requestId: string; sourceBytes: number; phase: string; cleanup: CleanupState; entry?: string; exportName?: string; diagnostic?: string };
+type DurableRecord = { schemaVersion: 1 | 2 | 3; profileId?: string; recordRef: string; plannedName: string; nonce: string; sourceDigest: string; endpoint: string; image: string; containerId: string | null; cidfile: string; workspace: string | null; workspaceParent?: string | null; requestId: string; sourceBytes: number; phase: string; cleanup: CleanupState; entry?: string; exportName?: string; diagnostic?: string };
 
 function fail(message: string): never { throw new Error(message); }
 function sha(bytes: Uint8Array): string { return createHash("sha256").update(bytes).digest("hex"); }
@@ -446,18 +446,22 @@ async function atomicWrite(path: string, bytes: Uint8Array): Promise<void> {
 async function writeRecord(record: DurableRecord): Promise<void> { await atomicWrite(join(STATE_ROOT, `${record.recordRef}.record.json`), new TextEncoder().encode(JSON.stringify(record))); }
 function recordExact(value: unknown): value is DurableRecord {
   if (!plain(value)) return false;
-  const keys = ["schemaVersion", "recordRef", "plannedName", "nonce", "sourceDigest", "endpoint", "image", "containerId", "cidfile", "workspace", "workspaceParent", "requestId", "sourceBytes", "phase", "cleanup", "entry", "exportName"];
+  const keys = ["schemaVersion", "profileId", "recordRef", "plannedName", "nonce", "sourceDigest", "endpoint", "image", "containerId", "cidfile", "workspace", "workspaceParent", "requestId", "sourceBytes", "phase", "cleanup", "entry", "exportName"];
   if (Object.keys(value).some((key) => !keys.includes(key) && key !== "diagnostic")) return false;
   const legacyWorkspaceValid = value.schemaVersion === 1 && (value.workspace === null || typeof value.workspace === "string" && isAbsolute(value.workspace) && dirname(value.workspace) === resolve(dirname(value.workspace)) && /^\.contained-candidate-[A-Za-z0-9]+$/.test(basename(value.workspace)));
-  const anchoredWorkspaceValid = value.schemaVersion === 2 && (value.workspace === null
+  const anchoredWorkspaceValid = (value.schemaVersion === 2 || value.schemaVersion === 3) && (value.workspace === null
     ? value.workspaceParent === null
     : typeof value.workspace === "string" && typeof value.workspaceParent === "string" && isAbsolute(value.workspaceParent)
       && resolve(value.workspaceParent) === value.workspaceParent && value.workspace === join(value.workspaceParent, basename(value.workspace))
-      && basename(value.workspace) === `.contained-candidate-${String(value.recordRef)}`);
-  return (value.schemaVersion === 1 || value.schemaVersion === 2) && typeof value.recordRef === "string" && /^[a-f0-9]{32}$/.test(value.recordRef)
+      && basename(value.workspace) === `.contained-candidate-${String(value.recordRef)}`
+      && (CANDIDATE_SCRATCH_ROOT === undefined || value.workspaceParent === CANDIDATE_SCRATCH_ROOT));
+  return (value.schemaVersion === 1 || value.schemaVersion === 2 || value.schemaVersion === 3) && typeof value.recordRef === "string" && /^[a-f0-9]{32}$/.test(value.recordRef)
     && typeof value.plannedName === "string" && /^agentx-contained-[a-f0-9]{20}$/.test(value.plannedName)
     && typeof value.nonce === "string" && /^[a-f0-9]{48}$/.test(value.nonce)
     && typeof value.sourceDigest === "string" && /^[a-f0-9]{64}$/.test(value.sourceDigest)
+    && (value.schemaVersion === 3
+      ? value.profileId === CONTAINED_RUNTIME_PROFILE?.id
+      : value.profileId === undefined && CONTAINED_RUNTIME_PROFILE?.platform === "darwin")
     && value.endpoint === CONTAINED_SOCKET && value.image === CONTAINED_IMAGE
     && (value.containerId === null || typeof value.containerId === "string" && /^[a-f0-9]{64}$/.test(value.containerId))
     && typeof value.cidfile === "string" && value.cidfile === join(STATE_ROOT, `${value.recordRef}.cid`)
@@ -486,6 +490,65 @@ async function readCidfile(record: DurableRecord): Promise<string | null> {
   } catch { return null; }
 }
 function clientEnv(privateRoot: string): NodeJS.ProcessEnv { return privateClientEnv(privateRoot); }
+
+/** Read-only worker-startup probe; it never pulls, creates containers, or invents a READY state. */
+export async function inspectContainedRuntimeReadiness(): Promise<ContainedRuntimeReadiness> {
+  return inspectContainedRuntimeReadinessForHost(process.platform, process.arch);
+}
+
+/** Probes a code-pinned host profile without accepting caller-supplied paths or executable settings. */
+export async function inspectContainedRuntimeReadinessForHost(platform: string, arch: string): Promise<ContainedRuntimeReadiness> {
+  const profile = containedRuntimeProfileForHost(platform, arch);
+  if (!profile) return evaluateContainedRuntimePrerequisites({ profileId: undefined, nodeVersion: process.version, privatePathsReady: false, pinnedImageReady: false });
+  if (process.version !== "v22.23.2") return evaluateContainedRuntimePrerequisites({ profileId: profile.id, nodeVersion: process.version, privatePathsReady: false, pinnedImageReady: false });
+
+  let privatePathsReady = false;
+  try {
+    if (profile.platform === "linux") {
+      const anchor = join(profile.stateRoot, "..");
+      const anchorInfo = await lstat(anchor);
+      if (!anchorInfo.isDirectory() || anchorInfo.isSymbolicLink() || anchorInfo.uid !== 0 || (anchorInfo.mode & 0o777) !== 0o755 || await realpath(anchor) !== anchor) throw new Error("runtime anchor is not fixed and root-owned");
+    }
+    const runtimePaths = [profile.stateRoot, ...(profile.candidateScratchRoot ? [profile.candidateScratchRoot] : []), ...(profile.evidenceRoot ? [profile.evidenceRoot] : [])];
+    for (const path of runtimePaths) {
+      await ensurePrivateDirectory(path, profile.platform === "darwin" && path === profile.stateRoot);
+      if (await realpath(path) !== path) throw new Error("runtime directory is not canonical");
+    }
+    const installedRoot = await lstat(profile.installedRuntimeRoot);
+    if (!installedRoot.isDirectory() || installedRoot.isSymbolicLink() || await realpath(profile.installedRuntimeRoot) !== profile.installedRuntimeRoot) throw new Error("installed runtime is unavailable");
+    const e2ePackage = JSON.parse(await readFile(join(profile.installedRuntimeRoot, "node_modules", "e2e", "package.json"), "utf8")) as { version?: unknown };
+    if (e2ePackage.version !== "0.20.0") throw new Error("installed runner version does not match the pinned package");
+    await access(join(profile.installedRuntimeRoot, "node_modules", "@agentx", "verifier", "dist", "index.js"), fsConstants.R_OK);
+    await access(profile.dockerPath, fsConstants.X_OK);
+    const socketPath = profile.dockerHost.startsWith("unix://") ? profile.dockerHost.slice("unix://".length) : "";
+    if (!socketPath) throw new Error("runtime profile has no fixed Unix socket");
+    const socket = await lstat(socketPath);
+    if (!socket.isSocket() || socket.isSymbolicLink()) throw new Error("fixed Docker socket is unavailable");
+    await access(socketPath, fsConstants.R_OK | fsConstants.W_OK);
+    privatePathsReady = true;
+  } catch {
+    return evaluateContainedRuntimePrerequisites({ profileId: profile.id, nodeVersion: process.version, privatePathsReady: false, pinnedImageReady: false });
+  }
+
+  const env = clientEnv(profile.stateRoot);
+  try {
+    await ensurePrivateDirectory(env.HOME!, true);
+    await ensurePrivateDirectory(env.DOCKER_CONFIG!, true);
+  } catch {
+    return evaluateContainedRuntimePrerequisites({ profileId: profile.id, nodeVersion: process.version, privatePathsReady: false, pinnedImageReady: false });
+  }
+  const imageResult = await runProcess(["image", "inspect", profile.image, "--format", "{{json .}}"], {
+    env, cwd: profile.stateRoot, deadline: performance.now() + 5_000, maxAggregateBytes: 1_048_576,
+  }).catch(() => null);
+  let pinnedImageReady = false;
+  if (imageResult?.code === 0 && !imageResult.error && !imageResult.timedOut && !imageResult.aborted) {
+    try {
+      const image = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(imageResult.stdout)) as { RepoDigests?: string[]; Os?: string; Architecture?: string };
+      pinnedImageReady = image.RepoDigests?.includes(profile.image) === true && image.Os === "linux" && image.Architecture === "arm64";
+    } catch { /* a malformed inspect result is unavailable */ }
+  }
+  return evaluateContainedRuntimePrerequisites({ profileId: profile.id, nodeVersion: process.version, privatePathsReady, pinnedImageReady });
+}
 function inspectTargetMatchesError(stderr: string, target: string): boolean {
   const normalized = stderr.trim().replace(/\r/g, "");
   return normalized === `Error: No such object: ${target}` || normalized === `Error: No such object: /${target}`
@@ -537,9 +600,9 @@ async function persistReceipt(record: DurableRecord, receipt: ContainerReceipt):
 }
 async function cleanupWorkspace(record: DurableRecord, persist = true): Promise<void> {
   if (!record.workspace) return;
-  const parent = record.schemaVersion === 2 ? record.workspaceParent : dirname(record.workspace);
+  const parent = record.schemaVersion >= 2 ? record.workspaceParent : dirname(record.workspace);
   if (!parent || dirname(record.workspace) !== parent || !isAbsolute(record.workspace)
-    || (record.schemaVersion === 2 ? basename(record.workspace) !== `.contained-candidate-${record.recordRef}` : !/^\.contained-candidate-[A-Za-z0-9]+$/.test(basename(record.workspace)))) fail("owned candidate workspace path is outside its durable anchor");
+    || (record.schemaVersion >= 2 ? basename(record.workspace) !== `.contained-candidate-${record.recordRef}` : !/^\.contained-candidate-[A-Za-z0-9]+$/.test(basename(record.workspace)))) fail("owned candidate workspace path is outside its durable anchor");
   if (await realpath(parent) !== parent) fail("owned candidate workspace anchor changed before cleanup");
   const workspaceInfo = await lstat(record.workspace).catch((error: unknown) => {
     if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return null;
@@ -547,7 +610,7 @@ async function cleanupWorkspace(record: DurableRecord, persist = true): Promise<
   });
   if (!workspaceInfo) {
     record.workspace = null;
-    if (record.schemaVersion === 2) record.workspaceParent = null;
+    if (record.schemaVersion >= 2) record.workspaceParent = null;
     if (persist) await writeRecord(record);
     return;
   }
@@ -570,7 +633,7 @@ async function cleanupWorkspace(record: DurableRecord, persist = true): Promise<
   });
   await rm(record.workspace, { recursive: true, force: true });
   record.workspace = null;
-  if (record.schemaVersion === 2) record.workspaceParent = null;
+  if (record.schemaVersion >= 2) record.workspaceParent = null;
   if (persist) await writeRecord(record);
 }
 async function cleanupOwned(record: DurableRecord, env: NodeJS.ProcessEnv, cwd: string): Promise<CleanupState> {
@@ -634,6 +697,7 @@ async function finishRecord(record: DurableRecord, result: Omit<Parameters<typeo
 }
 
 export async function reconcileOwnedContainers(): Promise<readonly ReconciliationReceipt[]> {
+  if (!CONTAINED_RUNTIME_PROFILE) throw new Error("contained verifier runtime is unavailable on this host");
   await ensurePrivateDirectory(STATE_ROOT, false).catch((error: unknown) => {
     if (error && typeof error === "object" && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
@@ -677,6 +741,7 @@ export async function reconcileOwnedContainers(): Promise<readonly Reconciliatio
 }
 
 export async function runContainedCandidate(packetInput: unknown, requestInput: unknown, optionsInput?: RunOptions): Promise<ContainedExecution> {
+  if (!CONTAINED_RUNTIME_PROFILE) throw new Error("contained verifier runtime is unavailable on this host");
   // All caller-controlled data is copied synchronously before the first await or filesystem effect.
   const packet = validateCandidatePacket(packetInput);
   const request = validateRequest(requestInput);
@@ -690,13 +755,13 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
   const name = `agentx-contained-${randomBytes(10).toString("hex")}`;
   const recordRef = randomBytes(16).toString("hex");
   const cidfile = join(STATE_ROOT, `${recordRef}.cid`);
-  const workspaceParent = resolve(process.cwd());
+  const workspaceParent = CANDIDATE_SCRATCH_ROOT ?? resolve(process.cwd());
   const plannedWorkspace = join(workspaceParent, `.contained-candidate-${recordRef}`);
   const sourceBytes = packet.files.reduce((total, file) => total + file.bytes.byteLength, 0);
   let workspace: string | null = null;
   let env: NodeJS.ProcessEnv = clientEnv(STATE_ROOT);
   let workCwd = STATE_ROOT;
-  const record: DurableRecord = { schemaVersion: 2, recordRef, plannedName: name, nonce, sourceDigest: packet.sourceDigest, endpoint: CONTAINED_SOCKET, image: CONTAINED_IMAGE, containerId: null, cidfile, workspace: plannedWorkspace, workspaceParent, requestId: request.requestId, sourceBytes, phase: "planned", cleanup: "pending", entry: packet.entry, exportName: packet.exportName };
+  const record: DurableRecord = { schemaVersion: 3, profileId: CONTAINED_RUNTIME_PROFILE.id, recordRef, plannedName: name, nonce, sourceDigest: packet.sourceDigest, endpoint: CONTAINED_SOCKET, image: CONTAINED_IMAGE, containerId: null, cidfile, workspace: plannedWorkspace, workspaceParent, requestId: request.requestId, sourceBytes, phase: "planned", cleanup: "pending", entry: packet.entry, exportName: packet.exportName };
   let exitCode: number | null = null;
   let timedOut = false;
   let aborted = false;
@@ -722,6 +787,7 @@ export async function runContainedCandidate(packetInput: unknown, requestInput: 
   };
   try {
     await ensurePrivateDirectory(STATE_ROOT, true);
+    if (CANDIDATE_SCRATCH_ROOT !== undefined) await ensurePrivateDirectory(CANDIDATE_SCRATCH_ROOT, false);
     const mkStatus = noteWindow();
     if (mkStatus) throw new Error(mkStatus === "aborted" ? "execution aborted before preparation" : "execution deadline elapsed before preparation");
     if (await lstat(workspaceParent).then((info) => !info.isDirectory() || info.isSymbolicLink() || false, (error: unknown) => {

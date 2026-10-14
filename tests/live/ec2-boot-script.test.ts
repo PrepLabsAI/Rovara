@@ -72,6 +72,10 @@ cat > /tmp/docker-shim <<'EOF'
 cat > /dev/null 2>&1 <&0 || true
 echo "docker $*" >> /tmp/calls.log
 if [[ "$1" == pull ]]; then
+  if [[ "$2" == node@sha256:* ]]; then
+    count=$(( $(cat /tmp/contained-pull.count 2>/dev/null || echo 0) + 1 )); echo "$count" > /tmp/contained-pull.count
+    (( count > CONTAINED_PULL_FAILURES )) || exit 1
+  fi
   count=$(( $(cat /tmp/pull.count 2>/dev/null || echo 0) + 1 )); echo "$count" > /tmp/pull.count
   (( count > DOCKER_PULL_FAILURES )) || exit 1
 fi
@@ -132,6 +136,9 @@ echo "@@mounted=$(mountpoint -q /mnt/workspace && echo yes || echo no)"
 echo "@@owner=$(stat -c %u:%g /mnt/workspace 2>/dev/null)"
 echo "@@kept=$(cat /mnt/workspace/work.txt 2>/dev/null)"
 echo "@@envmode=$(stat -c %a /etc/agentx/worker.env 2>/dev/null)"
+tmpdir=$(sed -n 's/^TMPDIR=//p' /etc/agentx/worker.env 2>/dev/null)
+probe="$tmpdir/agentx-ordinary-tmp-$$"
+if [[ -d "$tmpdir" ]] && touch "$probe"; then echo "@@ordinarytmp=available"; rm -f "$probe"; else echo "@@ordinarytmp=unavailable"; fi
 echo "@@fstab"; cat /etc/fstab
 echo "@@env"; cat /etc/agentx/worker.env 2>/dev/null
 echo "@@unit"; cat /etc/systemd/system/agentx-worker.service 2>/dev/null
@@ -159,6 +166,7 @@ function config(overrides: Partial<Ec2WorkerBootConfig> = {}): Ec2WorkerBootConf
 interface Faults {
   dnfFailures?: number | "always";
   pullFailures?: number;
+  containedPullFailures?: number;
   curlFailures?: number;
   awsFails?: boolean;
   systemctlFails?: string;
@@ -182,6 +190,7 @@ async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "exi
     "--env", `VOLUME_STATE=${volumeState}`,
     "--env", `DNF_FAILURES=${faults.dnfFailures ?? ""}`,
     "--env", `DOCKER_PULL_FAILURES=${faults.pullFailures ?? 0}`,
+    "--env", `CONTAINED_PULL_FAILURES=${faults.containedPullFailures ?? 0}`,
     "--env", `SYSTEMCTL_FAILS=${faults.systemctlFails ?? ""}`,
     "--env", `CURL_FAILURES=${faults.curlFailures ?? 0}`,
     "--env", `AWS_FAILS=${faults.awsFails ? "1" : ""}`,
@@ -199,7 +208,7 @@ async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "exi
   const calls = section("calls");
   return {
     exit: Number(field("exit")), type: field("type"), mounted: field("mounted") === "yes", owner: field("owner"),
-    kept: field("kept"), envMode: field("envmode"), ping: field("ping"), rescan: field("rescan"),
+    kept: field("kept"), envMode: field("envmode"), ping: field("ping"), rescan: field("rescan"), ordinaryTmp: field("ordinarytmp"),
     fstab: section("fstab"), env: section("env"), unit: section("unit"), calls, log: result.stderr,
     sleeps: calls.split("\n").filter((line) => line.startsWith("sleep ")).map((line) => Number(line.slice("sleep ".length))),
     count: (call: string) => calls.split("\n").filter((line) => line === call).length,
@@ -326,6 +335,19 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.ping).toBe("unreachable");
   }, 180_000);
 
+  it("keeps ordinary worker startup available when the optional contained runner image cannot preload", async () => {
+    const result = await boot(config(), "blank", { containedPullFailures: 99 });
+    expect(result.exit, result.log).toBe(0);
+    expect(result.count(`docker pull ${WORKER_IMAGE}`)).toBe(1);
+    expect(result.count("docker pull node@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9")).toBe(5);
+    expect(result.log).toContain("optional verifier image unavailable; worker continues");
+    expect(result.unit).toContain("ExecStart=");
+    expect(result.env).toContain("CONTAINED_FOUNDATION_EVIDENCE_DIR=/mnt/agentx-runtime/evidence");
+    expect(result.env).toContain("TMPDIR=/mnt/agentx-runtime/tmp");
+    expect(result.calls).toContain("systemctl enable --now agentx-worker.service");
+    expect(result.calls).not.toContain("systemd-run --unit=agentx-boot-failure --collect --property=Type=notify");
+  }, 180_000);
+
   it("gives up on the image pull after 5 tries and reports why on /ping", async () => {
     const result = await boot(config(), "blank", { pullFailures: 99 });
     expect(result.exit).not.toBe(0);
@@ -341,6 +363,19 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.kept).toBe("kept");
     expect(result.log).toContain("already has an ext4 filesystem");
     expect(result.log).not.toContain("formatting");
+  }, 180_000);
+
+  it("keeps ordinary worker temporary operations available when a reused volume has no verifier state", async () => {
+    const result = await boot(config({ generation: 4, expectNewVolume: false }), "existing");
+    expect(result.exit, result.log).toBe(0);
+    expect(result.kept).toBe("kept");
+    expect(result.env).toContain("TMPDIR=/tmp");
+    expect(result.env).not.toContain("CONTAINED_FOUNDATION_EVIDENCE_DIR=");
+    expect(result.ordinaryTmp).toBe("available");
+    expect(result.unit).not.toContain("--volume /mnt/agentx-runtime:/mnt/agentx-runtime");
+    expect(result.unit).toContain("RequiresMountsFor=/mnt/workspace");
+    expect(result.log).toContain("verifier unavailable; setup smoke withheld");
+    expect(result.calls).toContain("systemctl enable --now agentx-worker.service");
   }, 180_000);
 
   it("reports the step that stopped the boot when a command fails without a reason of its own", async () => {
