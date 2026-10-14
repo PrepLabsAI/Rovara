@@ -199,25 +199,51 @@ const RuntimeInstallExecutionSchema = z.object({
     "case-e1a9e129a98030e665eb13a5dbbc2c643624b1bfb893d2611baaed6688b9b9a7",
     "case-e014583b1e51edfe14e5d0cb2df6bde986cd7583c6b51eb913e0891cfc2d0fbe",
   ];
+  const expectedTarget = { id: "contract-web-1", index: 0, platform: "contract-web-1", environment: "test", engine: { name: "none", version: "unversioned", spiVersion: 1 }, capabilities: [], artifactCapabilities: [], stateCapability: false };
+  const expectedLimits = { maxAgentContextBytes: 16384, maxLedgerBytes: 8192, maxObservationBytes: 262144, maxEventsPerStep: 1000, maxModelTokensPerCall: 64000 };
+  const expectedUsage = { discoveredResults: 3, maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 };
   if (rows.length !== 3 || summary.discovered !== 3 || summary.selected !== 3 || summary.executed !== 3 || summary.passed !== 2 || summary.failed !== 1
+    || summary.interrupted !== 0 || summary.flaky !== 0 || summary.skipped !== 0 || !Array.isArray(report.run.serialGroups) || report.run.serialGroups.length !== 0
+    || canonicalJson(report.run.targets) !== canonicalJson([expectedTarget]) || canonicalJson(report.run.limits) !== canonicalJson(expectedLimits)
+    || canonicalJson(report.run.usage) !== canonicalJson(expectedUsage)
     || rows.some((row, index) => !isRecord(row) || row.status !== expectedStatuses[index] || row.kind !== "test" || row.selected !== true || row.repeat !== 0
+      || row.declarationIndex !== index || row.file !== ".agentx/e2e/generated-contract.test.ts" || row.platform !== "contract-web-1" || row.skip !== undefined
+      || !Array.isArray(row.tags) || row.tags.length !== 0 || !isRecord(row.source) || row.source.file !== ".agentx/e2e/generated-contract.test.ts"
+      || row.source.line !== index + 3 || row.source.column !== 1
       || !Array.isArray(row.attempts) || row.attempts.length !== 1 || !isRecord(row.attempts[0])
       || row.attempts[0].index !== 0 || row.attempts[0].status !== expectedStatuses[index] || row.attempts[0].cleanup !== "complete"
+      || !Array.isArray(row.attempts[0].artifacts) || row.attempts[0].artifacts.length !== 0
+      || typeof row.attempts[0].startedAt !== "string" || !Number.isFinite(Date.parse(row.attempts[0].startedAt))
+      || !Number.isSafeInteger(row.attempts[0].durationMs) || (row.attempts[0].durationMs as number) < 0 || (row.attempts[0].durationMs as number) > 10_000
       || !Array.isArray(row.attempts[0].steps) || row.attempts[0].steps.length !== 0
       || !Array.isArray(row.attempts[0].secondaryErrors) || row.attempts[0].secondaryErrors.length !== 0
-      || (index === 2 ? !isRecord(row.attempts[0].error) || row.attempts[0].error.category !== "test" : row.attempts[0].error !== undefined)
-      || !Array.isArray(row.titlePath) || row.titlePath.at(-1) !== expectedCaseIds[index]
+      || (index === 2 ? !isRecord(row.attempts[0].error) || row.attempts[0].error.category !== "test" || row.attempts[0].error.code !== "ASSERTION_FAILED"
+        || row.attempts[0].error.retryable !== false || row.attempts[0].error.phase !== "body" || typeof row.attempts[0].error.message !== "string"
+        || !isRecord(row.attempts[0].error.source) || row.attempts[0].error.source.file !== "worker-bridge.mjs" || row.attempts[0].error.source.line !== 60 || row.attempts[0].error.source.column !== 35 : row.attempts[0].error !== undefined)
+      || !Array.isArray(row.titlePath) || row.titlePath.length !== 1 || row.titlePath[0] !== expectedCaseIds[index]
       || typeof row.testId !== "string" || row.testId !== `.agentx/e2e/generated-contract.test.ts::${expectedCaseIds[index]}`
       || row.agent !== "default" || row.targetId !== "contract-web-1" || typeof row.id !== "string"
       || createHash("sha256").update(canonicalJson({ testId: row.testId, targetId: row.targetId, agent: row.agent })).digest("hex") !== row.id)) {
     context.addIssue({ code: "custom", path: ["run", "stdout"], message: "report must contain exactly two clean positive cases and the one fixed expected negative case" });
   }
-  const listPairs = isRecord(list) && Array.isArray(list.pairs) ? list.pairs : [];
-  if (listPairs.length !== 3 || !Array.isArray(rows) || rows.some((row, index) => !isRecord(row) || !isRecord(listPairs[index])
-    || listPairs[index].id !== row.id || listPairs[index].disposition !== "run" || listPairs[index].title !== (row.titlePath as unknown[] | undefined)?.at(-1)
-    || listPairs[index].target !== row.targetId || listPairs[index].agent !== row.agent)) {
-    context.addIssue({ code: "custom", path: ["list", "stdout"], message: "original CLI list output must identify exactly the same three ordered report cases" });
-  }
+  const listPairs: unknown[] = isRecord(list) && Array.isArray(list.pairs) ? list.pairs as unknown[] : [];
+  const expectedListKeys = "agent,disposition,file,id,kind,sessions,source,tags,target,title,titlePath";
+  if (!isRecord(list) || Object.keys(list).sort().join(",") !== "pairs" || listPairs.length !== 3 || !Array.isArray(rows) || rows.some((row, index) => {
+    const pair = listPairs[index];
+    const expectedCaseId = expectedCaseIds[index];
+    if (!isRecord(row) || !isRecord(pair) || !expectedCaseId) return true;
+    const source = isRecord(pair.source) ? pair.source : {};
+    const pairKeys = Object.keys(pair).sort().join(",");
+    const expectedId = typeof row.id === "string" ? row.id : "";
+    return pairKeys !== expectedListKeys || pair.id !== expectedId || pair.disposition !== "run"
+      || pair.file !== ".agentx/e2e/generated-contract.test.ts" || pair.title !== expectedCaseId
+      || canonicalJson(pair.titlePath) !== canonicalJson([expectedCaseId]) || pair.kind !== "test"
+      || !Array.isArray(pair.tags) || pair.tags.length !== 0 || !Array.isArray(pair.sessions) || pair.sessions.length !== 0
+      || pair.target !== "contract-web-1" || pair.agent !== "default"
+      || Object.keys(source).sort().join(",") !== "column,file,line" || source.file !== pair.file
+      || !Number.isSafeInteger(source.line) || (source.line as number) < 1 || !Number.isSafeInteger(source.column) || (source.column as number) < 1
+      || pair.title !== (row.titlePath as unknown[] | undefined)?.at(-1) || pair.target !== row.targetId || pair.agent !== row.agent;
+  })) context.addIssue({ code: "custom", path: ["list", "stdout"], message: "original CLI list output must preserve the fixed generated-file and source provenance for exactly the three ordered report cases" });
   if (report.run.status !== "failed" || report.run.exitCode !== 1 || !Array.isArray(report.run.errors) || report.run.errors.length !== 0) {
     context.addIssue({ code: "custom", path: ["run", "stdout"], message: "pinned CLI report must preserve only the intentional fixed negative test failure" });
   }
@@ -235,7 +261,8 @@ export const RuntimeInstallationProposalSchema = z.object({
   if (expectedIds.some((id, index) => proposal.probes[index]?.probeId !== id)) context.addIssue({ code: "custom", path: ["probes"], message: "proposal must contain the fixed setup-positive, feature-positive, feature-negative probe sequence" });
   if (Date.parse(proposal.createdAt) < Date.parse(proposal.challenge.issuedAt) || Date.parse(proposal.createdAt) >= Date.parse(proposal.challenge.expiresAt)) context.addIssue({ code: "custom", path: ["createdAt"], message: "proposal must be created during its challenge window" });
   if (proposal.runnerToolchain.version !== "v22.23.2" || proposal.runnerToolchain.arch !== proposal.challenge.profileId.split("-")[1] || proposal.runnerToolchain.platform !== (proposal.challenge.profileId.startsWith("linux-") ? "linux" : "darwin")) context.addIssue({ code: "custom", path: ["runnerToolchain"], message: "runner toolchain must match the challenge's fixed runtime profile" });
-  if (proposal.runnerEnvironment.arch !== proposal.runnerToolchain.arch || !proposal.runnerEnvironment.os.toLowerCase().startsWith(`${proposal.runnerToolchain.platform} `)) context.addIssue({ code: "custom", path: ["runnerEnvironment"], message: "runner environment must retain the observed OS platform and release" });
+  if (proposal.runnerEnvironment.arch !== proposal.runnerToolchain.arch || !proposal.runnerEnvironment.os.toLowerCase().startsWith(`${proposal.runnerToolchain.platform} `)
+    || proposal.runnerEnvironment.runtime !== `node ${proposal.runnerToolchain.version}`) context.addIssue({ code: "custom", path: ["runnerEnvironment"], message: "runner environment must retain the observed OS release, architecture, and exact Node runtime" });
   try {
     const report = JSON.parse(Buffer.from(proposal.execution.run.stdout.bytesBase64, "base64").toString("utf8")) as Record<string, unknown>;
     const run = isRecord(report.run) ? report.run : {};
@@ -250,6 +277,20 @@ export const RuntimeInstallationProposalSchema = z.object({
     if (!Number.isFinite(runStartedAt) || !Number.isFinite(runFinishedAt)
       || runStartedAt < Date.parse(proposal.challenge.issuedAt) || runFinishedAt < runStartedAt
       || runFinishedAt > Date.parse(proposal.createdAt)) context.addIssue({ code: "custom", path: ["execution", "run", "stdout"], message: "observed report chronology must fall within this fresh challenge and proposal window" });
+    if (Array.isArray(run.results)) {
+      for (const [index, rawRow] of run.results.entries()) {
+        if (!isRecord(rawRow) || !Array.isArray(rawRow.attempts)) continue;
+        for (const attempt of rawRow.attempts) {
+          if (!isRecord(attempt)) continue;
+          const attemptStartedAt = typeof attempt.startedAt === "string" ? Date.parse(attempt.startedAt) : Number.NaN;
+          const duration = typeof attempt.durationMs === "number" ? attempt.durationMs : Number.NaN;
+          if (!Number.isFinite(attemptStartedAt) || !Number.isFinite(duration) || attemptStartedAt < runStartedAt
+            || attemptStartedAt + duration > runFinishedAt || duration > 10_000) {
+            context.addIssue({ code: "custom", path: ["execution", "run", "stdout", "results", index, "attempts"], message: "fixed probe attempts must have finite timestamps and remain within the report and case timeout window" });
+          }
+        }
+      }
+    }
     const runStartCapture = JSON.parse(Buffer.from(proposal.execution.run.runStartCapture.bytesBase64, "base64").toString("utf8").trim()) as Record<string, unknown>;
     const capturedAt = typeof runStartCapture.at === "string" ? Date.parse(runStartCapture.at) : Number.NaN;
     if (!Number.isFinite(capturedAt) || capturedAt < Date.parse(proposal.challenge.issuedAt)
