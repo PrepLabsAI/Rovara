@@ -47,8 +47,8 @@ const gitBlob = (cwd: string, revision: string, path: string): Buffer | undefine
 
 describe("P0 normal project onboarding journey", () => {
   it("discovers and presents source-backed setup from ordinary addProject without injected setup authority", async () => {
-    const evidenceRoot = process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR;
-    expect(evidenceRoot, "CONTAINED_FOUNDATION_EVIDENCE_DIR must be pre-created outside the fresh TMPDIR").toBeDefined();
+    const evidenceRoot = process.env.P0_SETUP_EVIDENCE_DIR ?? process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR;
+    expect(evidenceRoot, "provide P0_SETUP_EVIDENCE_DIR or CONTAINED_FOUNDATION_EVIDENCE_DIR outside the fresh TMPDIR").toBeDefined();
     const root = resolve(evidenceRoot!, "native-journey", `5a-normal-discovery-${randomUUID()}`);
     const repositoryRoot = join(root, "selected-repository");
     const projectConfig = join(root, "project-config");

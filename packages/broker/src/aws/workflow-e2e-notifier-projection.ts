@@ -19,7 +19,7 @@ export async function readWorkflowE2ENotifierProjection(input: {
   workspaceId: string;
   current: { candidateDigest: string; roundId: string; groupRunIds: string[]; admissionSha256: string; evidenceSha256: string };
   readPrivateObject(key: string, maxBytes: number): Promise<Uint8Array | undefined>;
-}): Promise<{ view: ReturnType<typeof E2ESharedViewSchema.parse>; capturedAt: string } | undefined> {
+}): Promise<{ view: ReturnType<typeof E2ESharedViewSchema.parse>; capturedAt: string; candidateDigest: string; roundId: string } | undefined> {
   const ref = E2EWorkflowDisplayRefSchema.safeParse(input.ref);
   if (!ref.success || ref.data.key !== `private/${input.ownerKey}/${input.workspaceId}/workflow-e2e-display/${ref.data.sha256}.json`
     || ref.data.candidateDigest !== input.current.candidateDigest || ref.data.roundId !== input.current.roundId
@@ -35,7 +35,8 @@ export async function readWorkflowE2ENotifierProjection(input: {
       || envelope.data.admissionSha256 !== input.current.admissionSha256
       || envelope.data.evidenceSha256 !== input.current.evidenceSha256) return undefined;
     const view = { schemaVersion: envelope.data.schemaVersion, setup: envelope.data.setup, e2e: envelope.data.e2e, actions: envelope.data.actions };
-    return { view: E2ESharedViewSchema.parse(view), capturedAt: envelope.data.capturedAt };
+    return { view: E2ESharedViewSchema.parse(view), capturedAt: envelope.data.capturedAt,
+      candidateDigest: envelope.data.candidateDigest, roundId: envelope.data.roundId };
   } catch { return undefined; }
 }
 

@@ -1777,7 +1777,8 @@ function createAwsNotifierHandler() {
         const bytes = response.Body === undefined ? undefined : Buffer.from(await response.Body.transformToByteArray());
         return bytes !== undefined && bytes.byteLength <= maxBytes ? bytes : undefined;
       } });
-      return view === undefined ? undefined : renderE2ENotifierSlackBlocks(view.view, view.capturedAt, taskPageUrlFromBase(reviewUrlBase, task.taskId));
+      return view === undefined ? undefined : renderE2ENotifierSlackBlocks(view.view,
+        { candidateDigest: view.candidateDigest, roundId: view.roundId, capturedAt: view.capturedAt }, taskPageUrlFromBase(reviewUrlBase, task.taskId));
     },
   });
 }

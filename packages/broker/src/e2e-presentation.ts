@@ -38,11 +38,13 @@ export function renderE2EUnavailableSlackBlock(taskPageUrl?: string): E2ESlackBl
 }
 
 /** Renders a hashed notification snapshot without implying that it is current readiness. */
-export function renderE2ENotifierSlackBlocks(view: E2ESharedView, capturedAt: string, taskPageUrl?: string): E2ESlackBlock[] {
+export function renderE2ENotifierSlackBlocks(view: E2ESharedView, captured: { candidateDigest: string; roundId: string; capturedAt: string }, taskPageUrl?: string): E2ESlackBlock[] {
   const taskLink = taskPageUrl === undefined ? "Open the task for current status." : `<${slackBounded(taskPageUrl, 1800)}|Open the task for current status.>`;
+  const { e2e } = view;
   return [
-    { type: "section", text: { type: "mrkdwn", text: `*Captured E2E observation: ${view.e2e.status}*\n${slackBounded(view.e2e.label, 140)}\nCaptured ${slackBounded(capturedAt, 40)}. Current readiness is UNKNOWN; it was not rechecked in this notification. ${taskLink}` } },
-    { type: "section", text: { type: "mrkdwn", text: `Captured cases ${view.e2e.executedCases} · criteria ${view.e2e.qualifiedCriteria}/${view.e2e.requiredCriteria} · required unavailable ${view.e2e.unavailableCriteria}` } },
+    { type: "section", text: { type: "mrkdwn", text: `*Captured portable source/mock observations: ${e2e.status}*\n${slackBounded(e2e.label, 140)}\nCandidate ${slackBounded(captured.candidateDigest, 128)} · round ${slackBounded(captured.roundId, 80)} · captured ${slackBounded(captured.capturedAt, 80)}. Current readiness is UNKNOWN; it was not rechecked in this notification. ${taskLink}` } },
+    { type: "section", text: { type: "mrkdwn", text: `Captured groups ${e2e.receivedGroups}/${e2e.expectedGroups} · cases ${e2e.executedCases} · criteria ${e2e.qualifiedCriteria}/${e2e.requiredCriteria} · required unavailable ${e2e.unavailableCriteria} · unmet required ${slackBounded(e2e.requiredUnexercisedCriteriaIds.join(", ") || "none", 300)}` } },
+    { type: "section", text: { type: "mrkdwn", text: `Mocks ${e2e.mockedComponentIds.length} declared · ${e2e.observedMockedComponentIds.length} observed · unexercised behaviors ${slackBounded(e2e.unexercisedBehaviors.join(", ") || "none", 300)}. ${slackBounded(SCOPE_NOTE, 900)}` } },
   ];
 }
 

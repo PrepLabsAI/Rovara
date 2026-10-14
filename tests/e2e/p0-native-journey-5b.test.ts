@@ -60,7 +60,7 @@ import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/s
 import { e2eFeatureVerifierKey, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "../../packages/broker/src/aws/project-setup-runtime-catalog.js";
 import { readWorkflowE2ENotifierProjection } from "../../packages/broker/src/aws/workflow-e2e-notifier-projection.js";
-import { renderE2ESlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
+import { renderE2ENotifierSlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
 import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependencies.js";
 import { persistOriginalEvidencePrimary, persistOriginalMapPrimary } from "../support/p0-evidence-capture.js";
@@ -629,7 +629,8 @@ describe("P0 normal project onboarding journey", () => {
             const bytes = objects.get(key);
             return bytes !== undefined && bytes.byteLength <= maxBytes ? bytes : undefined;
           } });
-        notifierE2EBlocks = view === undefined ? undefined : renderE2ESlackBlocks(view);
+        notifierE2EBlocks = view === undefined ? undefined : renderE2ENotifierSlackBlocks(view.view,
+          { candidateDigest: view.candidateDigest, roundId: view.roundId, capturedAt: view.capturedAt }, `https://agentx.test/review/${featureTaskId}/task`);
         return notifierE2EBlocks;
       },
     });
@@ -1190,6 +1191,14 @@ describe("P0 normal project onboarding journey", () => {
       expect(workflowButtons).toHaveLength(1);
       expect(recordOf(workflowButtons[0])?.text).toEqual({ type: "plain_text", text: "Send back to coding" });
       expect(JSON.stringify(failedRoundPost?.blocks)).toContain("FAILED");
+      const failedNotifierText = JSON.stringify(notifierE2EBlocks);
+      expect(failedNotifierText).toContain("Captured portable source/mock observations: FAILED");
+      expect(failedNotifierText).toContain(workerCandidate.digest);
+      expect(failedNotifierText).toContain(checksAdmission?.roundId);
+      expect(failedNotifierText).toMatch(/captured 20\d\d-\d\d-\d\dT/u);
+      expect(failedNotifierText).toContain("Current readiness is UNKNOWN; it was not rechecked in this notification.");
+      expect(failedNotifierText).toContain("unmet required");
+      expect(failedNotifierText).not.toContain("agentx_workflow_send_back");
       const ownerFailedRoundProjection = await loadWorkflowE2EPresentation(broker.brokerInput as never,
         broker.db.get(`DEVTASK#${featureTaskId}`, "META") as never,
         broker.db.find((item) => item.pk === `WORKSPACE#${featureWorkspaceId}` && item.entityType === "OPERATION"), "owner");
@@ -1403,7 +1412,15 @@ describe("P0 normal project onboarding journey", () => {
       const workflowDelivery = await notifierHandler({ Records: [{ eventSource: "aws:sqs", messageId: "native-workflow", receiptHandle: "native-workflow",
         body: JSON.stringify(workflowNotice), attributes: { ApproximateReceiveCount: "1" } }] });
       expect(workflowDelivery.batchItemFailures, JSON.stringify(notifierLogs)).toEqual([]);
-      expect(notifierE2EBlocks).toEqual(e2ePresentation?.slackBlocks);
+      const notifierText = JSON.stringify(notifierE2EBlocks);
+      expect(notifierText).toContain("Captured portable source/mock observations: PASS");
+      expect(notifierText).toContain(retryResult.workflowCandidateSourceExport!.candidate.digest);
+      expect(notifierText).toContain(retryChecksAdmission?.roundId);
+      expect(notifierText).toContain("Current readiness is UNKNOWN");
+      expect(notifierText).toContain("was not rechecked in this notification");
+      expect(notifierText).toContain("Portable source and mock checks are scoped evidence");
+      expect(notifierText).toContain("Open the task for current status");
+      expect(notifierText).not.toContain("advisory owner proposals");
       expect(notifierPosts.at(-1)?.blocks).toEqual(expect.arrayContaining(notifierE2EBlocks ?? []));
       await writeFile(join(root, "fresh-pass-task-slack-notifier-post.json"), `${JSON.stringify({ post: notifierPosts.at(-1), e2eBlocks: notifierE2EBlocks }, null, 2)}\n`,
         { mode: 0o600, flag: "wx" });
@@ -2186,7 +2203,8 @@ describe("P0 normal project onboarding journey", () => {
       attributes: { ApproximateReceiveCount: "1" } }] });
     expect(browserNotice.batchItemFailures).toEqual([]);
     const browserNoticePost = notifierPosts.at(-1);
-    expect(JSON.stringify(browserNoticePost)).toContain("E2E UNKNOWN");
+    expect(JSON.stringify(browserNoticePost)).toContain("Captured portable source/mock observations: UNKNOWN");
+    expect(JSON.stringify(browserNoticePost)).toContain("Current readiness is UNKNOWN; it was not rechecked in this notification.");
     expect(browserNoticePost?.text).toContain("required E2E evidence is incomplete or unavailable");
     expect(browserNoticePost?.text).not.toContain("Something went wrong on AgentX's side");
     expect(JSON.stringify(browserNoticePost)).not.toContain("agentx_workflow_send_back");

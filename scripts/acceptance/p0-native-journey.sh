@@ -21,6 +21,24 @@ tmp_owner=$(stat -f '%u' "$tmp" 2>/dev/null || stat -c '%u' "$tmp") || unavailab
 [ "$tmp_owner" = "$(id -u)" ] || unavailable 'TMPDIR must be owned by the current user'
 tmp_real=$(cd "$tmp" && pwd -P)
 
+validate_evidence_root() {
+  root=$1
+  [ -n "$root" ] && [ -d "$root" ] || unavailable 'evidence root must be a pre-created directory'
+  [ ! -L "$root" ] || unavailable 'evidence root cannot be a symbolic link'
+  root_real=$(cd "$root" && pwd -P)
+  [ "$root" = "$root_real" ] || unavailable 'evidence root must be supplied by its canonical path'
+  root_owner=$(stat -f '%u' "$root" 2>/dev/null || stat -c '%u' "$root") || unavailable 'could not verify evidence-root ownership'
+  [ "$root_owner" = "$(id -u)" ] || unavailable 'evidence root must be owned by the current user'
+  root_mode=$(stat -f '%Lp' "$root" 2>/dev/null || stat -c '%a' "$root") || unavailable 'could not verify evidence-root permissions'
+  [ $((0$root_mode & 077)) -eq 0 ] || unavailable 'evidence root must be private to the current user'
+  [ -z "$(find "$root" -mindepth 1 -print -quit)" ] || unavailable 'evidence root must be empty before Vitest starts'
+  [ "$(basename "$(dirname "$root_real")")" = 'AgentX-e2e-p0-20261012-evidence' ] || unavailable 'evidence root must be a direct child of the owned evidence collection'
+  [ "$(dirname "$(dirname "$root_real")")" = "$(dirname "$(pwd -P)")" ] || unavailable 'evidence collection must be a sibling of this source checkout'
+  case "$root_real/" in "$tmp_real/"*) unavailable 'evidence root must be outside TMPDIR' ;; esac
+  case "$(pwd -P)/" in "$root_real/"*) unavailable 'evidence root must be outside the source checkout' ;; esac
+  printf '%s' "$root_real"
+}
+
 journey=${P0_NATIVE_JOURNEY_TEST:-tests/e2e/p0-native-journey.test.ts}
 case "$journey" in
   tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts|tests/unit/e2e-feature-plan-intent.test.ts|tests/unit/e2e-execution-plan.test.ts|tests/unit/e2e-review-fix3.test.ts|tests/contract/e2e-feature-verifier-catalog.test.ts|tests/contract/task-workflow-invocation.test.ts|tests/contract/task-workflow-contracts.test.ts|tests/contract/admin-read-projects.test.ts|tests/contract/admin-actions.test.ts|tests/contract/workflow-e2e-current-authority.test.ts|tests/contract/workflow-e2e-notifier-projection.test.ts|tests/contract/developer-task-notifier.test.ts|tests/contract/workflow-e2e-cancellation.test.ts|tests/contract/loop-candidate-untracked.test.ts|tests/contract/verifier-image-closure.test.ts) ;;
@@ -30,8 +48,12 @@ case "$journey" in
   tests/e2e/p0-native-journey.test.ts|tests/e2e/p0-native-journey-5b.test.ts)
     evidence=${CONTAINED_FOUNDATION_EVIDENCE_DIR:-}
     [ -n "$evidence" ] && [ -d "$evidence" ] || unavailable 'pre-create CONTAINED_FOUNDATION_EVIDENCE_DIR outside the fresh TMPDIR'
-    evidence_real=$(cd "$evidence" && pwd -P)
-    case "$evidence_real/" in "$tmp_real/"*) unavailable 'contained evidence directory must be outside TMPDIR' ;; esac
+    evidence_real=$(validate_evidence_root "$evidence")
+    setup_evidence=${P0_SETUP_EVIDENCE_DIR:-}
+    if [ -n "$setup_evidence" ]; then
+      setup_evidence_real=$(validate_evidence_root "$setup_evidence")
+      [ "$setup_evidence_real" != "$evidence_real" ] || unavailable 'setup and contained evidence roots must be separate'
+    fi
     command -v docker >/dev/null 2>&1 || unavailable 'Docker CLI is unavailable'
     image='node@sha256:48e4b67d85f87bd551df43704e24d252f56cc5f8e9718841aace50f19948f0f9'
     image_info=$(docker image inspect "$image" --format '{{.RepoDigests}} {{.Os}} {{.Architecture}}' 2>/dev/null) || unavailable 'pinned Docker image is unavailable locally; this command never pulls images'
@@ -68,6 +90,7 @@ if [ "$journey" = 'tests/e2e/p0-native-journey.test.ts' ] || [ "$journey" = 'tes
         buildArgv: ["node_modules/typescript/bin/tsc", "-b", "--force", "--pretty", "false"],
         verifier: { resolvedEntry: resolved, entrySha256: sha(entryBytes), runtimeCli: runtimePath, runtimeCliSha256: sha(runtimeBytes) },
         evidenceRoot: realpathSync(process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR),
+        setupEvidenceRoot: process.env.P0_SETUP_EVIDENCE_DIR ? realpathSync(process.env.P0_SETUP_EVIDENCE_DIR) : null,
         tmpDirectory: realpathSync(process.env.TMPDIR),
         dockerHost: process.env.DOCKER_HOST ?? null,
       };

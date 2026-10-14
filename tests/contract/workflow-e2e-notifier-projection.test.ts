@@ -42,13 +42,18 @@ describe("notifier E2E display projection", () => {
 
   it("labels a retained PASS as a captured observation and current readiness as unknown", () => {
     const passView = { ...view, e2e: { ...view.e2e, status: "PASS" as const, label: "Portable checks passed" } };
-    const blocks = renderE2ENotifierSlackBlocks(passView, capturedAt, "https://agentx.test/tasks/task-1");
+    const blocks = renderE2ENotifierSlackBlocks(passView, { candidateDigest: current.candidateDigest, roundId: current.roundId, capturedAt }, "https://agentx.test/tasks/task-1");
     const text = blocks.map((block) => block.text.text).join("\n");
-    expect(text).toContain("Captured E2E observation: PASS");
+    expect(text).toContain("Captured portable source/mock observations: PASS");
+    expect(text).toContain(current.candidateDigest);
+    expect(text).toContain(current.roundId);
     expect(text).toContain(capturedAt);
     expect(text).toContain("Current readiness is UNKNOWN");
     expect(text).toContain("was not rechecked in this notification");
     expect(text).toContain("Open the task for current status");
+    expect(text).toContain("Portable source and mock checks are scoped evidence");
+    expect(text).toContain("unmet required browser");
+    expect(text).not.toContain("advisory owner proposals");
     expect(text).not.toMatch(/\*E2E PASS:/u);
   });
 
