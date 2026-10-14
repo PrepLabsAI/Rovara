@@ -48,6 +48,25 @@ describe("rovara loop's setup commands (#355)", () => {
     expect(await h.store.repos()).toHaveLength(1);
   });
 
+  it("requires an explicit lane mode before writing enrollment state", async () => {
+    const h = await setUp();
+    await h.run(["loop", "init", h.checkout]);
+    await h.run(["loop", "add", h.checkout]);
+    const before = await h.store.enrollments();
+    expect(await h.run(["loop", "enroll", "acme/payments"])).not.toBe(0);
+    expect(await h.store.enrollments()).toEqual(before);
+    expect(await h.run(["loop", "enroll", "acme/payments", "--issue", "42"])).not.toBe(0);
+    expect(await h.store.enrollments()).toEqual(before);
+    expect(await h.run(["loop", "enroll", "acme/payments", "--target", "acme/payments"])).not.toBe(0);
+    expect(await h.store.enrollments()).toEqual(before);
+    const worldExec = h.world.exec;
+    h.world.exec = async (command, args, options) => command === "gh" && args[0] === "api" && args[1] === "repos/acme/payments" && args.at(-1) === ".id"
+      ? { code: 0, stdout: "1234\n", stderr: "" }
+      : worldExec(command, args, options);
+    expect(await h.run(["loop", "enroll", "acme/payments", "--standalone-local"])).toBe(0);
+    expect(await h.store.enrollments()).toMatchObject([{ kind: "standalone-local", project: "acme/payments" }]);
+  });
+
   it("refuses a config that names no collaborator, or another agent", async () => {
     const h = await setUp();
     await mkdir(join(h.checkout, ".rovara"), { recursive: true });

@@ -10,12 +10,12 @@ import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 
 const dirs: string[] = [];
 const servers: Server[] = [];
-const enrollment: RegisteredEnrollment = {
-  schemaVersion: 1, kind: "registered", enrollmentId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", namespace: "https://control.example/env/dev/project/payments",
+const makeEnrollment = (baseUrl: string): RegisteredEnrollment => ({
+  schemaVersion: 1, kind: "registered", enrollmentId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee", namespace: `${baseUrl}/env/dev/project/payments`,
   hostId: "host-a", uid: 501, account: "maya", project: "payments", projectRevision: 3,
   repository: "acme/payments", repositoryId: 1234, checkoutPath: "/work/payments", commonGitDir: "/work/payments/.git",
   sourceBindingRef: `cli-source:v1:${"a".repeat(64)}`, taskRef: "11111111-2222-4333-8444-555555555555", enrolledAt: "2026-10-14T10:00:00.000Z",
-};
+});
 const subject = { projectName: "payments", projectRevision: 3, repositoryId: 1234, commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "c".repeat(40) };
 
 async function fixture(baseUrl: string) {
@@ -62,17 +62,19 @@ async function serve(handler: (request: Request) => Response | Promise<Response>
 
 describe("the authenticated registered publication join client", () => {
   it("sends the frozen subject and opaque host binding through the CLI developer session", async () => {
-    expect(RegisteredEnrollmentSchema.safeParse(enrollment)).toMatchObject({ success: true });
     let received: { path?: string; authorization?: string; body?: unknown } = {};
     const baseUrl = await serve(async (request) => {
       received = { path: new URL(request.url).pathname, authorization: request.headers.get("authorization") ?? undefined, body: await request.json() };
-      return Response.json({ schemaVersion: 1, status: "READY", subject, candidateDigest: "d".repeat(64), contractDigest: "e".repeat(64), policyDigest: "f".repeat(64), planDigest: "1".repeat(64), roundId: "round-current", evidenceSetDigest: "2".repeat(64), checkedAt: new Date(Date.now() - 500).toISOString() });
+      await new Promise((resolve) => setTimeout(resolve, 55));
+      return Response.json({ schemaVersion: 1, status: "READY", requestId: "response-1", subject, candidateDigest: "d".repeat(64), contractDigest: "e".repeat(64), policyDigest: "f".repeat(64), planDigest: "1".repeat(64), roundId: "round-current", evidenceSetDigest: "2".repeat(64), checkedAt: new Date().toISOString() });
     });
     const h = await fixture(baseUrl);
+    const enrollment = makeEnrollment(baseUrl);
+    expect(RegisteredEnrollmentSchema.safeParse(enrollment)).toMatchObject({ success: true });
     const transport = createDeveloperPublicationJoinTransport({ home: h.home, env: "dev", tokenStore: h.tokenStore, fetch: fetch.bind(globalThis) });
-    const result = await resolveRegisteredPublication({ enrollment, subject, taskRef: enrollment.taskRef, transport, now: Date.now() });
+    const result = await resolveRegisteredPublication({ enrollment, subject, taskRef: enrollment.taskRef, transport, now: Date.now });
     if (result.kind !== "ready") throw new Error(JSON.stringify(result));
-    expect(result).toMatchObject({ kind: "ready", response: { roundId: "round-current" } });
+    expect(result).toMatchObject({ kind: "ready", response: { roundId: "round-current", requestId: "response-1" } });
     expect(received).toEqual({
       path: `/v1/dev/tasks/${enrollment.taskRef}/e2e-publication-context`, authorization: "Bearer synthetic-cli-session",
       body: { taskRef: enrollment.taskRef, subject, sourceBindingRef: enrollment.sourceBindingRef },
@@ -83,13 +85,27 @@ describe("the authenticated registered publication join client", () => {
     let requests = 0;
     const baseUrl = await serve(async () => { requests += 1; return Response.json({ error: "denied" }, { status: 403 }); });
     const h = await fixture(baseUrl);
+    const enrollment = makeEnrollment(baseUrl);
     const transport = createDeveloperPublicationJoinTransport({ home: h.home, env: "dev", tokenStore: h.tokenStore, fetch: fetch.bind(globalThis) });
     expect(RegisteredEnrollmentSchema.safeParse(enrollment)).toMatchObject({ success: true });
-    const refusal = await resolveRegisteredPublication({ enrollment, subject, taskRef: enrollment.taskRef, transport, now: Date.now() });
+    const refusal = await resolveRegisteredPublication({ enrollment, subject, taskRef: enrollment.taskRef, transport, now: Date.now });
     expect(refusal).toEqual({ kind: "hold", reasonCode: "native_join_unavailable" });
-    await expect(resolveRegisteredPublication({ enrollment, subject, taskRef: "not-a-uuid", transport, now: Date.now() }))
+    await expect(resolveRegisteredPublication({ enrollment, subject, taskRef: "not-a-uuid", transport, now: Date.now }))
       .resolves.toEqual({ kind: "hold", reasonCode: "task_binding_invalid" });
     expect(requests).toBe(1);
+  });
+
+  it("holds a registered namespace from another selected environment before sending any request", async () => {
+    let requests = 0;
+    const ready = { schemaVersion: 1, status: "READY", subject, candidateDigest: "d".repeat(64), contractDigest: "e".repeat(64), policyDigest: "f".repeat(64), planDigest: "1".repeat(64), roundId: "same-round", evidenceSetDigest: "2".repeat(64), checkedAt: new Date().toISOString() };
+    const authorityA = await serve(async () => Response.json(ready));
+    const selectedB = await serve(async () => { requests += 1; return Response.json(ready); });
+    const h = await fixture(selectedB);
+    const enrollment = makeEnrollment(authorityA);
+    const transport = createDeveloperPublicationJoinTransport({ home: h.home, env: "dev", tokenStore: h.tokenStore, fetch: fetch.bind(globalThis) });
+    const result = await resolveRegisteredPublication({ enrollment, subject, taskRef: enrollment.taskRef, transport, now: Date.now });
+    expect(result).toEqual({ kind: "hold", reasonCode: "native_join_unavailable" });
+    expect(requests).toBe(0);
   });
 });
 

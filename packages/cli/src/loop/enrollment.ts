@@ -163,14 +163,14 @@ export type PublicationJoinResponse = z.infer<typeof PublicationJoinResponseSche
 
 export const PublicationJoinRequestSchema = z.object({ taskRef: TaskRefSchema, subject: PublicationSubjectSchema, sourceBindingRef: SourceBindingRefSchema }).strict();
 export type PublicationJoinRequest = z.infer<typeof PublicationJoinRequestSchema>;
-export interface PublicationJoinTransport { load(request: PublicationJoinRequest): Promise<unknown> }
+export interface PublicationJoinTransport { load(request: PublicationJoinRequest, expectedAuthorityNamespace: string): Promise<unknown> }
 export type RegisteredPublicationResolution =
   | { kind: "ready"; response: z.infer<typeof PublicationReadySchema>; subject: PublicationSubject }
   | { kind: "hold"; reasonCode: string };
 
 export async function resolveRegisteredPublication(input: {
   enrollment: RegisteredEnrollment; subject: PublicationSubject; taskRef: string | undefined;
-  transport: PublicationJoinTransport | undefined; now: number; maxAgeMs?: number;
+  transport: PublicationJoinTransport | undefined; now: () => number; maxAgeMs?: number;
 }): Promise<RegisteredPublicationResolution> {
   if (input.taskRef === undefined || input.taskRef.length === 0) return { kind: "hold", reasonCode: "task_binding_missing" };
   if (!TaskRefSchema.safeParse(input.taskRef).success) return { kind: "hold", reasonCode: "task_binding_invalid" };
@@ -178,7 +178,7 @@ export async function resolveRegisteredPublication(input: {
   if (input.transport === undefined) return { kind: "hold", reasonCode: "native_join_unavailable" };
   let raw: unknown;
   try {
-    raw = await input.transport.load({ taskRef: input.taskRef, subject: input.subject, sourceBindingRef: input.enrollment.sourceBindingRef });
+    raw = await input.transport.load({ taskRef: input.taskRef, subject: input.subject, sourceBindingRef: input.enrollment.sourceBindingRef }, input.enrollment.namespace);
   } catch {
     return { kind: "hold", reasonCode: "native_join_unavailable" };
   }
@@ -188,7 +188,8 @@ export async function resolveRegisteredPublication(input: {
   if (!sameSubject(parsed.data.subject, input.subject)) return { kind: "hold", reasonCode: "subject_mismatch" };
   const observedAt = Date.parse(parsed.data.checkedAt);
   const maxAgeMs = input.maxAgeMs ?? 60_000;
-  if (!Number.isFinite(observedAt) || observedAt > input.now || input.now - observedAt > maxAgeMs) return { kind: "hold", reasonCode: "server_observation_stale" };
+  const receivedAt = input.now();
+  if (!Number.isFinite(receivedAt) || !Number.isFinite(observedAt) || observedAt > receivedAt || receivedAt - observedAt > maxAgeMs) return { kind: "hold", reasonCode: "server_observation_stale" };
   return { kind: "ready", response: parsed.data, subject: input.subject };
 }
 

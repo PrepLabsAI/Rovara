@@ -116,8 +116,10 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
     .option("--issue <number>", "existing loop issue number for task binding")
     .option("--target <repo>", "target repository for the existing issue child")
     .action(async (repo: string, options: { standaloneLocal?: boolean; task?: string; issue?: string; target?: string }) => {
-      if (options.standaloneLocal === (options.task !== undefined) || (options.task === undefined && (options.issue !== undefined || options.target !== undefined)) ||
-          (options.task !== undefined && options.issue === undefined)) {
+      const standaloneRequested = options.standaloneLocal === true;
+      const taskRequested = options.task !== undefined;
+      if (standaloneRequested === taskRequested || (!taskRequested && (options.issue !== undefined || options.target !== undefined)) ||
+          (taskRequested && options.issue === undefined)) {
         throw new Error("choose either --standalone-local or --task <UUID> --issue <number> [--target <repo>]");
       }
       const found = (await store.repos()).find((entry) => entry.repo.toLowerCase() === repo.toLowerCase());
@@ -150,7 +152,7 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
           enrollment: enrollmentResolution.enrollment,
           subject: { projectName: enrollmentResolution.project, projectRevision: enrollmentResolution.projectRevision,
             repositoryId: enrollmentResolution.repositoryId, commitSha: candidate.commitSha, treeSha: candidate.treeSha, baseCommitSha: candidate.baseCommitSha },
-          taskRef: options.task, transport: context.publicationJoin, now: Date.now(),
+          taskRef: options.task, transport: context.publicationJoin, now: Date.now,
         });
         if (joined.kind !== "ready") throw new Error(`task binding is on hold (${joined.reasonCode}); no task reference was stored`);
         const [latestCandidate, latestRepo, latestId, latestAccount, latestCheckout, latestCommonGitDir, latestRecords, latestItem] = await Promise.all([
@@ -283,7 +285,7 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
                 projectName: resolution.project, projectRevision: resolution.projectRevision, repositoryId: resolution.repositoryId,
                 commitSha: input.candidate.commitSha, treeSha: input.candidate.treeSha, baseCommitSha: input.candidate.baseCommitSha,
               },
-              taskRef: resolution.enrollment.taskRef, transport: context.publicationJoin, now: Date.now(),
+              taskRef: resolution.enrollment.taskRef, transport: context.publicationJoin, now: Date.now,
             });
             return joined.kind === "ready" ? { kind: "registered-ready" } : { kind: "hold", reasonCode: joined.reasonCode };
           } catch {

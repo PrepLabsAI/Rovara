@@ -94,9 +94,9 @@ describe("registered CLI publication context", () => {
   });
 
   it("requires a server join and holds if the native task reference is missing", async () => {
-    await expect(resolveRegisteredPublication({ enrollment: registered, subject, taskRef: undefined, transport: undefined, now: Date.parse("2026-10-14T10:01:00.000Z") }))
+    await expect(resolveRegisteredPublication({ enrollment: registered, subject, taskRef: undefined, transport: undefined, now: () => Date.parse("2026-10-14T10:01:00.000Z") }))
       .resolves.toEqual({ kind: "hold", reasonCode: "task_binding_missing" });
-    await expect(resolveRegisteredPublication({ enrollment: registered, subject, taskRef: "task-1", transport: { load: async () => ({ status: "READY" }) }, now: Date.parse("2026-10-14T10:01:00.000Z") }))
+    await expect(resolveRegisteredPublication({ enrollment: registered, subject, taskRef: "task-1", transport: { load: async () => ({ status: "READY" }) }, now: () => Date.parse("2026-10-14T10:01:00.000Z") }))
       .resolves.toEqual({ kind: "hold", reasonCode: "task_binding_invalid" });
   });
 
@@ -105,19 +105,21 @@ describe("registered CLI publication context", () => {
       schemaVersion: 1, status: "READY", subject, candidateDigest: "d".repeat(64), contractDigest: "e".repeat(64),
       policyDigest: "f".repeat(64), planDigest: "1".repeat(64), roundId: "round-1", evidenceSetDigest: "2".repeat(64), checkedAt: "2026-10-14T10:01:00.000Z",
     }) };
-    await expect(resolveRegisteredPublication({ enrollment: registered, subject, taskRef: "11111111-2222-4333-8444-555555555555", transport, now: Date.parse("2026-10-14T10:01:10.000Z") }))
+    await expect(resolveRegisteredPublication({ enrollment: registered, subject, taskRef: "11111111-2222-4333-8444-555555555555", transport, now: () => Date.parse("2026-10-14T10:01:10.000Z") }))
       .resolves.toMatchObject({ kind: "ready", subject, response: { candidateDigest: "d".repeat(64) } });
-    await expect(resolveRegisteredPublication({ enrollment: registered, subject: { ...subject, treeSha: "3".repeat(40) }, taskRef: "11111111-2222-4333-8444-555555555555", transport, now: Date.parse("2026-10-14T10:01:10.000Z") }))
+    await expect(resolveRegisteredPublication({ enrollment: registered, subject: { ...subject, treeSha: "3".repeat(40) }, taskRef: "11111111-2222-4333-8444-555555555555", transport, now: () => Date.parse("2026-10-14T10:01:10.000Z") }))
       .resolves.toMatchObject({ kind: "hold", reasonCode: "subject_mismatch" });
   });
 
   it("holds server UNKNOWN, stale READY, and malformed responses", async () => {
     const run = (response: unknown, now = Date.parse("2026-10-14T10:01:00.000Z")) => resolveRegisteredPublication({
-      enrollment: registered, subject, taskRef: "11111111-2222-4333-8444-555555555555", transport: { load: async () => response }, now,
+      enrollment: registered, subject, taskRef: "11111111-2222-4333-8444-555555555555", transport: { load: async () => response }, now: () => now,
     });
     await expect(run({ schemaVersion: 1, status: "UNKNOWN", subject, reasonCode: "missing_evidence", checkedAt: "2026-10-14T10:00:59.000Z" }))
       .resolves.toMatchObject({ kind: "hold", reasonCode: "missing_evidence" });
     await expect(run({ schemaVersion: 1, status: "READY", subject, candidateDigest: "d".repeat(64), contractDigest: "e".repeat(64), policyDigest: "f".repeat(64), planDigest: "1".repeat(64), roundId: "round-1", evidenceSetDigest: "2".repeat(64), checkedAt: "2026-10-14T09:58:00.000Z" }))
+      .resolves.toMatchObject({ kind: "hold", reasonCode: "server_observation_stale" });
+    await expect(run({ schemaVersion: 1, status: "READY", subject, candidateDigest: "d".repeat(64), contractDigest: "e".repeat(64), policyDigest: "f".repeat(64), planDigest: "1".repeat(64), roundId: "round-1", evidenceSetDigest: "2".repeat(64), checkedAt: "2026-10-14T10:01:01.000Z" }))
       .resolves.toMatchObject({ kind: "hold", reasonCode: "server_observation_stale" });
     await expect(run({ schemaVersion: 1, status: "READY", subject, checkedAt: "2026-10-14T10:01:00.000Z" }))
       .resolves.toMatchObject({ kind: "hold", reasonCode: "server_response_invalid" });

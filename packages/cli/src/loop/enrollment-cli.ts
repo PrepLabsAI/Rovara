@@ -13,11 +13,13 @@ import type { TokenStore } from "../token-store.js";
 /** The publication join uses the existing developer sign-in and its control-plane access token. */
 export function createDeveloperPublicationJoinTransport(input: { home: string; env: string | (() => string); tokenStore: TokenStore; fetch: typeof fetch }): PublicationJoinTransport {
   return {
-    async load(request) {
+    async load(request, expectedAuthorityNamespace) {
       const parsed = PublicationJoinRequestSchema.parse(request);
       const env = typeof input.env === "function" ? input.env() : input.env;
       const session = await developerAccessToken({ home: input.home, tokenStore: input.tokenStore, fetch: input.fetch }, env);
-      const baseUrl = session.entry.url.replace(/\/$/u, "");
+      const baseUrl = new URL(session.entry.url).href.replace(/\/$/u, "");
+      const actualAuthorityNamespace = `${baseUrl}/env/${session.env}/project/${parsed.subject.projectName}`;
+      if (expectedAuthorityNamespace !== actualAuthorityNamespace) throw new Error("registered_authority_namespace_mismatch");
       const response = await input.fetch(`${baseUrl}/v1/dev/tasks/${encodeURIComponent(parsed.taskRef)}/e2e-publication-context`, {
         method: "POST",
         headers: { authorization: `Bearer ${session.accessToken}`, "content-type": "application/json" },

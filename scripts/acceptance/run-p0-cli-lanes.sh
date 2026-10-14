@@ -21,6 +21,15 @@ fi
 TMP_REAL=$(CDPATH= cd -- "$TMPDIR" && pwd -P)
 EVIDENCE_REAL=$(CDPATH= cd -- "$EVIDENCE" && pwd -P)
 case "$EVIDENCE_REAL/" in "$TMP_REAL/"*) echo "UNAVAILABLE: evidence directory must be outside TMPDIR" >&2; exit 2 ;; esac
+for PROTECTED_ROOT in "$ROOT" "/Users/abhishekgarg/web/AgentX-e2e-p0-20261012" "/Users/abhishekgarg/Documents/ChatGPT/ManagedSDLC"; do
+  if [ ! -d "$PROTECTED_ROOT" ] || [ -L "$PROTECTED_ROOT" ]; then
+    echo "UNAVAILABLE: protected source root is missing or is a symlink: $PROTECTED_ROOT" >&2
+    exit 2
+  fi
+  PROTECTED_REAL=$(CDPATH= cd -- "$PROTECTED_ROOT" && pwd -P)
+  case "$EVIDENCE_REAL/" in "$PROTECTED_REAL/"*) echo "UNAVAILABLE: evidence directory is inside a protected source checkout" >&2; exit 2 ;; esac
+  case "$TMP_REAL/" in "$PROTECTED_REAL/"*) echo "UNAVAILABLE: TMPDIR is inside a protected source checkout" >&2; exit 2 ;; esac
+done
 if [ ! -x "$NODE" ] || [ "$($NODE --version)" != "v22.23.2" ] || [ "$($NODE -p 'process.execPath')" != "$NODE" ]; then
   echo "UNAVAILABLE: exact pinned Node v22.23.2 is unavailable" >&2
   exit 2
