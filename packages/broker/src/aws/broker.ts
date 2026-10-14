@@ -261,6 +261,7 @@ import {
 import { aiToolTurn, completedTurn, developerFooter, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
+import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../e2e/feature-plan-planning-context.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
@@ -414,7 +415,7 @@ interface AwsBrokerDependencies {
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
   githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getRepositoryIdentity" | "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
-  /** Trusted server-side source capture used only by normal project setup discovery. */
+  /** Trusted server-side source capture for setup discovery and exact-commit E2E planning context. */
   projectSetupSource?: { capture: (input: { repositoryUrl: string; ref: string }) => Promise<E2ESourceSnapshot> };
   /** Server-selected catalog namespace for an already configured setup verifier. */
   projectSetupRuntimeCatalogId?: string;
@@ -3942,8 +3943,12 @@ async function taskOperationParts(
   const workBreakdownContext = codingPlan && input.workflowMode === "PLAN" && input.legacyTask !== true
     ? await codingPlanWorkBreakdownContext(dependencies, workspace.id)
     : undefined;
+  const e2ePlanningContext = codingPlan && input.workflowMode === "PLAN" && input.legacyTask !== true
+    ? await codingPlanFeatureE2EContext(dependencies, workspace.id)
+    : undefined;
   const documentInstructions = planDocumentInstructions({ kind: planKind, path: input.workflowPhase === undefined ? "QUICK" : "FULL", anchors: true,
     ...(workBreakdownContext === undefined ? {} : { workBreakdownContext }),
+    ...(e2ePlanningContext === undefined ? {} : { e2ePlanningContext }),
     ...(input.retiredClaimIds === undefined ? {} : { retired: input.retiredClaimIds }) });
   const planChecks = codingPlan && input.workflowMode === "PLAN" ? await codingPlanChecksInstructions(dependencies, workspace.id) : "";
   const checksInstructions = planChecks === "" ? "" : `\n\n${planChecks}`;
@@ -4021,6 +4026,82 @@ async function codingPlanWorkBreakdownContext(dependencies: AwsBrokerDependencie
   const project = await requireProject(dependencies, task.project, task.startingRevision);
   if (project.definition.repositories.length !== 1) return undefined;
   return { taskId: task.taskId, repositoryId: project.definition.repositories[0]!.name };
+}
+
+/** Supplies source-backed feature-plan references only from the task's pinned project and immutable prepared commit. */
+async function codingPlanFeatureE2EContext(dependencies: AwsBrokerDependencies, workspaceId: string) {
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
+  const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  if (task === undefined) throw agentXError("CONFIG_INVALID", "the task for this planning step is missing");
+  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  if (project.definition.e2e === undefined) return undefined;
+  const parsedPolicy = E2EPolicySchema.safeParse(project.definition.e2e);
+  if (!parsedPolicy.success) return { status: "unknown" as const, reason: "the task's pinned E2E policy could not be validated" };
+  const repositories = project.definition.repositories;
+  if (repositories.length !== 1) return { status: "unknown" as const, reason: "source-backed planning currently requires one pinned repository" };
+  const repository = repositories[0]!;
+  const repositoryParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(repository.url);
+  const expectedRepositoryId = repositoryParts?.[1] && repositoryParts[2] ? `${repositoryParts[1]}/${repositoryParts[2]}` : undefined;
+  const prepared = (task.workflow?.reviewBase ?? task.preparedBase)?.find((item) => item.repositoryId === repository.name);
+
+  let snapshot: E2ESourceSnapshot | undefined;
+  let sourceOrigin: "prepared-commit" | "approved-setup" = "prepared-commit";
+  const setupApproval = project.setupApproval;
+  if (setupApproval?.decision === "approve") {
+    try {
+      const stored = await readStoredText(dependencies.s3, dependencies.artifactBucketName, setupApproval.proposalRef, MAX_SETUP_PROPOSAL_BYTES);
+      if (stored !== undefined && createHash("sha256").update(stored, "utf8").digest("hex") === setupApproval.proposalSha256) {
+        const artifact: unknown = JSON.parse(stored);
+        if (artifact && typeof artifact === "object" && !Array.isArray(artifact)) {
+          const record = artifact as Record<string, unknown>;
+          const rawSnapshot = record.snapshot;
+          if (record.schemaVersion === "project-setup-source-proposal/v1" && record.issuerOwnerKey === project.registeredBy
+            && record.repositoryUrl === repository.url && sameJsonContent(record.policy, parsedPolicy.data)
+            && record.identityMapping && typeof record.identityMapping === "object" && !Array.isArray(record.identityMapping)
+            && (record.identityMapping as Record<string, unknown>).registeredRepositoryId === repository.name
+            && rawSnapshot && typeof rawSnapshot === "object" && !Array.isArray(rawSnapshot)) {
+            const sourceRecord = rawSnapshot as Record<string, unknown>;
+            const rawSources = sourceRecord.sources;
+            if (Array.isArray(rawSources)) {
+              const sources = rawSources.map((raw) => {
+                if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid stored source record");
+                const source = raw as Record<string, unknown>;
+                if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") {
+                  throw new Error("invalid stored source record");
+                }
+                return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
+              });
+              const decoded = { ...sourceRecord, sources } as unknown as E2ESourceSnapshot;
+              const setupProposal = verifyE2ESetupProposal(E2ESetupProposalSchema.parse(record.proposal), decoded, decoded.candidate);
+              if (expectedRepositoryId !== undefined && isExactFeatureE2ESourceSnapshot(decoded, expectedRepositoryId, decoded.commitSha)
+                && decoded.candidate.digest === setupApproval.candidateDigest && setupProposal.candidateDigest === setupApproval.candidateDigest
+                && (prepared === undefined || decoded.commitSha === prepared.baseCommitSha)) {
+                snapshot = decoded;
+                if (prepared === undefined) sourceOrigin = "approved-setup";
+              }
+            }
+          }
+        }
+      }
+    } catch { /* A stored setup snapshot that cannot be independently verified is not planner context. */ }
+  }
+
+  if (snapshot === undefined) {
+    if (prepared === undefined) return { status: "unknown" as const, reason: "prepared commit is unavailable and no approved immutable setup snapshot could be verified" };
+    if (!dependencies.projectSetupSource) return { status: "unknown" as const, reason: "trusted source capture for the exact prepared commit is unavailable" };
+    if (expectedRepositoryId === undefined) return { status: "unknown" as const, reason: "the registered repository has no supported immutable source identity" };
+    try {
+      const captured = await dependencies.projectSetupSource.capture({ repositoryUrl: repository.url, ref: prepared.baseCommitSha });
+      if (!isExactFeatureE2ESourceSnapshot(captured, expectedRepositoryId, prepared.baseCommitSha)) {
+        return { status: "unknown" as const, reason: "trusted capture did not match the task's prepared repository commit" };
+      }
+      snapshot = captured;
+    } catch {
+      return { status: "unknown" as const, reason: "trusted source capture for the exact prepared commit failed" };
+    }
+  }
+  return buildFeatureE2EPlanningContext(parsedPolicy.data, snapshot, { origin: sourceOrigin,
+    preparedCommitSha: prepared?.baseCommitSha ?? null });
 }
 
 /** Whether the workspace belongs to a developer task with the gated workflow. */

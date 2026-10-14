@@ -676,6 +676,23 @@ describe("P0 normal project onboarding journey", () => {
     expect(prepareCallback.status).toBe(200);
     const planOperation = featureOperations().find((item) => item.workflowMode === "PLAN");
     expect(planOperation).toBeDefined();
+    const planOutbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.operationId === planOperation!.id)[0];
+    const planningPrompt = (planOutbox?.invocation as { payload?: { prompt?: unknown } } | undefined)?.payload?.prompt;
+    expect(typeof planningPrompt, "the ordinary PLAN dispatch contains a prompt").toBe("string");
+    expect(planningPrompt).toContain(commitSha);
+    expect(planningPrompt).toContain(treeSha);
+    expect(planningPrompt).toContain('"origin":"approved-setup"');
+    expect(planningPrompt).toContain('"preparedCommitStatus":"UNKNOWN"');
+    expect(planningPrompt).toContain("Inspect the actual prepared task checkout");
+    expect(planningPrompt).toContain("api/fixtures/orders-mocks.json");
+    expect(planningPrompt).toContain("priceRows");
+    expect(planningPrompt).toContain('"callableMappings":[]');
+    expect(planningPrompt).toContain("intentionally empty, so the fixture");
+    expect(planningPrompt).toContain("the fixture is an unlinked schema hint only");
+    expect(planningPrompt).toContain("may propose a new named callable");
+    expect(planningPrompt).toContain('"inputSelector":{"kind":"query","name":"mode"}');
+    expect(planningPrompt).toContain("E2EFeaturePlanIntent");
+    expect(sourcePort.capture, "normal planning reuses the exact approved immutable setup snapshot").toHaveBeenCalledTimes(1);
     const ordersRendererOperationId = portableOperationId(".", "ordinary-orders");
     const e2eIntent = {
       schemaVersion: 1 as const, requestedTargetIds: ["web-1", "web-2", "api-3", "desktop-4"],

@@ -3,6 +3,7 @@ import { PLAN_DOCUMENT_INFO_STRING, commentRefInAuthor, WORKER_INVOCATION_FEATUR
 import { describe, expect, it } from "vitest";
 import { asksForCodeAnchors, planChecksInstructions, planDocumentInstructions, withoutCodeAnchorText } from "../../packages/broker/src/aws/broker-shared.js";
 import { planDocument } from "../support/plan-documents.js";
+import type { FeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
 
 describe("planDocumentInstructions", () => {
   it("asks for exactly one agentx-plan block and describes every claim, evidence kind and decision field", () => {
@@ -102,6 +103,40 @@ describe("planDocumentInstructions", () => {
     const plan = { ...planDocument(), checks: example };
     const read = parsePlanDocument(`\`\`\`${PLAN_DOCUMENT_INFO_STRING}\n${JSON.stringify(plan)}\n\`\`\``, { kind: "plan", checks: { repositoryPaths: ["repo/demo"], required: [] } });
     expect(read).toMatchObject({ ok: true, plan: { checks: { proposed: [{ label: "Unit tests" }], proves: { "proposed-1": ["1"] } } } });
+  });
+
+  it("includes pinned source-backed E2E planning context only for E2E coding plans", () => {
+    const context: FeatureE2EPlanningContext = {
+      status: "available",
+      source: { origin: "approved-setup", commitSha: "a".repeat(40), treeSha: "b".repeat(40), candidateDigest: "c".repeat(64),
+        preparedCommitStatus: "UNKNOWN", preparedCommitSha: null, currentCheckoutUnverified: true },
+      baselineScenarioIds: ["orders-list-baseline"],
+      targets: [{ targetId: "web-1", applicationId: "ordinary-orders", kind: "web", accountProfileId: "synthetic" }],
+      portableOperations: [{ operationId: "op-render", applicationId: "ordinary-orders", requestedTargetIds: ["web-1"],
+        packageExportSubpath: ".", moduleSpecifier: "./src/index.mjs", callableSelectors: [{ selector: { kind: "named", exportName: "renderOrders" } }],
+        sourceRefs: [{ path: "src/index.mjs", sha256: "1".repeat(64) }] }],
+      mockFixtures: [{ componentId: "api-schema-orders", requestedTargetId: "web-1", operationId: "listOrders", sourcePath: "fixtures/orders-mocks.json",
+        sourceSha256: "d".repeat(64), contractPath: "openapi.json", contractSha256: "f".repeat(64), method: "GET", path: "/orders",
+        inputSelector: { kind: "query", name: "mode" }, callableMappings: [],
+        variants: [{ id: "success", inputValue: "success", status: 200, response: { orders: [{ name: "Sample order" }] } }] }],
+      accountContextRefs: [{ applicationId: "ordinary-orders", profileId: "synthetic", sourcePath: "package.json", sourceSha256: "e".repeat(64) }],
+    };
+    const codingPlan = planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context });
+    expect(codingPlan).toContain('e2e?: E2EFeaturePlanIntent;');
+    expect(codingPlan).toContain('"commitSha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"');
+    expect(codingPlan).toContain('"preparedCommitStatus":"UNKNOWN"');
+    expect(codingPlan).toContain("Inspect the actual prepared task checkout and verify every source path and hash");
+    expect(codingPlan).toContain('"operationId":"op-render"');
+    expect(codingPlan).toContain('"sourcePath":"fixtures/orders-mocks.json"');
+    expect(codingPlan).toContain('"callableMappings":[]');
+    expect(codingPlan).toContain("the fixture is an unlinked schema hint only");
+    expect(codingPlan).toContain("The model's `e2e` member is an untrusted proposal");
+    const unavailable = planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: { status: "unknown", reason: "prepared-source capture failed" } });
+    expect(unavailable).toContain("prepared-source capture failed");
+    expect(unavailable).toContain("Do not invent target, operation, fixture, account, or source IDs");
+    expect(unavailable).toContain("omit `e2e` until source-backed references are available");
+    expect(planDocumentInstructions({ kind: "plan", path: "FULL" })).not.toContain("E2EFeaturePlanIntent");
+    expect(planDocumentInstructions({ kind: "design", path: "FULL", e2ePlanningContext: context })).not.toContain("E2EFeaturePlanIntent");
   });
 });
 
