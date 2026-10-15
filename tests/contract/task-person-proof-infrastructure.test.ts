@@ -83,6 +83,14 @@ function parentRemainderDigest(template: TemplateJson): string {
     const dispatcherVariables = resource.Properties!.Environment as { Variables: Record<string, unknown> };
     delete dispatcherVariables.Variables.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID;
   }
+  // This separately tested, least-privilege creator fence is the only additional sign-in-table
+  // statement. Remove only its exact action/resource pair so historical parent hashes stay scoped.
+  for (const entry of developerSignInConditionCheckEntries(remainder)) {
+    const policy = resources[entry.policyId]!;
+    const document = policy.Properties!.PolicyDocument as { Statement: unknown };
+    if (Array.isArray(document.Statement)) document.Statement.splice(entry.index, 1);
+    else delete (document as { Statement?: unknown }).Statement;
+  }
   const establishedAssetHashNormalization = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
   return createHash("sha256").update(establishedAssetHashNormalization).digest("hex");
 }
@@ -99,6 +107,34 @@ function realAppControlPlane(env?: string): TemplateJson {
 function normalizeSingleton(value: unknown): unknown {
   // CDK may emit one IAM Action/Resource as a scalar or a singleton array; normalize only that shape.
   return Array.isArray(value) && value.length === 1 ? value[0] : value;
+}
+
+function developerSignInConditionCheckEntries(template: TemplateJson): Array<{ policyId: string; index: number; statement: Record<string, unknown>; tableId: string }> {
+  const resources = template.Resources ?? {};
+  const signInTable = Object.entries(resources).find(([id, resource]) => id.startsWith("DeveloperSignInTable") && resource.Type === "AWS::DynamoDB::Table");
+  const brokerRole = Object.entries(resources).find(([id, resource]) => id.startsWith("BrokerServiceRole") && resource.Type === "AWS::IAM::Role");
+  if (signInTable === undefined || brokerRole === undefined) return [];
+  const [tableId] = signInTable;
+  const roleId = brokerRole[0];
+  const expectedResource = { "Fn::GetAtt": [tableId, "Arn"] };
+  const entries: Array<{ policyId: string; index: number; statement: Record<string, unknown>; tableId: string }> = [];
+  for (const [policyId, resource] of Object.entries(resources)) {
+    if (resource.Type !== "AWS::IAM::Policy") continue;
+    const properties = resource.Properties as { Roles?: unknown; PolicyDocument?: { Statement?: unknown } } | undefined;
+    const roles = Array.isArray(properties?.Roles) ? properties.Roles as Array<Record<string, unknown>> : [];
+    if (!roles.some((role) => role.Ref === roleId)) continue;
+    const rawStatements = properties?.PolicyDocument?.Statement;
+    const statements = Array.isArray(rawStatements) ? rawStatements : rawStatements === undefined ? [] : [rawStatements];
+    statements.forEach((value, index) => {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) return;
+      const statement = value as Record<string, unknown>;
+      if (normalizeSingleton(statement.Action) === "dynamodb:ConditionCheckItem"
+        && JSON.stringify(statement.Resource) === JSON.stringify(expectedResource)) {
+        entries.push({ policyId, index, statement, tableId });
+      }
+    });
+  }
+  return entries;
 }
 
 describe("the named TEST proof-only installation gate", () => {
@@ -180,6 +216,21 @@ describe("the named TEST proof-only installation gate", () => {
       },
     ] as const;
     for (const { label, template, withRoute, withoutRoute } of digestCases) {
+      const creatorChecks = developerSignInConditionCheckEntries(template);
+      if (label === "legacy") {
+        expect(creatorChecks, "legacy has no new sign-in creator identity fence").toHaveLength(0);
+      } else {
+        expect(creatorChecks, `${label} has exactly one broker creator identity fence`).toHaveLength(1);
+        expect(creatorChecks[0]!.statement, `${label} checks only the exact sign-in table key namespace`).toEqual({
+          Action: "dynamodb:ConditionCheckItem",
+          Condition: {
+            "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVELOPER#*"] },
+            Null: { "dynamodb:LeadingKeys": "false" },
+          },
+          Effect: "Allow",
+          Resource: { "Fn::GetAtt": [creatorChecks[0]!.tableId, "Arn"] },
+        });
+      }
       expect(template.Resources?.ProjectSetupExecutionReadRoute, `${label} has the approved setup read route`).toMatchObject({
         Type: "AWS::ApiGatewayV2::Route",
         Properties: {
