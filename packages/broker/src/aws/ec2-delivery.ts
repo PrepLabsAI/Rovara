@@ -20,7 +20,7 @@ const WORKER_PORT = 8080;
 const TOKEN_LIFETIME_SECONDS = 60;
 export const STARTING_COMPUTE_MESSAGE = "Starting workspace compute";
 
-export type Ec2Delivery = "DELIVERED" | "WAITING_FOR_SESSION" | "WAITING_FOR_TASK_ACCESS";
+export type Ec2Delivery = "DELIVERED" | "WAITING_FOR_SESSION" | "WAITING_FOR_TASK_ACCESS" | { readinessGeneration: number };
 
 export interface ProjectSetupSessionPort {
   ensureSession(input: { setupExecutionId: string; subjectId: string; approvalRevision: number; transportCorrelationId: string; binding: Ec2RuntimeBinding; waitingOutboxId: string }):
@@ -46,6 +46,8 @@ export interface Ec2DeliveryDependencies {
   workerFeatures?: (url: string) => Promise<readonly string[]>;
   /** Rechecks fresh PEOPLE authority after compute is ready, immediately before signing and POST. */
   guardTaskDispatch?: (record: Ec2OutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
+  /** Loads and validates the durable internal readiness marker before any session provisioning. */
+  validateWorkflowE2EReadiness?: (record: Ec2OutboxRecord, invocation: WorkerInvocation) => Promise<"ORDINARY" | "READINESS" | "PARKED">;
   /** Rechecks stored project setup authority independently from feature-task access. */
   guardProjectSetupDispatch?: (record: Ec2OutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
   remainingTimeMs?: () => number;
@@ -60,6 +62,16 @@ export interface Ec2DeliveryDependencies {
 export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
   return async (record: Ec2OutboxRecord, invocation: WorkerInvocation, context?: { remainingTimeMs: () => number }): Promise<Ec2Delivery> => {
     const remainingTimeMs = context?.remainingTimeMs ?? dependencies.remainingTimeMs;
+    const hasReadinessMarker = record.workflowE2EReadiness !== undefined;
+    if (invocation.kind === "resume" && hasReadinessMarker && dependencies.validateWorkflowE2EReadiness === undefined) {
+      throw agentXError("CALLBACK_FORBIDDEN", "the internal E2E readiness operation cannot be verified by this dispatcher");
+    }
+    const storedReadiness = invocation.kind === "resume"
+      ? dependencies.validateWorkflowE2EReadiness === undefined
+        ? "ORDINARY"
+        : await dependencies.validateWorkflowE2EReadiness(record, invocation)
+      : "ORDINARY";
+    if (storedReadiness === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const guardCurrentAuthority = async () => {
       if (invocation.kind === "project-setup-smoke") {
         if (dependencies.guardProjectSetupDispatch === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "project setup smoke authority is not configured");
@@ -67,6 +79,8 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
       }
       return dependencies.guardTaskDispatch?.(record, remainingTimeMs === undefined ? undefined : { remainingTimeMs });
     };
+    const workflowE2EReadiness = storedReadiness === "READINESS";
+    if (workflowE2EReadiness && await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     if (invocation.kind === "project-setup-smoke" && await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     let binding: Ec2RuntimeBinding | undefined;
     let session: { ready: true; generation: number; privateIp: string } | { ready: false; generation: number; state: string };
@@ -89,6 +103,16 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     if (!session.ready) {
       if (invocation.kind !== "project-setup-smoke") await dependencies.progress(record, STARTING_COMPUTE_MESSAGE);
       return "WAITING_FOR_SESSION";
+    }
+    // The broker uses this existing dispatcher/session path to warm compute before it admits an
+    // immutable feature-E2E deadline. A resume invocation is an internal readiness signal only;
+    // it must never reach the worker.
+    if (workflowE2EReadiness) {
+      if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
+      if (await dependencies.validateWorkflowE2EReadiness?.(record, invocation) !== "READINESS") {
+        throw agentXError("CALLBACK_FORBIDDEN", "the stored E2E readiness operation changed while compute was starting");
+      }
+      return { readinessGeneration: session.generation };
     }
     if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures);

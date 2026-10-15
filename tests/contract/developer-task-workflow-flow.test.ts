@@ -355,6 +355,91 @@ describe("native developer task workflow", () => {
     expect(dispatchRows(harness)).toEqual([]);
   });
 
+  it("stops a warmed required-E2E dispatch in the idle gap before recovery can admit a round", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    const taskRow = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
+    const waiting = { ...taskRow.workflow, stage: "VERIFY" as const, state: "WAITING" as const,
+      e2e: { contractDigest: "a".repeat(64), policyDigest: "b".repeat(64), bundleDigest: "c".repeat(64),
+        executionPlanDigest: "d".repeat(64), required: true, currentGroupRunIds: [], resultRefs: [] } };
+    harness.db.set({ ...taskRow, workflow: waiting });
+    const dispatchSk = `${taskId}#${waiting.revision}`;
+    const readinessOperationId = workflowRequestId("agentx-workflow-e2e-readiness", taskId, waiting.revision, candidate.digest);
+    const readinessOutboxId = workflowRequestId("agentx-workflow-e2e-readiness-outbox", taskId, waiting.revision, candidate.digest);
+    const marker = { purpose: "workflow-e2e-readiness", taskId, workflowRevision: waiting.revision,
+      candidateDigest: candidate.digest, dispatchSk, outboxId: readinessOutboxId, readyGeneration: 4 };
+    const sourceOperation = operations(harness, workspaceId)[0]!;
+    const readinessOperation = { ...sourceOperation, pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${readinessOperationId}`,
+      id: readinessOperationId, entityType: "OPERATION", kind: "resume", status: "SUCCEEDED", workflowE2EReadiness: marker,
+      result: { status: "READY", generation: 4 } };
+    harness.db.set(readinessOperation);
+    const workspace = harness.db.get(`WORKSPACE#${workspaceId}`, "META") as Record<string, unknown>;
+    const { activeOperationId: _activeOperationId, ...idleWorkspace } = workspace;
+    void _activeOperationId;
+    harness.db.set({ ...idleWorkspace, status: "READY" });
+    const now = new Date().toISOString();
+    harness.db.set({ pk: "WORKFLOW_DISPATCH", sk: dispatchSk, entityType: "WORKFLOW_DISPATCH", taskId,
+      workflowRevision: waiting.revision, kind: "CHECKS", candidateDigest: candidate.digest, readinessOperationId,
+      createdAt: now, attempts: 0, nextAttemptAt: now, dispatchDuePk: "WORKFLOW_DISPATCH", dispatchDueSk: `${now}#${dispatchSk}`,
+      indexExpiresAt: Math.floor(Date.parse(now) / 1_000) + 86_400 });
+
+    const stopped = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() });
+    expect(stopped.status).toBe(200);
+    expect(dispatchRows(harness)).toEqual([]);
+    expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    await sweep(harness);
+    expect(operations(harness, workspaceId).filter((operation) => operation.workflowE2EAdmission !== undefined)).toEqual([]);
+    expect(operations(harness, workspaceId).filter((operation) => operation.workflowMode === "CHECKS")).toEqual([]);
+  });
+
+  it("lets the owner cancel an active required-E2E readiness resume and prevents recovery admission", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    const taskRow = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
+    const waiting = { ...taskRow.workflow, stage: "VERIFY" as const, state: "WAITING" as const,
+      e2e: { contractDigest: "a".repeat(64), policyDigest: "b".repeat(64), bundleDigest: "c".repeat(64),
+        executionPlanDigest: "d".repeat(64), required: true, currentGroupRunIds: [], resultRefs: [] } };
+    harness.db.set({ ...taskRow, workflow: waiting });
+    const dispatchSk = `${taskId}#${waiting.revision}`;
+    const readinessOperationId = workflowRequestId("agentx-workflow-e2e-readiness", taskId, waiting.revision, candidate.digest);
+    const readinessOutboxId = workflowRequestId("agentx-workflow-e2e-readiness-outbox", taskId, waiting.revision, candidate.digest);
+    const marker = { purpose: "workflow-e2e-readiness", taskId, workflowRevision: waiting.revision,
+      candidateDigest: candidate.digest, dispatchSk, outboxId: readinessOutboxId };
+    const workspace = harness.db.get(`WORKSPACE#${workspaceId}`, "META") as Record<string, unknown>;
+    const fence = Number(workspace.fence);
+    const readinessOperation = { ...operations(harness, workspaceId)[0]!, pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${readinessOperationId}`,
+      id: readinessOperationId, entityType: "OPERATION", workspaceId, kind: "resume", status: "DISPATCHING", fence,
+      workflowE2EReadiness: marker };
+    harness.db.set(readinessOperation);
+    harness.db.set({ ...workspace, status: "BUSY", activeOperationId: readinessOperationId, fence });
+    harness.db.set({ pk: `OUTBOX#${readinessOutboxId}`, sk: "OUTBOX", id: readinessOutboxId, entityType: "OUTBOX", status: "QUEUED",
+      operationId: readinessOperationId, workspaceId, deploymentMode: "ec2-ebs", workflowE2EReadiness: marker,
+      invocation: { kind: "resume", operationId: readinessOperationId, workspaceId, fence } });
+    harness.db.set({ pk: "WORKFLOW_DISPATCH", sk: dispatchSk, entityType: "WORKFLOW_DISPATCH", taskId,
+      workflowRevision: waiting.revision, kind: "CHECKS", candidateDigest: candidate.digest, readinessOperationId,
+      createdAt: new Date().toISOString(), attempts: 0, nextAttemptAt: new Date().toISOString(), dispatchDuePk: "WORKFLOW_DISPATCH",
+      dispatchDueSk: `${new Date().toISOString()}#${dispatchSk}`, indexExpiresAt: Math.floor(Date.now() / 1_000) + 86_400 });
+
+    const stopped = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() });
+
+    expect(stopped.status).toBe(200);
+    expect(harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${readinessOperationId}`)).toMatchObject({
+      status: "CANCELLED", result: { status: "CANCELLED" },
+    });
+    expect(harness.db.get(`OUTBOX#${readinessOutboxId}`, "OUTBOX")).toMatchObject({ status: "DELIVERED", operationId: readinessOperationId, workspaceId });
+    expect(harness.db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY" });
+    expect(harness.db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
+    expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    expect(dispatchRows(harness)).toEqual([]);
+
+    await sweep(harness);
+    expect(operations(harness, workspaceId).filter((operation) => operation.workflowE2EAdmission !== undefined)).toEqual([]);
+    expect(operations(harness, workspaceId).filter((operation) => operation.workflowMode === "CHECKS")).toEqual([]);
+    expect(dispatchRows(harness)).toEqual([]);
+  });
+
   it("returns a successful terminal response when the owner rejects a plan", async () => {
     const harness = await createDeveloperTaskBroker();
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {

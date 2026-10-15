@@ -14,7 +14,7 @@ import { scriptedPrompter } from "../support/init-fakes.js";
 import {
   canonicalJson, canonicalPlanJson, createCandidateManifest, WorkerInvocationSchema, parsePlanDocument, readCanonicalPlan,
   planDocumentMarkdown, portableOperationId, WorkflowSnapshotSchema, workflowSendBackOffered, sendBackProblems,
-  ProjectDefinitionSchema, workerInvokeToken, workerInvokeTokenPayload, type WorkerInvokeTokenClaims,
+  ProjectDefinitionSchema, workerInvokeToken, workerInvokeTokenPayload, workspaceSessionKey, type WorkerInvokeTokenClaims,
   type DeveloperTaskView, type E2EPolicy, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { executeCli } from "../../packages/cli/src/main.js";
@@ -31,7 +31,7 @@ import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { beforeAll, vi } from "vitest";
 import { GitHubAppCredentialProvider } from "../../packages/broker/src/github-app.js";
-import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
+import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator } from "../../packages/broker/src/aws/dispatcher.js";
 import { createEc2Delivery } from "../../packages/broker/src/aws/ec2-delivery.js";
 import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outbox-publisher.js";
 import { createProjectSetupBindingReader, createProjectSetupDispatchGuard, createProjectSetupDispatchLifecycle } from "../../packages/broker/src/aws/dispatcher.js";
@@ -1020,7 +1020,18 @@ describe("P0 normal project onboarding journey", () => {
     const sourceExportPrimary = await persistOriginalEvidencePrimary({ root, kind: "worker-candidate-source-export-request",
       key: `candidate-export:${implementInvocation.operationId}`, bytes: JSON.stringify(workerResult.workflowCandidateSourceExport),
       producer: "actual runTaskInvocation result before private callback", sourceCandidateDigest: workerResult.workflowCandidateSourceExport!.candidate.digest });
-    await postWorkerTerminalResult(callbacks, { operationId: implementInvocation.operationId, status: "SUCCEEDED", result: workerResult }, implementInvocation);
+    const coldStartElapsedMs = 61_000;
+    const candidateCompletedAtMs = Date.now();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // Model a candidate completion whose substrate readiness has already taken 61 seconds.
+      // Restore real time before readiness completion, admission, and the actual worker process so
+      // evidence timestamps remain ordered after the admitted round.
+      vi.setSystemTime(candidateCompletedAtMs - coldStartElapsedMs);
+      await postWorkerTerminalResult(callbacks, { operationId: implementInvocation.operationId, status: "SUCCEEDED", result: workerResult }, implementInvocation);
+    } finally {
+      vi.useRealTimers();
+    }
     const exportRequests = callbackRequests.filter(({ path }) => path.endsWith("/candidate-export"));
     await writeFile(join(root, "candidate-export-http-observations.json"), `${JSON.stringify({
       operationId: implementInvocation.operationId,
@@ -1044,6 +1055,42 @@ describe("P0 normal project onboarding journey", () => {
       callbackResponses: callbackRequests.map(({ path, status }) => ({ path, status })),
       sourceExportPrimary, storedExportPrimary,
     }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+
+    // Cold startup is outside the immutable feature-round budget. Even after a simulated 61-second
+    // provisioning delay, VERIFY stays waiting and no round exists until the exact readiness
+    // operation reports the same READY session generation. The admitted deadline remains 60 sec.
+    const readinessOperation = broker.db.find((item) => item.entityType === "OPERATION" && item.workflowE2EReadiness !== undefined
+      && (item.workflowE2EReadiness as { taskId?: string }).taskId === featureTaskId)[0] as Record<string, unknown> & {
+        id: string; fence: number; createdAt: string; workflowE2EReadiness: Record<string, unknown>;
+      } | undefined;
+    expect(readinessOperation, "candidate completion must queue one internal readiness operation before E2E admission").toBeDefined();
+    const notYetAdmitted = broker.db.get(`DEVTASK#${featureTaskId}`, "META") as { workflow: { stage: string; state: string; e2e?: { currentRoundId?: string } } };
+    expect(notYetAdmitted.workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+    expect(notYetAdmitted.workflow.e2e?.currentRoundId).toBeUndefined();
+    expect(broker.db.find((entry) => entry.workspaceId === featureWorkspaceId && entry.workflowE2EAdmission !== undefined)).toEqual([]);
+    const readinessOutbox = broker.db.find((entry) => entry.entityType === "OUTBOX" && entry.operationId === readinessOperation?.id)[0];
+    expect(readinessOutbox?.status).toBe("PENDING");
+    const readinessMarker = readinessOperation!.workflowE2EReadiness;
+    broker.db.set({ ...readinessOperation!, status: "SUCCEEDED", updatedAt: new Date().toISOString(),
+      workflowE2EReadiness: { ...readinessMarker, readyGeneration: 7 } });
+    broker.db.set({ ...readinessOutbox!, status: "DELIVERED" });
+    const workspace = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, "META") as Record<string, unknown>;
+    const { activeOperationId: _activeOperationId, ...readyWorkspace } = workspace;
+    void _activeOperationId;
+    broker.db.set({ ...readyWorkspace, status: "READY", updatedAt: new Date().toISOString() });
+    broker.db.set({ ...workspaceSessionKey(featureWorkspaceId), entityType: "SESSION", workspaceId: featureWorkspaceId,
+      state: "READY", sessionState: "READY", generation: 7, privateIp: "10.42.128.10", lastActivityAt: new Date().toISOString() });
+    await broker.handler({ source: "agentx.workflow-dispatch-recovery" });
+    const admittedChecksOperation = broker.db.find((entry) => entry.workspaceId === featureWorkspaceId
+      && entry.workflowE2EAdmission !== undefined)[0] as { workflowE2EAdmission?: { admissionRef?: { key?: string } } } | undefined;
+    const warmupAdmissionKey = admittedChecksOperation?.workflowE2EAdmission?.admissionRef?.key;
+    const warmupAdmittedBytes = warmupAdmissionKey === undefined ? undefined : objects.get(warmupAdmissionKey);
+    const warmupAdmittedRound = warmupAdmittedBytes === undefined ? undefined : (JSON.parse(warmupAdmittedBytes.toString("utf8")) as {
+      round?: { admittedAt?: string; deadlineAt?: string };
+    }).round;
+    expect(warmupAdmittedRound?.admittedAt).toBeDefined();
+    expect(Date.parse(warmupAdmittedRound!.admittedAt!) - Date.parse(readinessOperation!.createdAt)).toBeGreaterThanOrEqual(coldStartElapsedMs);
+    expect(Date.parse(warmupAdmittedRound!.deadlineAt!) - Date.parse(warmupAdmittedRound!.admittedAt!)).toBe(60_000);
 
     // This is the actual frozen-source RED boundary: after normal Owner artifact and graph approval,
     // source export now exists, but no first-party current-round joint VERIFY is attached to the task.
@@ -1127,7 +1174,8 @@ describe("P0 normal project onboarding journey", () => {
         return { status: response.status, body: await response.text() };
       },
       workerFeatures: async () => ((await (await handleWorkerRequest(new Request("http://worker/ping"), checksWorkerState)).json()) as { invocationFeatures: string[] }).invocationFeatures,
-      guardTaskDispatch: checksTaskGuard, progress: async () => undefined,
+      guardTaskDispatch: checksTaskGuard, validateWorkflowE2EReadiness: createWorkflowE2EReadinessValidator({ documentClient: broker.db as never, tableName: "state" }),
+      progress: async () => undefined,
     });
     const checksDispatcher = createDispatcherHandler({
       guardTaskDispatch: checksTaskGuard,
@@ -1143,11 +1191,66 @@ describe("P0 normal project onboarding journey", () => {
         UpdateExpression: "SET #status = :delivered, deliveredAt = :now", ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: { ":delivered": "DELIVERED", ":now": new Date().toISOString() } })); },
       markFailed: async () => undefined, deliverEc2: checksDelivery,
+      completeWorkflowE2EReadiness: createWorkflowE2EReadinessCompleter({ documentClient: broker.db as never, tableName: "state" }),
     });
     const checksPublisher = createOutboxPublisherHandler({ send: async () => undefined, markQueued: async (id) => {
       await broker.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `OUTBOX#${id}`, sk: "OUTBOX" },
         UpdateExpression: "SET #status = :queued", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":queued": "QUEUED" } }));
     } });
+    const readinessPublisher = createOutboxPublisherHandler({ send: async () => undefined, markQueued: async (id) => {
+      await broker.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `OUTBOX#${id}`, sk: "OUTBOX" },
+        UpdateExpression: "SET #status = :queued", ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":queued": "QUEUED" } }));
+    } });
+    const readinessDelivery = createEc2Delivery({ sessions: { ensureSession: async () => ({ ready: true as const, generation: 1, privateIp: "127.0.0.1" }) },
+      binding: async () => runtimeBinding, sign: async (message) => cryptoSign("sha256", message, workerKeys.privateKey),
+      post: async () => { throw new Error("internal E2E readiness must never POST to the worker"); },
+      guardTaskDispatch: checksTaskGuard, validateWorkflowE2EReadiness: createWorkflowE2EReadinessValidator({ documentClient: broker.db as never, tableName: "state" }),
+      progress: async () => undefined });
+    const readinessDispatcher = createDispatcherHandler({ guardTaskDispatch: checksTaskGuard,
+      markDispatching: async (record) => {
+        try {
+          await broker.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}` },
+            UpdateExpression: "SET #status = :dispatching, updatedAt = :now", ConditionExpression: "#status = :accepted OR #status = :dispatching",
+            ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":now": new Date().toISOString() } }));
+          return true;
+        } catch (error) { if (error instanceof Error && error.name === "ConditionalCheckFailedException") return false; throw error; }
+      },
+      markDelivered: async (id) => { await broker.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `OUTBOX#${id}`, sk: "OUTBOX" },
+        UpdateExpression: "SET #status = :delivered, deliveredAt = :now", ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":delivered": "DELIVERED", ":now": new Date().toISOString() } })); },
+      markFailed: async () => undefined, deliverEc2: readinessDelivery,
+      completeWorkflowE2EReadiness: createWorkflowE2EReadinessCompleter({ documentClient: broker.db as never, tableName: "state" }) });
+    const completeRequiredE2EReadiness = async (taskId: string, workspaceId: string) => {
+      await broker.handler({ source: "agentx.workflow-dispatch-recovery" });
+      const task = broker.db.get(`DEVTASK#${taskId}`, "META") as { workflow: { revision: number; stage: string; state: string;
+        candidate?: { digest?: string }; e2e?: { required?: boolean } } } | undefined;
+      expect(task?.workflow).toMatchObject({ stage: "VERIFY", state: "WAITING", e2e: { required: true } });
+      const { revision } = task!.workflow;
+      const candidateDigest = task!.workflow.candidate?.digest;
+      expect(candidateDigest).toBeDefined();
+      const operation = broker.db.find((item) => item.entityType === "OPERATION" && item.workflowE2EReadiness !== undefined
+        && (item.workflowE2EReadiness as { taskId?: string; workflowRevision?: number; candidateDigest?: string }).taskId === taskId
+        && (item.workflowE2EReadiness as { workflowRevision?: number }).workflowRevision === revision
+        && (item.workflowE2EReadiness as { candidateDigest?: string }).candidateDigest === candidateDigest)[0];
+      expect(operation, `revision ${revision} candidate readiness must be durably queued`).toBeDefined();
+      if (operation === undefined) throw new Error(`revision ${revision} candidate readiness was not queued`);
+      const outbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.operationId === operation?.id)[0];
+      expect(outbox).toBeDefined();
+      broker.db.set({ ...workspaceSessionKey(workspaceId), entityType: "SESSION", workspaceId,
+        state: "READY", sessionState: "READY", generation: 1, privateIp: "127.0.0.1", lastActivityAt: new Date().toISOString() });
+      const published = await readinessPublisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(outbox!) } }] as never });
+      expect(published.published).toBe(1);
+      const queued = broker.db.get(String(outbox!.pk), String(outbox!.sk))!;
+      const dispatched = await readinessDispatcher({ Records: [{ messageId: String(outbox!.id), body: JSON.stringify(queued) }] });
+      expect(dispatched.batchItemFailures).toEqual([]);
+      const completed = broker.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${String(operation.id)}`);
+      expect(completed?.status, JSON.stringify({ taskId, revision, dispatched, completed })).toBe("SUCCEEDED");
+      if (completed === undefined) throw new Error(`readiness operation ${String(operation.id)} disappeared`);
+      expect((completed?.workflowE2EReadiness as { candidateDigest?: string } | undefined)?.candidateDigest).toBe(candidateDigest);
+      const recovery = await broker.handler({ source: "agentx.workflow-dispatch-recovery" });
+      return { workflow: (broker.db.get(`DEVTASK#${taskId}`, "META") as { workflow: Record<string, unknown> }).workflow,
+        readinessOperation: completed, recovery: JSON.parse(recovery.body) as Record<string, unknown> };
+    };
     const checksPublished = await checksPublisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(checksOutbox!) } }] as never });
     expect(checksPublished.published).toBe(1);
     const checksQueuedOutbox = broker.db.get(String(checksOutbox!.pk), String(checksOutbox!.sk))!;
@@ -1344,11 +1447,35 @@ describe("P0 normal project onboarding journey", () => {
         requests: callbackRequests.filter(({ path }) => path.endsWith("/candidate-export")
           && (path.includes(retryInvocation.operationId))), result: callbackRequests.filter(({ path }) => path.endsWith(`/operations/${retryInvocation.operationId}/result`)) }, null, 2)}\n`,
       { mode: 0o600, flag: "wx" });
+      const completedRetryWarmup = await completeRequiredE2EReadiness(featureTaskId, featureWorkspaceId);
+      expect((completedRetryWarmup.readinessOperation.workflowE2EReadiness as { candidateDigest?: string } | undefined)?.candidateDigest)
+        .toBe(finalCandidateDigest);
       const retryChecksOutbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === featureWorkspaceId
         && (item.invocation as { kind?: string; payload?: { workflowMode?: string } } | undefined)?.kind === "task"
-        && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS").at(-1);
+        && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS"
+        && broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${String(item.operationId)}`)?.workflowE2EAdmission !== undefined
+        && (broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${String(item.operationId)}`)?.workflowE2EAdmission as { candidateDigest?: string })?.candidateDigest === finalCandidateDigest).at(-1);
+      if (retryChecksOutbox === undefined) {
+        const task = broker.db.get(`DEVTASK#${featureTaskId}`, "META");
+        const readiness = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${String(completedRetryWarmup.readinessOperation.id)}`);
+        const workspace = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, "META");
+        const session = broker.db.get(String(workspaceSessionKey(featureWorkspaceId).pk), String(workspaceSessionKey(featureWorkspaceId).sk));
+        const dispatchRows = broker.db.find((item) => item.taskId === featureTaskId && (item.entityType === "WORKFLOW_DISPATCH" || String(item.pk).startsWith("WORKFLOW_DISPATCH")));
+        const taskWorkflow = (task as { workflow?: Record<string, unknown> } | undefined)?.workflow;
+        const safeWorkflow = taskWorkflow === undefined ? undefined : { revision: taskWorkflow.revision, stage: taskWorkflow.stage, state: taskWorkflow.state,
+          e2e: taskWorkflow.e2e, candidate: taskWorkflow.candidate };
+        const safeWorkspace = workspace === undefined ? undefined : { id: workspace.id, status: workspace.status, fence: workspace.fence,
+          activeOperationId: workspace.activeOperationId, projectRevision: workspace.projectRevision };
+        const safeSession = session === undefined ? undefined : { state: session.state, sessionState: session.sessionState,
+          generation: session.generation, lastActivityAt: session.lastActivityAt };
+        const safeReadiness = readiness === undefined ? undefined : { id: readiness.id, status: readiness.status,
+          fence: readiness.fence, kind: readiness.kind, workflowE2EReadiness: readiness.workflowE2EReadiness };
+        throw new Error(`repaired candidate CHECKS was not admitted: ${JSON.stringify({ workflow: safeWorkflow, dispatchRows, readiness: safeReadiness,
+          readinessMarker: completedRetryWarmup.readinessOperation.workflowE2EReadiness, workspace: safeWorkspace, session: safeSession,
+          recovery: completedRetryWarmup.recovery })}`);
+      }
       expect(retryChecksOutbox, "the fixed candidate must receive a fresh server-admitted E2E round").toBeDefined();
-      const retryChecksInvocation = WorkerInvocationSchema.parse(retryChecksOutbox!.invocation);
+      const retryChecksInvocation = WorkerInvocationSchema.parse(retryChecksOutbox.invocation);
       checksOperationId = retryChecksInvocation.operationId;
       const retryGroupRunIds = recordOf(recordOf(retryChecksInvocation.payload)?.workflowE2EAdmission)?.groupRunIds;
       reverseGroupRunIds = Array.isArray(retryGroupRunIds) ? retryGroupRunIds.filter((id): id is string => typeof id === "string") : [];
@@ -1373,7 +1500,8 @@ describe("P0 normal project onboarding journey", () => {
           headers: { authorization: init.authorization, "content-type": "application/json" }, body: init.body }), retryChecksWorkerState);
           return { status: response.status, body: await response.text() }; },
         workerFeatures: async () => ((await (await handleWorkerRequest(new Request("http://worker/ping"), retryChecksWorkerState)).json()) as { invocationFeatures: string[] }).invocationFeatures,
-        guardTaskDispatch: checksTaskGuard, progress: async () => undefined });
+        guardTaskDispatch: checksTaskGuard, validateWorkflowE2EReadiness: createWorkflowE2EReadinessValidator({ documentClient: broker.db as never, tableName: "state" }),
+        progress: async () => undefined });
       const retryChecksDispatcher = createDispatcherHandler({ guardTaskDispatch: checksTaskGuard,
         markDispatching: async (record) => {
           try { await broker.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}` },
@@ -1384,17 +1512,18 @@ describe("P0 normal project onboarding journey", () => {
         markDelivered: async (id) => { await broker.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `OUTBOX#${id}`, sk: "OUTBOX" },
           UpdateExpression: "SET #status = :delivered, deliveredAt = :now", ExpressionAttributeNames: { "#status": "status" },
           ExpressionAttributeValues: { ":delivered": "DELIVERED", ":now": new Date().toISOString() } })); },
-        markFailed: async () => undefined, deliverEc2: retryChecksDelivery });
+        markFailed: async () => undefined, deliverEc2: retryChecksDelivery,
+        completeWorkflowE2EReadiness: createWorkflowE2EReadinessCompleter({ documentClient: broker.db as never, tableName: "state" }) });
       const retryChecksPublisher = createOutboxPublisherHandler({ send: async () => undefined, markQueued: async (id) => {
         await broker.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `OUTBOX#${id}`, sk: "OUTBOX" }, UpdateExpression: "SET #status = :queued",
           ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":queued": "QUEUED" } }));
       } });
-      const retryPublisherResult = await retryChecksPublisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(retryChecksOutbox!) } }] as never });
+      const retryPublisherResult = await retryChecksPublisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(retryChecksOutbox) } }] as never });
       await writeFile(join(root, "retry-checks-outbox-publish-diagnostic.json"), `${JSON.stringify({ retryChecksOutbox,
-        publisherResult: retryPublisherResult, marshalledImage: marshall(retryChecksOutbox!), }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+        publisherResult: retryPublisherResult, marshalledImage: marshall(retryChecksOutbox), }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
       expect(retryPublisherResult.published, JSON.stringify({ retryChecksOutbox, retryPublisherResult })).toBe(1);
-      const retryQueued = broker.db.get(String(retryChecksOutbox!.pk), String(retryChecksOutbox!.sk))!;
-      const retryDispatchResult = await retryChecksDispatcher({ Records: [{ messageId: String(retryChecksOutbox!.id), body: JSON.stringify(retryQueued) }] });
+      const retryQueued = broker.db.get(String(retryChecksOutbox.pk), String(retryChecksOutbox.sk))!;
+      const retryDispatchResult = await retryChecksDispatcher({ Records: [{ messageId: String(retryChecksOutbox.id), body: JSON.stringify(retryQueued) }] });
       expect(retryDispatchResult.batchItemFailures).toEqual([]);
       for (let index = 0; index < 800; index += 1) {
         const operation = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${retryChecksInvocation.operationId}`);
@@ -2177,8 +2306,12 @@ describe("P0 normal project onboarding journey", () => {
       piAdapter: createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: browserImplementRuntime, model: FAUX_MODEL }) }),
       eventSink: browserImplementCallbacks.eventSink, artifactSink: browserImplementCallbacks.artifactSink });
     await postWorkerTerminalResult(browserImplementCallbacks, { operationId: browserImplementInvocation.operationId, status: "SUCCEEDED", result: browserImplementationResult }, browserImplementInvocation);
+    const browserWarmup = await completeRequiredE2EReadiness(browserTaskId, browserWorkspaceId);
+    const browserCandidateDigest = (browserWarmup.workflow.candidate as { digest?: string } | undefined)?.digest;
     const browserChecksOutbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
-      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS").at(-1);
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS"
+      && (broker.db.get(`WORKSPACE#${browserWorkspaceId}`, `OPERATION#${String(item.operationId)}`)?.workflowE2EAdmission as { candidateDigest?: string } | undefined)?.candidateDigest
+        === browserCandidateDigest).at(-1);
     await writeFile(join(root, "browser-required-after-implement.json"), `${JSON.stringify({ implementationResult: browserImplementationResult, callbackRequests: browserCallbackRequests,
       task: broker.db.get(`DEVTASK#${browserTaskId}`, "META"), operations: browserOperations(),
       outboxes: broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId),
@@ -2333,6 +2466,11 @@ describe("P0 normal project onboarding journey", () => {
     expect(browserCreatorGrant?.grantId).toMatch(/^[0-9a-f-]{36}$/iu);
     const checkOutboxesBeforeAccessPause = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
       && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS").length;
+    const readinessOutboxesBeforeAccessPause = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
+      && (item.workflowE2EReadiness as { taskId?: string; workflowRevision?: number; candidateDigest?: string } | undefined)?.taskId === browserTaskId
+      && (item.workflowE2EReadiness as { workflowRevision?: number } | undefined)?.workflowRevision === queuedRetryWorkflow.revision
+      && (item.workflowE2EReadiness as { candidateDigest?: string } | undefined)?.candidateDigest === browserAdmission!.candidateDigest).length;
+    expect(readinessOutboxesBeforeAccessPause).toBe(0);
     broker.db.delete(browserCreatorKey.pk, browserCreatorKey.sk);
     ownerChannelAccess = false;
     const retryRecoveryResponse = await broker.handler({ source: "agentx.workflow-dispatch-recovery" });
@@ -2342,12 +2480,17 @@ describe("P0 normal project onboarding journey", () => {
       (typeof retryDispatchRow & { taskAccessPausedAt?: string; dispatchDuePk?: string }) | undefined;
     const pausedOutboxCount = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
       && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS").length;
+    const pausedReadinessOutboxCount = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
+      && (item.workflowE2EReadiness as { taskId?: string; workflowRevision?: number; candidateDigest?: string } | undefined)?.taskId === browserTaskId
+      && (item.workflowE2EReadiness as { workflowRevision?: number } | undefined)?.workflowRevision === queuedRetryWorkflow.revision
+      && (item.workflowE2EReadiness as { candidateDigest?: string } | undefined)?.candidateDigest === browserAdmission!.candidateDigest).length;
     await persistOriginalEvidencePrimary({ root, kind: "browser-required-access-pause-recovery-response", key: String(retryDispatchRow!.sk),
       bytes: Buffer.from(retryRecoveryResponse.body, "utf8"), producer: "actual broker workflow-dispatch recovery response after creator access was revoked",
       sourceCandidateDigest: browserAdmission!.candidateDigest });
     expect(pausedRetryDispatch?.taskAccessPausedAt).toBeDefined();
     expect(pausedRetryDispatch?.dispatchDuePk).toBeUndefined();
     expect(pausedOutboxCount).toBe(checkOutboxesBeforeAccessPause);
+    expect(pausedReadinessOutboxCount, "revoked creator project access must pause before an internal readiness outbox is created").toBe(0);
     broker.db.set({ ...browserCreatorGrant!, grantId: randomUUID(), grantedAt: new Date().toISOString() });
     const restoredRecoveryResponse = await broker.handler({ source: "agentx.workflow-dispatch-recovery" });
     expect(restoredRecoveryResponse.statusCode).toBe(200);
@@ -2394,8 +2537,12 @@ describe("P0 normal project onboarding journey", () => {
     expect(explicitRetryRecoveryResponse.statusCode).toBe(200);
     const explicitRetryRecovery = JSON.parse(explicitRetryRecoveryResponse.body) as { attempted: number; dispatched: number };
     expect(explicitRetryRecovery.dispatched).toBeGreaterThanOrEqual(1);
+    const explicitRetryWarmup = await completeRequiredE2EReadiness(browserTaskId, browserWorkspaceId);
+    const explicitRetryCandidateDigest = (explicitRetryWarmup.workflow.candidate as { digest?: string } | undefined)?.digest;
     const cancelledRetryOutbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
-      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS").at(-1);
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS"
+      && (broker.db.get(`WORKSPACE#${browserWorkspaceId}`, `OPERATION#${String(item.operationId)}`)?.workflowE2EAdmission as { candidateDigest?: string } | undefined)?.candidateDigest
+        === explicitRetryCandidateDigest).at(-1);
     expect(cancelledRetryOutbox).toBeDefined();
     const cancelledRetryInvocation = WorkerInvocationSchema.parse(cancelledRetryOutbox!.invocation);
     expect(cancelledRetryInvocation.operationId).not.toBe(browserChecksInvocation.operationId);
@@ -2559,9 +2706,13 @@ describe("P0 normal project onboarding journey", () => {
     cancelBrowserChecksOnRunning = undefined;
     const successfulRetryRecoveryResponse = await broker.handler({ source: "agentx.workflow-dispatch-recovery" });
     expect(successfulRetryRecoveryResponse.statusCode).toBe(200);
+    const successfulRetryWarmup = await completeRequiredE2EReadiness(browserTaskId, browserWorkspaceId);
+    const successfulRetryCandidateDigest = (successfulRetryWarmup.workflow.candidate as { digest?: string } | undefined)?.digest;
     const successfulRetryOutbox = broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === browserWorkspaceId
       && (item.invocation as { kind?: string; payload?: { workflowMode?: string } } | undefined)?.kind === "task"
-      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS").at(-1);
+      && (item.invocation as { payload?: { workflowMode?: string } } | undefined)?.payload?.workflowMode === "CHECKS"
+      && (broker.db.get(`WORKSPACE#${browserWorkspaceId}`, `OPERATION#${String(item.operationId)}`)?.workflowE2EAdmission as { candidateDigest?: string } | undefined)?.candidateDigest
+        === successfulRetryCandidateDigest).at(-1);
     expect(successfulRetryOutbox).toBeDefined();
     const successfulRetryInvocation = WorkerInvocationSchema.parse(successfulRetryOutbox!.invocation);
     const successfulRetryAdmission = recordOf(successfulRetryInvocation.payload)?.workflowE2EAdmission as { roundId?: string } | undefined;

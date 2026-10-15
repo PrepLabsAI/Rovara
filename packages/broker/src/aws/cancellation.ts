@@ -15,6 +15,7 @@ import {
   type WorkspaceInstance,
 } from "@agentx/contracts";
 import { hashJson, isConditional } from "./broker-shared.js";
+import type { WorkflowE2EReadinessMarker } from "./broker-shared.js";
 import type { ExtraItems } from "./developer-task-actions.js";
 import type { DurableOutboxRecord, RuntimeBinding } from "./lambda.js";
 
@@ -35,6 +36,8 @@ export interface OperationRecord extends Operation {
   sk: string;
   entityType: "OPERATION";
   eventSequence: number;
+  /** Broker-internal purpose binding for a resume used only to warm feature-E2E compute. */
+  workflowE2EReadiness?: WorkflowE2EReadinessMarker & { outboxId: string; readyGeneration?: number };
   targetOperationId?: string;
   /** The project revision whose non-disk settings applied, which may be newer than the workspace's. */
   settingsRevision?: number;

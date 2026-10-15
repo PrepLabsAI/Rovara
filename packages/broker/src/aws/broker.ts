@@ -13,6 +13,7 @@ import {
   QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
+  type TransactWriteCommandInput,
 } from "@aws-sdk/lib-dynamodb";
 import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
@@ -142,8 +143,10 @@ import {
   unhandledDeploymentMode,
   workspaceProjectIndexAttributes,
   workspaceRecordFields,
+  workflowRequestId,
   type Operation,
   type OperationRequester,
+  workspaceSessionKey,
   type OperationStatus,
   type ChannelTurn,
   type CodeBuildCheckResult,
@@ -261,7 +264,7 @@ import {
 } from "./cancellation.js";
 import { aiToolTurn, completedTurn, developerFooter, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
-import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
+import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, type WorkflowE2EReadinessMarker, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../e2e/feature-plan-planning-context.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
@@ -270,7 +273,7 @@ import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from ".
 import { chatGptHostId } from "../chatgpt/oauth.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
@@ -4756,6 +4759,12 @@ async function acceptCancellation(
   targetOperationId: string,
 ) {
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
+  const target = await requireOperation(dependencies, workspaceId, targetOperationId);
+  if (target.kind === "resume" && target.workflowE2EReadiness?.purpose === "workflow-e2e-readiness"
+    && !TERMINAL.has(target.status)) {
+    await cancelWorkflowE2EReadiness(dependencies, workspace, target);
+    return { operation: publicOperation(await requireOperation(dependencies, workspaceId, targetOperationId)), duplicate: false };
+  }
   return requestCancellation(dependencies, workspace, targetOperationId, requesterOf(identity));
 }
 
@@ -4788,8 +4797,16 @@ async function cancelRunningTask(
   extra: ExtraItems = () => [],
 ): Promise<TaskCancellation> {
   const targetOperationId = workspace.activeOperationId;
-  if (!targetOperationId) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
+  if (!targetOperationId) {
+    await stopQueuedWorkflowE2EReadiness(dependencies, workspace, extra);
+    return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
+  }
   const target = await requireOperation(dependencies, workspace.id, targetOperationId);
+  if (target.workflowE2EReadiness?.purpose === "workflow-e2e-readiness" && target.kind === "resume"
+    && !TERMINAL.has(target.status)) {
+    await cancelWorkflowE2EReadiness(dependencies, workspace, target, extra);
+    return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id, finishedStatus: "CANCELLED" };
+  }
   if (!CANCELLABLE_KINDS.has(target.kind) || target.status === "CANCEL_REQUESTED") {
     return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
   }
@@ -4798,6 +4815,102 @@ async function cancelRunningTask(
   // A duplicate here means the task finished before the cancel was recorded.
   if (result.duplicate) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id, finishedStatus: result.operation.status };
   return { outcome: "CANCEL_REQUESTED", workspaceId: workspace.id, targetOperationId, cancelOperationId: result.operation.id };
+}
+
+/** Stops a verified warm-up in the brief idle interval before recovery can admit its feature round. */
+async function stopQueuedWorkflowE2EReadiness(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance,
+  extra: ExtraItems,
+): Promise<void> {
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id));
+  if (pointer === undefined) return;
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.stage !== "VERIFY"
+    || workflow.state !== "WAITING" || workflow.e2e?.required !== true || workflow.candidate === undefined) return;
+  const dispatchKey = { pk: "WORKFLOW_DISPATCH", sk: `${task.taskId}#${workflow.revision}` };
+  const dispatch = await getItem<WorkflowDispatchRecord>(dependencies, dispatchKey);
+  if (dispatch === undefined || dispatch.kind !== "CHECKS" || dispatch.taskId !== task.taskId
+    || dispatch.workflowRevision !== workflow.revision || dispatch.candidateDigest !== workflow.candidate.digest
+    || dispatch.readinessOperationId === undefined) return;
+  const readiness = await getItem<OperationRecord>(dependencies, operationKey(workspace.id, dispatch.readinessOperationId));
+  if (readiness?.kind !== "resume" || readiness.workflowE2EReadiness?.purpose !== "workflow-e2e-readiness"
+    || readiness.workflowE2EReadiness.taskId !== task.taskId || readiness.workflowE2EReadiness.workflowRevision !== workflow.revision
+    || readiness.workflowE2EReadiness.candidateDigest !== workflow.candidate.digest || readiness.status !== "SUCCEEDED"
+    || !Number.isInteger(readiness.workflowE2EReadiness.readyGeneration)) return;
+  const now = new Date().toISOString();
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Delete: { TableName: dependencies.tableName, Key: dispatchKey,
+      ConditionExpression: "taskId = :task AND workflowRevision = :revision AND #kind = :checks AND candidateDigest = :candidate AND readinessOperationId = :operation",
+      ExpressionAttributeNames: { "#kind": "kind" }, ExpressionAttributeValues: {
+        ":task": task.taskId, ":revision": workflow.revision, ":checks": "CHECKS", ":candidate": workflow.candidate.digest,
+        ":operation": readiness.id,
+      } } },
+    { Update: { TableName: dependencies.tableName, Key: taskKey(task.taskId),
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ConditionExpression: "attribute_not_exists(closedAt) AND workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.e2e.required = :required AND workflow.candidate.digest = :candidate",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
+        ":workflow": blockWorkflow(workflow, "E2E compute readiness was stopped; no feature round was admitted.", now),
+        ":now": now, ":revision": workflow.revision, ":verify": "VERIFY", ":waiting": "WAITING", ":required": true,
+        ":candidate": workflow.candidate.digest,
+      } } },
+    ...extra(publicOperation(readiness)),
+  ] }));
+}
+
+/** A readiness resume never reaches a worker, so cancel it locally and release its exact lease. */
+async function cancelWorkflowE2EReadiness(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance,
+  operation: OperationRecord,
+  extra: ExtraItems = () => [],
+): Promise<void> {
+  const marker = operation.workflowE2EReadiness!;
+  const dispatchKey = { pk: "WORKFLOW_DISPATCH", sk: marker.dispatchSk };
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(marker.taskId));
+  const workflow = task?.workflow;
+  const taskMatches = task !== undefined && task.closedAt === undefined && workflow?.revision === marker.workflowRevision
+    && workflow.stage === "VERIFY" && workflow.state === "WAITING" && workflow.candidate?.digest === marker.candidateDigest;
+  const now = new Date().toISOString();
+  const items: TransactWriteCommandInput["TransactItems"] = [
+    { Update: { TableName: dependencies.tableName, Key: operationKey(workspace.id, operation.id),
+      UpdateExpression: "SET #status = :cancelled, updatedAt = :now, #result = :result REMOVE workflowE2EReadiness.readyGeneration",
+      ConditionExpression: "(#status = :accepted OR #status = :dispatching OR #status = :cancelRequested) AND #kind = :resume AND workspaceId = :workspace AND fence = :fence AND workflowE2EReadiness.purpose = :purpose AND workflowE2EReadiness.outboxId = :outbox",
+      ExpressionAttributeNames: { "#status": "status", "#result": "result", "#kind": "kind" }, ExpressionAttributeValues: {
+        ":cancelled": "CANCELLED", ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":cancelRequested": "CANCEL_REQUESTED",
+        ":resume": "resume", ":workspace": workspace.id, ":fence": operation.fence, ":purpose": "workflow-e2e-readiness", ":outbox": marker.outboxId,
+        ":now": now, ":result": { status: "CANCELLED", reason: "E2E compute readiness was cancelled by an authorized owner." },
+      } } },
+    { Update: { TableName: dependencies.tableName, Key: workspaceKey(workspace.id),
+      UpdateExpression: "SET #status = :ready, updatedAt = :now REMOVE activeOperationId",
+      ConditionExpression: "#status = :busy AND activeOperationId = :operation AND fence = :fence",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: {
+        ":ready": "READY", ":busy": "BUSY", ":now": now, ":operation": operation.id, ":fence": operation.fence,
+      } } },
+    { Update: { TableName: dependencies.tableName, Key: { pk: `OUTBOX#${marker.outboxId}`, sk: "OUTBOX" },
+      UpdateExpression: "SET #status = :delivered, deliveredAt = :now",
+      ConditionExpression: "(#status = :pending OR #status = :queued OR #status = :waitingSession OR #status = :waitingAccess) AND operationId = :operation AND workspaceId = :workspace AND workflowE2EReadiness.purpose = :purpose AND workflowE2EReadiness.taskId = :task AND workflowE2EReadiness.workflowRevision = :revision AND workflowE2EReadiness.candidateDigest = :candidate AND workflowE2EReadiness.dispatchSk = :dispatchSk",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: {
+        ":delivered": "DELIVERED", ":pending": "PENDING", ":queued": "QUEUED", ":waitingSession": "WAITING_FOR_SESSION",
+        ":waitingAccess": "WAITING_FOR_TASK_ACCESS", ":now": now, ":operation": operation.id, ":workspace": workspace.id,
+        ":purpose": "workflow-e2e-readiness", ":task": marker.taskId, ":revision": marker.workflowRevision,
+        ":candidate": marker.candidateDigest, ":dispatchSk": marker.dispatchSk,
+      } } },
+    { Delete: { TableName: dependencies.tableName, Key: dispatchKey,
+      ConditionExpression: "readinessOperationId = :operation AND workflowRevision = :revision AND candidateDigest = :candidate",
+      ExpressionAttributeValues: { ":operation": operation.id, ":revision": marker.workflowRevision, ":candidate": marker.candidateDigest } } },
+    ...(taskMatches && workflow !== undefined ? [{ Update: { TableName: dependencies.tableName, Key: taskKey(marker.taskId),
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ConditionExpression: "attribute_not_exists(closedAt) AND workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.candidate.digest = :candidate",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
+        ":workflow": blockWorkflow(workflow, "E2E compute readiness was cancelled; no feature round was admitted.", now),
+        ":now": now, ":revision": marker.workflowRevision, ":verify": "VERIFY", ":waiting": "WAITING", ":candidate": marker.candidateDigest,
+      } } }] : []),
+    ...extra(publicOperation({ ...operation, status: "CANCELLED", updatedAt: now,
+      result: { status: "CANCELLED", reason: "E2E compute readiness was cancelled by an authorized owner." } })),
+  ];
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
 }
 
 /** An administrator cancels any workspace's running task (#126). */
@@ -8778,6 +8891,193 @@ async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies
  */
 type AccessPausedWorkflowDispatch = WorkflowDispatchRecord & { taskAccessPausedAt?: string };
 
+type WorkflowE2EReadinessResult = { status: "WAITING" } | { status: "STALE" } | { status: "READY"; task: DeveloperTaskRecord };
+
+async function blockWorkflowE2EReadiness(dependencies: AwsBrokerDependencies, item: WorkflowDispatchRecord, reason: string): Promise<void> {
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== item.workflowRevision
+    || workflow.stage !== "VERIFY" || workflow.state !== "WAITING" || workflow.candidate?.digest !== item.candidateDigest) {
+    await dependencies.documentClient.send(new DeleteCommand({ TableName: dependencies.tableName, Key: { pk: item.pk, sk: item.sk },
+      ConditionExpression: "attribute_exists(pk) AND workflowRevision = :revision AND candidateDigest = :candidate",
+      ExpressionAttributeValues: { ":revision": item.workflowRevision, ":candidate": item.candidateDigest } }));
+    return;
+  }
+  const now = new Date().toISOString();
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Delete: { TableName: dependencies.tableName, Key: { pk: item.pk, sk: item.sk },
+      ConditionExpression: "attribute_exists(pk) AND workflowRevision = :revision AND candidateDigest = :candidate",
+      ExpressionAttributeValues: { ":revision": item.workflowRevision, ":candidate": item.candidateDigest } } },
+    { Update: { TableName: dependencies.tableName, Key: taskKey(item.taskId),
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
+        ":workflow": blockWorkflow(workflow, reason, now), ":now": now, ":revision": item.workflowRevision,
+        ":verify": "VERIFY", ":waiting": "WAITING", ":candidate": item.candidateDigest,
+      } } },
+  ] }));
+}
+
+/**
+ * Required native E2E rounds are admitted only after the existing EC2 outbox path reports the exact
+ * READY session generation. The readiness operation has no feature payload and never reaches a worker.
+ */
+/** Rechecks the original task creator's live project grant before warm-up and round admission. */
+async function requireWorkflowE2ECreatorAuthority(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord) {
+  const creatorRecord = await getWorkflowE2ECreatorIdentity(dependencies, task.developerId);
+  if (creatorRecord?.revoked === true) {
+    throw agentXError("TASK_ACCESS_DENIED", "the original task creator's account has been revoked");
+  }
+  if (creatorRecord === undefined || dependencies.developer === undefined) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the original creator identity is unavailable for this E2E round");
+  }
+  let creatorAccess: Awaited<ReturnType<typeof checkProjectAccess>>;
+  try {
+    creatorAccess = await checkProjectAccess({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+      developer: dependencies.developer, now: Date.now },
+    { developerId: task.developerId, ...(creatorRecord.slackUserId === undefined ? {} : { slackUserId: creatorRecord.slackUserId }) }, task.project);
+  } catch (error) {
+    if (error instanceof AgentXError && error.code === "PROJECT_ACCESS_DENIED") {
+      throw agentXError("TASK_ACCESS_DENIED", "the original creator no longer has current access to this task's project");
+    }
+    throw agentXError("RUNTIME_UNAVAILABLE", "the original creator's current project access is unavailable");
+  }
+  const creatorMembership = await getItem<Record<string, unknown>>(dependencies, { pk: `MEMBER#${task.developerId}`, sk: `PROJECT#${task.project}` });
+  const creatorAuthority = await workflowE2ECreatorAuthorityProof(dependencies, task, creatorMembership, creatorAccess);
+  if (creatorAuthority === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the creator has no versioned direct or locally bound channel access proof for this E2E round");
+  return creatorAuthority;
+}
+
+async function ensureWorkflowE2EComputeReadiness(
+  dependencies: AwsBrokerDependencies,
+  routeDependencies: Parameters<typeof startTaskWorkflowE2EChecksFromSystem>[0],
+  item: WorkflowDispatchRecord,
+): Promise<WorkflowE2EReadinessResult> {
+  const dispatchKey = { pk: item.pk, sk: item.sk };
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== item.workflowRevision
+    || workflow.stage !== "VERIFY" || workflow.state !== "WAITING" || workflow.e2e?.required !== true
+    || workflow.candidate?.digest !== item.candidateDigest) return { status: "STALE" };
+  const row = await getItem<WorkflowDispatchRecord>(dependencies, dispatchKey);
+  if (row === undefined || row.workflowRevision !== item.workflowRevision || row.kind !== "CHECKS" || row.candidateDigest !== item.candidateDigest) {
+    return { status: "STALE" };
+  }
+  // Keep the original creator's current project access in front of every warm-up start or resume.
+  // The feature-round admission rechecks this authority again after compute becomes ready.
+  await requireWorkflowE2ECreatorAuthority(dependencies, task);
+  if (row.readinessOperationId === undefined) {
+    const accessFence = await systemTaskDispatchAccessFence(routeDependencies, task);
+    const workspaceResult = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName,
+      Key: workspaceKey(task.workspaceId), ConsistentRead: true }));
+    const workspace = WorkspaceInstanceSchema.safeParse(workspaceResult.Item === undefined ? undefined : workspaceRecordFields(workspaceResult.Item));
+    if (!workspace.success || !["READY", "STOPPED"].includes(workspace.data.status) || workspace.data.activeOperationId !== null) {
+      throw agentXError("WORKSPACE_BUSY", "the task workspace cannot start its bounded E2E readiness operation");
+    }
+    const now = new Date().toISOString();
+    const marker: WorkflowE2EReadinessMarker = { purpose: "workflow-e2e-readiness", taskId: item.taskId,
+      workflowRevision: item.workflowRevision, candidateDigest: item.candidateDigest, dispatchSk: item.sk };
+    const operationId = workflowRequestId("agentx-workflow-e2e-readiness", item.taskId, item.workflowRevision, item.candidateDigest);
+    const requestId = operationId;
+    const fence = workspace.data.fence + 1;
+    const operation = operationRecord({ id: operationId, workspaceId: task.workspaceId, kind: "resume", requestId,
+      payloadHash: hashJson(marker), status: "ACCEPTED", fence, createdAt: now, updatedAt: now });
+    const outboxId = workflowRequestId("agentx-workflow-e2e-readiness-outbox", item.taskId, item.workflowRevision, item.candidateDigest);
+    operation.workflowE2EReadiness = { ...marker, outboxId };
+    const invocation: WorkerInvocation = { protocolVersion: AGENTX_PROTOCOL_VERSION, kind: "resume", operationId,
+      workspaceId: task.workspaceId, fence, projectRevision: workspace.data.projectRevision,
+      callbackCapability: issueCapability(dependencies, task.workspaceId, operationId, fence), payload: {} };
+    const generatedOutbox = outboxRecord(workspace.data, invocation);
+    const outbox = { ...generatedOutbox, id: outboxId, pk: `OUTBOX#${outboxId}`, workflowE2EReadiness: marker };
+    try {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { ConditionCheck: { TableName: dependencies.tableName, Key: taskKey(item.taskId),
+          ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.e2e.required = :required AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
+          ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
+            ":revision": item.workflowRevision, ":verify": "VERIFY", ":waiting": "WAITING", ":required": true, ":candidate": item.candidateDigest,
+          } } },
+        { Update: { TableName: dependencies.tableName, Key: workspaceKey(task.workspaceId),
+          UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
+          ConditionExpression: "attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped) AND fence = :previousFence",
+          ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: {
+            ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operationId,
+            ":fence": fence, ":previousFence": workspace.data.fence, ":now": now,
+          } } },
+        { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+        { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+        { Update: { TableName: dependencies.tableName, Key: dispatchKey,
+          UpdateExpression: "SET readinessOperationId = :operation",
+          ConditionExpression: "attribute_not_exists(readinessOperationId) AND workflowRevision = :revision AND #kind = :checks AND candidateDigest = :candidate",
+          ExpressionAttributeNames: { "#kind": "kind" }, ExpressionAttributeValues: {
+            ":operation": operationId, ":revision": item.workflowRevision, ":checks": "CHECKS", ":candidate": item.candidateDigest,
+          } } },
+        ...(accessFence === undefined ? [] : [accessFence]),
+      ] }));
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      const current = await getItem<WorkflowDispatchRecord>(dependencies, dispatchKey);
+      return current?.readinessOperationId === undefined ? { status: "WAITING" } : { status: "WAITING" };
+    }
+    return { status: "WAITING" };
+  }
+
+  const operation = await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, row.readinessOperationId));
+  const marker = operation?.workflowE2EReadiness;
+  const expectedMarker = { purpose: "workflow-e2e-readiness", taskId: item.taskId, workflowRevision: item.workflowRevision,
+    candidateDigest: item.candidateDigest, dispatchSk: item.sk } as const;
+  if (operation === undefined || operation.kind !== "resume" || marker === undefined || marker.purpose !== expectedMarker.purpose
+    || marker.taskId !== expectedMarker.taskId || marker.workflowRevision !== expectedMarker.workflowRevision
+    || marker.candidateDigest !== expectedMarker.candidateDigest || marker.dispatchSk !== expectedMarker.dispatchSk
+    || marker.outboxId !== workflowRequestId("agentx-workflow-e2e-readiness-outbox", item.taskId, item.workflowRevision, item.candidateDigest)) {
+    await blockWorkflowE2EReadiness(dependencies, item, "E2E compute readiness could not be verified; no feature round was admitted.");
+    return { status: "STALE" };
+  }
+  if (operation.status !== "SUCCEEDED") {
+    if (["FAILED", "CANCELLED", "INTERRUPTED"].includes(operation.status)) {
+      await blockWorkflowE2EReadiness(dependencies, item, "E2E compute readiness failed; no feature round was admitted.");
+      return { status: "STALE" };
+    }
+    return { status: "WAITING" };
+  }
+  const generation = marker.readyGeneration;
+  if (!Number.isInteger(generation) || generation! < 1) {
+    await blockWorkflowE2EReadiness(dependencies, item, "E2E compute readiness completed without a valid READY session witness.");
+    return { status: "STALE" };
+  }
+  const accessFence = await systemTaskDispatchAccessFence(routeDependencies, task);
+  const now = new Date().toISOString();
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: { TableName: dependencies.tableName, Key: workspaceSessionKey(task.workspaceId),
+        UpdateExpression: "SET lastActivityAt = :now",
+        ConditionExpression: "#state = :ready AND generation = :generation",
+        ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":now": now, ":ready": "READY", ":generation": generation } } },
+      { ConditionCheck: { TableName: dependencies.tableName, Key: taskKey(item.taskId),
+        ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.e2e.required = :required AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
+        ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
+          ":revision": item.workflowRevision, ":verify": "VERIFY", ":waiting": "WAITING", ":required": true, ":candidate": item.candidateDigest,
+        } } },
+      { ConditionCheck: { TableName: dependencies.tableName, Key: dispatchKey,
+        ConditionExpression: "readinessOperationId = :operation AND workflowRevision = :revision AND candidateDigest = :candidate",
+        ExpressionAttributeValues: { ":operation": row.readinessOperationId, ":revision": item.workflowRevision, ":candidate": item.candidateDigest } } },
+      ...(accessFence === undefined ? [] : [accessFence]),
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const session = await getItem<{ state?: unknown; generation?: unknown }>(dependencies, workspaceSessionKey(task.workspaceId));
+    if (session?.state !== "READY" || session.generation !== generation) {
+      await blockWorkflowE2EReadiness(dependencies, item, "The exact E2E-ready compute session is no longer available; no feature round was admitted.");
+      return { status: "STALE" };
+    }
+    return { status: "WAITING" };
+  }
+  const freshTask = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
+  if (freshTask === undefined || freshTask.closedAt !== undefined || freshTask.workflow?.revision !== item.workflowRevision
+    || freshTask.workflow.stage !== "VERIFY" || freshTask.workflow.state !== "WAITING"
+    || freshTask.workflow.candidate?.digest !== item.candidateDigest) return { status: "STALE" };
+  return { status: "READY", task: freshTask };
+}
+
 async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: AccessPausedWorkflowDispatch): Promise<"DISPATCHED" | "STALE" | "RETRY"> {
   const key = { pk: item.pk, sk: item.sk };
   const remove = async () => {
@@ -8810,10 +9110,20 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     }, caller, undefined, null);
     const expected = { workflowRevision: item.workflowRevision, candidateDigest: item.candidateDigest };
     // A fix for the pull requests already open is pushed to them by the same start, which sees they exist.
-    const outcome = item.kind === "PUBLISH" || item.kind === "UPDATE"
-      ? await startTaskWorkflowPublicationFromSystem(routeDependencies, item.taskId, expected, { taskPageUrl: taskPageUrl(dependencies.developer.issuer, item.taskId) })
-      : item.kind === "CHECKS" ? await startWorkflowE2EChecksDispatch(dependencies, routeDependencies, task, expected, caller)
-      : await startTaskWorkflowReviewFromSystem(routeDependencies, item.taskId, expected);
+    let outcome: "STARTED" | "DUPLICATE" | "STALE";
+    if (item.kind === "CHECKS") {
+      const readiness = await ensureWorkflowE2EComputeReadiness(dependencies, routeDependencies, item);
+      if (readiness.status === "WAITING") return "DISPATCHED";
+      if (readiness.status === "STALE") {
+        await remove();
+        return "STALE";
+      }
+      outcome = await startWorkflowE2EChecksDispatch(dependencies, routeDependencies, readiness.task, expected, caller);
+    } else {
+      outcome = item.kind === "PUBLISH" || item.kind === "UPDATE"
+        ? await startTaskWorkflowPublicationFromSystem(routeDependencies, item.taskId, expected, { taskPageUrl: taskPageUrl(dependencies.developer.issuer, item.taskId) })
+        : await startTaskWorkflowReviewFromSystem(routeDependencies, item.taskId, expected);
+    }
     await remove();
     return outcome === "STALE" ? "STALE" : "DISPATCHED";
   } catch (error) {
@@ -8912,35 +9222,16 @@ async function startWorkflowE2EChecksDispatch(
     intent: approved.plan.e2e, snapshot, artifactId: artifact.id, artifactSha256: artifact.sha256, planDigest,
     policy, runtimeCatalogId: catalogId, runtimeBinding: project.runtimeBinding, featureVerifier: featureRecord, now: Date.now(),
   });
-  const creatorRecord = await getWorkflowE2ECreatorIdentity(dependencies, task.developerId);
-  if (creatorRecord?.revoked === true) {
-    throw agentXError("TASK_ACCESS_DENIED", "the original task creator's account has been revoked");
-  }
-  if (creatorRecord === undefined || dependencies.developer === undefined) {
-    throw agentXError("RUNTIME_UNAVAILABLE", "the original creator identity is unavailable for this E2E round");
-  }
-  let creatorAccess: Awaited<ReturnType<typeof checkProjectAccess>>;
-  try {
-    creatorAccess = await checkProjectAccess({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
-      developer: dependencies.developer, now: Date.now },
-    { developerId: task.developerId, ...(creatorRecord.slackUserId === undefined ? {} : { slackUserId: creatorRecord.slackUserId }) }, task.project);
-  } catch (error) {
-    if (error instanceof AgentXError && error.code === "PROJECT_ACCESS_DENIED") {
-      throw agentXError("TASK_ACCESS_DENIED", "the original creator no longer has current access to this task's project");
-    }
-    throw agentXError("RUNTIME_UNAVAILABLE", "the original creator's current project access is unavailable");
-  }
-  const creatorMembership = await getItem<Record<string, unknown>>(dependencies, { pk: `MEMBER#${task.developerId}`, sk: `PROJECT#${task.project}` });
-  const creatorAuthority = await workflowE2ECreatorAuthorityProof(dependencies, task, creatorMembership, creatorAccess);
-  if (creatorAuthority === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the creator has no versioned direct or locally bound channel access proof for this E2E round");
+  const creatorAuthority = await requireWorkflowE2ECreatorAuthority(dependencies, task);
   const workspace = await routeDependencies.actions.workspace(task.workspaceId);
   const operationId = randomUUID();
   const fence = workspace.fence + 1;
   const workflowRevision = workflow.revision + 1;
   const roundId = randomUUID();
   const runIds = featureAdmission.plan.groups.map(() => randomUUID());
-  const admittedAt = new Date().toISOString();
-  const deadlineAt = new Date(Date.now() + policy.limits.runTimeoutMs).toISOString();
+  const admittedAtMs = Date.now();
+  const admittedAt = new Date(admittedAtMs).toISOString();
+  const deadlineAt = new Date(admittedAtMs + policy.limits.runTimeoutMs).toISOString();
   const built = buildE2EFeatureRound({ admission: featureAdmission, taskId: task.taskId, operationId, operationFence: fence,
     workflowRevision, roundId, runIds, admittedAt, deadlineAt });
   const { sourceSnapshot: _selectionSourceSnapshot, ...storedSelectionInput } = featureAdmission.selectionInput;

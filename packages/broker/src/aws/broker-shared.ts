@@ -292,6 +292,8 @@ export interface WorkflowDispatchRecord {
   /** UPDATE: an approved fix's checks and reviews passed, and it is pushed to the pull requests already open. */
   kind: "CHECKS" | "REVIEW" | "PUBLISH" | "UPDATE";
   candidateDigest: string;
+  /** A single internal resume operation warms EC2 before a required E2E round is immutably admitted. */
+  readinessOperationId?: string;
   createdAt: string;
   /** Failed runs so far; the row is retried with backoff and gives up (blocking the task) at the cap. */
   attempts: number;
@@ -302,6 +304,15 @@ export interface WorkflowDispatchRecord {
   dispatchDueSk: string;
   /** TTL backstop (epoch seconds), in case a row is somehow never resolved. */
   indexExpiresAt: number;
+}
+
+/** Internal purpose binding for the one pre-admission compute warmup of a required feature E2E dispatch. */
+export interface WorkflowE2EReadinessMarker {
+  purpose: "workflow-e2e-readiness";
+  taskId: string;
+  workflowRevision: number;
+  candidateDigest: string;
+  dispatchSk: string;
 }
 
 export const WORKFLOW_DISPATCH_PK = "WORKFLOW_DISPATCH";

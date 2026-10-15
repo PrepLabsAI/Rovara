@@ -568,6 +568,12 @@ async function systemTaskAccess(deps: DeveloperTaskRouteDependencies, task: Deve
 const accessFence = (deps: Pick<DeveloperTaskRouteDependencies, "tableName">, access: TaskAccess) =>
   taskAccessFence(deps.tableName, access.task.taskId, access.peopleRevision);
 
+/** A durable workflow dispatch uses the same fresh task-people proof and transactional fence as an accepted task. */
+export async function systemTaskDispatchAccessFence(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<TransactItems[number] | undefined> {
+  const access = await systemTaskAccess(deps, task);
+  return access === undefined ? undefined : accessFence(deps, access);
+}
+
 async function resumeParkedTaskDispatch(
   deps: DeveloperTaskRouteDependencies,
   caller: DeveloperCaller,
@@ -1197,12 +1203,26 @@ export async function taskView(
     options.loaded ?? workspaceReads(deps, task),
     get<DeveloperTaskPointerRecord>(deps, taskPointerKey(task.workspaceId)),
   ]);
-  const derived = deriveTaskStatus({
+  const derivedBase = deriveTaskStatus({
     closedAt: task.closedAt,
     workspaceStatus: workspace.status,
     pointer,
     operations: operations.map((operation) => ({ id: operation.id, kind: operation.kind, status: operation.status, error: operation.error, createdAt: operation.createdAt, updatedAt: operation.updatedAt, fence: operation.fence })),
   });
+  const workflowWaitingForE2ECompute = task.workflow?.stage === "VERIFY" && task.workflow.state === "WAITING"
+    && task.workflow.e2e?.required === true && task.workflow.e2e.currentRoundId === undefined;
+  const readinessOperationId = workflowWaitingForE2ECompute && task.workflow?.candidate !== undefined
+    ? workflowRequestId("agentx-workflow-e2e-readiness", task.taskId, task.workflow.revision, task.workflow.candidate.digest) : undefined;
+  const readinessOperation = readinessOperationId === undefined ? undefined : operations.find((operation) => operation.id === readinessOperationId && operation.kind === "resume");
+  const readinessFailed = readinessOperation !== undefined && ["FAILED", "CANCELLED", "INTERRUPTED"].includes(readinessOperation.status);
+  // A readiness resume is an internal compute warmup, not task work or a verification result. Keep
+  // the task visibly starting and use its startup events until the broker admits the immutable round.
+  const derived = workflowWaitingForE2ECompute && readinessOperation !== undefined
+    ? readinessFailed
+      ? { ...derivedBase, status: "FAILED" as const, current: readinessOperation,
+        failure: { category: "task_failed" as const, message: "E2E compute readiness failed; no feature round was admitted." } }
+      : { ...derivedBase, status: "STARTING" as const, current: readinessOperation, failure: undefined }
+    : derivedBase;
   // #225: a task whose setup failed shows its prepare's events (the failure the broker recorded).
   const eventsOf = derived.current ?? derived.failedPrepare;
   const events = eventsOf === undefined || options.events === 0
@@ -3018,6 +3038,9 @@ function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: boolean, 
         ? `Retry coding, keep the pull request as it is, or close the task ${inSlack}.` : `Retry coding or close the task ${inSlack}.` }
       : { status: workflow.blockReason === WORKFLOW_BLOCK_REASONS.noCodeChanged ? "Coding finished, but no code changed" : "Coding stopped before it finished",
         nextStep: `Retry coding or close the task ${inSlack}.` };
+    case "VERIFY/WAITING": return workflow.e2e?.required === true && workflow.e2e.currentRoundId === undefined
+      ? { status: "Preparing the checks", nextStep: "The checks start when workspace compute is ready." }
+      : { status: "Preparing the checks", nextStep: "The approved checks start shortly." };
     case "VERIFY/READY": case "VERIFY/RUNNING": return { status: "Running the checks", nextStep: "The code and security reviews start when the checks pass." };
     case "VERIFY/BLOCKED": return { status: "The checks didn't pass or couldn't run", nextStep: `Send it back to coding, retry the checks, or close the task ${inSlack}.` };
     case "REVIEW/READY": case "REVIEW/WAITING": case "REVIEW/RUNNING": return { status: "Code and security reviews are running", nextStep: "A draft pull request opens when both pass." };
