@@ -6708,7 +6708,7 @@ async function workflowE2ECurrentAuthorityIsValid(
       return reject("current-project-policy-or-runtime-changed");
     }
     stage = "creator-project-access";
-    const creator = await getItem<DeveloperRecord>(dependencies, { pk: `DEVELOPER#${task.developerId}`, sk: "META" });
+    const creator = await getWorkflowE2ECreatorIdentity(dependencies, task.developerId);
     if (creator === undefined || creator.revoked || dependencies.developer === undefined) return reject("current-creator-identity-unavailable");
     let creatorAccess: Awaited<ReturnType<typeof checkProjectAccess>>;
     try {
@@ -6791,9 +6791,9 @@ async function workflowE2ECurrentAuthorityIsValid(
         ExpressionAttributeNames: { "#definition": "definition", "#e2e": "e2e" },
         ExpressionAttributeValues: { ":entity": "PROJECT", ":registeredBy": latestProject.registeredBy, ":policy": policy,
           ":binding": latestProject.runtimeBinding, ":setupApproval": latestProject.setupApproval } } },
-      { ConditionCheck: { TableName: dependencies.tableName, Key: { pk: `DEVELOPER#${task.developerId}`, sk: "META" },
-        ConditionExpression: "developerId = :developerId AND revoked = :notRevoked",
-        ExpressionAttributeValues: { ":developerId": task.developerId, ":notRevoked": false } } },
+      { ConditionCheck: { TableName: dependencies.developer.signInTableName, Key: { pk: `DEVELOPER#${task.developerId}`, sk: "META" },
+        ConditionExpression: "entityType = :entity AND revoked = :notRevoked",
+        ExpressionAttributeValues: { ":entity": "DEVELOPER", ":notRevoked": false } } },
       { ConditionCheck: { TableName: dependencies.tableName, Key: key,
         ConditionExpression: "entityType = :entity AND #state = :ready AND runtimeCatalogId = :catalog AND catalogRevision = :catalogRevision AND profileId = :profile AND bindingDigest = :bindingDigest AND binding = :binding AND manifestDigest = :manifestDigest AND runnerEnvironmentDigest = :environmentDigest AND runnerEnvironment = :environment AND runnerToolchainDigest = :toolchainDigest AND runnerToolchain = :toolchain AND generation = :generation AND transportCorrelationId = :correlation AND supportedFeatureScopes = :scopes AND qualifiedAt = :qualifiedAt AND expiresAt = :expiresAt",
         ExpressionAttributeNames: { "#state": "state" },
@@ -8845,6 +8845,18 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
   }
 }
 
+/** Reads the original creator from its authoritative, separately scoped sign-in table. */
+async function getWorkflowE2ECreatorIdentity(dependencies: AwsBrokerDependencies, developerId: string): Promise<Pick<DeveloperRecord, "revoked" | "slackUserId"> & { entityType?: unknown } | undefined> {
+  const signInTableName = dependencies.developer?.signInTableName;
+  if (signInTableName === undefined) return undefined;
+  const response = await dependencies.documentClient.send(new GetCommand({
+    TableName: signInTableName,
+    Key: { pk: `DEVELOPER#${developerId}`, sk: "META" },
+    ConsistentRead: true,
+  })) as unknown as { Item?: Pick<DeveloperRecord, "revoked" | "slackUserId"> & { entityType?: unknown } };
+  return response.Item?.entityType === "DEVELOPER" ? response.Item : undefined;
+}
+
 /** Creates the content-addressed admission and starts the separate current CHECKS operation. */
 async function startWorkflowE2EChecksDispatch(
   dependencies: AwsBrokerDependencies,
@@ -8900,7 +8912,7 @@ async function startWorkflowE2EChecksDispatch(
     intent: approved.plan.e2e, snapshot, artifactId: artifact.id, artifactSha256: artifact.sha256, planDigest,
     policy, runtimeCatalogId: catalogId, runtimeBinding: project.runtimeBinding, featureVerifier: featureRecord, now: Date.now(),
   });
-  const creatorRecord = await getItem<DeveloperRecord>(dependencies, { pk: `DEVELOPER#${task.developerId}`, sk: "META" });
+  const creatorRecord = await getWorkflowE2ECreatorIdentity(dependencies, task.developerId);
   if (creatorRecord?.revoked === true) {
     throw agentXError("TASK_ACCESS_DENIED", "the original task creator's account has been revoked");
   }

@@ -179,6 +179,16 @@ export class DeveloperSignIn extends Construct {
       resources: [table.tableArn],
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*"] } },
     }));
+    // The workflow E2E terminal authority transaction also condition-checks the original creator
+    // record. Keep that cross-table fence to developer identity rows only.
+    broker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:ConditionCheckItem"],
+      resources: [table.tableArn],
+      conditions: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVELOPER#*"] },
+        Null: { "dynamodb:LeadingKeys": "false" },
+      },
+    }));
 
     // FR-037, R27: the developer task routes write immutable AI-tool turn records, only under TASK#.
     // No update or delete: a record is written once with a condition and never changed.

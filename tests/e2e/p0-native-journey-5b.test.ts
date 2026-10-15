@@ -37,7 +37,7 @@ import { createOutboxPublisherHandler } from "../../packages/broker/src/aws/outb
 import { createProjectSetupBindingReader, createProjectSetupDispatchGuard, createProjectSetupDispatchLifecycle } from "../../packages/broker/src/aws/dispatcher.js";
 import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { createTaskAuthorityAdmission } from "../../packages/broker/src/aws/task-authority-admission.js";
-import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { ProjectSetupSessionManager } from "../../packages/broker/src/aws/sessions.js";
 import { issueProjectSetupCapability } from "../../packages/broker/src/aws/project-setup-capability.js";
 
@@ -66,6 +66,7 @@ import { taskGraphDigest } from "../../packages/contracts/src/workflow-dependenc
 import { persistOriginalEvidencePrimary, persistOriginalMapPrimary } from "../support/p0-evidence-capture.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 import { observeInstalledRuntimeManifestForHost } from "@agentx/verifier";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 let installedRuntimeManifestDigest: string;
 beforeAll(async () => {
@@ -262,7 +263,7 @@ describe("P0 normal project onboarding journey", () => {
     const taskViewerSessionId = randomUUID();
     const localBaseTreeReads: Array<{ repositoryUrl: string; commitSha: string; treeSha: string }> = [];
     const broker = createBroker({ s3, developer: {
-      issuer, env: "staging", methods: { slack: true, oidc: true }, slackTeamId: "T0P0NATIVE", signInTableName: "state",
+      issuer, env: "staging", methods: { slack: true, oidc: true }, slackTeamId: "T0P0NATIVE", signInTableName: "developer-signins",
       workflowDependenciesEnabled: true,
       channelMembers: async () => ({ ok: true, memberOf: ownerChannelAccess ? ["C0P0NATIVE"] : [] }),
       taskPeopleConfiguration: { peopleChangesEnabled: true },
@@ -319,19 +320,50 @@ describe("P0 normal project onboarding journey", () => {
           return parents ? parents.split(" ") : [];
         } },
     } });
-    broker.db.set({ pk: `SESSION#${ownerSessionId}`, sk: "META", sessionId: ownerSessionId, developerId: ownerDeveloperId, amr: "oidc",
+    // Keep identities in their real separate table and add a tempting valid-looking state-table
+    // decoy. Creator authority must come only from the authoritative sign-in row.
+    const signInDb = new FakeDynamoDb();
+    const stateTableSend = broker.db.send.bind(broker.db);
+    broker.db.send = async (command) => {
+        const input = command.input ?? {};
+        if (input.TableName === "developer-signins") return signInDb.send(command);
+        if (command.constructor.name === "TransactWriteCommand") {
+          const transactItems = input.TransactItems as Array<Record<string, Record<string, unknown>>> | undefined;
+          const creatorCheck = transactItems?.find((entry) => {
+            const check = entry.ConditionCheck;
+            const key = check?.Key as { pk?: unknown; sk?: unknown } | undefined;
+            return key?.pk === `DEVELOPER#${ownerDeveloperId}` && key.sk === "META";
+          });
+          if (creatorCheck !== undefined) {
+            const check = creatorCheck.ConditionCheck!;
+            if (check.TableName !== "developer-signins") throw new Error("creator revocation check used the state table");
+            if (check.ConditionExpression !== "entityType = :entity AND revoked = :notRevoked"
+              || JSON.stringify(check.ExpressionAttributeValues) !== JSON.stringify({ ":entity": "DEVELOPER", ":notRevoked": false })) {
+              throw new Error("creator revocation check did not bind the authoritative sign-in record");
+            }
+            const row = signInDb.get(`DEVELOPER#${ownerDeveloperId}`, "META");
+            if (row?.entityType !== "DEVELOPER" || row.revoked !== false) throw new Error("creator identity is absent or revoked");
+            const rewritten = new TransactWriteCommand({ ...input, TransactItems: transactItems!.filter((entry) => entry !== creatorCheck) });
+            return stateTableSend(rewritten);
+          }
+        }
+        return stateTableSend(command);
+    };
+    signInDb.set({ pk: `SESSION#${ownerSessionId}`, sk: "META", sessionId: ownerSessionId, developerId: ownerDeveloperId, amr: "oidc",
       startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 60_000,
       reviewExpiresAt: Math.floor(Date.now() / 1000) + 60_000, slackUserId: "U0P0OWNER" });
-    broker.db.set({ pk: `DEVELOPER#${ownerDeveloperId}`, sk: "META", developerId: ownerDeveloperId, provider: "oidc", issuer, subject: "owner",
+    signInDb.set({ pk: `DEVELOPER#${ownerDeveloperId}`, sk: "META", entityType: "DEVELOPER", provider: "oidc", issuer, subject: "owner",
       displayName: "Owner", firstSignInAt: "fixture", lastSignInAt: "fixture", revoked: false, slackUserId: "U0P0OWNER" });
-    broker.db.set({ pk: `SESSION#${ungrantedSessionId}`, sk: "META", sessionId: ungrantedSessionId, developerId: ungrantedDeveloperId, amr: "oidc",
+    signInDb.set({ pk: `SESSION#${ungrantedSessionId}`, sk: "META", sessionId: ungrantedSessionId, developerId: ungrantedDeveloperId, amr: "oidc",
       startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 60_000,
       reviewExpiresAt: Math.floor(Date.now() / 1000) + 60_000, slackUserId: "U0P0VIEWER" });
-    broker.db.set({ pk: `DEVELOPER#${ungrantedDeveloperId}`, sk: "META", developerId: ungrantedDeveloperId, provider: "oidc", displayName: "Unjoined viewer", firstSignInAt: "fixture", lastSignInAt: "fixture", revoked: false, slackUserId: "U0P0VIEWER" });
-    broker.db.set({ pk: `SESSION#${taskViewerSessionId}`, sk: "META", sessionId: taskViewerSessionId, developerId: taskViewerDeveloperId, amr: "slack",
+    signInDb.set({ pk: `DEVELOPER#${ungrantedDeveloperId}`, sk: "META", entityType: "DEVELOPER", developerId: ungrantedDeveloperId, provider: "oidc", displayName: "Unjoined viewer", firstSignInAt: "fixture", lastSignInAt: "fixture", revoked: false, slackUserId: "U0P0VIEWER" });
+    signInDb.set({ pk: `SESSION#${taskViewerSessionId}`, sk: "META", sessionId: taskViewerSessionId, developerId: taskViewerDeveloperId, amr: "slack",
       startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 60_000,
       reviewExpiresAt: Math.floor(Date.now() / 1000) + 60_000, slackUserId: taskViewerSlackId });
-    broker.db.set({ pk: `DEVELOPER#${taskViewerDeveloperId}`, sk: "META", developerId: taskViewerDeveloperId, provider: "slack", displayName: "Task Viewer", firstSignInAt: "fixture", lastSignInAt: "fixture", revoked: false, slackUserId: taskViewerSlackId });
+    signInDb.set({ pk: `DEVELOPER#${taskViewerDeveloperId}`, sk: "META", entityType: "DEVELOPER", developerId: taskViewerDeveloperId, provider: "slack", displayName: "Task Viewer", firstSignInAt: "fixture", lastSignInAt: "fixture", revoked: false, slackUserId: taskViewerSlackId });
+    broker.db.set({ pk: `DEVELOPER#${ownerDeveloperId}`, sk: "META", entityType: "DEVELOPER", developerId: ownerDeveloperId,
+      provider: "oidc", issuer, subject: "owner", revoked: false, slackUserId: "U0P0OWNER" });
     const localRunnerEnvironment = { ci: true as const, trustNoticeShown: false as const, os: `${process.platform} ${osRelease()}`, arch: process.arch, runtime: `node ${process.version}` };
     broker.db.set({ ...runtimeCatalogKey, schemaVersion: 1, entityType: "PROJECT_SETUP_RUNTIME", runtimeCatalogId, catalogRevision: 1,
       bindingDigest: projectSetupBindingDigest(runtimeBinding), binding: runtimeBinding, manifestDigest: installedRuntimeManifestDigest,
@@ -2024,6 +2056,24 @@ describe("P0 normal project onboarding journey", () => {
     expect(regrantedCreatorView, JSON.stringify(regrantedCreatorRead.body)).toMatchObject({ status: "UNKNOWN", expectedGroups: oldRoundAdmission?.groupRunIds?.length,
       receivedGroups: 0, qualifiedCriteria: 0 });
     expect(broker.db.find((item) => item.entityType === "OUTBOX" && item.workspaceId === featureWorkspaceId)).toHaveLength(creatorAuthorityOutboxCount);
+    const creatorIdentityKey = { pk: `DEVELOPER#${ownerDeveloperId}`, sk: "META" };
+    const admittedCreatorIdentity = signInDb.get(creatorIdentityKey.pk, creatorIdentityKey.sk)!;
+    signInDb.set({ ...admittedCreatorIdentity, revoked: true });
+    const revokedIdentityRead = await call(broker.handler, { method: "GET", path: `/v1/dev/tasks/${featureTaskId}`,
+      headers: { authorization: "Bearer synthetic-owner-session" } });
+    signInDb.set({ ...admittedCreatorIdentity, revoked: false, entityType: "CORRUPT_DEVELOPER_ROW" });
+    const malformedIdentityRead = await call(broker.handler, { method: "GET", path: `/v1/dev/tasks/${featureTaskId}`,
+      headers: { authorization: "Bearer synthetic-owner-session" } });
+    const malformedIdentityStatus = (malformedIdentityRead.body as { task?: { e2ePresentation?: { shared?: { e2e?: { status?: string } } } } }).task?.e2ePresentation?.shared?.e2e?.status;
+    signInDb.delete(creatorIdentityKey.pk, creatorIdentityKey.sk);
+    const missingIdentityRead = await call(broker.handler, { method: "GET", path: `/v1/dev/tasks/${featureTaskId}`,
+      headers: { authorization: "Bearer synthetic-owner-session" } });
+    signInDb.set(admittedCreatorIdentity);
+    expect(revokedIdentityRead.status, JSON.stringify(revokedIdentityRead.body)).toBe(401);
+    expect((revokedIdentityRead.body as { error?: { code?: string } }).error?.code).toBe("AUTH_REQUIRED");
+    expect(malformedIdentityStatus, JSON.stringify(malformedIdentityRead.body)).toBe("UNKNOWN");
+    expect(missingIdentityRead.status, JSON.stringify(missingIdentityRead.body)).toBe(401);
+    expect((missingIdentityRead.body as { error?: { code?: string } }).error?.code).toBe("AUTH_REQUIRED");
 
     // A separate, normally approved task preserves the browser obligation end to end. Its
     // portable groups execute, while the unsupported required navigation criterion blocks
@@ -2551,6 +2601,9 @@ describe("P0 normal project onboarding journey", () => {
         ...(body === undefined ? {} : { body: JSON.stringify(body) }), requestContext: { requestId: randomUUID(), http: { method } } });
       return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
     };
+    // The legacy Task People fixture requires the optional id field; keep it absent during the
+    // E2E admission/round checks above so this regression models the stored creator row shape.
+    signInDb.set({ ...signInDb.get(`DEVELOPER#${ownerDeveloperId}`, "META")!, developerId: ownerDeveloperId });
     const ownerPeopleRead = await call(broker.handler, { method: "GET", path: `/v1/dev/tasks/${browserTaskId}/people`,
       headers: { authorization: "Bearer synthetic-owner-session" } });
     expect(ownerPeopleRead.status, JSON.stringify(ownerPeopleRead.body)).toBe(200);
