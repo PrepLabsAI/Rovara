@@ -34,6 +34,13 @@ const REQUIRED_CHECK = { id: "required-1", label: "npm test", command: { cwd: "r
 const operations = (harness: Harness, workspaceId: string) => harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION");
 const taskWorkflow = (harness: Harness, taskId: string) => (harness.db.get(`DEVTASK#${taskId}`, "META") as { workflow: WorkflowSnapshot }).workflow;
 const passingChecks = () => ({ status: "verified", source: "project", preambleVersion: "1", preambleSha256: "c".repeat(64), checks: [{ id: "readiness:0", label: "npm test", source: "project", before: "passed", after: "passed", class: "passing", output: "", durationMs: 12 }], extraTry: "not_needed", agentClaim: "success" });
+const baselinePolicy = (baselineScenarioIds: string[]) => ({
+  schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds,
+  targets: [{ targetId: "web-main", applicationId: "app-main", runtimeProfileId: "browser-linux", accountProfileId: "synthetic-tenant", kind: "web", browser: "chromium", viewport: { width: 1280, height: 800 } }],
+  defaultSandboxProfileId: "sandbox-v1", fallback: "mock-unconnected", modelRouteRevision: null,
+  capture: { screenshots: false, traces: false, video: false, downloads: false },
+  limits: { runTimeoutMs: 600000, startupTimeoutMs: 60000, preparationTimeoutMs: 180000, caseTimeoutMs: 90000, maxActionsPerCase: 30, maxModelRequests: 60, maxInputTokens: 200000, maxOutputTokens: 20000, maxSpendUsd: null },
+});
 const dispatchRows = (harness: Harness) => harness.db.find((item) => item.pk === "WORKFLOW_DISPATCH");
 const sweep = (harness: Harness) => harness.handler({ source: "agentx.workflow-dispatch-recovery" });
 /** The next review start meets a busy workspace: its acceptance transaction is cancelled with no saved request. */
@@ -164,6 +171,49 @@ async function collectingFeedbackTask(plan: { content: string; structured?: bool
 }
 
 describe("native developer task workflow", () => {
+  it("requires a canonical E2E plan when the pinned project has required baseline scenarios", async () => {
+    const approvePlanWithoutE2E = async (policy?: unknown, options: { structured?: boolean; registerLatestEmptyRevision?: boolean; removePinnedProject?: boolean } = {}) => {
+      const harness = await createDeveloperTaskBroker();
+      const project = harness.db.find((item) => item.entityType === "PROJECT" && item.definition !== undefined && (item.definition as { name: string }).name === "payments")[0]!;
+      const definition = { ...(project.definition as Record<string, unknown>), ...(policy === undefined ? {} : { e2e: policy }) };
+      harness.db.set({ ...project, definition });
+      const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK" });
+      const taskId = String((started.body.task as { taskId: string }).taskId);
+      const task = harness.db.get(`DEVTASK#${taskId}`, "META") as { startingRevision: number; workspaceId: string };
+      expect(task.startingRevision).toBe((project.definition as { revision: number }).revision);
+      if (options.registerLatestEmptyRevision) await registerSlackProject(harness.handler, { revision: task.startingRevision + 1 });
+      await harness.finish(task.workspaceId, String(operations(harness, task.workspaceId).find((item) => item.kind === "prepare")!.id), "SUCCEEDED", PREPARED);
+      const planning = operations(harness, task.workspaceId).find((item) => item.workflowMode === "PLAN")!;
+      const markdown = "# Plan\n\n1. Fix retry handling.\n";
+      await finishPlanningWithMarkdown(harness, task.workspaceId, String(planning.id), markdown);
+      const artifactDigest = options.structured ? seedStructured(harness, taskId, "plan", planDocument()) : createHash("sha256").update(markdown).digest("hex");
+      if (options.removePinnedProject) harness.db.delete(String(project.pk), String(project.sk));
+      const workflowBefore = structuredClone(taskWorkflow(harness, taskId));
+      const operationsBefore = operations(harness, task.workspaceId).map((operation) => ({ id: operation.id, workflowMode: operation.workflowMode }));
+      const response = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, {
+        requestId: randomUUID(), expectedRevision: taskWorkflow(harness, taskId).revision, decision: "APPROVE", reason: "Approved", artifactDigest,
+      });
+      return { response, harness, taskId, workspaceId: task.workspaceId, workflowBefore, operationsBefore };
+    };
+
+    const required = await approvePlanWithoutE2E(baselinePolicy(["checkout"]));
+    expect(required.response.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    expect(taskWorkflow(required.harness, required.taskId)).toEqual(required.workflowBefore);
+    expect(operations(required.harness, required.workspaceId).map((operation) => ({ id: operation.id, workflowMode: operation.workflowMode }))).toEqual(required.operationsBefore);
+    const requiredStructuredWithoutE2E = await approvePlanWithoutE2E(baselinePolicy(["checkout"]), { structured: true });
+    expect(requiredStructuredWithoutE2E.response.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    const pinnedPolicyDespiteNewerEmptyRevision = await approvePlanWithoutE2E(baselinePolicy(["checkout"]), { registerLatestEmptyRevision: true });
+    expect(pinnedPolicyDespiteNewerEmptyRevision.response.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    const missingPinnedRevision = await approvePlanWithoutE2E(undefined, { removePinnedProject: true });
+    expect(missingPinnedRevision.response.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    const emptyBaseline = await approvePlanWithoutE2E(baselinePolicy([]));
+    expect(emptyBaseline.response.status).toBe(200);
+    expect(emptyBaseline.response.body.error).toBeUndefined();
+    const absentPolicy = await approvePlanWithoutE2E();
+    expect(absentPolicy.response.status).toBe(200);
+    expect(absentPolicy.response.body.error).toBeUndefined();
+  });
+
   it("keeps takeover inert until the new owner explicitly redrives the exact parked operation", async () => {
     const creatorSlack = "U0PARKOWN1";
     const nextSlack = "U0PARKOWN2";

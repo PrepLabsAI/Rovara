@@ -1877,6 +1877,13 @@ export async function decideTaskWorkflow(
   const decisionRequest: WorkflowDecisionRequest = included.length === 0 && request.includedCommentIds === undefined
     ? boundDecisionRequest : { ...boundDecisionRequest, includedCommentIds: included.map((comment) => comment.commentId) };
   let next = transition(decisionRequest, decisions, workBreakdownDigest);
+  if (request.decision === "APPROVE" && documentType === "plan" && !(loaded?.format === "structured" && loaded.plan.e2e !== undefined)) {
+    const pinnedProject = await deps.actions.projectRevision(task.project, task.startingRevision);
+    if (pinnedProject === undefined) throw agentXError("CONFIG_INVALID", "the pinned project revision is unavailable; refresh the plan before approving it");
+    if (pinnedProject.definition.e2e !== undefined && E2EPolicySchema.parse(pinnedProject.definition.e2e).baselineScenarioIds.length > 0) {
+      throw agentXError("CONFIG_INVALID", "the approved plan must include the canonical E2E intent required by the pinned project baseline");
+    }
+  }
   // A required feature-E2E obligation begins only when the Owner approves the canonical plan bytes that contain it.
   // The digests below identify the approved intent and its policy/bundle; candidate-specific execution-plan identity is
   // bound later by the server-created CHECKS admission and round.
