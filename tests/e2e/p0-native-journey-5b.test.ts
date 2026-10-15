@@ -953,8 +953,8 @@ describe("P0 normal project onboarding journey", () => {
     const callbacks = createWorkerCallbackSinks({ controlPlaneUrl: "https://cp.example.test", invocation: implementInvocation, fetchImplementation: workerFetch });
     const { modelRuntime, faux } = await fauxModelRuntime();
     faux.setResponses([
-      fauxAssistantMessage([fauxToolCall("bash", { command: "cd repo/ordinary-orders && mkdir -p test && cat > test/orders-view.test.mjs <<'EOF'\nimport assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { priceRows } from '../src/index.mjs';\ntest('preserves each row price', () => { assert.deepEqual(priceRows({ rows: [{ price: 4 }] }), { rows: [{ price: 7 }] }); });\nEOF\ngit add -- test/orders-view.test.mjs && git commit -m 'Add an orders renderer regression test'" })], { stopReason: "toolUse" }),
-      fauxAssistantMessage([fauxToolCall("bash", { command: "cd repo/ordinary-orders && cat > src/index.mjs <<'EOF'\nimport { applyPrice } from './price-rows.mjs';\nexport async function renderOrders(input) { const response = await fetch(`/orders?mode=${encodeURIComponent(input.mode)}`); if (!response.ok) return `refused:${response.status}`; const body = await response.json(); if (!Array.isArray(body.orders)) return 'invalid-data'; return body.orders.map((row) => `<li data-testid=\\\"orders-list\\\">${row.name.toLowerCase()}</li>`).join(''); }\nexport function priceRows(input) { return { rows: input.rows.map(applyPrice) }; }\nEOF\ngit add -- src/index.mjs && git commit -m 'Implement the orders list renderer'" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("bash", { command: "cd repo/ordinary-orders && mkdir -p test && cat > test/orders-view.test.mjs <<'EOF'\nimport assert from 'node:assert/strict';\nimport test from 'node:test';\nimport { priceRows } from '../src/index.mjs';\ntest('preserves each row price', () => { assert.deepEqual(priceRows({ rows: [{ price: 4 }] }), { rows: [{ price: 7 }] }); });\nEOF" })], { stopReason: "toolUse" }),
+      fauxAssistantMessage([fauxToolCall("bash", { command: "cd repo/ordinary-orders && cat > src/index.mjs <<'EOF'\nimport { applyPrice } from './price-rows.mjs';\nexport async function renderOrders(input) { const response = await fetch(`/orders?mode=${encodeURIComponent(input.mode)}`); if (!response.ok) return `refused:${response.status}`; const body = await response.json(); if (!Array.isArray(body.orders)) return 'invalid-data'; return body.orders.map((row) => `<li data-testid=\\\"orders-list\\\">${row.name.toLowerCase()}</li>`).join(''); }\nexport function priceRows(input) { return { rows: input.rows.map(applyPrice) }; }\nEOF" })], { stopReason: "toolUse" }),
       fauxAssistantMessage("I added the requested orders renderer export."),
     ]);
     const workerResult = await runTaskInvocation(implementInvocation, {
@@ -967,6 +967,8 @@ describe("P0 normal project onboarding journey", () => {
       gitStatus: git(workerRepository, "status", "--porcelain"), callbackRequests }, null, 2)}\n`, { mode: 0o600, flag: "wx" });
     expect(workerResult.workflowCandidateSourceExport, "the actual worker must export committed source from its final HEAD").toBeDefined();
     const workerCandidateIdentity = workerResult.workflowCandidateSourceExport!.repositories[0]!;
+    expect(git(workerRepository, "rev-parse", `${workerCandidateIdentity.commitSha}^`), "the local implementation snapshot must preserve the current task base as its parent").toBe(commitSha);
+    expect(workerCandidateIdentity.treePaths).toContain("test/orders-view.test.mjs");
     const workerGitTreeBytes = gitBytes(workerRepository, "ls-tree", "-rz", "-r", "--full-tree", workerCandidateIdentity.commitSha);
     const workerGitTreePrimary = await persistOriginalEvidencePrimary({ root, kind: "worker-candidate-git-tree-listing",
       key: `${workerCandidateIdentity.commitSha}:${workerCandidateIdentity.treeSha}`, bytes: workerGitTreeBytes,

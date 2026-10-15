@@ -28,7 +28,7 @@ import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
 import type { FeedbackApprovalAuthorizer, FeedbackBundleReader } from "./callback-client.js";
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
-import { candidateUnchangedSinceBase, readCandidateRepositories, readCommittedCandidateSourceExport, type CandidateRepositoryInput, type CommittedCandidateSourceExport } from "./verification/candidate.js";
+import { candidateUnchangedSinceBase, commitCandidateWorktree, readCandidateRepositories, readCommittedCandidateSourceExport, type CandidateRepositoryInput, type CommittedCandidateSourceExport } from "./verification/candidate.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
@@ -330,6 +330,7 @@ export async function runTaskInvocation(
   let checkPlan: CheckPlan | undefined;
   let reportedChecks: CheckReport | undefined;
   let reportedChecksCandidate: CandidateRepository[] | undefined;
+  let candidateCheckDrift = false;
   // The first round's report when the extra try was given (Ruling N).
   let firstRoundChecks: CheckReport | undefined;
   const verification = verificationExtension({
@@ -343,6 +344,7 @@ export async function runTaskInvocation(
     onReport: async (report) => {
       reportedChecks = report;
       reportedChecksCandidate = undefined;
+      if (candidateCheckDrift) return;
       // A report of no checks, or of checks that were stopped or errored, binds the code too: the broker accepts it only
       // for a review-only task, which still needs the code the round finished on.
       if (invocation.payload.workflowMode === "IMPLEMENT") {
@@ -351,6 +353,14 @@ export async function runTaskInvocation(
         } catch { /* missing identity leaves the check result unbound and the workflow blocked */ }
       }
     },
+    ...(invocation.payload.workflowMode !== "IMPLEMENT" ? {} : {
+      prepareCandidate: async () => {
+        candidateCheckDrift = false;
+        await commitCandidateWorktree(candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase));
+      },
+      candidateIdentity: async () => JSON.stringify(await readCandidateRepositories(candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase))),
+      onCandidateDrift: () => { candidateCheckDrift = true; reportedChecksCandidate = undefined; },
+    }),
     // I-3: an earlier settle's report is stale once the agent has a regression to fix.
     onExtraTry: (firstRound) => { firstRoundChecks = firstRound; reportedChecks = undefined; },
     onDiagnostic,
@@ -631,6 +641,10 @@ export async function runTaskInvocation(
         const completeRetainedPrefix = execution.progress.length === 0 && taskGraphOrder(graph).every((itemId) => resumedItems.has(itemId));
         if (completeRetainedPrefix) {
           completedRetainedPrefix = true;
+          const finalized = await commitCandidateWorktree(repositoryInputs);
+          if (finalized.length !== 1 || finalized[0]?.treeSha !== execution.finalTreeSha) {
+            throw agentXError("OPERATION_INTERRUPTED", "the retained ordered-work candidate changed before its final checks");
+          }
           await runCompletedPrefixProjectChecks(repositoryInputs, execution.finalTreeSha);
         }
       }

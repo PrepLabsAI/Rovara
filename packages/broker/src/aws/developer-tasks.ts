@@ -28,6 +28,8 @@ import {
   DeveloperTaskCloseRequestSchema,
   DeveloperTaskStatusSchema,
   CandidateManifestSchema,
+  createCandidateManifest,
+  WorkflowDependencyResultSchema,
   projectCatalogKey,
   type ProjectDefinition,
   PullRequestResultSchema,
@@ -101,6 +103,7 @@ import {
   WorkflowFeedbackReviewRetryRequestSchema,
   WORKFLOW_PLAN_MAX_BYTES,
   WORKFLOW_BLOCK_REASONS,
+  WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
   canonicalPlanJson,
   canonicalJson,
   retiredClaimIds,
@@ -179,6 +182,7 @@ import type { DeveloperTaskActions, TransactItems } from "./developer-task-actio
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { setupWatchKey } from "./stuck-setup.js";
+import { operationKey } from "./cancellation.js";
 import { resumeTaskDispatch } from "./task-dispatch-access.js";
 import { feedbackReviewNoticeId } from "../developer/notifications.js";
 import { feedbackNoticeToDecisionMeasure, feedbackRecommendationMeasure } from "../developer/feedback-review-measures.js";
@@ -2074,9 +2078,20 @@ function keptProposedIds(policy: WorkflowCheckPolicy | undefined): string[] {
 async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-retry");
   const access = await authorizeTaskAction(deps, caller, taskId, "retry");
+  const { task } = access;
+  const recoveryHash = hashJson({ action: "committed-source-recovery", taskId, actorId: access.actorId, request });
+  const recoveryKey = { pk: `DEVTASK#${taskId}`, sk: `WORKFLOW_SOURCE_RECOVERY#${request.requestId}` };
+  const priorRecovery = await get<{ payloadHash: string; actorId: string; operationId: string }>(deps, recoveryKey);
+  if (priorRecovery !== undefined) {
+    if (priorRecovery.actorId !== access.actorId || priorRecovery.payloadHash !== recoveryHash) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "this retry request ID was already used for a different recovery request");
+    }
+  }
   const resumed = await resumeParkedTaskDispatch(deps, caller, access, request);
   if (resumed !== undefined) return resumed;
-  const { task } = access;
+  if (priorRecovery !== undefined) {
+    return { task: await taskView(deps, task, { events: 0, details: false }) };
+  }
   const priorVerificationRetry = task.workflow?.verificationRetries?.find((retry) => retry.requestId === request.requestId);
   if (priorVerificationRetry !== undefined) {
     const submittedIds = request.selectedOptionalCheckIds ?? task.workflow?.checkPolicy?.selectedOptionalIds ?? [];
@@ -2087,6 +2102,31 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       throw agentXError("IDEMPOTENCY_CONFLICT", "this retry request ID was already used for a different check selection");
     }
     return { task: await taskView(deps, task, { events: 0, details: false }) };
+  }
+  if (task.workflow !== undefined && isMissingCommittedSourceRecovery(task.workflow)) {
+    const policy = task.workflow.checkPolicy;
+    if (request.candidateDigest !== undefined
+      || (request.selectedOptionalCheckIds !== undefined
+        && canonicalJson(request.selectedOptionalCheckIds) !== canonicalJson(policy?.selectedOptionalIds ?? []))
+      || (request.selectedProposedCheckIds !== undefined
+        && canonicalJson(request.selectedProposedCheckIds) !== canonicalJson(keptProposedIds(policy)))) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "this recovery cannot change the candidate or approved check selection");
+    }
+    const recovery = await loadCommittedSourceRecovery(deps, access, request.expectedRevision);
+    await queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow: task.workflow } }, {
+      requestId: request.requestId,
+      prompt: (notes) => `Finalize the approved implementation from the retained completed work only. Do not edit or repair the code, do not rerun any implementation step, and do not change the retained repository tree. Create the required committed-source export for the exact retained tree, then run the approved final checks and report the result. ${NO_PUBLISH_NOTE}\n\nOwner note: ${request.instructions}${notes}`,
+      next: { ...withoutWorkflowBlockReason(task.workflow), revision: task.workflow.revision + 1, stage: "IMPLEMENT", state: "RUNNING", updatedAt: iso(deps) },
+      request: request.instructions,
+      response: "Finalizing the exact retained implementation",
+      workflowDependencies: recovery.invocation,
+      recovery: { sourceOperation: recovery.operation, sourceBinding: recovery.binding, graphApproval: recovery.invocation.approval, graphProgress: recovery.invocation.resumeProgress!,
+        payloadHash: recoveryHash, actorId: access.actorId, requestId: request.requestId },
+    });
+    const fresh = (await authorizeTaskAction(deps, caller, taskId, "retry")).task;
+    const view = await taskView(deps, fresh, { events: 0, details: false });
+    await syncIndex(deps, fresh, view.status, view.updatedAt);
+    return { task: view };
   }
   // Task 16: the checks run again from blocked verification, or on a change ready to publish whose code changed.
   if (task.workflow !== undefined && ((task.workflow.stage === "VERIFY" && task.workflow.state === "BLOCKED")
@@ -2262,6 +2302,85 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
   return { task: view };
 }
 
+function withoutWorkflowBlockReason(workflow: WorkflowSnapshot): WorkflowSnapshot {
+  const { blockReason: _blockReason, ...unblocked } = workflow;
+  void _blockReason;
+  return unblocked;
+}
+
+function isMissingCommittedSourceRecovery(workflow: WorkflowSnapshot): boolean {
+  const e2e = workflow.e2e;
+  return workflow.stage === "VERIFY" && workflow.state === "BLOCKED"
+    && workflow.blockReason === WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON
+    && workflow.candidate === undefined && e2e?.required === true
+    && e2e.currentRoundId === undefined && e2e.currentGroupRunIds.length === 0
+    && e2e.qualifiedRound === undefined && e2e.failedRound === undefined && e2e.resultRefs.length === 0;
+}
+
+async function loadCommittedSourceRecovery(
+  deps: DeveloperTaskRouteDependencies,
+  access: AuthorizedTask,
+  expectedRevision: number | undefined,
+): Promise<{ operation: Operation; binding: WorkflowDependencyInvocation; invocation: WorkflowDependencyInvocation }> {
+  const { task } = access;
+  const workflow = task.workflow;
+  if (workflow === undefined || !isMissingCommittedSourceRecovery(workflow)) throw agentXError("CONFIG_INVALID", "this task is not eligible for retained-source recovery");
+  if (expectedRevision === undefined || expectedRevision !== workflow.revision) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "the recovery request is stale; refresh the task and retry at its current revision");
+  }
+  await actionableWorkspace(deps, task);
+  const invocation = await approvedWorkflowDependencies(deps, task, access.peopleRevision);
+  if (invocation === undefined || deps.workflowDependenciesEnabled !== true) {
+    throw agentXError("CONFIG_INVALID", "the approved ordered plan is not available for retained-source recovery");
+  }
+  const operationId = workflow.workflowDependenciesOperationId;
+  const operation = operationId === undefined ? undefined : (await deps.actions.operations(task.workspaceId)).find((candidate) => candidate.id === operationId);
+  const sourceBinding = operation === undefined ? undefined : await deps.actions.workflowBinding(task.workspaceId, operation.id);
+  const sourceExportDigest = operation === undefined ? undefined : await deps.actions.workflowCandidateSourceExportDigest(task.workspaceId, operation.id);
+  if (operation === undefined || operation.status !== "SUCCEEDED" || operation.kind !== "task" || operation.workflowMode !== "IMPLEMENT"
+    || operation.workspaceId !== task.workspaceId || operation.conversationId !== task.conversationId
+    || invocation.graph.taskId !== task.taskId
+    || sourceExportDigest !== undefined) {
+    throw agentXError("CONFIG_INVALID", "the retained implementation is not an eligible source-export recovery attempt");
+  }
+  const rawResult = operation.result !== null && typeof operation.result === "object" && !Array.isArray(operation.result)
+    ? operation.result as Record<string, unknown> : undefined;
+  const sourceRepositories = rawResult?.workflowCandidateRepositories;
+  const checkedRepositories = rawResult?.workflowCheckCandidateRepositories;
+  const dependencyResult = WorkflowDependencyResultSchema.safeParse(rawResult?.workflowDependenciesResult);
+  if (!Array.isArray(sourceRepositories) || !Array.isArray(checkedRepositories) || !dependencyResult.success) {
+    throw agentXError("CONFIG_INVALID", "the retained implementation result is missing its source-tree binding");
+  }
+  const candidate = createCandidateManifest(sourceRepositories as Parameters<typeof createCandidateManifest>[0]);
+  const checkedCandidate = createCandidateManifest(checkedRepositories as Parameters<typeof createCandidateManifest>[0]);
+  const result = dependencyResult.data;
+  const progress = invocation.resumeProgress ?? [];
+  const last = progress.at(-1);
+  const repository = candidate.repositories.length === 1 ? candidate.repositories[0] : undefined;
+  const checkedRepository = checkedCandidate.repositories.length === 1 ? checkedCandidate.repositories[0] : undefined;
+  const preparedBase = workflow.reviewBase ?? task.preparedBase;
+  const matchingBase = repository === undefined ? undefined : preparedBase?.find((entry) => entry.repositoryId === repository.repositoryId);
+  if (operation.fence < 1 || sourceBinding === undefined
+    || sourceBinding.graph.taskId !== task.taskId || taskGraphDigest(sourceBinding.graph) !== invocation.approval.graphDigest
+    || sourceBinding.approval.graphDigest !== invocation.approval.graphDigest
+    || sourceBinding.approval.runId !== invocation.approval.runId
+    || sourceBinding.approval.artifactDigest !== invocation.approval.artifactDigest
+    || sourceBinding.approval.workflowRevision !== invocation.approval.workflowRevision
+    || sourceBinding.approval.actorId !== invocation.approval.actorId
+    || result.taskId !== task.taskId || result.operationId !== operation.id || result.status !== "SUCCEEDED"
+    || result.graphDigest !== invocation.approval.graphDigest || result.runId !== invocation.approval.runId
+    || result.workflowRevision !== invocation.approval.workflowRevision || result.candidateDigest !== candidate.digest
+    || canonicalJson(result.items) !== canonicalJson(progress) || progress.length !== invocation.graph.items.length
+    || progress.some((entry) => entry.state !== "IMPLEMENTED") || last?.state !== "IMPLEMENTED"
+    || repository === undefined || checkedRepository === undefined || candidate.digest !== checkedCandidate.digest
+    || repository.treeSha !== invocation.resumeTreeSha || repository.treeSha !== last.candidateTreeSha
+    || repository.repositoryId !== invocation.graph.items[0]?.repository || repository.baseCommitSha === undefined
+    || matchingBase?.baseCommitSha !== repository.baseCommitSha) {
+    throw agentXError("CONFIG_INVALID", "the retained graph result or repository tree changed; approve a refreshed whole coding plan before continuing");
+  }
+  return { operation, binding: sourceBinding, invocation };
+}
+
 /** The owner-approved coding plan, read back and checked against the digest the approval recorded. */
 async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<{ text: string; sha256: string; e2eIntent?: E2EFeaturePlanIntent }> {
   const plan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
@@ -2348,7 +2467,9 @@ const NO_PUBLISH_NOTE = "Do not push branches or create pull requests; AgentX ha
  */
 async function queueWorkflowCoding(
   deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, access: AuthorizedTask & { task: DeveloperTaskRecord & { workflow: WorkflowSnapshot } },
-  input: { requestId: string; prompt: (notes: string) => string; next: WorkflowSnapshot; request: string; response: string; workflowDependencies?: WorkflowDependencyInvocation },
+  input: { requestId: string; prompt: (notes: string) => string; next: WorkflowSnapshot; request: string; response: string; workflowDependencies?: WorkflowDependencyInvocation;
+    recovery?: { sourceOperation: Operation; sourceBinding: WorkflowDependencyInvocation; graphApproval: WorkflowDependencyInvocation["approval"]; graphProgress: NonNullable<WorkflowDependencyInvocation["resumeProgress"]>;
+      payloadHash: string; actorId: string; requestId: string } },
 ): Promise<{ task: DeveloperTaskView }> {
   const { task } = access;
   const { workflow } = task;
@@ -2360,10 +2481,26 @@ async function queueWorkflowCoding(
         { Update: {
           TableName: deps.tableName, Key: taskKey(task.taskId),
           UpdateExpression: `SET workflow = :workflow, updatedAt = :now${fed.clause}`,
-          ConditionExpression: `workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND attribute_not_exists(closedAt)${fed.condition}`,
+          ConditionExpression: `workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND attribute_not_exists(closedAt)${fed.condition}${input.recovery === undefined ? "" : " AND workflow.blockReason = :recoveryReason AND attribute_not_exists(workflow.candidate) AND workflow.e2e.required = :requiredE2E AND attribute_not_exists(workflow.e2e.currentRoundId) AND workflow.e2e.currentGroupRunIds = :emptyIds AND attribute_not_exists(workflow.e2e.qualifiedRound) AND attribute_not_exists(workflow.e2e.failedRound) AND workflow.e2e.resultRefs = :emptyIds AND workflow.workflowDependenciesOperationId = :graphOperationId AND workflow.workflowDependenciesApproval.graphDigest = :graphDigest AND workflow.workflowDependenciesApproval.runId = :graphRunId AND workflow.workflowDependenciesApproval.artifactDigest = :graphArtifactDigest AND workflow.workflowDependenciesApproval.workflowRevision = :graphApprovalRevision AND workflow.workflowDependenciesApproval.actorId = :graphActorId AND workflow.workflowDependenciesProgress = :graphProgress"}`,
           ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
-        ExpressionAttributeValues: { ":workflow": workflowWithCurrentGraphOperation(input.next, input.workflowDependencies === undefined ? undefined : operation.id, input.workflowDependencies), ":now": receivedAt, ":revision": workflow.revision, ":stage": workflow.stage, ":state": workflow.state, ...fed.values },
+          ExpressionAttributeValues: { ":workflow": workflowWithCurrentGraphOperation(input.next, input.workflowDependencies === undefined ? undefined : operation.id, input.workflowDependencies), ":now": receivedAt, ":revision": workflow.revision, ":stage": workflow.stage, ":state": workflow.state, ...fed.values,
+            ...(input.recovery === undefined ? {} : { ":recoveryReason": WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON, ":requiredE2E": true, ":emptyIds": [],
+              ":graphOperationId": input.recovery.sourceOperation.id, ":graphDigest": input.recovery.graphApproval.graphDigest, ":graphRunId": input.recovery.graphApproval.runId,
+              ":graphArtifactDigest": input.recovery.graphApproval.artifactDigest, ":graphApprovalRevision": input.recovery.graphApproval.workflowRevision,
+              ":graphActorId": input.recovery.graphApproval.actorId, ":graphProgress": workflow.workflowDependenciesProgress ?? [] }) },
         } },
+        ...(input.recovery === undefined ? [] : [
+          { ConditionCheck: {
+            TableName: deps.tableName, Key: operationKey(task.workspaceId, input.recovery.sourceOperation.id),
+            ConditionExpression: "#status = :sourceSucceeded AND fence = :sourceFence AND kind = :taskKind AND workflowMode = :implementMode AND workspaceId = :workspaceId AND conversationId = :conversationId AND attribute_not_exists(candidateSourceRef) AND #binding = :sourceBinding AND #result = :sourceResult",
+            ExpressionAttributeNames: { "#status": "status", "#binding": "workflowDependencies", "#result": "result" },
+            ExpressionAttributeValues: { ":sourceSucceeded": "SUCCEEDED", ":sourceFence": input.recovery.sourceOperation.fence, ":taskKind": "task", ":implementMode": "IMPLEMENT",
+              ":workspaceId": task.workspaceId, ":conversationId": task.conversationId, ":sourceBinding": input.recovery.sourceBinding,
+              ":sourceResult": input.recovery.sourceOperation.result },
+          } },
+          putNew(deps.tableName, { pk: `DEVTASK#${task.taskId}`, sk: `WORKFLOW_SOURCE_RECOVERY#${input.recovery.requestId}`, entityType: "WORKFLOW_SOURCE_RECOVERY",
+            actorId: input.recovery.actorId, payloadHash: input.recovery.payloadHash, operationId: operation.id, createdAt: receivedAt }),
+        ]),
         putNew(turnTable(deps), aiToolTurn({
           party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
           request: input.request, response: `${input.response} as operation ${operation.id}.`, operationId: operation.id,

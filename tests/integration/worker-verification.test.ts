@@ -18,6 +18,7 @@ import {
   type CheckReport,
   type ProjectCommand,
   type WorkerInvocation,
+  taskGraphDigest,
   type WorkflowFeedbackBundle,
   type WorkflowFeedbackBundleRef,
   WorkflowFeedbackBundleSchema,
@@ -30,7 +31,7 @@ import { runTaskInvocation, type TaskInvocationResult } from "../../packages/wor
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import { createCheckRunners, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { runWorkflowFeedbackReview } from "../../packages/worker/src/verification/review.js";
-import { readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
+import { commitCandidateWorktree, readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
 import { CHECKS_MESSAGE_TYPE, checksArtifactContent, compactCheckReport } from "../../packages/worker/src/verification/extension.js";
 import { AgentFilesRestoreError, type OriginalCode } from "../../packages/worker/src/verification/original-code.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
@@ -225,6 +226,178 @@ describe("verification-only retries", () => {
     expect(run.result?.checks).toMatchObject({ status: "not_verified", notVerifiedReason: "no_checks" });
     expect(run.result?.workflowCandidateRepositories).toHaveLength(1);
     expect(run.result?.workflowCheckCandidateRepositories).toEqual(run.result?.workflowCandidateRepositories);
+  });
+
+  it("commits a dirty IMPLEMENT candidate before selected checks and exports that exact committed source", async () => {
+    const rootPath = await gitWorkspaceRoot([lint]);
+    const repository = join(rootPath, "app");
+    const baseCommit = execFileSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const indexPath = join(repository, execFileSync("git", ["-C", repository, "rev-parse", "--git-path", "index"], { encoding: "utf8" }).trim());
+    const originalIndex = await readFile(indexPath);
+    await writeFile(join(repository, "untracked-source.mjs"), "export const fixture = 'untracked';\n");
+    let checkedHead: string | undefined;
+    let checkedTree: string | undefined;
+    const runners: CheckRunners = {
+      async runAgentCommand() { return { exitCode: 0, timedOut: false, output: "ok\n" }; },
+      async runProjectCommand() {
+        checkedHead = execFileSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        checkedTree = execFileSync("git", ["-C", repository, "rev-parse", "HEAD^{tree}"], { encoding: "utf8" }).trim();
+        return { exitCode: 0, timedOut: false, stdout: "ok\n", stderr: "" };
+      },
+    };
+    const run = await runTask({ steps: CHANGED_ONE_FILE, workflowMode: "IMPLEMENT", readiness: [lint], runners, rootPath });
+
+    expect(run.failure).toBeUndefined();
+    expect(checkedHead, JSON.stringify({ report: run.report, result: run.result?.checks, failure: run.failure, events: run.events.filter((event) => event.type === "progress") })).toBeDefined();
+    expect(checkedHead).not.toBe(baseCommit);
+    expect(run.result?.workflowCandidateRepositories?.[0]).toMatchObject({ commitSha: checkedHead, treeSha: checkedTree });
+    expect(run.result?.workflowCheckCandidateRepositories).toEqual(run.result?.workflowCandidateRepositories);
+    expect(run.result?.workflowCandidateSourceExport?.repositories[0]?.commitSha).toBe(checkedHead);
+    expect(run.result?.workflowCandidateSourceExport?.repositories[0]?.treePaths).toContain("untracked-source.mjs");
+    expect(run.result?.workflowCandidateSourceExport?.repositories[0]?.treePaths).toContain("notes.md");
+    expect(execFileSync("git", ["-C", repository, "diff", "--cached", "--quiet", "HEAD"], { encoding: "utf8" })).toBe("");
+    expect(execFileSync("git", ["-C", repository, "status", "--porcelain"], { encoding: "utf8" }).trim()).toBe("");
+    expect(await readFile(indexPath)).not.toEqual(originalIndex);
+  });
+
+  it("refuses a partially staged worktree without changing its index, files, or HEAD", async () => {
+    const rootPath = await gitWorkspaceRoot([lint]);
+    const repository = join(rootPath, "app");
+    const baseCommit = execFileSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const stagedPath = join(repository, "staged-only.mjs");
+    await writeFile(stagedPath, "export const staged = 'preserve';\n");
+    execFileSync("git", ["-C", repository, "add", "--", "staged-only.mjs"]);
+    const indexPath = join(repository, execFileSync("git", ["-C", repository, "rev-parse", "--git-path", "index"], { encoding: "utf8" }).trim());
+    const originalIndex = await readFile(indexPath);
+    await writeFile(stagedPath, "export const worktree = 'different';\n");
+    const run = await runTask({ steps: CHANGED_ONE_FILE, workflowMode: "IMPLEMENT", readiness: [lint], rootPath });
+
+    expect(run.failure).toBeUndefined();
+    expect(run.result?.checks).toMatchObject({ status: "not_verified", notVerifiedReason: "error" });
+    expect(execFileSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()).toBe(baseCommit);
+    expect(await readFile(indexPath)).toEqual(originalIndex);
+    expect(await readFile(stagedPath, "utf8")).toContain("worktree = 'different'");
+    expect(execFileSync("git", ["-C", repository, "show", ":staged-only.mjs"], { encoding: "utf8" })).toContain("staged = 'preserve'");
+  });
+
+  it("commits an already staged exact candidate and leaves a clean synchronized index", async () => {
+    const rootPath = await gitWorkspaceRoot();
+    const repository = join(rootPath, "app");
+    const baseCommit = execFileSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    await writeFile(join(repository, "staged-source.mjs"), "export const staged = true;\n");
+    execFileSync("git", ["-C", repository, "add", "--all"]);
+
+    const finalized = await commitCandidateWorktree([{ repositoryId: "app", directory: repository, baseCommitSha: baseCommit }]);
+
+    expect(finalized).toHaveLength(1);
+    expect(finalized[0]?.commitSha).not.toBe(baseCommit);
+    expect(execFileSync("git", ["-C", repository, "diff", "--cached", "--quiet", "HEAD"], { encoding: "utf8" })).toBe("");
+    expect(execFileSync("git", ["-C", repository, "status", "--porcelain"], { encoding: "utf8" }).trim()).toBe("");
+    const repeated = await commitCandidateWorktree([{ repositoryId: "app", directory: repository, baseCommitSha: baseCommit }]);
+    expect(repeated).toEqual(finalized);
+  });
+
+  it("rejects a HEAD-only snapshot whose index was never synchronized", async () => {
+    const rootPath = await gitWorkspaceRoot();
+    const repository = join(rootPath, "app");
+    const baseCommit = execFileSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    await writeFile(join(repository, "saved-only-in-commit.mjs"), "export const saved = true;\n");
+    const temporaryIndex = join(rootPath, "candidate-index");
+    const env = { ...process.env, GIT_INDEX_FILE: temporaryIndex };
+    execFileSync("git", ["-C", repository, "read-tree", baseCommit], { env });
+    execFileSync("git", ["-C", repository, "add", "--all"], { env });
+    const tree = execFileSync("git", ["-C", repository, "write-tree"], { env, encoding: "utf8" }).trim();
+    const savedCommit = execFileSync("git", ["-C", repository, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid",
+      "commit-tree", tree, "-p", baseCommit, "-m", "fixture incomplete index install"], { env, encoding: "utf8" }).trim();
+    execFileSync("git", ["-C", repository, "update-ref", "HEAD", savedCommit, baseCommit]);
+    const realIndex = join(repository, execFileSync("git", ["-C", repository, "rev-parse", "--git-path", "index"], { encoding: "utf8" }).trim());
+    const originalIndex = await readFile(realIndex);
+
+    await expect(commitCandidateWorktree([{ repositoryId: "app", directory: repository, baseCommitSha: baseCommit }]))
+      .rejects.toThrow(/staged files differ from the implementation snapshot/);
+
+    expect(execFileSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()).toBe(savedCommit);
+    expect(await readFile(realIndex)).toEqual(originalIndex);
+    expect(await readFile(join(repository, "saved-only-in-commit.mjs"), "utf8")).toContain("saved = true");
+  });
+
+  it("finalizes and checks a fully retained graph prefix without starting another model prompt", async () => {
+    const rootPath = await gitWorkspaceRoot([lint]);
+    const repository = join(rootPath, "app");
+    const baseCommit = execFileSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    await writeFile(join(repository, "retained-untracked.mjs"), "export const retained = true;\n");
+    const before = await readCandidateRepositories([{ repositoryId: "app", directory: repository, baseCommitSha: baseCommit }]);
+    const retainedTree = before[0]!.treeSha;
+    const taskId = randomUUID();
+    const runId = randomUUID();
+    const operationId = randomUUID();
+    const itemA = randomUUID();
+    const itemB = randomUUID();
+    const graph = { schemaVersion: 1 as const, taskId, version: 1, items: [
+      { id: itemA, title: "A", description: "Retained A", repository: "app", dependsOn: [] },
+      { id: itemB, title: "B", description: "Retained B", repository: "app", dependsOn: [itemA] },
+    ] };
+    const graphDigest = taskGraphDigest(graph);
+    const at = new Date().toISOString();
+    const resumeProgress = [itemA, itemB].map((itemId, index) => ({ schemaVersion: 1 as const, graphDigest, runId, itemId,
+      sequence: index + 1, state: "IMPLEMENTED" as const, operationId, baseTreeSha: retainedTree, candidateTreeSha: retainedTree,
+      at, producer: "agentx-worker" as const }));
+    let promptCalls = 0;
+    const adapter: PiSessionAdapter = { async create(input) {
+      await mkdir(input.sessionDirectory, { recursive: true });
+      const sessionFile = join(input.sessionDirectory, "retained.jsonl");
+      await writeFile(sessionFile, "");
+      return {
+        sessionFile, conversationId: input.conversationId ?? "retained",
+        async prompt() { promptCalls += 1; throw new Error("the retained prefix should not start a model prompt"); },
+        async abort() { return undefined; }, getModel: () => ({ provider: "fixture", modelId: "fixture" }),
+        getSessionStats: () => ({ sessionFile, sessionId: "retained", userMessages: promptCalls, assistantMessages: promptCalls,
+          toolCalls: 0, toolResults: 0, totalMessages: promptCalls * 2, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }),
+        subscribe() { return () => undefined; }, dispose() { return undefined; },
+      };
+    } };
+    let checkedHead: string | undefined;
+    const runners: CheckRunners = {
+      async runAgentCommand() { return { exitCode: 0, timedOut: false, output: "ok\n" }; },
+      async runProjectCommand() {
+        checkedHead = execFileSync("git", ["-C", repository, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+        execFileSync("git", ["-C", repository, "cat-file", "-e", "HEAD:retained-untracked.mjs"], { stdio: "ignore" });
+        return { exitCode: 0, timedOut: false, stdout: "ok\n", stderr: "" };
+      },
+    };
+    const invocation = { protocolVersion: 1, kind: "task", operationId, workspaceId: randomUUID(), fence: 1, projectRevision: 1,
+      callbackCapability: "c".repeat(64), payload: { conversationId: randomUUID(), prompt: "resume retained work", workflowMode: "IMPLEMENT",
+        readiness: [lint], workflowBase: [{ repositoryId: "app", baseCommitSha: baseCommit }], workflowDependencies: {
+          graph, resumeTreeSha: retainedTree, sequenceStart: 2, resumeProgress,
+          approval: { artifactDigest: "a".repeat(64), graphDigest, workflowRevision: 2, actorId: "b".repeat(64), runId },
+        } } };
+    const result = await runTaskInvocation(invocation as never, { rootPath, model: FAUX_MODEL, piAdapter: adapter, checkRunners: runners,
+      eventSink: async () => undefined, artifactSink: async () => undefined });
+
+    expect(promptCalls).toBe(0);
+    expect(result.checks).toMatchObject({ status: "verified", source: "project" });
+    expect(result.workflowCandidateRepositories?.[0]).toMatchObject({ commitSha: checkedHead });
+    expect(result.workflowCheckCandidateRepositories).toEqual(result.workflowCandidateRepositories);
+    expect(result.workflowCandidateSourceExport?.repositories[0]?.commitSha).toBe(checkedHead);
+    expect(result.workflowCandidateSourceExport?.repositories[0]?.treePaths).toContain("retained-untracked.mjs");
+  });
+
+  it("does not bind selected checks when a check mutates the finalized candidate", async () => {
+    const rootPath = await gitWorkspaceRoot([lint]);
+    const repository = join(rootPath, "app");
+    const runners: CheckRunners = {
+      async runAgentCommand() { return { exitCode: 0, timedOut: false, output: "ok\n" }; },
+      async runProjectCommand() {
+        await writeFile(join(repository, "check-side-effect.mjs"), "export const changedByCheck = true;\n");
+        return { exitCode: 0, timedOut: false, stdout: "ok\n", stderr: "" };
+      },
+    };
+    const run = await runTask({ steps: CHANGED_ONE_FILE, workflowMode: "IMPLEMENT", readiness: [lint], runners, rootPath });
+
+    expect(run.failure).toBeUndefined();
+    expect(run.result?.checks).toMatchObject({ status: "not_verified", notVerifiedReason: "error" });
+    expect(run.result?.workflowCheckCandidateRepositories).toBeUndefined();
+    expect(run.result?.workflowCandidateSourceExport).toBeUndefined();
   });
 
   it("names the code a coding run whose checks were stopped finished on, so a review-only task can go on to review", async () => {

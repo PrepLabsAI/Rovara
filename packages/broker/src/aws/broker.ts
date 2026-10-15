@@ -80,6 +80,7 @@ import {
   WORKFLOW_HISTORY_REWRITTEN_MESSAGE,
   WORKFLOW_NO_CODE_CHANGE_MESSAGE,
   WORKFLOW_BLOCK_REASONS,
+  WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
   WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE,
   WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE,
   WORKFLOW_DISPATCH_DUE_INDEX,
@@ -635,6 +636,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
       .filter((item) => item.entityType === "OPERATION")
       .map((item) => publicOperation(item as unknown as OperationRecord)),
     workflowBinding: async (workspaceId, operationId) => (await requireOperation(dependencies, workspaceId, operationId)).workflowDependencies,
+    workflowCandidateSourceExportDigest: async (workspaceId, operationId) => (await requireOperation(dependencies, workspaceId, operationId)).candidateSourceRef?.candidateDigest,
     eventsNewestFirst: (operationId, limit) => operationEventsNewestFirst(dependencies, operationId, limit),
     artifacts: async (workspaceId, operationId) => (await query(`WORKSPACE#${workspaceId}`, "ARTIFACT#"))
       .filter((item) => item.operationId === operationId)
@@ -9399,7 +9401,7 @@ async function completedWorkflowItems(
         if (task.workflow.e2e?.required === true && operation.workflowMode === "IMPLEMENT") {
           const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, operation, candidate);
           if (sourceExport === undefined) {
-            verificationFailure = "the final candidate has no first-party committed source export";
+            verificationFailure = WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON;
             throw new Error(verificationFailure);
           }
         }

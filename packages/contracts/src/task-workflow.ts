@@ -80,6 +80,9 @@ export const WORKFLOW_REGRESSED_CHECK_MAX = 120;
 /** The worker's refusal when the workspace no longer holds the tree its checks and reviews passed on. */
 export const WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE = "the code changed after its checks and reviews; AgentX did not publish it";
 
+/** Exact broker-owned reason for a required-E2E candidate blocked only because its source export is absent. */
+export const WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON = "the final candidate has no first-party committed source export";
+
 /** Why an AgentX worker refused, before running, to push a reviewed fix: it is too old to push exactly the reviewed tree. */
 export const WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED = "pushing a reviewed fix needs a worker that pushes exactly the reviewed tree";
 

@@ -36,6 +36,8 @@ export interface DeveloperTaskActions {
   operations(workspaceId: string): Promise<Operation[]>;
   /** The exact worker binding for one stored operation; routes use it to partition graph checkpoints by attempt. */
   workflowBinding(workspaceId: string, operationId: string): Promise<WorkflowDependencyInvocation | undefined>;
+  /** Whether the exact operation already owns a committed candidate source export. */
+  workflowCandidateSourceExportDigest(workspaceId: string, operationId: string): Promise<string | undefined>;
   /** At most `limit` events, newest first. Unchecked: callers must load the owned task and check project access first. */
   eventsNewestFirst(operationId: string, limit: number): Promise<StoredEvent[]>;
   /** The operation's artifacts, across all pages. Unchecked: callers must load the owned task and check project access first. */
