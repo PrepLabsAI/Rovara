@@ -2006,7 +2006,67 @@ describe("P0 normal project onboarding journey", () => {
 
     expect((await publishPublisher({ Records: [{ eventName: "INSERT", dynamodb: { NewImage: marshall(publishOutbox!) } }] as never })).published).toBe(1);
     const queuedPublish = broker.db.get(String(publishOutbox!.pk), String(publishOutbox!.sk))!;
-    const publishDispatch = await publishDispatcher({ Records: [{ messageId: String(publishOutbox!.id), body: JSON.stringify(queuedPublish) }] });
+    const qualifiedRound = recordOf((prePublishTask.workflow as unknown as Record<string, unknown>).e2e)?.qualifiedRound as
+      { roundId?: string; candidateDigest?: string; admissionSha256?: string; evidenceSha256?: string; groupRunIds?: string[] } | undefined;
+    expect(qualifiedRound?.candidateDigest).toBe(prePublishTask.workflow.candidate.digest);
+    const acceptedChecks = featureOperations().find((item) => {
+      const admission = recordOf(item.workflowE2EAdmission);
+      return item.kind === "task" && item.workflowMode === "CHECKS" && admission?.roundId === qualifiedRound?.roundId;
+    });
+    expect(acceptedChecks, "the qualified round must be bound to a stored terminal CHECKS operation").toBeDefined();
+    expect(acceptedChecks?.status).toBe("SUCCEEDED");
+    const admissionRef = recordOf(acceptedChecks?.workflowE2EAdmission)?.admissionRef as { key?: string; sha256?: string } | undefined;
+    expect(admissionRef?.key).toBeDefined();
+    const revalidationAdmissionText = admissionRef?.key === undefined ? undefined : objects.get(admissionRef.key)?.toString("utf8");
+    const acceptedAdmission = revalidationAdmissionText === undefined ? undefined : JSON.parse(revalidationAdmissionText) as { round?: { deadlineAt?: string } };
+    const roundDeadline = acceptedAdmission?.round?.deadlineAt;
+    expect(typeof roundDeadline).toBe("string");
+    expect(Date.parse(String(acceptedChecks?.updatedAt))).toBeLessThanOrEqual(Date.parse(roundDeadline!));
+    const delayedReadTime = Math.max(Date.now() + 10_000, Date.parse(roundDeadline!) + 10_000);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    let publishDispatch: Awaited<ReturnType<typeof publishDispatcher>>;
+    try {
+      vi.setSystemTime(delayedReadTime);
+      const delayedTaskRead = await broker.handler({ version: "2.0", rawPath: `/v1/dev/tasks/${featureTaskId}`, rawQueryString: "",
+        headers: { authorization: "Bearer synthetic-owner-session" }, requestContext: { requestId: randomUUID(), http: { method: "GET" } } });
+      const delayedTask = JSON.parse(delayedTaskRead.body) as { task?: { e2ePresentation?: { shared?: { e2e?: { status?: string } } } } };
+      expect(delayedTask.task?.e2ePresentation?.shared?.e2e?.status,
+        "a terminal, canonically qualified round must remain qualified when re-read after its fixed deadline")
+        .toBe("PASS");
+      const storedTask = broker.db.get(`DEVTASK#${featureTaskId}`, "META");
+      const acceptedCheck = acceptedChecks!;
+      const storedCheck = typeof acceptedCheck.pk === "string" && typeof acceptedCheck.sk === "string"
+        ? broker.db.get(acceptedCheck.pk, acceptedCheck.sk) : undefined;
+      expect(storedTask).toBeDefined();
+      expect(storedCheck).toBeDefined();
+      const originalTask = structuredClone(storedTask!);
+      const originalCheck = structuredClone(storedCheck!);
+      try {
+        const workflow = recordOf(storedTask!.workflow)!;
+        const e2e = recordOf(workflow.e2e)!;
+        const qualified = recordOf(e2e.qualifiedRound)!;
+        broker.db.set({ ...storedTask!, workflow: { ...workflow, e2e: { ...e2e, qualifiedRound: { ...qualified, evidenceSha256: "0".repeat(64) } } } });
+        const mismatchedBindingRead = await broker.handler({ version: "2.0", rawPath: `/v1/dev/tasks/${featureTaskId}`, rawQueryString: "",
+          headers: { authorization: "Bearer synthetic-owner-session" }, requestContext: { requestId: randomUUID(), http: { method: "GET" } } });
+        const mismatchedBindingTask = JSON.parse(mismatchedBindingRead.body) as { task?: { e2ePresentation?: { shared?: { e2e?: { status?: string } } } } };
+        expect(mismatchedBindingTask.task?.e2ePresentation?.shared?.e2e?.status,
+          "a changed canonical evidence hash must not inherit the broker terminal receipt").toBe("UNKNOWN");
+
+        broker.db.set(originalTask);
+        broker.db.set({ ...originalCheck, updatedAt: new Date(Date.parse(roundDeadline!) + 1).toISOString() });
+        const lateTerminalRead = await broker.handler({ version: "2.0", rawPath: `/v1/dev/tasks/${featureTaskId}`, rawQueryString: "",
+          headers: { authorization: "Bearer synthetic-owner-session" }, requestContext: { requestId: randomUUID(), http: { method: "GET" } } });
+        const lateTerminalTask = JSON.parse(lateTerminalRead.body) as { task?: { e2ePresentation?: { shared?: { e2e?: { status?: string } } } } };
+        expect(lateTerminalTask.task?.e2ePresentation?.shared?.e2e?.status,
+          "a broker terminal receipt recorded after the immutable deadline must remain unknown").toBe("UNKNOWN");
+      } finally {
+        broker.db.set(originalTask);
+        broker.db.set(originalCheck);
+      }
+      publishDispatch = await publishDispatcher({ Records: [{ messageId: String(publishOutbox!.id), body: JSON.stringify(queuedPublish) }] });
+    } finally {
+      vi.useRealTimers();
+    }
     expect(publishDispatch.batchItemFailures).toEqual([]);
     for (let index = 0; index < 800; index += 1) {
       const operation = broker.db.get(`WORKSPACE#${featureWorkspaceId}`, `OPERATION#${publishInvocation.operationId}`);

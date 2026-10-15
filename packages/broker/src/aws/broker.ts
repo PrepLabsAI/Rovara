@@ -213,7 +213,7 @@ import {
   workflowPublicationContext,
   workflowPublicationContextDigest,
 } from "@agentx/contracts";
-import { compileE2EScenarios, collectE2EActualCliRun, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes } from "@agentx/verifier";
+import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes } from "@agentx/verifier";
 import { renderE2EMcpProjection, renderE2EPageHtml, renderE2ESlackBlocks } from "../e2e-presentation.js";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
@@ -6610,6 +6610,49 @@ interface WorkflowE2EVerificationDiagnostic {
   authorityChecks?: Array<Record<string, unknown>>;
 }
 
+/**
+ * A terminal CHECKS operation's broker timestamp may anchor a later re-collection only when
+ * the task still carries the exact canonical outcome written from that operation's immutable
+ * admission and evidence. This never supplies a receipt for an active or first-time result.
+ */
+function workflowE2ETerminalReceiptAt(
+  operation: OperationRecord,
+  task: DeveloperTaskRecord,
+  candidateDigest: string,
+  reference: E2EWorkflowAdmissionRef,
+  round: ReturnType<typeof E2ERoundSchema.parse>,
+  allowStaleProjection: boolean,
+): { at: string; outcome: "PASS" | "FAILED" } | undefined {
+  if (operation.kind !== "task" || operation.workflowMode !== "CHECKS"
+    || operation.status !== "SUCCEEDED" && operation.status !== "FAILED"
+    || operation.workflowE2EAdmission === undefined || canonicalJson(operation.workflowE2EAdmission) !== canonicalJson(reference)
+    || operation.workflowE2EEvidenceRef === undefined || operation.workflowE2EEvidenceRef.key !== `workflow-e2e-evidence/sha256/${operation.workflowE2EEvidenceRef.sha256}.json`
+    || reference.taskId !== task.taskId || reference.candidateDigest !== candidateDigest || reference.roundId !== round.roundId
+    || reference.workflowRevision !== round.workflowRevision || canonicalJson(reference.groupRunIds) !== canonicalJson(round.groupBindings.map((binding) => binding.runId))
+    || new Set(operation.workflowE2EGroupRunIds ?? []).size !== reference.groupRunIds.length
+    || canonicalJson([...(operation.workflowE2EGroupRunIds ?? [])].sort()) !== canonicalJson([...reference.groupRunIds].sort())) return undefined;
+  const receiptTime = Date.parse(operation.updatedAt);
+  if (!Number.isFinite(receiptTime) || new Date(receiptTime).toISOString() !== operation.updatedAt
+    || receiptTime > Date.parse(round.deadlineAt)) return undefined;
+
+  const workflowE2E = task.workflow?.e2e;
+  if (operation.status === "SUCCEEDED" && !allowStaleProjection) {
+    const qualified = workflowE2E?.qualifiedRound;
+    if (!qualified || qualified.candidateDigest !== candidateDigest
+      || qualified.roundId !== reference.roundId || canonicalJson(qualified.groupRunIds) !== canonicalJson(reference.groupRunIds)
+      || qualified.admissionSha256 !== reference.admissionRef.sha256 || qualified.evidenceSha256 !== operation.workflowE2EEvidenceRef.sha256
+      || qualified.contractDigest !== workflowE2E.contractDigest || qualified.policyDigest !== workflowE2E.policyDigest
+      || qualified.bundleDigest !== workflowE2E.bundleDigest || qualified.executionPlanDigest !== workflowE2E.executionPlanDigest
+      || workflowE2E.currentRoundId !== qualified.roundId || canonicalJson(workflowE2E.currentGroupRunIds) !== canonicalJson(qualified.groupRunIds)) return undefined;
+    return { at: operation.updatedAt, outcome: "PASS" };
+  }
+  const failed = workflowE2E?.failedRound;
+  if (!allowStaleProjection || failed?.status !== "FAILED" || failed.candidateDigest !== candidateDigest
+    || failed.roundId !== reference.roundId || canonicalJson(failed.groupRunIds) !== canonicalJson(reference.groupRunIds)
+    || failed.admissionSha256 !== reference.admissionRef.sha256 || failed.evidenceSha256 !== operation.workflowE2EEvidenceRef.sha256) return undefined;
+  return { at: operation.updatedAt, outcome: "FAILED" };
+}
+
 /** Independently recompiles and collects every group; worker-supplied verdict fields are ignored. */
 async function verifyWorkflowE2EEvidence(
   dependencies: AwsBrokerDependencies, operation: OperationRecord, task: DeveloperTaskRecord, candidate: ReturnType<typeof CandidateManifestSchema.parse>,
@@ -6719,6 +6762,7 @@ async function verifyWorkflowE2EEvidence(
     const semantic = (admission.portableApprovalBinding as { semanticApproval?: { digest?: unknown } } | undefined)?.semanticApproval?.digest;
     if (typeof semantic !== "string" || !/^[a-f0-9]{64}$/u.test(semantic)) return unavailable("semantic-approval-binding");
     const semanticApprovalDigests = new Map(bundle.scenarios.map((scenario) => [scenario.scenarioId, semantic]));
+    const terminalReceipt = workflowE2ETerminalReceiptAt(operation, task, candidate.digest, reference, round, staleProjection);
     const qualifications: Array<"PASS" | "FAILED" | "UNKNOWN"> = [];
     for (const [index, group] of plan.groups.entries()) {
       const admitted = groupAdmissions[index]; const run = groupRunsById.get(reference.groupRunIds[index]!);
@@ -6756,16 +6800,20 @@ async function verifyWorkflowE2EEvidence(
         environment: runnerEnvironment,
         usage: { discoveredResults: Number(rawActual.selected) + Number(rawActual.filtered), maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 },
         limits: { maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 } });
+      const qualification = terminalReceipt !== undefined && result.collection !== null && result.oracle !== null
+        ? qualifyE2ECollection(result.oracle, { ...result.collection, receivedAt: terminalReceipt.at })
+        : result.qualification;
       const process = rawActual.runProcess as Record<string, unknown> | undefined;
-      if (result.qualification?.result !== null && result.qualification?.result !== undefined) {
+      if (qualification?.result !== null && qualification?.result !== undefined) {
         // This is a broker-side projection of the independently re-collected result. The raw
         // collector labels its structural output exploratory; only this verified path promotes
         // the projection after matching the stored admission, source, round, capture and receipts.
-        projectionResults.push({ ...result.qualification.result, producer: "broker-independent-e2e-verifier", qualification: "trusted",
+        projectionResults.push({ ...qualification.result, producer: "broker-independent-e2e-verifier", qualification: "trusted",
           ...(process?.status === 0 && process.signal === null && process.aborted === false && process.timedOut === false ? {} : { status: "failed", reason: "host-process-failed" }) });
       }
       if (process?.status !== 0 || process.signal !== null || process.aborted !== false || process.timedOut !== false) qualifications.push("FAILED");
-      else qualifications.push(result.qualification?.status ?? "UNKNOWN");
+      else if (terminalReceipt?.outcome === "FAILED" && qualification?.status !== "FAILED") qualifications.push("UNKNOWN");
+      else qualifications.push(qualification?.status ?? "UNKNOWN");
     }
     // Re-collect every supported admitted group for an honest scoped projection even when a
     // required criterion has no executable source-interface case. That criterion still holds
