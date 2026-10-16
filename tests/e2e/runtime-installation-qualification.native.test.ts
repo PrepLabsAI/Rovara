@@ -6,7 +6,7 @@ import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type Runtime
 import type { AuthenticatedIdentity } from "../../packages/broker/src/auth.js";
 import { canonicalJson } from "../../packages/contracts/src/canonical-json.js";
 import { qualifyInstalledP0Runtime } from "@agentx/verifier";
-import { createCandidateManifest, e2eScenarioBundleDigest, e2EDefaultSyntheticAccountDefinition, e2EPortableApprovalBindingDigest, e2ePortableOperationDescriptorDigest, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "../../packages/contracts/src/index.js";
+import { createCandidateManifest, e2eScenarioBundleDigest, e2EDefaultSyntheticAccountDefinition, e2EPortableApprovalBindingDigest, e2ePortableOperationDescriptorDigest, ProjectSetupRunnerToolchainSchema, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "../../packages/contracts/src/index.js";
 import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
 import { compileE2EScenarios, type E2EImmutableCompilationContext } from "../../packages/verifier/src/scenarios.js";
@@ -116,14 +116,14 @@ describe("actual native runtime assertion-mode wiring", () => {
       selectedTargetIds: [target.targetId], sandboxAvailability, runtimeAvailability: [], portableApprovalBinding, approvedSemanticApproval: semanticApproval };
     const plan = selectE2EExecutionPlan(selectionInput);
     const group = plan.groups[0]!;
-    const bundleBody = { schemaVersion: 1 as const, planDigest: selectionInput.planDigest, templateVersion: "trusted-e2e/v1", scenarios: [scenario] };
+    const bundleBody = { schemaVersion: 1 as const, planDigest: selectionInput.planDigest, templateVersion: "trusted-e2e/v1", scenarios: [scenario], bundleDigest: "0".repeat(64) };
     const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };
     const context: E2EImmutableCompilationContext = { selectionInput, executionPlan: plan, group };
     const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, context);
     const selectionPacket = JSON.parse(compiled.files.get(compiled.selectionPacketPath)!) as E2ESelectionPacket;
     const caseId = compiled.expectedCases[0]!.caseId;
     const hostRequestIds = new Map([[caseId, `native-${randomUUID()}`]]);
-    const runnerToolchain = { execPath: process.execPath, version: process.version, platform: process.platform, arch: process.arch };
+    const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse({ execPath: process.execPath, version: process.version, platform: process.platform, arch: process.arch });
     const run = await runE2EActualCli({ compiled, snapshot, selection: selectionPacket, runnerToolchain, hostRequestIds, sourceRoot: process.cwd(),
       evidenceDirectory, deadlineAt: Date.now() + 120_000, signal: new AbortController().signal });
     expect(run.assertionReceipts).toHaveLength(1);
