@@ -256,7 +256,7 @@ import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission } from "../e2e/feature-plan-intent.js";
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
-import { workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
+import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
 import { createWorkflowE2EDisplayObject } from "./workflow-e2e-notifier-projection.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
@@ -6843,17 +6843,21 @@ async function workflowE2ECurrentAuthorityIsValid(
   let stage = "workflow";
   try {
     const workflow = task.workflow;
-    const approval = workflow?.workflowDependenciesApproval;
-    const artifact = approval === undefined ? undefined : workflow?.artifacts.find((entry) => entry.type === "plan" && entry.sha256 === approval.artifactDigest);
     const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
-    if (!workflow || workflow.e2e?.required !== true || workflow.candidate?.digest !== candidate.digest || !approval || !artifact || !catalogId
+    if (!workflow || workflow.e2e?.required !== true || workflow.candidate?.digest !== candidate.digest || !catalogId
       || task.closedAt !== undefined) return reject("current-task-or-approval-missing");
+    const artifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
+    if (artifact === undefined || workflow.e2e.contractDigest !== artifact.sha256) return reject("current-canonical-plan-missing-or-stale");
     stage = "canonical-artifact";
     const approved = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), artifact, {});
-    if (approved?.format !== "structured" || approved.plan.e2e === undefined
-      || !workflow.decisions.some((decision) => decision.decision === "APPROVE" && decision.actorId === approval.actorId
-        && decision.artifactDigest === approval.artifactDigest && decision.workBreakdownDigest === approval.graphDigest
-        && decision.workflowRevision === approval.workflowRevision)) return reject("canonical-artifact-or-owner-decision-mismatch");
+    if (approved?.format !== "structured") return reject("canonical-artifact-or-owner-decision-mismatch");
+    const canonicalApproval = resolveWorkflowE2ECanonicalApproval({ taskId: task.taskId,
+      workflow: workflow as NonNullable<typeof workflow> & { artifacts: Array<{ id: string; type: string; sha256: string }>;
+        decisions: Array<{ decision: string; actorId: string; artifactDigest?: string; workBreakdownDigest?: string; workflowRevision: number }> },
+      artifact, plan: approved.plan });
+    if (canonicalApproval === undefined) return reject("canonical-artifact-or-owner-decision-mismatch");
+    const e2eIntent = approved.plan.e2e;
+    if (e2eIntent === undefined) return reject("canonical-e2e-intent-missing");
     stage = "project-record";
     const project = await requireProject(dependencies, task.project, task.startingRevision);
     const latestProject = await requireLatestProject(dependencies, task.project);
@@ -6918,22 +6922,21 @@ async function workflowE2ECurrentAuthorityIsValid(
       return reject("current-feature-runtime-admission-mismatch");
     }
     const planDigest = createHash("sha256").update(canonicalJson({
-      domain: "workflow-feature-e2e-approved-plan/v1", taskId: task.taskId, artifactId: artifact.id, artifactSha256: artifact.sha256,
-      graphDigest: approval.graphDigest, graphRunId: approval.runId, workflowRevision: approval.workflowRevision, actorId: approval.actorId,
+      domain: "workflow-feature-e2e-approved-plan/v1", taskId: task.taskId, artifactId: canonicalApproval.artifactId, artifactSha256: canonicalApproval.artifactDigest,
+      graphDigest: canonicalApproval.graphDigest, graphRunId: canonicalApproval.runId, workflowRevision: canonicalApproval.workflowRevision, actorId: canonicalApproval.actorId,
     })).digest("hex");
     stage = "current-admission-derivation";
-    const currentAdmission = deriveE2EFeatureExecutionAdmission({ intent: approved.plan.e2e, snapshot, artifactId: artifact.id,
+    const currentAdmission = deriveE2EFeatureExecutionAdmission({ intent: e2eIntent, snapshot, artifactId: artifact.id,
       artifactSha256: artifact.sha256, planDigest, policy, runtimeCatalogId: catalogId, runtimeBinding,
       featureVerifier: featureRow, now: Date.now() });
     const binding = admission.portableApprovalBinding as { semanticApproval?: { artifactId?: unknown; digest?: unknown }; planDigest?: unknown } | undefined;
     const semantic = binding?.semanticApproval;
     if (semantic?.artifactId !== artifact.id || semantic.digest !== artifact.sha256 || binding?.planDigest !== planDigest) return reject("canonical-approval-binding-mismatch");
-    const approvalRecord = { artifactId: artifact.id, artifactDigest: artifact.sha256, graphDigest: approval.graphDigest,
-      runId: approval.runId, workflowRevision: approval.workflowRevision, actorId: approval.actorId };
+    const approvalRecord = canonicalApproval;
     const authorityMatches = workflowE2ECurrentAuthorityMatches({
       admission: { candidateDigest: candidate.digest, intent: admission.intent, policy: admission.policy, runtime: admission.runtime,
         portableApprovalBinding: admission.portableApprovalBinding, creatorAuthority: admission.creatorAuthority, approval: approvalRecord },
-      current: { candidateDigest: candidate.digest, intent: approved.plan.e2e, policy, runtime: currentAdmission.runtime,
+      current: { candidateDigest: candidate.digest, intent: e2eIntent, policy, runtime: currentAdmission.runtime,
         portableApprovalBinding: currentAdmission.portableApprovalBinding, creatorAuthority, approval: approvalRecord, approvedDecision: true,
         creatorHasProjectAccess: true, now: Date.now() },
     }) && canonicalJson(admission.plan) === canonicalJson(currentAdmission.plan)
@@ -9225,21 +9228,29 @@ async function startWorkflowE2EChecksDispatch(
 ): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
   const workflow = task.workflow;
   const candidate = workflow?.candidate;
-  const approval = workflow?.workflowDependenciesApproval;
-  const artifact = approval === undefined ? undefined : workflow?.artifacts.find((entry) => entry.type === "plan" && entry.sha256 === approval.artifactDigest);
   const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
   if (workflow?.e2e?.required !== true || workflow.stage !== "VERIFY" || workflow.state !== "WAITING"
     || workflow.revision !== expected.workflowRevision || candidate?.digest !== expected.candidateDigest
-    || approval === undefined || artifact === undefined || catalogId === undefined || dependencies.projectSetupRuntimeCatalogId === undefined) {
+    || catalogId === undefined || dependencies.projectSetupRuntimeCatalogId === undefined) {
     throw agentXError("RUNTIME_UNAVAILABLE", "the current approved feature E2E admission is unavailable");
   }
+  const artifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
+  if (artifact === undefined || workflow.e2e.contractDigest !== artifact.sha256) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the current canonical feature E2E plan is unavailable or stale");
+  }
   const approved = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), artifact, {});
-  if (approved?.format !== "structured" || approved.plan.e2e === undefined
-    || !workflow.decisions.some((decision) => decision.decision === "APPROVE" && decision.actorId === approval.actorId
-      && decision.artifactDigest === approval.artifactDigest && decision.workBreakdownDigest === approval.graphDigest
-      && decision.workflowRevision === approval.workflowRevision)) {
+  if (approved?.format !== "structured") {
     throw agentXError("RUNTIME_UNAVAILABLE", "the canonical Owner-approved E2E intent is unavailable or stale");
   }
+  const canonicalApproval = resolveWorkflowE2ECanonicalApproval({ taskId: task.taskId,
+    workflow: workflow as NonNullable<typeof workflow> & { artifacts: Array<{ id: string; type: string; sha256: string }>;
+      decisions: Array<{ decision: string; actorId: string; artifactDigest?: string; workBreakdownDigest?: string; workflowRevision: number }> },
+    artifact, plan: approved.plan });
+  if (canonicalApproval === undefined) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the canonical Owner-approved E2E intent is unavailable or stale");
+  }
+  const e2eIntent = approved.plan.e2e;
+  if (e2eIntent === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the canonical E2E intent is unavailable");
   const sourceOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
     .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "IMPLEMENT")
     .map((item) => item as unknown as OperationRecord)
@@ -9263,11 +9274,11 @@ async function startWorkflowE2EChecksDispatch(
   const featureRecord = await getItem<Record<string, unknown>>(dependencies, e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId));
   if (featureRecord === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the separately qualified feature verifier is unavailable");
   const planDigest = createHash("sha256").update(canonicalJson({
-    domain: "workflow-feature-e2e-approved-plan/v1", taskId: task.taskId, artifactId: artifact.id, artifactSha256: artifact.sha256,
-    graphDigest: approval.graphDigest, graphRunId: approval.runId, workflowRevision: approval.workflowRevision, actorId: approval.actorId,
+    domain: "workflow-feature-e2e-approved-plan/v1", taskId: task.taskId, artifactId: canonicalApproval.artifactId, artifactSha256: canonicalApproval.artifactDigest,
+    graphDigest: canonicalApproval.graphDigest, graphRunId: canonicalApproval.runId, workflowRevision: canonicalApproval.workflowRevision, actorId: canonicalApproval.actorId,
   })).digest("hex");
   const featureAdmission = deriveE2EFeatureExecutionAdmission({
-    intent: approved.plan.e2e, snapshot, artifactId: artifact.id, artifactSha256: artifact.sha256, planDigest,
+    intent: e2eIntent, snapshot, artifactId: artifact.id, artifactSha256: artifact.sha256, planDigest,
     policy, runtimeCatalogId: catalogId, runtimeBinding: project.runtimeBinding, featureVerifier: featureRecord, now: Date.now(),
   });
   const creatorAuthority = await requireWorkflowE2ECreatorAuthority(dependencies, task);
@@ -9288,7 +9299,7 @@ async function startWorkflowE2EChecksDispatch(
     schemaVersion: "workflow-e2e-admission/v1", taskId: task.taskId, operationId, operationFence: fence, workflowRevision,
     candidateDigest: candidate.digest, sourceSnapshot: { ...snapshot, sources: snapshot.sources.map((source) => ({ path: source.path,
       sha256: source.sha256, kind: source.kind, bytesBase64: Buffer.from(source.bytes).toString("base64") })) },
-    intent: approved.plan.e2e, policy, runtime: featureAdmission.runtime, plan: featureAdmission.plan, bundle: featureAdmission.bundle,
+    intent: e2eIntent, policy, runtime: featureAdmission.runtime, plan: featureAdmission.plan, bundle: featureAdmission.bundle,
     selectionInput: storedSelectionInput, portableApprovalBinding: featureAdmission.portableApprovalBinding, creatorAuthority,
     round: built.round, groupAdmissions: built.groupAdmissions,
   };
