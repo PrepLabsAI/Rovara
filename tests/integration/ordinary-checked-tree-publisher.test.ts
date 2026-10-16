@@ -21,7 +21,6 @@ describe("ordinary checked-tree workflow publication", () => {
       capture: { screenshots: false, traces: false, video: false, downloads: false },
       limits: { runTimeoutMs: 600000, startupTimeoutMs: 60000, preparationTimeoutMs: 180000, caseTimeoutMs: 90000, maxActionsPerCase: 30, maxModelRequests: 60, maxInputTokens: 200000, maxOutputTokens: 20000, maxSpendUsd: null },
     };
-    const markdown = "# Plan\n\n1. Add greet to greeting.ts.\n2. Verify the assertion module.\n";
     const command = {
       cwd: "repo/demo",
       executable: "node",
