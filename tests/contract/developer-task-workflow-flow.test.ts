@@ -1190,6 +1190,33 @@ describe("native developer task workflow", () => {
     expect(taskWorkflow(harness, taskId).stage).toBe("PULL_REQUEST");
   });
 
+  it("rechecks an empty-baseline E2E policy before exchanging credentials when a newer revision adds required baselines", async () => {
+    const github = pullRequestGateway("b".repeat(40));
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: github } });
+    const project = harness.db.find((item) => item.entityType === "PROJECT" && item.definition !== undefined && (item.definition as { name: string }).name === "payments")[0]!;
+    harness.db.set({ ...project, definition: { ...(project.definition as Record<string, unknown>), e2e: baselinePolicy([]) } });
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    await passReviews(harness, workspaceId, candidate);
+    const publish = operations(harness, workspaceId).find((item) => item.kind === "publish") as { id: string; publication: Record<string, unknown> };
+    expect(publish.publication).toMatchObject({ publicationMode: "CHECKED_TREE", expectedTreeSha: "b".repeat(40) });
+    const invocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === publish.id)[0]!.invocation as { payload: { repositoryGrant: string } };
+    const exchange = vi.spyOn(harness.brokerInput.repositoryGrants, "exchange");
+
+    await registerSlackProject(harness.handler, { revision: 2 });
+    const latest = harness.db.find((item) => item.entityType === "PROJECT" && item.definition !== undefined && (item.definition as { name: string; revision: number }).name === "payments" && (item.definition as { revision: number }).revision === 2)[0]!;
+    harness.db.set({ ...latest, definition: { ...(latest.definition as Record<string, unknown>), e2e: baselinePolicy(["new-required-baseline"]) } });
+
+    const credentialResponse = await harness.handler({ version: "2.0", rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${publish.id}/repository-credentials`, rawQueryString: "",
+      headers: { "x-agentx-repository-grant": invocation.payload.repositoryGrant },
+      body: JSON.stringify({ credentialRef: "github-app", repositoryUrl: "https://github.com/example/demo.git", access: "push" }),
+      requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    expect(credentialResponse.statusCode).not.toBe(200);
+    expect(JSON.parse(credentialResponse.body)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(exchange).not.toHaveBeenCalled();
+    expect(taskWorkflow(harness, taskId).stage).toBe("PULL_REQUEST");
+  });
+
   it("holds the same publication mode when its approved plan reference and Owner approval change", async () => {
     const github = pullRequestGateway("b".repeat(40));
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: github } });

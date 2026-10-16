@@ -273,6 +273,8 @@ export async function createWorkflowE2E(options: {
   workerCallbackResponse?: (request: { path: string; body: string; statusCode: number }) => number | undefined | Promise<number | undefined>;
   /** Runs project readiness commands in the real fixture repository. */
   realProjectCommands?: boolean;
+  /** Project E2E policy used to exercise optional-E2E workflow publication admission. */
+  e2ePolicy?: unknown;
   /** Runs only the final workflow publication through the broker-signed worker server and production publisher. */
   realPublication?: boolean;
   /** "unavailable": this Slack workspace cannot create a Canvas, so approval cards link the task page. */
@@ -405,6 +407,12 @@ export async function createWorkflowE2E(options: {
   const readiness = options.readiness ?? [E2E_CHECK];
   await registerSlackProject(harness.handler, { readiness,
     ...(options.optionalChecks === undefined ? {} : { developerTasks: { optionalWorkflowChecks: options.optionalChecks } }) });
+  if (options.e2ePolicy !== undefined) {
+    // Model a previously approved project setup policy without exercising the separate setup-approval workflow here.
+    const project = db.find((item) => item.entityType === "PROJECT" && item.definition !== undefined && (item.definition as { name: string }).name === "payments")[0];
+    if (project === undefined) throw new Error("registered project is missing for the E2E policy fixture");
+    db.set({ ...project, definition: { ...(project.definition as Record<string, unknown>), e2e: options.e2ePolicy } });
+  }
   for (const channelId of options.taskPeople?.boundChannels ?? []) await bindChannel(harness.handler, channelId);
   // After setup, every call that reaches the broker is recorded: an HTTP route, or an event's source and action.
   const brokerCalls: string[] = [];

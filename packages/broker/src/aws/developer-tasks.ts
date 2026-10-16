@@ -3857,13 +3857,18 @@ async function workflowPublicationAuthority(
   // The required-E2E current-authority checks already include the stronger catalog condition
   // for this same key. DynamoDB transactions cannot contain two operations on one item.
   if (workflow.e2e?.required === true) return { authority, conditions: [] };
-  // Only the original approved artifact bytes/hash and positively loaded, policy-free pinned/current records establish
-  // the pre-E2E legacy path. Structured plans must positively lack E2E intent; verified legacy Markdown stays opaque.
+  // Only the original approved artifact bytes/hash and positively loaded pinned/current records establish checked-tree
+  // authority. Structured plans must positively lack E2E intent; verified legacy Markdown stays opaque.
   if (workflow.e2e !== undefined || approvedPlan === undefined
     || (approvedPlan.format === "structured" && approvedPlan.plan.e2e !== undefined)
     || task.startingRevision === undefined || approvedPlan.artifact.type !== "plan"
     || !workflow.decisions.some((decision) => decision.decision === "APPROVE" && decision.artifactDigest === approvedPlan.artifact.sha256)) return undefined;
-  if (pinned.definition.e2e !== undefined || latest.definition.e2e !== undefined) return undefined;
+  if (pinned.definition.e2e === undefined && latest.definition.e2e === undefined) return { authority, conditions };
+  if (pinned.definition.e2e === undefined || latest.definition.e2e === undefined) return undefined;
+  const pinnedPolicy = E2EPolicySchema.safeParse(pinned.definition.e2e);
+  const latestPolicy = E2EPolicySchema.safeParse(latest.definition.e2e);
+  if (!pinnedPolicy.success || !latestPolicy.success
+    || pinnedPolicy.data.baselineScenarioIds.length > 0 || latestPolicy.data.baselineScenarioIds.length > 0) return undefined;
   return {
     authority,
     conditions,

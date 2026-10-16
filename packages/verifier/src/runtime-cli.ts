@@ -10,7 +10,7 @@ import { createE2ERuntimeAssets, createE2ERuntimeLaunchId, parseE2EFirstPartyCap
 import { validateE2ECompiledRuntimeAdmission, type E2ECompiledSuite } from "./scenarios.js";
 import { createE2EWorkerSession } from "./runtime-session.js";
 import { createE2EAppAdapterPacket } from "./runtime-adapter.js";
-import { evaluateE2EAssertions } from "./runtime-assertions.js";
+import { evaluateE2EAssertionsForScenario } from "./runtime-assertions.js";
 import { runContainedCandidate } from "./contained-candidate.js";
 import { CONTAINED_RUNTIME_PROFILE } from "./container-envelope.js";
 
@@ -215,7 +215,7 @@ export async function runE2EActualCliWithSessionFactory(input: E2EActualCliInput
       if (!("equals" in assertion)) throw new Error("external every-index oracle does not support this assertion variant");
       return { index, digest: expected.assertionDigests[index] ?? "", expectedResponse: assertion.equals };
     });
-    const receipts = evaluateE2EAssertions({ responseBytes: rawFrame, assertions: assertionRows });
+    const receipts = evaluateE2EAssertionsForScenario({ responseBytes: rawFrame, scenario, assertions: assertionRows });
     if (receipts.length !== assertionRows.length || assertionRows.length === 0) throw new Error("contained candidate observation or complete independent assertion receipts are unavailable");
     const receiptPath = join(evidenceDirectory, `case-${sha(Buffer.from(caseId)).slice(0, 20)}-receipts.json`);
     const capturePath = join(evidenceDirectory, `case-${sha(Buffer.from(caseId)).slice(0, 20)}-capture.json`);
