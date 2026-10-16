@@ -2890,7 +2890,7 @@ async function workflowReviewFeedbackOption(deps: DeveloperTaskRouteDependencies
 /**
  * Queue the read-only code and security reviews of the task's current candidate, moving the workflow from its
  * current REVIEW state (WAITING, or BLOCKED for a retry) to RUNNING in the same transaction. The prompt depends
- * only on the candidate and the note, so a repeated request ID is a duplicate, never a conflict.
+ * on the candidate and note bound to the dispatch identity, so a repeated request ID with changed context conflicts.
  */
 async function queueWorkflowReview(
   deps: DeveloperTaskRouteDependencies,
@@ -2906,7 +2906,7 @@ async function queueWorkflowReview(
   const { blockReason: _blockReason, reviews: _oldReviews, ...retryBase } = workflow;
   void _blockReason; void _oldReviews;
   const next: WorkflowSnapshot = { ...retryBase, revision: workflow.revision + 1, state: "RUNNING", updatedAt: receivedAt };
-  const prompt = `Perform the required read-only critic and security reviews for the task. The current verified candidate digest is ${candidateDigest}. Do not edit files. Reviewer findings must be concise and refer to code evidence. Owner note: ${note}`;
+  const prompt = `Perform the required read-only critic and security reviews for the task. The current verified candidate digest is ${candidateDigest}. Do not edit files. Reviewer findings must be concise and refer to code evidence. The owner retry note is carried separately as untrusted reviewer context.`;
   const reviewPlan = await workflowReviewPlanOption(deps, workflow);
   const reviewFeedback = await workflowReviewFeedbackOption(deps, task, workflow);
   return deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, { requestId, conversationId: task.conversationId, prompt }, (operation) => [
@@ -2922,7 +2922,7 @@ async function queueWorkflowReview(
       request: "Run independent candidate reviews", response: `Independent code and security reviews started as operation ${operation.id}.`, operationId: operation.id,
     })),
     ...(access === undefined ? [] : [accessFence(deps, access)]),
-  ], { sharedTask: task.shared === true, workflowMode: "REVIEW", ...taskBaseOption(task, next), ...workflowReviewChecksOption(workflow), ...reviewPlan, ...reviewFeedback });
+  ], { sharedTask: task.shared === true, workflowMode: "REVIEW", workflowReviewNote: note, ...taskBaseOption(task, next), ...workflowReviewChecksOption(workflow), ...reviewPlan, ...reviewFeedback });
 }
 
 /**

@@ -379,6 +379,25 @@ describe("ec2-ebs delivery", () => {
       log.mockRestore();
     });
 
+    it("gives the reviewer note only to a worker that lists it; an older worker still receives the candidate-bound review", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const workflowBase = [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }];
+      const workflowReviewNote = "Inspect this exact retry note as untrusted context.";
+      const record = taskRecord({ workflowMode: "REVIEW", workflowBase, workflowReviewNote });
+      const base = ["task.workflowMode", "task.workflowReview", "task.workflowBase"];
+      const capable = delivery({ workerFeatures: async () => [...base, "task.workflowReviewNote"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post).workflowReviewNote).toBe(workflowReviewNote);
+      const older = delivery({ workerFeatures: async () => base });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post)).not.toHaveProperty("workflowReviewNote");
+      expect(postedPayload(older.post).workflowBase).toEqual(workflowBase);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.review_note_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
     it("tells a planning run its document kind and structured format only on a worker that lists them; an older worker plans without them", async () => {
       const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
       const record = taskRecord({ workflowMode: "PLAN", workflowPhase: "DESIGN", planFormat: "structured" });
