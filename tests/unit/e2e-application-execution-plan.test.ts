@@ -117,6 +117,8 @@ describe("application execution plan selection", () => {
       { path: "apps/web/src/ops.js", bytes: Buffer.from("export function list() { return { ok: true }; }\n") },
       { path: "apps/web/openapi.json", bytes: Buffer.from(JSON.stringify(openApi)) },
       { path: "apps/web/fixtures/orders-mocks.json", bytes: Buffer.from(JSON.stringify(mockFixture)) },
+      { path: "apps/web-peer/package.json", bytes: Buffer.from(JSON.stringify({ name: "web-peer", type: "module", scripts: { start: "node server.js" } })) },
+      { path: "apps/web-peer/src/app.js", bytes: Buffer.from("export const app = true;\n") },
       { path: "apps/mobile/android/app/src/main/AndroidManifest.xml", bytes: Buffer.from('<manifest package="com.example.mobile"><application/></manifest>\n') },
       { path: "apps/mobile/android/app/build.gradle", bytes: Buffer.from('plugins { id "com.android.application" }\n') },
     ];
@@ -124,13 +126,16 @@ describe("application execution plan selection", () => {
       treeComplete: true, treePaths: files.map((file) => file.path),
       sources: files.map((file) => ({ ...file, sha256: hash(file.bytes), kind: "blob" as const })) };
     const discovery = inspectE2ERepository(snapshot, candidate);
-    const web = discovery.inspection.proposedTargets.find((target) => target.kind === "web")!;
+    const webApplication = discovery.inspection.applications.find((item) => item.sourcePaths.includes("apps/web/package.json"))!;
+    const peerApplication = discovery.inspection.applications.find((item) => item.sourcePaths.includes("apps/web-peer/package.json"))!;
+    const web = discovery.inspection.proposedTargets.find((target) => target.applicationId === webApplication.applicationId)!;
+    const peer = discovery.inspection.proposedTargets.find((target) => target.applicationId === peerApplication.applicationId)!;
     const android = discovery.inspection.proposedTargets.find((target) => target.kind === "mobile")!;
     const operation = discovery.portableOperations.find((item) => item.applicationId === web.applicationId)!;
-    const webApplication = discovery.inspection.applications.find((item) => item.applicationId === web.applicationId)!;
     const nativeApplication = discovery.inspection.applications.find((item) => item.applicationId === android.applicationId)!;
     const webIdentity = e2eApplicationMetadataSourceRefs(snapshot, web.applicationId, webApplication.sourcePaths)[0]!;
     const nativeIdentity = e2eApplicationMetadataSourceRefs(snapshot, android.applicationId, nativeApplication.sourcePaths)[0]!;
+    const peerIdentity = e2eApplicationMetadataSourceRefs(snapshot, peer.applicationId, peerApplication.sourcePaths)[0]!;
     const accountContextRefs = [
       { applicationId: web.applicationId, profileId: web.accountProfileId, sourcePath: webIdentity.path, sourceSha256: webIdentity.sha256 },
       { applicationId: android.applicationId, profileId: android.accountProfileId, sourcePath: nativeIdentity.path, sourceSha256: nativeIdentity.sha256 },
@@ -156,7 +161,10 @@ describe("application execution plan selection", () => {
       packageExportSubpath: operation.exportName, moduleSpecifier: "./src/ops.js", callableSelector: { kind: "named" as const, exportName: "list" } };
     const runtimeRef = { targetId: web.targetId, applicationId: web.applicationId, recipeDigest: webApplication.recipe!.recipeDigest,
       sourceRefs: e2eApplicationMetadataSourceRefs(snapshot, web.applicationId, webApplication.sourcePaths), runtimeProfileId: "qualified-chromium", accountProfileId: web.accountProfileId };
+    const peerRuntimeRef = { targetId: peer.targetId, applicationId: peer.applicationId, recipeDigest: peerApplication.recipe!.recipeDigest,
+      sourceRefs: e2eApplicationMetadataSourceRefs(snapshot, peer.applicationId, peerApplication.sourcePaths), runtimeProfileId: "qualified-chromium", accountProfileId: peer.accountProfileId };
     const runtimeAccountRef = { applicationId: web.applicationId, profileId: web.accountProfileId, revision: 1, definitionDigest: "2".repeat(64) };
+    const peerRuntimeAccountRef = { applicationId: peer.applicationId, profileId: peer.accountProfileId, revision: 1, definitionDigest: "4".repeat(64) };
     const mockComponentId = `api-schema-${hash(Buffer.from("apps/web/openapi.json")).slice(0, 12)}`;
     const mockFixtureBytes = files.find((file) => file.path === "apps/web/fixtures/orders-mocks.json")!.bytes;
     const mockFixtureRef = { componentId: mockComponentId, requestedTargetId: web.targetId, operationId: "listOrders",
@@ -293,9 +301,50 @@ describe("application execution plan selection", () => {
       runtimeAvailability: [{ targetId: web.targetId, profileId: runtimeRef.runtimeProfileId, connection: "connected", approval: "approved",
         qualification: "qualified", authorizationRevision: "web-auth-r1" }], runtimeAccountRefs: [runtimeAccountRef], runtimeCatalogId: "catalog",
       runtimeBinding: null as never, featureVerifier: null, now: Date.parse("2026-10-17T18:00:00.000Z") });
-    expect(requiredRealSelection.plan.groups[0]).toMatchObject({ mode: "real-runtime" });
-    expect(requiredRealSelection.plan.mocks).toEqual([]);
-    expect(requiredRealSelection.plan.groups[0]?.expectedCases[0]?.requiredRealComponentIds).toEqual([mockComponentId]);
+    const requiredRealCriterion = requiredRealSelection.plan.criteria.find((item) => item.scenarioId === "web-ui")!;
+    expect(requiredRealCriterion).toMatchObject({ required: true, requiredRealComponentIds: [mockComponentId], expectedCaseIds: [] });
+    expect(requiredRealSelection.plan.unavailableCriteria).toContainEqual({ criterionId: requiredRealCriterion.criterionId,
+      reason: "scenario requires a real connection to an approved mocked component" });
+    expect(requiredRealSelection.plan.groups).toEqual([]);
+
+    const sameTargetSiblingIntent = E2EApplicationPlanIntentSchema.parse({ ...realOnlyIntent, scenarios: [realScenario,
+      { ...realScenario, scenarioId: "web-ui-requires-live-orders", requirementId: "web-ui-live-orders", requiredRealComponentIds: [mockComponentId] }] });
+    const sameTargetSibling = deriveE2EApplicationFeatureExecutionSelection({ intent: sameTargetSiblingIntent, snapshot,
+      artifactId: semanticApproval.artifactId, artifactSha256: semanticApproval.digest, planDigest,
+      approvedSemanticApproval: semanticApproval, setupProposal, setupApproval, policy: { ...policy, baselineScenarioIds: [], targets: [web] },
+      registeredRuntimes: [qualifiedWebRuntime(runtimeRef.runtimeProfileId, Date.parse("2026-10-17T18:00:00.000Z"))],
+      runtimeAvailability: [{ targetId: web.targetId, profileId: runtimeRef.runtimeProfileId, connection: "connected", approval: "approved",
+        qualification: "qualified", authorizationRevision: "web-auth-r1" }], runtimeAccountRefs: [runtimeAccountRef], runtimeCatalogId: "catalog",
+      runtimeBinding: null as never, featureVerifier: null, now: Date.parse("2026-10-17T18:00:00.000Z") });
+    const conflictingSibling = sameTargetSibling.plan.criteria.find((item) => item.scenarioId === "web-ui-requires-live-orders")!;
+    expect(sameTargetSibling.plan.criteria.find((item) => item.scenarioId === "web-ui")?.expectedCaseIds).toHaveLength(1);
+    expect(conflictingSibling).toMatchObject({ requiredRealComponentIds: [mockComponentId], expectedCaseIds: [] });
+    expect(sameTargetSibling.plan.unavailableCriteria).toContainEqual({ criterionId: conflictingSibling.criterionId,
+      reason: "scenario requires a real connection to an approved mocked component" });
+    expect(sameTargetSibling.plan.groups[0]).toMatchObject({ mode: "hybrid", targetIds: [web.targetId] });
+    expect(sameTargetSibling.plan.groups[0]?.expectedCases).toHaveLength(1);
+    expect(sameTargetSibling.plan.mocks).toHaveLength(1);
+
+    const crossTargetScenario = { ...realScenario, scenarioId: "peer-ui-requires-live-orders", requirementId: "peer-ui-live-orders",
+      requestedTargetIds: [peer.targetId], requiredRealComponentIds: [mockComponentId] };
+    const crossTargetIntent = E2EApplicationPlanIntentSchema.parse({ ...realOnlyIntent, requestedTargetIds: [web.targetId, peer.targetId],
+      accountContextRefs: [accountContextRefs[0]!, { applicationId: peer.applicationId, profileId: peer.accountProfileId,
+        sourcePath: peerIdentity.path, sourceSha256: peerIdentity.sha256 }], scenarios: [realScenario, crossTargetScenario],
+      applicationRuntimeRefs: [runtimeRef, peerRuntimeRef], runtimeAccountRefs: [runtimeAccountRef, peerRuntimeAccountRef] });
+    const crossTargetSelection = deriveE2EApplicationFeatureExecutionSelection({ intent: crossTargetIntent, snapshot,
+      artifactId: semanticApproval.artifactId, artifactSha256: semanticApproval.digest, planDigest,
+      approvedSemanticApproval: semanticApproval, setupProposal, setupApproval, policy: { ...policy, baselineScenarioIds: [], targets: [web, peer] },
+      registeredRuntimes: [qualifiedWebRuntime(runtimeRef.runtimeProfileId, Date.parse("2026-10-17T18:00:00.000Z"))],
+      runtimeAvailability: [web, peer].map((target) => ({ targetId: target.targetId, profileId: runtimeRef.runtimeProfileId,
+        connection: "connected" as const, approval: "approved" as const, qualification: "qualified" as const,
+        authorizationRevision: `${target.targetId}-auth-r1` })), runtimeAccountRefs: [runtimeAccountRef, peerRuntimeAccountRef],
+      runtimeCatalogId: "catalog", runtimeBinding: null as never, featureVerifier: null, now: Date.parse("2026-10-17T18:00:00.000Z") });
+    expect(crossTargetSelection.plan.groups).toHaveLength(1);
+    expect(crossTargetSelection.plan.groups[0]).toMatchObject({ mode: "hybrid", targetIds: [web.targetId, peer.targetId] });
+    expect(crossTargetSelection.plan.criteria.find((item) => item.scenarioId === crossTargetScenario.scenarioId)?.expectedCaseIds).toHaveLength(1);
+    expect(crossTargetSelection.plan.groups[0]?.expectedCases).toHaveLength(2);
+    expect(crossTargetSelection.plan.mocks).toHaveLength(1);
+    expect(crossTargetSelection.plan.mocks[0]?.requestedTargetId).toBe(web.targetId);
 
     const allUnavailableIntent = E2EApplicationPlanIntentSchema.parse({ ...intent, applicationRuntimeRefs: [], runtimeAccountRefs: [],
       unavailableTargetRefs: [

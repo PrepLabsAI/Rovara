@@ -248,6 +248,11 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
     const criterion = { criterionId, requirementId: scenario.requirementId, scenarioId: scenario.scenarioId, requestedTargetId: targetId,
       required, minimumEvidence: scenario.minimumEvidence, requiredRealComponentIds: [...scenario.requiredRealComponentIds], expectedCaseIds: [] as string[] };
     criteria.push(criterion);
+    const targetApprovedMocks = approvedMocks.filter((item) => item.requestedTargetId === targetId);
+    if (scenario.requiredRealComponentIds.some((componentId) => targetApprovedMocks.some((item) => item.componentId === componentId))) {
+      unavailable.push({ criterionId, reason: "scenario requires a real connection to an approved mocked component" });
+      continue;
+    }
     const availability = input.runtimeAvailability.filter((item) => item.targetId === targetId);
     const ref = realRefs.find((item) => item.targetId === targetId);
     const account = input.runtimeAccountRefs.find((item) => item.applicationId === ref?.applicationId && item.profileId === ref?.accountProfileId);
@@ -320,9 +325,8 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
       if (groupCases.length > 64) throw new Error("application execution group exceeds the 64-case limit");
       const profile = realTargetProfiles.get(selected[0]!)!;
       const groupId = stableId("group-", ["real-application", groupKey, selected]);
-      const requiredRealIds = new Set(groupCases.flatMap((item) => item.requiredRealComponentIds));
       const groupMocks: E2EMockSpec[] = selected.flatMap((targetId) => approvedMocks
-        .filter((item) => item.requestedTargetId === targetId && !requiredRealIds.has(item.componentId))
+        .filter((item) => item.requestedTargetId === targetId)
         .map((item) => {
           const target = policy.targets.find((candidate) => candidate.targetId === targetId)!;
           const edge = discovered.inspection.dependencyEdges.find((candidate) => candidate.fromApplicationId === target.applicationId
