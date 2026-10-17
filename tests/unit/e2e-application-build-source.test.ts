@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalJson, createCandidateManifest, type E2ESourceSnapshot } from "@agentx/contracts";
+import { E2EApplicationBuildSourceManifestSchema as SourceManifestSchema } from "../../packages/contracts/src/e2e-application-execution.js";
 import { encodeE2EApplicationBuildSourceArchive, materializeE2EApplicationBuildSource,
   validateE2EApplicationBuildSourceManifest } from "../../packages/verifier/src/application-build-source.js";
 
@@ -13,8 +14,60 @@ function tree(name: string, mode: string, objectId: string): string {
   const entry = Buffer.concat([Buffer.from(`${mode} ${name}\0`), Buffer.from(objectId, "hex")]);
   return createHash("sha1").update(Buffer.concat([Buffer.from(`tree ${entry.byteLength}\0`), entry])).digest("hex");
 }
+function treeForEntries(entries: readonly { path: string; mode: string; objectId: string }[]): string {
+  type Node = { files: Array<{ name: string; mode: string; objectId: string }>; dirs: Map<string, Node> };
+  const root: Node = { files: [], dirs: new Map() };
+  for (const entry of entries) {
+    const parts = entry.path.split("/"); let node = root;
+    for (const part of parts.slice(0, -1)) { let child = node.dirs.get(part); if (!child) { child = { files: [], dirs: new Map() }; node.dirs.set(part, child); } node = child; }
+    node.files.push({ name: parts.at(-1)!, mode: entry.mode, objectId: entry.objectId });
+  }
+  const write = (node: Node): Buffer => {
+    const records = [...node.files.map((item) => ({ name: item.name, dir: false, bytes: Buffer.concat([Buffer.from(`${item.mode} ${item.name}\0`), Buffer.from(item.objectId, "hex")]) })),
+      ...[...node.dirs].map(([name, child]) => ({ name, dir: true, bytes: Buffer.concat([Buffer.from(`40000 ${name}\0`), Buffer.from(createHash("sha1").update(write(child)).digest("hex"), "hex")]) }))];
+    records.sort((a, b) => Buffer.compare(Buffer.from(a.name + (a.dir ? "/" : "")), Buffer.from(b.name + (b.dir ? "/" : ""))));
+    const body = Buffer.concat(records.map((item) => item.bytes)); return Buffer.concat([Buffer.from(`tree ${body.byteLength}\0`), body]);
+  };
+  return createHash("sha1").update(write(root)).digest("hex");
+}
 
 describe("exact candidate application build source", () => {
+  it("bounds aggregate decoded source bytes at manifest ingress without allocating file payloads", async () => {
+    const limit = 64 * 1024 * 1024;
+    const makeManifest = (total: number) => {
+      const count = 9; const fileBytes = Array.from({ length: count }, (_, index) => Math.floor(total / count) + (index < total % count ? 1 : 0));
+      const files = fileBytes.map((byteLength, index) => ({ path: `src/file${index}.js`, mode: "100644" as const,
+        gitBlobId: "a".repeat(40), sha256: "b".repeat(64), byteLength }));
+      const treeEntries = files.map(({ path, mode, gitBlobId }) => ({ path, mode, objectId: gitBlobId }));
+      const body = { schemaVersion: "e2e-application-build-source-manifest/v1" as const, candidateDigest: "c".repeat(64),
+        repository: { repositoryId: "repo", commitSha: "d".repeat(40), treeSha: treeForEntries(treeEntries) }, sourceState: "candidate-index-tree" as const,
+        pathPolicy: "existing-safe-e2e-source-path/v1" as const, treeEntries, files, omissions: [],
+        archive: { format: "e2e-application-build-source-archive/v1" as const, sha256: "e".repeat(64), byteLength: 100_000_000, fileCount: count } };
+      return { ...body, manifestDigest: sha(canonicalJson(body)) };
+    };
+    expect(SourceManifestSchema.safeParse(makeManifest(limit - 1)).success).toBe(true);
+    expect(SourceManifestSchema.safeParse(makeManifest(limit)).success).toBe(true);
+    const overLimit = makeManifest(limit + 1);
+    expect(SourceManifestSchema.safeParse(overLimit).success).toBe(false);
+    const candidate = createCandidateManifest([{ repositoryId: "repo", commitSha: overLimit.repository.commitSha, treeSha: overLimit.repository.treeSha }]);
+    const sourceBody = { ...overLimit, candidateDigest: candidate.digest };
+    const sourceManifest = { ...sourceBody, manifestDigest: sha(canonicalJson(sourceBody)) };
+    const reference = { artifactId: "oversized", sha256: sourceManifest.archive.sha256,
+      byteLength: sourceManifest.archive.byteLength, manifestDigest: sourceManifest.manifestDigest };
+    const binding = { schemaVersion: "e2e-application-build-binding/v1", preparationId: "11111111-1111-4111-8111-111111111111",
+      taskId: "22222222-2222-4222-8222-222222222222", workspaceId: "33333333-3333-4333-8333-333333333333",
+      operationId: "44444444-4444-4444-8444-444444444444", operationFence: 1, workflowRevision: 1,
+      candidateDigest: candidate.digest, planDigest: "b".repeat(64), intentDigest: "c".repeat(64), applicationApprovalDigest: "d".repeat(64),
+      applicationId: "app", recipeDigest: "e".repeat(64), buildSourceManifestDigest: sourceManifest.manifestDigest,
+      buildSourceSha256: reference.sha256, runtimeProfileId: "profile", runtimeManifestDigest: "f".repeat(64), deadlineAt: "2026-10-17T23:00:00.000Z" } as const;
+    const readChunk = vi.fn(async () => { throw new Error("oversized source payload must not be requested"); });
+    await expect(materializeE2EApplicationBuildSource({ manifest: sourceManifest, reference, expectedCandidate: candidate,
+      inspectionSnapshot: { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha: candidate.repositories[0]!.treeSha,
+        treeComplete: true, treePaths: overLimit.treeEntries.map((entry) => entry.path).sort(), sources: [] }, binding,
+      destination: join(tmpdir(), "oversized-source-must-not-be-created"), signal: new AbortController().signal, readChunk })).rejects.toThrow(/64 MiB aggregate/);
+    expect(readChunk).not.toHaveBeenCalled();
+  });
+
   it("materializes a permitted asset that is absent from bounded inspection blobs", async () => {
     const bytes = Buffer.from("export const asset = 42;\n");
     const path = "src/asset.js";

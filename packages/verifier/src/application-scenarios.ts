@@ -14,7 +14,7 @@ import { E2EApplicationApprovalBindingSchema, E2EApplicationBuildSourceManifestS
   type E2EAppArtifactRef, type E2EAppBuildManifest, type E2EExecutionPlan, type E2EExpectedCase,
   type E2EApplicationPortableProjection, type E2EApplicationGroupAdmission, type E2ERound, type E2ERunBinding,
   type E2EApplicationExecutionAdmission,
-  type E2ERegisteredRuntime, type E2EScenario, type E2EScenarioBundle, type E2ESourceSnapshot } from "@agentx/contracts";
+  type E2ERegisteredRuntime, type E2EScenario, type E2EScenarioBundle, type E2ESourceSnapshot, type E2EPolicy } from "@agentx/contracts";
 import { compileE2EScenarios } from "./scenarios.js";
 
 export type { E2EApplicationCompilationContext };
@@ -235,6 +235,10 @@ function validateBindings(context: E2EApplicationCompilationContext, plan: E2EEx
   if (canonicalJson([...context.applicationBindings.keys()].sort()) !== canonicalJson(appIds)) throw new Error("application build binding map does not exactly cover runnable application groups");
   for (const applicationId of appIds) {
     const binding = context.applicationBindings.get(applicationId)!;
+    if (!context.selectionInput.applicationApprovalBinding
+      || canonicalJson(binding.approval) !== canonicalJson(context.selectionInput.applicationApprovalBinding)) {
+      throw new Error("application build binding approval differs from the exact selected application approval");
+    }
     if (binding.approval.applications.some((app) => app.applicationId === applicationId) === false) throw new Error("application build binding lacks its exact approval identity");
     const valid = validateE2EAppBuildBinding({ finalSnapshot: snapshot, binding: binding.approval, manifest: binding.build, artifacts: [...binding.artifacts] });
     if (valid.applicationId !== applicationId || binding.build.manifestDigest !== e2eAppBuildManifestDigest(binding.build)) throw new Error("application output build binding is invalid");
@@ -259,6 +263,14 @@ function validateBindings(context: E2EApplicationCompilationContext, plan: E2EEx
     validateE2EApplicationLaunchTarget(target, launch, runtime, context.selectionInput.policy.capture);
   }
   if (context.runtimeBindings.size !== profileIds.length || [...context.runtimeBindings.keys()].some((id) => !profileIds.includes(id))) throw new Error("runtime binding map contains a missing or foreign profile");
+  const selectedRuntimeByProfile = new Map(context.selectionInput.registeredRuntimes.map((runtime) => [runtime.profileId, runtime]));
+  for (const profileId of profileIds) {
+    const selectedRuntime = selectedRuntimeByProfile.get(profileId);
+    const suppliedRuntime = context.runtimeBindings.get(profileId);
+    if (!selectedRuntime || !suppliedRuntime || canonicalJson(selectedRuntime) !== canonicalJson(suppliedRuntime)) {
+      throw new Error("runtime binding differs from the exact selected registered runtime row");
+    }
+  }
   for (const group of appGroups) {
     const facts = context.preparedEnvironmentsByGroup.get(group.groupId)!;
     const targetSet = group.targetIds.map((targetId) => targetById.get(targetId)!);
@@ -336,9 +348,9 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
       const title = item.upstreamTestId.slice(item.upstreamTestId.lastIndexOf("::") + 2);
       const indexLine = lines.findIndex((line) => line.startsWith(`test(${JSON.stringify(title)},`));
       if (indexLine < 0) throw new Error("generated application test source position could not be derived");
-      // The installed E2E 0.20 TypeScript collector strips the declaration-only
-      // global block before reporting generated test source positions.
-      sourceByCaseId.set(item.caseId, { file: applicationTestPath, line: indexLine, column: 1 });
+      // The installed 0.20 runner reports the original generated source's
+      // one-based line, including the declaration-only global block.
+      sourceByCaseId.set(item.caseId, { file: applicationTestPath, line: indexLine + 1, column: 1 });
     });
     const titleByCaseId = new Map(expectedCases.map((item) => [item.caseId, item.upstreamTestId.slice(item.upstreamTestId.lastIndexOf("::") + 2)]));
     const packet = createE2EApplicationSelectionPacket({ plan: context.executionPlan, groupId: group.groupId, shardId: shardId(group.groupId, targetId), targetId,
@@ -349,7 +361,7 @@ function compileGroup(context: E2EApplicationCompilationContext, group: E2EExecu
       [E2E_APPLICATION_SELECTION_PACKET_PATH, renderE2EApplicationSelectionPacket(packet)],
       [E2E_APPLICATION_DECLARATION_PATH, renderE2EApplicationDeclaration({ target: launchTarget, cliHost,
         preparedEnvironmentDigest: prepared.preparedEnvironmentDigest, originByApplicationId: prepared.originByApplicationId,
-        expectedConfigDigest: configDigest, cases: expectedCases, assertionsByCase: assertionBindings })],
+        timeoutMs, modelRoute, expectedConfigDigest: configDigest, cases: expectedCases, assertionsByCase: assertionBindings })],
     ]);
     const inventory = emitInventory(files, configDigest);
     const shard: E2EApplicationCompiledShard = Object.freeze({ shardId: shardId(group.groupId, targetId), targetId, files,
@@ -418,7 +430,31 @@ export function validateE2ECompiledApplicationAdmission(compiled: E2ECompiledApp
     || compiled.inventory.digest !== sha256(canonicalJson(Object.fromEntries(Object.entries(compiled.inventory).filter(([key]) => key !== "digest"))))) throw new Error("application generated group inventory or bundle changed after compilation");
   for (const shard of compiled.shards) verifyShard(shard);
   const recompilation = compileE2EApplicationScenarios({ context: compiled.runtimeAdmissionContext, groupId: compiled.group.groupId });
-  if (recompilation.inventory.digest !== compiled.inventory.digest || canonicalJson([...recompilation.files]) !== canonicalJson([...compiled.files])
+  const mapEntries = <K, V>(value: ReadonlyMap<K, V>) => [...value.entries()];
+  const admissionFacts = (suite: E2ECompiledApplicationSuite) => ({ schemaVersion: suite.runtimeAdmission.schemaVersion,
+    expectedCandidate: suite.runtimeAdmission.expectedCandidate, sourceSnapshotDigest: suite.runtimeAdmission.sourceSnapshotDigest,
+    contextDigest: suite.runtimeAdmission.contextDigest, bundleDigest: suite.runtimeAdmission.bundleDigest,
+    compiledInventoryDigest: suite.runtimeAdmission.compiledInventoryDigest, applicationBindingsDigest: suite.runtimeAdmission.applicationBindingsDigest,
+    runtimeBindingsDigest: suite.runtimeAdmission.runtimeBindingsDigest, launchTargetsDigest: suite.runtimeAdmission.launchTargetsDigest,
+    assertionBindingsDigest: suite.runtimeAdmission.assertionBindingsDigest });
+  const shardFacts = (suite: E2ECompiledApplicationSuite) => suite.shards.map((shard) => ({ shardId: shard.shardId, targetId: shard.targetId,
+    files: mapEntries(shard.files), inventory: shard.inventory, expectedConfigDigest: shard.expectedConfigDigest,
+    selection: shard.selection, expectedCases: shard.expectedCases }));
+  if (recompilation.inventory.digest !== compiled.inventory.digest || canonicalJson(recompilation.inventory) !== canonicalJson(compiled.inventory)
+    || canonicalJson([...recompilation.files]) !== canonicalJson([...compiled.files])
+    || canonicalJson(recompilation.bundle) !== canonicalJson(compiled.bundle)
+    || canonicalJson(admissionFacts(recompilation)) !== canonicalJson(admissionFacts(compiled))
+    || canonicalJson(recompilation.group) !== canonicalJson(compiled.group)
+    || canonicalJson(recompilation.cliHost) !== canonicalJson(compiled.cliHost)
+    || recompilation.preparedEnvironmentDigest !== compiled.preparedEnvironmentDigest
+    || canonicalJson(recompilation.originByApplicationId) !== canonicalJson(compiled.originByApplicationId)
+    || recompilation.groupConfigManifestDigest !== compiled.groupConfigManifestDigest
+    || canonicalJson(recompilation.expectedCases) !== canonicalJson(compiled.expectedCases)
+    || canonicalJson(shardFacts(recompilation)) !== canonicalJson(shardFacts(compiled))
+    || canonicalJson(mapEntries(recompilation.applicationBindings)) !== canonicalJson(mapEntries(compiled.applicationBindings))
+    || canonicalJson(mapEntries(recompilation.runtimeBindings)) !== canonicalJson(mapEntries(compiled.runtimeBindings))
+    || canonicalJson(mapEntries(recompilation.assertionBindings)) !== canonicalJson(mapEntries(compiled.assertionBindings))
+    || recompilation.selectionPacketPath !== compiled.selectionPacketPath
     || admission.contextDigest !== recompilation.runtimeAdmission.contextDigest || admission.applicationBindingsDigest !== recompilation.runtimeAdmission.applicationBindingsDigest
     || admission.runtimeBindingsDigest !== recompilation.runtimeAdmission.runtimeBindingsDigest || admission.launchTargetsDigest !== recompilation.runtimeAdmission.launchTargetsDigest
     || admission.assertionBindingsDigest !== recompilation.runtimeAdmission.assertionBindingsDigest) throw new Error("compiled application files, bindings, or launch context differ from fresh compiler derivation");
@@ -494,6 +530,16 @@ export type ValidatedE2EApplicationAdmission = Readonly<{
   portableSuites: readonly ReturnType<typeof compileE2EScenarios>[];
 }>;
 
+export function assertE2EApplicationRoundWithinPolicy(round: E2ERound, policy: E2EPolicy): void {
+  const boundedLimitKeys = ["runTimeoutMs", "startupTimeoutMs", "preparationTimeoutMs", "caseTimeoutMs", "maxActionsPerCase",
+    "maxModelRequests", "maxInputTokens", "maxOutputTokens"] as const;
+  if (boundedLimitKeys.some((key) => round.limits[key] > policy.limits[key])
+    || (policy.limits.maxSpendUsd !== null && (round.limits.maxSpendUsd === null || round.limits.maxSpendUsd > policy.limits.maxSpendUsd))
+    || Date.parse(round.deadlineAt) - Date.parse(round.admittedAt) > policy.limits.runTimeoutMs) {
+    throw new Error("application admission round limits widen the approved policy or elapsed-time allowance");
+  }
+}
+
 function snapshotFromWire(value: unknown): E2ESourceSnapshot {
   const raw = ordinaryRecord(value, ["candidate", "commitSha", "treeSha", "treeComplete", "treePaths", "sources"], "application admission source snapshot");
   const sources = ordinaryArray(raw.sources, 512, "application admission source blobs", (entry) => {
@@ -536,6 +582,7 @@ export function validateE2EApplicationExecutionAdmission(admissionInput: unknown
     || canonicalJson(admission.policy) !== canonicalJson(admission.selectionInput.policy)
     || admission.intentDigest !== sha256(canonicalJson(admission.intent))) throw new Error("application admission changes its protected candidate, intent, approval, or policy identity");
   const selectionInput = { ...admission.selectionInput, sourceSnapshot } as unknown as E2EApplicationPlanSelectionInput;
+  assertE2EApplicationRoundWithinPolicy(admission.round, admission.policy);
   const executionPlan = E2EExecutionPlanSchema.parse(selectE2EApplicationExecutionPlan(selectionInput));
   if (canonicalJson(executionPlan) !== canonicalJson(admission.executionPlan)) throw new Error("application admission plan differs from fresh complete selection derivation");
   const bundle = E2EScenarioBundleSchema.parse(admission.bundle);

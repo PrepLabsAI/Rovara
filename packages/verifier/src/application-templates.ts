@@ -78,11 +78,13 @@ export function renderE2EApplicationConfigWrapper(): string {
 export function renderE2EApplicationDeclaration(input: {
   target: E2EApplicationLaunchTarget; cliHost: { profileId: string; descriptor: E2EApplicationCliHostDescriptor };
   preparedEnvironmentDigest: string; originByApplicationId: readonly { applicationId: string; origin: string }[];
+  timeoutMs: number; modelRoute: null | { routeId: string; routeRevision: string };
   expectedConfigDigest: string; cases: readonly E2EExpectedCase[]; assertionsByCase: ReadonlyMap<string, readonly { index: number; kind: string; digest: string }[]>;
 }): string {
   return `${JSON.stringify({ schemaVersion: "e2e-application-cli-declaration/v1", projectId: "rovara-application-e2e",
     testPath: APPLICATION_E2E_TEST_PATH, target: input.target, cliHost: input.cliHost, preparedEnvironmentDigest: input.preparedEnvironmentDigest,
-    originByApplicationId: input.originByApplicationId, expectedConfigDigest: input.expectedConfigDigest,
+    originByApplicationId: input.originByApplicationId, timeoutMs: input.timeoutMs, modelRoute: input.modelRoute,
+    expectedConfigDigest: input.expectedConfigDigest,
     cases: input.cases.map((item) => ({ caseId: item.caseId, upstreamTestId: item.upstreamTestId, targetId: item.targetId,
       assertionBindings: input.assertionsByCase.get(item.caseId) ?? [] })) }, null, 2)}\n`;
 }

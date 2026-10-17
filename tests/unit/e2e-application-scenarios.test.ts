@@ -11,8 +11,10 @@ import { deriveE2EApplicationApprovalBinding } from "../../packages/broker/src/e
 import { deriveE2EFeaturePortableApprovalBinding } from "../../packages/broker/src/e2e/feature-plan-intent.js";
 import { compileE2EScenarios } from "../../packages/verifier/src/scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../../packages/verifier/src/application-build-source.js";
+import { E2E_APPLICATION_DECLARATION_PATH } from "../../packages/verifier/src/application-templates.js";
 import { compileE2EApplicationScenarios, createE2EApplicationPortableChildBindings, decodeE2EApplicationExecutionAdmission,
-  encodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission, validateE2EApplicationLaunchTarget } from "../../packages/verifier/src/application-scenarios.js";
+  encodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission, validateE2EApplicationLaunchTarget,
+  assertE2EApplicationRoundWithinPolicy, validateE2ECompiledApplicationAdmission } from "../../packages/verifier/src/application-scenarios.js";
 
 function gitTreeSha(entries: readonly { path: string; mode: string; objectId: string }[]): string {
   type Node = { files: Array<{ name: string; mode: string; objectId: string }>; dirs: Map<string, Node> };
@@ -41,7 +43,7 @@ function qualifiedWebRuntime(profileId: string, now: number, hostOs: "linux" | "
   const hash = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
   const capabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ schemaVersion: "e2e-runtime-capabilities/v1", profileId,
     kind: "web", host: { os: hostOs, arch: hostOs === "darwin" ? "arm64" : "x64" }, engine: { name: "playwright", version: "1.0.0", spiVersion: 1 },
-    runtimeManifestDigest: "a".repeat(64), supportedSteps: ["navigate"], supportedAssertions: ["visible"], evidenceScopes: ["runtime"],
+    runtimeManifestDigest: "a".repeat(64), supportedSteps: ["agent", "navigate"], supportedAssertions: ["visible"], evidenceScopes: ["runtime"],
     networkPolicyDigest: "b".repeat(64), browsers: ["chromium"] });
   const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
     subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef" }], volumeSizeGiB: 32, volumeType: "gp3" as const };
@@ -149,7 +151,7 @@ describe("application scenario compilation", () => {
       assertions: [{ kind: "json", responseId: "result", schemaRef: "json-value-v1", equals: { rows: [1] } }] };
     const realScenario: E2EScenario = { scenarioId: "web-home", requirementId: "web-home-visible", requestedTargetIds: [target.targetId], required: true,
       accountProfileId: target.accountProfileId, minimumEvidence: "runtime", requiredRealComponentIds: [],
-      steps: [{ kind: "navigate", path: "/" }], assertions: [{ kind: "visible", testId: "home", equals: true }] };
+      steps: [{ kind: "agent", goal: "Inspect the page", maxActions: 1 }], assertions: [{ kind: "visible", testId: "home", equals: true }] };
     const blogScenario: E2EScenario = { scenarioId: "blog-home", requirementId: "blog-home-visible", requestedTargetIds: [blogTarget.targetId], required: true,
       accountProfileId: blogTarget.accountProfileId, minimumEvidence: "runtime", requiredRealComponentIds: [],
       steps: [{ kind: "navigate", path: "/" }], assertions: [{ kind: "visible", testId: "blog-home", equals: true }] };
@@ -314,11 +316,41 @@ describe("application scenario compilation", () => {
     const compiledApplication = compiledApplications.get(appGroup.groupId)!;
     const compiledDarwinApplication = compiledApplications.get(darwinGroup.groupId)!;
     const compiledApiApplication = compiledApplications.get(apiGroup.groupId)!;
+    expect(() => validateE2ECompiledApplicationAdmission(compiledApplication, snapshot)).not.toThrow();
+    expect(() => validateE2ECompiledApplicationAdmission({ ...compiledApplication, expectedCases: [] }, snapshot)).toThrow(/fresh compiler derivation/);
+    expect(() => validateE2ECompiledApplicationAdmission({ ...compiledApplication, group: { ...compiledApplication.group, expectedCases: [] } }, snapshot)).toThrow(/fresh compiler derivation/);
+    expect(() => validateE2ECompiledApplicationAdmission({ ...compiledApplication, bundle: { ...compiledApplication.bundle, scenarios: [] } }, snapshot))
+      .toThrow(/fresh compiler derivation/);
+    expect(() => validateE2ECompiledApplicationAdmission({ ...compiledApplication, runtimeBindings: new Map() }, snapshot)).toThrow(/fresh compiler derivation/);
+    expect(() => validateE2ECompiledApplicationAdmission({ ...compiledApplication, shards: compiledApplication.shards.map((shard) => ({
+      ...shard, selection: { ...shard.selection, tuples: [] },
+    })) }, snapshot)).toThrow(/fresh compiler derivation/);
+    const foreignApproval = deriveE2EApplicationApprovalBinding({ preparedSnapshot: snapshot, intent: realIntent,
+      artifactId: "another-approved-artifact", artifactSha256: hash("another approved semantic approval"), planDigest, setupProposal, setupApproval });
+    const foreignApprovalBindings = new Map([...applicationBindings].map(([id, value]) => [id, { ...value, approval: foreignApproval }]));
+    expect(() => compileE2EApplicationScenarios({ context: { ...context, applicationBindings: foreignApprovalBindings } as never, groupId: appGroup.groupId }))
+      .toThrow(/exact selected application approval/);
+    const foreignRuntime = E2ERegisteredRuntimeSchema.parse({ ...runtime, generation: runtime.generation + 1,
+      runtimeCatalogId: "another-catalog", endpoint: "http://127.0.0.1:9999", transportCorrelationId: "99999999-9999-4999-8999-999999999999" });
+    expect(() => compileE2EApplicationScenarios({ context: { ...context, runtimeBindings: new Map([...runtimeBindings, [runtimeProfileId, foreignRuntime]]) } as never,
+      groupId: appGroup.groupId })).toThrow(/exact selected registered runtime row/);
     expect(compiledApplication.expectedCases.map((item) => item.caseId)).toEqual(appGroup.expectedCases.map((item) => item.caseId));
     expect(compiledApplication.shards.map((item) => item.targetId).sort()).toEqual([target.targetId, blogTarget.targetId].sort());
     expect(compiledApplication.shards.every((shard) => shard.expectedCases.every((item) => item.targetId === shard.targetId))).toBe(true);
     expect(compiledApplication.shards.flatMap((shard) => shard.expectedCases.map((item) => item.caseId)).sort()).toEqual(appGroup.expectedCases.map((item) => item.caseId).sort());
+    for (const shard of compiledApplication.shards) {
+      const generated = shard.files.get(".agentx/e2e/generated-application.test.ts")!;
+      for (const tuple of shard.selection.tuples) {
+        const title = tuple.upstreamTestId.slice(tuple.upstreamTestId.lastIndexOf("::") + 2);
+        const expectedLine = generated.split("\n").findIndex((line) => line.startsWith(`test(${JSON.stringify(title)},`)) + 1;
+        expect(tuple.source.line).toBe(expectedLine);
+      }
+    }
     expect(compiledDarwinApplication.cliHost).toEqual({ profileId: darwinRuntimeProfileId, descriptor: cliHostsByProfile.get(darwinRuntimeProfileId) });
+    const webDeclaration = JSON.parse(compiledApplication.shards.find((shard) => shard.targetId === target.targetId)!.files.get(E2E_APPLICATION_DECLARATION_PATH)!) as Record<string, unknown>;
+    expect(webDeclaration).toMatchObject({ timeoutMs: policy.limits.caseTimeoutMs, modelRoute: { routeId: "route-1", routeRevision: "route-v1" } });
+    const apiDeclaration = JSON.parse(compiledApiApplication.shards[0]!.files.get(E2E_APPLICATION_DECLARATION_PATH)!) as Record<string, unknown>;
+    expect(apiDeclaration).toMatchObject({ modelRoute: null });
     expect(launchTargets.find((item) => item.targetId === apiTarget.targetId)).toEqual(expect.objectContaining({ targetId: apiTarget.targetId, engine: null, app: null }));
     expect(compiledApiApplication.originByApplicationId).toEqual([{ applicationId: apiTarget.applicationId, origin: `https://${apiTarget.applicationId}.test` }]);
     expect(runtimeBindings.get(runtimeProfileId)?.capabilities.host.os).toBe("linux");
@@ -410,6 +442,55 @@ describe("application scenario compilation", () => {
       .toEqual([target.targetId, blogTarget.targetId].sort());
     expect(validated.applicationSuites.find((suite) => suite.cliHost.profileId === darwinRuntimeProfileId)?.shards.map((shard) => shard.targetId))
       .toEqual([docsTarget.targetId]);
+    const finiteSpendPolicy = { ...decoded.policy, limits: { ...decoded.policy.limits, maxSpendUsd: 1 } };
+    expect(() => assertE2EApplicationRoundWithinPolicy(decoded.round, finiteSpendPolicy)).toThrow(/widen the approved policy/);
+    expect(() => assertE2EApplicationRoundWithinPolicy(E2ERoundSchema.parse({ ...decoded.round,
+      limits: { ...decoded.round.limits, maxSpendUsd: 0.5 } }), finiteSpendPolicy)).not.toThrow();
+    expect(() => assertE2EApplicationRoundWithinPolicy(E2ERoundSchema.parse({ ...decoded.round,
+      limits: { ...decoded.round.limits, maxSpendUsd: 0.5 } }), decoded.policy)).not.toThrow();
+    const resignAdmission = (value: Record<string, unknown>) => {
+      const body = Object.fromEntries(Object.entries(value).filter(([key]) => key !== "admissionDigest"));
+      return { ...body, admissionDigest: hash(canonicalJson(body)) };
+    };
+    const foreignApprovalAdmission = resignAdmission({ ...decoded, applicationBindings: decoded.applicationBindings.map((entry) => ({
+      ...entry, value: { ...entry.value, approval: foreignApproval },
+    })) });
+    expect(() => validateE2EApplicationExecutionAdmission(foreignApprovalAdmission)).toThrow(/exact selected application approval/);
+    const foreignRuntimeAdmission = resignAdmission({ ...decoded, runtimeBindings: decoded.runtimeBindings.map((entry) => entry.key === runtimeProfileId
+      ? { ...entry, value: foreignRuntime } : entry) });
+    expect(() => validateE2EApplicationExecutionAdmission(foreignRuntimeAdmission)).toThrow(/exact selected registered runtime row/);
+    const portableGroupIds = decoded.groups.filter((item) => item.protocol === "trusted-e2e/v1").map((item) => item.childBinding.groupId);
+    const childRunIds = new Map(decoded.groups.filter((item) => item.protocol === "trusted-e2e/v1")
+      .map((item) => [item.childBinding.groupId, item.childBinding.runId]));
+    const cappedSpendRound = E2ERoundSchema.parse({ ...decoded.round, limits: { ...decoded.round.limits, maxSpendUsd: 0.5 } });
+    const cappedSpendMapping = createE2EApplicationPortableChildBindings({ projection, outerRound: cappedSpendRound, outerPlan: fullPlan,
+      childRoundId: "a0000000-0000-4000-8000-000000000023", childRunIdsByGroup: childRunIds });
+    const cappedSpendGroups = decoded.groups.map((item) => item.protocol === "trusted-e2e/v1"
+      ? cappedSpendMapping.mappings.find((mappingItem) => mappingItem.childBinding.groupId === item.childBinding.groupId)! : item);
+    expect(() => validateE2EApplicationExecutionAdmission(resignAdmission({ ...decoded, round: cappedSpendRound, groups: cappedSpendGroups }))).not.toThrow();
+    const narrowedLimits = { ...decoded.round.limits, runTimeoutMs: decoded.round.limits.runTimeoutMs - 10_000,
+      maxActionsPerCase: decoded.round.limits.maxActionsPerCase - 1 };
+    const narrowedDeadlineAt = "2026-10-17T12:00:50.000Z";
+    const narrowedRound = E2ERoundSchema.parse({ ...decoded.round, deadlineAt: narrowedDeadlineAt, limits: narrowedLimits,
+      groupBindings: decoded.round.groupBindings.map((item) => ({ ...item, deadlineAt: narrowedDeadlineAt })) });
+    const narrowedMapping = createE2EApplicationPortableChildBindings({ projection, outerRound: narrowedRound, outerPlan: fullPlan,
+      childRoundId: "a0000000-0000-4000-8000-000000000021", childRunIdsByGroup: childRunIds });
+    expect(narrowedMapping.childRound.admittedAt).toBe(decoded.round.admittedAt);
+    expect(narrowedMapping.childRound.deadlineAt).toBe(narrowedRound.deadlineAt);
+    expect(narrowedMapping.childRound.limits.maxActionsPerCase).toBe(narrowedLimits.maxActionsPerCase);
+    const narrowedGroups = decoded.groups.map((item) => item.protocol === "trusted-e2e/v1"
+      ? narrowedMapping.mappings.find((mappingItem) => mappingItem.childBinding.groupId === item.childBinding.groupId)!
+      : { ...item, outerBinding: narrowedRound.groupBindings.find((bindingItem) => bindingItem.groupId === item.outerBinding.groupId)! });
+    expect(() => validateE2EApplicationExecutionAdmission(resignAdmission({ ...decoded, round: narrowedRound, groups: narrowedGroups }))).not.toThrow();
+    const widenedLimits = { ...decoded.round.limits, maxActionsPerCase: 11, maxModelRequests: 2 };
+    const widenedRound = E2ERoundSchema.parse({ ...decoded.round, limits: widenedLimits });
+    const widenedMapping = createE2EApplicationPortableChildBindings({ projection, outerRound: widenedRound, outerPlan: fullPlan,
+      childRoundId: "a0000000-0000-4000-8000-000000000022", childRunIdsByGroup: childRunIds });
+    const widenedGroups = decoded.groups.map((item) => item.protocol === "trusted-e2e/v1"
+      ? widenedMapping.mappings.find((mappingItem) => mappingItem.childBinding.groupId === item.childBinding.groupId)! : item);
+    expect(() => validateE2EApplicationExecutionAdmission(resignAdmission({ ...decoded, round: widenedRound, groups: widenedGroups })))
+      .toThrow(/widen the approved policy/);
+    expect(portableGroupIds).toHaveLength(1);
     const nativeCriterion = validated.executionPlan.criteria.find((item) => item.requestedTargetId === nativeTarget.targetId);
     expect(nativeCriterion).toBeDefined();
     expect(validated.executionPlan.unavailableCriteria.some((item) => item.criterionId === nativeCriterion?.criterionId)).toBe(true);

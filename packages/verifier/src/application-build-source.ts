@@ -119,6 +119,7 @@ export async function materializeE2EApplicationBuildSource(input: {
     reference: envelope.reference as E2EApplicationBuildSourceRef, expectedCandidate: envelope.expectedCandidate as CandidateManifest,
     inspectionSnapshot: envelope.inspectionSnapshot as E2ESourceSnapshot });
   const reference = E2EApplicationBuildSourceRefSchema.parse(envelope.reference);
+  if (manifest.files.reduce((sum, file) => sum + file.byteLength, 0) > 64 * 1024 * 1024) throw new Error("build source archive exceeds the decoded byte limit");
   const binding = E2EApplicationBuildBindingSchema.parse(envelope.binding);
   if (binding.candidateDigest !== manifest.candidateDigest || binding.buildSourceManifestDigest !== manifest.manifestDigest || binding.buildSourceSha256 !== reference.sha256) throw new Error("build ticket does not bind this exact source archive");
   const deadline = Date.parse(binding.deadlineAt);
@@ -181,11 +182,14 @@ export async function materializeE2EApplicationBuildSource(input: {
     || digest(archiveBytes) !== manifest.archive.sha256) throw new Error("build source archive does not match its manifest count, digest, or size");
   const actualByPath = new Map(archiveSchema.data.files.map((file) => [file.path, file]));
   if (actualByPath.size !== manifest.files.length) throw new Error("build source archive contains duplicate files");
+  let decodedBytes = 0;
   for (const file of manifest.files) {
     assertActive();
     const actual = actualByPath.get(file.path);
     if (!actual || actual.mode !== file.mode) throw new Error("build source archive file set or executable mode differs from its manifest");
     const bytes = Buffer.from(actual.bytesBase64, "base64");
+    decodedBytes += bytes.byteLength;
+    if (decodedBytes > 64 * 1024 * 1024) throw new Error("decoded build source archive exceeds the 64 MiB aggregate limit");
     if (bytes.toString("base64") !== actual.bytesBase64 || bytes.byteLength !== file.byteLength || digest(bytes) !== file.sha256 || blobId(bytes) !== file.gitBlobId) throw new Error(`build source file bytes do not match their Git blob and content identities: ${file.path}`);
   }
   for (const file of archiveSchema.data.files) if (!manifest.files.some((item) => item.path === file.path)) throw new Error("build source archive contains an unmanifested file");

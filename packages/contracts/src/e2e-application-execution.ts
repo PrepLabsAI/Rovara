@@ -34,6 +34,9 @@ export const E2EApplicationBuildSourceManifestSchema = z.object({
   treeEntries: z.array(E2EBuildTreeEntrySchema).min(1).max(100_000), files: z.array(E2EBuildFileSchema).max(10_000),
   omissions: z.array(E2EBuildOmissionSchema).max(100_000), archive: E2EBuildArchiveSchema, manifestDigest: sha256,
 }).strict().superRefine((manifest, context) => {
+  if (manifest.files.reduce((sum, file) => sum + file.byteLength, 0) > 64 * 1024 * 1024) {
+    context.addIssue({ code: "custom", path: ["files"], message: "permitted source files exceed the decoded 64 MiB aggregate limit" });
+  }
   const paths = manifest.treeEntries.map((entry) => entry.path);
   if (new Set(paths).size !== paths.length || paths.some((path) => path.normalize("NFC") !== path || Buffer.byteLength(path, "utf8") > 1024
     || path.startsWith("/") || path.includes("\\") || path.includes("\0") || path.split("/").some((part) => part === "" || part === "." || part === ".."))) {
