@@ -23,6 +23,7 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import {
   AgentXError,
   E2ESetupProposalSchema,
+  E2ESharedViewSchema,
   E2EPolicySchema,
   E2EScenarioBundleSchema,
   e2eScenarioBundleDigest,
@@ -215,7 +216,7 @@ import {
   workflowPublicationContextDigest,
 } from "@agentx/contracts";
 import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes } from "@agentx/verifier";
-import { renderE2EMcpProjection, renderE2EPageHtml, renderE2ESlackBlocks } from "../e2e-presentation.js";
+import { renderE2EMcpProjection, renderE2EPageHtml, renderE2ESlackBlocks, renderE2ENotifierSlackBlocks } from "../e2e-presentation.js";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
 import { outcomeMetric } from "./admin-change-audit.js";
@@ -254,16 +255,16 @@ import { projectSetupTerminalAuthorityChecks } from "./project-setup-terminal-co
 import { verifyProjectSetupCapability } from "./project-setup-capability.js";
 import { issueProjectSetupCapability } from "./project-setup-capability.js";
 import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke.js";
-import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission } from "../e2e/feature-plan-intent.js";
+import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePlanReferenceError } from "../e2e/feature-plan-intent.js";
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
-import { createWorkflowE2EDisplayObject } from "./workflow-e2e-notifier-projection.js";
+import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
   type CallbackClaims, type OperationRecord,
 } from "./cancellation.js";
-import { aiToolTurn, completedTurn, developerFooter, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
+import { aiToolTurn, completedTurn, developerFooter, E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, type WorkflowE2EReadinessMarker, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../e2e/feature-plan-planning-context.js";
@@ -7049,6 +7050,50 @@ async function workflowE2EPresentation(
   const candidateResult = CandidateManifestSchema.safeParse(workflow?.candidate);
   if (workflow === undefined || progress?.required !== true
     || candidateResult.success !== true || candidateResult.data.digest !== workflow.candidate?.digest) return undefined;
+  if (task.closedAt !== undefined) {
+    const qualified = progress.qualifiedRound;
+    const failed = progress.failedRound;
+    const round = qualified ?? failed;
+    const roundMatchesClosedTask = round !== undefined && round.candidateDigest === candidateResult.data.digest
+      && round.roundId === progress.currentRoundId && round.groupRunIds.length === progress.currentGroupRunIds.length
+      && round.groupRunIds.every((runId, index) => runId === progress.currentGroupRunIds[index]);
+    let captured: Awaited<ReturnType<typeof readWorkflowE2ENotifierProjection>>;
+    if (roundMatchesClosedTask && round !== undefined && progress.displayRef !== undefined) {
+      captured = await readWorkflowE2ENotifierProjection({
+        ref: progress.displayRef, ownerKey: task.ownerKey, workspaceId: task.workspaceId,
+        current: { candidateDigest: round.candidateDigest, roundId: round.roundId, groupRunIds: [...round.groupRunIds],
+          admissionSha256: round.admissionSha256, evidenceSha256: round.evidenceSha256 },
+        readPrivateObject: async (key, maxBytes) => {
+          try {
+            const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: key })) as { ContentLength?: number; Body?: { transformToByteArray(): Promise<Uint8Array> } };
+            if (!Number.isSafeInteger(object.ContentLength) || object.ContentLength! > maxBytes) return undefined;
+            const bytes = await object.Body?.transformToByteArray();
+            return bytes !== undefined && bytes.byteLength === object.ContentLength && bytes.byteLength <= maxBytes ? bytes : undefined;
+          } catch { return undefined; }
+        },
+      });
+    }
+    const current = E2ESharedViewSchema.parse({ schemaVersion: 1,
+      setup: { status: "unavailable", selectedTargetIds: [], executionPlanDigest: null, blockingInputIds: [], mockSubstitutableInputIds: [] },
+      e2e: { status: "UNKNOWN", label: "Current eligibility unavailable: task closed.", executionPlanDigest: null,
+        expectedGroups: 0, receivedGroups: 0, executedCases: 0, qualifiedCriteria: 0, requiredCriteria: 0,
+        unavailableCriteria: 0, optionalUnavailableCriteria: 0, mockedComponentIds: [], observedMockedComponentIds: [],
+        unexercisedBehaviors: [], policyPresence: "absent", workflowPhase: "closed", requiredUnexercisedCriteriaIds: [] }, actions: [] });
+    const historyMatchesCloseTime = captured !== undefined && Date.parse(captured.capturedAt) <= Date.parse(task.closedAt);
+    const history = historyMatchesCloseTime && captured !== undefined && (qualified !== undefined ? captured.view.e2e.status === "PASS"
+      : failed !== undefined && captured.view.e2e.status === "FAILED") ? captured : undefined;
+    const historicalHtml = history === undefined ? "" : `<section aria-labelledby="e2e-historical-${history.roundId}"><h2 id="e2e-historical-${history.roundId}">Recorded historical E2E result</h2><p>Recorded ${history.view.e2e.status} at ${history.capturedAt}; this is not current eligibility.</p>${renderE2EPageHtml(history.view).replaceAll("e2e-summary", `e2e-historical-summary-${history.roundId}`)}</section>`;
+    const scope = history === undefined
+      ? "Current eligibility unavailable: task closed. No verified historical E2E display is available."
+      : `Current eligibility unavailable: task closed. Recorded historical ${history.view.e2e.status} at ${history.capturedAt}, candidate ${history.candidateDigest}, round ${history.roundId}; groups ${history.view.e2e.receivedGroups}/${history.view.e2e.expectedGroups}, cases ${history.view.e2e.executedCases}, criteria ${history.view.e2e.qualifiedCriteria}/${history.view.e2e.requiredCriteria}; these counts are historical only.`;
+    const currentHtml = `<section aria-labelledby="e2e-current-eligibility"><h2 id="e2e-current-eligibility">Current E2E eligibility</h2><p>Unavailable because the task is closed. No current run counts are available.</p></section>`;
+    const currentSlack = { type: "section", text: { type: "mrkdwn", text: "*Current E2E eligibility: UNKNOWN*\nTask closed. No current run counts are available." } };
+    return { shared: current,
+      slackBlocks: [currentSlack, ...(history === undefined ? [] : renderE2ENotifierSlackBlocks(history.view,
+        { candidateDigest: history.candidateDigest, roundId: history.roundId, capturedAt: history.capturedAt }))].slice(0, 16),
+      pageHtml: `${currentHtml}${historicalHtml}`.slice(0, 65_536),
+      mcp: { ...renderE2EMcpProjection(current), scope: `${renderE2EMcpProjection(current).scope} ${scope}`.slice(0, 2_000) } };
+  }
   const failedRound = progress.failedRound;
   const staleFailure = workflow.stage === "IMPLEMENT" && failedRound?.status === "FAILED"
     && failedRound.candidateDigest === candidateResult.data.digest;
@@ -8947,6 +8992,55 @@ async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies
  */
 type AccessPausedWorkflowDispatch = WorkflowDispatchRecord & { taskAccessPausedAt?: string };
 
+/** A deterministic source-reference mismatch returns the same owner-approved candidate to plan review. */
+async function returnWorkflowToCorrectE2EPlan(dependencies: AwsBrokerDependencies, item: WorkflowDispatchRecord,
+  error: E2EPortablePlanReferenceError): Promise<boolean> {
+  if (item.kind !== "CHECKS") return false;
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
+  const workflow = task?.workflow;
+  const artifact = workflow?.artifacts.filter((entry) => entry.type === "plan").at(-1);
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || artifact === undefined
+    || workflow.revision !== item.workflowRevision || workflow.stage !== "VERIFY" || workflow.state !== "WAITING"
+    || workflow.e2e?.required !== true || workflow.candidate?.digest !== item.candidateDigest) return false;
+  const {
+    e2e: _e2e, verification: _verification, reviews: _reviews, acceptedFindings: _acceptedFindings,
+    regressedChecks: _regressedChecks, workflowDependenciesApproval: _workflowDependenciesApproval,
+    workflowDependenciesOperationId: _workflowDependenciesOperationId,
+    workflowDependenciesProgress: _workflowDependenciesProgress, feedbackDispatchApproval: _feedbackDispatchApproval,
+    outcome: _outcome, ...retained
+  } = workflow;
+  void _e2e; void _verification; void _reviews; void _acceptedFindings; void _regressedChecks;
+  void _workflowDependenciesApproval; void _workflowDependenciesOperationId; void _workflowDependenciesProgress;
+  void _feedbackDispatchApproval; void _outcome;
+  const now = new Date().toISOString();
+  const next = WorkflowSnapshotSchema.parse({ ...retained, revision: workflow.revision + 1, stage: "PLAN_REVIEW", state: "WAITING",
+    updatedAt: now, blockReason: E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON });
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Delete: { TableName: dependencies.tableName, Key: { pk: item.pk, sk: item.sk },
+        ConditionExpression: "attribute_exists(pk) AND workflowRevision = :revision AND #kind = :checks AND candidateDigest = :candidate",
+        ExpressionAttributeNames: { "#kind": "kind" }, ExpressionAttributeValues: {
+          ":revision": item.workflowRevision, ":checks": "CHECKS", ":candidate": item.candidateDigest,
+        } } },
+      { Update: { TableName: dependencies.tableName, Key: taskKey(item.taskId),
+        UpdateExpression: "SET workflow = :workflow, e2ePlanCorrection = :correction, updatedAt = :now",
+        ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.e2e.required = :required AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
+        ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
+          ":workflow": next, ":correction": { artifactId: artifact.id, artifactSha256: artifact.sha256,
+            candidateDigest: item.candidateDigest, reasonCode: error.reasonCode, requiredE2E: true }, ":now": now,
+          ":revision": item.workflowRevision, ":verify": "VERIFY", ":waiting": "WAITING", ":required": true,
+          ":candidate": item.candidateDigest,
+        } } },
+    ] }));
+    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_plan_reference_rejected", taskId: item.taskId,
+      reasonCode: error.reasonCode, artifactId: artifact.id }));
+    return true;
+  } catch (caught) {
+    if (isConditional(caught)) return false;
+    throw caught;
+  }
+}
+
 type WorkflowE2EReadinessResult = { status: "WAITING" } | { status: "STALE" } | { status: "READY"; task: DeveloperTaskRecord };
 
 async function blockWorkflowE2EReadiness(dependencies: AwsBrokerDependencies, item: WorkflowDispatchRecord, reason: string): Promise<void> {
@@ -9183,6 +9277,16 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     await remove();
     return outcome === "STALE" ? "STALE" : "DISPATCHED";
   } catch (error) {
+    if (error instanceof E2EPortablePlanReferenceError) {
+      try {
+        if (await returnWorkflowToCorrectE2EPlan(dependencies, item, error)) return "STALE";
+      } catch (recoveryError) {
+        console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_plan_correction_failed", taskId: item.taskId,
+          error: recoveryError instanceof Error ? recoveryError.name : "unknown" }));
+      }
+      await recordWorkflowDispatchFailure(dependencies, item);
+      return "RETRY";
+    }
     // PEOPLE-backed work with no current freshly qualified owner stays parked on its durable
     // dispatch row. It does not consume the bounded infrastructure failure budget; only a later
     // explicit owner action can start or redrive work.
@@ -10164,7 +10268,7 @@ async function storePlanAnswer(
   const prefix = `private/${task.ownerKey}/${task.workspaceId}/plan-documents/${artifactId}`;
   const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
   await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: `${prefix}.json`, Body: canonical, ContentType: "application/json" }));
-  const next = submitWorkflowArtifact(workflow, {
+  let next = submitWorkflowArtifact(workflow, {
     expectedRevision: workflow.revision,
     now,
     ...(parsed.proposal === undefined ? {} : { proposal: parsed.proposal }),
@@ -10174,6 +10278,11 @@ async function storePlanAnswer(
       format: "structured",
     },
   });
+  if (next.blockReason === E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON) {
+    const { blockReason: _priorE2EPlanReferenceFailure, ...withoutPriorPlanFailure } = next;
+    void _priorE2EPlanReferenceFailure;
+    next = WorkflowSnapshotSchema.parse(withoutPriorPlanFailure);
+  }
   const replies = plannerRepliesFor(content, plan, step, task, { artifactId, version: next.artifacts.at(-1)?.version ?? 1 });
   const withReplies = replies === undefined ? {} : { plannerReplies: replies };
   if (!planCitesCode(plan)) return { next, planUnreadable: null, ...withReplies };

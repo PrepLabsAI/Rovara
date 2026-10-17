@@ -32,6 +32,8 @@ import {
 import type { AuthenticatedIdentity } from "../auth.js";
 import type { ShareDecision } from "./share.js";
 
+export const E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON = "The approved feature E2E plan references a source operation that does not match the protected candidate. Request changes and submit a corrected E2E plan before coding resumes.";
+
 export interface CounterKey { pk: string; sk: string }
 export interface WorkspaceCharge { member: CounterKey; organization: CounterKey }
 
@@ -77,6 +79,8 @@ export interface DeveloperTaskRecord {
   preparedBase?: WorkflowReviewBase;
   /** Spec 061: why the planner's last answer could not be read, kept for Retry planning; `workflowRevision` is the blocked step's revision. */
   planUnreadable?: { workflowRevision: number; errors: string[] };
+  /** Broker-private fence requiring a new E2E plan after the protected source disproved an approved plan reference. */
+  e2ePlanCorrection?: { artifactId: string; artifactSha256: string; candidateDigest: string; reasonCode: string; requiredE2E: true };
   /** Gap 2: how many thread replies are saved for the task (NOTE# items). */
   threadNoteCount?: number;
   /** Gap 2: the newest saved reply's receivedAt already given to a planning or coding step; each reply is given once. */

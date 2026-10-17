@@ -13,6 +13,19 @@ import { admitE2EFeatureVerifier, E2E_FEATURE_PROCESS_RESPONSE_SCOPE, type E2EFe
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 
+export type E2EPortablePlanReferenceFailure = "operation-inventory" | "target-ownership" | "module-path" | "callable-export" | "scenario-binding";
+
+/** A deterministic owner-plan reference mismatch against the candidate's protected source inventory. */
+export class E2EPortablePlanReferenceError extends Error {
+  readonly reasonCode: E2EPortablePlanReferenceFailure;
+
+  constructor(reasonCode: E2EPortablePlanReferenceFailure, message: string) {
+    super(message);
+    this.name = "E2EPortablePlanReferenceError";
+    this.reasonCode = reasonCode;
+  }
+}
+
 function deriveApprovedMockSelections(input: { intent: E2EFeaturePlanIntent; snapshot: E2ESourceSnapshot;
   inspection: ReturnType<typeof inspectE2ERepository>["inspection"] }): Array<{ componentId: string; requestedTargetId: string; kind: "api";
   sourceRefs: Array<{ path: string; sha256: string }>; fixture: unknown }> {
@@ -54,11 +67,11 @@ export function deriveE2EFeaturePortableApprovalBinding(input: {
   for (const proposed of intent.portableOperationRefs ?? []) {
     const sourceOperation = discovered.portableOperations.find((item) => item.operationId === proposed.operationId);
     if (!sourceOperation || sourceOperation.applicationId !== proposed.applicationId || sourceOperation.exportName !== proposed.packageExportSubpath) {
-      throw new Error("Owner-approved portable operation reference does not match the protected package export inventory");
+      throw new E2EPortablePlanReferenceError("operation-inventory", "Owner-approved portable operation reference does not match the protected package export inventory");
     }
     if (proposed.requestedTargetIds.some((targetId) => !sourceOperation.targetIds.includes(targetId)
       || targets.get(targetId)?.applicationId !== proposed.applicationId)) {
-      throw new Error("Owner-approved portable operation target is not owned by its protected source application");
+      throw new E2EPortablePlanReferenceError("target-ownership", "Owner-approved portable operation target is not owned by its protected source application");
     }
     const manifestDirectory = sourceOperation.manifestPath.includes("/")
       ? sourceOperation.manifestPath.slice(0, sourceOperation.manifestPath.lastIndexOf("/")) : ".";
@@ -66,11 +79,11 @@ export function deriveE2EFeaturePortableApprovalBinding(input: {
       .find((source) => source !== undefined);
     if (!moduleSource) throw new Error("protected portable operation module bytes are missing");
     const expectedModuleSpecifier = manifestDirectory === "." ? `./${moduleSource.path}` : `./${moduleSource.path.slice(manifestDirectory.length + 1)}`;
-    if (proposed.moduleSpecifier !== expectedModuleSpecifier) throw new Error("Owner-approved module reference differs from the protected package module path");
+    if (proposed.moduleSpecifier !== expectedModuleSpecifier) throw new E2EPortablePlanReferenceError("module-path", "Owner-approved module reference differs from the protected package module path");
     const moduleInspection = inspectE2EPortableSource(Buffer.from(moduleSource.bytes).toString("utf8"), moduleSource.path);
     const exportName = proposed.callableSelector.kind === "default" ? "default" : proposed.callableSelector.exportName;
     if (!moduleInspection.parseable || moduleInspection.exports.find((item) => item.name === exportName)?.kind !== "callable") {
-      throw new Error("Owner-approved callable selector is not an AST-verified callable export in the protected module");
+      throw new E2EPortablePlanReferenceError("callable-export", "Owner-approved callable selector is not an AST-verified callable export in the protected module");
     }
     const body = {
       operationId: sourceOperation.operationId, applicationId: sourceOperation.applicationId, purpose: "feature-invocation" as const,
@@ -107,7 +120,7 @@ export function deriveE2EFeaturePortableApprovalBinding(input: {
     if (step?.kind !== "invoke-contract") continue;
     const registration = operationById.get(step.operationId);
     if (!registration || scenario.requestedTargetIds.some((targetId) => !(intent.portableOperationRefs ?? []).find((ref) => ref.operationId === step.operationId)?.requestedTargetIds.includes(targetId))) {
-      throw new Error("feature invocation scenario is not covered by an approved source-bound operation reference");
+      throw new E2EPortablePlanReferenceError("scenario-binding", "feature invocation scenario is not covered by an approved source-bound operation reference");
     }
     scenarioRegistrations.push({ scenarioId: scenario.scenarioId, registrationKey: e2ePortableRegistrationKey(registration) });
   }

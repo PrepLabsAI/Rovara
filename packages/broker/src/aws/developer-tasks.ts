@@ -153,6 +153,7 @@ import {
   byCreated,
   deriveTaskStatus,
   developerTaskIdentity,
+  E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON,
   inertName,
   partyOfTask,
   recentTaskEvents,
@@ -1838,6 +1839,18 @@ export async function decideTaskWorkflow(
   const answered = (request.answers?.length ?? 0) > 0;
   // The decided document, checked against its digest: its decisions check the answers, and the next step reads it.
   const loaded = decided !== undefined && (answered || (prior === undefined && request.decision !== "REJECT")) ? await loadWorkflowDocument(read, decided, {}) : undefined;
+  const correction = task.e2ePlanCorrection;
+  if (request.decision === "APPROVE" && documentType === "plan" && correction !== undefined) {
+    if (workflow.candidate?.digest !== correction.candidateDigest) {
+      throw agentXError("CONFIG_INVALID", "the candidate changed after this plan's source reference was rejected; refresh the plan before approval");
+    }
+    if (decided?.sha256 === correction.artifactSha256) {
+      throw agentXError("CONFIG_INVALID", "this plan was returned because its E2E source reference failed protected-candidate validation; request changes and submit a corrected plan before approval");
+    }
+    if (correction.requiredE2E && !(loaded?.format === "structured" && loaded.plan.e2e !== undefined)) {
+      throw agentXError("CONFIG_INVALID", "the corrected plan must retain the required feature E2E intent before approval");
+    }
+  }
   const decisions = loaded?.format === "structured"
     ? loaded.plan.decisions.map((decision) => ({ id: decision.id, optionIds: decision.options.map((option) => option.id), recommended: decision.recommended }))
     : undefined;
@@ -1995,13 +2008,18 @@ export async function decideTaskWorkflow(
       const fed = fedThroughUpdate(notes);
       return deps.actions.acceptTask(developerTaskIdentity(current), current.workspaceId, { requestId: request.requestId, conversationId: current.conversationId, prompt: basePrompt + notes.suffix }, (operation) => {
         const workflowToStore = workflowWithCurrentGraphOperation(next, workflowDependencies === undefined ? undefined : operation.id, workflowDependencies);
+        const correctedPlan = correction !== undefined && request.decision === "APPROVE" && documentType === "plan"
+          && currentPlan.sha256 !== correction.artifactSha256 && workflow.candidate?.digest === correction.candidateDigest
+          && loaded?.format === "structured" && loaded.plan.e2e !== undefined;
         return [
           { Update: {
             TableName: deps.tableName, Key: taskKey(taskId),
-            UpdateExpression: `SET workflow = :workflow, updatedAt = :now${fed.clause}`,
-            ConditionExpression: `workflow.revision = :revision AND workflow.#state = :waiting${fed.condition}`,
+            UpdateExpression: `SET workflow = :workflow, updatedAt = :now${fed.clause}${correctedPlan ? " REMOVE e2ePlanCorrection" : ""}`,
+            ConditionExpression: `workflow.revision = :revision AND workflow.#state = :waiting${fed.condition}${correctedPlan ? " AND e2ePlanCorrection.artifactId = :correctionArtifact AND e2ePlanCorrection.artifactSha256 = :correctionSha AND e2ePlanCorrection.candidateDigest = :correctionCandidate" : ""}`,
             ExpressionAttributeNames: { "#state": "state" },
-            ExpressionAttributeValues: { ":workflow": workflowToStore, ":now": receivedAt, ":revision": workflow.revision, ":waiting": "WAITING", ...fed.values },
+            ExpressionAttributeValues: { ":workflow": workflowToStore, ":now": receivedAt, ":revision": workflow.revision, ":waiting": "WAITING", ...fed.values,
+              ...(correctedPlan ? { ":correctionArtifact": correction.artifactId, ":correctionSha": correction.artifactSha256,
+                ":correctionCandidate": correction.candidateDigest } : {}) },
           } },
           putNew(turnTable(deps), aiToolTurn({
             party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
@@ -3028,9 +3046,13 @@ function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: boolean, 
     case "PLAN/READY": case "PLAN/RUNNING": return { status: `Writing the ${name}`, nextStep: `It will be posted ${inSlack} for approval; no code changes until it's approved.` };
     case "PLAN/BLOCKED": return { status: `Stopped while writing the ${name}`, nextStep: `Retry planning or close the task ${inSlack}.` };
     // A teammate reading the page is not the one who approves.
-    case "PLAN_REVIEW/WAITING": return owner
-      ? { status: "Waiting for your approval", nextStep: `Approve or request changes ${inSlack}.` }
-      : { status: "Waiting for the owner's approval", nextStep: `The task owner approves or requests changes ${inSlack}.` };
+    case "PLAN_REVIEW/WAITING":
+      if (workflow.blockReason === E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON) return owner
+        ? { status: "The E2E plan needs correction", nextStep: `Request changes to submit a corrected E2E plan, or close the task ${inSlack}.` }
+        : { status: "The E2E plan needs correction", nextStep: `The task owner must request changes and submit a corrected E2E plan, or close the task ${inSlack}.` };
+      return owner
+        ? { status: "Waiting for your approval", nextStep: `Approve or request changes ${inSlack}.` }
+        : { status: "Waiting for the owner's approval", nextStep: `The task owner approves or requests changes ${inSlack}.` };
     case "PLAN_REVIEW/BLOCKED": return { status: `Stopped before approval of the ${name}`, nextStep: `Close the task ${inSlack} and start again.` };
     case "IMPLEMENT/READY": case "IMPLEMENT/RUNNING": return { status: "Writing the code", nextStep: "The checks and reviews run when coding finishes." };
     case "IMPLEMENT/BLOCKED": return workflow.blockReason === WORKFLOW_BLOCK_REASONS.fixChangedNothing
