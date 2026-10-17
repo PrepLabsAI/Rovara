@@ -157,7 +157,7 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
  * "publish.reportChecks". A review's workflowReviewChecks goes only to one whose /ping lists "task.workflowReviewChecks";
  * an older one reviews without being told which checks ran, and its workflowReviewPlan goes only to one whose /ping lists
  * "task.workflowReviewPlan"; an older one reviews without seeing the approved plan, and its workflowReviewFeedback goes only to one whose
- * /ping lists "task.workflowReviewFeedback"; an older one judges a feedback fix against the plan alone. A planning run's workflowPhase and planFormat go only to one whose /ping lists
+ * /ping lists "task.workflowReviewFeedback"; an older one judges a feedback fix against the plan alone. The retry note goes only to one whose /ping lists "task.workflowReviewNote"; older workers review without it. A planning run's workflowPhase and planFormat go only to one whose /ping lists
  * "task.structuredPlans"; an older one plans without checking the answer's format. A planning prompt asks for anchor lines on
  * code citations only on one whose /ping lists "task.codeAnchors"; for an older one that text is left out of the prompt. The invoke token signs the operation, not the payload, so
  * dropping a field leaves it valid. A ping that fails fails the attempt: the worker journals a hash of
@@ -172,7 +172,7 @@ async function forWorker(
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
   const carriesReviewChecks = invocation.kind === "task" && (invocation.payload.workflowReviewChecks !== undefined || invocation.payload.workflowReviewPlan !== undefined
-    || invocation.payload.workflowReviewFeedback !== undefined);
+    || invocation.payload.workflowReviewFeedback !== undefined || invocation.payload.workflowReviewNote !== undefined);
   const carriesWorkflowMode = invocation.kind === "task" && invocation.payload.workflowMode !== undefined;
   const carriesFeedbackReview = invocation.kind === "task" && invocation.payload.workflowMode === "FEEDBACK_REVIEW";
   const carriesFeedbackApproval = invocation.kind === "task" && invocation.payload.workflowFeedbackApproval !== undefined;
@@ -326,8 +326,18 @@ async function forWorker(
       workspaceId: invocation.workspaceId,
     }));
   }
-  const sent = withoutCodeAnchors(withFeedback, features);
-  if (sent !== withFeedback) {
+  const withNote = withoutReviewNote(withFeedback, features);
+  if (withNote !== withFeedback) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.review_note_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
+  const sent = withoutCodeAnchors(withNote, features);
+  if (sent !== withNote) {
     console.log(JSON.stringify({
       component: "dispatcher",
       event: "dispatch.code_anchors_omitted",
@@ -384,6 +394,14 @@ function withoutReviewFeedback(invocation: WorkerInvocation, features: readonly 
   if (invocation.kind !== "task" || invocation.payload.workflowReviewFeedback === undefined || features.includes("task.workflowReviewFeedback")) return invocation;
   const payload = { ...invocation.payload };
   delete payload.workflowReviewFeedback;
+  return { ...invocation, payload };
+}
+
+/** A review without the owner's retry note for a worker that does not parse it; its review remains unchanged. */
+function withoutReviewNote(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || invocation.payload.workflowReviewNote === undefined || features.includes("task.workflowReviewNote")) return invocation;
+  const payload = { ...invocation.payload };
+  delete payload.workflowReviewNote;
   return { ...invocation, payload };
 }
 

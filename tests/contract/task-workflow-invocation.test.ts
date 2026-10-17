@@ -88,6 +88,18 @@ describe("workflow-mode worker invocation", () => {
     expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowReviewFeedback");
   });
 
+  it("carries the exact review retry note only on review operations and bounds it to the owner-note limit", () => {
+    const reviewNote = (workflowReviewNote: unknown, workflowMode = "REVIEW") => WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode, workflowReviewNote } }).success;
+    expect(reviewNote("Check the changed timeout path." )).toBe(true);
+    expect(reviewNote("x".repeat(65_536))).toBe(true);
+    expect(reviewNote("é".repeat(32_769))).toBe(false);
+    expect(reviewNote("x".repeat(65_537))).toBe(false);
+    expect(reviewNote("")).toBe(false);
+    expect(reviewNote("Check the changed timeout path.", "IMPLEMENT")).toBe(false);
+    expect(WorkerInvocationSchema.parse(base).payload).not.toHaveProperty("workflowReviewNote");
+    expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowReviewNote");
+  });
+
   it("carries the reviewed tree for a pull request update, only as 40 hex on a maintain append", () => {
     const maintain = {
       ...base,

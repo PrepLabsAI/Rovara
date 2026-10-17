@@ -4,6 +4,7 @@ import { ProjectCommandSchema, StoredProjectDefinitionSchema } from "./project.j
 import { ModelSelectionSchema, type ModelSelection } from "./models.js";
 import { WorkflowDependencyInvocationSchema } from "./workflow-dependencies.js";
 import { E2EFeaturePlanIntentSchema, E2EWorkflowAdmissionRefSchema } from "./e2e.js";
+import { DEVELOPER_INSTRUCTIONS_MAX_BYTES } from "./developer-tasks.js";
 
 export const AGENTX_PROTOCOL_VERSION = 1 as const;
 
@@ -14,7 +15,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -70,6 +71,10 @@ export const WorkflowReviewFeedbackSchema = z.array(z.object({
 }).strict()).min(1).max(WORKFLOW_REVIEW_FEEDBACK_MAX)
   .refine((value) => new TextEncoder().encode(JSON.stringify(value)).byteLength <= WORKFLOW_REVIEW_FEEDBACK_MAX_BYTES, `approved feedback exceeds ${WORKFLOW_REVIEW_FEEDBACK_MAX_BYTES} UTF-8 bytes`);
 export type WorkflowReviewFeedback = z.infer<typeof WorkflowReviewFeedbackSchema>;
+
+/** The owner's review retry note, bounded like the canonical task instruction and shown only as untrusted reviewer context. */
+export const WorkflowReviewNoteSchema = z.string().min(1).refine((value) => new TextEncoder().encode(value).byteLength <= DEVELOPER_INSTRUCTIONS_MAX_BYTES, `review note exceeds ${DEVELOPER_INSTRUCTIONS_MAX_BYTES} UTF-8 bytes`);
+export type WorkflowReviewNote = z.infer<typeof WorkflowReviewNoteSchema>;
 
 const InvocationBaseSchema = z.object({
   protocolVersion: z.literal(AGENTX_PROTOCOL_VERSION),
@@ -150,6 +155,8 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * the review without it.
          */
         workflowReviewFeedback: WorkflowReviewFeedbackSchema.optional(),
+        /** The exact owner retry note, shown as untrusted context. Older workers omit it and review as before. */
+        workflowReviewNote: WorkflowReviewNoteSchema.optional(),
         model: ModelSelectionSchema.optional(),
         /**
          * Sign in with ChatGPT (#341): the task runs on its owner's ChatGPT plan, with this model, and the worker asks
@@ -183,6 +190,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         }
         if (payload.workflowReviewFeedback !== undefined && payload.workflowMode !== "REVIEW") {
           context.addIssue({ code: "custom", path: ["workflowReviewFeedback"], message: "the approved feedback reviewers are shown requires review mode" });
+        }
+        if (payload.workflowReviewNote !== undefined && payload.workflowMode !== "REVIEW") {
+          context.addIssue({ code: "custom", path: ["workflowReviewNote"], message: "the retry note reviewers are shown requires review mode" });
         }
         if (payload.workflowFeedbackApproval !== undefined && payload.workflowMode !== "IMPLEMENT") {
           context.addIssue({ code: "custom", path: ["workflowFeedbackApproval"], message: "feedback approval binding requires implementation mode" });
