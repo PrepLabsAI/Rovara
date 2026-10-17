@@ -2,7 +2,7 @@ import {
   E2EApiMockFixtureSchema, canonicalJson, createE2EOpenApiFixtureDescriptor, inspectE2EPortableSource, inspectE2ERepository, redactSecrets,
   verifyE2ESourceSnapshot, type E2EAppRecipe, type E2EPolicy, type E2ESourceSnapshot,
 } from "@agentx/contracts";
-import { e2eApplicationMetadataSourceRefs } from "./application-plan-binding.js";
+import { e2eApplicationMetadataSourceRefs } from "@agentx/contracts";
 import * as ts from "typescript";
 
 const MAX_PLANNING_CONTEXT_BYTES = 12_000;
@@ -22,6 +22,7 @@ export type FeatureE2EPlanningContext = {
   applicationRefs?: Array<{ applicationId: string; kind: string; sourceRefs: Array<{ path: string; sha256: string }>; recipe: E2EAppRecipe | null }>;
   runtimeRefs?: Array<{ targetId: string; applicationId: string; recipeDigest: string | null; sourceRefs: Array<{ path: string; sha256: string }>;
     runtimeProfileId: string; accountProfileId: string }>;
+  unavailableTargetRefs?: Array<{ targetId: string; applicationId: string; accountProfileId: string; sourceRefs: Array<{ path: string; sha256: string }> }>;
   portableOperations: Array<{ operationId: string; applicationId: string; requestedTargetIds: string[]; packageExportSubpath: string;
     moduleSpecifier: string; callableSelectors: Array<{ selector: { kind: "default" } | { kind: "named"; exportName: string }; firstInputParameter?: string }>;
     sourceRefs: Array<{ path: string; sha256: string }> }>;
@@ -114,6 +115,13 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
         applicationId: target.applicationId, recipeDigest: applicationRef.recipe?.recipeDigest ?? null,
         sourceRefs: applicationRef.sourceRefs, runtimeProfileId: discoveredTarget.runtimeProfileId, accountProfileId: target.accountProfileId }];
     });
+    const unavailableTargetRefs = targets.flatMap((target) => {
+      const discoveredTarget = discovered.inspection.proposedTargets.find((item) => item.targetId === target.targetId);
+      const applicationRef = applicationRefs.find((item) => item.applicationId === target.applicationId);
+      return discoveredTarget === undefined || applicationRef === undefined || (applicationRef.recipe !== null
+        && !discoveredTarget.runtimeProfileId.endsWith("-phase-unavailable") && discoveredTarget.runtimeProfileId !== "no-device-selected")
+        ? [] : [{ targetId: target.targetId, applicationId: target.applicationId, accountProfileId: target.accountProfileId, sourceRefs: applicationRef.sourceRefs }];
+    });
     const portableOperations = discovered.portableOperations.flatMap((operation) => {
       const requestedTargetIds = operation.targetIds.filter((targetId) => selectedTargetIds.has(targetId));
       if (requestedTargetIds.length === 0) return [];
@@ -180,7 +188,8 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       status: "available", source: { origin: sourceOrigin, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha,
         candidateDigest: snapshot.candidate.digest, preparedCommitStatus: preparedCommitSha === null ? "UNKNOWN" : "MATCHED", preparedCommitSha,
         currentCheckoutUnverified: identity.origin === "approved-setup" },
-      baselineScenarioIds: policy.baselineScenarioIds, targets, applicationRefs, runtimeRefs, portableOperations, mockFixtures: mockFixtures.slice(0, 32), accountContextRefs,
+      baselineScenarioIds: policy.baselineScenarioIds, targets, applicationRefs, runtimeRefs, unavailableTargetRefs,
+      portableOperations, mockFixtures: mockFixtures.slice(0, 32), accountContextRefs,
     };
     if (Buffer.byteLength(canonicalJson(context), "utf8") > MAX_PLANNING_CONTEXT_BYTES) {
       return { status: "unknown", reason: "source-backed planning references exceed the bounded prompt context" };

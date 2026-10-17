@@ -12,3 +12,7 @@ export function e2eCaseIdentityDigest(input: E2ECaseIdentityInput): string {
 }
 export function e2eCaseIdFromIdentity(input: E2ECaseIdentityInput): string { return `case-${e2eCaseIdentityDigest(input)}`; }
 export function e2eUpstreamTestIdFromIdentity(input: E2ECaseIdentityInput): string { return `.agentx/e2e/generated-contract.test.ts::case-${e2eCaseIdentityDigest(input)}`; }
+export const APPLICATION_E2E_TEST_PATH = ".agentx/e2e/generated-application.test.ts" as const;
+export function e2eApplicationUpstreamTestIdFromIdentity(input: E2ECaseIdentityInput): string {
+  return `${APPLICATION_E2E_TEST_PATH}::case-${e2eCaseIdentityDigest(input)}`;
+}

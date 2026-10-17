@@ -7,61 +7,11 @@ import {
   type E2EAppBuildManifest, type E2EAppRecipe, type E2ESetupProposal, type SourceRef,
   type E2ESourceSnapshot,
 } from "@agentx/contracts";
+import { e2eApplicationMetadataSourcePaths, e2eApplicationMetadataSourceRefs } from "@agentx/contracts";
+export { e2eApplicationMetadataSourceRefs } from "@agentx/contracts";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const dependencyLockfileName = /^(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lock(?:b)?|gradle\.lockfile|packages\.lock\.json|Podfile\.lock|Package\.resolved|Cargo\.lock|Gemfile\.lock|composer\.lock|poetry\.lock|Pipfile\.lock|uv\.lock|go\.sum)$/i;
-const applicationIdentityName = /(?:^|\/)(?:AndroidManifest\.xml|Info\.plist|[^/]+\.xcodeproj\/project\.pbxproj|[^/]+\.xcworkspace\/contents\.xcworkspacedata|[^/]+\.csproj|[^/]+\.sln|CMakeLists\.txt|meson\.build)$/i;
-const buildMetadataName = /(?:^|\/)(?:build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|gradle\.properties|Podfile|project\.yml|Package\.swift|Cargo\.toml|go\.mod)$/i;
-
-function sourceRef(snapshot: E2ESourceSnapshot, path: string): SourceRef {
-  const source = snapshot.sources.find((item) => item.path === path && item.kind === "blob");
-  if (!source) throw new Error(`selected application metadata source is missing: ${path}`);
-  return { path: source.path, sha256: source.sha256 };
-}
-
-function appMetadataPaths(appSourcePaths: readonly string[], sourcePaths: readonly string[], applicationId: string): string[] {
-  const packagePaths = appSourcePaths.filter((path) => /(^|\/)package\.json$/i.test(path));
-  if (packagePaths.length > 1) throw new Error(`application ${applicationId} has ambiguous source-owned package identity`);
-  const packagePath = packagePaths[0];
-  const identityPaths = appSourcePaths.filter((path) => applicationIdentityName.test(path));
-  if (packagePath === undefined && identityPaths.length === 0) throw new Error(`application ${applicationId} has no source-owned package or native project identity metadata`);
-  const appDirectory = packagePath === undefined ? undefined : packagePath.includes("/") ? packagePath.slice(0, packagePath.lastIndexOf("/")) : ".";
-  const nativeRoots = identityPaths.map((path) => {
-    const androidProject = /^(.*?)(?:\/src\/main\/)AndroidManifest\.xml$/i.exec(path);
-    if (androidProject) return androidProject[1] || ".";
-    const projectMatch = /^(.*?)(?:\/[^/]+\.xcodeproj)\/project\.pbxproj$/i.exec(path);
-    if (projectMatch) return projectMatch[1] || ".";
-    return path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".";
-  });
-  const withinRoot = (path: string, root: string) => root === "." || path === root || path.startsWith(root + "/");
-  const relatedSourcePaths = sourcePaths.filter((path) => {
-    const directory = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".";
-    const lockOrBuildMetadataApplies = (root: string) => directory === root
-      || (root !== "." && (directory === "." || root.startsWith(`${directory}/`)));
-    return (appDirectory !== undefined && lockOrBuildMetadataApplies(appDirectory))
-      || nativeRoots.some((root) => lockOrBuildMetadataApplies(root) || withinRoot(path, root));
-  });
-  const authorityPaths = relatedSourcePaths.filter((path) => dependencyLockfileName.test(path.slice(path.lastIndexOf("/") + 1))
-    || buildMetadataName.test(path) || applicationIdentityName.test(path));
-  const paths = [...new Set([...(packagePath === undefined ? [] : [packagePath]), ...identityPaths, ...authorityPaths])].sort((left, right) => left.localeCompare(right));
-  if (paths.length > 128) throw new Error(`application ${applicationId} metadata source references exceed the supported limit`);
-  return paths;
-}
-
-export function e2eApplicationMetadataSourceRefs(snapshot: E2ESourceSnapshot, applicationId: string, appSourcePaths: readonly string[]): SourceRef[] {
-  const paths = appMetadataPaths(appSourcePaths, snapshot.sources.map((source) => source.path), applicationId);
-  const packagePath = paths.find((path) => /(^|\/)package\.json$/i.test(path));
-  if (packagePath !== undefined) {
-    const packageBytes = snapshot.sources.find((item) => item.path === packagePath)?.bytes;
-    if (!packageBytes) throw new Error(`application ${applicationId} package identity source is missing`);
-    try {
-      const packageValue: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(packageBytes));
-      if (packageValue === null || typeof packageValue !== "object" || Array.isArray(packageValue)) throw new Error("invalid package JSON object");
-    } catch { throw new Error(`application ${applicationId} package identity is not valid UTF-8 JSON`); }
-  }
-  return paths.map((path) => sourceRef(snapshot, path));
-}
-
 function parsedRecipe(recipe: unknown, applicationId: string): E2EAppRecipe {
   if (recipe === null || recipe === undefined) throw new Error(`application ${applicationId} has no source-backed launch recipe`);
   const parsed = E2EAppRecipeSchema.parse(recipe);
@@ -118,7 +68,7 @@ export function deriveE2EApplicationApprovalBinding(input: {
     const priorRecipe = parsedRecipe(priorApplication.recipe, applicationId);
     if (canonicalJson(recipe) !== canonicalJson(priorRecipe)) throw new Error(`application ${applicationId} recipe metadata changed since setup approval; replan is required`);
     const selectedRefs = e2eApplicationMetadataSourceRefs(input.preparedSnapshot, applicationId, sourceApplication.sourcePaths);
-    const previousPaths = appMetadataPaths(priorApplication.sourcePaths, setupProposal.sources.map((ref) => ref.path), applicationId);
+    const previousPaths = e2eApplicationMetadataSourcePaths(priorApplication.sourcePaths, setupProposal.sources.map((ref) => ref.path), applicationId);
     if (canonicalJson(previousPaths) !== canonicalJson(selectedRefs.map((ref) => ref.path))) throw new Error(`application ${applicationId} identity or lockfile source set changed since setup approval`);
     const priorRefs = new Map(setupProposal.sources.map((ref) => [ref.path, ref.sha256]));
     if (selectedRefs.some((ref) => priorRefs.get(ref.path) !== ref.sha256)) throw new Error(`application ${applicationId} authority-bearing source metadata changed since setup approval`);

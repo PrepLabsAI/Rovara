@@ -39,6 +39,14 @@ export const E2EApplicationRuntimeRefSchema = z.object({
 });
 export type E2EApplicationRuntimeRef = z.infer<typeof E2EApplicationRuntimeRefSchema>;
 
+export const E2EUnavailableTargetRefSchema = z.object({
+  targetId: boundedId(80), applicationId: boundedId(120), accountProfileId: boundedId(120),
+  sourceRefs: z.array(SourceRefSchema).min(1).max(128),
+}).strict().superRefine((value, context) => {
+  if (!uniqueSourceRefs(value.sourceRefs)) context.addIssue({ code: "custom", path: ["sourceRefs"], message: "unavailable target source references must have unique paths" });
+});
+export type E2EUnavailableTargetRef = z.infer<typeof E2EUnavailableTargetRefSchema>;
+
 export const E2ERuntimeAccountRefSchema = z.object({
   applicationId: boundedId(120), profileId: boundedId(120), revision: z.number().int().positive().max(Number.MAX_SAFE_INTEGER), definitionDigest: digest,
 }).strict();
@@ -52,17 +60,31 @@ export const E2EApplicationPlanIntentSchema = z.object({
   accountContextRefs: v1IntentShape.accountContextRefs,
   scenarios: z.array(E2EScenarioSchema).min(1).max(32),
   semanticExportDeltas: v1IntentShape.semanticExportDeltas,
-  applicationRuntimeRefs: z.array(E2EApplicationRuntimeRefSchema).min(1).max(12),
+  applicationRuntimeRefs: z.array(E2EApplicationRuntimeRefSchema).max(12),
+  unavailableTargetRefs: z.array(E2EUnavailableTargetRefSchema).max(12).optional(),
   runtimeAccountRefs: z.array(E2ERuntimeAccountRefSchema).max(32),
 }).strict().superRefine((intent, context) => {
   const requested = new Set(intent.requestedTargetIds);
+  const unavailableRefs = intent.unavailableTargetRefs ?? [];
   if (requested.size !== intent.requestedTargetIds.length) context.addIssue({ code: "custom", path: ["requestedTargetIds"], message: "requested target IDs must be unique" });
   if (new Set(intent.scenarios.map((scenario) => scenario.scenarioId)).size !== intent.scenarios.length) context.addIssue({ code: "custom", path: ["scenarios"], message: "scenario IDs must be unique" });
   const refsByTarget = new Map(intent.applicationRuntimeRefs.map((ref) => [ref.targetId, ref]));
+  const unavailableByTarget = new Map(unavailableRefs.map((ref) => [ref.targetId, ref]));
   if (refsByTarget.size !== intent.applicationRuntimeRefs.length) context.addIssue({ code: "custom", path: ["applicationRuntimeRefs"], message: "there must be one application runtime reference per target" });
+  if (unavailableByTarget.size !== unavailableRefs.length) context.addIssue({ code: "custom", path: ["unavailableTargetRefs"], message: "there must be one unavailable reference per target" });
+  for (const ref of unavailableRefs) {
+    if (!requested.has(ref.targetId)) context.addIssue({ code: "custom", path: ["unavailableTargetRefs"], message: "unavailable reference must bind a requested target" });
+    if (refsByTarget.has(ref.targetId)) context.addIssue({ code: "custom", path: ["unavailableTargetRefs"], message: "unavailable and executable runtime references must be disjoint by target" });
+    const assigned = intent.scenarios.some((scenario) => scenario.requestedTargetIds.includes(ref.targetId)
+      && scenario.steps[0]?.kind !== "invoke-contract" && scenario.steps[0]?.kind !== "inspect-contract"
+      && scenario.accountProfileId === ref.accountProfileId
+      && intent.accountContextRefs.some((account) => account.applicationId === ref.applicationId && account.profileId === ref.accountProfileId));
+    if (!assigned) context.addIssue({ code: "custom", path: ["unavailableTargetRefs"], message: "unavailable reference must bind a nonportable scenario and its approved source account context" });
+  }
   for (const [index, ref] of intent.applicationRuntimeRefs.entries()) {
     if (!requested.has(ref.targetId)) context.addIssue({ code: "custom", path: ["applicationRuntimeRefs", index, "targetId"], message: "runtime reference must bind a requested target" });
     if (!intent.scenarios.some((scenario) => scenario.requestedTargetIds.includes(ref.targetId)
+      && scenario.steps[0]?.kind !== "invoke-contract" && scenario.steps[0]?.kind !== "inspect-contract"
       && scenario.accountProfileId === ref.accountProfileId
       && intent.accountContextRefs.some((account) => account.applicationId === ref.applicationId && account.profileId === ref.accountProfileId))) {
       context.addIssue({ code: "custom", path: ["applicationRuntimeRefs", index], message: "runtime reference must bind an assigned scenario and its approved account profile" });
@@ -74,9 +96,22 @@ export const E2EApplicationPlanIntentSchema = z.object({
     }
     for (const targetId of scenario.requestedTargetIds) {
       const assignment = refsByTarget.get(targetId);
-      if (!assignment || assignment.accountProfileId !== scenario.accountProfileId
-        || !intent.accountContextRefs.some((account) => account.applicationId === assignment.applicationId && account.profileId === scenario.accountProfileId)
-        || !intent.runtimeAccountRefs.some((account) => account.applicationId === assignment.applicationId && account.profileId === scenario.accountProfileId)) {
+      const firstStep = scenario.steps[0];
+      const portable = (firstStep?.kind === "invoke-contract" || firstStep?.kind === "inspect-contract")
+        && scenario.steps.length === 1
+        && (intent.portableOperationRefs ?? []).some((operation) => operation.operationId === firstStep.operationId
+          && operation.requestedTargetIds.includes(targetId)
+          && intent.accountContextRefs.some((account) => account.applicationId === operation.applicationId && account.profileId === scenario.accountProfileId));
+      const sourceAppId = assignment?.applicationId ?? unavailableByTarget.get(targetId)?.applicationId;
+      const accountContextExists = sourceAppId !== undefined
+        && intent.accountContextRefs.some((account) => account.applicationId === sourceAppId && account.profileId === scenario.accountProfileId);
+      const runtimeAccountExists = assignment !== undefined && assignment.accountProfileId === scenario.accountProfileId
+        && intent.runtimeAccountRefs.some((account) => account.applicationId === assignment.applicationId && account.profileId === scenario.accountProfileId);
+      const unavailable = unavailableByTarget.get(targetId);
+      const explicitlyUnavailable = unavailable !== undefined && unavailable.accountProfileId === scenario.accountProfileId
+        && accountContextExists && unavailable.applicationId === sourceAppId;
+      if ((!portable && (!assignment || !runtimeAccountExists || !accountContextExists))
+        && !explicitlyUnavailable) {
         context.addIssue({ code: "custom", path: ["scenarios"], message: `scenario account profile is not approved for target ${targetId}` });
       }
     }

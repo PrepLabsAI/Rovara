@@ -11,6 +11,9 @@ import { compileE2EScenarios } from "@agentx/verifier";
 import { E2ERunBindingSchema, E2ERoundSchema, type E2ERound } from "@agentx/contracts";
 import { admitE2EFeatureVerifier, E2E_FEATURE_PROCESS_RESPONSE_SCOPE, type E2EFeatureVerifierRecord } from "../aws/e2e-feature-verifier-catalog.js";
 
+export { deriveE2EApplicationFeatureExecutionSelection } from "./application-feature-plan-intent.js";
+export type { E2EApplicationFeatureSelectionInput } from "./application-feature-plan-intent.js";
+
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 
 export type E2EPortablePlanReferenceFailure = "operation-inventory" | "target-ownership" | "module-path" | "callable-export" | "scenario-binding";

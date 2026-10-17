@@ -110,6 +110,20 @@ describe("source-bound application approval and build identity", () => {
     expect(E2EFeaturePlanIntentAnySchema.safeParse({ ...portableIntent, schemaVersion: 1 }).success).toBe(true);
   });
 
+  it("represents a source-bound unavailable application obligation without inventing runtime authority", () => {
+    const source = snapshot("1".repeat(40), "2".repeat(40));
+    const intent = planIntent(source);
+    const runtimeRef = intent.applicationRuntimeRefs[0]!;
+    const unavailable = { ...intent, applicationRuntimeRefs: [], runtimeAccountRefs: [],
+      unavailableTargetRefs: [{ targetId: runtimeRef.targetId, applicationId: runtimeRef.applicationId,
+        accountProfileId: runtimeRef.accountProfileId, sourceRefs: runtimeRef.sourceRefs }] };
+    expect(E2EApplicationPlanIntentSchema.safeParse(unavailable).success).toBe(true);
+    expect(E2EApplicationPlanIntentSchema.safeParse({ ...unavailable,
+      unavailableTargetRefs: [{ ...unavailable.unavailableTargetRefs[0]!, runtimeProfileId: "invented" }] }).success).toBe(false);
+    expect(E2EApplicationPlanIntentSchema.safeParse({ ...unavailable,
+      applicationRuntimeRefs: [runtimeRef] }).success).toBe(false);
+  });
+
   it("retains approved setup lineage when only application implementation bytes change", () => {
     const setupSnapshot = snapshot("3".repeat(40), "4".repeat(40));
     const prepared = snapshot("5".repeat(40), "6".repeat(40), Buffer.from("export const version = 2;\n"));
