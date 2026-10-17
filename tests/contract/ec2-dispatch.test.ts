@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkerInvocationSchema, agentXError, taskGraphDigest, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
-import { createDispatcherHandler, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
+import { WorkerInvocationSchema, agentXError, taskGraphDigest, workflowPublicationContext, workflowPublicationContextDigest, workspaceSessionKey, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
+import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
 import { guardTaskDispatch as coreGuardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
 import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
@@ -44,6 +44,33 @@ function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}) {
     ...overrides,
   });
   return { deliver, post, progress };
+}
+
+function readinessFixture() {
+  const db = new FakeDynamoDb();
+  const record = recordFor();
+  const taskId = randomUUID();
+  const marker = {
+    purpose: "workflow-e2e-readiness" as const,
+    taskId,
+    workflowRevision: 4,
+    candidateDigest: "a".repeat(64),
+    dispatchSk: `${taskId}#4`,
+  };
+  record.workflowE2EReadiness = marker;
+  db.set({ pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}`, entityType: "OPERATION",
+    id: record.operationId, kind: "resume", status: "DISPATCHING", workspaceId: record.workspaceId, fence: record.invocation.fence, eventSequence: 0,
+    workflowE2EReadiness: { ...marker, outboxId: record.id } });
+  db.set({ pk: `OUTBOX#${record.id}`, sk: "OUTBOX", ...record, status: "QUEUED" });
+  db.set({ pk: `WORKSPACE#${record.workspaceId}`, sk: "META", entityType: "WORKSPACE", id: record.workspaceId, status: "BUSY",
+    deploymentMode: "ec2-ebs", projectName: "readiness-test", projectRevision: record.invocation.projectRevision,
+    activeOperationId: record.operationId, fence: record.invocation.fence });
+  db.set({ pk: "PROJECT#readiness-test", sk: `REV#${String(record.invocation.projectRevision).padStart(12, "0")}`, entityType: "PROJECT", runtimeBinding: binding });
+  db.set({ pk: `DEVTASK#${taskId}`, sk: "META", taskId, workspaceId: record.workspaceId, workflow: { revision: marker.workflowRevision, stage: "VERIFY", state: "WAITING",
+    candidate: { digest: marker.candidateDigest }, e2e: { required: true } } });
+  db.set({ pk: "WORKFLOW_DISPATCH", sk: marker.dispatchSk, taskId, workflowRevision: marker.workflowRevision,
+    candidateDigest: marker.candidateDigest, readinessOperationId: record.operationId, kind: "CHECKS" });
+  return { db, record, marker, taskId };
 }
 
 describe("ec2-ebs delivery", () => {
@@ -90,6 +117,127 @@ describe("ec2-ebs delivery", () => {
     })).toEqual({ ok: false, reason: "expired" });
   });
 
+  it("uses only a marked ready resume as a compute-readiness receipt and never posts it to the worker", async () => {
+    const fixture = readinessFixture();
+    const validate = vi.fn(createWorkflowE2EReadinessValidator({ documentClient: fixture.db as never, tableName: "state" }));
+    const ensureSession = vi.fn(async () => ({ ready: true as const, generation: 3, privateIp: "10.42.128.10" }));
+    const { deliver, post } = delivery({ validateWorkflowE2EReadiness: validate, sessions: { ensureSession } });
+
+    await expect(deliver(fixture.record, fixture.record.invocation)).resolves.toEqual({ readinessGeneration: 3 });
+    expect(validate).toHaveBeenCalledTimes(2);
+    expect(validate.mock.invocationCallOrder[0]).toBeLessThan(ensureSession.mock.invocationCallOrder[0]!);
+    expect(post).not.toHaveBeenCalled();
+    expect(fixture.db.commandNames().filter((command) => command === "GetCommand").length).toBeGreaterThan(0);
+  });
+
+  it("does not treat an unrelated resume as E2E readiness", async () => {
+    const db = new FakeDynamoDb();
+    const record = recordFor();
+    db.set({ pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}`, kind: "resume", status: "DISPATCHING",
+      id: record.operationId, workspaceId: record.workspaceId, fence: record.invocation.fence });
+    const validate = createWorkflowE2EReadinessValidator({ documentClient: db as never, tableName: "state" });
+    const { deliver, post } = delivery({ validateWorkflowE2EReadiness: validate });
+
+    await expect(deliver(record, record.invocation)).resolves.toBe("DELIVERED");
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a forged readiness marker before provisioning compute or posting to the worker", async () => {
+    const fixture = readinessFixture();
+    fixture.record.workflowE2EReadiness = { ...fixture.marker, purpose: "not-readiness" } as unknown as typeof fixture.marker;
+    const ensureSession = vi.fn(async () => ({ ready: true as const, generation: 3, privateIp: "10.42.128.10" }));
+    const { deliver, post } = delivery({
+      validateWorkflowE2EReadiness: createWorkflowE2EReadinessValidator({ documentClient: fixture.db as never, tableName: "state" }),
+      sessions: { ensureSession },
+    });
+
+    await expect(deliver(fixture.record, fixture.record.invocation)).rejects.toThrow("stored E2E readiness operation, outbox, task, or active fence does not match");
+    expect(ensureSession).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["stored invocation fence", (fixture: ReturnType<typeof readinessFixture>) => {
+      const outbox = fixture.db.get(`OUTBOX#${fixture.record.id}`, "OUTBOX")!;
+      fixture.db.set({ ...outbox, invocation: { ...fixture.record.invocation, fence: fixture.record.invocation.fence + 1 } });
+    }],
+    ["operation fence", (fixture: ReturnType<typeof readinessFixture>) => {
+      const operation = fixture.db.get(`WORKSPACE#${fixture.record.workspaceId}`, `OPERATION#${fixture.record.operationId}`)!;
+      fixture.db.set({ ...operation, fence: fixture.record.invocation.fence + 1 });
+    }],
+    ["active workspace fence", (fixture: ReturnType<typeof readinessFixture>) => {
+      const workspace = fixture.db.get(`WORKSPACE#${fixture.record.workspaceId}`, "META")!;
+      fixture.db.set({ ...workspace, fence: fixture.record.invocation.fence + 1 });
+    }],
+    ["workflow revision", (fixture: ReturnType<typeof readinessFixture>) => {
+      const task = fixture.db.get(`DEVTASK#${fixture.taskId}`, "META")!;
+      const workflow = task.workflow as Record<string, unknown>;
+      fixture.db.set({ ...task, workflow: { ...workflow, revision: fixture.marker.workflowRevision + 1 } });
+    }],
+    ["stored purpose", (fixture: ReturnType<typeof readinessFixture>) => {
+      const operation = fixture.db.get(`WORKSPACE#${fixture.record.workspaceId}`, `OPERATION#${fixture.record.operationId}`)!;
+      const marker = operation.workflowE2EReadiness as Record<string, unknown>;
+      fixture.db.set({ ...operation, workflowE2EReadiness: { ...marker, purpose: "other-purpose" } });
+    }],
+  ])("rejects before provisioning compute when the stored %s is stale or changed", async (_caseName, mutate) => {
+    const fixture = readinessFixture();
+    mutate(fixture);
+    const ensureSession = vi.fn(async () => ({ ready: true as const, generation: 3, privateIp: "10.42.128.10" }));
+    const { deliver, post } = delivery({
+      validateWorkflowE2EReadiness: createWorkflowE2EReadinessValidator({ documentClient: fixture.db as never, tableName: "state" }),
+      sessions: { ensureSession },
+    });
+
+    await expect(deliver(fixture.record, fixture.record.invocation)).rejects.toThrow("stored E2E readiness operation, outbox, task, or active fence does not match");
+    expect(ensureSession).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it("completes only the validated readiness operation and releases its matching active workspace fence", async () => {
+    const fixture = readinessFixture();
+    const generation = 9;
+    fixture.db.set({ ...workspaceSessionKey(fixture.record.workspaceId), state: "READY", generation, privateIp: "10.42.128.10" });
+    const transactions: Array<{ TransactItems: Array<Record<string, Record<string, unknown>>> }> = [];
+    const documentClient = { send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+      if (command.constructor.name === "TransactWriteCommand") transactions.push(command.input as typeof transactions[number]);
+      return fixture.db.send(command);
+    } };
+    const validate = createWorkflowE2EReadinessValidator({ documentClient: documentClient as never, tableName: "state" });
+    const complete = createWorkflowE2EReadinessCompleter({ documentClient: documentClient as never, tableName: "state" });
+    const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
+    const deliver = createEc2Delivery({
+      sessions: { ensureSession: async () => ({ ready: true, generation, privateIp: "10.42.128.10" }) },
+      binding: async () => binding, sign: kmsSign, post, progress: async () => undefined, now: () => NOW,
+      validateWorkflowE2EReadiness: validate,
+    });
+    const handler = createDispatcherHandler({
+      markDispatching: async () => true, markDelivered: async () => undefined, markFailed: async () => undefined,
+      deliverEc2: (record, invocation) => deliver(record, invocation),
+      completeWorkflowE2EReadiness: complete, log: () => undefined,
+    });
+
+    await expect(handler({ Records: [{ messageId: "readiness", body: JSON.stringify(fixture.record) }] })).resolves.toEqual({ batchItemFailures: [] });
+    expect(post).not.toHaveBeenCalled();
+    const completedOperation = fixture.db.get(`WORKSPACE#${fixture.record.workspaceId}`, `OPERATION#${fixture.record.operationId}`)!;
+    expect(completedOperation).toMatchObject({
+      status: "SUCCEEDED", result: { status: "READY", generation },
+      workflowE2EReadiness: { ...fixture.marker, outboxId: fixture.record.id, readyGeneration: generation },
+    });
+    expect(Object.hasOwn(completedOperation, "workflowE2EReadiness.readyGeneration")).toBe(false);
+    const completion = transactions[0]?.TransactItems;
+    expect(completion).toHaveLength(6);
+    const operationUpdate = completion?.find((entry) => "Update" in entry && entry.Update?.Key && (entry.Update.Key as { sk?: string }).sk === `OPERATION#${fixture.record.operationId}`)?.Update;
+    expect(operationUpdate?.UpdateExpression).toContain("workflowE2EReadiness = :readiness");
+    expect(operationUpdate?.ExpressionAttributeValues).toMatchObject({ ":readiness": { ...fixture.marker, outboxId: fixture.record.id, readyGeneration: generation },
+      ":fence": fixture.record.invocation.fence, ":outbox": fixture.record.id });
+    const sessionCheck = completion?.find((entry) => "ConditionCheck" in entry && JSON.stringify(entry.ConditionCheck?.Key) === JSON.stringify(workspaceSessionKey(fixture.record.workspaceId)))?.ConditionCheck;
+    expect(sessionCheck).toMatchObject({ ConditionExpression: "#state = :ready AND generation = :generation",
+      ExpressionAttributeValues: { ":ready": "READY", ":generation": generation } });
+    expect(fixture.db.get(`OUTBOX#${fixture.record.id}`, "OUTBOX")).toMatchObject({ status: "DELIVERED" });
+    expect(fixture.db.get(`WORKSPACE#${fixture.record.workspaceId}`, "META")).toMatchObject({ status: "READY", fence: fixture.record.invocation.fence });
+    expect(fixture.db.get(`WORKSPACE#${fixture.record.workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
+  });
+
   describe("the task's readiness and workers built before it (spec 051)", () => {
     const readiness = [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 300 }];
     function taskRecord(payload: Record<string, unknown>): Ec2OutboxRecord {
@@ -99,6 +247,8 @@ describe("ec2-ebs delivery", () => {
         kind: "task",
         payload: { conversationId: randomUUID(), prompt: "test it", ...payload },
       } as WorkerInvocation;
+      const context = workflowPublicationContext(invocation);
+      if (context !== undefined && invocation.kind === "publish") invocation.payload.publicationContextDigest = workflowPublicationContextDigest(context);
       return { ...record, invocation };
     }
     const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
@@ -355,7 +505,7 @@ describe("ec2-ebs delivery", () => {
     function publishRecord(payload: Record<string, unknown>): Ec2OutboxRecord {
       const record = recordFor();
       const operationId = record.invocation.operationId;
-      const invocation = {
+      const invocation: WorkerInvocation = {
         ...record.invocation,
         kind: "publish",
         payload: {
@@ -366,13 +516,15 @@ describe("ec2-ebs delivery", () => {
           },
           repository: "demo", title: "t", headBranch: `agentx/${operationId}`, repositoryGrant: "g", ...payload,
         },
-      } as WorkerInvocation;
+      };
+      const context = workflowPublicationContext(invocation);
+      if (context !== undefined && invocation.kind === "publish") invocation.payload.publicationContextDigest = workflowPublicationContextDigest(context);
       return { ...record, invocation };
     }
     const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
 
     it("refuses a publication bound to a checked tree before POST unless the worker advertises it, and never drops the tree", async () => {
-      const record = publishRecord({ candidateTreeSha: "b".repeat(40) });
+      const record = publishRecord({ candidateTreeSha: "b".repeat(40), publicationMode: "CHECKED_TREE" });
       const refused = delivery({ workerFeatures: async () => ["publish.reportChecks"] });
       await expect(refused.deliver(record, record.invocation)).rejects.toThrow(/publishes exactly the checked tree/);
       expect(refused.post).not.toHaveBeenCalled();
@@ -380,9 +532,14 @@ describe("ec2-ebs delivery", () => {
       await expect(unprobed.deliver(record, record.invocation)).rejects.toThrow(/publishes exactly the checked tree/);
       expect(unprobed.post).not.toHaveBeenCalled();
 
-      const accepted = delivery({ workerFeatures: async () => ["publish.candidateTree"] });
+      const missingMode = delivery({ workerFeatures: async () => ["publish.candidateTree"] });
+      await expect(missingMode.deliver(record, record.invocation)).rejects.toThrow(/authenticates the broker-selected publication mode/);
+      expect(missingMode.post).not.toHaveBeenCalled();
+
+      const accepted = delivery({ workerFeatures: async () => ["publish.candidateTree", "publish.mode", "publish.contextDigest"] });
       expect(await accepted.deliver(record, record.invocation)).toBe("DELIVERED");
       expect(postedPayload(accepted.post).candidateTreeSha).toBe("b".repeat(40));
+      expect(postedPayload(accepted.post).publicationMode).toBe("CHECKED_TREE");
     });
 
     it("refuses a reviewed fix for a pull request before POST unless the worker advertises pushing it", async () => {
@@ -403,11 +560,11 @@ describe("ec2-ebs delivery", () => {
     });
 
     it("refuses a publication carrying the task's pinned base before POST unless the worker advertises it, and never drops it", async () => {
-      const record = publishRecord({ candidateTreeSha: "b".repeat(40), workflowBaseCommit: "c".repeat(40) });
-      const refused = delivery({ workerFeatures: async () => ["publish.candidateTree"] });
+      const record = publishRecord({ candidateTreeSha: "b".repeat(40), publicationMode: "CHECKED_TREE", workflowBaseCommit: "c".repeat(40) });
+      const refused = delivery({ workerFeatures: async () => ["publish.candidateTree", "publish.mode", "publish.contextDigest"] });
       await expect(refused.deliver(record, record.invocation)).rejects.toThrow(/task's pinned base commit/);
       expect(refused.post).not.toHaveBeenCalled();
-      const accepted = delivery({ workerFeatures: async () => ["publish.candidateTree", "publish.workflowBase"] });
+      const accepted = delivery({ workerFeatures: async () => ["publish.candidateTree", "publish.mode", "publish.contextDigest", "publish.workflowBase"] });
       expect(await accepted.deliver(record, record.invocation)).toBe("DELIVERED");
       expect(postedPayload(accepted.post).workflowBaseCommit).toBe("c".repeat(40));
     });
@@ -803,6 +960,51 @@ describe("ec2-ebs delivery through the real session manager", () => {
     expect(verifyInvokeAuthorization(post.mock.calls[0]![1].authorization, {
       publicKey: keys.publicKey, workspaceId: record.workspaceId, generation: 1, now: () => Math.floor(NOW / 1_000),
     }).ok).toBe(true);
+  });
+
+  it("acknowledges a duplicate readiness delivery already parked while provisioning", async () => {
+    const fixture = readinessFixture();
+    const start = vi.fn(async ({ name }: { name: string }) => `arn:aws:states:us-east-1:111122223333:execution:provisioner:${name}`);
+    const sessions = new SessionManager({ documentClient: fixture.db, tableName: "state",
+      executions: { provisionerArn: "arn:aws:states:us-east-1:111122223333:stateMachine:provisioner", deleterArn: "arn:aws:states:us-east-1:111122223333:stateMachine:deleter", start } });
+    const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{}" }));
+    const markFailed = vi.fn(async () => undefined);
+    const markDelivered = vi.fn(async () => undefined);
+    const deliver = createEc2Delivery({
+      sessions,
+      binding: (workspaceId) => workspaceBinding(fixture.db, "state", workspaceId),
+      sign: kmsSign,
+      post,
+      progress: (record, message) => appendOperationEvent(fixture.db, "state", {
+        workspaceId: record.workspaceId, operationId: record.operationId, fence: record.invocation.fence,
+        onceKey: `session-wait#${record.id}`, event: { type: "progress", timestamp: new Date(NOW).toISOString(), payload: { message } },
+      }),
+      validateWorkflowE2EReadiness: createWorkflowE2EReadinessValidator({ documentClient: fixture.db as never, tableName: "state" }),
+      now: () => NOW,
+    });
+    const handler = createDispatcherHandler({
+      markDispatching: async () => true, markDelivered, markFailed,
+      deliverEc2: (record, invocation) => deliver(record, invocation), log: () => undefined,
+    });
+    const message = { messageId: "readiness-parked", body: JSON.stringify(fixture.record) };
+
+    await expect(handler({ Records: [message] })).resolves.toEqual({ batchItemFailures: [] });
+    expect(fixture.db.get(`OUTBOX#${fixture.record.id}`, "OUTBOX")).toMatchObject({ status: "WAITING_FOR_SESSION" });
+    expect(fixture.db.get(...Object.values(workspaceSessionKey(fixture.record.workspaceId)) as [string, string])).toMatchObject({
+      state: "PROVISIONING", generation: 1, waitingOutboxIds: new Set([fixture.record.id]),
+    });
+    expect(start).toHaveBeenCalledOnce();
+
+    await expect(handler({ Records: [{ ...message, messageId: "readiness-duplicate" }] })).resolves.toEqual({ batchItemFailures: [] });
+    expect(start).toHaveBeenCalledOnce();
+    expect(markFailed).not.toHaveBeenCalled();
+    expect(markDelivered).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
+    expect(fixture.db.get(`OUTBOX#${fixture.record.id}`, "OUTBOX")).toMatchObject({ status: "WAITING_FOR_SESSION" });
+    expect(fixture.db.get(...Object.values(workspaceSessionKey(fixture.record.workspaceId)) as [string, string])).toMatchObject({
+      state: "PROVISIONING", generation: 1, waitingOutboxIds: new Set([fixture.record.id]),
+    });
+    expect(fixture.db.find((item) => item.entityType === "EVENT" && item.operationId === fixture.record.operationId)).toHaveLength(1);
   });
 });
 

@@ -2268,8 +2268,10 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Ref": "AdminValues",
             },
             "AGENTX_ALARM_PREFIX": "agentx-staging-",
+            "AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID": "agentx-staging-e2e-mock-runtime-v1",
             "AGENTX_ENV": "staging",
             "AGENTX_METRICS_NAMESPACE": "AgentX/staging",
+            "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-staging-project-setup-runtime-v1",
             "AGENTX_WORKFLOW_DEPENDENCIES_ENABLED": {
               "Ref": "WorkflowDependenciesEnabled",
             },
@@ -3106,6 +3108,26 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                     "DEVELOPER#*",
                     "EMAIL#*",
                   ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "DeveloperSignInTable26CE739E",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:ConditionCheckItem",
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "DEVELOPER#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:LeadingKeys": "false",
                 },
               },
               "Effect": "Allow",
@@ -4682,6 +4704,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
         "Environment": {
           "Variables": {
+            "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-staging-project-setup-runtime-v1",
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
             },
@@ -6741,6 +6764,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         ],
       },
       "Type": "AWS::IAM::Policy",
+    },
+    "ProjectSetupExecutionReadRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "GET /v1/internal/project-setups/{setupExecutionId}/execution",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
     },
     "ProxyRoute": {
       "Properties": {
@@ -11602,7 +11646,7 @@ exports[`named environment templates > agentx-staging-foundation is unchanged 1`
           },
           "ImageId": "resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64",
           "InstanceInitiatedShutdownBehavior": "terminate",
-          "InstanceType": "m6g.medium",
+          "InstanceType": "m6g.large",
           "MetadataOptions": {
             "HttpEndpoint": "enabled",
             "HttpPutResponseHopLimit": 1,

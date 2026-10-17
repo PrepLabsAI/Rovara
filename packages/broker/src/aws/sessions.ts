@@ -8,16 +8,21 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import {
   Ec2RuntimeBindingSchema,
+  ProjectSetupSessionSchema,
   WORKSPACE_SESSION_STATE_INDEX,
   WorkspaceSessionSchema,
   agentXError,
+  canonicalJson,
   sessionDeletionName,
   sessionProvisioningName,
   workspaceSessionKey,
+  projectSetupSessionKey,
   type Ec2RuntimeBinding,
   type WorkspaceSession,
   type WorkspaceSessionState,
+  type ProjectSetupSession,
 } from "@agentx/contracts";
+import { createHash } from "node:crypto";
 import type { DurableOutboxRecord } from "./lambda.js";
 import { failOutboxOperation } from "./outbox-failure.js";
 
@@ -536,6 +541,45 @@ export class SessionManager {
 
   private now(): string {
     return (this.dependencies.now?.() ?? new Date()).toISOString();
+  }
+}
+
+/** Reads only an already-authorized PROJECT_SETUP session; it never creates a workspace or provisions compute. */
+export class ProjectSetupSessionManager {
+  constructor(private readonly dependencies: Pick<SessionManagerDependencies, "documentClient" | "tableName">) {}
+
+  async get(setupExecutionId: string): Promise<ProjectSetupSession | undefined> {
+    const key = projectSetupSessionKey(setupExecutionId);
+    const response = await this.dependencies.documentClient.send(new GetCommand({
+      TableName: this.dependencies.tableName,
+      Key: key,
+      ConsistentRead: true,
+    }));
+    if (response.Item === undefined) return undefined;
+    if (response.Item.pk !== key.pk || response.Item.sk !== key.sk || response.Item.entityType !== "PROJECT_SETUP_SESSION") {
+      throw agentXError("RUNTIME_UNAVAILABLE", "stored project setup session identity is invalid");
+    }
+    const { pk: _pk, sk: _sk, entityType: _entityType, ...domain } = response.Item;
+    void _pk; void _sk; void _entityType;
+    return ProjectSetupSessionSchema.parse(domain);
+  }
+
+  async ensureSession(input: {
+    setupExecutionId: string; subjectId: string; approvalRevision: number; transportCorrelationId: string;
+    binding: Ec2RuntimeBinding; waitingOutboxId: string;
+  }): Promise<{ ready: true; generation: number; privateIp: string } | { ready: false; generation: number; state: string }> {
+    const binding = Ec2RuntimeBindingSchema.parse(input.binding);
+    const session = await this.get(input.setupExecutionId);
+    if (session === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "an authorized project setup worker session is not available; no workspace session or compute was created");
+    const bindingDigest = createHash("sha256").update(canonicalJson(binding)).digest("hex");
+    if (session.setupExecutionId !== input.setupExecutionId || session.subjectId !== input.subjectId
+      || session.approvalRevision !== input.approvalRevision || session.transportCorrelationId !== input.transportCorrelationId
+      || session.bindingDigest !== bindingDigest) {
+      throw agentXError("STALE_FENCE", "project setup session does not match the current approved setup execution");
+    }
+    if (session.state === "READY") return { ready: true, generation: session.generation, privateIp: session.privateIp! };
+    if (session.state === "PROVISIONING") return { ready: false, generation: session.generation, state: session.state };
+    throw agentXError("RUNTIME_UNAVAILABLE", `project setup session is ${session.state}; explicit setup retry is required`);
   }
 }
 

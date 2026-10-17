@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { redactText } from "@agentx/contracts";
 import { z } from "zod";
 import { checksReport, runChecks, shellCheckRun, type CheckRun } from "./check-runner.js";
+import { captureCandidate, CandidateHoldError, sameCandidate, type CandidateSnapshot } from "./candidate.js";
 import { parseComment } from "./commands-parse.js";
 import { LOOP_CONFIG_PATH, readLoopConfig, type LoopRepoConfig } from "./config.js";
 import { loopNamed, planArtifact, stepOf, type Artifact, type LoopDefinition } from "./definitions.js";
@@ -52,6 +53,16 @@ export interface DaemonDeps {
   checkRun?: CheckRun;
   /** How a reviewer runs (#358): the repository's chosen agent (#359), headless and read-only, by default. */
   reviewerRun?: ReviewerRun;
+  /** Host-owned candidate snapshot seam; production defaults to direct Git observations. */
+  captureCandidate?: (input: { worktree: string; branch: string; baseRef: string }) => Promise<CandidateSnapshot>;
+  /** Host-owned enrollment and current-evidence resolver; an absent resolver holds publication. */
+  resolvePublicationContext?: (input: {
+    issueRepo: string; issue: number; targetRepo: string; destinationRepo: string; upstream?: { repo: string; branch: string }; worktree: string; candidate: CandidateSnapshot;
+  }) => Promise<{ kind: "unmanaged-local" | "registered-ready" } | { kind: "hold"; reasonCode: string }>;
+}
+
+class PublicationHoldError extends Error {
+  constructor(readonly reasonCode: string) { super(reasonCode); }
 }
 
 type ActionResult = Extract<LoopEvent, { kind: "action-result" }>;
@@ -482,7 +493,8 @@ export class LoopDaemon {
         else if (action === "review") await this.reviewRound(item, config, done);
         else await this.publishItem(item, done);
       } catch (error) {
-        done("failed", redactText((error as Error).message).slice(0, 1_000));
+        if (error instanceof PublicationHoldError) done("blocked", error.reasonCode);
+        else done("failed", redactText((error as Error).message).slice(0, 1_000));
       } finally {
         this.running.delete(key);
       }
@@ -492,10 +504,13 @@ export class LoopDaemon {
 
   private async runItemChecks(item: WorkItemState, config: LoopRepoConfig, done: (outcome: ActionResult["outcome"], detail: string) => void): Promise<void> {
     if (item.worktree === undefined) throw new Error("the item has no worktree to check");
+    const candidate = await this.candidateFor(item);
     const results = await runChecks(config.checks, item.worktree.path, this.deps.checkRun ?? shellCheckRun);
     const report = checksReport(results);
+    const after = await this.candidateFor(item);
     const current = await this.deps.store.item(item.repo, item.issue, item.target);
-    if (current !== undefined) await this.deps.store.saveItem({ ...current, checks: report.slice(0, 20_000) });
+    if (current !== undefined) await this.deps.store.saveItem({ ...current, checks: report.slice(0, 20_000), checksCandidate: sameCandidate(candidate, after) ? candidate : undefined });
+    if (!sameCandidate(candidate, after)) { done("failed", "the committed candidate or tracked files changed while checks ran; checks must be rerun"); return; }
     done(results.every((result) => result.passed) ? "passed" : "failed", report);
   }
 
@@ -506,7 +521,10 @@ export class LoopDaemon {
    */
   private async reviewItem(item: WorkItemState, config: LoopRepoConfig, done: (outcome: ActionResult["outcome"], detail: string, extra?: Partial<ActionResult>) => void): Promise<void> {
     if (item.worktree === undefined) throw new Error("the item has no worktree to review");
+    const candidate = await this.candidateFor(item);
     if (!config.reviews.enabled) {
+      const current = await this.deps.store.item(item.repo, item.issue, item.target);
+      if (current !== undefined) await this.deps.store.saveItem({ ...current, reviewsCandidate: candidate });
       done("passed", "Reviews are turned off in `.rovara/loop.yaml`.");
       return;
     }
@@ -518,9 +536,11 @@ export class LoopDaemon {
       // #393: what collaborators asked for since, and the loop's own evidence left out (it is written after the reviews).
       requests: item.requests ?? [], exclude: ["checks.md", "reviews.md"].map((name) => evidencePath(item.issue, name, docsDir(item))),
     });
+    const after = await this.candidateFor(item);
     const report = reviewsReport(results);
     const current = await this.deps.store.item(item.repo, item.issue, item.target);
-    if (current !== undefined) await this.deps.store.saveItem({ ...current, reviews: report.slice(0, 20_000) });
+    if (current !== undefined) await this.deps.store.saveItem({ ...current, reviews: report.slice(0, 20_000), reviewsCandidate: sameCandidate(candidate, after) ? candidate : undefined });
+    if (!sameCandidate(candidate, after)) { done("failed", "the committed candidate or tracked files changed while reviews ran; checks and reviews must be rerun"); return; }
     if (results.some((result) => result.status === "UNKNOWN")) done("blocked", report, { unrun: true });
     else if (results.every((result) => result.status === "PASS")) done("passed", report);
     else done((item.reviewRounds ?? 0) + 1 >= config.reviews.maxRounds ? "blocked" : "failed", report);
@@ -617,7 +637,15 @@ export class LoopDaemon {
     const upstream = item.upstream;
     // #359: a follow-up pull request is opened where the pull request it builds on has its branch: maybe a fork.
     const repo = upstream?.repo ?? item.target ?? item.repo;
-    await this.commitEvidence(item, item.worktree.path, item.checks ?? "The checks passed.", item.reviews);
+    const candidate = await this.candidateFor(item);
+    const localQualified = sameCandidate(item.checksCandidate, candidate) && sameCandidate(item.reviewsCandidate, candidate);
+    if (!localQualified) {
+      const publicationResolver = this.deps.resolvePublicationContext;
+      if (publicationResolver === undefined) throw new PublicationHoldError("the host enrollment and evidence resolver is unavailable");
+      const initialAdmission = await publicationResolver({ issueRepo: item.repo, issue: item.issue, targetRepo: item.target ?? item.repo, destinationRepo: repo,
+        ...(upstream === undefined ? {} : { upstream: { repo: upstream.repo, branch: upstream.branch } }), worktree: item.worktree.path, candidate });
+      if (initialAdmission.kind !== "registered-ready") throw new PublicationHoldError(initialAdmission.kind === "hold" ? initialAdmission.reasonCode : "qualified checks and reviews do not match the current committed candidate");
+    }
     const contribution = planArtifact(loopNamed(item.loop)) === "contribution";
     const published = await publish(this.deps.exec, {
       repo, issueRepo: item.repo, issue: item.issue, worktree: item.worktree.path, branch: item.worktree.branch,
@@ -626,6 +654,25 @@ export class LoopDaemon {
       startedBy: item.startedBy, approvals: item.approvals, skipped: item.skipped, pullRequest: item.pullRequest, reviewsAccepted: item.reviewsAccepted,
       defaultBranch: upstream?.branch ?? await this.deps.github.defaultBranch(repo),
       ...(upstream !== undefined && upstream.repo !== item.repo ? { head: `${item.repo.split("/")[0] ?? ""}:${item.worktree.branch}` } : {}),
+      beforePush: async () => {
+        const fresh = await this.candidateFor(item);
+        if (!sameCandidate(candidate, fresh)) throw new PublicationHoldError("the candidate changed after qualification and before push");
+        const resolver = this.deps.resolvePublicationContext;
+        if (resolver === undefined) throw new PublicationHoldError("the host enrollment and evidence resolver is unavailable");
+        const admission = await resolver({ issueRepo: item.repo, issue: item.issue, targetRepo: item.target ?? item.repo, destinationRepo: repo,
+          ...(upstream === undefined ? {} : { upstream: { repo: upstream.repo, branch: upstream.branch } }), worktree: item.worktree!.path, candidate: fresh });
+        if (admission.kind === "hold") throw new PublicationHoldError(admission.reasonCode);
+        const afterAdmission = await this.candidateFor(item);
+        const currentItem = await this.deps.store.item(item.repo, item.issue, item.target);
+        if (!sameCandidate(fresh, afterAdmission) || !sameCandidate(candidate, afterAdmission) || currentItem === undefined ||
+            currentItem.worktree?.path !== item.worktree!.path || currentItem.worktree.branch !== item.worktree!.branch || currentItem.target !== item.target ||
+            currentItem.upstream?.repo !== item.upstream?.repo || currentItem.upstream?.branch !== item.upstream?.branch || currentItem.upstream?.ref !== item.upstream?.ref) {
+          throw new PublicationHoldError("the candidate or loop binding changed during the current evidence check");
+        }
+        if (admission.kind !== "registered-ready" && (!sameCandidate(currentItem.checksCandidate, afterAdmission) || !sameCandidate(currentItem.reviewsCandidate, afterAdmission))) {
+          throw new PublicationHoldError("qualified checks and reviews no longer match the current committed candidate");
+        }
+      },
     });
     const { number, url } = published.pullRequest;
     if (upstream !== undefined) {
@@ -636,6 +683,15 @@ export class LoopDaemon {
       ? `Opened pull request #${number}: ${url}\n\nReply here to ask for changes; the loop runs the checks again and pushes them to the same pull request.`
       : `Opened pull request ${repo}#${number}: ${url}\n\nReview it there: what collaborators say on it goes back to its agent. Approve it (a GitHub approval, or \`/rovara approve\` on it) when it's ready.`;
     done("published", published.created ? opened : `Pushed the update to pull request ${item.target === undefined ? "" : repo}#${number}: ${url}`, { pullRequest: { ...published.pullRequest, repo } });
+  }
+
+  private async candidateFor(item: WorkItemState): Promise<CandidateSnapshot> {
+    if (item.worktree === undefined) throw new CandidateHoldError("candidate_worktree_missing");
+    const repo = item.target ?? item.repo;
+    const branch = item.upstream?.ref ?? `origin/${item.upstream?.branch ?? await this.deps.github.defaultBranch(repo)}`;
+    return this.deps.captureCandidate === undefined
+      ? captureCandidate(this.deps.exec, item.worktree.path, item.worktree.branch, branch)
+      : this.deps.captureCandidate({ worktree: item.worktree.path, branch: item.worktree.branch, baseRef: branch });
   }
 
   /** A working agent whose session ended (a crash, a closed terminal) is resumed, a few times, then told about. */
@@ -783,25 +839,6 @@ export class LoopDaemon {
         await this.say(pull, `I couldn't start this pull request's agent: ${redactText((error as Error).message).slice(0, 500)}`);
       }
     }
-  }
-
-  /**
-   * The checks report and (#358) the reviews report, committed by the loop in the item's evidence directory before it
-   * publishes, so the branch carries what proved it. Added with -f: a repository may ignore docs/. Nothing is
-   * committed when unchanged.
-   */
-  private async commitEvidence(item: WorkItemState, worktree: string, checks: string, reviews: string | undefined): Promise<void> {
-    const dir = docsDir(item);
-    const files: Array<[string, string]> = [[evidencePath(item.issue, "checks.md", dir), `# Checks\n\nRun by rovara loop before it published this branch.\n\n${checks}\n`]];
-    if (reviews !== undefined) files.push([evidencePath(item.issue, "reviews.md", dir), `# Reviews\n\nRun by rovara loop before it published this branch.\n\n${reviews}\n`]);
-    const relatives = files.map(([relative]) => relative);
-    for (const [relative, text] of files) {
-      await mkdir(join(worktree, relative, ".."), { recursive: true });
-      await writeFile(join(worktree, relative), text);
-    }
-    await run(this.deps.exec, "git", ["-C", worktree, "add", "-f", ...relatives]);
-    if ((await this.deps.exec("git", ["-C", worktree, "diff", "--cached", "--quiet"])).code === 0) return;
-    await run(this.deps.exec, "git", ["-C", worktree, "commit", "--quiet", "-m", `chore(rovara): evidence for ${elsewhere(item) ? `${item.repo}` : ""}#${item.issue}`, "--", ...relatives]);
   }
 
   /** A change request, added to its artifact under "Review feedback", so the document carries its own history. */

@@ -23,6 +23,8 @@ import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
 import { runTaskCanvasCloseout, type CanvasCloseoutStore, type TaskCanvasCloseoutTask } from "./developer-task-closeout.js";
 import { SlackPostError, chatPostEphemeral, chatPostMessage, chatUpdate, createTaskPlanCanvas, deleteTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
+import { readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
+import { renderE2ENotifierSlackBlocks, renderE2EUnavailableSlackBlock } from "../e2e-presentation.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
@@ -53,6 +55,8 @@ export interface NotifierDependencies {
   /** One `SlackDeliveryFailed` count (spec 015 FR-045's alarm sums it). */
   deliveryFailed(): void;
   peopleChangesEnabled?: boolean;
+  /** Revalidates the current CHECKS admission and evidence before adding a read-only Slack projection. */
+  workflowE2EBlocks?(task: DeveloperTaskRecord, operations: readonly unknown[]): Promise<unknown[] | undefined>;
 }
 
 /** The start message is still being posted: a reply waits for its thread (C9). */
@@ -608,9 +612,13 @@ interface Reply {
 
 /** The trusted AgentX task page, when the notifier knows its base and it is a plain https origin. */
 function taskPageUrl(deps: NotifierDependencies, taskId: string): string | undefined {
-  if (deps.reviewUrlBase === undefined) return undefined;
+  return taskPageUrlFromBase(deps.reviewUrlBase, taskId);
+}
+
+function taskPageUrlFromBase(reviewUrlBase: string | undefined, taskId: string): string | undefined {
+  if (reviewUrlBase === undefined) return undefined;
   try {
-    const base = new URL(deps.reviewUrlBase);
+    const base = new URL(reviewUrlBase);
     if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) return undefined;
     return new URL(`/review/${encodeURIComponent(taskId)}/task`, base).href;
   } catch {
@@ -823,7 +831,19 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
   }
   const message = workflowMessage(context);
   if (message === undefined) return undefined;
-  return { ...message, sameAs: reopened ? `reopened:${workflow.revision}` : workflowMessageKey(workflow), ...(approval === undefined ? {} : { approval }) };
+  const e2eBlocks = workflow.e2e?.required === true && deps.workflowE2EBlocks !== undefined
+    ? await deps.workflowE2EBlocks(task, await operationsOf(deps, task.workspaceId)).catch((error: unknown) => {
+      deps.log({ event: "developer_notifier.e2e_projection_unavailable", taskId: task.taskId, error: errorName(error) });
+      return undefined;
+    })
+    : undefined;
+  const unavailableE2E = workflow.e2e?.required === true && e2eBlocks === undefined
+    ? [renderE2EUnavailableSlackBlock(context.taskPageUrl)]
+    : [];
+  const blocks = e2eBlocks === undefined
+    ? [...(message.blocks ?? []), ...unavailableE2E].slice(0, 50)
+    : [...(message.blocks ?? []), ...e2eBlocks].slice(0, 50);
+  return { ...message, ...(blocks === undefined ? {} : { blocks }), sameAs: reopened ? `reopened:${workflow.revision}` : workflowMessageKey(workflow), ...(approval === undefined ? {} : { approval }) };
 }
 
 async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice): Promise<Reply | undefined> {
@@ -1700,6 +1720,7 @@ function createAwsNotifierHandler() {
     },
     now: () => new Date().toISOString(),
   });
+  const reviewUrlBase = process.env.CONTROL_PLANE_URL;
   return createNotifierHandler({
     documentClient,
     tableName: requiredEnvironment("STATE_TABLE_NAME"),
@@ -1722,7 +1743,7 @@ function createAwsNotifierHandler() {
       await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl(), ReceiptHandle: receiptHandle, VisibilityTimeout: seconds }));
     },
     post: slack.post,
-    ...(process.env.CONTROL_PLANE_URL === undefined ? {} : { reviewUrlBase: process.env.CONTROL_PLANE_URL }),
+    ...(reviewUrlBase === undefined ? {} : { reviewUrlBase }),
     async readArtifact(key) {
       const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
       if (response.Body === undefined) throw new Error("workflow plan artifact has no body");
@@ -1742,6 +1763,23 @@ function createAwsNotifierHandler() {
       component: "developer-task-notifier", event: "metric", SlackDeliveryFailed: 1,
     })),
     peopleChangesEnabled: process.env.AGENTX_TASK_PEOPLE_CHANGES_ENABLED === "true",
+    workflowE2EBlocks: async (task, operations) => {
+      void operations;
+      const progress = task.workflow?.e2e;
+      const candidateDigest = task.workflow?.candidate?.digest;
+      const ref = progress?.displayRef;
+      if (candidateDigest === undefined || progress?.currentRoundId === undefined || ref === undefined) return undefined;
+      const view = await readWorkflowE2ENotifierProjection({ ref, ownerKey: task.ownerKey, workspaceId: task.workspaceId, current: { candidateDigest, roundId: progress.currentRoundId,
+        groupRunIds: progress.currentGroupRunIds, admissionSha256: ref.admissionSha256, evidenceSha256: ref.evidenceSha256 },
+      readPrivateObject: async (key, maxBytes) => {
+        if (maxBytes > 262_144 || !/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/u.test(key)) return undefined;
+        const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
+        const bytes = response.Body === undefined ? undefined : Buffer.from(await response.Body.transformToByteArray());
+        return bytes !== undefined && bytes.byteLength <= maxBytes ? bytes : undefined;
+      } });
+      return view === undefined ? undefined : renderE2ENotifierSlackBlocks(view.view,
+        { candidateDigest: view.candidateDigest, roundId: view.roundId, capturedAt: view.capturedAt }, taskPageUrlFromBase(reviewUrlBase, task.taskId));
+    },
   });
 }
 

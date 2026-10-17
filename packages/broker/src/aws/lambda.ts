@@ -7,6 +7,7 @@ import {
   type WorkerInvocation,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import type { WorkflowE2EReadinessMarker } from "./broker-shared.js";
 
 export interface HttpApiV2Event {
   version?: string;
@@ -62,6 +63,8 @@ interface OutboxRecordBase {
   operationId: string;
   workspaceId: string;
   invocation: WorkerInvocation;
+  /** Stored internal purpose binding; only the broker-created E2E readiness resume may be intercepted. */
+  workflowE2EReadiness?: WorkflowE2EReadinessMarker;
 }
 
 /** Records written before ec2-ebs existed have no deploymentMode, so its absence marks a retired runtime. */

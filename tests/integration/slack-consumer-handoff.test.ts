@@ -151,11 +151,16 @@ describe("the heartbeat hook (#173)", () => {
   it("tells the turn each SQS heartbeat while it runs, and never after its message is done", async () => {
     const { queue, visibility } = fakeQueue(async () => []);
     let beats = 0;
+    let completeTwoBeats!: () => void;
+    const twoBeats = new Promise<void>((resolve) => { completeTwoBeats = resolve; });
     let listener: (() => void) | undefined;
     await processGroup(queue, async (_message, context) => {
-      context.onHeartbeat!(() => { beats += 1; });
+      context.onHeartbeat!(() => {
+        beats += 1;
+        if (beats === 2) completeTwoBeats();
+      });
       listener = () => undefined;
-      await pause(35);
+      await twoBeats;
     }, [queueMessage("Ev000000A1", "thread-a")], { ...groupOptions, heartbeatMilliseconds: 10 }, () => undefined);
     expect(listener).toBeDefined();
     expect(beats).toBeGreaterThanOrEqual(2);
@@ -169,11 +174,19 @@ describe("the heartbeat hook (#173)", () => {
   it("keeps the heartbeat going when a listener throws, and logs it by name", async () => {
     const { queue, visibility } = fakeQueue(async () => []);
     const logs: Array<[string, unknown]> = [];
+    let beats = 0;
+    let completeTwoBeats!: () => void;
+    const twoBeats = new Promise<void>((resolve) => { completeTwoBeats = resolve; });
     await processGroup(queue, async (_message, context) => {
-      context.onHeartbeat!(() => { throw Object.assign(new Error("PLANTED"), { name: "StampFailed" }); });
-      await pause(25);
+      context.onHeartbeat!(() => {
+        beats += 1;
+        if (beats === 2) completeTwoBeats();
+        throw Object.assign(new Error("PLANTED"), { name: "StampFailed" });
+      });
+      await twoBeats;
     }, [queueMessage("Ev000000A1", "thread-a")], { ...groupOptions, heartbeatMilliseconds: 10 }, (event, fields) => logs.push([event, fields]));
-    expect(visibility.length).toBeGreaterThanOrEqual(2);
+    expect(beats).toBeGreaterThanOrEqual(2);
+    expect(visibility.length).toBe(beats);
     expect(logs).toContainEqual(["queue.heartbeat_listener_failed", { errorName: "StampFailed" }]);
     expect(JSON.stringify(logs)).not.toContain("PLANTED");
   });

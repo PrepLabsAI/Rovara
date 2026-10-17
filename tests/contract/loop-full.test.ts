@@ -116,7 +116,8 @@ describe("the Full loop end to end (#357)", () => {
     expect(await h.step()).toBe("pr-open");
     expect(h.world.pullRequests).toHaveLength(1);
     expect(h.world.pullRequests[0]!.body).toContain("Approved: the requirements by @maya, the design by @sam, the plan by @maya.");
-    expect(h.world.loopCommits).toEqual(["docs/rovara/42/evidence/checks.md, docs/rovara/42/evidence/reviews.md: chore(rovara): evidence for #42"]);
+    // Reports stay in the PR body and outside the candidate that checks/reviews qualified.
+    expect(h.world.loopCommits).toEqual([]);
   });
 
   it("starts past a phase declared away, says who declared it, and the pull request says so", async () => {

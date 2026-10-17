@@ -67,6 +67,27 @@ describe("hosted Slack control-plane infrastructure", () => {
     template.hasOutput("GithubWebhookUrl", {});
   });
 
+  it("routes only the capability-protected project setup execution read through the internal API", () => {
+    template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "GET /v1/internal/project-setups/{setupExecutionId}/execution",
+      AuthorizationType: "NONE",
+      Target: { "Fn::Join": ["", ["integrations/", { Ref: Match.stringLikeRegexp("^BrokerIntegration") }]] },
+    });
+    template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "POST /v1/internal/{proxy+}",
+      AuthorizationType: "NONE",
+      Target: { "Fn::Join": ["", ["integrations/", { Ref: Match.stringLikeRegexp("^BrokerIntegration") }]] },
+    });
+    template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "ANY /{proxy+}",
+      AuthorizationType: "JWT",
+      AuthorizerId: { Ref: Match.stringLikeRegexp("^JwtAuthorizer") },
+      Target: { "Fn::Join": ["", ["integrations/", { Ref: Match.stringLikeRegexp("^BrokerIntegration") }]] },
+    });
+    const routes = Object.values(template.findResources("AWS::ApiGatewayV2::Route")) as Array<{ Properties: { RouteKey: string } }>;
+    expect(routes.some((route) => route.Properties.RouteKey === "GET /v1/internal/{proxy+}")).toBe(false);
+  });
+
   it("indexes due GitHub webhook retries and invokes the broker from a bounded recovery schedule", () => {
     template.hasResourceProperties("AWS::DynamoDB::Table", {
       GlobalSecondaryIndexes: Match.arrayWith([Match.objectLike({
@@ -320,7 +341,7 @@ describe("production foundation and worker settings", () => {
     expect(Object.values(template.toJSON().Resources as Record<string, { Type: string }>).filter((resource) => resource.Type.startsWith("AWS::Bedrock"))).toEqual([]);
     expect(json).not.toContain("AWS::Bedrock");
     template.hasResourceProperties("AWS::EC2::LaunchTemplate", {
-      LaunchTemplateData: Match.objectLike({ InstanceType: "m6g.medium" }),
+      LaunchTemplateData: Match.objectLike({ InstanceType: "m6g.large" }),
     });
     expect(json).toContain("alias/agentx/production-workspaces");
     expect(json).toContain('"RetentionInDays":30');

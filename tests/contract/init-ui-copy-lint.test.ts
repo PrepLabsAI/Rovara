@@ -128,8 +128,8 @@ describe("SC-011: the whole install, as the page shows it", () => {
     const { operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     const questions = new Map<string, WizardQuestion>(operator.states.flatMap((state) => (state.question === undefined ? [] : [[state.question.id, state.question] as const])));
     // The settings form, the plan, the Slack installed question, the Slack form, the bot check, the
-    // Verified check, then the eight finishing questions (repository, project name, commands,
-    // channel, three trackers, the test alert).
+    // Verified check, then the eight finishing questions (repository, project name, one setup-plan
+    // or command confirmation, channel, three trackers, the test alert).
     expect(questions.size).toBe(14);
     // Spec 048 FR-020: the settings are one form, so each of its fields is held to the same words.
     const fields = new Map([...questions.values()].flatMap((question) => (question.fields ?? []).map((field) => [`${question.text}/${field.name}`, field] as const)));

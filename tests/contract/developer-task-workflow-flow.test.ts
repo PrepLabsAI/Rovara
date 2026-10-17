@@ -12,7 +12,7 @@ import { developerTaskIdentity } from "../../packages/broker/src/developer/task-
 import { taskOwnerKey } from "../../packages/broker/src/developer/task-records.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
-import { captureWorkflowFeedbackNote, decideTaskWorkflow, getTaskDocumentView, inertTaskTitle, promptTagId, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowReviewFromSystem, threadNotesPromptSection, workflowPullRequestBody } from "../../packages/broker/src/aws/developer-tasks.js";
+import { captureWorkflowFeedbackNote, decideTaskWorkflow, getTaskDocumentView, inertTaskTitle, promptTagId, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, taskPageUrl, threadNotesPromptSection, workflowPullRequestBody } from "../../packages/broker/src/aws/developer-tasks.js";
 import { GATED_TASK_TURN_REFUSAL, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
 import { failOutboxOperation } from "../../packages/broker/src/aws/outbox-failure.js";
 import { guardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
@@ -23,6 +23,7 @@ import { attachEvidence, planEvidenceJobItem } from "../../packages/broker/src/d
 import { noticesFromStream } from "../../packages/broker/src/developer/notifications.js";
 import { DEV_ISSUER, MAYA, OMAR, createDeveloperTaskBroker, markThreadPosted, recordStream, teammate } from "../support/developer-task-broker.js";
 import type { Developer } from "../support/developer-task-broker.js";
+import { registerSlackProject } from "../support/slack-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 /** A prepare result as the worker sends it: where preparation checked out each repository. */
@@ -33,6 +34,13 @@ const REQUIRED_CHECK = { id: "required-1", label: "npm test", command: { cwd: "r
 const operations = (harness: Harness, workspaceId: string) => harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION");
 const taskWorkflow = (harness: Harness, taskId: string) => (harness.db.get(`DEVTASK#${taskId}`, "META") as { workflow: WorkflowSnapshot }).workflow;
 const passingChecks = () => ({ status: "verified", source: "project", preambleVersion: "1", preambleSha256: "c".repeat(64), checks: [{ id: "readiness:0", label: "npm test", source: "project", before: "passed", after: "passed", class: "passing", output: "", durationMs: 12 }], extraTry: "not_needed", agentClaim: "success" });
+const baselinePolicy = (baselineScenarioIds: string[]) => ({
+  schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds,
+  targets: [{ targetId: "web-main", applicationId: "app-main", runtimeProfileId: "browser-linux", accountProfileId: "synthetic-tenant", kind: "web", browser: "chromium", viewport: { width: 1280, height: 800 } }],
+  defaultSandboxProfileId: "sandbox-v1", fallback: "mock-unconnected", modelRouteRevision: null,
+  capture: { screenshots: false, traces: false, video: false, downloads: false },
+  limits: { runTimeoutMs: 600000, startupTimeoutMs: 60000, preparationTimeoutMs: 180000, caseTimeoutMs: 90000, maxActionsPerCase: 30, maxModelRequests: 60, maxInputTokens: 200000, maxOutputTokens: 20000, maxSpendUsd: null },
+});
 const dispatchRows = (harness: Harness) => harness.db.find((item) => item.pk === "WORKFLOW_DISPATCH");
 const sweep = (harness: Harness) => harness.handler({ source: "agentx.workflow-dispatch-recovery" });
 /** The next review start meets a busy workspace: its acceptance transaction is cancelled with no saved request. */
@@ -86,7 +94,7 @@ async function workflowAtVerification(harness: Harness, structured?: PlanDocumen
   const digest = structured === undefined ? createHash("sha256").update(plan).digest("hex") : seedStructured(harness, taskId, "plan", structured);
   await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, { requestId: randomUUID(), expectedRevision: taskWorkflow(harness, taskId).revision, decision: "APPROVE", reason: "Approved", artifactDigest: digest });
   const implementation = operations(harness, workspaceId).find((item) => item.workflowMode === "IMPLEMENT")!;
-  const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
+  const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
   const finishImplementation = () => harness.finish(workspaceId, String(implementation.id), "SUCCEEDED", { result: { workflowCandidateRepositories: candidate.repositories, workflowCheckCandidateRepositories: candidate.repositories, checks: passingChecks() } });
   return { taskId, workspaceId, candidate, plan, digest, finishImplementation };
 }
@@ -163,6 +171,49 @@ async function collectingFeedbackTask(plan: { content: string; structured?: bool
 }
 
 describe("native developer task workflow", () => {
+  it("requires a canonical E2E plan when the pinned project has required baseline scenarios", async () => {
+    const approvePlanWithoutE2E = async (policy?: unknown, options: { structured?: boolean; registerLatestEmptyRevision?: boolean; removePinnedProject?: boolean } = {}) => {
+      const harness = await createDeveloperTaskBroker();
+      const project = harness.db.find((item) => item.entityType === "PROJECT" && item.definition !== undefined && (item.definition as { name: string }).name === "payments")[0]!;
+      const definition = { ...(project.definition as Record<string, unknown>), ...(policy === undefined ? {} : { e2e: policy }) };
+      harness.db.set({ ...project, definition });
+      const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK" });
+      const taskId = String((started.body.task as { taskId: string }).taskId);
+      const task = harness.db.get(`DEVTASK#${taskId}`, "META") as { startingRevision: number; workspaceId: string };
+      expect(task.startingRevision).toBe((project.definition as { revision: number }).revision);
+      if (options.registerLatestEmptyRevision) await registerSlackProject(harness.handler, { revision: task.startingRevision + 1 });
+      await harness.finish(task.workspaceId, String(operations(harness, task.workspaceId).find((item) => item.kind === "prepare")!.id), "SUCCEEDED", PREPARED);
+      const planning = operations(harness, task.workspaceId).find((item) => item.workflowMode === "PLAN")!;
+      const markdown = "# Plan\n\n1. Fix retry handling.\n";
+      await finishPlanningWithMarkdown(harness, task.workspaceId, String(planning.id), markdown);
+      const artifactDigest = options.structured ? seedStructured(harness, taskId, "plan", planDocument()) : createHash("sha256").update(markdown).digest("hex");
+      if (options.removePinnedProject) harness.db.delete(String(project.pk), String(project.sk));
+      const workflowBefore = structuredClone(taskWorkflow(harness, taskId));
+      const operationsBefore = operations(harness, task.workspaceId).map((operation) => ({ id: operation.id, workflowMode: operation.workflowMode }));
+      const response = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, {
+        requestId: randomUUID(), expectedRevision: taskWorkflow(harness, taskId).revision, decision: "APPROVE", reason: "Approved", artifactDigest,
+      });
+      return { response, harness, taskId, workspaceId: task.workspaceId, workflowBefore, operationsBefore };
+    };
+
+    const required = await approvePlanWithoutE2E(baselinePolicy(["checkout"]));
+    expect(required.response.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    expect(taskWorkflow(required.harness, required.taskId)).toEqual(required.workflowBefore);
+    expect(operations(required.harness, required.workspaceId).map((operation) => ({ id: operation.id, workflowMode: operation.workflowMode }))).toEqual(required.operationsBefore);
+    const requiredStructuredWithoutE2E = await approvePlanWithoutE2E(baselinePolicy(["checkout"]), { structured: true });
+    expect(requiredStructuredWithoutE2E.response.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    const pinnedPolicyDespiteNewerEmptyRevision = await approvePlanWithoutE2E(baselinePolicy(["checkout"]), { registerLatestEmptyRevision: true });
+    expect(pinnedPolicyDespiteNewerEmptyRevision.response.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    const missingPinnedRevision = await approvePlanWithoutE2E(undefined, { removePinnedProject: true });
+    expect(missingPinnedRevision.response.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    const emptyBaseline = await approvePlanWithoutE2E(baselinePolicy([]));
+    expect(emptyBaseline.response.status).toBe(200);
+    expect(emptyBaseline.response.body.error).toBeUndefined();
+    const absentPolicy = await approvePlanWithoutE2E();
+    expect(absentPolicy.response.status).toBe(200);
+    expect(absentPolicy.response.body.error).toBeUndefined();
+  });
+
   it("keeps takeover inert until the new owner explicitly redrives the exact parked operation", async () => {
     const creatorSlack = "U0PARKOWN1";
     const nextSlack = "U0PARKOWN2";
@@ -301,6 +352,91 @@ describe("native developer task workflow", () => {
     });
     expect(retried.status).toBe(200);
     expect(operations(harness, workspaceId).filter((operation) => operation.workflowMode === "REVIEW")).toHaveLength(1);
+    expect(dispatchRows(harness)).toEqual([]);
+  });
+
+  it("stops a warmed required-E2E dispatch in the idle gap before recovery can admit a round", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    const taskRow = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
+    const waiting = { ...taskRow.workflow, stage: "VERIFY" as const, state: "WAITING" as const,
+      e2e: { contractDigest: "a".repeat(64), policyDigest: "b".repeat(64), bundleDigest: "c".repeat(64),
+        executionPlanDigest: "d".repeat(64), required: true, currentGroupRunIds: [], resultRefs: [] } };
+    harness.db.set({ ...taskRow, workflow: waiting });
+    const dispatchSk = `${taskId}#${waiting.revision}`;
+    const readinessOperationId = workflowRequestId("agentx-workflow-e2e-readiness", taskId, waiting.revision, candidate.digest);
+    const readinessOutboxId = workflowRequestId("agentx-workflow-e2e-readiness-outbox", taskId, waiting.revision, candidate.digest);
+    const marker = { purpose: "workflow-e2e-readiness", taskId, workflowRevision: waiting.revision,
+      candidateDigest: candidate.digest, dispatchSk, outboxId: readinessOutboxId, readyGeneration: 4 };
+    const sourceOperation = operations(harness, workspaceId)[0]!;
+    const readinessOperation = { ...sourceOperation, pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${readinessOperationId}`,
+      id: readinessOperationId, entityType: "OPERATION", kind: "resume", status: "SUCCEEDED", workflowE2EReadiness: marker,
+      result: { status: "READY", generation: 4 } };
+    harness.db.set(readinessOperation);
+    const workspace = harness.db.get(`WORKSPACE#${workspaceId}`, "META") as Record<string, unknown>;
+    const { activeOperationId: _activeOperationId, ...idleWorkspace } = workspace;
+    void _activeOperationId;
+    harness.db.set({ ...idleWorkspace, status: "READY" });
+    const now = new Date().toISOString();
+    harness.db.set({ pk: "WORKFLOW_DISPATCH", sk: dispatchSk, entityType: "WORKFLOW_DISPATCH", taskId,
+      workflowRevision: waiting.revision, kind: "CHECKS", candidateDigest: candidate.digest, readinessOperationId,
+      createdAt: now, attempts: 0, nextAttemptAt: now, dispatchDuePk: "WORKFLOW_DISPATCH", dispatchDueSk: `${now}#${dispatchSk}`,
+      indexExpiresAt: Math.floor(Date.parse(now) / 1_000) + 86_400 });
+
+    const stopped = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() });
+    expect(stopped.status).toBe(200);
+    expect(dispatchRows(harness)).toEqual([]);
+    expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    await sweep(harness);
+    expect(operations(harness, workspaceId).filter((operation) => operation.workflowE2EAdmission !== undefined)).toEqual([]);
+    expect(operations(harness, workspaceId).filter((operation) => operation.workflowMode === "CHECKS")).toEqual([]);
+  });
+
+  it("lets the owner cancel an active required-E2E readiness resume and prevents recovery admission", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    const taskRow = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
+    const waiting = { ...taskRow.workflow, stage: "VERIFY" as const, state: "WAITING" as const,
+      e2e: { contractDigest: "a".repeat(64), policyDigest: "b".repeat(64), bundleDigest: "c".repeat(64),
+        executionPlanDigest: "d".repeat(64), required: true, currentGroupRunIds: [], resultRefs: [] } };
+    harness.db.set({ ...taskRow, workflow: waiting });
+    const dispatchSk = `${taskId}#${waiting.revision}`;
+    const readinessOperationId = workflowRequestId("agentx-workflow-e2e-readiness", taskId, waiting.revision, candidate.digest);
+    const readinessOutboxId = workflowRequestId("agentx-workflow-e2e-readiness-outbox", taskId, waiting.revision, candidate.digest);
+    const marker = { purpose: "workflow-e2e-readiness", taskId, workflowRevision: waiting.revision,
+      candidateDigest: candidate.digest, dispatchSk, outboxId: readinessOutboxId };
+    const workspace = harness.db.get(`WORKSPACE#${workspaceId}`, "META") as Record<string, unknown>;
+    const fence = Number(workspace.fence);
+    const readinessOperation = { ...operations(harness, workspaceId)[0]!, pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${readinessOperationId}`,
+      id: readinessOperationId, entityType: "OPERATION", workspaceId, kind: "resume", status: "DISPATCHING", fence,
+      workflowE2EReadiness: marker };
+    harness.db.set(readinessOperation);
+    harness.db.set({ ...workspace, status: "BUSY", activeOperationId: readinessOperationId, fence });
+    harness.db.set({ pk: `OUTBOX#${readinessOutboxId}`, sk: "OUTBOX", id: readinessOutboxId, entityType: "OUTBOX", status: "QUEUED",
+      operationId: readinessOperationId, workspaceId, deploymentMode: "ec2-ebs", workflowE2EReadiness: marker,
+      invocation: { kind: "resume", operationId: readinessOperationId, workspaceId, fence } });
+    harness.db.set({ pk: "WORKFLOW_DISPATCH", sk: dispatchSk, entityType: "WORKFLOW_DISPATCH", taskId,
+      workflowRevision: waiting.revision, kind: "CHECKS", candidateDigest: candidate.digest, readinessOperationId,
+      createdAt: new Date().toISOString(), attempts: 0, nextAttemptAt: new Date().toISOString(), dispatchDuePk: "WORKFLOW_DISPATCH",
+      dispatchDueSk: `${new Date().toISOString()}#${dispatchSk}`, indexExpiresAt: Math.floor(Date.now() / 1_000) + 86_400 });
+
+    const stopped = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/cancel`, { requestId: randomUUID() });
+
+    expect(stopped.status).toBe(200);
+    expect(harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${readinessOperationId}`)).toMatchObject({
+      status: "CANCELLED", result: { status: "CANCELLED" },
+    });
+    expect(harness.db.get(`OUTBOX#${readinessOutboxId}`, "OUTBOX")).toMatchObject({ status: "DELIVERED", operationId: readinessOperationId, workspaceId });
+    expect(harness.db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY" });
+    expect(harness.db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
+    expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    expect(dispatchRows(harness)).toEqual([]);
+
+    await sweep(harness);
+    expect(operations(harness, workspaceId).filter((operation) => operation.workflowE2EAdmission !== undefined)).toEqual([]);
+    expect(operations(harness, workspaceId).filter((operation) => operation.workflowMode === "CHECKS")).toEqual([]);
     expect(dispatchRows(harness)).toEqual([]);
   });
 
@@ -964,8 +1100,9 @@ describe("native developer task workflow", () => {
     // AgentX opened the draft pull request itself once both reviews passed; a manual request is refused.
     const manual = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/pull-requests`, { requestId: randomUUID(), title: "Fix retry" });
     expect(manual.body.error).toMatchObject({ code: "CONFIG_INVALID", message: "AgentX opens the draft pull request for this task itself once checks and reviews pass" });
-    const publication = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.kind === "publish") as { id?: string; publication?: { headBranch?: string; draft?: boolean; expectedTreeSha?: string } } | undefined;
-    expect(publication?.publication).toMatchObject({ draft: true, expectedTreeSha: "b".repeat(40) });
+    const publication = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.kind === "publish") as { id?: string; publication?: { headBranch?: string; draft?: boolean; expectedTreeSha?: string; admittedPinnedRevision?: number; admittedLatestRevision?: number; admittedMaterialDigest?: string } } | undefined;
+    expect(publication?.publication).toMatchObject({ draft: true, expectedTreeSha: "b".repeat(40), admittedPinnedRevision: 1, admittedLatestRevision: 1 });
+    expect(publication?.publication?.admittedMaterialDigest).toMatch(/^[a-f0-9]{64}$/u);
     harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "PULL_REQUEST#demo#000000000042", entityType: "PULL_REQUEST", workspaceId,
       repository: "demo", repositoryUrl: "https://github.com/example/demo.git", number: 42, url: "https://github.com/example/demo/pull/42", state: "open", headBranch: publication?.publication?.headBranch,
       baseBranch: "main", expectedHeadCommit: "d".repeat(40), title: "Fix retry", body: "", createdByOperationId: String(publication?.id), updatedAt: new Date().toISOString() });
@@ -999,8 +1136,11 @@ describe("native developer task workflow", () => {
     expect(body).toContain(`AgentX task: ${new URL(DEV_ISSUER).origin}/review/${taskId}/task`);
     expect(body).toContain("Opened as a draft by AgentX after the owner-approved plan, checks and reviews passed. Merge it on GitHub.");
     expect(dispatchRows(harness)).toEqual([]);
-    const invocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === publish?.id)[0]?.invocation as { payload: { candidateTreeSha?: string; repositoryGrant: string } };
+    expect(publish?.publication).toMatchObject({ publicationMode: "CHECKED_TREE" });
+    expect(publish?.publication).not.toHaveProperty("expectedCommitSha");
+    const invocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === publish?.id)[0]?.invocation as { payload: { candidateTreeSha?: string; publicationMode?: string; repositoryGrant: string } };
     expect(invocation.payload.candidateTreeSha).toBe("b".repeat(40));
+    expect(invocation.payload.publicationMode).toBe("CHECKED_TREE");
     expect(invocation.payload.repositoryGrant).toEqual(expect.any(String));
     // Only the publish step carries a repository grant; no coding, check or review run ever does.
     for (const op of operations(harness, workspaceId).filter((item) => item.kind === "task")) {
@@ -1015,6 +1155,130 @@ describe("native developer task workflow", () => {
     await harness.finish(workspaceId, publish!.id, "SUCCEEDED", { result: { repository: "demo", number: 42, url: "https://github.com/example/demo/pull/42", headBranch: p.headBranch, baseBranch: "main", commit: "d".repeat(40), checks: [], reconciled: false } });
     expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ number: 42, headSha: "d".repeat(40) }] });
     expect(dispatchRows(harness)).toEqual([]);
+  });
+
+  it("holds admitted publication before credentials and callback when latest project material changes", async () => {
+    const github = pullRequestGateway("b".repeat(40));
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: github } });
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    await passReviews(harness, workspaceId, candidate);
+    const publish = operations(harness, workspaceId).find((item) => item.kind === "publish") as { id: string; publication: Record<string, unknown> };
+    const invocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === publish.id)[0]!.invocation as { callbackCapability: string; payload: { repositoryGrant: string } };
+    const exchange = vi.spyOn(harness.brokerInput.repositoryGrants, "exchange");
+
+    // A newly registered current revision changes project material after this exact publication was admitted.
+    await registerSlackProject(harness.handler, { revision: 2 });
+
+    const credentialResponse = await harness.handler({ version: "2.0", rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${publish.id}/repository-credentials`, rawQueryString: "",
+      headers: { "x-agentx-repository-grant": invocation.payload.repositoryGrant },
+      body: JSON.stringify({ credentialRef: "github-app", repositoryUrl: "https://github.com/example/demo.git", access: "push" }),
+      requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    expect(credentialResponse.statusCode).not.toBe(200);
+    expect(JSON.parse(credentialResponse.body)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(exchange).not.toHaveBeenCalled();
+
+    const metadataResponse = await harness.handler({ version: "2.0", rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${publish.id}/pull-request`, rawQueryString: "",
+      headers: { "x-agentx-callback-capability": invocation.callbackCapability },
+      body: JSON.stringify({ repository: publish.publication.repository, repositoryUrl: publish.publication.repositoryUrl, headBranch: publish.publication.headBranch,
+        baseBranch: publish.publication.baseBranch, commit: "d".repeat(40), title: publish.publication.title }),
+      requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    expect(metadataResponse.statusCode).not.toBe(200);
+    expect(JSON.parse(metadataResponse.body)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(github.getBranchHead).not.toHaveBeenCalled();
+    expect(github.reconcilePullRequest).not.toHaveBeenCalled();
+    expect(taskWorkflow(harness, taskId).stage).toBe("PULL_REQUEST");
+  });
+
+  it("rechecks an empty-baseline E2E policy before exchanging credentials when a newer revision adds required baselines", async () => {
+    const github = pullRequestGateway("b".repeat(40));
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: github } });
+    const project = harness.db.find((item) => item.entityType === "PROJECT" && item.definition !== undefined && (item.definition as { name: string }).name === "payments")[0]!;
+    harness.db.set({ ...project, definition: { ...(project.definition as Record<string, unknown>), e2e: baselinePolicy([]) } });
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    await passReviews(harness, workspaceId, candidate);
+    const publish = operations(harness, workspaceId).find((item) => item.kind === "publish") as { id: string; publication: Record<string, unknown> };
+    expect(publish.publication).toMatchObject({ publicationMode: "CHECKED_TREE", expectedTreeSha: "b".repeat(40) });
+    const invocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === publish.id)[0]!.invocation as { payload: { repositoryGrant: string } };
+    const exchange = vi.spyOn(harness.brokerInput.repositoryGrants, "exchange");
+
+    await registerSlackProject(harness.handler, { revision: 2 });
+    const latest = harness.db.find((item) => item.entityType === "PROJECT" && item.definition !== undefined && (item.definition as { name: string; revision: number }).name === "payments" && (item.definition as { revision: number }).revision === 2)[0]!;
+    harness.db.set({ ...latest, definition: { ...(latest.definition as Record<string, unknown>), e2e: baselinePolicy(["new-required-baseline"]) } });
+
+    const credentialResponse = await harness.handler({ version: "2.0", rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${publish.id}/repository-credentials`, rawQueryString: "",
+      headers: { "x-agentx-repository-grant": invocation.payload.repositoryGrant },
+      body: JSON.stringify({ credentialRef: "github-app", repositoryUrl: "https://github.com/example/demo.git", access: "push" }),
+      requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    expect(credentialResponse.statusCode).not.toBe(200);
+    expect(JSON.parse(credentialResponse.body)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(exchange).not.toHaveBeenCalled();
+    expect(taskWorkflow(harness, taskId).stage).toBe("PULL_REQUEST");
+  });
+
+  it("holds the same publication mode when its approved plan reference and Owner approval change", async () => {
+    const github = pullRequestGateway("b".repeat(40));
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: github } });
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    await passReviews(harness, workspaceId, candidate);
+    const publish = operations(harness, workspaceId).find((item) => item.kind === "publish") as { id: string; publication: Record<string, unknown> };
+    expect(publish.publication.publicationMode).toBe("CHECKED_TREE");
+    const invocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === publish.id)[0]!.invocation as { callbackCapability: string; payload: { repositoryGrant: string } };
+    const exchange = vi.spyOn(harness.brokerInput.repositoryGrants, "exchange");
+
+    // Model a new canonical plan object and matching Owner decision after this publication was admitted.
+    const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
+    const workflow = record.workflow;
+    const oldPlan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)!;
+    const oldApproval = workflow.decisions.filter((decision) => decision.decision === "APPROVE" && decision.artifactDigest === oldPlan.sha256).at(-1)!;
+    const planText = "# Plan\n\n1. Preserve the approved implementation but record its revised rationale.\n";
+    const planSha = createHash("sha256").update(planText, "utf8").digest("hex");
+    const planArtifact = { ...oldPlan, id: randomUUID(), version: oldPlan.version + 1, sha256: planSha,
+      objectKey: `workflow/${taskId}/plan-revision-${randomUUID()}.md`, createdAt: new Date().toISOString(), format: "markdown" as const };
+    harness.s3.objects.set(planArtifact.objectKey, planText);
+    const ownerApproval = { ...oldApproval, requestId: randomUUID(), workflowRevision: workflow.revision + 1, artifactDigest: planSha, at: new Date().toISOString() };
+    harness.db.set({ ...record, workflow: { ...workflow, revision: workflow.revision + 1, updatedAt: ownerApproval.at,
+      artifacts: workflow.artifacts.map((artifact) => artifact.id === oldPlan.id ? planArtifact : artifact), decisions: [...workflow.decisions, ownerApproval] } });
+
+    const credentialResponse = await harness.handler({ version: "2.0", rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${publish.id}/repository-credentials`, rawQueryString: "",
+      headers: { "x-agentx-repository-grant": invocation.payload.repositoryGrant },
+      body: JSON.stringify({ credentialRef: "github-app", repositoryUrl: "https://github.com/example/demo.git", access: "push" }),
+      requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    expect(credentialResponse.statusCode).not.toBe(200);
+    expect(JSON.parse(credentialResponse.body)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(exchange).not.toHaveBeenCalled();
+
+    const metadataResponse = await harness.handler({ version: "2.0", rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${publish.id}/pull-request`, rawQueryString: "",
+      headers: { "x-agentx-callback-capability": invocation.callbackCapability },
+      body: JSON.stringify({ repository: publish.publication.repository, repositoryUrl: publish.publication.repositoryUrl, headBranch: publish.publication.headBranch,
+        baseBranch: publish.publication.baseBranch, commit: "d".repeat(40), title: publish.publication.title }),
+      requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    expect(metadataResponse.statusCode).not.toBe(200);
+    expect(JSON.parse(metadataResponse.body)).toMatchObject({ error: { code: "CALLBACK_FORBIDDEN" } });
+    expect(github.getBranchHead).not.toHaveBeenCalled();
+    expect(github.reconcilePullRequest).not.toHaveBeenCalled();
+  });
+
+  it("treats a reused publication request with a changed candidate base as an idempotency conflict", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    await passReviews(harness, workspaceId, candidate);
+    const publicationCount = operations(harness, workspaceId).filter((item) => item.kind === "publish").length;
+    expect(publicationCount).toBe(1);
+
+    const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
+    const workflow = record.workflow;
+    const routeDeps = { documentClient: harness.db, tableName: "state", actions: harness.actions, now: () => Date.now() };
+    const expected = { workflowRevision: workflow.revision, candidateDigest: candidate.digest };
+    const origin = { taskPageUrl: taskPageUrl(DEV_ISSUER, taskId), ownerAccess: { peopleRevision: 1 } };
+    await expect(startTaskWorkflowPublicationFromSystem(routeDeps as never, taskId, expected, origin)).resolves.toBe("DUPLICATE");
+
+    harness.db.set({ ...record, workflow: { ...workflow, reviewBase: [{ repositoryId: "demo", baseCommitSha: "f".repeat(40) }] } });
+    await expect(startTaskWorkflowPublicationFromSystem(routeDeps as never, taskId, expected, origin)).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(operations(harness, workspaceId).filter((item) => item.kind === "publish")).toHaveLength(publicationCount);
   });
 
   for (const [name, tree, heads, opened] of [
@@ -1134,18 +1398,20 @@ describe("native developer task workflow", () => {
 
   it("starts both reviews automatically once the selected checks pass, bound to the exact checked code", async () => {
     const harness = await createDeveloperTaskBroker();
-    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    // This is the ordinary non-E2E review-start control. Required browser/source-interface intent now uses the
+    // dedicated normal-route acceptance, where unsupported criteria remain UNKNOWN and hold review admission.
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness, planDocument());
     await finishImplementation();
     const workflow = taskWorkflow(harness, taskId);
     expect(workflow).toMatchObject({ stage: "REVIEW", state: "RUNNING", candidate: { digest: candidate.digest } });
     const review = operations(harness, workspaceId).find((item) => item.workflowMode === "REVIEW")!;
     expect(review.requestId).toBe(workflowRequestId("agentx-auto-review", taskId, workflow.revision - 1, candidate.digest));
-    const payload = (harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === review.id)[0]?.invocation as { payload: { workflowBase?: unknown; workflowReviewChecks?: unknown; workflowReviewPlan?: { markdown: string; sha256: string }; prompt: string } }).payload;
+    const payload = (harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === review.id)[0]?.invocation as { payload: { workflowBase?: unknown; workflowReviewChecks?: unknown; workflowReviewPlan?: { markdown: string; sha256: string; e2eIntent?: unknown }; prompt: string } }).payload;
     expect(payload.workflowBase).toEqual([{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }]);
     // Reviewers get the approved coding plan (the approved artifact's digest and its Markdown), not the owner's note.
     const approvedPlan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)!;
     expect(payload.workflowReviewPlan?.sha256).toBe(approvedPlan.sha256);
-    expect(payload.workflowReviewPlan?.markdown).toContain("Fix retry handling.");
+    expect(payload.workflowReviewPlan?.markdown).toContain("Retry failed payments");
     expect(Buffer.byteLength(payload.workflowReviewPlan!.markdown, "utf8")).toBeLessThanOrEqual(32_768);
     expect(payload.prompt).not.toContain(payload.workflowReviewPlan!.markdown);
     // Reviewers are told which checks ran on the checked code.
@@ -2297,7 +2563,7 @@ describe("the draft pull request AgentX opens (final review)", () => {
   const routeDeps = (harness: Harness) => ({ documentClient: harness.db, tableName: "state", actions: harness.actions, log: () => undefined,
     checkAccess: async () => ({ revision: 1, policy: {} as never, access: "granted" as const, channelIds: [] }), projectChannelIds: async () => [], now: () => Date.now() });
 
-  it("describes only the owner-approved plan whose saved text still has its digest, else the task's title", async () => {
+  it("holds publication when the owner-approved plan bytes no longer match its digest", async () => {
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
     const plan = taskWorkflow(harness, taskId).artifacts.find((artifact) => artifact.type === "plan")!;
@@ -2309,9 +2575,8 @@ describe("the draft pull request AgentX opens (final review)", () => {
     const reviewPayload = (harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === review.id)[0]?.invocation as { payload: Record<string, unknown> }).payload;
     expect(reviewPayload).not.toHaveProperty("workflowReviewPlan");
     await passReviews(harness, workspaceId, candidate);
-    const body = String(publishOf(harness, workspaceId)[0]?.publication.body);
-    expect(body).not.toContain("Push straight to main.");
-    expect(body.split("\n")[0]).toBe("Fix the retry bug");
+    expect(publishOf(harness, workspaceId)).toEqual([]);
+    expect(dispatchRows(harness)).toEqual([]);
   });
 
   it("makes a Slack-written title inert in the pull request's title and description", () => {
@@ -2969,7 +3234,7 @@ describe("checks AgentX proposes in the coding plan", () => {
 describe("review-only verification when no check applies", () => {
   const EMPTY_POLICY = { required: [], optional: [], selectedOptionalIds: [] };
   const NO_CHECKS = { status: "not_verified", notVerifiedReason: "no_checks", source: "none", preambleVersion: "1", preambleSha256: "c".repeat(64), checks: [], extraTry: "not_needed", agentClaim: "success" };
-  const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
+  const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
   /** A Quick task coding after the owner approved `plan`; `policy` is the stored check policy (undefined: none stored). */
   async function coding(harness: Harness, plan: string | { answer: string }, policy: Record<string, unknown> | undefined) {
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK" });
@@ -4501,7 +4766,8 @@ describe("pushing an approved PR feedback fix to the same pull request (item 7)"
     await harness.finish(workspaceId, publish.id, "SUCCEEDED", { result: { repository: "demo", number: 42, url: PR_URL, headBranch: p.headBranch, baseBranch: "main", commit: "d".repeat(40), checks: [], reconciled: false } });
     expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "WAIT_FOR_MERGE", pullRequests: [{ number: 42, headSha: "d".repeat(40), headTreeSha: "b".repeat(40) }] });
     // The owner approved PR feedback and the fix was coded and checked (tree c, same base): its reviews are due.
-    const fix = createCandidateManifest([{ repositoryId: "demo", commitSha: "9".repeat(40), treeSha: FIX_TREE, baseCommitSha: "e".repeat(40) }]);
+    // The synthetic candidate is the exact immutable commit the simulated update pushes; the broker now binds both.
+    const fix = createCandidateManifest([{ repositoryId: "demo", commitSha: PUSHED, treeSha: FIX_TREE, baseCommitSha: "e".repeat(40) }]);
     const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: WorkflowSnapshot };
     const opened = record.workflow;
     const now = new Date().toISOString();

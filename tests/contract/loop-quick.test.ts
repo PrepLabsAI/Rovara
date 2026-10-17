@@ -34,6 +34,7 @@ async function setUp(options: { checks?: boolean[] } = {}) {
   await mkdir(join(checkout, ".rovara"), { recursive: true });
   await writeFile(join(checkout, ".rovara", "loop.yaml"), ["version: 1", "collaborators: [maya, sam]", "checks:", "  - name: tests", "    run: npm test", ""].join("\n"));
   const world = new LoopWorld();
+  const candidate = { branch: "rovara/42", commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "c".repeat(40) };
   world.titles.set(ISSUE, "Retry payments on 503");
   const store = new LoopStore(join(root, "home", ".rovara", "loop"));
   await store.saveRepos([{ repo: world.repo, path: checkout }]);
@@ -49,6 +50,8 @@ async function setUp(options: { checks?: boolean[] } = {}) {
     store, exec: world.exec, github: new GitHub(world.exec), harness: new AgentHarness(world.exec, { claudeHome: join(root, "claude") }),
     cliCommand: ["/usr/local/bin/node", "/opt/rovara/cli.js"], now: () => new Date(world.clock), log: () => undefined, checkRun,
     reviewerRun: async () => ({ ok: true, text: NO_FINDINGS }),
+    captureCandidate: async () => candidate,
+    resolvePublicationContext: async () => ({ kind: "unmanaged-local" }),
   });
   await daemon.poll();
   const worktree = () => join(store.itemDir(world.repo, ISSUE), "worktree");
@@ -63,19 +66,16 @@ async function setUp(options: { checks?: boolean[] } = {}) {
   };
   const readPlanFile = () => readFile(join(worktree(), "docs", "rovara", String(ISSUE), "plan.md"), "utf8");
   /** The agent claims its step done through its MCP tool, while the daemon attends to its inbox. */
-  const complete = async (summary: string) => {
-    const server = createLoopMcpServer({ store, repo: world.repo, issue: ISSUE, version: "test", pollMs: 5, waitMs: 2_000 });
+  const complete = async (summary: string, afterAttend?: () => Promise<void>) => {
+    const server = createLoopMcpServer({
+      store, repo: world.repo, issue: ISSUE, version: "test", pollMs: 5, waitMs: 2_000,
+      sleep: async () => { await daemon.attend(); await afterAttend?.(); },
+    });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     await server.connect(serverSide);
     const client = new Client({ name: "claude-code", version: "test" });
     await client.connect(clientSide);
     const call = client.callTool({ name: "loop_complete", arguments: { summary } });
-    let answered = false;
-    void call.finally(() => { answered = true; });
-    while (!answered) {
-      await daemon.attend();
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
     return ((await call) as { content: Array<{ text: string }> }).content[0]?.text ?? "";
   };
   /** The loop's own steps (checks, publishing) run in the background: attend, let them finish, attend again. */
@@ -143,6 +143,34 @@ describe("the repository's checks, through a real shell (#356)", () => {
 });
 
 describe("the Quick loop end to end (#356)", () => {
+  it("does not advance past a written verdict while MCP response observation is delayed", async () => {
+    const h = await setUp({ checks: [false] });
+    h.world.say(ISSUE, "maya", "/rovara quick Retry the payment call on a 503");
+    await h.daemon.poll();
+    await h.writePlan(PLAN);
+    expect(await h.complete("Planned the retry.")).toContain("Accepted");
+    h.world.say(ISSUE, "maya", "/rovara approve");
+    await h.daemon.poll();
+    await h.writePlan(PLAN);
+    await h.selfReview();
+
+    let releasePoll!: () => void;
+    let sawMissingVerdict!: () => void;
+    const missingVerdict = new Promise<void>((resolve) => { sawMissingVerdict = resolve; });
+    const delayedPoll = new Promise<void>((resolve) => { releasePoll = resolve; });
+    const completion = h.complete("Coded the retry.", async () => {
+      sawMissingVerdict();
+      await delayedPoll;
+    });
+    await missingVerdict;
+    // Let the instant failed check finish while its MCP acknowledgement is withheld.
+    await h.daemon.settle();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    releasePoll();
+    expect(await completion).toContain("Accepted");
+    expect(h.label()).toEqual(["rovara:checking"]);
+  });
+
   it("plans, takes changes into the plan, waits for approval, codes, sends a failing check back, then opens one pull request", async () => {
     const h = await setUp({ checks: [false] });
     // Like this repository: the default branch is mainline, which GitHub says; origin/HEAD is never asked.
@@ -218,8 +246,8 @@ describe("the Quick loop end to end (#356)", () => {
     expect(pull).toMatchObject({ head: "rovara/42", base: "mainline", title: "Retry payments on 503" });
     expect(pull.body).toContain("Closes #42.");
     expect(pull.body).toContain("Approved: the plan by @maya.");
-    // The loop committed its checks report as evidence before it published.
-    expect(h.world.loopCommits).toEqual(["docs/rovara/42/evidence/checks.md, docs/rovara/42/evidence/reviews.md: chore(rovara): evidence for #42"]);
+    // Check and review reports remain outside the committed candidate.
+    expect(h.world.loopCommits).toEqual([]);
     expect(pull.body).toContain("## Plan");
     expect(pull.body).toContain("- ✅ **tests**");
     expect(pull.body).toContain("## Reviews\n\n### Code review: passed\n\n### Security review: passed");

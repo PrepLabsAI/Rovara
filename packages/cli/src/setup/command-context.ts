@@ -51,7 +51,7 @@ function noTerminalPrompter(): Prompter {
  * settings, so a day-2 command relies on the admin route's own check. */
 export function realSetupContext(input: {
   parameterStore: (region?: string) => ParameterStore; fetch: typeof fetch; tokenStore: TokenStore;
-  stdout: TextWriter; stderr: TextWriter;
+  stdout: TextWriter; stderr: TextWriter; home?: string;
 }): SetupCommandContext {
   const openAws = async (command: Command): Promise<Omit<SetupRun, "session">> => {
     const globals = command.optsWithGlobals<{ env: string; json: boolean; configDir: string; region?: string }>();
@@ -62,7 +62,7 @@ export function realSetupContext(input: {
     return {
       env: globals.env, settings,
       secrets: secretsManagerInitSecrets(new SecretsManagerClient({ region: settings.region })),
-      services: realSetupServices({ region: settings.region, fetch: input.fetch, configDir: globals.configDir, tokenStore: input.tokenStore }),
+      services: { ...realSetupServices({ region: settings.region, fetch: input.fetch, configDir: globals.configDir, tokenStore: input.tokenStore }), ...(input.home === undefined ? {} : { loopHome: input.home }) },
       prompter: process.stdin.isTTY === true ? processPrompter(input.stderr) : noTerminalPrompter(),
       write: (line) => { input.stderr.write(`${line}\n`); },
       sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),

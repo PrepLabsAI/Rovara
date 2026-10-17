@@ -9,6 +9,7 @@ import { ProjectModelsSchema } from "./models.js";
 import { redactText } from "./redaction.js";
 
 import { AGENTX_NAME_PATTERN } from "./names.js";
+import { E2EPolicySchema, E2E_PROJECT_CHECK_ID } from "./e2e.js";
 
 export { AGENTX_NAME_PATTERN };
 export const OCI_DIGEST_PATTERN = /@sha256:[a-f0-9]{64}$/;
@@ -315,6 +316,8 @@ function projectDefinitionObject<Connectors extends z.ZodTypeAny>(connectorsSche
       }).strict().optional(),
       actionPolicy: ActionPolicySchema.optional(),
       developerTasks: DeveloperTaskPolicySchema.optional(),
+      /** Optional trusted-scenario policy. Absence preserves the legacy workflow. */
+      e2e: E2EPolicySchema.optional(),
     })
     .strict();
 }
@@ -375,6 +378,11 @@ function checkProjectDefinition(
 
 export const ProjectDefinitionSchema = projectDefinitionObject(ConnectorsSchema)
   .superRefine(checkProjectDefinition)
+  .superRefine((project, context) => {
+    if ((project.e2e?.targets ?? []).some((target) => target.targetId === E2E_PROJECT_CHECK_ID)) {
+      context.addIssue({ code: "custom", path: ["e2e", "targets"], message: "project-e2e is a reserved check identity, not a target ID" });
+    }
+  })
   // Runs wherever ProjectDefinitionSchema parses a project: registration, the developer CLI's
   // local project-file check, and the local broker. A stored revision is read with
   // StoredProjectDefinitionSchema, which does not re-check.

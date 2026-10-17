@@ -15,7 +15,7 @@ import { type AgentXNaming, legacyNaming } from "./naming.js";
 
 export const AGENTX_PRODUCTION_DEPLOYMENT_MODE = "ec2-ebs";
 export const AGENTX_PRODUCTION_VPC_CIDR = "10.42.0.0/16";
-export const AGENTX_PRODUCTION_INSTANCE_TYPE = "m6g.medium";
+export const AGENTX_PRODUCTION_INSTANCE_TYPE = "m6g.large";
 
 const DEFAULT_AZ_IDS: Readonly<Record<string, readonly [string, string]>> = {
   "us-east-1": ["use1-az1", "use1-az2"],

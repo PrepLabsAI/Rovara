@@ -93,6 +93,19 @@ describe("doctor: the budget's fix (final review I1)", () => {
 });
 
 describe("doctor: capacity (item 5)", () => {
+  it("requires the two vCPUs needed by an m6g.large worker", async () => {
+    const quotaOne = passingChecks({ ec2Quota: async () => 1 });
+    expect((await capacityChecks(doctorContext({ services: doctorServices({ checks: quotaOne }) })))
+      .find((entry) => entry.name === "EC2 vCPUs")).toMatchObject({
+      status: "fail", detail: "the Standard on-demand vCPU quota is 1 in us-east-1; an m6g.large worker needs 2 vCPUs",
+    });
+    const quotaTwo = passingChecks({ ec2Quota: async () => 2 });
+    expect((await capacityChecks(doctorContext({ services: doctorServices({ checks: quotaTwo }) })))
+      .find((entry) => entry.name === "EC2 vCPUs")).toMatchObject({
+      status: "ok", detail: "the Standard on-demand vCPU quota is 2 in us-east-1",
+    });
+  });
+
   it("reports free Elastic IPs and warns when a second environment would not fit", async () => {
     expect((await capacityChecks(doctorContext())).find((entry) => entry.name === "Elastic IPs")).toMatchObject({ status: "ok", detail: "5 of 5 EC2-VPC Elastic IPs free in us-east-1" });
     const tight = passingChecks({ elasticIps: async () => ({ quota: 5, allocated: 4 }) });

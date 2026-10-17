@@ -27,6 +27,10 @@ import {
   DeveloperTaskActionRequestSchema,
   DeveloperTaskCloseRequestSchema,
   DeveloperTaskStatusSchema,
+  CandidateManifestSchema,
+  createCandidateManifest,
+  WorkflowDependencyResultSchema,
+  projectCatalogKey,
   type ProjectDefinition,
   PullRequestResultSchema,
   ShareDeveloperTaskRequestSchema,
@@ -55,6 +59,7 @@ import {
   type StartDeveloperTaskRequest,
   type WorkspaceInstance,
   type WorkflowSnapshot,
+  WorkflowSnapshotSchema,
   type TaskComment,
   type TaskSuggestion,
   type WorkflowStage,
@@ -80,6 +85,9 @@ import {
   type WorkflowReviewFinding,
   type WorkflowCheckPolicy,
   WorkflowDecisionRequestSchema,
+  E2EPolicySchema,
+  e2ePolicyDigest,
+  e2eScenarioBundleDigest,
   WorkflowFeedbackNoteSchema,
   WorkflowFeedbackBundleSchema,
   WorkflowFeedbackReviewReportSchema,
@@ -95,6 +103,7 @@ import {
   WorkflowFeedbackReviewRetryRequestSchema,
   WORKFLOW_PLAN_MAX_BYTES,
   WORKFLOW_BLOCK_REASONS,
+  WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
   canonicalPlanJson,
   canonicalJson,
   retiredClaimIds,
@@ -117,9 +126,12 @@ import {
   WORKFLOW_KEEP_PULL_REQUESTS_NOTE,
   returnWorkflowToImplementation,
   sendBackProblems,
+  workflowSendBackOffered,
   WORKFLOW_REGRESSION_INSTRUCTION,
   type WorkflowSendBackProblem,
   type WorkflowDependencyInvocation,
+  type E2EFeaturePlanIntent,
+  type E2EWorkflowAdmissionRef,
   workflowDependencyAttemptTerminalProgress,
   WorkflowResolveFindingsInputSchema,
   TaskPeopleRoleRequestSchema,
@@ -132,7 +144,7 @@ import {
   workflowFindingAccepted,
   workflowFindingProblem,
 } from "@agentx/contracts";
-import type { z } from "zod";
+import { z } from "zod";
 import { channelLabel, decideMode, decideShare, type BoundChannel, type ShareDecision } from "../developer/share.js";
 import { PULL_REQUEST_PARTIAL_REVIEW_LINE, PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START } from "../developer/pull-request-feedback-section.js";
 import { chargeConflict, chargeItems, developerCharge, limitReached, readWorkspaceLimits, releaseConflict, releaseItems, type ChargeConflict, type WorkspaceLimits } from "../developer/limits.js";
@@ -141,6 +153,7 @@ import {
   byCreated,
   deriveTaskStatus,
   developerTaskIdentity,
+  E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON,
   inertName,
   partyOfTask,
   recentTaskEvents,
@@ -170,6 +183,7 @@ import type { DeveloperTaskActions, TransactItems } from "./developer-task-actio
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { setupWatchKey } from "./stuck-setup.js";
+import { operationKey } from "./cancellation.js";
 import { resumeTaskDispatch } from "./task-dispatch-access.js";
 import { feedbackReviewNoticeId } from "../developer/notifications.js";
 import { feedbackNoticeToDecisionMeasure, feedbackRecommendationMeasure } from "../developer/feedback-review-measures.js";
@@ -235,6 +249,75 @@ export interface DeveloperTaskRouteDependencies {
   resolveTaskPickerPerson?(taskId: string, slackUserId: string): Promise<{ personId: string; developerId: string; slackUserId: string; channelMember: boolean }>;
   taskPeopleChannel?(taskId: string): Promise<{ teamId: string; channelId: string; threadTs: string }>;
   inviteTaskPerson?(input: TaskPersonInviteClaimRequest): Promise<TaskPersonInviteOutcome>;
+  /** Loads E2E presentation from the current server-owned CHECKS operation and its immutable evidence references. */
+  workflowE2EPresentation?(input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }): Promise<DeveloperTaskView["e2ePresentation"] | undefined>;
+  /** Atomic conditions for current managed-E2E authority, attached to publication admission. */
+  workflowE2EPublicationChecks?(input: { task: DeveloperTaskRecord; operations: readonly unknown[] }): Promise<TransactItems | undefined>;
+  /** Resolves only a URL loaded from the task's immutable registered project revision. */
+  registeredRepositoryIdentity?(url: string): Promise<{ repositoryId: number; fullName: string } | undefined>;
+}
+
+const E2EPublicationSubjectSchema = z.object({
+  projectName: z.string().min(1).max(100), projectRevision: z.number().int().positive(), repositoryId: z.number().int().positive(),
+  commitSha: z.string().regex(/^[a-f0-9]{40}$/), treeSha: z.string().regex(/^[a-f0-9]{40}$/), baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/),
+}).strict();
+const E2EPublicationJoinRequestSchema = z.object({
+  taskRef: z.string().uuid(), subject: E2EPublicationSubjectSchema, sourceBindingRef: z.string().regex(/^cli-source:v1:[a-f0-9]{64}$/),
+}).strict();
+
+async function e2ePublicationContext(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, pathTaskId: string, input: unknown) {
+  const request = E2EPublicationJoinRequestSchema.safeParse(input);
+  if (!request.success || request.data.taskRef !== pathTaskId) {
+    return { schemaVersion: 1, status: "UNKNOWN", reasonCode: "invalid_or_mismatched_task_selector", checkedAt: iso(deps) };
+  }
+  const task = await loadOwnedTask(deps, caller, pathTaskId);
+  const { subject } = request.data;
+  const unknown = (reasonCode: string) => ({ schemaVersion: 1, status: "UNKNOWN", subject, reasonCode, checkedAt: iso(deps) });
+  if (task.workflow?.e2e?.required !== true || task.workflow.candidate === undefined || task.workflow.e2e.currentRoundId === undefined
+    || subject.projectName !== task.project || subject.projectRevision !== task.startingRevision) return unknown("current_task_scope_unavailable");
+  const candidate = CandidateManifestSchema.safeParse(task.workflow.candidate);
+  if (!candidate.success) return unknown("current_candidate_unavailable");
+  const project = await deps.actions.projectRevision(task.project, task.startingRevision);
+  if (project === undefined || project.definition.revision !== subject.projectRevision) return unknown("registered_project_revision_unavailable");
+  const candidateRepositories = candidate.data.repositories.filter((item) => item.commitSha === subject.commitSha && item.treeSha === subject.treeSha);
+  if (candidateRepositories.length !== 1) return unknown("candidate_commit_tree_or_base_mismatch");
+  const candidateRepository = candidateRepositories[0]!;
+  const candidateBase = candidateRepository.baseCommitSha
+    ?? task.workflow.reviewBase?.find((item) => item.repositoryId === candidateRepository.repositoryId)?.baseCommitSha;
+  if (candidateBase !== subject.baseCommitSha) return unknown("candidate_commit_tree_or_base_mismatch");
+  const registeredRepository = project.definition.repositories.find((item) => item.name === candidateRepository.repositoryId);
+  if (registeredRepository === undefined || deps.registeredRepositoryIdentity === undefined) return unknown("registered_repository_identity_unavailable");
+  const identity = await deps.registeredRepositoryIdentity(registeredRepository.url);
+  if (identity === undefined || identity.repositoryId !== subject.repositoryId) return unknown("registered_repository_id_mismatch");
+  const url = new URL(registeredRepository.url);
+  const pathParts = url.pathname.split("/").filter(Boolean);
+  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com" || pathParts.length !== 2) return unknown("registered_repository_url_unsupported");
+  const registeredFullName = `${pathParts[0]}/${pathParts[1]!.replace(/\.git$/u, "")}`;
+  if (identity.fullName.toLowerCase() !== registeredFullName.toLowerCase()) return unknown("registered_repository_full_name_mismatch");
+  const operations = await deps.actions.operations(task.workspaceId);
+  const publicationChecks = await deps.workflowE2EPublicationChecks?.({ task, operations });
+  const presentation = await deps.workflowE2EPresentation?.({ task, operations, actor: "owner" });
+  if (publicationChecks === undefined || publicationChecks.length === 0 || presentation?.shared.e2e.status !== "PASS") {
+    return unknown("current_e2e_evidence_unavailable");
+  }
+  const progress = task.workflow.e2e;
+  const qualified = progress.qualifiedRound;
+  if (qualified === undefined || qualified.roundId !== progress.currentRoundId || qualified.candidateDigest !== candidate.data.digest
+    || qualified.groupRunIds.length === 0 || canonicalJson(qualified.groupRunIds) !== canonicalJson(progress.currentGroupRunIds)) {
+    return unknown("current_e2e_round_unavailable");
+  }
+  const evidenceSetDigest = createHash("sha256").update(canonicalJson({
+    domain: "agentx-e2e-publication-context/v1", taskId: task.taskId, candidateDigest: candidate.data.digest,
+    roundId: qualified.roundId, admissionSha256: qualified.admissionSha256,
+    evidenceSha256: qualified.evidenceSha256, groupRunIds: qualified.groupRunIds,
+  })).digest("hex");
+  const planDigest = progress.executionPlanDigest;
+  if (planDigest === undefined || qualified.contractDigest !== progress.contractDigest
+    || qualified.policyDigest !== progress.policyDigest || qualified.executionPlanDigest !== planDigest
+    ) return unknown("current_e2e_plan_unavailable");
+  return { schemaVersion: 1, status: "READY", subject, candidateDigest: candidate.data.digest,
+    contractDigest: progress.contractDigest, policyDigest: progress.policyDigest,
+    planDigest, roundId: qualified.roundId, evidenceSetDigest, checkedAt: iso(deps) };
 }
 
 function taskPeopleEffectsDependencies(deps: DeveloperTaskRouteDependencies) {
@@ -486,6 +569,12 @@ async function systemTaskAccess(deps: DeveloperTaskRouteDependencies, task: Deve
 const accessFence = (deps: Pick<DeveloperTaskRouteDependencies, "tableName">, access: TaskAccess) =>
   taskAccessFence(deps.tableName, access.task.taskId, access.peopleRevision);
 
+/** A durable workflow dispatch uses the same fresh task-people proof and transactional fence as an accepted task. */
+export async function systemTaskDispatchAccessFence(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<TransactItems[number] | undefined> {
+  const access = await systemTaskAccess(deps, task);
+  return access === undefined ? undefined : accessFence(deps, access);
+}
+
 async function resumeParkedTaskDispatch(
   deps: DeveloperTaskRouteDependencies,
   caller: DeveloperCaller,
@@ -531,11 +620,84 @@ async function resumeAccessPausedWorkflowDispatch(
       throw agentXError("IDEMPOTENCY_CONFLICT", "this request ID was already used for another retry");
     }
     await authorizeTaskAction(deps, caller, access.task.taskId, "retry");
+    if (audit.kind === "CHECKS" && access.task.workflow?.e2e?.required === true) {
+      return { task: await taskView(deps, access.task, { events: 0, details: false }) };
+    }
   } else {
     const rowKey = { pk: WORKFLOW_DISPATCH_PK, sk: `${access.task.taskId}#${request.expectedRevision}` };
     const row = await get<WorkflowDispatchRecord & { taskAccessPausedAt?: string }>(deps, rowKey);
     if (row?.taskAccessPausedAt === undefined || row.candidateDigest !== request.candidateDigest) return undefined;
     const at = iso(deps);
+    const current = access.task.workflow;
+    if (row.kind === "CHECKS" && current?.e2e?.required === true) {
+      if (current.stage !== "VERIFY" || current.state !== "WAITING" || current.revision !== row.workflowRevision
+        || current.revision !== request.expectedRevision || current.candidate?.digest !== row.candidateDigest || current.checkPolicy === undefined) {
+        return undefined;
+      }
+      const { blockReason: _blockReason, verification: _oldVerification, reviews: _oldReviews, ...workflowBase } = current;
+      const { qualifiedRound: _qualifiedRound, failedRound: _failedRound, currentRoundId: _currentRoundId,
+        currentGroupRunIds: _currentGroupRunIds, displayRef: _displayRef, ...unqualifiedE2E } = current.e2e;
+      void _blockReason;
+      void _oldVerification;
+      void _oldReviews;
+      void _qualifiedRound;
+      void _failedRound;
+      void _currentRoundId;
+      void _currentGroupRunIds;
+      void _displayRef;
+      const selectedOptionalCheckIds = current.checkPolicy.selectedOptionalIds;
+      const selectedProposedCheckIds = keptProposedIds(current.checkPolicy);
+      const next = WorkflowSnapshotSchema.parse({
+        ...workflowBase,
+        revision: current.revision + 1,
+        stage: "VERIFY",
+        state: "WAITING",
+        e2e: { ...unqualifiedE2E, currentGroupRunIds: [] },
+        verificationRetries: [...(current.verificationRetries ?? []), {
+          requestId: request.requestId, actorId: access.actorId, selectedOptionalCheckIds, selectedProposedCheckIds, at,
+        }],
+        updatedAt: at,
+      });
+      const freshAudit: WorkflowAccessRetryAudit = { ...auditKey, entityType: "WORKFLOW_ACCESS_RETRY", actorId: access.actorId,
+        payloadHash, workflowRevision: next.revision, kind: "CHECKS", candidateDigest: row.candidateDigest, at };
+      try {
+        await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+          { ConditionCheck: {
+            TableName: deps.tableName, Key: rowKey,
+            ConditionExpression: "workflowRevision = :revision AND #kind = :kind AND candidateDigest = :candidate AND attribute_exists(taskAccessPausedAt)",
+            ExpressionAttributeNames: { "#kind": "kind" },
+            ExpressionAttributeValues: { ":revision": row.workflowRevision, ":kind": "CHECKS", ":candidate": row.candidateDigest },
+          } },
+          { Update: {
+            TableName: deps.tableName, Key: taskKey(access.task.taskId),
+            UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+            ConditionExpression: "workflow.revision = :revision AND workflow.candidate.digest = :candidate AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.e2e.required = :required AND attribute_not_exists(closedAt)",
+            ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+            ExpressionAttributeValues: { ":workflow": next, ":now": at, ":revision": current.revision, ":candidate": row.candidateDigest,
+              ":stage": "VERIFY", ":state": "WAITING", ":required": true },
+          } },
+          putNew(turnTable(deps), aiToolTurn({
+            party: partyOfTaskActor(access.task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
+            receivedAt: at, finishedAt: iso(deps), request: "Resume access-paused required verification.",
+            response: "The owner authorized a fresh verification admission after project access was restored.",
+          })),
+          workflowDispatchItem(deps.tableName, access.task.taskId, next.revision, "CHECKS", row.candidateDigest, at),
+          accessFence(deps, access),
+          { Put: { TableName: deps.tableName, Item: freshAudit, ConditionExpression: "attribute_not_exists(pk)" } },
+        ] }));
+      } catch (error) {
+        if (!isConditional(error)) throw error;
+        await authorizeTaskAction(deps, caller, access.task.taskId, "retry");
+        const historical = await get<WorkflowAccessRetryAudit>(deps, auditKey);
+        if (historical === undefined || historical.actorId !== access.actorId || historical.payloadHash !== payloadHash) {
+          throw agentXError("IDEMPOTENCY_CONFLICT", "this retry is out of date; refresh the task and try again");
+        }
+      }
+      const fresh = (await authorizeTaskAction(deps, caller, access.task.taskId, "retry")).task;
+      const view = await taskView(deps, fresh, { events: 0, details: false });
+      await syncIndex(deps, fresh, view.status, view.updatedAt);
+      return { task: view };
+    }
     audit = { ...auditKey, entityType: "WORKFLOW_ACCESS_RETRY", actorId: access.actorId, payloadHash,
       workflowRevision: row.workflowRevision, kind: row.kind, candidateDigest: row.candidateDigest, at };
     try {
@@ -1036,18 +1198,32 @@ async function workspaceReads(deps: DeveloperTaskRouteDependencies, task: Develo
 export async function taskView(
   deps: DeveloperTaskRouteDependencies,
   task: DeveloperTaskRecord,
-  options: { events: number; details: boolean; loaded?: WorkspaceReads },
+  options: { events: number; details: boolean; loaded?: WorkspaceReads; actor?: "owner" | "viewer" },
 ): Promise<DeveloperTaskView> {
   const [{ workspace, operations }, pointer] = await Promise.all([
     options.loaded ?? workspaceReads(deps, task),
     get<DeveloperTaskPointerRecord>(deps, taskPointerKey(task.workspaceId)),
   ]);
-  const derived = deriveTaskStatus({
+  const derivedBase = deriveTaskStatus({
     closedAt: task.closedAt,
     workspaceStatus: workspace.status,
     pointer,
     operations: operations.map((operation) => ({ id: operation.id, kind: operation.kind, status: operation.status, error: operation.error, createdAt: operation.createdAt, updatedAt: operation.updatedAt, fence: operation.fence })),
   });
+  const workflowWaitingForE2ECompute = task.workflow?.stage === "VERIFY" && task.workflow.state === "WAITING"
+    && task.workflow.e2e?.required === true && task.workflow.e2e.currentRoundId === undefined;
+  const readinessOperationId = workflowWaitingForE2ECompute && task.workflow?.candidate !== undefined
+    ? workflowRequestId("agentx-workflow-e2e-readiness", task.taskId, task.workflow.revision, task.workflow.candidate.digest) : undefined;
+  const readinessOperation = readinessOperationId === undefined ? undefined : operations.find((operation) => operation.id === readinessOperationId && operation.kind === "resume");
+  const readinessFailed = readinessOperation !== undefined && ["FAILED", "CANCELLED", "INTERRUPTED"].includes(readinessOperation.status);
+  // A readiness resume is an internal compute warmup, not task work or a verification result. Keep
+  // the task visibly starting and use its startup events until the broker admits the immutable round.
+  const derived = workflowWaitingForE2ECompute && readinessOperation !== undefined
+    ? readinessFailed
+      ? { ...derivedBase, status: "FAILED" as const, current: readinessOperation,
+        failure: { category: "task_failed" as const, message: "E2E compute readiness failed; no feature round was admitted." } }
+      : { ...derivedBase, status: "STARTING" as const, current: readinessOperation, failure: undefined }
+    : derivedBase;
   // #225: a task whose setup failed shows its prepare's events (the failure the broker recorded).
   const eventsOf = derived.current ?? derived.failedPrepare;
   const events = eventsOf === undefined || options.events === 0
@@ -1094,12 +1270,18 @@ export async function taskView(
       else workflow = { ...workflow, state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.documentUnverified };
     }
   }
+  let e2ePresentation: DeveloperTaskView["e2ePresentation"];
+  if (options.details && task.workflow?.e2e?.required === true && deps.workflowE2EPresentation !== undefined) {
+    try { e2ePresentation = await deps.workflowE2EPresentation({ task, operations, actor: options.actor ?? "owner" }); }
+    catch (error) { log(deps, { event: "developer.task_e2e_view_unavailable", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }); }
+  }
   return {
     taskId: task.taskId,
     title: task.title,
     project: task.project,
     status: derived.status,
     ...(workflow === undefined ? {} : { workflow }),
+    ...(e2ePresentation === undefined ? {} : { e2ePresentation }),
     ...(derived.failure === undefined ? {} : { failure: derived.failure }),
     startingRevision: task.startingRevision,
     client: task.client,
@@ -1657,6 +1839,18 @@ export async function decideTaskWorkflow(
   const answered = (request.answers?.length ?? 0) > 0;
   // The decided document, checked against its digest: its decisions check the answers, and the next step reads it.
   const loaded = decided !== undefined && (answered || (prior === undefined && request.decision !== "REJECT")) ? await loadWorkflowDocument(read, decided, {}) : undefined;
+  const correction = task.e2ePlanCorrection;
+  if (request.decision === "APPROVE" && documentType === "plan" && correction !== undefined) {
+    if (workflow.candidate?.digest !== correction.candidateDigest) {
+      throw agentXError("CONFIG_INVALID", "the candidate changed after this plan's source reference was rejected; refresh the plan before approval");
+    }
+    if (decided?.sha256 === correction.artifactSha256) {
+      throw agentXError("CONFIG_INVALID", "this plan was returned because its E2E source reference failed protected-candidate validation; request changes and submit a corrected plan before approval");
+    }
+    if (correction.requiredE2E && !(loaded?.format === "structured" && loaded.plan.e2e !== undefined)) {
+      throw agentXError("CONFIG_INVALID", "the corrected plan must retain the required feature E2E intent before approval");
+    }
+  }
   const decisions = loaded?.format === "structured"
     ? loaded.plan.decisions.map((decision) => ({ id: decision.id, optionIds: decision.options.map((option) => option.id), recommended: decision.recommended }))
     : undefined;
@@ -1716,6 +1910,27 @@ export async function decideTaskWorkflow(
   const decisionRequest: WorkflowDecisionRequest = included.length === 0 && request.includedCommentIds === undefined
     ? boundDecisionRequest : { ...boundDecisionRequest, includedCommentIds: included.map((comment) => comment.commentId) };
   let next = transition(decisionRequest, decisions, workBreakdownDigest);
+  if (request.decision === "APPROVE" && documentType === "plan" && !(loaded?.format === "structured" && loaded.plan.e2e !== undefined)) {
+    const pinnedProject = await deps.actions.projectRevision(task.project, task.startingRevision);
+    if (pinnedProject === undefined) throw agentXError("CONFIG_INVALID", "the pinned project revision is unavailable; refresh the plan before approving it");
+    if (pinnedProject.definition.e2e !== undefined && E2EPolicySchema.parse(pinnedProject.definition.e2e).baselineScenarioIds.length > 0) {
+      throw agentXError("CONFIG_INVALID", "the approved plan must include the canonical E2E intent required by the pinned project baseline");
+    }
+  }
+  // A required feature-E2E obligation begins only when the Owner approves the canonical plan bytes that contain it.
+  // The digests below identify the approved intent and its policy/bundle; candidate-specific execution-plan identity is
+  // bound later by the server-created CHECKS admission and round.
+  if (request.decision === "APPROVE" && documentType === "plan" && loaded?.format === "structured" && loaded.plan.e2e !== undefined) {
+    const pinnedProject = await deps.actions.projectRevision(task.project, task.startingRevision);
+    if (pinnedProject?.definition.e2e === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the approved feature E2E intent has no pinned project policy");
+    const intent = loaded.plan.e2e;
+    const policy = E2EPolicySchema.parse(pinnedProject.definition.e2e);
+    const bundleBody = { schemaVersion: 1 as const, planDigest: decided!.sha256, templateVersion: "trusted-e2e/v1", scenarios: intent.scenarios, bundleDigest: "0".repeat(64) };
+    const bundleDigest = e2eScenarioBundleDigest(bundleBody);
+    const intentDigest = createHash("sha256").update(canonicalJson({ domain: "workflow-e2e-approved-intent/v1", artifactDigest: decided!.sha256, intent })).digest("hex");
+    next = WorkflowSnapshotSchema.parse({ ...next, e2e: { contractDigest: decided!.sha256, policyDigest: e2ePolicyDigest(policy),
+      bundleDigest, executionPlanDigest: intentDigest, required: true, currentGroupRunIds: [], resultRefs: [] } });
+  }
   const receivedAt = iso(deps);
   if (request.decision === "REJECT") {
     await deps.actions.transact([{ Update: {
@@ -1793,13 +2008,18 @@ export async function decideTaskWorkflow(
       const fed = fedThroughUpdate(notes);
       return deps.actions.acceptTask(developerTaskIdentity(current), current.workspaceId, { requestId: request.requestId, conversationId: current.conversationId, prompt: basePrompt + notes.suffix }, (operation) => {
         const workflowToStore = workflowWithCurrentGraphOperation(next, workflowDependencies === undefined ? undefined : operation.id, workflowDependencies);
+        const correctedPlan = correction !== undefined && request.decision === "APPROVE" && documentType === "plan"
+          && currentPlan.sha256 !== correction.artifactSha256 && workflow.candidate?.digest === correction.candidateDigest
+          && loaded?.format === "structured" && loaded.plan.e2e !== undefined;
         return [
           { Update: {
             TableName: deps.tableName, Key: taskKey(taskId),
-            UpdateExpression: `SET workflow = :workflow, updatedAt = :now${fed.clause}`,
-            ConditionExpression: `workflow.revision = :revision AND workflow.#state = :waiting${fed.condition}`,
+            UpdateExpression: `SET workflow = :workflow, updatedAt = :now${fed.clause}${correctedPlan ? " REMOVE e2ePlanCorrection" : ""}`,
+            ConditionExpression: `workflow.revision = :revision AND workflow.#state = :waiting${fed.condition}${correctedPlan ? " AND e2ePlanCorrection.artifactId = :correctionArtifact AND e2ePlanCorrection.artifactSha256 = :correctionSha AND e2ePlanCorrection.candidateDigest = :correctionCandidate" : ""}`,
             ExpressionAttributeNames: { "#state": "state" },
-            ExpressionAttributeValues: { ":workflow": workflowToStore, ":now": receivedAt, ":revision": workflow.revision, ":waiting": "WAITING", ...fed.values },
+            ExpressionAttributeValues: { ":workflow": workflowToStore, ":now": receivedAt, ":revision": workflow.revision, ":waiting": "WAITING", ...fed.values,
+              ...(correctedPlan ? { ":correctionArtifact": correction.artifactId, ":correctionSha": correction.artifactSha256,
+                ":correctionCandidate": correction.candidateDigest } : {}) },
           } },
           putNew(turnTable(deps), aiToolTurn({
             party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
@@ -1903,9 +2123,20 @@ function keptProposedIds(policy: WorkflowCheckPolicy | undefined): string[] {
 async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-retry");
   const access = await authorizeTaskAction(deps, caller, taskId, "retry");
+  const { task } = access;
+  const recoveryHash = hashJson({ action: "committed-source-recovery", taskId, actorId: access.actorId, request });
+  const recoveryKey = { pk: `DEVTASK#${taskId}`, sk: `WORKFLOW_SOURCE_RECOVERY#${request.requestId}` };
+  const priorRecovery = await get<{ payloadHash: string; actorId: string; operationId: string }>(deps, recoveryKey);
+  if (priorRecovery !== undefined) {
+    if (priorRecovery.actorId !== access.actorId || priorRecovery.payloadHash !== recoveryHash) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "this retry request ID was already used for a different recovery request");
+    }
+  }
   const resumed = await resumeParkedTaskDispatch(deps, caller, access, request);
   if (resumed !== undefined) return resumed;
-  const { task } = access;
+  if (priorRecovery !== undefined) {
+    return { task: await taskView(deps, task, { events: 0, details: false }) };
+  }
   const priorVerificationRetry = task.workflow?.verificationRetries?.find((retry) => retry.requestId === request.requestId);
   if (priorVerificationRetry !== undefined) {
     const submittedIds = request.selectedOptionalCheckIds ?? task.workflow?.checkPolicy?.selectedOptionalIds ?? [];
@@ -1916,6 +2147,31 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       throw agentXError("IDEMPOTENCY_CONFLICT", "this retry request ID was already used for a different check selection");
     }
     return { task: await taskView(deps, task, { events: 0, details: false }) };
+  }
+  if (task.workflow !== undefined && isMissingCommittedSourceRecovery(task.workflow)) {
+    const policy = task.workflow.checkPolicy;
+    if (request.candidateDigest !== undefined
+      || (request.selectedOptionalCheckIds !== undefined
+        && canonicalJson(request.selectedOptionalCheckIds) !== canonicalJson(policy?.selectedOptionalIds ?? []))
+      || (request.selectedProposedCheckIds !== undefined
+        && canonicalJson(request.selectedProposedCheckIds) !== canonicalJson(keptProposedIds(policy)))) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "this recovery cannot change the candidate or approved check selection");
+    }
+    const recovery = await loadCommittedSourceRecovery(deps, access, request.expectedRevision);
+    await queueWorkflowCoding(deps, caller, { ...access, task: { ...task, workflow: task.workflow } }, {
+      requestId: request.requestId,
+      prompt: (notes) => `Finalize the approved implementation from the retained completed work only. Do not edit or repair the code, do not rerun any implementation step, and do not change the retained repository tree. Create the required committed-source export for the exact retained tree, then run the approved final checks and report the result. ${NO_PUBLISH_NOTE}\n\nOwner note: ${request.instructions}${notes}`,
+      next: { ...withoutWorkflowBlockReason(task.workflow), revision: task.workflow.revision + 1, stage: "IMPLEMENT", state: "RUNNING", updatedAt: iso(deps) },
+      request: request.instructions,
+      response: "Finalizing the exact retained implementation",
+      workflowDependencies: recovery.invocation,
+      recovery: { sourceOperation: recovery.operation, sourceBinding: recovery.binding, graphApproval: recovery.invocation.approval, graphProgress: recovery.invocation.resumeProgress!,
+        payloadHash: recoveryHash, actorId: access.actorId, requestId: request.requestId },
+    });
+    const fresh = (await authorizeTaskAction(deps, caller, taskId, "retry")).task;
+    const view = await taskView(deps, fresh, { events: 0, details: false });
+    await syncIndex(deps, fresh, view.status, view.updatedAt);
+    return { task: view };
   }
   // Task 16: the checks run again from blocked verification, or on a change ready to publish whose code changed.
   if (task.workflow !== undefined && ((task.workflow.stage === "VERIFY" && task.workflow.state === "BLOCKED")
@@ -1956,6 +2212,62 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       updatedAt: receivedAt,
     };
     const selectedReadiness = selected.map((check) => check.command);
+    // Required managed E2E retries must pass through the same server-owned admission
+    // dispatcher as the first VERIFY round. An ordinary CHECKS operation here would
+    // rerun project commands while leaving the canceled/failed native round stale.
+    if (workflow.e2e?.required === true) {
+      if (workflow.candidate === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the required E2E retry has no current candidate");
+      const { blockReason: _previousBlockReason, verification: _previousVerification, reviews: _previousReviews, ...retryBase } = workflow;
+      const { qualifiedRound: _qualifiedRound, failedRound: _failedRound, currentRoundId: _currentRoundId,
+        currentGroupRunIds: _currentGroupRunIds, displayRef: _displayRef, ...unqualifiedE2E } = workflow.e2e;
+      void _previousBlockReason;
+      void _previousVerification;
+      void _previousReviews;
+      void _qualifiedRound;
+      void _failedRound;
+      void _currentRoundId;
+      void _currentGroupRunIds;
+      void _displayRef;
+      const next = WorkflowSnapshotSchema.parse({
+        ...retryBase,
+        revision: workflow.revision + 1,
+        stage: "VERIFY",
+        state: "WAITING",
+        checkPolicy: { ...policy, selectedOptionalIds, selectedProposedIds },
+        e2e: { ...unqualifiedE2E, currentGroupRunIds: [] },
+        verificationRetries: [...(workflow.verificationRetries ?? []), {
+          requestId: request.requestId, actorId: access.actorId, selectedOptionalCheckIds: selectedOptionalIds,
+          selectedProposedCheckIds: selectedProposedIds, at: receivedAt,
+        }],
+        updatedAt: receivedAt,
+      });
+      try {
+        await deps.documentClient.send(new TransactWriteCommand({ TransactItems: [
+          { Update: {
+            TableName: deps.tableName, Key: taskKey(taskId),
+            UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+            ConditionExpression: "workflow.revision = :revision AND workflow.#state = :state AND workflow.#stage = :stage AND workflow.e2e.required = :required AND attribute_not_exists(closedAt)",
+            ExpressionAttributeNames: { "#state": "state", "#stage": "stage" },
+            ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision,
+              ":state": workflow.state, ":stage": workflow.stage, ":required": true },
+          } },
+          putNew(turnTable(deps), aiToolTurn({
+            party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
+            receivedAt, finishedAt: iso(deps), request: request.instructions,
+            response: "The owner authorized a fresh verification round. AgentX is rechecking the current approved source and runtime before dispatch.",
+          })),
+          workflowDispatchItem(deps.tableName, taskId, next.revision, "CHECKS", workflow.candidate.digest, receivedAt),
+          accessFence(deps, access),
+        ] }));
+      } catch (error) {
+        if (isConditional(error)) await authorizeTaskAction(deps, caller, taskId, "retry");
+        return busyOrClosing(deps, task, error);
+      }
+      const fresh = (await authorizeTaskAction(deps, caller, taskId, "retry")).task;
+      const view = await taskView(deps, fresh, { events: 0, details: false });
+      await syncIndex(deps, fresh, view.status, view.updatedAt);
+      return { task: view };
+    }
     try {
       await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, {
         requestId: request.requestId, conversationId: task.conversationId,
@@ -2035,14 +2347,94 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
   return { task: view };
 }
 
+function withoutWorkflowBlockReason(workflow: WorkflowSnapshot): WorkflowSnapshot {
+  const { blockReason: _blockReason, ...unblocked } = workflow;
+  void _blockReason;
+  return unblocked;
+}
+
+function isMissingCommittedSourceRecovery(workflow: WorkflowSnapshot): boolean {
+  const e2e = workflow.e2e;
+  return workflow.stage === "VERIFY" && workflow.state === "BLOCKED"
+    && workflow.blockReason === WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON
+    && workflow.candidate === undefined && e2e?.required === true
+    && e2e.currentRoundId === undefined && e2e.currentGroupRunIds.length === 0
+    && e2e.qualifiedRound === undefined && e2e.failedRound === undefined && e2e.resultRefs.length === 0;
+}
+
+async function loadCommittedSourceRecovery(
+  deps: DeveloperTaskRouteDependencies,
+  access: AuthorizedTask,
+  expectedRevision: number | undefined,
+): Promise<{ operation: Operation; binding: WorkflowDependencyInvocation; invocation: WorkflowDependencyInvocation }> {
+  const { task } = access;
+  const workflow = task.workflow;
+  if (workflow === undefined || !isMissingCommittedSourceRecovery(workflow)) throw agentXError("CONFIG_INVALID", "this task is not eligible for retained-source recovery");
+  if (expectedRevision === undefined || expectedRevision !== workflow.revision) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "the recovery request is stale; refresh the task and retry at its current revision");
+  }
+  await actionableWorkspace(deps, task);
+  const invocation = await approvedWorkflowDependencies(deps, task, access.peopleRevision);
+  if (invocation === undefined || deps.workflowDependenciesEnabled !== true) {
+    throw agentXError("CONFIG_INVALID", "the approved ordered plan is not available for retained-source recovery");
+  }
+  const operationId = workflow.workflowDependenciesOperationId;
+  const operation = operationId === undefined ? undefined : (await deps.actions.operations(task.workspaceId)).find((candidate) => candidate.id === operationId);
+  const sourceBinding = operation === undefined ? undefined : await deps.actions.workflowBinding(task.workspaceId, operation.id);
+  const sourceExportDigest = operation === undefined ? undefined : await deps.actions.workflowCandidateSourceExportDigest(task.workspaceId, operation.id);
+  if (operation === undefined || operation.status !== "SUCCEEDED" || operation.kind !== "task" || operation.workflowMode !== "IMPLEMENT"
+    || operation.workspaceId !== task.workspaceId || operation.conversationId !== task.conversationId
+    || invocation.graph.taskId !== task.taskId
+    || sourceExportDigest !== undefined) {
+    throw agentXError("CONFIG_INVALID", "the retained implementation is not an eligible source-export recovery attempt");
+  }
+  const rawResult = operation.result !== null && typeof operation.result === "object" && !Array.isArray(operation.result)
+    ? operation.result as Record<string, unknown> : undefined;
+  const sourceRepositories = rawResult?.workflowCandidateRepositories;
+  const checkedRepositories = rawResult?.workflowCheckCandidateRepositories;
+  const dependencyResult = WorkflowDependencyResultSchema.safeParse(rawResult?.workflowDependenciesResult);
+  if (!Array.isArray(sourceRepositories) || !Array.isArray(checkedRepositories) || !dependencyResult.success) {
+    throw agentXError("CONFIG_INVALID", "the retained implementation result is missing its source-tree binding");
+  }
+  const candidate = createCandidateManifest(sourceRepositories as Parameters<typeof createCandidateManifest>[0]);
+  const checkedCandidate = createCandidateManifest(checkedRepositories as Parameters<typeof createCandidateManifest>[0]);
+  const result = dependencyResult.data;
+  const progress = invocation.resumeProgress ?? [];
+  const last = progress.at(-1);
+  const repository = candidate.repositories.length === 1 ? candidate.repositories[0] : undefined;
+  const checkedRepository = checkedCandidate.repositories.length === 1 ? checkedCandidate.repositories[0] : undefined;
+  const preparedBase = workflow.reviewBase ?? task.preparedBase;
+  const matchingBase = repository === undefined ? undefined : preparedBase?.find((entry) => entry.repositoryId === repository.repositoryId);
+  if (operation.fence < 1 || sourceBinding === undefined
+    || sourceBinding.graph.taskId !== task.taskId || taskGraphDigest(sourceBinding.graph) !== invocation.approval.graphDigest
+    || sourceBinding.approval.graphDigest !== invocation.approval.graphDigest
+    || sourceBinding.approval.runId !== invocation.approval.runId
+    || sourceBinding.approval.artifactDigest !== invocation.approval.artifactDigest
+    || sourceBinding.approval.workflowRevision !== invocation.approval.workflowRevision
+    || sourceBinding.approval.actorId !== invocation.approval.actorId
+    || result.taskId !== task.taskId || result.operationId !== operation.id || result.status !== "SUCCEEDED"
+    || result.graphDigest !== invocation.approval.graphDigest || result.runId !== invocation.approval.runId
+    || result.workflowRevision !== invocation.approval.workflowRevision || result.candidateDigest !== candidate.digest
+    || canonicalJson(result.items) !== canonicalJson(progress) || progress.length !== invocation.graph.items.length
+    || progress.some((entry) => entry.state !== "IMPLEMENTED") || last?.state !== "IMPLEMENTED"
+    || repository === undefined || checkedRepository === undefined || candidate.digest !== checkedCandidate.digest
+    || repository.treeSha !== invocation.resumeTreeSha || repository.treeSha !== last.candidateTreeSha
+    || repository.repositoryId !== invocation.graph.items[0]?.repository || repository.baseCommitSha === undefined
+    || matchingBase?.baseCommitSha !== repository.baseCommitSha) {
+    throw agentXError("CONFIG_INVALID", "the retained graph result or repository tree changed; approve a refreshed whole coding plan before continuing");
+  }
+  return { operation, binding: sourceBinding, invocation };
+}
+
 /** The owner-approved coding plan, read back and checked against the digest the approval recorded. */
-async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<{ text: string; sha256: string }> {
+async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<{ text: string; sha256: string; e2eIntent?: E2EFeaturePlanIntent }> {
   const plan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
   if (plan === undefined) throw agentXError("WORKSPACE_NOT_READY", "the approved coding plan is missing");
   // A structured plan is given as its Markdown copy, with the owner's answers and the comments they sent with the approval.
   const loaded = await loadWorkflowDocument((objectKey, maxBytes) => deps.actions.readArtifact(objectKey, maxBytes), plan, { answers: await ownerAnswersFor(deps, workflow, plan) });
   if (loaded === undefined) throw agentXError("WORKSPACE_NOT_READY", "the approved coding plan failed its digest check");
-  return { text: loaded.markdown, sha256: plan.sha256 };
+  return { text: loaded.markdown, sha256: plan.sha256,
+    ...(loaded.format === "structured" && loaded.plan.e2e !== undefined ? { e2eIntent: loaded.plan.e2e } : {}) };
 }
 
 /** Reload the exact whole-plan artifact bound by the Owner so a retry cannot fall back to plain coding. */
@@ -2120,7 +2512,9 @@ const NO_PUBLISH_NOTE = "Do not push branches or create pull requests; AgentX ha
  */
 async function queueWorkflowCoding(
   deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, access: AuthorizedTask & { task: DeveloperTaskRecord & { workflow: WorkflowSnapshot } },
-  input: { requestId: string; prompt: (notes: string) => string; next: WorkflowSnapshot; request: string; response: string; workflowDependencies?: WorkflowDependencyInvocation },
+  input: { requestId: string; prompt: (notes: string) => string; next: WorkflowSnapshot; request: string; response: string; workflowDependencies?: WorkflowDependencyInvocation;
+    recovery?: { sourceOperation: Operation; sourceBinding: WorkflowDependencyInvocation; graphApproval: WorkflowDependencyInvocation["approval"]; graphProgress: NonNullable<WorkflowDependencyInvocation["resumeProgress"]>;
+      payloadHash: string; actorId: string; requestId: string } },
 ): Promise<{ task: DeveloperTaskView }> {
   const { task } = access;
   const { workflow } = task;
@@ -2132,10 +2526,26 @@ async function queueWorkflowCoding(
         { Update: {
           TableName: deps.tableName, Key: taskKey(task.taskId),
           UpdateExpression: `SET workflow = :workflow, updatedAt = :now${fed.clause}`,
-          ConditionExpression: `workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND attribute_not_exists(closedAt)${fed.condition}`,
+          ConditionExpression: `workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND attribute_not_exists(closedAt)${fed.condition}${input.recovery === undefined ? "" : " AND workflow.blockReason = :recoveryReason AND attribute_not_exists(workflow.candidate) AND workflow.e2e.required = :requiredE2E AND attribute_not_exists(workflow.e2e.currentRoundId) AND workflow.e2e.currentGroupRunIds = :emptyIds AND attribute_not_exists(workflow.e2e.qualifiedRound) AND attribute_not_exists(workflow.e2e.failedRound) AND workflow.e2e.resultRefs = :emptyIds AND workflow.workflowDependenciesOperationId = :graphOperationId AND workflow.workflowDependenciesApproval.graphDigest = :graphDigest AND workflow.workflowDependenciesApproval.runId = :graphRunId AND workflow.workflowDependenciesApproval.artifactDigest = :graphArtifactDigest AND workflow.workflowDependenciesApproval.workflowRevision = :graphApprovalRevision AND workflow.workflowDependenciesApproval.actorId = :graphActorId AND workflow.workflowDependenciesProgress = :graphProgress"}`,
           ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
-        ExpressionAttributeValues: { ":workflow": workflowWithCurrentGraphOperation(input.next, input.workflowDependencies === undefined ? undefined : operation.id, input.workflowDependencies), ":now": receivedAt, ":revision": workflow.revision, ":stage": workflow.stage, ":state": workflow.state, ...fed.values },
+          ExpressionAttributeValues: { ":workflow": workflowWithCurrentGraphOperation(input.next, input.workflowDependencies === undefined ? undefined : operation.id, input.workflowDependencies), ":now": receivedAt, ":revision": workflow.revision, ":stage": workflow.stage, ":state": workflow.state, ...fed.values,
+            ...(input.recovery === undefined ? {} : { ":recoveryReason": WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON, ":requiredE2E": true, ":emptyIds": [],
+              ":graphOperationId": input.recovery.sourceOperation.id, ":graphDigest": input.recovery.graphApproval.graphDigest, ":graphRunId": input.recovery.graphApproval.runId,
+              ":graphArtifactDigest": input.recovery.graphApproval.artifactDigest, ":graphApprovalRevision": input.recovery.graphApproval.workflowRevision,
+              ":graphActorId": input.recovery.graphApproval.actorId, ":graphProgress": workflow.workflowDependenciesProgress ?? [] }) },
         } },
+        ...(input.recovery === undefined ? [] : [
+          { ConditionCheck: {
+            TableName: deps.tableName, Key: operationKey(task.workspaceId, input.recovery.sourceOperation.id),
+            ConditionExpression: "#status = :sourceSucceeded AND fence = :sourceFence AND kind = :taskKind AND workflowMode = :implementMode AND workspaceId = :workspaceId AND conversationId = :conversationId AND attribute_not_exists(candidateSourceRef) AND #binding = :sourceBinding AND #result = :sourceResult",
+            ExpressionAttributeNames: { "#status": "status", "#binding": "workflowDependencies", "#result": "result" },
+            ExpressionAttributeValues: { ":sourceSucceeded": "SUCCEEDED", ":sourceFence": input.recovery.sourceOperation.fence, ":taskKind": "task", ":implementMode": "IMPLEMENT",
+              ":workspaceId": task.workspaceId, ":conversationId": task.conversationId, ":sourceBinding": input.recovery.sourceBinding,
+              ":sourceResult": input.recovery.sourceOperation.result },
+          } },
+          putNew(deps.tableName, { pk: `DEVTASK#${task.taskId}`, sk: `WORKFLOW_SOURCE_RECOVERY#${input.recovery.requestId}`, entityType: "WORKFLOW_SOURCE_RECOVERY",
+            actorId: input.recovery.actorId, payloadHash: input.recovery.payloadHash, operationId: operation.id, createdAt: receivedAt }),
+        ]),
         putNew(turnTable(deps), aiToolTurn({
           party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
           request: input.request, response: `${input.response} as operation ${operation.id}.`, operationId: operation.id,
@@ -2195,6 +2605,9 @@ export async function sendTaskWorkflowBackToCoding(deps: DeveloperTaskRouteDepen
   }
   if (request.expectedRevision === undefined) throw agentXError("CONFIG_INVALID", "refresh the task and include its current revision before sending it back to coding");
   if (request.expectedRevision !== workflow.revision) throw agentXError("IDEMPOTENCY_CONFLICT", "this send-back is out of date; refresh the task and try again");
+  if (!workflowSendBackOffered(workflow)) {
+    throw agentXError("CONFIG_INVALID", "there is no current failed check or review finding to send back to coding");
+  }
   const receivedAt = iso(deps);
   let returned: WorkflowSnapshot;
   try {
@@ -2446,7 +2859,10 @@ async function workflowReviewPlanOption(deps: DeveloperTaskRouteDependencies, wo
     if (error instanceof AgentXError && error.code === "WORKSPACE_NOT_READY") return {};
     throw error;
   }
-  return { workflowReviewPlan: { markdown: shortenMarkdown(approved.text, WORKFLOW_PLAN_MAX_BYTES), sha256: approved.sha256 } };
+  return { workflowReviewPlan: {
+    markdown: shortenMarkdown(approved.text, WORKFLOW_PLAN_MAX_BYTES), sha256: approved.sha256,
+    ...(approved.e2eIntent === undefined ? {} : { e2eIntent: approved.e2eIntent }),
+  } };
 }
 
 /**
@@ -2557,6 +2973,60 @@ export async function startTaskWorkflowReviewFromSystem(
   return accepted.duplicate ? "DUPLICATE" : "STARTED";
 }
 
+/** Starts a separate server-admitted native CHECKS operation from VERIFY/WAITING. */
+export async function startTaskWorkflowE2EChecksFromSystem(
+  deps: DeveloperTaskRouteDependencies,
+  taskId: string,
+  expected: { workflowRevision: number; candidateDigest: string },
+  admission: E2EWorkflowAdmissionRef,
+  operationId: string,
+  actor?: DeveloperCaller,
+): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined
+    || workflow.revision !== expected.workflowRevision || workflow.stage !== "VERIFY" || workflow.state !== "WAITING"
+    || workflow.e2e?.required !== true || workflow.candidate?.digest !== expected.candidateDigest
+    || admission.taskId !== taskId || admission.candidateDigest !== expected.candidateDigest
+    || admission.workflowRevision !== workflow.revision + 1 || admission.roundId.length === 0
+    || admission.groupRunIds.length === 0 || new Set(admission.groupRunIds).size !== admission.groupRunIds.length) return "STALE";
+  const dispatchAccess = await systemTaskAccess(deps, task);
+  const workspace = await deps.actions.workspace(task.workspaceId);
+  if (workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
+  const receivedAt = iso(deps);
+  const { qualifiedRound: _previousQualification, failedRound: _previousFailure, ...unqualifiedE2E } = workflow.e2e;
+  void _previousQualification;
+  void _previousFailure;
+  const next: WorkflowSnapshot = WorkflowSnapshotSchema.parse({
+    ...workflow,
+    revision: workflow.revision + 1,
+    state: "RUNNING",
+    stage: "VERIFY",
+    e2e: { ...unqualifiedE2E, currentRoundId: admission.roundId, currentGroupRunIds: admission.groupRunIds },
+    updatedAt: receivedAt,
+  });
+  const requestId = workflowRequestId("agentx-auto-e2e-checks", taskId, expected.workflowRevision, expected.candidateDigest);
+  const accepted = await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, {
+    requestId, conversationId: task.conversationId,
+    prompt: "Run the broker-admitted E2E verification groups for this exact candidate. Do not edit files or expand the admitted scenarios.",
+  }, (operation) => [
+    { Update: {
+      TableName: deps.tableName, Key: taskKey(taskId),
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.candidate.digest = :candidate AND workflow.e2e.required = :required AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
+      ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":verify": "VERIFY", ":waiting": "WAITING", ":candidate": expected.candidateDigest, ":required": true },
+    } },
+    putNew(turnTable(deps), aiToolTurn({
+      party: actor === undefined ? partyOfTask(task) : partyOfTaskActor(task, actor), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
+      receivedAt, finishedAt: iso(deps), request: "Run admitted E2E verification", response: `Broker-admitted E2E CHECKS started as operation ${operation.id}.`, operationId: operation.id,
+    })),
+    ...(dispatchAccess === undefined ? [] : [accessFence(deps, dispatchAccess)]),
+  ], { sharedTask: task.shared === true, operationId, workflowMode: "CHECKS", workflowE2EAdmission: admission,
+    readiness: workflowSelectedChecks(workflow.checkPolicy).map((check) => check.command), ...taskBaseOption(task, next) });
+  return accepted.duplicate ? "DUPLICATE" : "STARTED";
+}
+
 /** The task's page, which the draft pull request's description links to. */
 export function taskPageUrl(issuer: string, taskId: string): string {
   return new URL(`/review/${encodeURIComponent(taskId)}/task`, new URL(issuer).origin).href;
@@ -2576,9 +3046,13 @@ function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: boolean, 
     case "PLAN/READY": case "PLAN/RUNNING": return { status: `Writing the ${name}`, nextStep: `It will be posted ${inSlack} for approval; no code changes until it's approved.` };
     case "PLAN/BLOCKED": return { status: `Stopped while writing the ${name}`, nextStep: `Retry planning or close the task ${inSlack}.` };
     // A teammate reading the page is not the one who approves.
-    case "PLAN_REVIEW/WAITING": return owner
-      ? { status: "Waiting for your approval", nextStep: `Approve or request changes ${inSlack}.` }
-      : { status: "Waiting for the owner's approval", nextStep: `The task owner approves or requests changes ${inSlack}.` };
+    case "PLAN_REVIEW/WAITING":
+      if (workflow.blockReason === E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON) return owner
+        ? { status: "The E2E plan needs correction", nextStep: `Request changes to submit a corrected E2E plan, or close the task ${inSlack}.` }
+        : { status: "The E2E plan needs correction", nextStep: `The task owner must request changes and submit a corrected E2E plan, or close the task ${inSlack}.` };
+      return owner
+        ? { status: "Waiting for your approval", nextStep: `Approve or request changes ${inSlack}.` }
+        : { status: "Waiting for the owner's approval", nextStep: `The task owner approves or requests changes ${inSlack}.` };
     case "PLAN_REVIEW/BLOCKED": return { status: `Stopped before approval of the ${name}`, nextStep: `Close the task ${inSlack} and start again.` };
     case "IMPLEMENT/READY": case "IMPLEMENT/RUNNING": return { status: "Writing the code", nextStep: "The checks and reviews run when coding finishes." };
     case "IMPLEMENT/BLOCKED": return workflow.blockReason === WORKFLOW_BLOCK_REASONS.fixChangedNothing
@@ -2586,6 +3060,9 @@ function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: boolean, 
         ? `Retry coding, keep the pull request as it is, or close the task ${inSlack}.` : `Retry coding or close the task ${inSlack}.` }
       : { status: workflow.blockReason === WORKFLOW_BLOCK_REASONS.noCodeChanged ? "Coding finished, but no code changed" : "Coding stopped before it finished",
         nextStep: `Retry coding or close the task ${inSlack}.` };
+    case "VERIFY/WAITING": return workflow.e2e?.required === true && workflow.e2e.currentRoundId === undefined
+      ? { status: "Preparing the checks", nextStep: "The checks start when workspace compute is ready." }
+      : { status: "Preparing the checks", nextStep: "The approved checks start shortly." };
     case "VERIFY/READY": case "VERIFY/RUNNING": return { status: "Running the checks", nextStep: "The code and security reviews start when the checks pass." };
     case "VERIFY/BLOCKED": return { status: "The checks didn't pass or couldn't run", nextStep: `Send it back to coding, retry the checks, or close the task ${inSlack}.` };
     case "REVIEW/READY": case "REVIEW/WAITING": case "REVIEW/RUNNING": return { status: "Code and security reviews are running", nextStep: "A draft pull request opens when both pass." };
@@ -2668,6 +3145,9 @@ const cutReason = (reason: string): string => {
 export async function getTaskPageState(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskPageState> {
   const { access, capabilities } = await coherentPageAccess(deps, caller, taskId);
   const { task } = access;
+  const taskViewRecord = task.workflow?.e2e?.required === true
+    ? await taskView(deps, task, { events: 0, details: true, actor: "viewer" })
+    : undefined;
   const workflow = task.workflow;
   const documents = TASK_PAGE_DOCUMENTS.flatMap(({ type, anchor }) => {
     const latest = (workflow?.artifacts ?? []).filter((artifact) => artifact.type === type).reduce((most, artifact) => Math.max(most, artifact.version), 0);
@@ -2682,6 +3162,7 @@ export async function getTaskPageState(deps: DeveloperTaskRouteDependencies, cal
     canComment: permissions.canComment, canSuggest: permissions.canSuggest, canDecide: permissions.canDecide,
     canAsk: permissions.canAsk && await commentAnswersAvailable(deps, task),
     canManagePeople: capabilities.canManagePeople, canTakeOwnership: capabilities.canTakeOwnership,
+    ...(taskViewRecord?.e2ePresentation === undefined ? {} : { e2ePresentation: taskViewRecord.e2ePresentation }),
   };
 }
 
@@ -3319,10 +3800,129 @@ export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot): stri
  * an owner approval names its digest and the text read back has that digest. Anything else (no plan, no approval of
  * it, a changed object) gives undefined, and the description falls back to the task's title.
  */
-async function approvedPlanForPullRequest(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<LoadedDocument | undefined> {
+async function approvedPlanForPullRequest(deps: Pick<DeveloperTaskRouteDependencies, "actions">, workflow: WorkflowSnapshot): Promise<LoadedDocument | undefined> {
   const plan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
   if (plan === undefined || !workflow.decisions.some((decision) => decision.decision === "APPROVE" && decision.artifactDigest === plan.sha256)) return undefined;
   return loadWorkflowDocument((objectKey, maxBytes) => deps.actions.readArtifact(objectKey, maxBytes), plan, {});
+}
+
+/** Selects a publication protocol from broker-validated task, plan and project state, never request fields. */
+export type WorkflowPublicationAuthority = {
+  mode: "COMMITTED_HEAD" | "CHECKED_TREE";
+  pinnedRevision: number;
+  latestRevision: number;
+  materialDigest: string;
+  workflowRevision: number;
+  planArtifact: { id: string; type: string; version: number; objectKey: string; sha256: string; format: "markdown" | "structured" };
+  ownerApproval: { requestId: string; workflowRevision: number; actorId: string; actorRole: "TASK_OWNER" | "PROJECT_ADMIN"; artifactDigest: string; workBreakdownDigest: string | null; at: string };
+  workflowAuthorityDigest: string;
+};
+
+type LoadedPublicationProject = NonNullable<Awaited<ReturnType<DeveloperTaskActions["latestProject"]>>>;
+
+function workflowPublicationMaterialDigest(pinned: LoadedPublicationProject, latest: LoadedPublicationProject): string {
+  const material = (project: LoadedPublicationProject) => ({
+    projectName: project.definition.name,
+    revision: project.definition.revision,
+    registeredBy: project.registeredBy,
+    definition: project.definition,
+    runtimeBinding: project.runtimeBinding,
+    setupApproval: project.setupApproval ?? null,
+  });
+  return createHash("sha256").update(canonicalJson({
+    domain: "workflow-publication-project-material/v1",
+    pinned: material(pinned),
+    latest: material(latest),
+  })).digest("hex");
+}
+
+async function workflowPublicationAuthority(
+  deps: Pick<DeveloperTaskRouteDependencies, "actions" | "tableName">,
+  task: DeveloperTaskRecord,
+  workflow: WorkflowSnapshot,
+  approvedPlan: LoadedDocument | undefined,
+  admittedWorkflowRevision = workflow.revision,
+): Promise<{ authority: WorkflowPublicationAuthority; conditions: TransactItems } | undefined> {
+  if (approvedPlan === undefined) return undefined;
+  const ownerDecision = workflow.decisions.filter((decision) => decision.decision === "APPROVE"
+    && decision.artifactDigest === approvedPlan.artifact.sha256).at(-1);
+  if (ownerDecision === undefined || ownerDecision.artifactDigest === undefined) return undefined;
+  if (task.startingRevision === undefined) return undefined;
+  const [pinned, latest] = await Promise.all([
+    deps.actions.projectRevision(task.project, task.startingRevision),
+    deps.actions.latestProject(task.project),
+  ]);
+  if (pinned === undefined || latest === undefined || pinned.definition.name !== task.project || latest.definition.name !== task.project
+    || pinned.definition.revision !== task.startingRevision || latest.definition.revision < pinned.definition.revision) return undefined;
+  const planArtifact = { id: approvedPlan.artifact.id, type: approvedPlan.artifact.type, version: approvedPlan.artifact.version,
+    objectKey: approvedPlan.artifact.objectKey, sha256: approvedPlan.artifact.sha256, format: approvedPlan.format };
+  const ownerApproval = { requestId: ownerDecision.requestId, workflowRevision: ownerDecision.workflowRevision, actorId: ownerDecision.actorId,
+    actorRole: ownerDecision.actorRole, artifactDigest: ownerDecision.artifactDigest,
+    workBreakdownDigest: ownerDecision.workBreakdownDigest ?? null, at: ownerDecision.at };
+  const materialDigest = workflowPublicationMaterialDigest(pinned, latest);
+  const workflowAuthorityDigest = createHash("sha256").update(canonicalJson({
+    domain: "workflow-publication-approved-authority/v1", workflowRevision: admittedWorkflowRevision,
+    planArtifact, ownerDecision, graphApproval: workflow.workflowDependenciesApproval ?? null, projectMaterialDigest: materialDigest,
+  })).digest("hex");
+  const authority: WorkflowPublicationAuthority = {
+    mode: workflow.e2e?.required === true ? "COMMITTED_HEAD" : "CHECKED_TREE",
+    pinnedRevision: pinned.definition.revision,
+    latestRevision: latest.definition.revision,
+    materialDigest,
+    workflowRevision: admittedWorkflowRevision,
+    planArtifact,
+    ownerApproval,
+    workflowAuthorityDigest,
+  };
+  const conditions: TransactItems = [{ ConditionCheck: { TableName: deps.tableName, Key: projectCatalogKey(task.project),
+    ConditionExpression: "latestRevision = :revision", ExpressionAttributeValues: { ":revision": latest.definition.revision } } }];
+  // The required-E2E current-authority checks already include the stronger catalog condition
+  // for this same key. DynamoDB transactions cannot contain two operations on one item.
+  if (workflow.e2e?.required === true) return { authority, conditions: [] };
+  // Only the original approved artifact bytes/hash and positively loaded pinned/current records establish checked-tree
+  // authority. Structured plans must positively lack E2E intent; verified legacy Markdown stays opaque.
+  if (workflow.e2e !== undefined || approvedPlan === undefined
+    || (approvedPlan.format === "structured" && approvedPlan.plan.e2e !== undefined)
+    || task.startingRevision === undefined || approvedPlan.artifact.type !== "plan"
+    || !workflow.decisions.some((decision) => decision.decision === "APPROVE" && decision.artifactDigest === approvedPlan.artifact.sha256)) return undefined;
+  if (pinned.definition.e2e === undefined && latest.definition.e2e === undefined) return { authority, conditions };
+  if (pinned.definition.e2e === undefined || latest.definition.e2e === undefined) return undefined;
+  const pinnedPolicy = E2EPolicySchema.safeParse(pinned.definition.e2e);
+  const latestPolicy = E2EPolicySchema.safeParse(latest.definition.e2e);
+  if (!pinnedPolicy.success || !latestPolicy.success
+    || pinnedPolicy.data.baselineScenarioIds.length > 0 || latestPolicy.data.baselineScenarioIds.length > 0) return undefined;
+  return {
+    authority,
+    conditions,
+  };
+}
+
+/** Recollects current task/project material and policy before a worker receives workflow push credentials. */
+export async function currentWorkflowPublicationAuthorityForTask(
+  deps: Pick<DeveloperTaskRouteDependencies, "actions" | "tableName" | "workflowE2EPresentation" | "workflowE2EPublicationChecks">,
+  task: DeveloperTaskRecord,
+): Promise<WorkflowPublicationAuthority | undefined> {
+  const workflow = task.workflow;
+  if (task.closedAt !== undefined || workflow?.candidate === undefined) return undefined;
+  const approvedPlan = await approvedPlanForPullRequest(deps, workflow);
+  const selection = await workflowPublicationAuthority(deps, task, workflow, approvedPlan);
+  if (selection === undefined) return undefined;
+  if (selection.authority.mode === "COMMITTED_HEAD") {
+    if (deps.workflowE2EPresentation === undefined || deps.workflowE2EPublicationChecks === undefined) return undefined;
+    const operations = await deps.actions.operations(task.workspaceId);
+    const presentation = await deps.workflowE2EPresentation({ task, operations, actor: "owner" });
+    const checks = await deps.workflowE2EPublicationChecks({ task, operations });
+    if (presentation?.shared.e2e.status !== "PASS" || checks === undefined || checks.length === 0) return undefined;
+  }
+  return selection.authority;
+}
+
+/** Compatibility projection for callers that only need the selected protocol. */
+export async function currentWorkflowPublicationModeForTask(
+  deps: Pick<DeveloperTaskRouteDependencies, "actions" | "tableName" | "workflowE2EPresentation" | "workflowE2EPublicationChecks">,
+  task: DeveloperTaskRecord,
+): Promise<"COMMITTED_HEAD" | "CHECKED_TREE" | undefined> {
+  return (await currentWorkflowPublicationAuthorityForTask(deps, task))?.mode;
 }
 
 /**
@@ -3351,6 +3951,16 @@ export async function startTaskWorkflowPublicationFromSystem(
   if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== expected.workflowRevision
     || !(ownerRetry ? workflowPublicationRetryable(workflow) : workflow.stage === "PULL_REQUEST" && workflow.state === "READY")
     || workflow.candidate === undefined || workflow.candidate.digest !== expected.candidateDigest) return "STALE";
+  let currentE2EChecks: TransactItems = [];
+  if (workflow.e2e?.required === true) {
+    if (deps.workflowE2EPresentation === undefined) return "STALE";
+    const operations = await deps.actions.operations(task.workspaceId);
+    const presentation = await deps.workflowE2EPresentation({ task, operations, actor: "owner" });
+    if (presentation?.shared.e2e.status !== "PASS") return "STALE";
+    if (deps.workflowE2EPublicationChecks === undefined) return "STALE";
+    currentE2EChecks = await deps.workflowE2EPublicationChecks({ task, operations }) ?? [];
+    if (currentE2EChecks.length === 0) return "STALE";
+  }
   const dispatchAccess = origin.ownerAccess ?? await systemTaskAccess(deps, task);
   const workspace = await deps.actions.workspace(task.workspaceId);
   if (workspace.status === "CLOSED" || workspace.status === "PREPARATION_FAILED") return "STALE";
@@ -3359,13 +3969,15 @@ export async function startTaskWorkflowPublicationFromSystem(
   // Every repository has its pull request: an approved fix whose checks and reviews passed is pushed to them instead.
   if (repository === undefined) {
     return workflow.state === "READY" && workflowPullRequestUpdateDue(workflow)
-      ? startTaskWorkflowPullRequestUpdate(deps, task, { ...workflow, candidate: workflow.candidate }, expected, dispatchAccess, origin.ownerActor)
+      ? startTaskWorkflowPullRequestUpdate(deps, task, { ...workflow, candidate: workflow.candidate }, expected, currentE2EChecks, dispatchAccess, origin.ownerActor)
       : "STALE";
   }
   const attempt = 1 + await deps.actions.failedPublications(task.workspaceId, { repositoryId: repository.repositoryId, candidateDigest: expected.candidateDigest, treeSha: repository.treeSha });
   if (attempt > 1 && !ownerRetry) return "STALE";
   const requestId = workflowRequestId("agentx-auto-publish", taskId, expected.workflowRevision, expected.candidateDigest, repository.repositoryId, attempt);
   const approvedPlan = await approvedPlanForPullRequest(deps, workflow);
+  const publication = await workflowPublicationAuthority(deps, task, workflow, approvedPlan, workflow.revision + (ownerRetry ? 1 : 0));
+  if (publication === undefined) return "STALE";
   const title = `AgentX: ${inertTaskTitle(task.title)}`.slice(0, 256);
   const body = workflowPullRequestBody(task, workflow, approvedPlan, origin.taskPageUrl);
   const receivedAt = iso(deps);
@@ -3392,14 +4004,21 @@ export async function startTaskWorkflowPublicationFromSystem(
       requestId, repository: repository.repositoryId, title, body, draft: true,
     }, (operation) => [
       taskItem,
+      ...currentE2EChecks,
+      ...publication.conditions,
       putNew(turnTable(deps), aiToolTurn({
         party: origin.ownerActor === undefined ? partyOfTask(task) : partyOfTaskActor(task, origin.ownerActor), turnId: randomUUID(), action: "pull_request", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: ownerRetry ? "Retry opening the pull request" : "Open the draft pull request",
         response: `AgentX is opening a draft pull request on ${repository.repositoryId} as operation ${operation.id}.`, operationId: operation.id,
       })),
       ...(dispatchAccess === undefined ? [] : [taskAccessFence(deps.tableName, taskId, dispatchAccess.peopleRevision)]),
-    ], { workflowCandidate: { repositoryId: repository.repositoryId, treeSha: repository.treeSha, candidateDigest: expected.candidateDigest,
-      ...(baseCommitSha === undefined ? {} : { baseCommitSha }) } });
+    ], { workflowCandidate: { repositoryId: repository.repositoryId, treeSha: repository.treeSha,
+      ...(publication.authority.mode === "COMMITTED_HEAD" ? { commitSha: repository.commitSha } : {}), candidateDigest: expected.candidateDigest,
+      ...(baseCommitSha === undefined ? {} : { baseCommitSha }), publicationMode: publication.authority.mode,
+      admittedPinnedRevision: publication.authority.pinnedRevision, admittedLatestRevision: publication.authority.latestRevision,
+      admittedMaterialDigest: publication.authority.materialDigest, admittedWorkflowRevision: publication.authority.workflowRevision,
+      admittedPlanArtifact: publication.authority.planArtifact, admittedOwnerApproval: publication.authority.ownerApproval,
+      admittedWorkflowAuthorityDigest: publication.authority.workflowAuthorityDigest } });
   } catch (error) {
     // The task moved on (or closed) between the read and the commit: nothing was started, and nothing is due.
     if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY") {
@@ -3412,7 +4031,7 @@ export async function startTaskWorkflowPublicationFromSystem(
   // (still running, or just finished) needs the task ready to record its pull request.
   if (accepted.duplicate && workflow.state === "BLOCKED") {
     try {
-      await deps.actions.transact([taskItem, ...(dispatchAccess === undefined ? [] : [taskAccessFence(deps.tableName, taskId, dispatchAccess.peopleRevision)])]);
+      await deps.actions.transact([taskItem, ...currentE2EChecks, ...(dispatchAccess === undefined ? [] : [taskAccessFence(deps.tableName, taskId, dispatchAccess.peopleRevision)])]);
     } catch (error) {
       if (!isConditional(error)) throw error;
     }
@@ -3436,9 +4055,11 @@ async function startTaskWorkflowPullRequestUpdate(
   task: DeveloperTaskRecord,
   workflow: WorkflowSnapshot & { candidate: NonNullable<WorkflowSnapshot["candidate"]> },
   expected: { workflowRevision: number; candidateDigest: string },
+  currentE2EChecks: TransactItems,
   ownerAccess?: Pick<TaskAccess, "peopleRevision">,
   ownerActor?: DeveloperCaller,
 ): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  if (workflow.e2e?.required === true && currentE2EChecks.length === 0) return "STALE";
   const pullRequest = nextWorkflowPullRequestUpdate(workflow);
   const repository = workflow.candidate.repositories.find((entry) => entry.repositoryId === pullRequest?.repositoryId);
   const baseCommitSha = workflow.reviewBase?.find((entry) => entry.repositoryId === repository?.repositoryId)?.baseCommitSha;
@@ -3453,6 +4074,7 @@ async function startTaskWorkflowPullRequestUpdate(
     try {
       await deps.actions.transact([{ Update: { TableName: deps.tableName, Key: taskKey(task.taskId), UpdateExpression: "SET workflow = :workflow, updatedAt = :now", ...unchanged,
         ExpressionAttributeValues: { ":workflow": blockWorkflowPullRequestUpdate(workflow, { numbers: [pullRequest.number], cause, now }), ":now": now, ...at } } },
+      ...currentE2EChecks,
       ...(ownerAccess === undefined ? [] : [taskAccessFence(deps.tableName, task.taskId, ownerAccess.peopleRevision)])]);
     } catch (error) {
       if (!isConditional(error)) throw error;
@@ -3475,6 +4097,7 @@ async function startTaskWorkflowPullRequestUpdate(
         request: "Push the approved fix to the pull request",
         response: `AgentX is pushing the approved fix to pull request #${pullRequest.number} on ${repository.repositoryId} as operation ${operation.id}.`, operationId: operation.id,
       })),
+      ...currentE2EChecks,
       ...(ownerAccess === undefined ? [] : [taskAccessFence(deps.tableName, task.taskId, ownerAccess.peopleRevision)]),
     ], { candidateDigest: expected.candidateDigest, treeSha: repository.treeSha, baseCommitSha, expectedHeadCommit: pullRequest.headSha });
   } catch (error) {
@@ -5031,6 +5654,10 @@ async function retryTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, c
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
+  const publicationContextRoute = /^\/v1\/dev\/tasks\/([^/]+)\/e2e-publication-context$/.exec(url.pathname);
+  if (publicationContextRoute !== null && request.method === "POST") {
+    return e2ePublicationContext(deps, caller, safeDecode(publicationContextRoute[1]!), body(request));
+  }
   const proposalRoute = /^\/v1\/dev\/tasks\/([^/]+)\/people\/requests\/([^/]+)$/.exec(url.pathname);
   if (proposalRoute !== null && request.method === "GET") {
     const taskId = safeDecode(proposalRoute[1]!);

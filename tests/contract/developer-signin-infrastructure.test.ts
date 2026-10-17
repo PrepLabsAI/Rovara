@@ -199,9 +199,18 @@ describe("developer sign-in infrastructure (named environments)", () => {
   it("gives the broker only session, developer and email-index reads on the sign-in table", () => {
     const [tableId] = ofType(named, "AWS::DynamoDB::Table").find(([logicalId]) => logicalId.startsWith("DeveloperSignInTable"))!;
     const tableStatements = statementsOfRole(named, "BrokerServiceRole").filter((statement) => touches(statement, "dynamodb") && reaches(named, statement, tableId, SAMPLE_TABLE_ARN));
-    expect(tableStatements).toHaveLength(1);
-    expect(tableStatements[0]!.Action).toBe("dynamodb:GetItem");
-    expect(tableStatements[0]!.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*"] } });
+    expect(tableStatements).toHaveLength(2);
+    const reads = tableStatements.filter((statement) => actionsOf(statement).includes("dynamodb:GetItem"));
+    const creatorChecks = tableStatements.filter((statement) => actionsOf(statement).includes("dynamodb:ConditionCheckItem"));
+    expect(reads).toHaveLength(1);
+    expect(reads[0]!.Action).toBe("dynamodb:GetItem");
+    expect(reads[0]!.Condition).toEqual({ "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*"] } });
+    expect(creatorChecks).toHaveLength(1);
+    expect(actionsOf(creatorChecks[0]!)).toEqual(["dynamodb:ConditionCheckItem"]);
+    expect(creatorChecks[0]!.Condition).toEqual({
+      "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVELOPER#*"] },
+      Null: { "dynamodb:LeadingKeys": "false" },
+    });
   });
 
   it("gives DeveloperIdentity exactly the item operations its store uses on the sign-in table, nothing table-wide", () => {

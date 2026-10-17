@@ -1,5 +1,7 @@
 // Fakes for the setup modules (phase 15d2). Nothing here reaches AWS, a vendor or the control plane.
 import { tmpdir } from "node:os";
+import { createHash } from "node:crypto";
+import { E2EPolicySchema, canonicalJson, createCandidateManifest, inspectE2ERepository, proposeE2ESetup } from "@agentx/contracts";
 import { join } from "node:path";
 import type { AuthorizeSecrets } from "../../packages/cli/src/admin/authorize.js";
 import { tokenStoreKey, type LoginOptions } from "../../packages/cli/src/auth.js";
@@ -8,7 +10,7 @@ import type { StoredTokens, TokenStore } from "../../packages/cli/src/token-stor
 import type { AlertsApi, Subscription } from "../../packages/cli/src/setup/alerts.js";
 import type { CognitoAdmin, SetupServices } from "../../packages/cli/src/setup/services.js";
 import type { LinearTeam, McpToolSummary, VendorApi } from "../../packages/cli/src/setup/connectors/vendors.js";
-import type { GitHubRepositoryApi } from "../../packages/cli/src/setup/project-files.js";
+import type { GitHubRepositoryApi, RepositorySnapshot } from "../../packages/cli/src/setup/project-files.js";
 import { SlackRateLimitedError, type SlackChannel, type SlackChannelApi } from "../../packages/cli/src/setup/channel-add.js";
 import { fakeGitHubApi } from "./init-fakes.js";
 
@@ -89,12 +91,16 @@ export interface FakeControlPlane {
   preflight: Record<string, { status: "connected" | "not_connected" | "unavailable"; problem?: string }>;
   bindings: string[];
   turns: unknown[];
+  /** Host-test-only source capture. The setup route derives proposals from this repository snapshot. */
+  captureSetupSource?: (repositoryUrl: string, ref: string) => Promise<RepositorySnapshot>;
+  setupProposals: Map<string, { proposal: unknown; policy: unknown; ownerKey: string; repositoryUrl: string; candidateDigest: string; registeredRepositoryId: string }>;
+  setupDecisions: Map<string, { proposalRef: string; ownerKey: string; projectName: string; decision: "approve" | "decline" }>;
 }
 
 /** Serves the admin routes the setup modules call, in memory. */
 export function fakeControlPlane(): FakeControlPlane {
   const plane: FakeControlPlane = {
-    requests: [], forbidden: new Set(), registered: [], preflight: {}, bindings: [], turns: [],
+    requests: [], forbidden: new Set(), registered: [], preflight: {}, bindings: [], turns: [], setupProposals: new Map(), setupDecisions: new Map(),
     credentials: [{ ref: "github-agentx-sdlc", type: "github-app", secretName: "agentx/staging/github-app", builtIn: true, tokenCached: false }],
     fetch: async (url, init) => {
       const parsed = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url);
@@ -104,11 +110,64 @@ export function fakeControlPlane(): FakeControlPlane {
       plane.requests.push({ method, path: parsed.pathname, ...(body === undefined ? {} : { body }), ...(token === undefined ? {} : { token }) });
       const json = (status: number, value: unknown) => new Response(JSON.stringify(value), { status, headers: { "content-type": "application/json" } });
       if (token !== undefined && plane.forbidden.has(token)) return json(403, { error: { code: "FORBIDDEN", message: "administrator role required" } });
+      if (parsed.pathname === "/v1/admin/projects/setup-proposals" && method === "POST") {
+        const request = body as { repositoryUrl?: unknown; ref?: unknown } | undefined;
+        if (typeof request?.repositoryUrl !== "string" || typeof request.ref !== "string" || !plane.captureSetupSource) {
+          return json(503, { error: { code: "RUNTIME_UNAVAILABLE", message: "trusted source snapshot is unavailable" } });
+        }
+        const sourceMatch = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(request.repositoryUrl);
+        if (!sourceMatch?.[1] || !sourceMatch[2]) return json(400, { error: { code: "CONFIG_INVALID", message: "setup repository must be a canonical GitHub repository URL" } });
+        const snapshot = await plane.captureSetupSource(request.repositoryUrl, request.ref);
+        const expectedRepositoryId = `${sourceMatch[1]}/${sourceMatch[2]}`;
+        if (snapshot.candidate.repositories.length !== 1 || snapshot.candidate.repositories[0]?.repositoryId.toLowerCase() !== expectedRepositoryId.toLowerCase()) {
+          return json(403, { error: { code: "FORBIDDEN", message: "captured source does not match selected repository" } });
+        }
+        const inspection = inspectE2ERepository(snapshot, snapshot.candidate).inspection;
+        const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: snapshot.candidate });
+        const policy = E2EPolicySchema.parse({
+          schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [], targets: proposal.targets,
+          defaultSandboxProfileId: "default-sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
+          capture: { screenshots: false, traces: false, video: false, downloads: false },
+          limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000,
+            maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null },
+        });
+        const ownerKey = createHash("sha256").update(token ?? "synthetic-setup-owner").digest("hex");
+        const artifact = { schemaVersion: "project-setup-source-proposal/v1", issuerOwnerKey: ownerKey, repositoryUrl: request.repositoryUrl, selectedRef: request.ref,
+          candidate: snapshot.candidate, snapshot: { ...snapshot, sources: snapshot.sources.map((source) => ({ ...source, bytesBase64: Buffer.from(source.bytes).toString("base64"), bytes: undefined })) }, proposal, policy };
+        const artifactBytes = canonicalJson(artifact);
+        const proposalSha256 = createHash("sha256").update(artifactBytes, "utf8").digest("hex");
+        const proposalRef = `project-setup-proposals/${ownerKey}/${proposalSha256}.json`;
+        const registeredRepositoryId = sourceMatch[2].toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);
+        plane.setupProposals.set(proposalSha256, { proposal, policy, ownerKey, repositoryUrl: request.repositoryUrl, candidateDigest: snapshot.candidate.digest, registeredRepositoryId: /^[a-z]/.test(registeredRepositoryId) ? registeredRepositoryId : `repo-${registeredRepositoryId}`.slice(0, 63) });
+        return json(200, { proposalRef, proposalSha256, candidateDigest: snapshot.candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, proposal, policy });
+      }
+      if (parsed.pathname === "/v1/admin/projects/setup-approvals" && method === "POST") {
+        const request = body as { projectName?: unknown; proposalRef?: unknown; proposalSha256?: unknown; decision?: unknown } | undefined;
+        if (typeof request?.projectName !== "string" || typeof request.proposalRef !== "string" || typeof request.proposalSha256 !== "string"
+          || (request.decision !== "approve" && request.decision !== "decline")) return json(400, { error: { code: "CONFIG_INVALID", message: "invalid setup decision" } });
+        const proposal = plane.setupProposals.get(request.proposalSha256);
+        if (!proposal || request.proposalRef !== `project-setup-proposals/${proposal.ownerKey}/${request.proposalSha256}.json`) return json(403, { error: { code: "FORBIDDEN", message: "setup proposal is not stored for this administrator" } });
+        plane.setupDecisions.set(request.proposalSha256, { proposalRef: request.proposalRef, ownerKey: proposal.ownerKey, projectName: request.projectName, decision: request.decision });
+        return json(200, { proposalRef: request.proposalRef, proposalSha256: request.proposalSha256, decision: request.decision });
+      }
       if (parsed.pathname === "/v1/admin/credentials" && method === "GET") return json(200, { credentials: plane.credentials });
       if (parsed.pathname === "/v1/admin/credentials" && method === "POST") { plane.credentials.push(body as Record<string, unknown>); return json(200, { registered: true }); }
       if (parsed.pathname === "/v1/admin/projects" && method === "POST") {
+        const registration = body as { definition: { name: string; revision: number; e2e?: unknown; repositories?: Array<{ name: string; url: string }>; integrations?: { connectors?: Array<{ name: string }> } }; setupApproval?: { proposalRef: string; proposalSha256: string; decision: "approve" | "decline" } };
+        const definition = registration.definition;
+        if (definition.e2e !== undefined || registration.setupApproval !== undefined) {
+          const setupApproval = registration.setupApproval;
+          const proposal = setupApproval === undefined ? undefined : plane.setupProposals.get(setupApproval.proposalSha256);
+          const decision = setupApproval === undefined ? undefined : plane.setupDecisions.get(setupApproval.proposalSha256);
+          if (!setupApproval || !proposal || !decision || decision.proposalRef !== setupApproval.proposalRef || decision.decision !== setupApproval.decision
+            || decision.projectName !== definition.name || proposal.registeredRepositoryId !== definition.repositories?.[0]?.name
+            || proposal.repositoryUrl.toLowerCase() !== definition.repositories?.[0]?.url.toLowerCase()
+            || (setupApproval.decision === "approve" && canonicalJson(definition.e2e) !== canonicalJson(proposal.policy))
+            || (setupApproval.decision === "decline" && definition.e2e !== undefined)) {
+            return json(403, { error: { code: "FORBIDDEN", message: "registration does not match its stored source proposal decision" } });
+          }
+        }
         plane.registered.push(body);
-        const definition = (body as { definition: { name: string; revision: number; integrations?: { connectors?: Array<{ name: string }> } } }).definition;
         const connectors = (definition.integrations?.connectors ?? []).map((connector) => ({ name: connector.name, offered: [], skipped: [], ...(plane.preflight[connector.name] ?? { status: "connected" }) }));
         return json(200, { name: definition.name, revision: definition.revision, preflight: { connectors } });
       }
@@ -117,12 +176,13 @@ export function fakeControlPlane(): FakeControlPlane {
       return json(404, { error: { code: "NOT_FOUND", message: `no route ${method} ${parsed.pathname}` } });
     },
   };
+  Object.assign(plane.fetch, { __fakeControlPlane: plane });
   return plane;
 }
 
 /** `repositories` maps a full name ("owner/repo") to its default branch and build files. Every
  * `file()` read is recorded in `reads` as "owner/repo:path", for tests that check what was fetched. */
-export function fakeRepositories(repositories: Record<string, { defaultBranch?: string; files: Record<string, string> }>): GitHubRepositoryApi & { reads: string[] } {
+export function fakeRepositories(repositories: Record<string, { defaultBranch?: string; files: Record<string, string> }>): GitHubRepositoryApi & { reads: string[]; snapshotAll(token: string, fullName: string, ref: string): Promise<RepositorySnapshot> } {
   const reads: string[] = [];
   return {
     reads,
@@ -130,6 +190,34 @@ export function fakeRepositories(repositories: Record<string, { defaultBranch?: 
       fullName, name: fullName.split("/")[1]!, defaultBranch: repositories[fullName]!.defaultBranch ?? "main", cloneUrl: `https://github.com/${fullName}.git`,
     })),
     file: async (_token, fullName, path) => { reads.push(`${fullName}:${path}`); return repositories[fullName]?.files[path]; },
+    snapshot: async (_token, fullName, paths, ref) => {
+      const repository = repositories[fullName];
+      if (repository === undefined) throw new Error("repository not found");
+      const commitSha = createHash("sha1").update(fullName + ":" + ref).digest("hex");
+      const treeSha = createHash("sha1").update(JSON.stringify(repository.files)).digest("hex");
+      const sources = paths.map((path) => {
+        const value = repository.files[path];
+        if (value === undefined) throw new Error("source path not found");
+        const bytes = Buffer.from(value);
+        return { path, bytes, sha256: createHash("sha256").update(bytes).digest("hex"), kind: "blob" as const };
+      });
+      return { candidate: createCandidateManifest([{ repositoryId: fullName, commitSha, treeSha }]), commitSha, treeSha, treeComplete: true as const, treePaths: Object.keys(repository.files), sources };
+    },
+    snapshotAll: async (token, fullName, ref) => {
+      const repository = repositories[fullName];
+      if (repository === undefined) throw new Error("repository not found");
+      return fakeRepositories(repositories).snapshot(token, fullName, Object.keys(repository.files), ref);
+    },
+  };
+}
+
+/** Binds only the host test's immutable fake GitHub repository bytes to the fake setup route. */
+export function bindSetupSourceProvider(plane: FakeControlPlane, repositories: GitHubRepositoryApi & { snapshotAll?: (token: string, fullName: string, ref: string) => Promise<RepositorySnapshot> }): void {
+  plane.captureSetupSource = async (repositoryUrl, ref) => {
+    const match = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(repositoryUrl);
+    if (!match?.[1] || !match[2]) throw new Error("repository URL is not canonical");
+    if (!repositories.snapshotAll) throw new Error("fake repository adapter does not provide a complete source snapshot");
+    return repositories.snapshotAll("synthetic-source-read", `${match[1]}/${match[2]}`, ref);
   };
 }
 
@@ -271,12 +359,16 @@ export function fakeAlerts(options: { existing?: Subscription[]; confirmAfterPol
  * add its fake, or this stops type-checking. */
 export function setupServices(overrides: Partial<SetupServices> = {}): SetupServices {
   const plane = fakeControlPlane();
+  const repositories = overrides.repositories ?? fakeRepositories({});
+  const configuredFetch = overrides.fetch ?? plane.fetch;
+  const fetchPlane = (configuredFetch as typeof configuredFetch & { __fakeControlPlane?: FakeControlPlane }).__fakeControlPlane;
+  if (fetchPlane !== undefined) bindSetupSourceProvider(fetchPlane, repositories);
   return {
     tokenStore: memoryTokenStore(),
     cognito: fakeCognito(),
     login: fakeLogin({ accessToken: accessToken({ "cognito:groups": ["agentx-admin"] }), expiresAt: Date.parse("2026-09-27T01:00:00.000Z") }),
-    fetch: plane.fetch,
-    repositories: fakeRepositories({}),
+    fetch: configuredFetch,
+    repositories,
     github: fakeGitHubApi(),
     stackOutputs: async () => FOUNDATION_OUTPUTS,
     // Tests that write project files pass their own directory.

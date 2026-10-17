@@ -315,6 +315,9 @@ export function decide(loop: LoopDefinition, state: WorkItemState | undefined, e
       }
       // #359: a review round's report; what it was asked to look at besides the brief is used up.
       if (event.action === "review") return { state: { ...next, focus: undefined }, effects: [...moved.effects, { kind: "comment", body: event.detail }] };
+      if (event.action === "publish" && event.outcome === "blocked") {
+        return { state: next, effects: [...moved.effects, { kind: "comment", body: `Publication is on hold: ${event.detail}\n\nNo push or pull request was attempted. Resolve the enrollment or evidence gap, then reply here to retry.` }] };
+      }
       if (event.outcome === "failed") return { state: next, effects: [...moved.effects, { kind: "comment", body: `I couldn't publish the change: ${event.detail}\n\nReply here to try again.` }] };
       return { state: next, effects: [...moved.effects, { kind: "comment", body: event.detail }] };
     }

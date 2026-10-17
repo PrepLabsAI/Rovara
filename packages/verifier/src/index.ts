@@ -1,0 +1,26 @@
+/** Protocol-only verifier workspace foundation. Runtime packages are introduced in later tasks. */
+export const VERIFIER_PROTOCOL = "trusted-e2e/v1" as const;
+export { compileE2EScenarios } from "./scenarios.js";
+export type { E2ECompiledSuite, E2EImmutableCompilationContext } from "./scenarios.js";
+export { runIsolatedE2E } from "./runtime.js";
+export type { E2EIndependentAssertionReceipt } from "./runtime-assertions.js";
+export { evaluateE2EAssertions } from "./runtime-assertions.js";
+export { E2E_RUNTIME_ASSET_VERSION, createE2ERuntimeAssets, createE2ERuntimeLaunchId, parseE2EFirstPartyCapture } from "./runtime-assets.js";
+export type { E2ERuntimeAssets, E2EFirstPartyCapture, E2EFirstPartyCaptureResult } from "./runtime-assets.js";
+export { createE2EWorkerSession } from "./runtime-session.js";
+export type { E2EWorkerSession, E2EWorkerSessionReadback } from "./runtime-session.js";
+export { createE2EAppAdapterPacket } from "./runtime-adapter.js";
+export type { E2EAppAdapterPacket } from "./runtime-adapter.js";
+export { runE2EActualCli } from "./runtime-cli.js";
+export type { E2EActualCliRun } from "./runtime-cli.js";
+export { CONTAINED_IMAGE, CONTAINED_RUNTIME_PROFILE, CONTAINED_SOCKET, containedRuntimeProfileForHost, inspectContainedRuntimeReadiness, inspectContainedRuntimeReadinessForHost } from "./contained-candidate.js";
+export type { ContainedRuntimeProfile } from "./container-envelope.js";
+export type { ContainedRuntimeReadiness } from "./contained-runtime-readiness.js";
+export { observeInstalledRuntimeManifestForHost } from "./installed-runtime-manifest.js";
+export type { InstalledRuntimeManifest } from "./installed-runtime-manifest.js";
+export { collectE2EActualCliRun, e2eSnapshotSourceDigest } from "./runtime-collection.js";
+export type { E2EActualCollectionResult } from "./runtime-collection.js";
+export { qualifyInstalledP0Runtime } from "./install-qualification.js";
+export { verifyE2ECompiledFileInventory, expectedE2EConfigDigest } from "./identity.js";
+export { E2EReportSchema, type E2EReport } from "./report-schema.js";
+export { E2E_REPORT_MAX_BYTES, E2E_APP_RPC_FRAME_MAX_BYTES, E2E_APP_LITERAL_MAX_BYTES, E2E_APP_LITERAL_MAX_DEPTH, E2E_COLLECTION_ORACLE_MAX_CARRIER_BYTES, e2ePrivateTransferMaxBytes, E2E_MODULE_EXPORT_INVENTORY_PROTOCOL, E2E_MODULE_EXPORT_PROJECTION_VERSION, parseE2EReport, qualifyE2EReport, createE2ECollectionOracleFromCompiledSuite, qualifyE2ECollection, projectE2EModuleExportNames, type E2EReportMapping, type E2EReportExpectation, type ParsedE2EReport, type E2ECollectionOracle, type E2ECollection, type E2EObservedReceipt, type E2ECaseObservation, type E2EStructuralQualification } from "./result-adapter.js";

@@ -6,6 +6,7 @@ import {
   WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { WORKFLOW_ACTION_IDS } from "./workflow-actions.js";
+import { E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON } from "./task-records.js";
 
 export interface WorkflowMessageContext {
   taskId: string;
@@ -111,6 +112,7 @@ export function isFeedbackReviewFailure(blockReason: string | undefined): boolea
 /** The broker's own reason a step stopped, in words the owner can act on; any other reason is internal. */
 export function plainBlockReason(blockReason: string | undefined): string {
   if (blockReason === undefined) return GENERIC_REASON;
+  if (blockReason === E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON) return slackText(blockReason);
   const reworded = REWORDED_REASONS.get(blockReason);
   if (reworded !== undefined) return slackText(reworded);
   if (/operation ended (failed|interrupted|cancelled)$/.test(blockReason)) return "The run stopped unexpectedly.";
@@ -331,10 +333,15 @@ function planReview(context: WorkflowMessageContext, exits: ReturnType<typeof ex
   const { workflow, structured } = context;
   const name = workflowDocumentName(workflow);
   const document = workflow.artifacts.filter((artifact) => artifact.type === workflowDocumentType(workflow)).at(-1);
-  const header = `*${capitalized(name)}${document === undefined ? "" : ` v${document.version}`} is ready for your approval.* No code has changed yet.`;
+  const needsE2ECorrection = workflow.blockReason === E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON;
+  const header = needsE2ECorrection
+    ? `*${capitalized(name)}${document === undefined ? "" : ` v${document.version}`} needs changes before approval.* ${plainBlockReason(workflow.blockReason)}`
+    : `*${capitalized(name)}${document === undefined ? "" : ` v${document.version}`} is ready for your approval.* ${workflow.candidate === undefined ? "No code has changed yet." : "The existing candidate is retained while this plan is reviewed."}`;
   const decide = (decision: "APPROVE" | "REQUEST_CHANGES") => JSON.stringify({ taskId: context.taskId, revision: workflow.revision, digest: document?.sha256, decision,
     ...(decision === "APPROVE" && context.workBreakdownDigest !== undefined ? { workBreakdownDigest: context.workBreakdownDigest } : {}) });
-  const decisions = document === undefined ? [exits.close] : [
+  const decisions = document === undefined ? [exits.close] : needsE2ECorrection ? [
+    exits.button("agentx_workflow_changes", "Request changes", { value: decide("REQUEST_CHANGES") }), exits.close,
+  ] : [
     exits.button("agentx_workflow_approve", `Approve ${name}`, { value: decide("APPROVE"), primary: true }),
     exits.button("agentx_workflow_changes", "Request changes", { value: decide("REQUEST_CHANGES") }),
     exits.close,
@@ -402,6 +409,12 @@ function reviewBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof
 
 function verifyBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof exitButtons>): { text: string; buttons: Button[] } {
   const { workflow } = context;
+  const e2eFailure = sendBackProblems(workflow).some((problem) => problem.source === "check"
+    && problem.text.startsWith("required E2E verification failed for the current round"));
+  if (e2eFailure && workflowSendBackOffered(workflow)) {
+    return { text: "The required end-to-end verification failed for the current code. Send it back to coding, or close the task.",
+      buttons: [...exits.sendBack(), exits.close] };
+  }
   const verification = workflow.candidate !== undefined && workflow.verification?.candidateDigest === workflow.candidate.digest ? workflow.verification : undefined;
   const results = verification?.results ?? [];
   const failed = results.filter((result) => result.status === "FAILED");
@@ -445,6 +458,11 @@ function verifyBlocked(context: WorkflowMessageContext, exits: ReturnType<typeof
   // Rewritten history can't be checked again: a new task is the way on.
   if (workflow.blockReason === WORKFLOW_HISTORY_REWRITTEN_MESSAGE) {
     return { text: `The code is written, but I couldn't run the checks. ${plainBlockReason(workflow.blockReason)}`, buttons: [exits.close] };
+  }
+  if (workflow.e2e?.required === true && workflow.e2e.currentRoundId !== undefined
+    && workflow.blockReason?.startsWith("admitted E2E evidence is incomplete or unknown") === true) {
+    return { text: "The required E2E evidence is incomplete or unavailable. Some required runtime checks may not have run. Nothing was sent to GitHub.",
+      buttons: [...exits.retryChecks(), exits.close] };
   }
   // Review only: no check runs, so the way on is coding again, or a check the owner chooses when the project has one.
   if (workflowIsReviewOnly(workflow.checkPolicy)) {

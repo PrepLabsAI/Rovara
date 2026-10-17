@@ -3,6 +3,7 @@ import { WORKFLOW_PLAN_MAX_BYTES, WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckPro
 import { ProjectCommandSchema, StoredProjectDefinitionSchema } from "./project.js";
 import { ModelSelectionSchema, type ModelSelection } from "./models.js";
 import { WorkflowDependencyInvocationSchema } from "./workflow-dependencies.js";
+import { E2EFeaturePlanIntentSchema, E2EWorkflowAdmissionRefSchema } from "./e2e.js";
 
 export const AGENTX_PROTOCOL_VERSION = 1 as const;
 
@@ -13,8 +14,8 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "model.chatgpt", "task.workflowDependencies"] as const;
-export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number];
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission"] as const;
+export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
 
@@ -46,6 +47,8 @@ export type WorkflowReviewChecks = z.infer<typeof WorkflowReviewChecksSchema>;
 export const WorkflowReviewPlanSchema = z.object({
   markdown: z.string().min(1).refine((value) => new TextEncoder().encode(value).byteLength <= WORKFLOW_PLAN_MAX_BYTES, `plan exceeds ${WORKFLOW_PLAN_MAX_BYTES} UTF-8 bytes`),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  /** Structured E2E intent reloaded from the exact Owner-approved canonical plan artifact. */
+  e2eIntent: E2EFeaturePlanIntentSchema.optional(),
 }).strict();
 export type WorkflowReviewPlan = z.infer<typeof WorkflowReviewPlanSchema>;
 
@@ -79,6 +82,22 @@ const InvocationBaseSchema = z.object({
 
 export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
   InvocationBaseSchema.extend({
+    kind: z.literal("project-setup-smoke"),
+    payload: z.object({
+      domain: z.literal("project-setup-source-interface/v1"),
+      setupExecutionId: z.string().uuid(),
+      subjectId: z.string().uuid(),
+      approvalRevision: z.number().int().positive(),
+      /** Opaque supervisor-issued correlation for transport auth; never a project workspace identity. */
+      transportCorrelationId: z.string().uuid(),
+      executionRef: z.object({
+        key: z.string().regex(/^project-setup-executions\/sha256\/[a-f0-9]{64}\.json$/),
+        sha256: z.string().regex(/^[a-f0-9]{64}$/),
+        byteLength: z.number().int().positive().max(24 * 1024 * 1024),
+      }).strict(),
+    }).strict(),
+  }).strict(),
+  InvocationBaseSchema.extend({
     kind: z.literal("prepare"),
     payload: z.object({ project: StoredProjectDefinitionSchema, repositoryGrant: z.string().min(1) }).strict(),
   }).strict(),
@@ -105,6 +124,8 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         planFormat: z.literal("structured").optional(),
         workflowFeedbackReview: z.object({ taskId: z.string().uuid(), workflowRevision: z.number().int().positive(), candidateDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
         workflowFeedbackApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
+        /** Server-assigned immutable native E2E round; the worker must reload it through its signed callback capability. */
+        workflowE2EAdmission: E2EWorkflowAdmissionRefSchema.optional(),
         /** One approved same-repository dependency graph, sent only to workers advertising task.workflowDependencies. */
         workflowDependencies: WorkflowDependencyInvocationSchema.optional(),
         /**
@@ -169,6 +190,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         if (payload.workflowDependencies !== undefined && payload.workflowMode !== "IMPLEMENT") {
           context.addIssue({ code: "custom", path: ["workflowDependencies"], message: "a work breakdown requires implementation mode" });
         }
+        if (payload.workflowE2EAdmission !== undefined && payload.workflowMode !== "CHECKS") {
+          context.addIssue({ code: "custom", path: ["workflowE2EAdmission"], message: "a trusted E2E admission requires its separate CHECKS operation" });
+        }
       }),
   }).strict(),
   InvocationBaseSchema.extend({
@@ -204,6 +228,12 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * "publish.candidateTree"; never dropped for an older one.
          */
         candidateTreeSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+        /** Server-selected behavior for publishing a workflow candidate; never supplied by a caller. */
+        publicationMode: z.enum(["COMMITTED_HEAD", "CHECKED_TREE"]).optional(),
+        /** Digest of the immutable workflow publication context, copied into the signed worker claims. */
+        publicationContextDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+        /** The exact committed HEAD whose tree was checked and reviewed. */
+        candidateCommitSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
         /**
          * The base commit the broker pinned for the task in this repository: the published commit's only parent, in
          * place of the commit the workspace's (agent-writable) preparation manifest records. Only with candidateTreeSha.
@@ -230,6 +260,21 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         }
         if (value.workflowBaseCommit !== undefined && value.candidateTreeSha === undefined) {
           context.addIssue({ code: "custom", message: "workflowBaseCommit is allowed only with candidateTreeSha" });
+        }
+        if (value.candidateCommitSha !== undefined && value.candidateTreeSha === undefined) {
+          context.addIssue({ code: "custom", message: "candidateCommitSha is allowed only with candidateTreeSha" });
+        }
+        if ((value.candidateTreeSha === undefined) !== (value.publicationMode === undefined)) {
+          context.addIssue({ code: "custom", path: ["publicationMode"], message: "candidateTreeSha and publicationMode go together" });
+        }
+        if (value.publicationMode === "COMMITTED_HEAD" && value.candidateCommitSha === undefined) {
+          context.addIssue({ code: "custom", path: ["candidateCommitSha"], message: "committed-head publication requires the exact checked commit" });
+        }
+        if (value.publicationMode === "CHECKED_TREE" && value.candidateCommitSha !== undefined) {
+          context.addIssue({ code: "custom", path: ["candidateCommitSha"], message: "checked-tree publication cannot select a commit" });
+        }
+        if ((value.publicationMode === undefined) !== (value.publicationContextDigest === undefined)) {
+          context.addIssue({ code: "custom", path: ["publicationContextDigest"], message: "workflow publication mode and context digest must be present together" });
         }
       }),
   }).strict(),

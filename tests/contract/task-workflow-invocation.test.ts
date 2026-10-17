@@ -46,6 +46,20 @@ describe("workflow-mode worker invocation", () => {
     expect(review({ reviewOnly: false, checks: [{ label: "Unit tests", command: "x".repeat(1025) }] })).toBe(false);
   });
 
+  it("accepts only a broker-assigned immutable E2E admission reference on a CHECKS operation", () => {
+    const workflowE2EAdmission = { schemaVersion: 1, taskId: "44444444-4444-4444-8444-444444444444",
+      workflowRevision: 8, candidateDigest: "a".repeat(64), roundId: "55555555-5555-4555-8555-555555555555", groupRunIds: ["66666666-6666-4666-8666-666666666666"],
+      admissionRef: { key: `workflow-e2e-admissions/sha256/${"b".repeat(64)}.json`, sha256: "b".repeat(64), byteLength: 4096 } };
+    const parse = (extra: Record<string, unknown>, workflowMode = "CHECKS") => WorkerInvocationSchema.safeParse({
+      ...base, payload: { ...base.payload, workflowMode, ...extra },
+    }).success;
+    expect(parse({ workflowE2EAdmission })).toBe(true);
+    expect(parse({ workflowE2EAdmission }, "IMPLEMENT")).toBe(false);
+    expect(parse({ workflowE2EAdmission: { ...workflowE2EAdmission, admissionRef: { ...workflowE2EAdmission.admissionRef,
+      key: "workflow-e2e-admissions/other.json" } } })).toBe(false);
+    expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EAdmission");
+  });
+
   it("carries the approved plan for the reviewers, with its digest, only on a review operation and within 32,768 bytes", () => {
     const sha256 = "a".repeat(64);
     const plan = (workflowReviewPlan: unknown, workflowMode = "REVIEW") => WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode, workflowReviewPlan } }).success;

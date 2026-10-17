@@ -1,5 +1,5 @@
-import { createSign } from "node:crypto";
-import { agentXError, type AgentXError } from "@agentx/contracts";
+import { createHash, createSign } from "node:crypto";
+import { agentXError, createCandidateManifest, isSafeE2ESourcePath, type AgentXError, type E2ESourceSnapshot } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "./repository-access.js";
 import type { GithubMergeReadBudget } from "./aws/workflow-merge-recovery.js";
 
@@ -76,6 +76,8 @@ export interface GitHubWebhookRepositoryScope {
   fullName: string;
 }
 
+export interface GitHubRepositoryIdentity { repositoryId: number; fullName: string }
+
 /** A repository the App can reach: its installation, and the owner as GitHub spells it. */
 interface InstalledRepository {
   owner: string;
@@ -140,6 +142,27 @@ export class GitHubAppCredentialProvider {
     const record = body as Record<string, unknown>;
     return Number.isSafeInteger(record.id) && record.id === scope.repositoryId
       && typeof record.full_name === "string" && record.full_name.toLowerCase() === expectedFullName;
+  }
+
+  /** Reads the immutable GitHub numeric identity for a server-registered repository URL. */
+  async getRepositoryIdentity(repositoryUrl: string): Promise<GitHubRepositoryIdentity | undefined> {
+    const parsed = parseGitHubRepository(repositoryUrl);
+    const expectedFullName = `${parsed.owner}/${parsed.name}`;
+    const installed = await this.installed(parsed);
+    const token = await this.createInstallationToken(installed, { contents: "read" });
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(installed.owner)}/${encodeURIComponent(installed.name)}`,
+      { headers: githubHeaders(token), signal: AbortSignal.timeout(5_000), redirect: "error" },
+    );
+    if (response.status === 404) return undefined;
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub repository lookup failed with HTTP ${response.status}`);
+    const body: unknown = await response.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid repository response");
+    const record = body as Record<string, unknown>;
+    if (!Number.isSafeInteger(record.id) || typeof record.full_name !== "string" || record.full_name.toLowerCase() !== expectedFullName.toLowerCase()) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid repository identity");
+    }
+    return { repositoryId: record.id as number, fullName: record.full_name };
   }
 
   async issueCredentials(
@@ -386,6 +409,82 @@ export class GitHubAppCredentialProvider {
     const repository = await this.installed(parseGitHubRepository(repositoryUrl));
     const token = await this.createInstallationToken(repository, { contents: "read" });
     return this.getCommitTreeSha(repository, commitSha, token);
+  }
+
+  /** Server-owned, complete-tree source capture for normal project setup discovery. */
+  async captureE2ESourceSnapshot(repositoryUrl: string, ref: string): Promise<E2ESourceSnapshot> {
+    if (!ref || ref.length > 255 || ref.startsWith("-") || /[\0\\~^:?*[\s]/.test(ref) || ref.split("/").some(part => part === "" || part === "." || part === "..")) {
+      throw agentXError("CONFIG_INVALID", "repository ref is invalid");
+    }
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl));
+    const token = await this.readTokenFor(repository);
+    const api = `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}`;
+    const headers = githubHeaders(token);
+    const deadlineAt = this.now() + 60_000;
+    const readJson = async (url: string, limit: number): Promise<Record<string, unknown>> => {
+      const remaining = deadlineAt - this.now();
+      if (remaining <= 0) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub immutable source capture exceeded its shared deadline");
+      const response = await this.fetchImplementation(url, { headers, signal: AbortSignal.timeout(Math.min(8_000, remaining)), redirect: "error" });
+      if (!response.ok) { await response.body?.cancel(); throw agentXError("RUNTIME_UNAVAILABLE", `GitHub immutable source read failed with HTTP ${response.status}`); }
+      const responseBody = response.body as unknown as ReadableStream<Uint8Array> | null;
+      const reader = responseBody?.getReader();
+      if (!reader) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub immutable source response body is unavailable");
+      const chunks: Uint8Array[] = []; let total = 0;
+      try {
+        for (;;) {
+          const next = await reader.read();
+          if (next.done) break;
+          total += next.value.byteLength;
+          if (total > limit) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub immutable source metadata exceeded the response size limit");
+          chunks.push(next.value);
+        }
+      } finally { await reader.cancel().catch(() => undefined); }
+      const value: unknown = JSON.parse(Buffer.concat(chunks.map(chunk => Buffer.from(chunk))).toString("utf8"));
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned invalid immutable source metadata");
+      return value as Record<string, unknown>;
+    };
+    const commit = await readJson(`${api}/commits/${encodeURIComponent(ref)}`, 256 * 1024);
+    const commitSha = commit.sha;
+    const commitInfo = commit.commit && typeof commit.commit === "object" && !Array.isArray(commit.commit) ? commit.commit as Record<string, unknown> : undefined;
+    const commitTree = commitInfo?.tree && typeof commitInfo.tree === "object" && !Array.isArray(commitInfo.tree) ? commitInfo.tree as Record<string, unknown> : undefined;
+    const treeSha = commitTree?.sha;
+    if (typeof commitSha !== "string" || !/^[a-f0-9]{40}$/u.test(commitSha) || typeof treeSha !== "string" || !/^[a-f0-9]{40}$/u.test(treeSha)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid immutable commit or tree identity");
+    const treeBody = await readJson(`${api}/git/trees/${treeSha}?recursive=1`, 16 * 1024 * 1024);
+    const entries = treeBody.tree;
+    if (treeBody.sha !== treeSha || treeBody.truncated !== false || !Array.isArray(entries) || entries.length > 100_000) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned a mismatched, incomplete or oversized immutable source tree");
+    const paths: string[] = [];
+    const selected: Array<{ path: string; sha: string; size: number }> = [];
+    const seen = new Set<string>();
+    for (const raw of entries) {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid immutable tree entry");
+      const entry = raw as Record<string, unknown>;
+      const path = entry.path;
+      if (typeof path !== "string" || path.length === 0 || path.length > 1024 || path.startsWith("/") || path.includes("\\") || path.includes("\0") || path.split("/").some(part => part === "" || part === "." || part === "..") || seen.has(path)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid or duplicate immutable tree path");
+      seen.add(path); paths.push(path);
+      const useful = isSafeE2ESourcePath(path) && /(?:^|\/)(?:package\.json|package-lock\.json|pnpm-lock\.yaml|yarn\.lock|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|pyproject\.toml|requirements\.txt|AndroidManifest\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|project\.pbxproj|Info\.plist|.*\.(?:js|mjs|cjs|ts|tsx|jsx|json|swift|kt|kts|plist|gradle|md|toml|ya?ml))$/i.test(path);
+      if (!useful || entry.type !== "blob") continue;
+      if (entry.mode !== "100644" && entry.mode !== "100755") throw agentXError("RUNTIME_UNAVAILABLE", "selected immutable source path has an unsupported Git mode");
+      if (typeof entry.sha !== "string" || !/^[a-f0-9]{40}$/u.test(entry.sha) || typeof entry.size !== "number" || !Number.isSafeInteger(entry.size) || entry.size < 0 || entry.size > 512 * 1024) throw agentXError("RUNTIME_UNAVAILABLE", "selected immutable source blob exceeds supported bounds");
+      selected.push({ path, sha: entry.sha, size: entry.size });
+    }
+    if (selected.length > 512) throw agentXError("RUNTIME_UNAVAILABLE", "selected immutable source set exceeds 512 files");
+    const sources: E2ESourceSnapshot["sources"][number][] = [];
+    let total = 0;
+    for (const entry of selected) {
+      const blob = await readJson(`${api}/git/blobs/${entry.sha}`, 768 * 1024);
+      if (blob.sha !== entry.sha || blob.encoding !== "base64" || blob.size !== entry.size || typeof blob.content !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned mismatched immutable source blob data");
+      const encoded = blob.content.replace(/[\r\n\t ]/g, "");
+      if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(encoded)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned malformed immutable source bytes");
+      const bytes = Buffer.from(encoded, "base64");
+      const actualGitSha = createHash("sha1").update(Buffer.from(`blob ${bytes.byteLength}\0`)).update(bytes).digest("hex");
+      if (bytes.byteLength !== entry.size || actualGitSha !== entry.sha) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub source bytes do not match immutable Git blob identity");
+      total += bytes.byteLength;
+      if (total > 4 * 1024 * 1024) throw agentXError("RUNTIME_UNAVAILABLE", "selected immutable source set exceeds 4 MiB");
+      sources.push({ path: entry.path, sha256: createHash("sha256").update(bytes).digest("hex"), bytes, kind: "blob" });
+    }
+    const fullName = `${repository.owner}/${repository.name}`;
+    const candidate = createCandidateManifest([{ repositoryId: fullName, commitSha, treeSha }]);
+    return { candidate, commitSha, treeSha, treeComplete: true, treePaths: paths, sources };
   }
 
   /**

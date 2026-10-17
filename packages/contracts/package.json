@@ -6,6 +6,7 @@
   "exports": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "dependencies": {
+    "typescript": "5.9.3",
     "zod": "4.6.5"
   }
 }

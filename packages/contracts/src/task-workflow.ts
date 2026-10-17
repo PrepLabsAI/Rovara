@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { E2EWorkflowProgressSchema, E2EQualifiedRoundSchema, E2E_PROJECT_CHECK_ID } from "./e2e.js";
 import { z } from "zod";
 import { ProjectCommandSchema } from "./project.js";
 import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema, feedbackReplacementCheckProblem } from "./workflow-check-input.js";
@@ -78,6 +79,9 @@ export const WORKFLOW_REGRESSED_CHECK_MAX = 120;
 
 /** The worker's refusal when the workspace no longer holds the tree its checks and reviews passed on. */
 export const WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE = "the code changed after its checks and reviews; AgentX did not publish it";
+
+/** Exact broker-owned reason for a required-E2E candidate blocked only because its source export is absent. */
+export const WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON = "the final candidate has no first-party committed source export";
 
 /** Why an AgentX worker refused, before running, to push a reviewed fix: it is too old to push exactly the reviewed tree. */
 export const WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED = "pushing a reviewed fix needs a worker that pushes exactly the reviewed tree";
@@ -623,7 +627,7 @@ export const WorkflowCheckSchema = z.object({
   id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
   label: z.string().trim().min(1).max(80),
   command: ProjectCommandSchema,
-}).strict();
+}).strict().refine((check) => check.id !== E2E_PROJECT_CHECK_ID, "project-e2e is reserved for trusted E2E aggregation");
 export type WorkflowCheck = z.infer<typeof WorkflowCheckSchema>;
 export const WORKFLOW_PROPOSED_CHECKS_MAX = 8;
 /** The checks a coding plan proposed (`parseProposedChecks`), with why it proposed none or why they could not be read. */
@@ -934,6 +938,8 @@ const WorkflowSnapshotShapeSchema = z.object({
   artifacts: z.array(WorkflowArtifactSchema).max(100),
   decisions: z.array(WorkflowDecisionSchema).max(100),
   checkPolicy: WorkflowCheckPolicySchema.optional(),
+  /** Frozen E2E references. Results remain separately qualified by the broker. */
+  e2e: E2EWorkflowProgressSchema.optional(),
   verificationRetries: z.array(WorkflowVerificationRetrySchema).max(100).optional(),
   candidate: CandidateManifestSchema.optional(),
   /** Each repository's base commit, pinned by the first verified candidate; later candidates must keep it. */
@@ -1059,6 +1065,21 @@ export const WorkflowSnapshotSchema = WorkflowSnapshotShapeSchema.superRefine((w
   if (workflow.state === "BLOCKED" && (workflow.stage === "PLAN_REVIEW" || workflow.stage === "CLOSED")) {
     context.addIssue({ code: "custom", path: ["state"], message: "an approval waiting for its owner or a closed task cannot be blocked" });
   }
+  // Until the broker's trusted aggregate gate is wired, ordinary worker verification cannot
+  // advance a required E2E task into review or publication.
+  const qualifiedRound = workflow.e2e?.qualifiedRound;
+  if (qualifiedRound !== undefined && (workflow.e2e?.required !== true || workflow.candidate?.digest !== qualifiedRound.candidateDigest
+    || workflow.verification?.candidateDigest !== qualifiedRound.candidateDigest || workflow.e2e.currentRoundId !== qualifiedRound.roundId
+    || workflow.e2e.currentGroupRunIds.length !== qualifiedRound.groupRunIds.length
+    || workflow.e2e.currentGroupRunIds.some((runId, index) => runId !== qualifiedRound.groupRunIds[index])
+    || workflow.e2e.contractDigest !== qualifiedRound.contractDigest || workflow.e2e.policyDigest !== qualifiedRound.policyDigest
+    || workflow.e2e.bundleDigest !== qualifiedRound.bundleDigest || workflow.e2e.executionPlanDigest !== qualifiedRound.executionPlanDigest)) {
+    context.addIssue({ code: "custom", path: ["e2e", "qualifiedRound"], message: "trusted E2E qualification must bind the current candidate, contract, plan, and round" });
+  }
+  if (workflow.e2e?.required === true && (workflow.stage === "REVIEW" || workflow.stage === "PULL_REQUEST" || workflow.stage === "WAIT_FOR_MERGE" || workflow.stage === "MERGED")
+    && (qualifiedRound === undefined || workflow.candidate?.digest !== qualifiedRound.candidateDigest)) {
+    context.addIssue({ code: "custom", path: ["stage"], message: "required E2E awaits trusted aggregate verification" });
+  }
 });
 export type WorkflowSnapshot = z.infer<typeof WorkflowSnapshotSchema>;
 /** Each repository's pinned base commit, as the workflow stores it and the worker receives it. */
@@ -1107,7 +1128,7 @@ function validatedCandidate(input: unknown): CandidateManifest {
 
 export function recordWorkflowVerification(
   currentInput: unknown,
-  input: { candidate: CandidateManifest; checks: WorkflowVerificationResults; now: string },
+  input: { candidate: CandidateManifest; checks: WorkflowVerificationResults; now: string; e2eQualification?: unknown },
 ): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   if (current.stage !== "VERIFY" || (current.state !== "BLOCKED" && current.state !== "WAITING")) {
@@ -1130,6 +1151,14 @@ export function recordWorkflowVerification(
     ? candidate.repositories.map((repository) => ({ repositoryId: repository.repositoryId, baseCommitSha: repository.baseCommitSha as string }))
     : undefined);
   const passed = checks.data.results.every((result) => result.status === "PASS");
+  const e2eRequired = current.e2e?.required === true;
+  const e2eQualification = input.e2eQualification === undefined ? undefined : E2EQualifiedRoundSchema.parse(input.e2eQualification);
+  const e2eQualified = !e2eRequired || e2eQualification !== undefined && e2eQualification.candidateDigest === candidate.digest
+    && current.e2e?.currentRoundId === e2eQualification.roundId
+    && current.e2e.contractDigest === e2eQualification.contractDigest && current.e2e.policyDigest === e2eQualification.policyDigest
+    && current.e2e.bundleDigest === e2eQualification.bundleDigest && current.e2e.executionPlanDigest === e2eQualification.executionPlanDigest
+    && current.e2e.currentGroupRunIds.length === e2eQualification.groupRunIds.length
+    && current.e2e.currentGroupRunIds.every((runId, index) => runId === e2eQualification.groupRunIds[index]);
   const failedResults = checks.data.results.filter((result) => result.status === "FAILED");
   // Every failed check could not run: coding again would not help, so the owner is told that, not "checks failed".
   const allBroken = failedResults.length > 0 && failedResults.every(workflowCheckResultBroken);
@@ -1137,15 +1166,18 @@ export function recordWorkflowVerification(
   const { blockReason: _priorBlockReason, regressedChecks: _priorRegressions, ...withoutBlockReason } = current;
   void _priorBlockReason;
   void _priorRegressions;
+  const { qualifiedRound: _priorQualifiedRound, ...unqualifiedE2E } = current.e2e ?? {};
+  void _priorQualifiedRound;
   return WorkflowSnapshotSchema.parse({
     ...withoutBlockReason,
     revision: current.revision + 1,
-    state: passed ? "WAITING" : "BLOCKED",
-    stage: passed ? "REVIEW" : "VERIFY",
+    state: passed && e2eQualified ? "WAITING" : passed ? "WAITING" : "BLOCKED",
+    stage: passed && e2eQualified ? "REVIEW" : "VERIFY",
     ...(passed ? {} : { blockReason: allBroken ? WORKFLOW_BLOCK_REASONS.checksBroken : "candidate checks failed or have unknown results" }),
     candidate,
     ...(reviewBase === undefined ? {} : { reviewBase }),
     verification: checks.data,
+    ...(current.e2e === undefined ? {} : { e2e: { ...unqualifiedE2E, ...(e2eRequired && passed && e2eQualified && e2eQualification !== undefined ? { qualifiedRound: e2eQualification } : {}) } }),
     // A new candidate invalidates every prior review report.
     reviews: candidateChanged ? [] : current.reviews ?? [],
     updatedAt: input.now,
@@ -1646,13 +1678,21 @@ export function submitWorkflowArtifact(
 }
 
 /** Blocks the current step with `reason`; `regressedChecks` names the tests a review-only rerun found regressed. */
-export function blockWorkflow(currentInput: unknown, reason: string, now: string, detail: { regressedChecks?: readonly string[] } = {}): WorkflowSnapshot {
+export function blockWorkflow(currentInput: unknown, reason: string, now: string, detail: { regressedChecks?: readonly string[];
+  failedE2ERound?: { status: "FAILED"; candidateDigest: string; roundId: string; groupRunIds: readonly string[]; admissionSha256: string; evidenceSha256: string } } = {}): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   const { regressedChecks: _prior, ...withoutRegressions } = current;
   void _prior;
+  const failure = detail.failedE2ERound;
+  const failedRound = failure !== undefined && current.e2e?.required === true && current.candidate?.digest === failure.candidateDigest
+    && current.e2e.currentRoundId === failure.roundId && current.e2e.currentGroupRunIds.length === failure.groupRunIds.length
+    && current.e2e.currentGroupRunIds.every((runId, index) => runId === failure.groupRunIds[index]) ? failure : undefined;
+  const { failedRound: _priorFailedRound, ...e2eWithoutFailure } = current.e2e ?? {};
+  void _priorFailedRound;
   return WorkflowSnapshotSchema.parse({
     ...withoutRegressions, revision: current.revision + 1, state: "BLOCKED", blockReason: reason.slice(0, 500), updatedAt: now,
     ...(detail.regressedChecks === undefined || detail.regressedChecks.length === 0 ? {} : { regressedChecks: detail.regressedChecks }),
+    ...(current.e2e === undefined ? {} : { e2e: { ...e2eWithoutFailure, ...(failedRound === undefined ? {} : { failedRound }) } }),
   });
 }
 
@@ -1685,6 +1725,8 @@ export function workflowSendBackOffered(workflow: {
   reviews?: ReadonlyArray<{ candidateDigest?: string; role?: string; findings?: ReadonlyArray<{ text?: string; file?: string | undefined; line?: number | undefined; origin?: string; advisory?: boolean | undefined } | string> | undefined }> | undefined;
   acceptedFindings?: ReadonlyArray<{ candidateDigest: string; role: string; fingerprint: string }> | undefined;
   verification?: { candidateDigest?: string; results?: ReadonlyArray<{ status: string; broken?: boolean | undefined; programNotFound?: boolean | undefined }> | undefined } | undefined;
+  e2e?: { required?: boolean | undefined; currentRoundId?: string | undefined; currentGroupRunIds?: readonly string[] | undefined;
+    failedRound?: { status: string; candidateDigest: string; roundId: string; groupRunIds: readonly string[]; admissionSha256: string; evidenceSha256: string } | undefined } | undefined;
 }): boolean {
   if (!sendBackAllowedFrom(workflow)) return false;
   // Only evidence about the current code counts: a review or check of older code describes code that is gone.
@@ -1699,8 +1741,14 @@ export function workflowSendBackOffered(workflow: {
     if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.regressionFound) return true;
     // Review only: there is no check to retry, so coding again is the way on, except from rewritten history.
     if (workflowIsReviewOnly(workflow.checkPolicy)) return workflow.blockReason !== WORKFLOW_HISTORY_REWRITTEN_MESSAGE;
-    return current !== undefined && workflow.verification?.candidateDigest === current
+    const failedOrdinaryCheck = current !== undefined && workflow.verification?.candidateDigest === current
       && workflow.verification.results?.some((result) => result.status === "FAILED" && !workflowCheckResultBroken(result)) === true;
+    const failure = workflow.e2e?.failedRound;
+    const failedCurrentE2ERound = workflow.e2e?.required === true && current !== undefined && failure?.status === "FAILED"
+      && failure.candidateDigest === current && failure.roundId === workflow.e2e.currentRoundId
+      && failure.groupRunIds.length > 0 && failure.groupRunIds.length === workflow.e2e.currentGroupRunIds?.length
+      && failure.groupRunIds.every((runId, index) => runId === workflow.e2e?.currentGroupRunIds?.[index]);
+    return failedOrdinaryCheck || failedCurrentE2ERound;
   }
   return true;
 }
@@ -1851,7 +1899,14 @@ export function sendBackProblems(workflow: WorkflowSnapshot): WorkflowSendBackPr
   const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.proposed ?? []), ...(workflow.checkPolicy?.optional ?? [])];
   const failed = workflow.verification?.candidateDigest !== current ? [] : workflow.verification.results.filter((result) => result.status === "FAILED" && !workflowCheckResultBroken(result))
     .map((result) => ({ source: "check" as const, text: `${checks.find((check) => check.id === result.checkId)?.label ?? result.checkId} failed` }));
-  return [...findings, ...failed, ...regressed];
+  const failure = workflow.e2e?.failedRound;
+  const failedE2E = workflow.e2e?.required === true && failure?.status === "FAILED" && failure.candidateDigest === current
+    && failure.roundId === workflow.e2e.currentRoundId && failure.groupRunIds.length > 0
+    && failure.groupRunIds.length === workflow.e2e.currentGroupRunIds.length
+    && failure.groupRunIds.every((runId, index) => runId === workflow.e2e?.currentGroupRunIds[index])
+    ? [{ source: "check" as const, text: `required E2E verification failed for the current round (${failure.groupRunIds.join(", ")})` }]
+    : [];
+  return [...findings, ...failed, ...failedE2E, ...regressed];
 }
 
 /** The problems as plain lines, "- [code review] text (file:line)" and "- check <label> failed", for people to read. */

@@ -13,7 +13,7 @@ describe("cost estimate", () => {
     expect(estimate.lines.map((line) => [line.item, line.usd])).toEqual([
       ["Two NAT gateways", 65.7],
       ["The Slack connection (Fargate, 0.5 vCPU, 1 GB, arm64)", 14.42],
-      ["Coding machines (m6g.medium)", 2.31],
+      ["Coding machines (m6g.large)", 4.62],
       ["Coding machine disks (30 GiB gp3)", 0.2],
       ["Kept workspaces", 16],
       ["API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS (including the invocation-signing key) and CloudWatch", 10],
@@ -22,7 +22,7 @@ describe("cost estimate", () => {
       ["Coding model (Claude Sonnet 4.6)", 75],
     ]);
     // 60 machine-hours x 30 GiB x ($0.08/GB-month / 730 hours/month) = $0.1972..., rounded to $0.20.
-    expect(estimate.totalUsd).toBe(211.13);
+    expect(estimate.totalUsd).toBe(213.44);
     expect(estimate.unpriced).toEqual([]);
   });
 
@@ -35,11 +35,11 @@ describe("cost estimate", () => {
   });
 
   it("prices GLM 4.7 lower, and names a model it has no price for instead of guessing", () => {
-    expect(estimateMonthlyCost({ ...sampleAnswers().models, orchestrator: "zai.glm-4.7" }).totalUsd).toBe(193.13);
+    expect(estimateMonthlyCost({ ...sampleAnswers().models, orchestrator: "zai.glm-4.7" }).totalUsd).toBe(195.44);
     const custom = estimateMonthlyCost({ ...sampleAnswers().models, worker: "us.anthropic.claude-opus-4-1-20250805-v1:0" });
     expect(custom.unpriced).toEqual(["us.anthropic.claude-opus-4-1-20250805-v1:0"]);
     expect(custom.lines.find((line) => line.item.startsWith("Coding model"))?.usd).toBeUndefined();
-    expect(custom.totalUsd).toBe(136.13);
+    expect(custom.totalUsd).toBe(138.44);
   });
 
   it("prices the coding machine disk at the same usage as the coding machines, separately from the kept workspaces", () => {
@@ -67,7 +67,7 @@ describe("install plan", () => {
       "- Alerts: email to ops@example.com, subscribed and tested at the end of the install",
       "- Models: main model Claude Sonnet 4.6 (Amazon Bedrock), safety check model Claude Haiku 4.5 (Amazon Bedrock), coding model Claude Sonnet 4.6 (Amazon Bedrock)",
       "AgentX never answers itself or other bots. Messages other apps post for people: answered.",
-      "Estimated monthly total: $211.13 at 1,000 turns, 100 coding sessions and 60 machine-hours a month",
+      "Estimated monthly total: $213.44 at 1,000 turns, 100 coding sessions and 60 machine-hours a month",
       "To remove everything later, use the remove command in the ready summary. It deletes the coding machines' disks too.",
       "Coding machine disks (30 GiB gp3)",
       "KMS (including the invocation-signing key)",

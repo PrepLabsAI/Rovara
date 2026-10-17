@@ -140,6 +140,17 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     expect(broker.Properties.VpcConfig).toBeUndefined();
   });
 
+  it("gives the broker fixed, separate setup and mock-feature catalogs and the dispatcher setup catalog only", () => {
+    const broker = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("Broker"))![1];
+    const dispatcher = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("Dispatcher"))![1];
+    const brokerEnv = (broker.Properties.Environment as { Variables: Record<string, string> }).Variables;
+    const dispatcherEnv = (dispatcher.Properties.Environment as { Variables: Record<string, string> }).Variables;
+    expect(brokerEnv.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID).toBe("agentx-production-project-setup-runtime-v1");
+    expect(brokerEnv.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID).toBe("agentx-production-e2e-mock-runtime-v1");
+    expect(dispatcherEnv.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID).toBe(brokerEnv.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID);
+    expect(dispatcherEnv.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID).toBeUndefined();
+  });
+
   it("runs the reconciler every 10 minutes in the VPC, repairing only this environment's ec2-ebs resources (#86)", () => {
     const [reconcilerId, reconciler] = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("SessionsReconciler"))!;
     expect(reconciler.Properties.ReservedConcurrentExecutions).toBeUndefined();

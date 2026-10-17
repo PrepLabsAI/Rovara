@@ -9,6 +9,7 @@ import {
   TaskPeopleRoleRequestSchema, TaskPeopleTakeOwnershipRequestSchema,
   type TaskPeopleChangeResult, type TaskPeopleRoleRequest, type TaskPeopleTakeOwnershipRequest, type TaskPeopleView,
 } from "@agentx/contracts";
+import type { DeveloperTaskView } from "@agentx/contracts";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import type { PageCommentView } from "./plan-page/comments.js";
@@ -38,6 +39,8 @@ export interface TaskPageState {
   canAsk: boolean;
   canManagePeople: boolean;
   canTakeOwnership: boolean;
+  /** Read-only E2E projection loaded from the current server-owned CHECKS admission and evidence. */
+  e2ePresentation?: DeveloperTaskView["e2ePresentation"];
 }
 
 const DecisionIdSchema = z.string().max(4);
@@ -179,6 +182,7 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
           ...(state.peopleRevision === undefined ? {} : { peopleRevision: state.peopleRevision }),
           canRead: state.canRead, canComment: state.canComment, canSuggest: state.canSuggest, canDecide: state.canDecide,
           canAsk: state.canAsk, canManagePeople: state.canManagePeople, canTakeOwnership: state.canTakeOwnership, csrf,
+          ...(state.e2ePresentation === undefined ? {} : { e2ePresentation: state.e2ePresentation }),
         });
         response.headers["set-cookie"] = csrfCookie(csrf);
         return response;

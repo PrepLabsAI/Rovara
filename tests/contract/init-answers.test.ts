@@ -98,7 +98,7 @@ describe("init questions", () => {
       // Spec 048 FR-023: empty is the estimate of the models chosen, plus 20%, so the field's own default is
       // empty; the suggested amount is in the terminal's question and the page's hint.
       question: "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)", defaultValue: "",
-      why: "AgentX's estimate is about $211.13 a month. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.",
+      why: "AgentX's estimate is about $213.44 a month. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.",
       hint: "Optional. Leave empty to use the estimate plus 20% ($260).",
     });
     expect(collected.notes).not.toContain(BUDGET_TAG_NOTE);

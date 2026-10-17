@@ -580,4 +580,90 @@ describe("broker work-breakdown callback integrity", () => {
     expect(calls).toEqual(setup.graph.items.map((item) => item.id));
     expect(resumed.progress.filter((entry) => entry.state === "IMPLEMENTED").map((entry) => entry.itemId)).toEqual(setup.graph.items.map((item) => item.id));
   });
+
+  it("recovers a required-E2E missing-export block by finalizing the exact retained graph tree", async () => {
+    const setup = await approvedGraph(true, 1);
+    const workflowRecord = setup.harness.db.get(`DEVTASK#${setup.taskId}`, "META") as { workflow: Record<string, unknown> } & Record<string, unknown>;
+    const workflow = workflowRecord.workflow as { revision: number; workflowDependenciesApproval: { runId: string; graphDigest: string; workflowRevision: number }; [key: string]: unknown };
+    const approval = workflow.workflowDependenciesApproval;
+    const requiredE2E = { contractDigest: "1".repeat(64), policyDigest: "2".repeat(64), bundleDigest: "3".repeat(64),
+      executionPlanDigest: "4".repeat(64), required: true, currentGroupRunIds: [], resultRefs: [] };
+    setup.harness.db.set({ ...workflowRecord, workflow: { ...workflow, e2e: requiredE2E } });
+    const sourceOperationId = implementationId(setup);
+    const implementedAt = new Date().toISOString();
+    const implemented = { schemaVersion: 1, graphDigest: approval.graphDigest, runId: approval.runId, itemId: setup.graph.items[0]!.id,
+      sequence: 2, state: "IMPLEMENTED" as const, operationId: sourceOperationId, baseTreeSha: "a".repeat(40), candidateTreeSha: "b".repeat(40),
+      at: implementedAt, producer: "agentx-worker" };
+    await setup.harness.events(setup.workspaceId, sourceOperationId, [
+      { type: "progress", payload: { workItemProgress: { schemaVersion: 1, graphDigest: approval.graphDigest, runId: approval.runId,
+        itemId: setup.graph.items[0]!.id, sequence: 1, state: "STARTED", operationId: sourceOperationId,
+        baseTreeSha: "a".repeat(40), at: new Date().toISOString(), producer: "agentx-worker" } } },
+      { type: "progress", payload: { workItemProgress: implemented } },
+    ]);
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
+    await setup.harness.finish(setup.workspaceId, sourceOperationId, "SUCCEEDED", { result: {
+      workflowCandidateRepositories: candidate.repositories, workflowCheckCandidateRepositories: candidate.repositories,
+      checks: passingChecks(),
+      workflowDependenciesResult: { schemaVersion: 1, taskId: setup.taskId, graphDigest: approval.graphDigest, runId: approval.runId,
+        operationId: sourceOperationId, workflowRevision: approval.workflowRevision, status: "SUCCEEDED",
+        items: [implemented], candidateDigest: candidate.digest, at: new Date().toISOString() },
+    } });
+
+    const blocked = (setup.harness.db.get(`DEVTASK#${setup.taskId}`, "META") as { workflow: { revision: number; stage: string; state: string; blockReason?: string; candidate?: unknown } }).workflow;
+    expect(blocked).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "the final candidate has no first-party committed source export" });
+    expect(blocked.candidate).toBeUndefined();
+    const sourceOperation = (await setup.harness.actions.operations(setup.workspaceId)).find((operation) => operation.id === sourceOperationId)!;
+    expect(sourceOperation).not.toHaveProperty("workflowDependencies");
+    const route = `/v1/dev/tasks/${setup.taskId}/workflow/retry`;
+    const stale = await setup.harness.dev(MAYA, "POST", route, {
+      requestId: randomUUID(), expectedRevision: blocked.revision - 1, instructions: "Finalize the retained source.",
+    });
+    expect(stale.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    const candidateChange = await setup.harness.dev(MAYA, "POST", route, {
+      requestId: randomUUID(), expectedRevision: blocked.revision, candidateDigest: "f".repeat(64), instructions: "Finalize the retained source.",
+    });
+    expect(candidateChange.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    const selectionChange = await setup.harness.dev(MAYA, "POST", route, {
+      requestId: randomUUID(), expectedRevision: blocked.revision, selectedOptionalCheckIds: ["other-check"], instructions: "Finalize the retained source.",
+    });
+    expect(selectionChange.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+
+    const workspaceRecord = setup.harness.db.get(`WORKSPACE#${setup.workspaceId}`, "META") as Record<string, unknown>;
+    setup.harness.db.set({ ...workspaceRecord, activeOperationId: randomUUID() });
+    const liveWorker = await setup.harness.dev(MAYA, "POST", route, {
+      requestId: randomUUID(), expectedRevision: blocked.revision, instructions: "Finalize the retained source.",
+    });
+    setup.harness.db.set(workspaceRecord);
+    expect(liveWorker.body.error).toMatchObject({ code: "TASK_BUSY" });
+
+    const sourceRecord = setup.harness.db.find((item) => item.pk === `WORKSPACE#${setup.workspaceId}` && item.id === sourceOperationId)[0]!;
+    const originalSourceResult = sourceRecord.result as Record<string, unknown>;
+    const forgedRepositories = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "c".repeat(40), baseCommitSha: "e".repeat(40) }]).repositories;
+    setup.harness.db.set({ ...sourceRecord, result: { ...originalSourceResult, workflowCandidateRepositories: forgedRepositories } });
+    const forgedCandidate = await setup.harness.dev(MAYA, "POST", route, {
+      requestId: randomUUID(), expectedRevision: blocked.revision, instructions: "Finalize the retained source.",
+    });
+    expect(forgedCandidate.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    setup.harness.db.set(sourceRecord);
+
+    const requestId = randomUUID();
+    const recoveryRequest = { requestId, expectedRevision: blocked.revision, instructions: "Finalize the retained source without editing it." };
+    const response = await setup.harness.dev(MAYA, "POST", route, recoveryRequest);
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    const recovery = setup.operations().find((operation) => operation.requestId === requestId);
+    expect(recovery).toBeDefined();
+    expect(recovery).toMatchObject({ workflowMode: "IMPLEMENT", status: "ACCEPTED" });
+    const invocation = setup.harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === recovery?.id)[0]?.invocation as {
+      payload: { workflowDependencies: { resumeTreeSha: string; sequenceStart: number; resumeProgress: WorkItemProgressV1[] }; prompt: string };
+    };
+    expect(invocation.payload.workflowDependencies).toMatchObject({ resumeTreeSha: "b".repeat(40), sequenceStart: 2,
+      resumeProgress: [{ itemId: setup.graph.items[0]!.id, state: "IMPLEMENTED", candidateTreeSha: "b".repeat(40) }] });
+    expect(invocation.payload.prompt).toContain("Do not edit");
+    expect(setup.operations().filter((operation) => operation.requestId === requestId)).toHaveLength(1);
+    expect((await setup.harness.dev(MAYA, "POST", route, recoveryRequest)).status).toBe(200);
+    expect(setup.operations().filter((operation) => operation.requestId === requestId)).toHaveLength(1);
+    const conflict = await setup.harness.dev(MAYA, "POST", route, { ...recoveryRequest, instructions: "Change the retained source tree." });
+    expect(conflict.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(setup.operations().filter((operation) => operation.requestId === requestId)).toHaveLength(1);
+  });
 });

@@ -4,20 +4,24 @@
 // connector add can build the next revision from it. The file holds no secret: the repository's
 // credential is a reference (the built-in GitHub App's ref), never a token.
 import { access, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import YAML from "yaml";
+import { verifyE2ESetupProposal } from "@agentx/broker/e2e/discovery";
 import {
-  ProjectDefinitionSchema, RegistrationPreflightSchema, agentXError, environmentStackName,
-  type ConnectorPreflight, type Ec2RuntimeBinding, type ProjectDefinition,
+  AgentXError, AgentXErrorCodeSchema, ProjectDefinitionSchema, RegistrationPreflightSchema, E2EPolicySchema, E2ESetupProposalSchema, agentXError, canonicalJson, environmentStackName,
+  type ConnectorPreflight, type Ec2RuntimeBinding, type ProjectDefinition, type E2EPolicy, type E2ESetupProposal,
 } from "@agentx/contracts";
 import { listCredentials } from "../admin/credential.js";
 import { cliRuntimeBinding, registerProject } from "../admin/register.js";
+import { readJsonResponse, serverError } from "../admin/http.js";
 import { loadProjectConfig } from "../config.js";
+import { recordRegisteredLoopEnrollment } from "../loop/enrollment-cli.js";
 import type { StackOutputs } from "../deploy/parameters.js";
 import type { Prompter } from "../init/prompts.js";
 import {
-  agentxRepositoryName, commandLine, parseCommandLine, proposeCommands, BUILD_FILES, SETUP_TIMEOUT, TEST_TIMEOUT, type RepositoryInfo,
+  agentxRepositoryName, commandLine, parseCommandLine, proposeCommands, BUILD_FILES, SETUP_TIMEOUT, TEST_TIMEOUT, type RepositoryInfo, type RepositorySnapshot,
 } from "./project-files.js";
 import type { AdminSession, SetupServices } from "./services.js";
 
@@ -121,16 +125,36 @@ export async function writeProjectFile(configDir: string, definition: ProjectDef
 
 export async function registerRevision(input: {
   env: string; session: AdminSession; definition: ProjectDefinition;
-  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir">;
+  services: Pick<SetupServices, "fetch" | "stackOutputs" | "configDir" | "loopHome">;
+  setupApproval?: StoredSetupDecision;
+  setupPolicy?: E2EPolicy;
 }): Promise<{ revision: number; preflight: ConnectorPreflight[]; warnings: string[]; file: string }> {
   const foundation = environmentStackName(input.env, "foundation");
   const runtimeBinding = ec2Binding(await input.services.stackOutputs(foundation), foundation);
-  const result = (await registerProject({ controlPlaneUrl: input.session.controlPlaneUrl, accessToken: input.session.accessToken, definition: input.definition, runtimeBinding }, input.services.fetch)) as Record<string, unknown>;
+  const result = (await registerProject({ controlPlaneUrl: input.session.controlPlaneUrl, accessToken: input.session.accessToken, definition: input.definition, runtimeBinding, ...(input.setupApproval === undefined ? {} : { setupApproval: input.setupApproval }) }, input.services.fetch)) as Record<string, unknown>;
   const preflight = RegistrationPreflightSchema.safeParse(result.preflight);
   const warnings = Array.isArray(result.warnings) ? result.warnings.filter((entry): entry is string => typeof entry === "string") : [];
+  if (input.setupApproval?.decision === "approve" && input.definition.e2e !== undefined) {
+    if (result.setupRuntime === "QUEUED") warnings.push("E2E testing setup was queued; project registration is complete, but testing is not ready.");
+    else if (result.setupRuntime === "UNAVAILABLE") warnings.push("E2E testing setup is unavailable; project registration is complete, but testing is not ready.");
+    else warnings.push("E2E testing setup status is unknown; project registration is complete, but testing is not ready.");
+  }
+  if (input.services.loopHome !== undefined) {
+    try {
+      const enrollment = await recordRegisteredLoopEnrollment({ home: input.services.loopHome, env: input.env, controlPlaneUrl: input.session.controlPlaneUrl, definition: input.definition, response: result });
+      if (!enrollment.recorded) warnings.push(`local Rovara enrollment is on hold (${enrollment.reasonCode}); publication stays held until registration is confirmed from its source checkout`);
+    } catch (error) {
+      warnings.push(`local Rovara enrollment could not be saved (${(error as Error).message}); publication stays held`);
+    }
+  }
   // Written only after the control plane accepted the revision, so the file never names a revision
   // that is not registered.
   const file = await writeProjectFile(input.services.configDir, input.definition, { env: input.env, binding: runtimeBinding });
+  if (input.setupApproval !== undefined) {
+    const policy = input.setupPolicy ?? input.definition.e2e;
+    if (policy === undefined) throw agentXError("CONFIG_INVALID", "a stored setup decision cannot be saved without its source-backed E2E policy");
+    await writeStoredSetupDecision({ configDir: input.services.configDir, env: input.env, session: input.session, definition: input.definition, policy, decision: input.setupApproval });
+  }
   return { revision: input.definition.revision, preflight: preflight.success ? preflight.data.connectors : [], warnings, file };
 }
 
@@ -170,6 +194,129 @@ async function existingProject(configDir: string, name: string): Promise<Project
 
 const cloneUrlOf = (fullName: string) => `https://github.com/${fullName}.git`.toLowerCase();
 
+interface StoredSetupDecision { proposalRef: string; proposalSha256: string; decision: "approve" | "decline" }
+
+interface LocalSetupDecisionRecord {
+  schemaVersion: 1;
+  env: string;
+  controlPlaneUrl: string;
+  projectName: string;
+  repositoryUrl: string;
+  policySha256: string;
+  setupApproval: StoredSetupDecision;
+}
+
+function setupDecisionPath(configDir: string, projectName: string): string {
+  return `${projectFilePath(configDir, projectName)}.setup-approval.json`;
+}
+
+function normalizedControlPlaneUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "https:" && url.protocol !== "http:") || url.username || url.password || url.search || url.hash) throw new Error("invalid control-plane URL");
+    return url.href.replace(/\/$/, "");
+  } catch {
+    throw agentXError("CONFIG_INVALID", "the setup decision cannot be bound to an invalid control-plane URL");
+  }
+}
+
+function policyDigest(value: E2EPolicy): string {
+  return createHash("sha256").update(canonicalJson(E2EPolicySchema.parse(value)), "utf8").digest("hex");
+}
+
+function setupDecisionRecord(input: { env: string; session: AdminSession; definition: ProjectDefinition; policy: E2EPolicy; decision: StoredSetupDecision }): LocalSetupDecisionRecord {
+  const repositoryUrl = input.definition.repositories[0]?.url;
+  if (repositoryUrl === undefined || !/^[a-f0-9]{64}$/.test(input.decision.proposalSha256)
+    || input.decision.proposalRef.length > 512 || !input.decision.proposalRef.startsWith("project-setup-proposals/")
+    || (input.decision.decision !== "approve" && input.decision.decision !== "decline")) {
+    throw agentXError("CONFIG_INVALID", "the stored setup decision is missing its project or source proposal binding");
+  }
+  return {
+    schemaVersion: 1, env: input.env, controlPlaneUrl: normalizedControlPlaneUrl(input.session.controlPlaneUrl),
+    projectName: input.definition.name, repositoryUrl: repositoryUrl.toLowerCase().replace(/\/$/, ""),
+    policySha256: policyDigest(input.policy), setupApproval: input.decision,
+  };
+}
+
+async function writeStoredSetupDecision(input: { configDir: string; env: string; session: AdminSession; definition: ProjectDefinition; policy: E2EPolicy; decision: StoredSetupDecision }): Promise<void> {
+  await mkdir(input.configDir, { recursive: true, mode: 0o700 });
+  await writeFile(setupDecisionPath(input.configDir, input.definition.name), `${JSON.stringify(setupDecisionRecord(input), null, 2)}\n`, { mode: 0o600 });
+}
+
+/** Reuses only the exact locally retained, non-secret decision context. The control plane still
+ * authenticates the reference, owner, repository, and policy on every registration. */
+export async function setupDecisionForRevision(input: { configDir: string; env: string; session: AdminSession; definition: ProjectDefinition }): Promise<StoredSetupDecision | undefined> {
+  const path = setupDecisionPath(input.configDir, input.definition.name);
+  let raw: string;
+  try { raw = await readFile(path, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      if (input.definition.e2e !== undefined) throw agentXError("CONFIG_INVALID", `project ${input.definition.name} has E2E policy but no local source-backed setup decision; obtain a fresh owner setup decision before registering a revision`);
+      return undefined;
+    }
+    throw agentXError("CONFIG_INVALID", `the local setup decision for ${input.definition.name} cannot be read; obtain a fresh owner setup decision before registering a revision`);
+  }
+  if (Buffer.byteLength(raw, "utf8") > 16 * 1024) throw agentXError("CONFIG_INVALID", `the local setup decision for ${input.definition.name} is too large; obtain a fresh owner setup decision`);
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { parsed = undefined; }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw agentXError("CONFIG_INVALID", `the local setup decision for ${input.definition.name} is invalid; obtain a fresh owner setup decision`);
+  const record = parsed as Record<string, unknown>;
+  const decision = record.setupApproval;
+  if (Object.keys(record).sort().join(",") !== "controlPlaneUrl,env,policySha256,projectName,repositoryUrl,schemaVersion,setupApproval"
+    || record.schemaVersion !== 1 || typeof record.env !== "string" || typeof record.controlPlaneUrl !== "string"
+    || typeof record.projectName !== "string" || typeof record.repositoryUrl !== "string" || typeof record.policySha256 !== "string"
+    || !/^[a-f0-9]{64}$/.test(record.policySha256)
+    || decision === null || typeof decision !== "object" || Array.isArray(decision)) {
+    throw agentXError("CONFIG_INVALID", `the local setup decision for ${input.definition.name} is invalid; obtain a fresh owner setup decision`);
+  }
+  const storedDecision = decision as Record<string, unknown>;
+  if (Object.keys(storedDecision).sort().join(",") !== "decision,proposalRef,proposalSha256"
+    || typeof storedDecision.proposalRef !== "string" || storedDecision.proposalRef.length > 512
+    || typeof storedDecision.proposalSha256 !== "string" || !/^[a-f0-9]{64}$/.test(storedDecision.proposalSha256)
+    || (storedDecision.decision !== "approve" && storedDecision.decision !== "decline")) {
+    throw agentXError("CONFIG_INVALID", `the local setup decision for ${input.definition.name} is invalid; obtain a fresh owner setup decision`);
+  }
+  // A decline created a non-E2E project. Subsequent ordinary revisions need no setup authority;
+  // do not forward the old decline as if it were a continuing E2E policy decision.
+  if (input.definition.e2e === undefined && storedDecision.decision === "decline") return undefined;
+  const repositoryUrl = input.definition.repositories[0]?.url.toLowerCase().replace(/\/$/, "");
+  let matches = record.env === input.env && record.controlPlaneUrl === normalizedControlPlaneUrl(input.session.controlPlaneUrl)
+    && record.projectName === input.definition.name && record.repositoryUrl === repositoryUrl;
+  matches &&= input.definition.e2e !== undefined && storedDecision.decision === "approve" && record.policySha256 === policyDigest(input.definition.e2e);
+  if (!matches) throw agentXError("CONFIG_INVALID", `the saved setup decision for ${input.definition.name} no longer matches its project, environment, control plane, repository, or E2E policy; obtain a fresh owner setup decision before registering a revision`);
+  return { proposalRef: storedDecision.proposalRef, proposalSha256: storedDecision.proposalSha256, decision: storedDecision.decision };
+}
+
+async function setupRequest(session: AdminSession, fetchImplementation: typeof fetch, path: string, body: Record<string, unknown>, timeoutMs?: number): Promise<Record<string, unknown>> {
+  const response = await fetchImplementation(`${session.controlPlaneUrl.replace(/\/$/, "")}${path}`, {
+    method: "POST", headers: { authorization: `Bearer ${session.accessToken}`, "content-type": "application/json" }, body: JSON.stringify(body),
+    ...(timeoutMs === undefined ? {} : { signal: AbortSignal.timeout(timeoutMs) }),
+  });
+  const { ok, status, body: result } = await readJsonResponse(response);
+  if (!ok) {
+    const { code, message } = serverError(result);
+    const parsedCode = AgentXErrorCodeSchema.safeParse(code);
+    const fallback = status >= 500 ? "RUNTIME_UNAVAILABLE" : "CONFIG_INVALID";
+    const responseCode = status === 401 ? "AUTH_REQUIRED" : status === 403 ? "FORBIDDEN" : parsedCode.success ? parsedCode.data : fallback;
+    throw agentXError(responseCode, `${path} failed with HTTP ${status}${message ? `: ${message}` : ""}`);
+  }
+  if (result === undefined || result === null || typeof result !== "object" || Array.isArray(result)) throw agentXError("CONFIG_INVALID", `${path} returned a malformed successful response`);
+  return result as Record<string, unknown>;
+}
+
+function validateSetupProposalResponse(value: Record<string, unknown>): { proposal: E2ESetupProposal; policy: E2EPolicy; proposalRef: string; proposalSha256: string } {
+  const proposal = E2ESetupProposalSchema.parse(value.proposal);
+  const policy = E2EPolicySchema.parse(value.policy);
+  if (typeof value.proposalRef !== "string" || !/^project-setup-proposals\/[a-f0-9]{64}\/[a-f0-9]{64}\.json$/.test(value.proposalRef)
+    || typeof value.proposalSha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.proposalSha256)
+    || value.proposalRef !== `project-setup-proposals/${value.proposalRef.split("/")[1]}/${value.proposalSha256}.json`
+    || value.candidateDigest !== proposal.candidateDigest || policy.targets.length !== proposal.targets.length
+    || proposal.targets.some((target) => !policy.targets.some((configured) => JSON.stringify(configured) === JSON.stringify(target)))) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned an unbound source-backed setup proposal");
+  }
+  return { proposal, policy, proposalRef: value.proposalRef, proposalSha256: value.proposalSha256 };
+}
+
 /** What this rerun asks for that the existing project does not have. Only the answers given are
  * compared (the repository, and any command flags); nothing is asked again and nothing is fetched. */
 function differences(existing: ProjectDefinition, wanted: { repositoryUrl?: string; setupCommand?: string; testCommand?: string }): string[] {
@@ -186,6 +333,8 @@ export async function addProject(input: {
   env: string; session: AdminSession; githubToken: string; prompter: Prompter; write: (line: string) => void;
   services: Pick<SetupServices, "fetch" | "repositories" | "stackOutputs" | "configDir">;
   flags: { projectName?: string; repository?: string; setupCommand?: string; testCommand?: string };
+  /** A source-verified proposal and policy for the single normal project-setup confirmation. */
+  e2eSetup?: { proposal: E2ESetupProposal; policy: E2EPolicy; snapshot: RepositorySnapshot };
   /** The install page's project card (spec 040 phase 3): told the repository once it is chosen. */
   onRepository?: (fullName: string) => void;
 }): Promise<{ name: string; revision: number; file: string }> {
@@ -231,14 +380,82 @@ export async function addProject(input: {
   const repoName = agentxRepositoryName(repository.name);
   const cwd = `repo/${repoName}`;
   const source = repository;
-  const files = Object.fromEntries(await Promise.all(BUILD_FILES.map(async (file) => [file, await input.services.repositories.file(input.githubToken, source.fullName, file)] as const)));
+  let trustedSetup: ReturnType<typeof validateSetupProposalResponse> | undefined;
+  let setupProposalResponse: Record<string, unknown> | undefined;
+  let setupDiscoveryNotice: string | undefined;
+  try {
+    setupProposalResponse = await setupRequest(input.session, input.services.fetch, "/v1/admin/projects/setup-proposals", {
+      repositoryUrl: source.cloneUrl, ref: source.defaultBranch,
+    }, 65_000);
+  } catch (error) {
+    // This route is optional exploration, so unusable discovery can be quarantined while ordinary
+    // setup proceeds. Authentication and authorization remain hard failures. Never expose provider
+    // text or accept malformed discovery as E2E policy.
+    if (error instanceof AgentXError && (error.code === "AUTH_REQUIRED" || error.code === "FORBIDDEN")) throw error;
+    if (!(error instanceof AgentXError)
+      && !(error instanceof TypeError)
+      && !(error instanceof DOMException && (error.name === "AbortError" || error.name === "TimeoutError"))) throw error;
+    setupDiscoveryNotice = error instanceof AgentXError && error.code === "CONFIG_INVALID"
+      ? "Testing exploration not done: source-backed proposal was malformed or unbound; E2E evidence remains unknown."
+      : "Testing exploration not done: source capture exceeded its time or size bound, or the discovery service was unavailable; E2E evidence remains unknown.";
+  }
+  if (setupProposalResponse !== undefined) {
+    try { trustedSetup = validateSetupProposalResponse(setupProposalResponse); }
+    catch {
+      setupDiscoveryNotice = "Testing exploration not done: source-backed proposal was malformed or unbound; E2E evidence remains unknown.";
+    }
+  }
+  let setupProposal = trustedSetup?.proposal;
+  const e2ePolicy = trustedSetup?.policy;
+  let setupApproval: StoredSetupDecision | undefined;
+  if (input.e2eSetup !== undefined) {
+    if (trustedSetup === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "locally supplied E2E setup evidence requires a fresh trusted server proposal");
+    const candidateProposal = E2ESetupProposalSchema.parse(input.e2eSetup.proposal);
+    const policy = E2EPolicySchema.parse(input.e2eSetup.policy);
+    const snapshot = input.e2eSetup.snapshot;
+    if (snapshot.candidate.digest !== candidateProposal.candidateDigest || snapshot.candidate.repositories.length !== 1 || snapshot.candidate.repositories[0]?.repositoryId !== source.fullName) {
+      throw agentXError("CONFIG_INVALID", "E2E setup proposal must match this repository's immutable candidate snapshot");
+    }
+    let verifiedProposal: E2ESetupProposal;
+    try { verifiedProposal = verifyE2ESetupProposal(candidateProposal, snapshot, snapshot.candidate); }
+    catch (error) { throw agentXError("CONFIG_INVALID", `E2E setup proposal failed source verification: ${error instanceof Error ? error.message : "invalid source evidence"}`); }
+    if (candidateProposal.targets.length !== policy.targets.length || candidateProposal.targets.some((target) => !policy.targets.some((configured) => JSON.stringify(configured) === JSON.stringify(target)))) {
+      throw agentXError("CONFIG_INVALID", "E2E setup policy targets must match the source-backed proposal");
+    }
+    setupProposal = verifiedProposal;
+    if (verifiedProposal.candidateDigest !== trustedSetup.proposal.candidateDigest || !isDeepStrictEqual(policy, trustedSetup.policy)) {
+      throw agentXError("CONFIG_INVALID", "locally supplied setup evidence differs from the trusted server proposal");
+    }
+  }
+  const files = input.e2eSetup === undefined
+    ? Object.fromEntries(await Promise.all(BUILD_FILES.map(async (file) => [file, await input.services.repositories.file(input.githubToken, source.fullName, file)] as const)))
+    : Object.fromEntries(BUILD_FILES.map((file) => [file, input.e2eSetup!.snapshot.sources.find((item) => item.path === file)?.bytes ? Buffer.from(input.e2eSetup!.snapshot.sources.find((item) => item.path === file)!.bytes).toString("utf8") : undefined] as const));
   const proposed = proposeCommands(files, cwd);
   let setup = proposed.setup;
   let readiness = proposed.readiness;
+  let e2eAccepted = false;
   const typed = (line: string, timeout: number) => (line.trim() === "" ? [] : [parseCommandLine(line, cwd, timeout)]);
-  if (flags.setupCommand !== undefined || flags.testCommand !== undefined) {
-    if (flags.setupCommand !== undefined) setup = typed(flags.setupCommand, SETUP_TIMEOUT);
-    if (flags.testCommand !== undefined) readiness = typed(flags.testCommand, TEST_TIMEOUT);
+  // Explicit command flags remain the user's selected ordinary project commands. They do not
+  // replace or suppress the source-backed E2E proposal; the separate confirmation below still
+  // records the owner's approve/decline decision for that proposal.
+  if (flags.setupCommand !== undefined) setup = typed(flags.setupCommand, SETUP_TIMEOUT);
+  if (flags.testCommand !== undefined) readiness = typed(flags.testCommand, TEST_TIMEOUT);
+  if (setupProposal !== undefined && e2ePolicy !== undefined && trustedSetup !== undefined) {
+    const targetSummary = setupProposal.targets.map((target) => target.kind + ":" + target.targetId).join(", ") || "no targets detected";
+    const mockSummary = setupProposal.missingInputs.filter((item) => item.disposition === "mock-substitutable").map((item) => item.kind).join(", ") || "none detected";
+    const blockerSummary = setupProposal.missingInputs.filter((item) => item.disposition === "blocking").map((item) => item.reason).join("; ") || "none";
+    input.write(setupProposal.missingInputs.length === 0 ? "Detected source-backed E2E setup." : "Detected source-backed E2E setup with unresolved inputs: " + blockerSummary);
+    const commandSummary = "setup: " + setup.map(commandLine).join("; ") + "; readiness: " + readiness.map(commandLine).join("; ");
+    e2eAccepted = await prompter.confirm("Use this project setup plan? (" + commandSummary + "; targets: " + targetSummary + "; mock substitutions: " + mockSummary + "; unresolved inputs: " + blockerSummary + ")", { defaultValue: true });
+    if (!e2eAccepted) { setup = []; readiness = []; }
+    const decision = e2eAccepted ? "approve" : "decline";
+    const approval = await setupRequest(input.session, input.services.fetch, "/v1/admin/projects/setup-approvals", {
+      projectName: name, proposalRef: trustedSetup.proposalRef, proposalSha256: trustedSetup.proposalSha256, decision,
+    });
+    if (approval.proposalRef !== trustedSetup.proposalRef || approval.proposalSha256 !== trustedSetup.proposalSha256 || approval.decision !== decision) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "control plane returned a mismatched immutable setup decision");
+    }
+    setupApproval = { proposalRef: trustedSetup.proposalRef, proposalSha256: trustedSetup.proposalSha256, decision };
   } else {
     input.write(proposed.basis.length === 0
       ? `No build file AgentX knows in ${repository.fullName}. AgentX will propose checks for each task; you can add project checks later.`
@@ -253,8 +470,12 @@ export async function addProject(input: {
     name, revision: 1,
     repositories: [{ name: repoName, url: repository.cloneUrl, path: cwd, defaultBranch: repository.defaultBranch, credentialRef: await builtInGitHubRef(input.session, input.services.fetch) }],
     setup, readiness, orchestratorInstructions: DEFAULT_INSTRUCTIONS,
+    ...(e2eAccepted && e2ePolicy !== undefined ? { e2e: e2ePolicy } : {}),
   });
-  const registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services });
+  const registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services,
+    ...(setupApproval === undefined || e2ePolicy === undefined ? {} : { setupApproval, setupPolicy: e2ePolicy }) });
   input.write(`Registered project ${name}, revision 1, on EC2 workers. Its file is ${registered.file}.`);
+  if (setupDiscoveryNotice !== undefined) input.write(setupDiscoveryNotice);
+  for (const warning of registered.warnings) input.write(`Warning: ${warning}`);
   return { name, revision: 1, file: registered.file };
 }

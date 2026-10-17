@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { AgentXError, WORKFLOW_HISTORY_REWRITTEN_MESSAGE } from "@agentx/contracts";
 import { preparedBaseResult, type PreparationManifest } from "../../packages/worker/src/prepare.js";
 import { afterEach, describe, expect, it } from "vitest";
-import { candidateUnchangedSinceBase, readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
+import { candidateUnchangedSinceBase, readCandidateRepositories, readCommittedCandidateSourceExport } from "../../packages/worker/src/verification/candidate.js";
 
 const execFile = promisify(execFileCallback);
 const roots: string[] = [];
@@ -34,6 +34,24 @@ afterEach(async () => {
 });
 
 describe("candidate repository capture", () => {
+  it("exports bounded source bytes from the exact committed HEAD tree and rejects an index-only candidate", async () => {
+    const directory = await repository();
+    const baseCommitSha = await git(directory, "rev-parse", "HEAD");
+    await writeFile(join(directory, "tracked.txt"), "approved candidate\n");
+    await git(directory, "commit", "--quiet", "-am", "candidate");
+    const input = { repositoryId: "payments", directory, baseCommitSha };
+    const [identity] = await readCandidateRepositories([input]);
+    expect(identity).toBeDefined();
+    const exported = await readCommittedCandidateSourceExport([input], [identity!]);
+    expect(exported).toMatchObject({ schemaVersion: "workflow-candidate-source/v1", candidate: { repositories: [identity] } });
+    expect(exported.repositories[0]?.treePaths).toEqual(["tracked.txt"]);
+    expect(Buffer.from(exported.repositories[0]?.sources[0]?.bytesBase64 ?? "", "base64").toString("utf8")).toBe("approved candidate\n");
+
+    await writeFile(join(directory, "tracked.txt"), "uncommitted change\n");
+    const indexOnly = await readCandidateRepositories([input]);
+    await expect(readCommittedCandidateSourceExport([input], indexOnly)).rejects.toThrow(/does not match the final candidate identity/);
+  });
+
   it("returns immutable HEAD and a tree hash that includes tracked edits and untracked files without changing the index", async () => {
     const directory = await repository();
     const head = await git(directory, "rev-parse", "HEAD");

@@ -36,6 +36,12 @@ export interface VerificationOptions {
   onReport: (report: CheckReport) => void | Promise<void>;
   /** Graph implementation: intermediate item settles defer checks until the final item. */
   shouldRun?: () => boolean;
+  /** IMPLEMENT only: commit the completed worktree before its final selected checks run. */
+  prepareCandidate?: () => Promise<void>;
+  /** Exact candidate identity before and after final checks; a changed tree cannot receive a check binding. */
+  candidateIdentity?: () => Promise<string>;
+  /** Clears the worker's candidate binding when preparation fails or the check changes the candidate. */
+  onCandidateDrift?: () => void;
   /**
    * Called when the agent is given its extra try, with the first round's report (`regression`, extraTry `given`). It is
    * the result if no second settle follows and the signal did not fire (Ruling N); a stopped run reports stopped.
@@ -144,6 +150,8 @@ export function verificationExtension(options: VerificationOptions): InlineExten
           }
           if (event.outcome !== "completed" || options.signal.aborted) return report(unverified("stopped", claim));
           await recorder.settled();
+          await options.prepareCandidate?.();
+          const candidateBefore = options.candidateIdentity === undefined ? undefined : await options.candidateIdentity();
           const plan = options.plan();
           if (plan.source === "none") return report(unverified("no_checks", claim));
           const budgetMs = options.budgetMs();
@@ -156,6 +164,13 @@ export function verificationExtension(options: VerificationOptions): InlineExten
             options.runners,
             { budgetMs: Math.max(0, budgetMs - (Date.now() - started)), signal: options.signal },
           );
+          if (candidateBefore !== undefined && options.candidateIdentity !== undefined) {
+            const candidateAfter = await options.candidateIdentity();
+            if (candidateAfter !== candidateBefore) {
+              options.onCandidateDrift?.();
+              return report(unverified("error", claim, { source: plan.source, checks: round.entries }));
+            }
+          }
           if (round.stopped || options.signal.aborted) {
             return report(unverified("stopped", claim, { source: plan.source, checks: round.entries }));
           }
@@ -187,6 +202,7 @@ export function verificationExtension(options: VerificationOptions): InlineExten
           }
           return report(roundReport());
         } catch (error) {
+          options.onCandidateDrift?.();
           try {
             options.onDiagnostic?.(`AgentX could not check the agent's work: ${error instanceof Error ? error.message : String(error)}`);
           } catch { /* Reporting must not break the settle. */ }

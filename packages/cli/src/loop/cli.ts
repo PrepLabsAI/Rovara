@@ -2,10 +2,12 @@
 // daemon in the background, `run` is the daemon in the foreground, `do` starts a Do loop on an issue,
 // `check` evaluates an item without running anything, and `mcp` is the agent's tool server.
 import { spawn } from "node:child_process";
-import { access, mkdir, open, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, open, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { Command } from "commander";
+import { DeveloperTaskResponseSchema } from "@agentx/contracts";
 import { LOOP_CONFIG_PATH, initialLoopConfig, readLoopConfig } from "./config.js";
 import { LoopDaemon } from "./daemon.js";
 import { LOOPS, loopNamed, stepOf } from "./definitions.js";
@@ -16,6 +18,8 @@ import { createLoopMcpServer } from "./mcp.js";
 import { ARTIFACT_SECTIONS } from "./instructions.js";
 import { artifactDigest, missingSections, readArtifact } from "./exit-checks.js";
 import { artifactPath } from "./naming.js";
+import { createStandaloneEnrollment, importNativeTaskEvidence, resolveLoopEnrollment, resolvePublicationScopes, resolveRegisteredPublication, sameNativeTaskEvidenceReceipt, type PublicationJoinTransport } from "./enrollment.js";
+import { captureCandidate, sameCandidate, type CandidateSnapshot } from "./candidate.js";
 import type { Artifact, LoopDefinition } from "./definitions.js";
 import type { WorkItemState } from "./state.js";
 import { LoopStore, RepoSlugSchema } from "./state.js";
@@ -28,10 +32,82 @@ export interface LoopCommandContext {
   exec?: Exec;
   /** How to run this CLI again: [node, path to the CLI]. */
   cliCommand?: readonly string[];
+  /** Authenticated host-owned adapter to the current native evidence producer; absent means HOLD. */
+  publicationJoin?: PublicationJoinTransport;
 }
 
 const POLL_SECONDS = 30;
 const ATTEND_MS = 2_000;
+
+/** The production resolver used by the foreground daemon and directly exercised through its authenticated CLI transport. */
+export function createLoopPublicationContextResolver(input: {
+  store: LoopStore; github: GitHub; hostId: string; uid: number; publicationJoin?: PublicationJoinTransport;
+}) {
+  return async (request: { issueRepo: string; issue: number; targetRepo: string; destinationRepo: string; upstream?: { repo: string; branch: string }; worktree: string; candidate: CandidateSnapshot }) => {
+    try {
+      const records = await input.store.enrollments();
+      const repos = await input.store.repos();
+      const source = repos.find((entry) => entry.repo.toLowerCase() === request.issueRepo.toLowerCase());
+      const target = repos.find((entry) => entry.repo.toLowerCase() === request.targetRepo.toLowerCase());
+      if (source === undefined || target === undefined) return { kind: "hold" as const, reasonCode: "source_or_target_checkout_unavailable" };
+      const observe = async (entry: typeof source) => {
+        const actualRepo = await input.github.repoAt(entry.path);
+        if (actualRepo.toLowerCase() !== entry.repo.toLowerCase()) throw new Error("repository identity changed");
+        return {
+          hostId: input.hostId, uid: input.uid, account: await input.github.login(), repo: actualRepo, repositoryId: await input.github.repositoryId(actualRepo),
+          checkoutPath: await realpath(entry.path), commonGitDir: await input.github.commonGitDir(entry.path),
+        };
+      };
+      const [sourceObservation, targetObservation] = await Promise.all([observe(source), observe(target)]);
+      let upstreamRepo: string | undefined;
+      let destinationObservation: Awaited<ReturnType<typeof observe>> | undefined;
+      if (request.upstream !== undefined) {
+        const upstreamPull = await input.github.pullRequest(request.issueRepo, request.issue);
+        if (upstreamPull === undefined || !upstreamPull.open || upstreamPull.headRepo.toLowerCase() !== request.upstream.repo.toLowerCase() || upstreamPull.headRef !== request.upstream.branch) {
+          return { kind: "hold" as const, reasonCode: "destination_binding_unknown" };
+        }
+        upstreamRepo = upstreamPull.headRepo;
+        if (upstreamRepo.toLowerCase() !== request.targetRepo.toLowerCase()) {
+          const destination = repos.find((entry) => entry.repo.toLowerCase() === upstreamRepo!.toLowerCase());
+          if (destination === undefined) return { kind: "hold" as const, reasonCode: "destination_binding_unknown" };
+          destinationObservation = await observe(destination);
+        }
+      }
+      const resolution = resolvePublicationScopes({
+        records, source: sourceObservation, target: targetObservation,
+        destinationRepo: request.destinationRepo, ...(upstreamRepo === undefined ? {} : { upstreamRepo }),
+        ...(destinationObservation === undefined ? {} : { destination: destinationObservation }),
+      });
+      if (resolution.kind === "hold") return resolution;
+      if (resolution.kind === "unmanaged-local") return { kind: "unmanaged-local" as const };
+      if (request.targetRepo !== request.issueRepo || request.destinationRepo !== request.targetRepo || request.upstream !== undefined) {
+        return { kind: "hold" as const, reasonCode: "registered_target_join_unavailable" };
+      }
+      const subject = { projectName: resolution.project, projectRevision: resolution.projectRevision, repositoryId: resolution.repositoryId,
+        commitSha: request.candidate.commitSha, treeSha: request.candidate.treeSha, baseCommitSha: request.candidate.baseCommitSha };
+      const joined = await resolveRegisteredPublication({ enrollment: resolution.enrollment, subject,
+        taskRef: resolution.enrollment.taskRef, transport: input.publicationJoin, now: Date.now });
+      if (joined.kind !== "ready") return { kind: "hold" as const, reasonCode: joined.reasonCode };
+      if (input.publicationJoin?.loadTask === undefined || resolution.enrollment.nativeEvidence === undefined) return { kind: "hold" as const, reasonCode: "native_task_evidence_missing" };
+      const rawTask = await input.publicationJoin.loadTask(resolution.enrollment.taskRef!, resolution.enrollment.namespace, resolution.project);
+      const currentEvidence = importNativeTaskEvidence({ rawTask, taskRef: resolution.enrollment.taskRef!, subject,
+        logicalRepositoryName: resolution.enrollment.logicalRepositoryName, join: joined.response, now: new Date() });
+      if (!sameNativeTaskEvidenceReceipt(resolution.enrollment.nativeEvidence, currentEvidence)) return { kind: "hold" as const, reasonCode: "native_task_evidence_changed" };
+      const [latestRecords, latestSourceObservation, latestTargetObservation] = await Promise.all([
+        input.store.enrollments(), observe(source), observe(target),
+      ]);
+      const latestResolution = resolvePublicationScopes({ records: latestRecords, source: latestSourceObservation, target: latestTargetObservation,
+        destinationRepo: request.destinationRepo });
+      if (latestResolution.kind !== "registered" || latestResolution.enrollment.enrollmentId !== resolution.enrollment.enrollmentId ||
+          latestResolution.enrollment.namespace !== resolution.enrollment.namespace || latestResolution.enrollment.taskRef !== resolution.enrollment.taskRef ||
+          latestResolution.enrollment.sourceBindingRef !== resolution.enrollment.sourceBindingRef || latestResolution.enrollment.projectRevision !== resolution.enrollment.projectRevision ||
+          latestResolution.enrollment.nativeEvidence?.proofDigest !== resolution.enrollment.nativeEvidence.proofDigest) return { kind: "hold" as const, reasonCode: "host_binding_changed" };
+      return { kind: "registered-ready" as const };
+    } catch {
+      return { kind: "hold" as const, reasonCode: "provenance_resolution_failed" };
+    }
+  };
+}
 
 /**
  * Each document the loop writes: declared away, not written yet, missing sections, written but not approved, locked,
@@ -64,9 +140,11 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
   const cliCommand = context.cliCommand ?? [process.execPath, process.argv[1] ?? ""];
   const say = (line: string) => { context.stdout.write(`${line}\n`); };
   const repoAt = async (path: string | undefined) => {
-    const full = resolve(path ?? process.cwd());
+    const full = await realpath(resolve(path ?? process.cwd()));
     return { path: full, repo: await github.repoAt(full) };
   };
+  const hostId = `${hostname()}:${process.platform}:${process.arch}`;
+  const uid = process.getuid?.() ?? 0;
 
   /** #358: each per-PR loop of an item: its repository, step, pull request and agent. */
   const pullLines = async (repo: string, issue: number): Promise<string[]> => {
@@ -97,9 +175,128 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
     .action(async (path: string | undefined) => {
       const found = await repoAt(path);
       await readLoopConfig(found.path);
-      const repos = (await store.repos()).filter((entry) => entry.repo !== found.repo);
+      const repos = (await store.repos()).filter((entry) => entry.repo !== found.repo && entry.path !== found.path);
       await store.saveRepos([...repos, found]);
       say(`Added ${found.repo} (${found.path}). Comments from now on are read; start the daemon with rovara loop start.`);
+    });
+
+  loop.command("enroll").description("enroll a local-only repository or bind a registered repository to a validated task")
+    .argument("<repo>", "the added repository, owner/name")
+    .option("--standalone-local", "explicitly enroll this repository in a local-only namespace")
+    .option("--task <task-id>", "task UUID selected from a normal Developer task response; validated by the server")
+    .option("--issue <number>", "existing loop issue number for task binding")
+    .option("--target <repo>", "target repository for the existing issue child")
+    .option("--worktree <path>", "explicit retained Git worktree for creating a missing native publication route")
+    .action(async (repo: string, options: { standaloneLocal?: boolean; task?: string; issue?: string; target?: string; worktree?: string }) => {
+      const standaloneRequested = options.standaloneLocal === true;
+      const taskRequested = options.task !== undefined;
+      if (standaloneRequested === taskRequested || (!taskRequested && (options.issue !== undefined || options.target !== undefined)) ||
+          (taskRequested && options.issue === undefined)) {
+        throw new Error("choose either --standalone-local or --task <UUID> --issue <number> [--target <repo>]");
+      }
+      const found = (await store.repos()).find((entry) => entry.repo.toLowerCase() === repo.toLowerCase());
+      if (found === undefined) throw new Error(`${repo} is not added to rovara loop on this computer; run rovara loop add in its checkout first`);
+      const actualRepo = await github.repoAt(found.path);
+      if (actualRepo.toLowerCase() !== found.repo.toLowerCase()) throw new Error("the added checkout now identifies as a different GitHub repository; publication remains on hold");
+      const checkoutPath = await realpath(found.path);
+      const account = await github.login();
+      const repositoryId = await github.repositoryId(actualRepo);
+      const commonGitDir = await github.commonGitDir(found.path);
+      if (options.task !== undefined) {
+        const issue = Number(options.issue);
+        if (!Number.isSafeInteger(issue) || issue <= 0) throw new Error("--issue must be an existing issue number");
+        const item = await store.item(found.repo, issue, options.target);
+        const adopting = item === undefined;
+        if (adopting && options.worktree === undefined) throw new Error("the selected loop issue/target child does not exist on this computer; pass --worktree <path> to validate and create its native publication route");
+        if (adopting && options.target !== undefined) throw new Error("native publication route adoption supports only the issue's home repository; publication remains on hold");
+        const targetRepo = item?.target ?? item?.repo ?? found.repo;
+        if (item !== undefined && options.target !== undefined && options.target.toLowerCase() !== targetRepo.toLowerCase()) throw new Error("the selected target does not match the existing loop child; publication remains on hold");
+        if (targetRepo.toLowerCase() !== found.repo.toLowerCase()) throw new Error("registered cross-target task binding is not available; publication remains on hold");
+        if (item !== undefined && item.worktree === undefined) throw new Error("the selected loop item has no retained worktree; publication remains on hold");
+        const worktreePath = adopting ? await realpath(options.worktree!).catch(() => { throw new Error("the explicit worktree path is unavailable; publication remains on hold"); }) : item.worktree!.path;
+        if (item !== undefined && options.worktree !== undefined && await realpath(options.worktree) !== worktreePath) throw new Error("the explicit worktree does not match the existing loop route; publication remains on hold");
+        const worktreeRepo = await github.repoAt(worktreePath);
+        const worktreeRepositoryId = await github.repositoryId(worktreeRepo);
+        const worktreeCommonGitDir = await github.commonGitDir(worktreePath);
+        if (worktreeRepo.toLowerCase() !== actualRepo.toLowerCase() || worktreeRepositoryId !== repositoryId || worktreeCommonGitDir !== commonGitDir) {
+          throw new Error("the explicit worktree is not bound to the registered source checkout; publication remains on hold");
+        }
+        let branch: string;
+        if (adopting) {
+          try { branch = (await run(exec, "git", ["-C", worktreePath, "symbolic-ref", "--quiet", "--short", "HEAD"])).trim(); }
+          catch { throw new Error("the explicit worktree must have a checked-out symbolic branch; detached worktrees remain on hold"); }
+        } else branch = item.worktree!.branch;
+        if (adopting) {
+          if (options.target !== undefined || await github.issueState(found.repo, issue) !== "open" || await github.pullRequest(found.repo, issue) !== undefined) {
+            throw new Error("native publication route adoption requires an existing open issue in its home repository; publication remains on hold");
+          }
+        }
+        const records = await store.enrollments();
+        const observation = { hostId, uid, account, repo: actualRepo, repositoryId, checkoutPath, commonGitDir };
+        const enrollmentResolution = resolveLoopEnrollment(records, observation);
+        if (enrollmentResolution.kind !== "registered") throw new Error(`registered task binding is on hold (${enrollmentResolution.kind === "hold" ? enrollmentResolution.reasonCode : "standalone_enrollment"})`);
+        if (adopting && enrollmentResolution.enrollment.taskRef !== undefined && enrollmentResolution.enrollment.taskRef !== options.task) {
+          throw new Error("the registered source is already bound to a different native task; publication remains on hold");
+        }
+        const baseRef = item?.upstream?.ref ?? `origin/${item?.upstream?.branch ?? await github.defaultBranch(targetRepo)}`;
+        const candidate = await captureCandidate(exec, worktreePath, branch, baseRef);
+        const joined = await resolveRegisteredPublication({
+          enrollment: enrollmentResolution.enrollment,
+          subject: { projectName: enrollmentResolution.project, projectRevision: enrollmentResolution.projectRevision,
+            repositoryId: enrollmentResolution.repositoryId, commitSha: candidate.commitSha, treeSha: candidate.treeSha, baseCommitSha: candidate.baseCommitSha },
+          taskRef: options.task, transport: context.publicationJoin, now: Date.now,
+        });
+        if (joined.kind !== "ready") throw new Error(`task binding is on hold (${joined.reasonCode}); no task reference was stored`);
+        if (context.publicationJoin?.loadTask === undefined) throw new Error("the authenticated native task reader is unavailable; no task reference was stored");
+        const rawTask = await context.publicationJoin.loadTask(options.task, enrollmentResolution.enrollment.namespace, enrollmentResolution.project);
+        const nativeEvidence = importNativeTaskEvidence({ rawTask, taskRef: options.task,
+          subject: { projectName: enrollmentResolution.project, projectRevision: enrollmentResolution.projectRevision,
+            repositoryId: enrollmentResolution.repositoryId, commitSha: candidate.commitSha, treeSha: candidate.treeSha, baseCommitSha: candidate.baseCommitSha },
+          logicalRepositoryName: enrollmentResolution.enrollment.logicalRepositoryName, join: joined.response, now: new Date() });
+        if (item?.nativeImport !== undefined && (item.nativeImport.enrollmentId !== enrollmentResolution.enrollment.enrollmentId || item.nativeImport.taskRef !== options.task ||
+            item.nativeImport.sourceBindingRef !== enrollmentResolution.enrollment.sourceBindingRef || item.nativeImport.proofDigest !== nativeEvidence.proofDigest)) {
+          throw new Error("the existing route is bound to different native task proof; publication remains on hold");
+        }
+        const workflowPath = DeveloperTaskResponseSchema.parse(rawTask).task.workflow?.path;
+        if (adopting && workflowPath === undefined) throw new Error("the native task does not identify a supported Quick or Full publication route");
+        const routeItem: WorkItemState | undefined = adopting ? {
+          version: 1, repo: found.repo, issue, loop: workflowPath!.toLowerCase(), step: "publish", startedBy: account,
+          instruction: `Native task ${options.task} publication route.`, startedAt: new Date().toISOString(), stepEnteredAt: new Date().toISOString(),
+          worktree: { path: worktreePath, branch }, nativeImport: { schemaVersion: 1, enrollmentId: enrollmentResolution.enrollment.enrollmentId,
+            taskRef: options.task, sourceBindingRef: enrollmentResolution.enrollment.sourceBindingRef, proofDigest: nativeEvidence.proofDigest, importedAt: nativeEvidence.importedAt },
+        } : undefined;
+        const [latestCandidate, latestRepo, latestId, latestAccount, latestCheckout, latestCommonGitDir, latestWorktreeRepo, latestWorktreeId, latestWorktreeCommonGitDir, latestRecords, latestRepos, latestItem] = await Promise.all([
+          captureCandidate(exec, worktreePath, branch, baseRef), github.repoAt(found.path), github.repositoryId(actualRepo), github.login(),
+          realpath(found.path), github.commonGitDir(found.path), github.repoAt(worktreePath), github.repositoryId(worktreeRepo), github.commonGitDir(worktreePath),
+          store.enrollments(), store.repos(), store.item(found.repo, issue, options.target),
+        ]);
+        const latestResolution = resolveLoopEnrollment(latestRecords, { hostId, uid, account: latestAccount, repo: latestRepo, repositoryId: latestId, checkoutPath: latestCheckout, commonGitDir: latestCommonGitDir });
+        const latestRegisteredRepo = latestRepos.find((entry) => entry.repo.toLowerCase() === found.repo.toLowerCase());
+        if (adopting && (await github.issueState(found.repo, issue) !== "open" || await github.pullRequest(found.repo, issue) !== undefined)) {
+          throw new Error("the selected issue changed during native task validation; publication remains on hold");
+        }
+        if (!sameCandidate(candidate, latestCandidate) || latestRepo.toLowerCase() !== found.repo.toLowerCase() || latestAccount.toLowerCase() !== account.toLowerCase() ||
+            latestCheckout !== checkoutPath || latestCommonGitDir !== commonGitDir || latestWorktreeRepo.toLowerCase() !== actualRepo.toLowerCase() ||
+            latestId !== repositoryId || latestWorktreeId !== repositoryId || latestWorktreeCommonGitDir !== commonGitDir || latestRegisteredRepo?.path !== found.path || latestResolution.kind !== "registered" ||
+            latestResolution.enrollment.enrollmentId !== enrollmentResolution.enrollment.enrollmentId ||
+            latestResolution.enrollment.projectRevision !== enrollmentResolution.projectRevision || latestResolution.enrollment.sourceBindingRef !== enrollmentResolution.enrollment.sourceBindingRef ||
+            latestResolution.enrollment.taskRef !== enrollmentResolution.enrollment.taskRef ||
+            (adopting ? latestItem !== undefined : latestItem === undefined || latestItem.repo !== item?.repo || latestItem.issue !== item?.issue || latestItem.target !== item?.target ||
+              latestItem.upstream?.repo !== item?.upstream?.repo || latestItem.upstream?.branch !== item?.upstream?.branch || latestItem.upstream?.ref !== item?.upstream?.ref ||
+              latestItem.worktree?.path !== item?.worktree?.path || latestItem.worktree?.branch !== item?.worktree?.branch)) {
+          throw new Error("the host binding or Git candidate changed during task validation; no task reference was stored");
+        }
+        if (routeItem !== undefined) await store.saveItemIfAbsent(routeItem);
+        await store.bindTaskRef(enrollmentResolution.enrollment.enrollmentId, options.task, nativeEvidence);
+        say(`Bound task ${options.task} to the current authenticated native evidence for ${found.repo}#${issue}. The server join and task proof are reloaded before each publication attempt.`);
+        return;
+      }
+      const enrollment = createStandaloneEnrollment({
+        hostId, uid, account, project: actualRepo, repositoryId,
+        checkoutPath, commonGitDir, now: new Date(),
+      });
+      await store.saveEnrollment(enrollment);
+      say(`Enrolled ${actualRepo} in ${enrollment.namespace}. This local receipt applies only to this host, account, project and repository.`);
     });
 
   loop.command("remove").description("stop reading a repository's issues")
@@ -159,6 +356,8 @@ export function registerLoopCommands(program: Command, context: LoopCommandConte
       const daemon = new LoopDaemon({
         store, exec, github, harness: new AgentHarness(exec), cliCommand, now: () => new Date(),
         log: (line) => { context.stderr.write(`${new Date().toISOString()} ${line}\n`); },
+        resolvePublicationContext: createLoopPublicationContextResolver({ store, github, hostId, uid,
+          ...(context.publicationJoin === undefined ? {} : { publicationJoin: context.publicationJoin }) }),
       });
       let stopping = false;
       const stop = () => { stopping = true; };

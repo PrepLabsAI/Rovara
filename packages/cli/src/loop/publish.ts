@@ -29,6 +29,8 @@ export interface PublishInput {
   /** #359: what the planning document is called in the description: "Plan", or "Contribution". */
   planHeading?: string;
   pullRequest: { number: number; url: string; repo?: string | undefined } | undefined;
+  /** Host-owned candidate/enrollment/evidence check, awaited immediately before every push. */
+  beforePush: () => Promise<void>;
   /** #394: a person published past reviews that blocked or couldn't run. */
   reviewsAccepted?: { by: string; at: string; unrun: boolean } | undefined;
 }
@@ -84,6 +86,7 @@ export function describe(input: PublishInput): string {
 }
 
 export async function publish(exec: Exec, input: PublishInput): Promise<Published> {
+  await input.beforePush();
   await run(exec, "git", ["-C", input.worktree, "push", "--quiet", "--set-upstream", "origin", input.branch]);
   // A pull request opened before a restart lost it from the state is found, never opened twice.
   let existing = input.pullRequest;

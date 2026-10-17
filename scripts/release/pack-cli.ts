@@ -207,7 +207,7 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
     },
     // Bundled CommonJS dependencies call `require`, which a native ESM module doesn't have.
     banner: {
-      js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);",
+      js: "import { createRequire as __cr } from 'node:module'; import { fileURLToPath as __fileURLToPath } from 'node:url'; import { dirname as __dirnameOf } from 'node:path'; const require = __cr(import.meta.url); const __filename = __fileURLToPath(import.meta.url); const __dirname = __dirnameOf(__filename);",
     },
     legalComments: "none",
     plugins: [stripEntryShebang()],

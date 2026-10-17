@@ -26,6 +26,7 @@ import { STSClient } from "@aws-sdk/client-sts";
 import { Command, Option } from "commander";
 import { authorizeCredential, expectedAccountEmail, secretsManagerAuthorizeSecrets, type AuthorizeSecrets } from "./admin/authorize.js";
 import { listCredentials, registerCredential } from "./admin/credential.js";
+import { requestRuntimeInstallChallenge, submitRuntimeInstallProposal } from "./admin/runtime-installation.js";
 import { cliRuntimeBinding, registerProject } from "./admin/register.js";
 import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
@@ -78,6 +79,7 @@ import type { SigninServices } from "./signin/commands.js";
 import { SystemCredentialTokenStore, type TokenStore } from "./token-store.js";
 import { CLI_VERSION, RELEASE_VERSION } from "./version.js";
 import { registerLoopCommands } from "./loop/cli.js";
+import { createDeveloperPublicationJoinTransport, recordRegisteredLoopEnrollment } from "./loop/enrollment-cli.js";
 import type { Exec } from "./loop/exec.js";
 
 interface GlobalOptions {
@@ -451,6 +453,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   registerLoopCommands(program, {
     home, version: CLI_VERSION, stdout: services.stdout, stderr: services.stderr,
+    publicationJoin: createDeveloperPublicationJoinTransport({ home, env: () => globalOptions(program).env, tokenStore: services.tokenStore, fetch: services.fetchImplementation }),
     ...(dependencies.loop?.exec === undefined ? {} : { exec: dependencies.loop.exec }),
     ...(dependencies.loop?.cliCommand === undefined ? {} : { cliCommand: dependencies.loop.cliCommand }),
   });
@@ -503,8 +506,51 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         definition,
         runtimeBinding,
       }, services.fetchImplementation);
+      try {
+        const enrollment = await recordRegisteredLoopEnrollment({
+          home, env: globals.env, controlPlaneUrl: settings.controlPlaneUrl, definition, response: result,
+          ...(dependencies.loop?.exec === undefined ? {} : { exec: dependencies.loop.exec }),
+        });
+        if (!enrollment.recorded) services.stderr.write(`Warning: native project registration succeeded, but local Rovara enrollment is on hold (${enrollment.reasonCode}); register it from its source checkout or reconnect there before publication.\n`);
+      } catch (error) {
+        services.stderr.write(`Warning: native project registration succeeded, but local Rovara enrollment could not be saved (${(error as Error).message}); publication will remain on hold.\n`);
+      }
       services.stdout.write(formatSuccess(result, globals.json));
       for (const warning of registrationWarnings(result, definition)) services.stderr.write(`Warning: ${warning}\n`);
+    });
+
+  const runtimeInstallation = admin.command("runtime-installation").description("qualify and register the standard portable runtime");
+  runtimeInstallation.command("challenge")
+    .description("issue a one-use installation challenge for an explicitly identified private verifier host")
+    .requiredOption("--binding-file <path>", "JSON EC2 runtime binding for the dedicated verifier host")
+    .requiredOption("--endpoint <url>", "private IPv4 HTTP endpoint recorded for this host")
+    .requiredOption("--generation <number>", "current worker generation")
+    .requiredOption("--transport-correlation-id <uuid>", "current trusted worker/session correlation UUID")
+    .requiredOption("--profile <id>", "fixed runtime profile: linux-arm64-docker-v1 or darwin-arm64-colima-v1")
+    .requiredOption("--out <path>", "new private file receiving the challenge, including its one-use secret")
+    .action(async (options: { bindingFile: string; endpoint: string; generation: string; transportCorrelationId: string; profile: string; out: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const session = await adminSessionFor(globals.env);
+      if (!session) throw agentXError("AUTH_REQUIRED", "an unexpired administrator session is required; sign in explicitly with `agentx login --admin`");
+      const settings = await deploymentSettings(globals);
+      const profileId = options.profile as "linux-arm64-docker-v1" | "darwin-arm64-colima-v1";
+      const result = await requestRuntimeInstallChallenge({
+        controlPlaneUrl: settings.controlPlaneUrl, accessToken: session.accessToken, bindingFile: options.bindingFile,
+        endpoint: options.endpoint, generation: Number(options.generation), transportCorrelationId: options.transportCorrelationId,
+        profileId, outputFile: options.out,
+      }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
+    });
+  runtimeInstallation.command("register")
+    .description("approve the exact challenge-bound proof and atomically register both existing runtime catalogs")
+    .requiredOption("--proposal-file <path>", "strict qualification proposal produced on the dedicated verifier host")
+    .action(async (options: { proposalFile: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const session = await adminSessionFor(globals.env);
+      if (!session) throw agentXError("AUTH_REQUIRED", "an unexpired administrator session is required; sign in explicitly with `agentx login --admin`");
+      const settings = await deploymentSettings(globals);
+      const result = await submitRuntimeInstallProposal({ controlPlaneUrl: settings.controlPlaneUrl, accessToken: session.accessToken, proposalFile: options.proposalFile }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
     });
 
   // Spec 025 E17 (Q6): a person typing the command is the confirmation; --yes answers for them.
@@ -907,7 +953,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     });
 
   registerSetupCommands(program, dependencies.setup ?? realSetupContext({
-    parameterStore, fetch: services.fetchImplementation, tokenStore: services.tokenStore, stdout: services.stdout, stderr: services.stderr,
+    parameterStore, fetch: services.fetchImplementation, tokenStore: services.tokenStore, stdout: services.stdout, stderr: services.stderr, home,
   }));
 
   const envCommand = program.command("env").description("AgentX environments in this AWS account and region");
@@ -994,8 +1040,15 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         ...(envGivenExplicitly ? { expectedEnv: globals.env } : {}),
       };
       const result = await runDeploy(deployOptions, dependencies.deploy ?? {}, { stderr: services.stderr });
+      const runtimeQualification = result.settingsWritten ? {
+        status: "manual-required",
+        reason: "deployment does not run a live installation qualification; use a dedicated Linux ARM64 verifier host",
+        hostCommand: "docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/verifier/dist/install-qualification-cli.js --challenge-file /mnt/agentx-runtime/evidence/runtime-install-challenge.json --evidence-root /mnt/agentx-runtime/evidence --out /mnt/agentx-runtime/evidence/runtime-install-proposal.json",
+        registrationCommand: `agentx --env ${result.env} admin runtime-installation register --proposal-file ./runtime-install-proposal.json`,
+        instructions: "docs/runtime-installation.md",
+      } as const : undefined;
       if (globals.json) {
-        services.stdout.write(formatSuccess(result, true));
+        services.stdout.write(formatSuccess(runtimeQualification ? { ...result, runtimeQualification } : result, true));
         return;
       }
       const lines = [`${options.mode === "install" ? "Installed" : "Upgraded"} environment ${result.env}${result.settingsWritten ? "" : " (not every part is deployed yet)"}`];
@@ -1006,6 +1059,14 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           "Environment settings are written once every part is deployed.",
         );
         if (result.missingParts.length > 0) lines.push(`Resume with: ${resumeCommand(deployOptions, result.missingParts)}`);
+      } else {
+        lines.push(
+          "The portable runtime is not live-qualified by deployment; use a dedicated Linux ARM64 verifier host.",
+          `On that host: ${runtimeQualification!.hostCommand}`,
+          "Copy the proposal back to this operator machine through the approved existing transfer process, then run:",
+          `  ${runtimeQualification!.registrationCommand}`,
+          `See ${runtimeQualification!.instructions} for challenge issuance and the administrator trust boundary.`,
+        );
       }
       services.stdout.write(`${lines.join("\n")}\n`);
     });

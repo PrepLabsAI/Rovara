@@ -7,6 +7,7 @@ WORKDIR /opt/agentx
 COPY package.json package-lock.json tsconfig.json tsconfig.base.json ./
 COPY packages/model-runtime/package.json packages/model-runtime/package.json
 COPY packages/contracts/package.json packages/contracts/package.json
+COPY packages/verifier/package.json packages/verifier/package.json
 COPY packages/gateway/package.json packages/gateway/package.json
 COPY packages/mcp/package.json packages/mcp/package.json
 COPY packages/worker/package.json packages/worker/package.json
@@ -14,13 +15,15 @@ COPY packages/cli/package.json packages/cli/package.json
 COPY packages/orchestrator/package.json packages/orchestrator/package.json
 COPY packages/broker/package.json packages/broker/package.json
 COPY packages/slack-service/package.json packages/slack-service/package.json
+COPY upstream/e2e-0.20.0.tgz upstream/e2e-0.20.0.tgz
 COPY infra/package.json infra/package.json
 RUN npm ci --ignore-scripts
 
 COPY packages/model-runtime packages/model-runtime
 COPY packages/contracts packages/contracts
+COPY packages/verifier packages/verifier
 COPY packages/worker packages/worker
-RUN npx tsc -b packages/contracts packages/worker --pretty false
+RUN npx tsc -b packages/contracts packages/verifier packages/worker --pretty false
 RUN npm prune --omit=dev --workspaces
 
 # The Docker CLI and Compose plugin, which run a project's devcontainer through the EC2 host's
@@ -74,9 +77,11 @@ COPY --from=tools /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/li
 COPY --from=tools /usr/local/bin/uv /usr/local/bin/uv
 COPY --from=tools /usr/local/bin/uvx /usr/local/bin/uvx
 WORKDIR /opt/agentx
+COPY --from=build /opt/agentx/package-lock.json ./package-lock.json
 COPY --from=build /opt/agentx/node_modules ./node_modules
 COPY --from=build /opt/agentx/packages/model-runtime ./packages/model-runtime
 COPY --from=build /opt/agentx/packages/contracts ./packages/contracts
+COPY --from=build /opt/agentx/packages/verifier ./packages/verifier
 COPY --from=build /opt/agentx/packages/worker ./packages/worker
 
 # AGENTX_WORKER_PROCESS_SCOPE: this container is the worker's own process namespace, so before a push every other

@@ -224,7 +224,7 @@ describe("the worker invoke token", () => {
       fence: 3,
       expiresAt: Math.floor(Date.now() / 1_000) + 60,
     };
-    expect(WorkerInvokeTokenClaimsSchema.parse(claims)).toEqual(claims);
+    expect(WorkerInvokeTokenClaimsSchema.parse(claims)).toEqual({ ...claims, purpose: "WORKSPACE" });
     expect(() => WorkerInvokeTokenClaimsSchema.parse({ ...claims, generation: 0 })).toThrow();
     expect(() => WorkerInvokeTokenClaimsSchema.parse({ ...claims, expiresAt: new Date().toISOString() })).toThrow();
     expect(() => WorkerInvokeTokenClaimsSchema.parse({ ...claims, runtimeSessionId: randomUUID() })).toThrow();

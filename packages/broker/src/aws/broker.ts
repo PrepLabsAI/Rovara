@@ -13,15 +13,32 @@ import {
   QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
+  type TransactWriteCommandInput,
 } from "@aws-sdk/lib-dynamodb";
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import {
   AgentXError,
+  E2ESetupProposalSchema,
+  E2ESharedViewSchema,
+  E2EPolicySchema,
+  E2EScenarioBundleSchema,
+  e2eScenarioBundleDigest,
+  e2ePlanHasCompleteRequiredCriteria,
+  E2ERunBindingSchema,
+  E2ERoundSchema,
+  buildE2ESharedView,
+  CandidateManifestSchema,
+  selectE2EExecutionPlan,
+  inspectE2ERepository,
+  proposeE2ESetup,
+  verifyE2ESourceSnapshot,
+  verifyE2ESetupProposal,
   CHANNEL_TURN_REQUEST_MAX,
+  AGENTX_PROTOCOL_VERSION,
   CheckReportSchema,
   LatestChecksSchema,
   PULL_REQUEST_BODY_MAX_CHARS,
@@ -42,6 +59,7 @@ import {
   type CommentAnswer,
   type PlanClaim,
   type WorkflowDecisionDetail,
+  type DeveloperTaskView,
   retiredClaimIds,
   canonicalPlanJson,
   canonicalJson,
@@ -64,6 +82,7 @@ import {
   WORKFLOW_HISTORY_REWRITTEN_MESSAGE,
   WORKFLOW_NO_CODE_CHANGE_MESSAGE,
   WORKFLOW_BLOCK_REASONS,
+  WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
   WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE,
   WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE,
   WORKFLOW_DISPATCH_DUE_INDEX,
@@ -125,8 +144,10 @@ import {
   unhandledDeploymentMode,
   workspaceProjectIndexAttributes,
   workspaceRecordFields,
+  workflowRequestId,
   type Operation,
   type OperationRequester,
+  workspaceSessionKey,
   type OperationStatus,
   type ChannelTurn,
   type CodeBuildCheckResult,
@@ -181,13 +202,26 @@ import {
   indexExpiresAt,
   WORKFLOW_RESOLVE_FINDINGS_MAX,
   sameJsonContent,
+  type E2ESourceSnapshot,
+  type E2EWorkflowAdmissionRef,
+  E2EWorkflowAdmissionRefSchema,
+  E2EWorkflowEvidenceRefSchema,
+  E2EWorkflowGroupEvidenceRefSchema,
+  type E2ESetupProposal,
+  ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
+  projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey,
+  WorkerInvocationSchema,
+  workflowPublicationContext,
+  workflowPublicationContextDigest,
 } from "@agentx/contracts";
+import { compileE2EScenarios, collectE2EActualCliRun, qualifyE2ECollection, e2eSnapshotSourceDigest, parseE2EFirstPartyCapture, e2ePrivateTransferMaxBytes } from "@agentx/verifier";
+import { renderE2EMcpProjection, renderE2EPageHtml, renderE2ESlackBlocks, renderE2ENotifierSlackBlocks } from "../e2e-presentation.js";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
 import { outcomeMetric } from "./admin-change-audit.js";
 import { pressAdminChange, routeAdminChange, type AdminChangeDependencies } from "./admin-changes.js";
 import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans.js";
-import { ZodError } from "zod";
+import { ZodError, z } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { recordPrepareFailureEvent } from "./operation-events.js";
 import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js";
@@ -215,21 +249,32 @@ import { resolvePlanEvidence } from "../developer/plan-evidence.js";
 import { WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { approvedFeedbackFixes, withFeedbackFixes, withStatusLines } from "../developer/pull-request-feedback-section.js";
 import { projectKey, requireProject } from "./project-records.js";
+import { admitProjectSetupRuntime, projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
+import { projectSetupTerminalAuthorityChecks } from "./project-setup-terminal-conditions.js";
+import { verifyProjectSetupCapability } from "./project-setup-capability.js";
+import { issueProjectSetupCapability } from "./project-setup-capability.js";
+import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke.js";
+import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePlanReferenceError } from "../e2e/feature-plan-intent.js";
+import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
+import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
+import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
+import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
   type CallbackClaims, type OperationRecord,
 } from "./cancellation.js";
-import { aiToolTurn, completedTurn, developerFooter, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
+import { aiToolTurn, completedTurn, developerFooter, E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
-import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
+import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, type WorkflowE2EReadinessMarker, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
+import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../e2e/feature-plan-planning-context.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
 import { chatGptConnections, kmsChatGptSealer, type ChatGptConnections } from "../chatgpt/connections.js";
 import { chatGptHostId } from "../chatgpt/oauth.js";
-import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
+import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, checkProjectAccess, developerKeysThroughLambda, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, taskChannelPeopleThroughLambda, taskPeopleDisplayReadThroughLambda, taskPersonProofThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
@@ -271,7 +316,27 @@ import { can, resolveTaskAccess, type TaskAccess, type TaskAction } from "../dev
 import { resolveTaskDispatchPeople, taskAccessFence } from "../developer/task-people.js";
 
 const MAX_ARTIFACT_BYTES = 5_000_000;
+const MAX_SETUP_PROPOSAL_BYTES = 24 * 1024 * 1024;
+// This derived ceiling bounds only the chunked private carrier; each report,
+// frame, literal, record, and admitted group keeps its existing component limit.
+const MAX_SETUP_EVIDENCE_BYTES = e2ePrivateTransferMaxBytes(64, 4);
+const SETUP_ARTIFACT_CHUNK_BYTES = 64 * 1024;
+// 100,000 complete tree paths at the 1,024-byte path ceiling, plus the accepted 4 MiB source
+// materialization (base64 expansion and bounded JSON envelope). This is a private chunked object
+// ceiling, not a larger HTTP/report limit.
+const MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES = 112 * 1024 * 1024;
+const WORKFLOW_CANDIDATE_CHUNK_BYTES = 64 * 1024;
 const EVENT_TRANSACTION_CHUNK = 80;
+
+function projectSetupPolicy(proposal: E2ESetupProposal): ReturnType<typeof E2EPolicySchema.parse> {
+  return E2EPolicySchema.parse({
+    schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [], targets: proposal.targets,
+    defaultSandboxProfileId: "default-sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
+    capture: { screenshots: false, traces: false, video: false, downloads: false },
+    limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000,
+      maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null },
+  });
+}
 
 export interface RegisteredProjectRecord {
   pk: string;
@@ -281,6 +346,7 @@ export interface RegisteredProjectRecord {
   runtimeBinding: RuntimeBinding;
   registeredBy: string;
   registeredAt: string;
+  setupApproval?: { proposalRef: string; proposalSha256: string; candidateDigest: string; decision: "approve" | "decline" };
 }
 
 interface MembershipRecord {
@@ -290,6 +356,7 @@ interface MembershipRecord {
   ownerKey: string;
   projectName: string;
   role: "developer" | "administrator";
+  grantId: string;
 }
 
 interface ProjectModelSelectionRecord {
@@ -352,7 +419,13 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getRepositoryIdentity" | "getPullRequestChangedFiles" | "getPullRequestFeedback" | "getPullRequestMergeObservation" | "getCommitTree" | "getCommitParents" | "getBranchHead" | "getFileAtCommit">>;
+  /** Trusted server-side source capture for setup discovery and exact-commit E2E planning context. */
+  projectSetupSource?: { capture: (input: { repositoryUrl: string; ref: string }) => Promise<E2ESourceSnapshot> };
+  /** Server-selected catalog namespace for an already configured setup verifier. */
+  projectSetupRuntimeCatalogId?: string;
+  /** Separate server-selected namespace for the already qualified portable feature verifier. */
+  e2eFeatureRuntimeCatalogId?: string;
   /** Reads the GitHub webhook HMAC key from the configured GitHub App secret; `refresh` asks for a fresh read of the secret. */
   githubWebhookSecret?: (options?: { refresh?: boolean }) => Promise<string>;
   /** How long a PR description update (D2) may take before it gives up without writing; 5 seconds when absent. */
@@ -567,6 +640,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
       .filter((item) => item.entityType === "OPERATION")
       .map((item) => publicOperation(item as unknown as OperationRecord)),
     workflowBinding: async (workspaceId, operationId) => (await requireOperation(dependencies, workspaceId, operationId)).workflowDependencies,
+    workflowCandidateSourceExportDigest: async (workspaceId, operationId) => (await requireOperation(dependencies, workspaceId, operationId)).candidateSourceRef?.candidateDigest,
     eventsNewestFirst: (operationId, limit) => operationEventsNewestFirst(dependencies, operationId, limit),
     artifacts: async (workspaceId, operationId) => (await query(`WORKSPACE#${workspaceId}`, "ARTIFACT#"))
       .filter((item) => item.operationId === operationId)
@@ -832,6 +906,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
         return await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
+          workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
+          workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+          registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : url => dependencies.githubPullRequests.getRepositoryIdentity!(url),
           refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
       }
       // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
@@ -899,8 +976,25 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (request.method === "POST" && evalCallback !== undefined) {
         return json(await handleSwebenchCallback(swebenchDependencies(dependencies), request.headers["x-agentx-callback-capability"], evalCallback.runId, evalCallback.action, parseBody(request.body)), request.requestId);
       }
+      const setupCallback = /^\/v1\/internal\/project-setups\/([0-9a-f-]{36})\/operations\/([0-9a-f-]{36})\/result$/.exec(url.pathname);
+      if (request.method === "POST" && setupCallback?.[1] && setupCallback[2]) {
+        return json(await handleProjectSetupCallback(dependencies, request, setupCallback[1], setupCallback[2]), request.requestId);
+      }
+      const setupArtifact = /^\/v1\/internal\/project-setups\/([0-9a-f-]{36})\/(execution|evidence(?:\/init|\/chunks|\/finalize)?)$/.exec(url.pathname);
+      if (setupArtifact?.[1] && setupArtifact[2] === "execution" && request.method === "GET") {
+        return json(await handleProjectSetupExecutionRead(dependencies, request, setupArtifact[1], url.searchParams.get("offset")), request.requestId);
+      }
+      if (setupArtifact?.[1] && setupArtifact[2] === "evidence/init" && request.method === "POST") {
+        return json(await handleProjectSetupEvidenceInit(dependencies, request, setupArtifact[1]), request.requestId);
+      }
+      if (setupArtifact?.[1] && setupArtifact[2] === "evidence/chunks" && request.method === "POST") {
+        return json(await handleProjectSetupEvidenceChunk(dependencies, request, setupArtifact[1]), request.requestId);
+      }
+      if (setupArtifact?.[1] && setupArtifact[2] === "evidence/finalize" && request.method === "POST") {
+        return json(await handleProjectSetupEvidenceFinalize(dependencies, request, setupArtifact[1]), request.requestId);
+      }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|e2e-admission|e2e-evidence|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -991,6 +1085,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
         return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
+          workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
+          workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+          registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : url => dependencies.githubPullRequests.getRepositoryIdentity!(url),
           refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url), request.requestId);
       }
 
@@ -1003,6 +1100,10 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (request.method === "POST" && webhookRetry?.[1]) {
         return json(await retryGithubWebhookAsAdministrator(dependencies, identity, webhookRetry[1]), request.requestId, 202);
       }
+      const projectSetupRetry = /^\/v1\/admin\/projects\/setup-executions\/([0-9a-f-]{36})\/retry$/.exec(url.pathname);
+      if (request.method === "POST" && projectSetupRetry?.[1]) {
+        return json(await retryProjectSetupAsAdministrator(dependencies, identity, projectSetupRetry[1], parseBody(request.body)), request.requestId, 202);
+      }
       const body = parseBody(request.body);
       // Spec 025 phase 25e: admin changes (FR-039 to FR-041, FR-052).
       const changed = await routeAdminChange(adminChanges, identity, { method: request.method, headers: request.headers, body }, url);
@@ -1010,6 +1111,130 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // Spec 025 phase 25d: the admin read routes (FR-038), each behind the admin claim (A2).
       const adminRead = await routeAdminRead(adminReads, identity, request, url);
       if (adminRead !== undefined) return json(adminRead, request.requestId);
+
+      if (request.method === "POST" && url.pathname === "/v1/admin/runtime-installation/challenges") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (!dependencies.projectSetupRuntimeCatalogId || !dependencies.e2eFeatureRuntimeCatalogId) throw agentXError("RUNTIME_UNAVAILABLE", "runtime installation catalogs are not configured in this deployment");
+        const runtimeDeps: RuntimeInstallationDependencies = { documentClient: dependencies.documentClient, s3: dependencies.s3,
+          tableName: dependencies.tableName, artifactBucketName: dependencies.artifactBucketName,
+          setupCatalogId: dependencies.projectSetupRuntimeCatalogId, featureCatalogId: dependencies.e2eFeatureRuntimeCatalogId };
+        return json(await issueRuntimeInstallChallenge(runtimeDeps, identity, body), request.requestId, 201);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/admin/runtime-installation/registrations") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (!dependencies.projectSetupRuntimeCatalogId || !dependencies.e2eFeatureRuntimeCatalogId) throw agentXError("RUNTIME_UNAVAILABLE", "runtime installation catalogs are not configured in this deployment");
+        const runtimeDeps: RuntimeInstallationDependencies = { documentClient: dependencies.documentClient, s3: dependencies.s3,
+          tableName: dependencies.tableName, artifactBucketName: dependencies.artifactBucketName,
+          setupCatalogId: dependencies.projectSetupRuntimeCatalogId, featureCatalogId: dependencies.e2eFeatureRuntimeCatalogId };
+        return json(await registerRuntimeInstallation(runtimeDeps, identity, body), request.requestId, 201);
+      }
+
+      if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-proposals") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        if (!dependencies.projectSetupSource) throw agentXError("RUNTIME_UNAVAILABLE", "trusted project source capture is not configured");
+        const requestBody = z.object({ repositoryUrl: z.string().url().max(500), ref: z.string().min(1).max(255) }).strict().parse(body);
+        const urlParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(requestBody.repositoryUrl);
+        if (!urlParts?.[1] || !urlParts[2]) throw agentXError("CONFIG_INVALID", "setup repository must be a canonical GitHub repository URL");
+        const snapshot = await dependencies.projectSetupSource.capture({ repositoryUrl: requestBody.repositoryUrl, ref: requestBody.ref });
+        const candidate = snapshot.candidate;
+        const sourceRepository = candidate.repositories.length === 1 ? candidate.repositories[0] : undefined;
+        const expectedRepositoryId = `${urlParts[1]}/${urlParts[2]}`;
+        if (!sourceRepository || sourceRepository.repositoryId.toLowerCase() !== expectedRepositoryId.toLowerCase()) throw agentXError("FORBIDDEN", "captured source repository does not match the selected repository");
+        verifyE2ESourceSnapshot(snapshot, candidate);
+        const inspection = inspectE2ERepository(snapshot, candidate).inspection;
+        const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate });
+        const policy = projectSetupPolicy(proposal);
+        const repositoryName = urlParts[2].replace(/\.git$/i, "");
+        const cleanedRepositoryName = repositoryName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);
+        const registeredRepositoryId = /^[a-z]/.test(cleanedRepositoryName) ? cleanedRepositoryName : `repo-${cleanedRepositoryName}`.slice(0, 63);
+        const artifact = {
+          schemaVersion: "project-setup-source-proposal/v1",
+          issuerOwnerKey: identity.ownerKey,
+          repositoryUrl: requestBody.repositoryUrl,
+          selectedRef: requestBody.ref,
+          identityMapping: { schemaVersion: "github-source-to-agentx-registration/v1", sourceRepositoryId: expectedRepositoryId, registeredRepositoryId },
+          candidate,
+          snapshot: { ...snapshot, sources: snapshot.sources.map(source => ({ ...source, bytesBase64: Buffer.from(source.bytes).toString("base64"), bytes: undefined })) },
+          proposal,
+          policy,
+        };
+        const artifactBytes = canonicalJson(artifact);
+        if (Buffer.byteLength(artifactBytes, "utf8") > MAX_SETUP_PROPOSAL_BYTES) throw agentXError("RUNTIME_UNAVAILABLE", "immutable setup proposal exceeds its bounded object size");
+        const artifactDigest = createHash("sha256").update(artifactBytes, "utf8").digest("hex");
+        const proposalRef = `project-setup-proposals/${identity.ownerKey}/${artifactDigest}.json`;
+        try {
+          await dependencies.s3.send(new PutObjectCommand({
+            Bucket: dependencies.artifactBucketName,
+            Key: proposalRef,
+            Body: artifactBytes,
+            ContentType: "application/json",
+            Metadata: { sha256: artifactDigest, owner: identity.ownerKey, candidate: candidate.digest },
+            IfNoneMatch: "*",
+          }));
+        } catch (error) {
+          const code = error && typeof error === "object" ? (error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } }).name : undefined;
+          const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+          if (code !== "PreconditionFailed" && status !== 412) throw error;
+          const retained = await readStoredText(dependencies.s3, dependencies.artifactBucketName, proposalRef, MAX_SETUP_PROPOSAL_BYTES);
+          if (retained !== artifactBytes) throw agentXError("RUNTIME_UNAVAILABLE", "content-addressed setup proposal object conflicts with its expected bytes");
+        }
+        return json({ proposalRef, proposalSha256: artifactDigest, candidateDigest: candidate.digest, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, proposal, policy }, request.requestId);
+      }
+
+      if (request.method === "POST" && url.pathname === "/v1/admin/projects/setup-approvals") {
+        if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+        const approvalInput = z.object({ projectName: z.string().regex(/^[a-z][a-z0-9-]{0,62}$/), proposalRef: z.string().min(1).max(512), proposalSha256: z.string().regex(/^[a-f0-9]{64}$/), decision: z.enum(["approve", "decline"]) }).strict().parse(body);
+        const expectedPrefix = `project-setup-proposals/${identity.ownerKey}/`;
+        if (!approvalInput.proposalRef.startsWith(expectedPrefix) || approvalInput.proposalRef !== `${expectedPrefix}${approvalInput.proposalSha256}.json`) throw agentXError("FORBIDDEN", "setup proposal reference is outside the authenticated administrator scope");
+        const stored = await readStoredText(dependencies.s3, dependencies.artifactBucketName, approvalInput.proposalRef, MAX_SETUP_PROPOSAL_BYTES);
+        if (!stored || createHash("sha256").update(stored, "utf8").digest("hex") !== approvalInput.proposalSha256) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal is missing or its digest changed");
+        let artifact: Record<string, unknown>;
+        try {
+          const decoded: unknown = JSON.parse(stored);
+          if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) throw new Error("invalid");
+          artifact = decoded as Record<string, unknown>;
+        } catch { throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal is unreadable"); }
+        if (artifact.schemaVersion !== "project-setup-source-proposal/v1" || artifact.issuerOwnerKey !== identity.ownerKey) throw agentXError("FORBIDDEN", "stored setup proposal belongs to another administrator");
+        const storedSnapshot = artifact.snapshot;
+        if (!storedSnapshot || typeof storedSnapshot !== "object" || Array.isArray(storedSnapshot)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source snapshot is missing");
+        const snapshotObject = storedSnapshot as Record<string, unknown>;
+        const rawSources = snapshotObject.sources;
+        if (!Array.isArray(rawSources)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source inventory is invalid");
+        const sources = rawSources.map((raw) => {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source item is invalid");
+          const source = raw as Record<string, unknown>;
+          if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") throw agentXError("RUNTIME_UNAVAILABLE", "stored setup source item is invalid");
+          return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
+        });
+        const snapshot = { ...snapshotObject, sources } as unknown as E2ESourceSnapshot;
+        const candidate = snapshot.candidate;
+        if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup candidate is invalid");
+        verifyE2ESourceSnapshot(snapshot, candidate);
+        const inspection = inspectE2ERepository(snapshot, candidate).inspection;
+        const proposal = verifyE2ESetupProposal(E2ESetupProposalSchema.parse(artifact.proposal), snapshot, candidate);
+        const policy = projectSetupPolicy(proposal);
+        if (!sameJsonContent(artifact.policy, policy)) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup policy differs from the fixed approved default");
+        const identityMapping = artifact.identityMapping;
+        if (!identityMapping || typeof identityMapping !== "object" || Array.isArray(identityMapping)
+          || (identityMapping as Record<string, unknown>).schemaVersion !== "github-source-to-agentx-registration/v1"
+          || (identityMapping as Record<string, unknown>).sourceRepositoryId !== candidate.repositories[0]?.repositoryId
+          || typeof (identityMapping as Record<string, unknown>).registeredRepositoryId !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "stored setup repository identity mapping is invalid");
+        const canonicalArtifact = { ...artifact, snapshot: { ...snapshotObject, sources: sources.map(source => ({ path: source.path, sha256: source.sha256, kind: source.kind, bytesBase64: source.bytes.toString("base64") })) }, proposal };
+        if (canonicalJson(canonicalArtifact) !== stored || proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate }).candidateDigest !== proposal.candidateDigest) throw agentXError("RUNTIME_UNAVAILABLE", "stored setup proposal does not match its source-derived bytes");
+        const approvalKey = { pk: `PROJECT_SETUP#${approvalInput.projectName}`, sk: `PROPOSAL#${approvalInput.proposalSha256}` };
+        const existing = await getItem<Record<string, unknown>>(dependencies, approvalKey);
+        if (existing) {
+          if (existing.ownerKey !== identity.ownerKey || existing.decision !== approvalInput.decision) throw agentXError("PROJECT_REVISION_MISMATCH", "setup proposal already has a different immutable decision");
+          return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: true }, request.requestId);
+        }
+        await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: {
+          ...approvalKey, entityType: "PROJECT_SETUP_APPROVAL", ownerKey: identity.ownerKey, projectName: approvalInput.projectName,
+          proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, candidateDigest: proposal.candidateDigest,
+          repositoryUrl: artifact.repositoryUrl, identityMapping, decision: approvalInput.decision, approvedAt: new Date().toISOString(),
+          policyDigest: createHash("sha256").update(canonicalJson(policy), "utf8").digest("hex"), policy, targetIds: proposal.targets.map(target => target.targetId),
+        }, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
+        return json({ proposalRef: approvalInput.proposalRef, proposalSha256: approvalInput.proposalSha256, decision: approvalInput.decision, duplicate: false }, request.requestId);
+      }
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects") {
         return json(await registerProject(dependencies, identity, body), request.requestId, 201);
@@ -1441,7 +1666,7 @@ function gitHubContext(identity: AuthenticatedIdentity, workspace: WorkspaceInst
 }
 
 /** The registration request's parse, shared by registerProject and a change plan (spec 025 C4). */
-function parseRegistrationInput(value: unknown): { definition: ProjectDefinition; runtimeBinding: ReturnType<typeof parseRuntimeBinding>; wantsPreflight: boolean } {
+function parseRegistrationInput(value: unknown): { definition: ProjectDefinition; runtimeBinding: ReturnType<typeof parseRuntimeBinding>; wantsPreflight: boolean; setupApproval?: { proposalRef: string; proposalSha256: string; decision: "approve" | "decline" } } {
   const input = object(value, "project registration");
   const retired = legacyProjectFields(input.definition);
   if (retired.length > 0) {
@@ -1449,8 +1674,11 @@ function parseRegistrationInput(value: unknown): { definition: ProjectDefinition
   }
   const definition = ProjectDefinitionSchema.parse(input.definition);
   const runtimeBinding = parseRuntimeBinding(input.runtimeBinding);
+  const setupApproval = input.setupApproval === undefined ? undefined : z.object({
+    proposalRef: z.string().min(1).max(512), proposalSha256: z.string().regex(/^[a-f0-9]{64}$/), decision: z.enum(["approve", "decline"]),
+  }).strict().parse(input.setupApproval);
   // Preflight contacts the vendor, so it runs only when the caller asks; older clients never do.
-  return { definition, runtimeBinding, wantsPreflight: input.preflight === true };
+  return { definition, runtimeBinding, wantsPreflight: input.preflight === true, ...(setupApproval === undefined ? {} : { setupApproval }) };
 }
 
 /** Registration's refusals and preflight, for a new revision; registerProject and a change plan share them. */
@@ -1482,7 +1710,43 @@ async function registerProject(
   checked?: { preflight?: PreflightOutcome },
 ): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-  const { definition, runtimeBinding, wantsPreflight } = parseRegistrationInput(value);
+  const { definition, runtimeBinding, wantsPreflight, setupApproval } = parseRegistrationInput(value);
+  let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
+  let setupExecutionCreated = false;
+  let setupApprovalBinding: RegisteredProjectRecord["setupApproval"];
+  if (definition.e2e !== undefined || setupApproval !== undefined) {
+    if (setupApproval === undefined) throw agentXError("FORBIDDEN", "E2E project registration requires a stored source-backed setup decision");
+    const expectedProposalPrefix = `project-setup-proposals/${identity.ownerKey}/`;
+    if (!setupApproval.proposalRef.startsWith(expectedProposalPrefix) || setupApproval.proposalRef !== `${expectedProposalPrefix}${setupApproval.proposalSha256}.json`) throw agentXError("FORBIDDEN", "setup approval reference is outside the authenticated administrator scope");
+    const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${definition.name}`, sk: `PROPOSAL#${setupApproval.proposalSha256}` });
+    if (!approval || approval.ownerKey !== identity.ownerKey || approval.proposalRef !== setupApproval.proposalRef || approval.decision !== setupApproval.decision) throw agentXError("FORBIDDEN", "setup decision is missing, stale, or belongs to another administrator");
+    const repository = definition.repositories[0];
+    const mapping = approval.identityMapping;
+    if (!repository || !mapping || typeof mapping !== "object" || Array.isArray(mapping)
+      || (mapping as Record<string, unknown>).registeredRepositoryId !== repository.name
+      || typeof approval.repositoryUrl !== "string" || approval.repositoryUrl.toLowerCase() !== repository.url.toLowerCase()) throw agentXError("PROJECT_REVISION_MISMATCH", "registered repository identity does not match the source-backed setup decision");
+    if (setupApproval.decision === "approve") {
+      if (definition.e2e === undefined || !sameJsonContent(definition.e2e, approval.policy)) throw agentXError("PROJECT_REVISION_MISMATCH", "E2E policy does not match the approved source-backed setup proposal");
+    } else if (definition.e2e !== undefined) throw agentXError("FORBIDDEN", "declined setup decision cannot register an E2E policy");
+    setupApprovalBinding = { proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256, candidateDigest: String(approval.candidateDigest), decision: setupApproval.decision };
+    if (setupApproval.decision === "approve" && definition.e2e !== undefined && dependencies.projectSetupRuntimeCatalogId
+      && runtimeBinding.deploymentMode === "ec2-ebs") {
+      const bindingDigest = projectSetupBindingDigest(runtimeBinding);
+      const catalogItem = await dependencies.documentClient.send(new GetCommand({
+        TableName: dependencies.tableName,
+        Key: projectSetupRuntimeKey(dependencies.projectSetupRuntimeCatalogId, bindingDigest),
+        ConsistentRead: true,
+      }));
+      const runtimeKey = projectSetupRuntimeKey(dependencies.projectSetupRuntimeCatalogId, bindingDigest);
+      const parsedCatalog = ProjectSetupRuntimeRecordSchema.safeParse(projectSetupRuntimeRecord(catalogItem.Item, runtimeKey));
+      if (parsedCatalog.success) {
+        setupRuntimeAdmission = admitProjectSetupRuntime(parsedCatalog.data, {
+          runtimeCatalogId: dependencies.projectSetupRuntimeCatalogId, binding: runtimeBinding,
+          scope: "source-interface", now: Date.now(),
+        });
+      }
+    }
+  }
   const budget = toolBudget(approvedToolCount(definition));
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
   const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: PreflightOutcome | undefined) => {
@@ -1491,15 +1755,73 @@ async function registerProject(
       project, duplicate,
       tools: { maximum: budget.maximum, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT },
       ...(warnings.length ? { warnings } : {}), ...(preflight ? { preflight: preflight.report } : {}),
+      ...(setupApprovalBinding?.decision === "approve" ? { setupRuntime: setupExecutionCreated ? "QUEUED" : "UNAVAILABLE" } : {}),
     };
   };
   const key = projectKey(definition.name, definition.revision);
+  const readCatalogSnapshot = async (): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number }> => {
+    const catalog = await getItem<{ entityType?: string; name?: string; latestRevision?: number }>(dependencies, projectCatalogKey(definition.name));
+    if (catalog !== undefined && (catalog.entityType !== "PROJECT_CATALOG" || catalog.name !== definition.name
+      || (catalog.latestRevision !== undefined && (!Number.isSafeInteger(catalog.latestRevision) || catalog.latestRevision < 1)))) {
+      throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is unavailable or invalid");
+    }
+    let newestRevision = 0;
+    try {
+      const newest = await requireLatestProject(dependencies, definition.name);
+      newestRevision = newest.definition.revision;
+      if (newest.definition.name !== definition.name || !Number.isSafeInteger(newestRevision) || newestRevision < 1) {
+        throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is invalid");
+      }
+    } catch (error) {
+      if (!(error instanceof AgentXError) || error.code !== "NOT_FOUND") throw error;
+    }
+    if (catalog?.latestRevision !== undefined && catalog.latestRevision > newestRevision) {
+      throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is ahead of registered revision history");
+    }
+    return { catalog, newestRevision };
+  };
+  const repairCatalogPointerFromHistory = async (): Promise<void> => {
+    // This is an index-only repair after the immutable revision has already been
+    // authenticated. It never rewrites project, membership, approval, or setup rows.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const snapshot = await readCatalogSnapshot();
+      const targetRevision = snapshot.newestRevision;
+      if (targetRevision < 1) throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is unavailable");
+      if (snapshot.catalog?.latestRevision === targetRevision) return;
+      const key = projectCatalogKey(definition.name);
+      try {
+        await dependencies.documentClient.send(new UpdateCommand({
+          TableName: dependencies.tableName,
+          Key: key,
+          UpdateExpression: "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+          ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)"
+            : snapshot.catalog.latestRevision === undefined
+              ? "entityType = :entity AND #name = :name AND attribute_not_exists(latestRevision)"
+              : "entityType = :entity AND #name = :name AND latestRevision = :observed AND latestRevision < :revision",
+          ExpressionAttributeNames: { "#name": "name" },
+          ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":revision": targetRevision,
+            ":now": new Date().toISOString(),
+            ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
+        }));
+        return;
+      } catch (error) {
+        if (!isConditional(error)) throw error;
+        if (attempt === 2) throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer could not be reconciled with immutable revision history");
+        const refreshed = await readCatalogSnapshot();
+        if (refreshed.newestRevision <= snapshot.newestRevision
+          && (refreshed.catalog?.latestRevision ?? 0) <= (snapshot.catalog?.latestRevision ?? 0)) {
+          throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer changed without revision history advancing");
+        }
+      }
+    }
+  };
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
     // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
-    if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding)) {
+    if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding) || !sameJsonContent(existing.setupApproval, setupApprovalBinding)) {
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
     }
+    await repairCatalogPointerFromHistory();
     // A revision stored before the static checks existed stays idempotent: report, never refuse.
     const preflight = checked?.preflight
       ?? (wantsPreflight ? await preflightConnectors(connectors(), definition, identity.ownerKey) : undefined);
@@ -1514,27 +1836,348 @@ async function registerProject(
     runtimeBinding,
     registeredBy: identity.ownerKey,
     registeredAt: now,
+    ...(setupApprovalBinding === undefined ? {} : { setupApproval: setupApprovalBinding }),
   };
   const membership = membershipRecord(identity.ownerKey, definition.name, "administrator");
-  try {
-    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+  const setupAdmissionRows = setupRuntimeAdmission && setupApprovalBinding?.decision === "approve" && definition.e2e !== undefined
+    ? await createProjectSetupAdmissionRows(dependencies, identity, record, setupApprovalBinding, setupRuntimeAdmission)
+    : undefined;
+  setupExecutionCreated = setupAdmissionRows !== undefined;
+  const maxRegistrationAttempts = 3;
+  for (let attempt = 0; attempt < maxRegistrationAttempts; attempt += 1) {
+    const snapshot = await readCatalogSnapshot();
+    const latestRevision = Math.max(definition.revision, snapshot.newestRevision);
+    const updateCatalog = snapshot.catalog?.latestRevision !== latestRevision;
+    try {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Put: { TableName: dependencies.tableName, Item: record, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: membership } },
       // Spec 025 A3: the admin project list reads this row instead of scanning the table.
-      { Update: {
+      ...(updateCatalog ? [{ Update: {
         TableName: dependencies.tableName,
         Key: projectCatalogKey(definition.name),
-        UpdateExpression: "SET entityType = :entity, #name = :name, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+        UpdateExpression: "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+        ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)"
+          : snapshot.catalog.latestRevision === undefined ? "attribute_not_exists(latestRevision)"
+            : "latestRevision = :observed AND latestRevision < :revision",
         ExpressionAttributeNames: { "#name": "name" },
-        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":now": now },
-      } },
+        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":revision": latestRevision, ":now": now,
+          ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
+      } }] : []),
+      ...(setupAdmissionRows?.transactionItems ?? []),
+      ] }));
+      return respond(withoutKeys(record), false, preflight);
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      // A same-revision registration may have won concurrently. Validate the immutable record and
+      // catalog before returning duplicate success; otherwise retry only a catalog/history advance.
+      const winner = await getItem<RegisteredProjectRecord>(dependencies, key);
+      if (winner !== undefined) {
+        if (!sameJsonContent(winner.definition, definition) || !sameJsonContent(winner.runtimeBinding, runtimeBinding)
+          || !sameJsonContent(winner.setupApproval, setupApprovalBinding)) {
+          throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
+        }
+        await repairCatalogPointerFromHistory();
+        return respond(withoutKeys(winner), true, preflight);
+      }
+      const refreshed = await readCatalogSnapshot();
+      const advanced = refreshed.newestRevision > snapshot.newestRevision
+        || (refreshed.catalog?.latestRevision ?? 0) > (snapshot.catalog?.latestRevision ?? 0);
+      if (!advanced || attempt + 1 === maxRegistrationAttempts) {
+        throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration could not commit against the current catalog");
+      }
+    }
+  }
+  throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration exceeded its bounded catalog retries");
+}
+
+async function createProjectSetupAdmissionRows(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  project: RegisteredProjectRecord,
+  setupApproval: NonNullable<RegisteredProjectRecord["setupApproval"]>,
+  runtime: NonNullable<ReturnType<typeof admitProjectSetupRuntime>>,
+  retry?: { attemptId: string; retryOfExecutionId: string },
+): Promise<{ transactionItems: Array<Record<string, unknown>> } | undefined> {
+  if (!dependencies.projectSetupRuntimeCatalogId || project.runtimeBinding.deploymentMode !== "ec2-ebs") return undefined;
+  const endpoint = new URL(runtime.endpoint);
+  if (endpoint.protocol !== "http:" || !z.ipv4().safeParse(endpoint.hostname).success) return undefined;
+  const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${project.definition.name}`, sk: `PROPOSAL#${setupApproval.proposalSha256}` });
+  if (!approval || approval.ownerKey !== identity.ownerKey || approval.decision !== "approve" || approval.proposalRef !== setupApproval.proposalRef
+    || typeof approval.policyDigest !== "string" || !sameJsonContent(approval.policy, project.definition.e2e)) return undefined;
+  const stored = await readStoredText(dependencies.s3, dependencies.artifactBucketName, setupApproval.proposalRef, MAX_SETUP_PROPOSAL_BYTES);
+  if (!stored || createHash("sha256").update(stored, "utf8").digest("hex") !== setupApproval.proposalSha256) return undefined;
+  let artifact: Record<string, unknown>;
+  try {
+    const decoded: unknown = JSON.parse(stored);
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) return undefined;
+    artifact = decoded as Record<string, unknown>;
+  } catch { return undefined; }
+  if (artifact.schemaVersion !== "project-setup-source-proposal/v1" || artifact.issuerOwnerKey !== identity.ownerKey
+    || !artifact.snapshot || typeof artifact.snapshot !== "object" || Array.isArray(artifact.snapshot)) return undefined;
+  const rawSnapshot = artifact.snapshot as Record<string, unknown>;
+  if (!Array.isArray(rawSnapshot.sources)) return undefined;
+  let snapshot: E2ESourceSnapshot;
+  try {
+    snapshot = { ...rawSnapshot, sources: rawSnapshot.sources.map((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid source record");
+      const source = raw as Record<string, unknown>;
+      if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") throw new Error("invalid source record");
+      return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
+    }) } as unknown as E2ESourceSnapshot;
+    verifyE2ESourceSnapshot(snapshot, snapshot.candidate);
+  } catch { return undefined; }
+  const policy = E2EPolicySchema.safeParse(project.definition.e2e);
+  if (!policy.success) return undefined;
+  let derived: ReturnType<typeof deriveProjectSetupSourceSmoke>;
+  try {
+    derived = deriveProjectSetupSourceSmoke({
+      projectName: project.definition.name, proposalSha256: setupApproval.proposalSha256,
+      approval: { proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256, candidateDigest: setupApproval.candidateDigest,
+        policyDigest: approval.policyDigest, runtimeCatalogId: runtime.runtimeCatalogId, catalogRevision: runtime.catalogRevision,
+        bindingDigest: runtime.bindingDigest, manifestDigest: runtime.manifestDigest, generation: runtime.generation },
+      snapshot, policy: policy.data,
+      sandboxAvailability: { targetId: "default-sandbox", profileId: policy.data.defaultSandboxProfileId, connection: "connected", approval: "approved",
+        qualification: "qualified", authorizationRevision: `catalog-${runtime.catalogRevision}` },
+      runtimeAvailability: [],
+    });
+  } catch { return undefined; }
+
+  const now = new Date();
+  const stableUuid = (label: string) => {
+    const stableInput = retry
+      ? `project-setup/retry/v1\0${retry.retryOfExecutionId}\0${retry.attemptId}\0${identity.ownerKey}\0${project.definition.name}\0${project.definition.revision}\0${setupApproval.proposalSha256}\0${runtime.generation}\0${label}`
+      : `project-setup/v1\0${identity.ownerKey}\0${project.definition.name}\0${project.definition.revision}\0${setupApproval.proposalSha256}\0${runtime.generation}\0${label}`;
+    const bytes = createHash("sha256").update(stableInput).digest().subarray(0, 16);
+    bytes[6] = ((bytes[6] ?? 0) & 0x0f) | 0x50; bytes[8] = ((bytes[8] ?? 0) & 0x3f) | 0x80;
+    const hex = bytes.toString("hex");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  };
+  const setupExecutionId = stableUuid("execution");
+  const subjectId = stableUuid("subject");
+  // This is the exact server-configured worker identity from the ready registry, never a caller
+  // supplied workspace id or a value inferred from the setup execution.
+  const transportCorrelationId = runtime.transportCorrelationId;
+  const operationId = stableUuid("operation");
+  const outboxId = stableUuid("outbox");
+  const fence = 1;
+  let setupRunContext: Record<string, unknown>;
+  let evidenceByteLimit: number;
+  try {
+    const plan = selectE2EExecutionPlan(derived.selectionInput);
+    if (plan.groups.length === 0 || plan.groups.some((group) => group.expectedCases.length === 0)) return undefined;
+    const bundleBody = { schemaVersion: 1 as const, planDigest: derived.planDigest, templateVersion: "trusted-e2e/v1", scenarios: derived.scenarios, bundleDigest: "0".repeat(64) };
+    const bundle = E2EScenarioBundleSchema.parse({ ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) });
+    const compiledGroups = plan.groups.map((group) => ({ group, compiled: compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput: derived.selectionInput, executionPlan: plan, group }) }));
+    const totalCases = compiledGroups.reduce((total, item) => total + item.group.expectedCases.length, 0);
+    evidenceByteLimit = e2ePrivateTransferMaxBytes(totalCases, compiledGroups.length);
+    const roundId = stableUuid("round");
+    const admittedAt = now.toISOString();
+    const deadlineAt = new Date(now.getTime() + policy.data.limits.runTimeoutMs).toISOString();
+    const taskId = `project-setup:${setupExecutionId}`;
+    const groupAdmissions = compiledGroups.map(({ group, compiled }, index) => {
+      const runId = stableUuid(`run-${index}-${group.groupId}`);
+      const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId, roundId, taskId, operationId, operationFence: fence,
+        workflowRevision: project.definition.revision, groupId: group.groupId, executionPlanDigest: plan.digest, executionMode: group.mode,
+        mockManifestDigest: group.mockManifestDigest, authorizationRevision: `setup:${1}`, candidateDigest: setupApproval.candidateDigest,
+        planDigest: derived.planDigest, policyDigest: approval.policyDigest, bundleDigest: bundle.bundleDigest,
+        appBuildDigest: createHash("sha256").update(canonicalJson(compiled.inventory)).digest("hex"),
+        environmentDigest: createHash("sha256").update(canonicalJson(runtime.runnerEnvironment), "utf8").digest("hex"), runtimeManifestDigest: runtime.manifestDigest,
+        modelRouteRevision: null, expectedCases: compiled.expectedCases, admittedAt, deadlineAt });
+      return { group, binding, expectedConfigDigest: compiled.expectedConfigDigest, compiledInventoryDigest: compiled.inventory.digest,
+        expectedCases: compiled.expectedCases, selectionPacketPath: compiled.selectionPacketPath };
+    });
+    const round = E2ERoundSchema.parse({ schemaVersion: 1, roundId, taskId, operationId, operationFence: fence,
+      workflowRevision: project.definition.revision, executionPlanDigest: plan.digest, admittedAt, deadlineAt,
+      limits: policy.data.limits, groupBindings: groupAdmissions.map((item) => item.binding) });
+    setupRunContext = { roundId, admittedAt, deadlineAt, runnerEnvironment: runtime.runnerEnvironment,
+      runnerToolchain: runtime.runnerToolchain, runnerToolchainDigest: runtime.runnerToolchainDigest, plan, bundle, round, groupAdmissions };
+  } catch { return undefined; }
+  const executionObject = {
+    domain: "project-setup-source-interface/v1", schemaVersion: 1, setupExecutionId, subjectId,
+    transportCorrelationId, ownerKey: identity.ownerKey, projectName: project.definition.name, projectRevision: project.definition.revision,
+    approvalRevision: 1, proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256,
+    candidateDigest: setupApproval.candidateDigest, policyDigest: approval.policyDigest, policy: policy.data,
+    sourceSnapshot: { ...snapshot, sources: snapshot.sources.map((source) => ({ path: source.path, sha256: source.sha256, kind: source.kind, bytesBase64: Buffer.from(source.bytes).toString("base64") })) },
+    // The worker reconstructs this exact selection against the retained snapshot bytes and then
+    // recompiles. Snapshot bytes live once in the bounded content-addressed object above.
+    selectionInput: Object.fromEntries(Object.entries(derived.selectionInput).filter(([key]) => key !== "sourceSnapshot")),
+    setupRunContext, evidenceByteLimit,
+    semanticApproval: derived.semanticApproval, planDigest: derived.planDigest, portableApprovalBinding: derived.portableApprovalBinding,
+    scenarios: derived.scenarios, selectedTargetIds: derived.targetIds,
+    unsupportedTargetIds: derived.unsupportedTargetIds,
+    discoveredApplications: derived.discoveredApplications, discoveryMissingInputs: derived.discoveryMissingInputs,
+    discoveredTargetIds: derived.discoveredTargetIds,
+    notExecutedTargetIds: derived.unsupportedTargetIds,
+    runtime: { runtimeCatalogId: runtime.runtimeCatalogId, catalogRevision: runtime.catalogRevision, bindingDigest: runtime.bindingDigest,
+      manifestDigest: runtime.manifestDigest, runnerEnvironment: runtime.runnerEnvironment, generation: runtime.generation,
+      transportCorrelationId, endpoint: runtime.endpoint, expiresAt: runtime.expiresAt },
+    ...(retry ? { retryOfExecutionId: retry.retryOfExecutionId, retryActorKey: identity.ownerKey } : {}),
+  };
+  const executionBytes = Buffer.from(canonicalJson(executionObject), "utf8");
+  const executionDigest = createHash("sha256").update(executionBytes).digest("hex");
+  const executionRef = { key: `project-setup-executions/sha256/${executionDigest}.json`, sha256: executionDigest, byteLength: executionBytes.byteLength };
+  try {
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: executionRef.key, Body: executionBytes,
+      ContentType: "application/json", Metadata: { sha256: executionDigest, owner: identity.ownerKey, candidate: setupApproval.candidateDigest }, IfNoneMatch: "*" }));
+  } catch (error) {
+    const code = error && typeof error === "object" ? (error as { name?: unknown; $metadata?: { httpStatusCode?: unknown } }).name : undefined;
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (code !== "PreconditionFailed" && status !== 412) throw error;
+    if (await readStoredText(dependencies.s3, dependencies.artifactBucketName, executionRef.key, MAX_SETUP_PROPOSAL_BYTES) !== executionBytes.toString("utf8")) return undefined;
+  }
+  const execution = ProjectSetupExecutionSchema.parse({ schemaVersion: 1, setupExecutionId, subjectId, transportCorrelationId,
+    projectName: project.definition.name, projectRevision: project.definition.revision, ownerKey: identity.ownerKey, approvalRevision: 1,
+    proposalRef: setupApproval.proposalRef, proposalSha256: setupApproval.proposalSha256, candidateDigest: setupApproval.candidateDigest,
+    policyDigest: approval.policyDigest, bindingDigest: runtime.bindingDigest, runtimeGeneration: runtime.generation,
+    executionRef, runtimeCatalogId: runtime.runtimeCatalogId, runtimeCatalogRevision: runtime.catalogRevision,
+    state: "ACCEPTED", operationId, outboxId, fence,
+    deadlineAt: setupRunContext.deadlineAt, evidenceByteLimit, createdAt: now.toISOString(),
+    ...(retry ? { retryOfExecutionId: retry.retryOfExecutionId, retryActorKey: identity.ownerKey } : {}) });
+  const session = ProjectSetupSessionSchema.parse({ schemaVersion: 1, setupExecutionId, subjectId, transportCorrelationId,
+    approvalRevision: 1, bindingDigest: runtime.bindingDigest, state: "READY", generation: runtime.generation, privateIp: endpoint.hostname });
+  const operation = { ...projectSetupOperationKey(setupExecutionId, operationId), entityType: "PROJECT_SETUP_OPERATION",
+    ...ProjectSetupOperationSchema.parse({ schemaVersion: 1, setupExecutionId, operationId, transportCorrelationId, fence,
+      status: "ACCEPTED", createdAt: now.toISOString(), updatedAt: now.toISOString() }) };
+  const callbackCapability = issueProjectSetupCapability(dependencies.callbackSigningKey, { domain: "PROJECT_SETUP", setupExecutionId, subjectId,
+    transportCorrelationId, operationId, approvalRevision: 1, fence, expiresAt: Math.floor(now.getTime() / 1_000) + 32_400,
+    actions: ["read-execution", "write-evidence", "result"] });
+  const invocation = WorkerInvocationSchema.parse({ protocolVersion: AGENTX_PROTOCOL_VERSION, operationId, workspaceId: transportCorrelationId,
+    fence, projectRevision: project.definition.revision, callbackCapability, kind: "project-setup-smoke",
+    payload: { domain: "project-setup-source-interface/v1", setupExecutionId, subjectId, approvalRevision: 1, transportCorrelationId, executionRef } });
+  const outbox = { pk: `OUTBOX#${outboxId}`, sk: "OUTBOX", id: outboxId, entityType: "OUTBOX", status: "PENDING", operationId,
+    workspaceId: transportCorrelationId, deploymentMode: "ec2-ebs", invocation, createdAt: now.toISOString() };
+  const put = (item: Record<string, unknown>) => ({ Put: { TableName: dependencies.tableName, Item: item, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } });
+  return { transactionItems: [put({ ...projectSetupExecutionKey(setupExecutionId), entityType: "PROJECT_SETUP_EXECUTION", ...execution }),
+    put({ ...projectSetupSessionKey(setupExecutionId), entityType: "PROJECT_SETUP_SESSION", ...session }), put(operation), put(outbox)] };
+}
+
+async function retryProjectSetupAsAdministrator(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  setupExecutionId: string,
+  value: unknown,
+): Promise<{ setupExecutionId: string; operationId: string; status: "QUEUED"; duplicate: boolean }> {
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required for an explicit setup retry");
+  const input = z.object({ requestId: z.string().uuid() }).strict().parse(value);
+  const idempotencyKey = { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `RETRY#${identity.ownerKey}#${input.requestId}` };
+  const executionKey = projectSetupExecutionKey(setupExecutionId);
+  const raw = await getItem<Record<string, unknown>>(dependencies, executionKey);
+  const parked = ProjectSetupExecutionSchema.safeParse(projectSetupDomainRecord(raw, executionKey, "PROJECT_SETUP_EXECUTION"));
+  if (!parked.success) throw agentXError("STALE_FENCE", "only a current setup execution can be retried");
+  const expiredDispatch = parked.data.state === "DISPATCHING" && parked.data.result === undefined && Date.parse(parked.data.deadlineAt) <= Date.now();
+  const priorOperationKey = projectSetupOperationKey(setupExecutionId, parked.data.operationId);
+  const priorOperationResponse = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: priorOperationKey, ConsistentRead: true }));
+  const priorOperation = ProjectSetupOperationSchema.safeParse(projectSetupDomainRecord(priorOperationResponse.Item, priorOperationKey, "PROJECT_SETUP_OPERATION"));
+  const parkedRetry = parked.data.state === "PARKED" && parked.data.result !== undefined
+    && priorOperation.success && priorOperation.data.status === "PARKED";
+  const expiredDispatchRetry = expiredDispatch && priorOperation.success
+    && (priorOperation.data.status === "DISPATCHING" || priorOperation.data.status === "DELIVERED")
+    && priorOperation.data.setupExecutionId === setupExecutionId && priorOperation.data.operationId === parked.data.operationId
+    && priorOperation.data.fence === parked.data.fence && priorOperation.data.transportCorrelationId === parked.data.transportCorrelationId;
+  if (!parkedRetry && !expiredDispatchRetry) throw agentXError("STALE_FENCE", "only an owned parked setup execution or an expired matching dispatch can be retried");
+  if (identity.ownerKey !== parked.data.ownerKey) throw agentXError("FORBIDDEN", "setup retry actor must be the original project creator");
+  const project = await requireProject(dependencies, parked.data.projectName, parked.data.projectRevision);
+  await requireAdministrator(dependencies, identity, parked.data.projectName);
+  if (project.runtimeBinding.deploymentMode !== "ec2-ebs") throw agentXError("RUNTIME_UNAVAILABLE", "the approved setup runtime profile is unavailable");
+  if (project.registeredBy !== parked.data.ownerKey || project.setupApproval?.decision !== "approve"
+    || project.setupApproval.proposalRef !== parked.data.proposalRef || project.setupApproval.proposalSha256 !== parked.data.proposalSha256
+    || project.setupApproval.candidateDigest !== parked.data.candidateDigest || project.definition.e2e === undefined
+    || !dependencies.projectSetupRuntimeCatalogId || dependencies.projectSetupRuntimeCatalogId !== parked.data.runtimeCatalogId
+    || projectSetupBindingDigest(project.runtimeBinding) !== parked.data.bindingDigest) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "setup source, policy, binding, or catalog changed; complete normal approval before retry");
+  }
+  const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${project.definition.name}`, sk: `PROPOSAL#${parked.data.proposalSha256}` });
+  if (!approval || approval.ownerKey !== parked.data.ownerKey || approval.decision !== "approve" || approval.proposalRef !== parked.data.proposalRef
+    || approval.policyDigest !== parked.data.policyDigest || !sameJsonContent(approval.policy, project.definition.e2e)) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "current setup approval no longer matches the parked source and policy");
+  }
+  const runtimeKey = projectSetupRuntimeKey(parked.data.runtimeCatalogId, parked.data.bindingDigest);
+  const runtimeItem = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: runtimeKey, ConsistentRead: true }));
+  const runtime = ProjectSetupRuntimeRecordSchema.safeParse(projectSetupRuntimeRecord(runtimeItem.Item, runtimeKey));
+  if (!runtime.success) throw agentXError("RUNTIME_UNAVAILABLE", "the exact approved setup runtime binding is unavailable");
+  const admittedRuntime = admitProjectSetupRuntime(runtime.data, { runtimeCatalogId: parked.data.runtimeCatalogId, binding: project.runtimeBinding,
+    scope: "source-interface", now: Date.now() });
+  if (!admittedRuntime || admittedRuntime.catalogRevision !== parked.data.runtimeCatalogRevision) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "the admitted setup catalog revision changed; complete normal approval before retry");
+  }
+  if (!(await setupAdmissionMatchesExecution(dependencies, parked.data))) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the immutable setup admission does not match its stored execution identity");
+  }
+  const sessionKey = projectSetupSessionKey(setupExecutionId);
+  const sessionResponse = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: sessionKey, ConsistentRead: true }));
+  const session = ProjectSetupSessionSchema.safeParse(projectSetupDomainRecord(sessionResponse.Item, sessionKey, "PROJECT_SETUP_SESSION"));
+  if (!session.success || session.data.setupExecutionId !== setupExecutionId || session.data.subjectId !== parked.data.subjectId
+    || session.data.transportCorrelationId !== parked.data.transportCorrelationId || session.data.approvalRevision !== parked.data.approvalRevision
+    || session.data.bindingDigest !== parked.data.bindingDigest || session.data.generation !== parked.data.runtimeGeneration || session.data.state !== "READY") {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the exact approved setup session is no longer ready");
+  }
+  const prior = await getItem<Record<string, unknown>>(dependencies, idempotencyKey);
+  if (prior && prior.entityType === "PROJECT_SETUP_RETRY" && prior.previousExecutionId === setupExecutionId
+    && prior.retryActorKey === identity.ownerKey && prior.originalCreatorKey === parked.data.ownerKey
+    && typeof prior.setupExecutionId === "string" && typeof prior.operationId === "string") {
+    return { setupExecutionId: prior.setupExecutionId, operationId: prior.operationId, status: "QUEUED", duplicate: true };
+  }
+  const setupApproval = project.setupApproval;
+  const rows = await createProjectSetupAdmissionRows(dependencies, identity, project, setupApproval, admittedRuntime,
+    { attemptId: input.requestId, retryOfExecutionId: setupExecutionId });
+  if (!rows) throw agentXError("RUNTIME_UNAVAILABLE", "the approved source-interface setup run cannot be admitted");
+  const executionPut = rows.transactionItems.find((item) => "Put" in item && (item as { Put: { Item?: { entityType?: unknown } } }).Put.Item?.entityType === "PROJECT_SETUP_EXECUTION") as { Put: { Item: Record<string, unknown> } } | undefined;
+  const operationPut = rows.transactionItems.find((item) => "Put" in item && (item as { Put: { Item?: { entityType?: unknown } } }).Put.Item?.entityType === "PROJECT_SETUP_OPERATION") as { Put: { Item: Record<string, unknown> } } | undefined;
+  if (!executionPut || !operationPut) throw agentXError("RUNTIME_UNAVAILABLE", "setup retry admission rows are incomplete");
+  const nextExecution = executionPut.Put.Item;
+  const nextOperation = operationPut.Put.Item;
+  const marker = { ...idempotencyKey, entityType: "PROJECT_SETUP_RETRY", previousExecutionId: setupExecutionId,
+    setupExecutionId: nextExecution.setupExecutionId, operationId: nextOperation.operationId, retryActorKey: identity.ownerKey,
+    originalCreatorKey: parked.data.ownerKey, createdAt: new Date().toISOString() };
+  const now = new Date().toISOString();
+  const terminalAuthorityChecks = projectSetupTerminalAuthorityChecks(dependencies.tableName, parked.data, runtime.data, session.data);
+  const parkResult = { domain: "project-setup-source-interface/v1", candidateDigest: parked.data.candidateDigest,
+    processStatus: "UNKNOWN", qualification: "UNKNOWN", cleanupConfirmed: false, parkReason: "setup-deadline-expired" };
+  const priorExecutionMutation = expiredDispatchRetry
+    ? { Update: { TableName: dependencies.tableName, Key: executionKey,
+        UpdateExpression: "SET #state = :parked, updatedAt = :now, completedAt = :now, #result = :result",
+        ConditionExpression: "#state = :dispatching AND operationId = :operationId AND subjectId = :subjectId AND fence = :fence AND approvalRevision = :approvalRevision AND transportCorrelationId = :correlation AND deadlineAt = :deadlineAt AND deadlineAt <= :now",
+        ExpressionAttributeNames: { "#state": "state", "#result": "result" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING", ":now": now, ":result": parkResult,
+          ":operationId": parked.data.operationId, ":subjectId": parked.data.subjectId, ":fence": parked.data.fence,
+          ":approvalRevision": parked.data.approvalRevision, ":correlation": parked.data.transportCorrelationId,
+          ":deadlineAt": parked.data.deadlineAt } } }
+    : { ConditionCheck: { TableName: dependencies.tableName, Key: executionKey,
+        ConditionExpression: "#state = :parked AND operationId = :operationId AND fence = :fence",
+        ExpressionAttributeNames: { "#state": "state" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":operationId": parked.data.operationId, ":fence": parked.data.fence } } };
+  const priorOperationMutation = expiredDispatchRetry
+    ? { Update: { TableName: dependencies.tableName, Key: priorOperationKey,
+        UpdateExpression: "SET #status = :parked, updatedAt = :now, #result = :result",
+        ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#status": "status", "#result": "result" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":now": now,
+          ":result": parkResult, ":setupExecutionId": setupExecutionId, ":operationId": parked.data.operationId,
+          ":fence": parked.data.fence, ":correlation": parked.data.transportCorrelationId } } }
+    : { ConditionCheck: { TableName: dependencies.tableName, Key: priorOperationKey,
+        ConditionExpression: "#status = :parked AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":setupExecutionId": setupExecutionId,
+          ":operationId": parked.data.operationId, ":fence": parked.data.fence, ":correlation": parked.data.transportCorrelationId } } };
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      ...terminalAuthorityChecks,
+      priorExecutionMutation,
+      priorOperationMutation,
+      ...rows.transactionItems,
+      { Put: { TableName: dependencies.tableName, Item: marker, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } },
     ] }));
   } catch (error) {
-    // A concurrent registration won; answer as a duplicate without contacting the vendor again.
-    if (isConditional(error)) return registerProject(dependencies, identity, value, preflight ? { preflight } : {});
+    const duplicate = await getItem<Record<string, unknown>>(dependencies, idempotencyKey);
+    if (duplicate?.entityType === "PROJECT_SETUP_RETRY" && duplicate.previousExecutionId === setupExecutionId
+      && duplicate.retryActorKey === identity.ownerKey && duplicate.originalCreatorKey === parked.data.ownerKey
+      && typeof duplicate.setupExecutionId === "string" && typeof duplicate.operationId === "string") {
+      return { setupExecutionId: duplicate.setupExecutionId, operationId: duplicate.operationId, status: "QUEUED", duplicate: true };
+    }
     throw error;
   }
-  return respond(withoutKeys(record), false, preflight);
+  return { setupExecutionId: String(nextExecution.setupExecutionId), operationId: String(nextOperation.operationId), status: "QUEUED", duplicate: false };
 }
 
 async function prepareWorkspace(
@@ -3260,7 +3903,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[]; slackThread?: SlackThread },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; operationId?: string; shared?: boolean; legacyTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowE2EAdmission?: E2EWorkflowAdmissionRef; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[]; slackThread?: SlackThread },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -3268,7 +3911,7 @@ async function taskOperationParts(
   // #341: a task whose owner connected a working ChatGPT plan runs on it; `model` stays the default it falls back to.
   const chatgpt = dependencies.chatgpt === undefined ? undefined
     : await chatGptTaskSelection(dependencies.chatgpt, chatGptOwner(await workspaceTaskOwner(dependencies, workspace.id), input.requester.requestedBy, developerIdForSlackUser));
-  const operationId = randomUUID();
+  const operationId = input.operationId ?? randomUUID();
   const fence = workspace.fence + 1;
   const operation = operationRecord({
     id: operationId,
@@ -3278,10 +3921,12 @@ async function taskOperationParts(
     ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
     ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
+    ...(input.workflowE2EAdmission === undefined ? {} : { workflowE2EAdmission: input.workflowE2EAdmission }),
     ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
     requestId: input.requestId,
     payloadHash: hashJson({ conversationId: input.conversationId, prompt: input.prompt,
-      ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }) }),
+      ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
+      ...(input.workflowE2EAdmission === undefined ? {} : { workflowE2EAdmission: input.workflowE2EAdmission }) }),
     status: "ACCEPTED",
     fence,
     createdAt: now,
@@ -3304,8 +3949,12 @@ async function taskOperationParts(
   const workBreakdownContext = codingPlan && input.workflowMode === "PLAN" && input.legacyTask !== true
     ? await codingPlanWorkBreakdownContext(dependencies, workspace.id)
     : undefined;
+  const e2ePlanningContext = codingPlan && input.workflowMode === "PLAN" && input.legacyTask !== true
+    ? await codingPlanFeatureE2EContext(dependencies, workspace.id)
+    : undefined;
   const documentInstructions = planDocumentInstructions({ kind: planKind, path: input.workflowPhase === undefined ? "QUICK" : "FULL", anchors: true,
     ...(workBreakdownContext === undefined ? {} : { workBreakdownContext }),
+    ...(e2ePlanningContext === undefined ? {} : { e2ePlanningContext }),
     ...(input.retiredClaimIds === undefined ? {} : { retired: input.retiredClaimIds }) });
   const planChecks = codingPlan && input.workflowMode === "PLAN" ? await codingPlanChecksInstructions(dependencies, workspace.id) : "";
   const checksInstructions = planChecks === "" ? "" : `\n\n${planChecks}`;
@@ -3331,7 +3980,7 @@ async function taskOperationParts(
     workspaceId: workspace.id,
     fence,
     projectRevision: workspace.projectRevision,
-    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW", input.workflowFeedbackApproval !== undefined, chatgpt !== undefined),
+    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW", input.workflowFeedbackApproval !== undefined, chatgpt !== undefined, input.workflowMode === "IMPLEMENT", input.workflowE2EAdmission !== undefined),
     payload: {
       conversationId: input.conversationId,
       prompt,
@@ -3343,6 +3992,7 @@ async function taskOperationParts(
       ...(input.workflowMode === "PLAN" ? { planFormat: "structured" as const } : {}),
       ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
       ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
+      ...(input.workflowE2EAdmission === undefined ? {} : { workflowE2EAdmission: input.workflowE2EAdmission }),
       ...(input.workflowDependencies === undefined ? {} : { workflowDependencies: input.workflowDependencies }),
       ...(input.workflowBase === undefined ? {} : { workflowBase: input.workflowBase }),
       ...(input.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: input.workflowReviewChecks }),
@@ -3382,6 +4032,82 @@ async function codingPlanWorkBreakdownContext(dependencies: AwsBrokerDependencie
   const project = await requireProject(dependencies, task.project, task.startingRevision);
   if (project.definition.repositories.length !== 1) return undefined;
   return { taskId: task.taskId, repositoryId: project.definition.repositories[0]!.name };
+}
+
+/** Supplies source-backed feature-plan references only from the task's pinned project and immutable prepared commit. */
+async function codingPlanFeatureE2EContext(dependencies: AwsBrokerDependencies, workspaceId: string) {
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
+  const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  if (task === undefined) throw agentXError("CONFIG_INVALID", "the task for this planning step is missing");
+  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  if (project.definition.e2e === undefined) return undefined;
+  const parsedPolicy = E2EPolicySchema.safeParse(project.definition.e2e);
+  if (!parsedPolicy.success) return { status: "unknown" as const, reason: "the task's pinned E2E policy could not be validated" };
+  const repositories = project.definition.repositories;
+  if (repositories.length !== 1) return { status: "unknown" as const, reason: "source-backed planning currently requires one pinned repository" };
+  const repository = repositories[0]!;
+  const repositoryParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(repository.url);
+  const expectedRepositoryId = repositoryParts?.[1] && repositoryParts[2] ? `${repositoryParts[1]}/${repositoryParts[2]}` : undefined;
+  const prepared = (task.workflow?.reviewBase ?? task.preparedBase)?.find((item) => item.repositoryId === repository.name);
+
+  let snapshot: E2ESourceSnapshot | undefined;
+  let sourceOrigin: "prepared-commit" | "approved-setup" = "prepared-commit";
+  const setupApproval = project.setupApproval;
+  if (setupApproval?.decision === "approve") {
+    try {
+      const stored = await readStoredText(dependencies.s3, dependencies.artifactBucketName, setupApproval.proposalRef, MAX_SETUP_PROPOSAL_BYTES);
+      if (stored !== undefined && createHash("sha256").update(stored, "utf8").digest("hex") === setupApproval.proposalSha256) {
+        const artifact: unknown = JSON.parse(stored);
+        if (artifact && typeof artifact === "object" && !Array.isArray(artifact)) {
+          const record = artifact as Record<string, unknown>;
+          const rawSnapshot = record.snapshot;
+          if (record.schemaVersion === "project-setup-source-proposal/v1" && record.issuerOwnerKey === project.registeredBy
+            && record.repositoryUrl === repository.url && sameJsonContent(record.policy, parsedPolicy.data)
+            && record.identityMapping && typeof record.identityMapping === "object" && !Array.isArray(record.identityMapping)
+            && (record.identityMapping as Record<string, unknown>).registeredRepositoryId === repository.name
+            && rawSnapshot && typeof rawSnapshot === "object" && !Array.isArray(rawSnapshot)) {
+            const sourceRecord = rawSnapshot as Record<string, unknown>;
+            const rawSources = sourceRecord.sources;
+            if (Array.isArray(rawSources)) {
+              const sources = rawSources.map((raw) => {
+                if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid stored source record");
+                const source = raw as Record<string, unknown>;
+                if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") {
+                  throw new Error("invalid stored source record");
+                }
+                return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
+              });
+              const decoded = { ...sourceRecord, sources } as unknown as E2ESourceSnapshot;
+              const setupProposal = verifyE2ESetupProposal(E2ESetupProposalSchema.parse(record.proposal), decoded, decoded.candidate);
+              if (expectedRepositoryId !== undefined && isExactFeatureE2ESourceSnapshot(decoded, expectedRepositoryId, decoded.commitSha)
+                && decoded.candidate.digest === setupApproval.candidateDigest && setupProposal.candidateDigest === setupApproval.candidateDigest
+                && (prepared === undefined || decoded.commitSha === prepared.baseCommitSha)) {
+                snapshot = decoded;
+                if (prepared === undefined) sourceOrigin = "approved-setup";
+              }
+            }
+          }
+        }
+      }
+    } catch { /* A stored setup snapshot that cannot be independently verified is not planner context. */ }
+  }
+
+  if (snapshot === undefined) {
+    if (prepared === undefined) return { status: "unknown" as const, reason: "prepared commit is unavailable and no approved immutable setup snapshot could be verified" };
+    if (!dependencies.projectSetupSource) return { status: "unknown" as const, reason: "trusted source capture for the exact prepared commit is unavailable" };
+    if (expectedRepositoryId === undefined) return { status: "unknown" as const, reason: "the registered repository has no supported immutable source identity" };
+    try {
+      const captured = await dependencies.projectSetupSource.capture({ repositoryUrl: repository.url, ref: prepared.baseCommitSha });
+      if (!isExactFeatureE2ESourceSnapshot(captured, expectedRepositoryId, prepared.baseCommitSha)) {
+        return { status: "unknown" as const, reason: "trusted capture did not match the task's prepared repository commit" };
+      }
+      snapshot = captured;
+    } catch {
+      return { status: "unknown" as const, reason: "trusted source capture for the exact prepared commit failed" };
+    }
+  }
+  return buildFeatureE2EPlanningContext(parsedPolicy.data, snapshot, { origin: sourceOrigin,
+    preparedCommitSha: prepared?.baseCommitSha ?? null });
 }
 
 /** Whether the workspace belongs to a developer task with the gated workflow. */
@@ -3449,14 +4175,15 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[] } = {},
+  options: { sharedTask?: boolean; operationId?: string; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowE2EAdmission?: E2EWorkflowAdmissionRef; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[] } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
   const requestHash = hashJson({ conversationId: request.conversationId, prompt: request.prompt,
-    ...(options.workflowDependencies === undefined ? {} : { workflowDependencies: options.workflowDependencies }) });
+    ...(options.workflowDependencies === undefined ? {} : { workflowDependencies: options.workflowDependencies }),
+    ...(options.workflowE2EAdmission === undefined ? {} : { workflowE2EAdmission: options.workflowE2EAdmission }) });
   const idempotencyKey = {
     pk: `IDEMPOTENCY#${identity.ownerKey}#${workspaceId}`,
     sk: `REQUEST#${request.requestId}`,
@@ -3493,9 +4220,11 @@ async function acceptTask(
     // 25c note 1: a turn from an open shared thread, or the developer's own turn on a shared task.
     shared: identity.sharedTask?.state === "continue" || options.sharedTask === true,
     ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }),
+    ...(options.operationId === undefined ? {} : { operationId: options.operationId }),
     ...(options.workflowPhase === undefined ? {} : { workflowPhase: options.workflowPhase }),
     ...(options.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: options.workflowFeedbackReview }),
     ...(options.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: options.workflowFeedbackApproval }),
+    ...(options.workflowE2EAdmission === undefined ? {} : { workflowE2EAdmission: options.workflowE2EAdmission }),
     ...(options.workflowDependencies === undefined ? {} : { workflowDependencies: options.workflowDependencies }),
     ...(options.workflowBase === undefined ? {} : { workflowBase: options.workflowBase }),
     ...(options.workflowReviewChecks === undefined ? {} : { workflowReviewChecks: options.workflowReviewChecks }),
@@ -3550,14 +4279,22 @@ async function acceptPullRequest(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { workflowCandidate?: { repositoryId: string; treeSha: string; candidateDigest: string; baseCommitSha?: string } } = {},
+  options: { workflowCandidate?: { repositoryId: string; treeSha: string; commitSha?: string; candidateDigest: string; baseCommitSha?: string; publicationMode: "COMMITTED_HEAD" | "CHECKED_TREE"; admittedPinnedRevision: number; admittedLatestRevision: number; admittedMaterialDigest: string; admittedWorkflowRevision: number; admittedPlanArtifact: { id: string; type: string; version: number; objectKey: string; sha256: string; format: "markdown" | "structured" }; admittedOwnerApproval: { requestId: string; workflowRevision: number; actorId: string; actorRole: "TASK_OWNER" | "PROJECT_ADMIN"; artifactDigest: string; workBreakdownDigest: string | null; at: string }; admittedWorkflowAuthorityDigest: string } } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   const request = PullRequestRequestSchema.parse(value);
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
   await requireMembership(dependencies, identity.ownerKey, workspace.projectName);
   const candidate = options.workflowCandidate;
   if (candidate !== undefined && (candidate.repositoryId !== request.repository || !/^[a-f0-9]{40}$/.test(candidate.treeSha)
-    || !/^[a-f0-9]{64}$/.test(candidate.candidateDigest) || (candidate.baseCommitSha !== undefined && !/^[a-f0-9]{40}$/.test(candidate.baseCommitSha)))) {
+    || (candidate.commitSha !== undefined && !/^[a-f0-9]{40}$/.test(candidate.commitSha))
+    || (candidate.publicationMode === "COMMITTED_HEAD" && candidate.commitSha === undefined)
+    || (candidate.publicationMode === "CHECKED_TREE" && candidate.commitSha !== undefined)
+    || !/^[a-f0-9]{64}$/.test(candidate.candidateDigest) || (candidate.baseCommitSha !== undefined && !/^[a-f0-9]{40}$/.test(candidate.baseCommitSha))
+    || candidate.admittedPinnedRevision !== workspace.projectRevision || candidate.admittedLatestRevision < candidate.admittedPinnedRevision
+    || !/^[a-f0-9]{64}$/.test(candidate.admittedMaterialDigest) || !Number.isInteger(candidate.admittedWorkflowRevision)
+    || candidate.admittedWorkflowRevision < 1 || candidate.admittedPlanArtifact.sha256.length !== 64
+    || candidate.admittedPlanArtifact.sha256 !== candidate.admittedOwnerApproval.artifactDigest
+    || !/^[a-f0-9]{64}$/.test(candidate.admittedWorkflowAuthorityDigest))) {
     throw agentXError("CONFIG_INVALID", "workflow publication does not match its checked candidate");
   }
   const requestHash = hashJson({
@@ -3565,7 +4302,8 @@ async function acceptPullRequest(
     title: request.title,
     ...(request.body === undefined ? {} : { body: request.body }),
     ...(request.draft === undefined ? {} : { draft: request.draft }),
-    ...(candidate === undefined ? {} : { candidateTreeSha: candidate.treeSha, candidateDigest: candidate.candidateDigest }),
+    ...(candidate === undefined ? {} : { candidateTreeSha: candidate.treeSha, ...(candidate.commitSha === undefined ? {} : { candidateCommitSha: candidate.commitSha }), ...(candidate.baseCommitSha === undefined ? {} : { candidateBaseCommitSha: candidate.baseCommitSha }), candidateDigest: candidate.candidateDigest, publicationMode: candidate.publicationMode, admittedPinnedRevision: candidate.admittedPinnedRevision, admittedLatestRevision: candidate.admittedLatestRevision, admittedMaterialDigest: candidate.admittedMaterialDigest,
+      admittedWorkflowRevision: candidate.admittedWorkflowRevision, admittedPlanArtifact: candidate.admittedPlanArtifact, admittedOwnerApproval: candidate.admittedOwnerApproval, admittedWorkflowAuthorityDigest: candidate.admittedWorkflowAuthorityDigest }),
   });
   const idempotencyKey = {
     pk: `IDEMPOTENCY#${identity.ownerKey}#${workspaceId}`,
@@ -3624,7 +4362,10 @@ async function acceptPullRequest(
     codeBuildGates: repository.codeBuildGates ?? [],
     ...(body === undefined ? {} : { body }),
     ...(draft === undefined ? {} : { draft }),
-    ...(candidate === undefined ? {} : { expectedTreeSha: candidate.treeSha, candidateDigest: candidate.candidateDigest }),
+    ...(candidate === undefined ? {} : { expectedTreeSha: candidate.treeSha, ...(candidate.commitSha === undefined ? {} : { expectedCommitSha: candidate.commitSha }), candidateDigest: candidate.candidateDigest, publicationMode: candidate.publicationMode,
+      admittedPinnedRevision: candidate.admittedPinnedRevision, admittedLatestRevision: candidate.admittedLatestRevision, admittedMaterialDigest: candidate.admittedMaterialDigest,
+      admittedWorkflowRevision: candidate.admittedWorkflowRevision, admittedPlanArtifact: candidate.admittedPlanArtifact, admittedOwnerApproval: candidate.admittedOwnerApproval,
+      admittedWorkflowAuthorityDigest: candidate.admittedWorkflowAuthorityDigest }),
     ...(candidate?.baseCommitSha === undefined ? {} : { expectedBaseCommit: candidate.baseCommitSha }),
   };
   const invocation: WorkerInvocation = {
@@ -3656,10 +4397,18 @@ async function acceptPullRequest(
       ...(project.definition.readiness.length === 0 ? {} : { reportChecks: true as const }),
       // The tree the checks and reviews passed on: the worker publishes exactly it, or refuses before pushing.
       ...(candidate === undefined ? {} : { candidateTreeSha: candidate.treeSha }),
+      ...(candidate === undefined ? {} : { candidateCommitSha: candidate.commitSha }),
+      ...(candidate === undefined ? {} : { publicationMode: candidate.publicationMode }),
       // The task's pinned base, as the published commit's parent, in place of the workspace's own record of it.
       ...(candidate?.baseCommitSha === undefined ? {} : { workflowBaseCommit: candidate.baseCommitSha }),
     },
   };
+  const publicationContext = workflowPublicationContext(invocation);
+  if (publicationContext !== undefined && invocation.kind === "publish") {
+    const publicationContextDigest = workflowPublicationContextDigest(publicationContext);
+    invocation.payload.publicationContextDigest = publicationContextDigest;
+    operation.publication.publicationContextDigest = publicationContextDigest;
+  }
   const outbox = outboxRecord(workspace, invocation);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
@@ -4011,6 +4760,12 @@ async function acceptCancellation(
   targetOperationId: string,
 ) {
   const workspace = await requireOwnedWorkspace(dependencies, identity, workspaceId);
+  const target = await requireOperation(dependencies, workspaceId, targetOperationId);
+  if (target.kind === "resume" && target.workflowE2EReadiness?.purpose === "workflow-e2e-readiness"
+    && !TERMINAL.has(target.status)) {
+    await cancelWorkflowE2EReadiness(dependencies, workspace, target);
+    return { operation: publicOperation(await requireOperation(dependencies, workspaceId, targetOperationId)), duplicate: false };
+  }
   return requestCancellation(dependencies, workspace, targetOperationId, requesterOf(identity));
 }
 
@@ -4043,8 +4798,16 @@ async function cancelRunningTask(
   extra: ExtraItems = () => [],
 ): Promise<TaskCancellation> {
   const targetOperationId = workspace.activeOperationId;
-  if (!targetOperationId) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
+  if (!targetOperationId) {
+    await stopQueuedWorkflowE2EReadiness(dependencies, workspace, extra);
+    return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
+  }
   const target = await requireOperation(dependencies, workspace.id, targetOperationId);
+  if (target.workflowE2EReadiness?.purpose === "workflow-e2e-readiness" && target.kind === "resume"
+    && !TERMINAL.has(target.status)) {
+    await cancelWorkflowE2EReadiness(dependencies, workspace, target, extra);
+    return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id, finishedStatus: "CANCELLED" };
+  }
   if (!CANCELLABLE_KINDS.has(target.kind) || target.status === "CANCEL_REQUESTED") {
     return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
   }
@@ -4053,6 +4816,102 @@ async function cancelRunningTask(
   // A duplicate here means the task finished before the cancel was recorded.
   if (result.duplicate) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id, finishedStatus: result.operation.status };
   return { outcome: "CANCEL_REQUESTED", workspaceId: workspace.id, targetOperationId, cancelOperationId: result.operation.id };
+}
+
+/** Stops a verified warm-up in the brief idle interval before recovery can admit its feature round. */
+async function stopQueuedWorkflowE2EReadiness(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance,
+  extra: ExtraItems,
+): Promise<void> {
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspace.id));
+  if (pointer === undefined) return;
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.stage !== "VERIFY"
+    || workflow.state !== "WAITING" || workflow.e2e?.required !== true || workflow.candidate === undefined) return;
+  const dispatchKey = { pk: "WORKFLOW_DISPATCH", sk: `${task.taskId}#${workflow.revision}` };
+  const dispatch = await getItem<WorkflowDispatchRecord>(dependencies, dispatchKey);
+  if (dispatch === undefined || dispatch.kind !== "CHECKS" || dispatch.taskId !== task.taskId
+    || dispatch.workflowRevision !== workflow.revision || dispatch.candidateDigest !== workflow.candidate.digest
+    || dispatch.readinessOperationId === undefined) return;
+  const readiness = await getItem<OperationRecord>(dependencies, operationKey(workspace.id, dispatch.readinessOperationId));
+  if (readiness?.kind !== "resume" || readiness.workflowE2EReadiness?.purpose !== "workflow-e2e-readiness"
+    || readiness.workflowE2EReadiness.taskId !== task.taskId || readiness.workflowE2EReadiness.workflowRevision !== workflow.revision
+    || readiness.workflowE2EReadiness.candidateDigest !== workflow.candidate.digest || readiness.status !== "SUCCEEDED"
+    || !Number.isInteger(readiness.workflowE2EReadiness.readyGeneration)) return;
+  const now = new Date().toISOString();
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Delete: { TableName: dependencies.tableName, Key: dispatchKey,
+      ConditionExpression: "taskId = :task AND workflowRevision = :revision AND #kind = :checks AND candidateDigest = :candidate AND readinessOperationId = :operation",
+      ExpressionAttributeNames: { "#kind": "kind" }, ExpressionAttributeValues: {
+        ":task": task.taskId, ":revision": workflow.revision, ":checks": "CHECKS", ":candidate": workflow.candidate.digest,
+        ":operation": readiness.id,
+      } } },
+    { Update: { TableName: dependencies.tableName, Key: taskKey(task.taskId),
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ConditionExpression: "attribute_not_exists(closedAt) AND workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.e2e.required = :required AND workflow.candidate.digest = :candidate",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
+        ":workflow": blockWorkflow(workflow, "E2E compute readiness was stopped; no feature round was admitted.", now),
+        ":now": now, ":revision": workflow.revision, ":verify": "VERIFY", ":waiting": "WAITING", ":required": true,
+        ":candidate": workflow.candidate.digest,
+      } } },
+    ...extra(publicOperation(readiness)),
+  ] }));
+}
+
+/** A readiness resume never reaches a worker, so cancel it locally and release its exact lease. */
+async function cancelWorkflowE2EReadiness(
+  dependencies: AwsBrokerDependencies,
+  workspace: WorkspaceInstance,
+  operation: OperationRecord,
+  extra: ExtraItems = () => [],
+): Promise<void> {
+  const marker = operation.workflowE2EReadiness!;
+  const dispatchKey = { pk: "WORKFLOW_DISPATCH", sk: marker.dispatchSk };
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(marker.taskId));
+  const workflow = task?.workflow;
+  const taskMatches = task !== undefined && task.closedAt === undefined && workflow?.revision === marker.workflowRevision
+    && workflow.stage === "VERIFY" && workflow.state === "WAITING" && workflow.candidate?.digest === marker.candidateDigest;
+  const now = new Date().toISOString();
+  const items: TransactWriteCommandInput["TransactItems"] = [
+    { Update: { TableName: dependencies.tableName, Key: operationKey(workspace.id, operation.id),
+      UpdateExpression: "SET #status = :cancelled, updatedAt = :now, #result = :result REMOVE workflowE2EReadiness.readyGeneration",
+      ConditionExpression: "(#status = :accepted OR #status = :dispatching OR #status = :cancelRequested) AND #kind = :resume AND workspaceId = :workspace AND fence = :fence AND workflowE2EReadiness.purpose = :purpose AND workflowE2EReadiness.outboxId = :outbox",
+      ExpressionAttributeNames: { "#status": "status", "#result": "result", "#kind": "kind" }, ExpressionAttributeValues: {
+        ":cancelled": "CANCELLED", ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":cancelRequested": "CANCEL_REQUESTED",
+        ":resume": "resume", ":workspace": workspace.id, ":fence": operation.fence, ":purpose": "workflow-e2e-readiness", ":outbox": marker.outboxId,
+        ":now": now, ":result": { status: "CANCELLED", reason: "E2E compute readiness was cancelled by an authorized owner." },
+      } } },
+    { Update: { TableName: dependencies.tableName, Key: workspaceKey(workspace.id),
+      UpdateExpression: "SET #status = :ready, updatedAt = :now REMOVE activeOperationId",
+      ConditionExpression: "#status = :busy AND activeOperationId = :operation AND fence = :fence",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: {
+        ":ready": "READY", ":busy": "BUSY", ":now": now, ":operation": operation.id, ":fence": operation.fence,
+      } } },
+    { Update: { TableName: dependencies.tableName, Key: { pk: `OUTBOX#${marker.outboxId}`, sk: "OUTBOX" },
+      UpdateExpression: "SET #status = :delivered, deliveredAt = :now",
+      ConditionExpression: "(#status = :pending OR #status = :queued OR #status = :waitingSession OR #status = :waitingAccess) AND operationId = :operation AND workspaceId = :workspace AND workflowE2EReadiness.purpose = :purpose AND workflowE2EReadiness.taskId = :task AND workflowE2EReadiness.workflowRevision = :revision AND workflowE2EReadiness.candidateDigest = :candidate AND workflowE2EReadiness.dispatchSk = :dispatchSk",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: {
+        ":delivered": "DELIVERED", ":pending": "PENDING", ":queued": "QUEUED", ":waitingSession": "WAITING_FOR_SESSION",
+        ":waitingAccess": "WAITING_FOR_TASK_ACCESS", ":now": now, ":operation": operation.id, ":workspace": workspace.id,
+        ":purpose": "workflow-e2e-readiness", ":task": marker.taskId, ":revision": marker.workflowRevision,
+        ":candidate": marker.candidateDigest, ":dispatchSk": marker.dispatchSk,
+      } } },
+    { Delete: { TableName: dependencies.tableName, Key: dispatchKey,
+      ConditionExpression: "readinessOperationId = :operation AND workflowRevision = :revision AND candidateDigest = :candidate",
+      ExpressionAttributeValues: { ":operation": operation.id, ":revision": marker.workflowRevision, ":candidate": marker.candidateDigest } } },
+    ...(taskMatches && workflow !== undefined ? [{ Update: { TableName: dependencies.tableName, Key: taskKey(marker.taskId),
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ConditionExpression: "attribute_not_exists(closedAt) AND workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.candidate.digest = :candidate",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
+        ":workflow": blockWorkflow(workflow, "E2E compute readiness was cancelled; no feature round was admitted.", now),
+        ":now": now, ":revision": marker.workflowRevision, ":verify": "VERIFY", ":waiting": "WAITING", ":candidate": marker.candidateDigest,
+      } } }] : []),
+    ...extra(publicOperation({ ...operation, status: "CANCELLED", updatedAt: now,
+      result: { status: "CANCELLED", reason: "E2E compute readiness was cancelled by an authorized owner." } })),
+  ];
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
 }
 
 /** An administrator cancels any workspace's running task (#126). */
@@ -4834,6 +5693,40 @@ async function handleCallback(
     const artifactId = await putArtifact(dependencies, operation, body);
     return json({ artifactId }, request.requestId);
   }
+  if (action === "candidate-export") {
+    if (operation.kind !== "task" || operation.workflowMode !== "IMPLEMENT" || operation.status !== "RUNNING") {
+      throw agentXError("CALLBACK_FORBIDDEN", "candidate source export is limited to the current implementation operation");
+    }
+    return json(await handleWorkflowCandidateExport(dependencies, operation, body), request.requestId);
+  }
+  if (action === "e2e-admission") {
+    if (operation.kind !== "task" || operation.workflowMode !== "CHECKS" || operation.status !== "RUNNING" || operation.workflowE2EAdmission === undefined) {
+      throw agentXError("CALLBACK_FORBIDDEN", "E2E admission reads require the active server-assigned CHECKS operation");
+    }
+    const body = z.object({ stage: z.literal("read"), offset: z.number().int().nonnegative(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(parseBody(request.body));
+    const reference = operation.workflowE2EAdmission;
+    if (body.sha256 !== reference.admissionRef.sha256 || body.offset % WORKFLOW_CANDIDATE_CHUNK_BYTES !== 0
+      || body.offset >= reference.admissionRef.byteLength) throw agentXError("CALLBACK_FORBIDDEN", "E2E admission read is outside its immutable reference");
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(reference.taskId));
+    if (task?.workspaceId !== operation.workspaceId || task.workflow?.stage !== "VERIFY" || task.workflow.state !== "RUNNING"
+      || task.workflow.revision !== reference.workflowRevision || task.workflow.candidate?.digest !== reference.candidateDigest
+      || task.workflow.e2e?.currentRoundId !== reference.roundId
+      || canonicalJson(task.workflow.e2e.currentGroupRunIds) !== canonicalJson(reference.groupRunIds)) {
+      throw agentXError("STALE_FENCE", "E2E CHECKS admission is no longer current");
+    }
+    const text = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, reference.admissionRef.byteLength);
+    if (text === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "E2E admission object is unavailable");
+    const bytes = Buffer.from(text, "utf8");
+    if (bytes.byteLength !== reference.admissionRef.byteLength || createHash("sha256").update(bytes).digest("hex") !== reference.admissionRef.sha256) throw agentXError("CONFIG_INVALID", "E2E admission object failed its content address");
+    const chunk = bytes.subarray(body.offset, Math.min(body.offset + WORKFLOW_CANDIDATE_CHUNK_BYTES, bytes.byteLength));
+    return json({ offset: body.offset, totalBytes: bytes.byteLength, sha256: reference.admissionRef.sha256, chunkBase64: chunk.toString("base64") }, request.requestId);
+  }
+  if (action === "e2e-evidence") {
+    if (operation.kind !== "task" || operation.workflowMode !== "CHECKS" || operation.status !== "RUNNING" || operation.workflowE2EAdmission === undefined) {
+      throw agentXError("CALLBACK_FORBIDDEN", "E2E evidence upload requires the active server-assigned CHECKS operation");
+    }
+    return json(await handleWorkflowE2EEvidenceUpload(dependencies, operation, parseBody(request.body)), request.requestId);
+  }
   if (action === "feedback-bundles") {
     const { acceptedRequirementsDigests: _accepted, ...inputs } = await readFeedbackBundlesForCritic(dependencies, operation, body);
     void _accepted;
@@ -4857,6 +5750,1439 @@ async function handleCallback(
   }
   const result = await recordTerminalResult(dependencies, operation, body);
   return json({ operation: publicOperation(result) }, request.requestId);
+}
+
+async function handleWorkflowCandidateExport(dependencies: AwsBrokerDependencies, operation: OperationRecord, rawBody: unknown): Promise<unknown> {
+  const body = z.discriminatedUnion("stage", [
+    z.object({ stage: z.literal("init"), schemaVersion: z.literal("workflow-candidate-export-upload/v1"), totalBytes: z.number().int().positive().max(MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES),
+      chunkCount: z.number().int().positive().max(Math.ceil(MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES / WORKFLOW_CANDIDATE_CHUNK_BYTES)), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+    z.object({ stage: z.literal("chunk"), schemaVersion: z.literal("workflow-candidate-export-chunk/v1"), uploadId: z.string().uuid(), index: z.number().int().nonnegative(),
+      bytesBase64: z.string().min(1).max(Math.ceil(WORKFLOW_CANDIDATE_CHUNK_BYTES * 4 / 3) + 8), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+    z.object({ stage: z.literal("finalize"), schemaVersion: z.literal("workflow-candidate-export-finalize/v1"), uploadId: z.string().uuid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  ]).parse(rawBody);
+  const key = { pk: `WORKSPACE#${operation.workspaceId}`, sk: `CANDIDATE_EXPORT#${operation.id}` };
+  if (body.stage === "init") {
+    if (body.chunkCount !== Math.ceil(body.totalBytes / WORKFLOW_CANDIDATE_CHUNK_BYTES)) throw agentXError("CONFIG_INVALID", "candidate source chunk count does not match its total");
+    const existing = await getItem<Record<string, unknown>>(dependencies, key);
+    if (existing) {
+      if (existing.entityType !== "WORKFLOW_CANDIDATE_EXPORT" || existing.status !== "OPEN" || existing.operationId !== operation.id
+        || existing.fence !== operation.fence || existing.totalBytes !== body.totalBytes || existing.chunkCount !== body.chunkCount || existing.sha256 !== body.sha256
+        || typeof existing.uploadId !== "string") throw agentXError("CALLBACK_FORBIDDEN", "implementation already owns a different candidate source export");
+      return { uploadId: existing.uploadId, chunkBytes: WORKFLOW_CANDIDATE_CHUNK_BYTES, totalBytes: body.totalBytes, chunkCount: body.chunkCount };
+    }
+    const uploadId = randomUUID();
+    await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: { ...key, entityType: "WORKFLOW_CANDIDATE_EXPORT", schemaVersion: 1,
+      workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, uploadId, totalBytes: body.totalBytes, chunkCount: body.chunkCount,
+      sha256: body.sha256, nextChunkIndex: 0, status: "OPEN", createdAt: new Date().toISOString() }, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
+    return { uploadId, chunkBytes: WORKFLOW_CANDIDATE_CHUNK_BYTES, totalBytes: body.totalBytes, chunkCount: body.chunkCount };
+  }
+  const upload = await getItem<Record<string, unknown>>(dependencies, key);
+  if (!upload || upload.entityType !== "WORKFLOW_CANDIDATE_EXPORT" || upload.operationId !== operation.id || upload.fence !== operation.fence) {
+    throw agentXError("STALE_FENCE", "candidate source export is not current");
+  }
+  if (body.stage === "finalize" && upload.status === "COMPLETE" && upload.uploadId === body.uploadId && upload.sha256 === body.sha256
+    && operation.candidateSourceRef && typeof operation.candidateSourceRef.key === "string") return { sourceRef: operation.candidateSourceRef, duplicate: true };
+  if (upload.status !== "OPEN") throw agentXError("STALE_FENCE", "candidate source export is no longer open");
+  if (body.stage === "chunk") {
+    if (upload.uploadId !== body.uploadId || !Number.isSafeInteger(body.index) || body.index >= Number(upload.chunkCount)) throw agentXError("CALLBACK_FORBIDDEN", "candidate source chunk is outside its owned upload");
+    const bytes = Buffer.from(body.bytesBase64, "base64");
+    const expected = body.index === Number(upload.chunkCount) - 1 ? Number(upload.totalBytes) - body.index * WORKFLOW_CANDIDATE_CHUNK_BYTES : WORKFLOW_CANDIDATE_CHUNK_BYTES;
+    if (bytes.byteLength !== expected || bytes.toString("base64") !== body.bytesBase64 || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "candidate source chunk bytes or digest are invalid");
+    const nextIndex = Number(upload.nextChunkIndex);
+    if (body.index > nextIndex) throw agentXError("CONFIG_INVALID", "candidate source chunks must arrive in order");
+    const chunkKey = `workflow-candidate-staging/${operation.workspaceId}/${operation.id}/${body.uploadId}/${body.index}.chunk`;
+    if (body.index < nextIndex) {
+      const prior = await readSetupChunk(dependencies, chunkKey);
+      if (!prior?.equals(bytes)) throw agentXError("CALLBACK_FORBIDDEN", "replayed candidate source chunk differs from its owned bytes");
+      return { accepted: true, index: body.index, duplicate: true };
+    }
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: chunkKey, Body: bytes,
+      ContentType: "application/octet-stream", Metadata: { sha256: body.sha256, upload: body.uploadId, index: String(body.index) }, IfNoneMatch: "*" }));
+    await dependencies.documentClient.send(new UpdateCommand({ TableName: dependencies.tableName, Key: key, UpdateExpression: "SET nextChunkIndex = :next",
+      ConditionExpression: "#status = :open AND nextChunkIndex = :index AND operationId = :operationId AND fence = :fence",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":next": body.index + 1, ":open": "OPEN", ":index": body.index,
+        ":operationId": operation.id, ":fence": operation.fence } }));
+    return { accepted: true, index: body.index, duplicate: false };
+  }
+  if (upload.uploadId !== body.uploadId || upload.sha256 !== body.sha256 || Number(upload.nextChunkIndex) !== Number(upload.chunkCount)) {
+    throw agentXError("STALE_FENCE", "candidate source export is incomplete or changed");
+  }
+  const chunks: Buffer[] = [];
+  const chunkKeys: string[] = [];
+  for (let index = 0; index < Number(upload.chunkCount); index += 1) {
+    const chunkKey = `workflow-candidate-staging/${operation.workspaceId}/${operation.id}/${body.uploadId}/${index}.chunk`;
+    const chunk = await readSetupChunk(dependencies, chunkKey);
+    if (!chunk) throw agentXError("RUNTIME_UNAVAILABLE", "an owned candidate source chunk is missing");
+    chunks.push(chunk);
+    chunkKeys.push(chunkKey);
+  }
+  const bytes = Buffer.concat(chunks);
+  if (bytes.byteLength !== Number(upload.totalBytes) || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "candidate source export bytes do not match their stored digest");
+  let parsed: z.infer<ReturnType<typeof workflowCandidateSourceExportSchema>>;
+  try { parsed = workflowCandidateSourceExportSchema().parse(JSON.parse(bytes.toString("utf8")) as unknown); }
+  catch { throw agentXError("CONFIG_INVALID", "candidate source export is malformed or outside its immutable bounds"); }
+  const manifest = CandidateManifestSchema.safeParse(parsed.candidate);
+  if (!manifest.success || createCandidateManifest(manifest.data.repositories).digest !== manifest.data.digest || manifest.data.repositories.length !== parsed.repositories.length) {
+    throw agentXError("CONFIG_INVALID", "candidate source export manifest is invalid");
+  }
+  let sourceBytes = 0;
+  for (const [index, repository] of parsed.repositories.entries()) {
+    const identity = manifest.data.repositories[index];
+    if (!identity || identity.repositoryId !== repository.repositoryId || identity.commitSha !== repository.commitSha || identity.treeSha !== repository.treeSha
+      || identity.baseCommitSha !== repository.baseCommitSha) throw agentXError("CONFIG_INVALID", "candidate source repository differs from its immutable manifest");
+    const singleCandidate = createCandidateManifest([identity]);
+    const sources = repository.sources.map((source) => {
+      const decoded = Buffer.from(source.bytesBase64, "base64");
+      if (decoded.toString("base64") !== source.bytesBase64) throw agentXError("CONFIG_INVALID", "candidate source blob encoding is invalid");
+      sourceBytes += decoded.byteLength;
+      if (sourceBytes > 4 * 1024 * 1024) throw agentXError("CONFIG_INVALID", "candidate source blobs exceed their aggregate bound");
+      return { path: source.path, sha256: source.sha256, bytes: decoded, kind: "blob" as const };
+    });
+    try { verifyE2ESourceSnapshot({ candidate: singleCandidate, commitSha: repository.commitSha, treeSha: repository.treeSha,
+      treeComplete: repository.treeComplete, treePaths: repository.treePaths, sources }, singleCandidate); }
+    catch { throw agentXError("CONFIG_INVALID", "candidate source bytes do not match their committed tree inventory"); }
+  }
+  const candidateDigest = manifest.data.digest;
+  const sourceRef = { key: `workflow-candidate-sources/sha256/${body.sha256}.json`, sha256: body.sha256, byteLength: bytes.byteLength, candidateDigest };
+  try {
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: sourceRef.key, Body: bytes, ContentType: "application/json",
+      Metadata: { sha256: body.sha256, candidate: candidateDigest, operation: operation.id }, IfNoneMatch: "*" }));
+  } catch (error) {
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (status !== 412 && (error as { name?: unknown } | undefined)?.name !== "PreconditionFailed") throw error;
+    if (await readStoredText(dependencies.s3, dependencies.artifactBucketName, sourceRef.key, MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES) !== bytes.toString("utf8")) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "existing candidate source object does not match its content address");
+    }
+  }
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Update: { TableName: dependencies.tableName, Key: key, UpdateExpression: "SET #status = :complete, sourceRef = :sourceRef",
+      ConditionExpression: "#status = :open AND uploadId = :uploadId AND sha256 = :sha256 AND operationId = :operationId AND fence = :fence",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":complete": "COMPLETE", ":open": "OPEN", ":sourceRef": sourceRef,
+        ":uploadId": body.uploadId, ":sha256": body.sha256, ":operationId": operation.id, ":fence": operation.fence } } },
+    { Update: { TableName: dependencies.tableName, Key: operationKey(operation.workspaceId, operation.id), UpdateExpression: "SET candidateSourceRef = :sourceRef",
+      ConditionExpression: "#status = :running AND fence = :fence AND workflowMode = :mode AND attribute_not_exists(candidateSourceRef)",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":sourceRef": sourceRef, ":running": "RUNNING", ":fence": operation.fence, ":mode": "IMPLEMENT" } } },
+  ] }));
+  for (const chunkKey of chunkKeys) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: chunkKey }));
+  return { sourceRef };
+}
+
+const WORKFLOW_E2E_TRANSFER_CHUNK_BYTES = 64 * 1024;
+const WORKFLOW_E2E_ADMISSION_MAX_BYTES = 24 * 1024 * 1024;
+
+async function handleWorkflowE2EEvidenceUpload(dependencies: AwsBrokerDependencies, operation: OperationRecord, rawBody: unknown): Promise<unknown> {
+  const body = z.discriminatedUnion("stage", [
+    z.object({ stage: z.literal("init"), groupRunId: z.string().uuid().optional(), totalBytes: z.number().int().positive().max(WORKFLOW_E2E_ADMISSION_MAX_BYTES), chunkCount: z.number().int().positive(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+    z.object({ stage: z.literal("chunk"), groupRunId: z.string().uuid().optional(), uploadId: z.string().uuid(), index: z.number().int().nonnegative(), bytesBase64: z.string().min(1).max(Math.ceil(WORKFLOW_E2E_TRANSFER_CHUNK_BYTES * 4 / 3) + 8), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+    z.object({ stage: z.literal("finalize"), groupRunId: z.string().uuid().optional(), uploadId: z.string().uuid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict(),
+  ]).parse(rawBody);
+  const admissionRef = operation.workflowE2EAdmission;
+  if (admissionRef === undefined || operation.workflowMode !== "CHECKS") throw agentXError("CALLBACK_FORBIDDEN", "E2E evidence has no server-assigned admission");
+  const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, admissionRef.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
+  if (admissionText === undefined || Buffer.byteLength(admissionText) !== admissionRef.admissionRef.byteLength
+    || createHash("sha256").update(admissionText).digest("hex") !== admissionRef.admissionRef.sha256) throw agentXError("STALE_FENCE", "E2E admission object is unavailable or changed");
+  const admission = JSON.parse(admissionText) as { round?: { groupBindings?: Array<{ runId?: string; expectedCases?: unknown[] }> }; plan?: { groups?: unknown[] };
+    taskId?: string; operationId?: string; operationFence?: number; workflowRevision?: number; candidateDigest?: string };
+  const groups = admission.round?.groupBindings;
+  const caseCount = groups?.reduce((sum, group) => sum + (group.expectedCases?.length ?? 0), 0) ?? 0;
+  if (!Array.isArray(groups) || groups.length !== admissionRef.groupRunIds.length || caseCount < 1
+    || admission.taskId !== admissionRef.taskId || admission.operationId !== operation.id || admission.operationFence !== operation.fence
+    || admission.workflowRevision !== admissionRef.workflowRevision || admission.candidateDigest !== admissionRef.candidateDigest) throw agentXError("STALE_FENCE", "E2E admission no longer matches its operation");
+  const maxBytes = Math.min(WORKFLOW_E2E_ADMISSION_MAX_BYTES, e2ePrivateTransferMaxBytes(caseCount, groups.length));
+  const groupRunId = body.groupRunId;
+  const admittedGroupIndex = groupRunId === undefined ? -1 : admissionRef.groupRunIds.indexOf(groupRunId);
+  if (groupRunId !== undefined && admittedGroupIndex < 0) throw agentXError("CALLBACK_FORBIDDEN", "E2E group upload is outside the immutable admission");
+  const selectedGroup = groupRunId === undefined ? undefined : groups[admittedGroupIndex];
+  const selectedGroupCaseCount = selectedGroup?.expectedCases?.length ?? 0;
+  const transferLimit = groupRunId === undefined ? maxBytes : Math.min(WORKFLOW_E2E_ADMISSION_MAX_BYTES, e2ePrivateTransferMaxBytes(selectedGroupCaseCount, 1));
+  const key = { pk: `WORKSPACE#${operation.workspaceId}`, sk: `WORKFLOW_E2E_UPLOAD#${operation.id}${groupRunId === undefined ? "" : `#${groupRunId}`}` };
+  if (body.stage === "init") {
+    if (body.chunkCount !== Math.ceil(body.totalBytes / WORKFLOW_E2E_TRANSFER_CHUNK_BYTES) || body.totalBytes > transferLimit) throw agentXError("CONFIG_INVALID", "E2E evidence exceeds its admission-derived transfer bound");
+    const existing = await getItem<Record<string, unknown>>(dependencies, key);
+    if (existing) {
+      if (groupRunId !== undefined && existing.status === "COMPLETE" && existing.entityType === "WORKFLOW_E2E_EVIDENCE_UPLOAD"
+        && existing.operationId === operation.id && existing.groupRunId === groupRunId && existing.fence === operation.fence
+        && existing.admissionSha256 === admissionRef.admissionRef.sha256 && existing.sha256 === body.sha256
+        && existing.totalBytes === body.totalBytes && existing.chunkCount === body.chunkCount && typeof existing.uploadId === "string") {
+        const groupEvidenceRef = E2EWorkflowGroupEvidenceRefSchema.safeParse(existing.groupEvidenceRef);
+        if (!groupEvidenceRef.success || groupEvidenceRef.data.groupRunId !== groupRunId || groupEvidenceRef.data.evidenceRef.sha256 !== body.sha256) {
+          throw agentXError("CALLBACK_FORBIDDEN", "completed group upload does not match its accepted content reference");
+        }
+        return { uploadId: existing.uploadId, groupRunId, complete: true, evidenceRef: groupEvidenceRef.data.evidenceRef,
+          chunkBytes: WORKFLOW_E2E_TRANSFER_CHUNK_BYTES, chunkCount: body.chunkCount };
+      }
+      if (existing.entityType !== "WORKFLOW_E2E_EVIDENCE_UPLOAD" || existing.status !== "OPEN" || existing.operationId !== operation.id
+        || existing.groupRunId !== groupRunId || existing.fence !== operation.fence || existing.admissionSha256 !== admissionRef.admissionRef.sha256 || existing.totalBytes !== body.totalBytes
+        || existing.chunkCount !== body.chunkCount || existing.sha256 !== body.sha256 || typeof existing.uploadId !== "string") throw agentXError("CALLBACK_FORBIDDEN", "CHECKS already owns a different evidence upload");
+      return { uploadId: existing.uploadId, ...(groupRunId === undefined ? {} : { groupRunId }), chunkBytes: WORKFLOW_E2E_TRANSFER_CHUNK_BYTES, chunkCount: body.chunkCount };
+    }
+    const uploadId = randomUUID();
+    await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: { ...key, entityType: "WORKFLOW_E2E_EVIDENCE_UPLOAD", schemaVersion: 1,
+      operationId: operation.id, ...(groupRunId === undefined ? {} : { groupRunId }), fence: operation.fence, admissionSha256: admissionRef.admissionRef.sha256, uploadId, totalBytes: body.totalBytes,
+      chunkCount: body.chunkCount, sha256: body.sha256, nextChunkIndex: 0, status: "OPEN", createdAt: new Date().toISOString() },
+      ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
+    return { uploadId, ...(groupRunId === undefined ? {} : { groupRunId }), chunkBytes: WORKFLOW_E2E_TRANSFER_CHUNK_BYTES, chunkCount: body.chunkCount };
+  }
+  const upload = await getItem<Record<string, unknown>>(dependencies, key);
+  if (!upload || upload.entityType !== "WORKFLOW_E2E_EVIDENCE_UPLOAD" || upload.operationId !== operation.id || upload.fence !== operation.fence
+    || upload.groupRunId !== groupRunId || upload.admissionSha256 !== admissionRef.admissionRef.sha256 || upload.status !== "OPEN" || upload.uploadId !== body.uploadId) throw agentXError("STALE_FENCE", "CHECKS evidence upload is no longer current");
+  if (body.stage === "chunk") {
+    const index = Number(upload.nextChunkIndex);
+    if (body.index !== index || body.index >= Number(upload.chunkCount)) throw agentXError("CALLBACK_FORBIDDEN", "E2E evidence chunks must be uploaded once in order");
+    const bytes = Buffer.from(body.bytesBase64, "base64");
+    const expected = body.index === Number(upload.chunkCount) - 1 ? Number(upload.totalBytes) - body.index * WORKFLOW_E2E_TRANSFER_CHUNK_BYTES : WORKFLOW_E2E_TRANSFER_CHUNK_BYTES;
+    if (bytes.byteLength !== expected || bytes.toString("base64") !== body.bytesBase64 || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "E2E evidence chunk bytes or digest are invalid");
+    const chunkKey = `workflow-e2e-staging/${operation.workspaceId}/${operation.id}/${groupRunId ?? "aggregate"}/${body.uploadId}/${body.index}.chunk`;
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: chunkKey, Body: bytes, ContentType: "application/octet-stream", Metadata: { sha256: body.sha256 }, IfNoneMatch: "*" }));
+    await dependencies.documentClient.send(new UpdateCommand({ TableName: dependencies.tableName, Key: key, UpdateExpression: "SET nextChunkIndex = :next",
+      ConditionExpression: "#status = :open AND nextChunkIndex = :index AND operationId = :operation AND fence = :fence AND admissionSha256 = :admission",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":next": index + 1, ":open": "OPEN", ":index": index, ":operation": operation.id, ":fence": operation.fence, ":admission": admissionRef.admissionRef.sha256 } }));
+    return { accepted: true, index };
+  }
+  if (body.sha256 !== upload.sha256 || Number(upload.nextChunkIndex) !== Number(upload.chunkCount)) throw agentXError("STALE_FENCE", "E2E evidence upload is incomplete or changed");
+  const chunks: Buffer[] = [];
+  const chunkKeys: string[] = [];
+  for (let index = 0; index < Number(upload.chunkCount); index += 1) {
+    const chunkKey = `workflow-e2e-staging/${operation.workspaceId}/${operation.id}/${groupRunId ?? "aggregate"}/${body.uploadId}/${index}.chunk`;
+    const chunk = await readSetupChunk(dependencies, chunkKey);
+    if (!chunk) throw agentXError("RUNTIME_UNAVAILABLE", "an owned E2E evidence chunk is missing");
+    chunks.push(chunk); chunkKeys.push(chunkKey);
+  }
+  const bytes = Buffer.concat(chunks);
+  if (bytes.byteLength !== Number(upload.totalBytes) || bytes.byteLength > transferLimit || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "assembled E2E evidence failed its bound or digest");
+  if (groupRunId !== undefined) {
+    const decoded = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+    const expectedBinding = groups[admittedGroupIndex];
+    const groupResult = decoded.groupRun as Record<string, unknown> | undefined;
+    if (decoded.schemaVersion !== "workflow-e2e-group-evidence/v1" || decoded.admissionSha256 !== admissionRef.admissionRef.sha256
+      || decoded.taskId !== admissionRef.taskId || decoded.operationId !== operation.id || decoded.operationFence !== operation.fence
+      || decoded.workflowRevision !== admissionRef.workflowRevision || decoded.candidateDigest !== admissionRef.candidateDigest
+      || canonicalJson(decoded.round) !== canonicalJson(admission.round) || expectedBinding?.runId !== groupRunId
+      || !groupResult || canonicalJson(groupResult.binding) !== canonicalJson(expectedBinding)
+      || canonicalJson(groupResult.group) !== canonicalJson(admission.plan?.groups?.[admittedGroupIndex])) {
+      throw agentXError("CALLBACK_FORBIDDEN", "E2E group evidence is outside its exact admitted run binding");
+    }
+    const groupRef = E2EWorkflowGroupEvidenceRefSchema.parse({ groupRunId,
+      evidenceRef: { key: `workflow-e2e-group-evidence/sha256/${body.sha256}.json`, sha256: body.sha256, byteLength: bytes.byteLength } });
+    const existingObject = await readStoredText(dependencies.s3, dependencies.artifactBucketName, groupRef.evidenceRef.key, transferLimit);
+    if (existingObject !== undefined && (Buffer.byteLength(existingObject) !== bytes.byteLength
+      || createHash("sha256").update(existingObject).digest("hex") !== body.sha256 || existingObject !== bytes.toString("utf8"))) {
+      throw agentXError("CALLBACK_FORBIDDEN", "content-addressed E2E group evidence conflicts with an existing object");
+    }
+    if (existingObject === undefined) await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName,
+      Key: groupRef.evidenceRef.key, Body: bytes, ContentType: "application/json", Metadata: { sha256: body.sha256, operation: operation.id, groupRunId }, IfNoneMatch: "*" }));
+    const storedGroupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, groupRef.evidenceRef.key, transferLimit);
+    if (storedGroupText === undefined || Buffer.byteLength(storedGroupText) !== bytes.byteLength
+      || createHash("sha256").update(storedGroupText).digest("hex") !== body.sha256 || storedGroupText !== bytes.toString("utf8")) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "stored E2E group evidence could not be read back exactly");
+    }
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: { TableName: dependencies.tableName, Key: key, UpdateExpression: "SET #status = :complete, groupEvidenceRef = :ref",
+        ConditionExpression: "#status = :open AND nextChunkIndex = chunkCount AND uploadId = :upload AND groupRunId = :run AND operationId = :operation AND fence = :fence AND admissionSha256 = :admission",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":complete": "COMPLETE", ":open": "OPEN", ":ref": groupRef,
+          ":upload": body.uploadId, ":run": groupRunId, ":operation": operation.id, ":fence": operation.fence, ":admission": admissionRef.admissionRef.sha256 } } },
+      { Update: { TableName: dependencies.tableName, Key: operationKey(operation.workspaceId, operation.id),
+        UpdateExpression: "SET workflowE2EGroupEvidenceRefs = list_append(if_not_exists(workflowE2EGroupEvidenceRefs, :emptyRefs), :refs), workflowE2EGroupRunIds = list_append(if_not_exists(workflowE2EGroupRunIds, :emptyIds), :runIds)",
+        ConditionExpression: "#status = :running AND fence = :fence AND workflowMode = :checks AND workflowE2EAdmission.admissionRef.sha256 = :admission AND (attribute_not_exists(workflowE2EGroupRunIds) OR NOT contains(workflowE2EGroupRunIds, :run))",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":emptyRefs": [], ":refs": [groupRef], ":emptyIds": [], ":runIds": [groupRunId],
+          ":run": groupRunId, ":running": "RUNNING", ":fence": operation.fence, ":checks": "CHECKS", ":admission": admissionRef.admissionRef.sha256 } } },
+    ] }));
+    for (const chunkKey of chunkKeys) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: chunkKey }));
+    return { key: groupRef.evidenceRef.key, sha256: groupRef.evidenceRef.sha256, groupRunId };
+  }
+  const evidenceRef = E2EWorkflowEvidenceRefSchema.parse({ key: `workflow-e2e-evidence/sha256/${body.sha256}.json`, sha256: body.sha256, byteLength: bytes.byteLength });
+  const decoded = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>;
+  if (decoded.schemaVersion !== "workflow-e2e-evidence/v1" || decoded.admissionSha256 !== admissionRef.admissionRef.sha256
+    || decoded.taskId !== admissionRef.taskId || decoded.operationId !== operation.id || decoded.operationFence !== operation.fence
+    || decoded.workflowRevision !== admissionRef.workflowRevision || decoded.candidateDigest !== admissionRef.candidateDigest) throw agentXError("CALLBACK_FORBIDDEN", "E2E evidence is outside its admitted CHECKS operation");
+  const aggregateGroups = decoded.groupRuns;
+  const currentOperation = await getItem<OperationRecord>(dependencies, operationKey(operation.workspaceId, operation.id));
+  const acceptedGroupRefs = currentOperation?.workflowE2EGroupEvidenceRefs ?? [];
+  const acceptedGroupIds = currentOperation?.workflowE2EGroupRunIds ?? [];
+  if (!Array.isArray(aggregateGroups) || aggregateGroups.length !== admissionRef.groupRunIds.length
+    || acceptedGroupRefs.length !== admissionRef.groupRunIds.length || acceptedGroupIds.length !== admissionRef.groupRunIds.length
+    || canonicalJson([...acceptedGroupIds].sort()) !== canonicalJson([...admissionRef.groupRunIds].sort())) {
+    throw agentXError("STALE_FENCE", "CHECKS aggregate is missing one or more separately accepted admitted group results");
+  }
+  const acceptedReferenceIds = acceptedGroupRefs.map((raw) => E2EWorkflowGroupEvidenceRefSchema.parse(raw).groupRunId);
+  if (new Set(acceptedReferenceIds).size !== admissionRef.groupRunIds.length
+    || canonicalJson([...acceptedReferenceIds].sort()) !== canonicalJson([...admissionRef.groupRunIds].sort())) {
+    throw agentXError("CALLBACK_FORBIDDEN", "accepted group evidence references do not cover the immutable admission exactly once");
+  }
+  const aggregateByRun = new Map(aggregateGroups.map((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw agentXError("CONFIG_INVALID", "CHECKS aggregate group result is malformed");
+    const run = raw as Record<string, unknown>;
+    const binding = run.binding as Record<string, unknown> | undefined;
+    if (typeof binding?.runId !== "string") throw agentXError("CONFIG_INVALID", "CHECKS aggregate group binding is malformed");
+    return [binding.runId, run] as const;
+  }));
+  if (aggregateByRun.size !== admissionRef.groupRunIds.length) throw agentXError("CALLBACK_FORBIDDEN", "CHECKS aggregate contains duplicate or foreign group runs");
+  for (const accepted of acceptedGroupRefs) {
+    const reference = E2EWorkflowGroupEvidenceRefSchema.parse(accepted);
+    if (!admissionRef.groupRunIds.includes(reference.groupRunId)
+      || reference.evidenceRef.key !== `workflow-e2e-group-evidence/sha256/${reference.evidenceRef.sha256}.json`) {
+      throw agentXError("CALLBACK_FORBIDDEN", "accepted group evidence reference is outside the immutable admission");
+    }
+    const groupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.evidenceRef.key,
+      Math.min(maxBytes, e2ePrivateTransferMaxBytes(groups[admissionRef.groupRunIds.indexOf(reference.groupRunId)]?.expectedCases?.length ?? 0, 1)));
+    if (groupText === undefined || Buffer.byteLength(groupText) !== reference.evidenceRef.byteLength
+      || createHash("sha256").update(groupText).digest("hex") !== reference.evidenceRef.sha256) throw agentXError("STALE_FENCE", "an accepted E2E group result is unavailable or changed");
+    const groupEnvelope = JSON.parse(groupText) as Record<string, unknown>;
+    const aggregateGroup = aggregateByRun.get(reference.groupRunId);
+    if (groupEnvelope.schemaVersion !== "workflow-e2e-group-evidence/v1" || groupEnvelope.admissionSha256 !== admissionRef.admissionRef.sha256
+      || groupEnvelope.taskId !== admissionRef.taskId || groupEnvelope.operationId !== operation.id || groupEnvelope.operationFence !== operation.fence
+      || groupEnvelope.workflowRevision !== admissionRef.workflowRevision || groupEnvelope.candidateDigest !== admissionRef.candidateDigest
+      || canonicalJson(groupEnvelope.round) !== canonicalJson(admission.round) || canonicalJson(groupEnvelope.groupRun) !== canonicalJson(aggregateGroup)) {
+      throw agentXError("CALLBACK_FORBIDDEN", "CHECKS aggregate differs from a separately accepted group result");
+    }
+  }
+  await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: evidenceRef.key, Body: bytes, ContentType: "application/json", Metadata: { sha256: body.sha256, operation: operation.id }, IfNoneMatch: "*" }));
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Update: { TableName: dependencies.tableName, Key: key, UpdateExpression: "SET #status = :complete, evidenceRef = :ref", ConditionExpression: "#status = :open AND nextChunkIndex = chunkCount AND uploadId = :upload AND operationId = :operation AND fence = :fence AND admissionSha256 = :admission",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":complete": "COMPLETE", ":open": "OPEN", ":ref": evidenceRef, ":upload": body.uploadId, ":operation": operation.id, ":fence": operation.fence, ":admission": admissionRef.admissionRef.sha256 } } },
+    { Update: { TableName: dependencies.tableName, Key: operationKey(operation.workspaceId, operation.id), UpdateExpression: "SET workflowE2EEvidenceRef = :ref",
+      ConditionExpression: "#status = :running AND fence = :fence AND workflowMode = :checks AND attribute_not_exists(workflowE2EEvidenceRef)",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":ref": evidenceRef, ":running": "RUNNING", ":fence": operation.fence, ":checks": "CHECKS" } } },
+  ] }));
+  for (const chunkKey of chunkKeys) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: chunkKey }));
+  return { key: evidenceRef.key, sha256: evidenceRef.sha256 };
+}
+
+function workflowCandidateSourceExportSchema() {
+  return z.object({ schemaVersion: z.literal("workflow-candidate-source/v1"), candidate: CandidateManifestSchema,
+    repositories: z.array(z.object({ repositoryId: z.string().min(1).max(200), commitSha: z.string().regex(/^[a-f0-9]{40}$/), treeSha: z.string().regex(/^[a-f0-9]{40}$/),
+      baseCommitSha: z.string().regex(/^[a-f0-9]{40}$/).optional(), treeComplete: z.literal(true), treePaths: z.array(z.string().min(1).max(1024)).max(100_000),
+      sources: z.array(z.object({ path: z.string().min(1).max(1024), sha256: z.string().regex(/^[a-f0-9]{64}$/), bytesBase64: z.string().max(700_000), kind: z.literal("blob") }).strict()).max(512),
+    }).strict()).max(32),
+  }).strict();
+}
+
+async function handleProjectSetupExecutionRead(dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string, rawOffset: string | null): Promise<unknown> {
+  const authorized = await requireProjectSetupCapability(dependencies, request, setupExecutionId, "read-execution");
+  const offset = rawOffset === null ? 0 : Number(rawOffset);
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset % SETUP_ARTIFACT_CHUNK_BYTES !== 0 || offset >= authorized.execution.executionRef.byteLength) throw agentXError("CONFIG_INVALID", "project setup source chunk offset is invalid");
+  const deadlineAt = authorized.execution.deadlineAt;
+  if (Date.parse(deadlineAt) <= Date.now()) throw agentXError("STALE_FENCE", "project setup source read is past its stored deadline");
+  const lastByte = Math.min(offset + SETUP_ARTIFACT_CHUNK_BYTES, authorized.execution.executionRef.byteLength) - 1;
+  const response = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: authorized.execution.executionRef.key,
+    Range: `bytes=${offset}-${lastByte}` }) as never) as { Body?: { transformToByteArray(): Promise<Uint8Array> }; ContentRange?: string; ContentLength?: number };
+  if (!response.Body || typeof response.ContentRange !== "string") throw agentXError("RUNTIME_UNAVAILABLE", "approved project setup source object is unreadable");
+  const range = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(response.ContentRange);
+  if (!range || Number(range[1]) !== offset || Number(range[2]) !== lastByte || Number(range[3]) !== authorized.execution.executionRef.byteLength) throw agentXError("RUNTIME_UNAVAILABLE", "approved project setup source range is inconsistent");
+  const totalBytes = Number(range[3]);
+  const bytes = await response.Body.transformToByteArray();
+  if (totalBytes > MAX_SETUP_PROPOSAL_BYTES || bytes.byteLength !== lastByte - offset + 1 || bytes.byteLength > SETUP_ARTIFACT_CHUNK_BYTES) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "approved project setup source object exceeds its bounded range");
+  }
+  return { setupExecutionId, operationId: authorized.claims.operationId, fence: authorized.claims.fence, executionRef: authorized.execution.executionRef,
+    offset, totalBytes, deadlineAt, chunkBase64: Buffer.from(bytes).toString("base64") };
+}
+
+async function handleProjectSetupEvidenceInit(dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string): Promise<unknown> {
+  const authorized = await requireProjectSetupCapability(dependencies, request, setupExecutionId, "write-evidence");
+  const body = z.object({ schemaVersion: z.literal("project-setup-evidence-upload/v1"), totalBytes: z.number().int().positive().max(MAX_SETUP_EVIDENCE_BYTES),
+    chunkCount: z.number().int().positive().max(Math.ceil(MAX_SETUP_EVIDENCE_BYTES / SETUP_ARTIFACT_CHUNK_BYTES)), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(parseBody(request.body));
+  const expectedChunkCount = Math.ceil(body.totalBytes / SETUP_ARTIFACT_CHUNK_BYTES);
+  if (body.chunkCount !== expectedChunkCount || body.totalBytes > authorized.execution.evidenceByteLimit) throw agentXError("CONFIG_INVALID", "setup evidence exceeds its admitted constituent ceiling or chunk count");
+  const deadlineAt = authorized.execution.deadlineAt;
+  if (Date.parse(deadlineAt) <= Date.now()) throw agentXError("STALE_FENCE", "project setup evidence upload is past its stored deadline");
+  const uploadKey = { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `EVIDENCE_UPLOAD#${authorized.claims.operationId}` };
+  const existing = await getItem<Record<string, unknown>>(dependencies, uploadKey);
+  const existingSession = projectSetupDomainRecord(existing, uploadKey, "PROJECT_SETUP_EVIDENCE_UPLOAD");
+  if (existing) {
+    if (existingSession.status !== "OPEN" || existingSession.setupExecutionId !== setupExecutionId || existingSession.subjectId !== authorized.execution.subjectId
+      || existingSession.operationId !== authorized.claims.operationId || existingSession.fence !== authorized.claims.fence
+      || existingSession.totalBytes !== body.totalBytes || existingSession.chunkCount !== body.chunkCount || existingSession.sha256 !== body.sha256
+      || existingSession.evidenceByteLimit !== authorized.execution.evidenceByteLimit
+      || typeof existingSession.uploadId !== "string") throw agentXError("CALLBACK_FORBIDDEN", "project setup operation already owns a different evidence upload");
+    return { setupExecutionId, operationId: authorized.claims.operationId, fence: authorized.claims.fence, uploadId: existingSession.uploadId,
+      totalBytes: body.totalBytes, chunkCount: body.chunkCount, chunkBytes: SETUP_ARTIFACT_CHUNK_BYTES, deadlineAt: existingSession.deadlineAt };
+  }
+  const uploadId = randomUUID();
+  const item = { ...uploadKey, entityType: "PROJECT_SETUP_EVIDENCE_UPLOAD",
+    schemaVersion: 1, setupExecutionId, subjectId: authorized.execution.subjectId, operationId: authorized.claims.operationId, uploadId, fence: authorized.claims.fence,
+    approvalRevision: authorized.execution.approvalRevision, transportCorrelationId: authorized.execution.transportCorrelationId,
+    totalBytes: body.totalBytes, evidenceByteLimit: authorized.execution.evidenceByteLimit, chunkCount: body.chunkCount, sha256: body.sha256, nextChunkIndex: 0, deadlineAt, status: "OPEN", createdAt: new Date().toISOString() };
+  await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: item, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
+  return { setupExecutionId, operationId: authorized.claims.operationId, fence: authorized.claims.fence, uploadId, totalBytes: body.totalBytes,
+    chunkCount: body.chunkCount, chunkBytes: SETUP_ARTIFACT_CHUNK_BYTES, deadlineAt };
+}
+
+async function handleProjectSetupEvidenceChunk(dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string): Promise<unknown> {
+  const authorized = await requireProjectSetupCapability(dependencies, request, setupExecutionId, "write-evidence");
+  const body = z.object({ schemaVersion: z.literal("project-setup-evidence-chunk/v1"), uploadId: z.string().uuid(), index: z.number().int().nonnegative(),
+    bytesBase64: z.string().min(1).max(Math.ceil(SETUP_ARTIFACT_CHUNK_BYTES * 4 / 3) + 8), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(parseBody(request.body));
+  const key = { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `EVIDENCE_UPLOAD#${authorized.claims.operationId}` };
+  const upload = await getItem<Record<string, unknown>>(dependencies, key);
+  const session = projectSetupDomainRecord(upload, key, "PROJECT_SETUP_EVIDENCE_UPLOAD");
+  const deadlineAt = typeof session.deadlineAt === "string" ? session.deadlineAt : "";
+  if (session.status !== "OPEN" || session.uploadId !== body.uploadId || session.setupExecutionId !== setupExecutionId || session.subjectId !== authorized.execution.subjectId
+    || session.operationId !== authorized.claims.operationId || session.fence !== authorized.claims.fence || session.approvalRevision !== authorized.execution.approvalRevision
+    || session.transportCorrelationId !== authorized.execution.transportCorrelationId || Date.parse(deadlineAt) <= Date.now()) throw agentXError("STALE_FENCE", "setup evidence upload is not current");
+  const totalBytes = Number(session.totalBytes);
+  const chunkCount = Number(session.chunkCount);
+  if (!Number.isSafeInteger(body.index) || body.index >= chunkCount || totalBytes > authorized.execution.evidenceByteLimit
+    || session.evidenceByteLimit !== authorized.execution.evidenceByteLimit || chunkCount !== Math.ceil(totalBytes / SETUP_ARTIFACT_CHUNK_BYTES)) throw agentXError("CONFIG_INVALID", "setup evidence chunk index or admitted total is outside its upload");
+  const bytes = Buffer.from(body.bytesBase64, "base64");
+  const expectedLength = body.index === chunkCount - 1 ? totalBytes - body.index * SETUP_ARTIFACT_CHUNK_BYTES : SETUP_ARTIFACT_CHUNK_BYTES;
+  if (bytes.byteLength !== expectedLength || bytes.toString("base64") !== body.bytesBase64 || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "setup evidence chunk length or digest is invalid");
+  const nextChunkIndex = Number(session.nextChunkIndex);
+  if (body.index > nextChunkIndex) throw agentXError("CONFIG_INVALID", "setup evidence chunks must arrive in order");
+  const objectKey = `project-setup-staging/${setupExecutionId}/${authorized.claims.operationId}/${body.uploadId}/${body.index}.chunk`;
+  if (body.index < nextChunkIndex) {
+    const existing = await readSetupChunk(dependencies, objectKey);
+    if (!existing || !existing.equals(bytes)) throw agentXError("CALLBACK_FORBIDDEN", "replayed setup evidence chunk differs from the owned chunk");
+    return { accepted: true, index: body.index, duplicate: true };
+  }
+  try {
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: objectKey, Body: bytes,
+      ContentType: "application/octet-stream", Metadata: { sha256: body.sha256, upload: body.uploadId, index: String(body.index) }, IfNoneMatch: "*" }));
+  } catch (error) {
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (status !== 412 && (error as { name?: unknown } | undefined)?.name !== "PreconditionFailed") throw error;
+    const existing = await readSetupChunk(dependencies, objectKey);
+    if (!existing || !existing.equals(bytes)) throw agentXError("CALLBACK_FORBIDDEN", "setup evidence chunk key is already occupied by different bytes");
+  }
+  await dependencies.documentClient.send(new UpdateCommand({ TableName: dependencies.tableName, Key: key,
+    UpdateExpression: "SET nextChunkIndex = :next", ConditionExpression: "#status = :open AND nextChunkIndex = :index AND fence = :fence AND operationId = :operationId",
+    ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":next": body.index + 1, ":open": "OPEN", ":index": body.index,
+      ":fence": authorized.claims.fence, ":operationId": authorized.claims.operationId } }));
+  return { accepted: true, index: body.index, duplicate: false };
+}
+
+async function handleProjectSetupEvidenceFinalize(dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string): Promise<unknown> {
+  const authorized = await requireProjectSetupCapability(dependencies, request, setupExecutionId, "write-evidence");
+  const body = z.object({ schemaVersion: z.literal("project-setup-evidence-finalize/v1"), uploadId: z.string().uuid(), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().parse(parseBody(request.body));
+  const key = { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `EVIDENCE_UPLOAD#${authorized.claims.operationId}` };
+  const raw = await getItem<Record<string, unknown>>(dependencies, key);
+  const session = projectSetupDomainRecord(raw, key, "PROJECT_SETUP_EVIDENCE_UPLOAD");
+  if (session.status === "COMPLETE" && session.uploadId === body.uploadId && session.sha256 === body.sha256 && session.operationId === authorized.claims.operationId
+    && session.fence === authorized.claims.fence && session.evidenceKey === `project-setup-evidence/sha256/${body.sha256}.json`) {
+    return { evidenceRef: { key: session.evidenceKey, sha256: body.sha256 } };
+  }
+  if (session.status !== "OPEN" || session.uploadId !== body.uploadId || session.setupExecutionId !== setupExecutionId || session.subjectId !== authorized.execution.subjectId
+    || session.operationId !== authorized.claims.operationId || session.fence !== authorized.claims.fence || session.sha256 !== body.sha256
+    || Number(session.nextChunkIndex) !== Number(session.chunkCount) || Number(session.totalBytes) > authorized.execution.evidenceByteLimit
+    || session.evidenceByteLimit !== authorized.execution.evidenceByteLimit || Date.parse(String(session.deadlineAt)) <= Date.now()) throw agentXError("STALE_FENCE", "setup evidence upload is incomplete or no longer current");
+  const chunks: Buffer[] = [];
+  const chunkKeys: string[] = [];
+  for (let index = 0; index < Number(session.chunkCount); index += 1) {
+    const chunkKey = `project-setup-staging/${setupExecutionId}/${authorized.claims.operationId}/${body.uploadId}/${index}.chunk`;
+    const chunk = await readSetupChunk(dependencies, chunkKey);
+    if (!chunk) throw agentXError("RUNTIME_UNAVAILABLE", "an owned setup evidence chunk is missing");
+    chunks.push(chunk);
+    chunkKeys.push(chunkKey);
+  }
+  const bytes = Buffer.concat(chunks);
+  if (bytes.byteLength !== Number(session.totalBytes) || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "assembled setup evidence does not match its declared bytes or digest");
+  let evidence: Record<string, unknown>;
+  try {
+    const decoded: unknown = JSON.parse(bytes.toString("utf8"));
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) throw new Error("invalid evidence");
+    evidence = decoded as Record<string, unknown>;
+  } catch { throw agentXError("CONFIG_INVALID", "setup evidence object is malformed"); }
+  if (evidence.schemaVersion !== "project-setup-smoke-evidence/v1" || evidence.setupExecutionId !== setupExecutionId
+    || evidence.subjectId !== authorized.execution.subjectId || evidence.transportCorrelationId !== authorized.execution.transportCorrelationId
+    || evidence.executionRefSha256 !== authorized.execution.executionRef.sha256 || evidence.candidateDigest !== authorized.execution.candidateDigest) {
+    throw agentXError("CALLBACK_FORBIDDEN", "setup evidence is outside its stored project execution");
+  }
+  const evidenceKey = `project-setup-evidence/sha256/${body.sha256}.json`;
+  try {
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: evidenceKey, Body: bytes, ContentType: "application/json",
+      Metadata: { sha256: body.sha256, domain: "project-setup-smoke-evidence-v1" }, IfNoneMatch: "*" }));
+  } catch (error) {
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (status !== 412 && (error as { name?: unknown } | undefined)?.name !== "PreconditionFailed") throw error;
+    if (await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceKey, MAX_SETUP_EVIDENCE_BYTES) !== bytes.toString("utf8")) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "existing setup evidence object does not match its content address");
+    }
+  }
+  await dependencies.documentClient.send(new UpdateCommand({ TableName: dependencies.tableName, Key: { pk: `PROJECT_SETUP#${setupExecutionId}`, sk: `EVIDENCE_UPLOAD#${authorized.claims.operationId}` },
+    UpdateExpression: "SET #status = :complete, evidenceKey = :evidenceKey, completedAt = :completedAt",
+    ConditionExpression: "#status = :open AND nextChunkIndex = chunkCount AND operationId = :operationId AND fence = :fence",
+    ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":complete": "COMPLETE", ":open": "OPEN", ":evidenceKey": evidenceKey,
+      ":completedAt": new Date().toISOString(), ":operationId": authorized.claims.operationId, ":fence": authorized.claims.fence } }));
+  for (const chunkKey of chunkKeys) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: chunkKey }));
+  return { evidenceRef: { key: evidenceKey, sha256: body.sha256 } };
+}
+
+async function readSetupChunk(dependencies: AwsBrokerDependencies, key: string): Promise<Buffer | undefined> {
+  try {
+    const response = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: key })) as { Body?: { transformToByteArray(): Promise<Uint8Array> } };
+    if (!response.Body) return undefined;
+    const bytes = Buffer.from(await response.Body.transformToByteArray());
+    return bytes.byteLength > 0 && bytes.byteLength <= SETUP_ARTIFACT_CHUNK_BYTES ? bytes : undefined;
+  } catch (error) {
+    const name = error && typeof error === "object" ? (error as { name?: unknown }).name : undefined;
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (name === "NoSuchKey" || status === 404) return undefined;
+    throw error;
+  }
+}
+
+async function requireProjectSetupCapability(
+  dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest, setupExecutionId: string, action: "read-execution" | "write-evidence" | "result",
+): Promise<{ execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>; claims: NonNullable<ReturnType<typeof verifyProjectSetupCapability>>;
+  runtime: ReturnType<typeof ProjectSetupRuntimeRecordSchema.parse>; session: ReturnType<typeof ProjectSetupSessionSchema.parse> }> {
+  const token = request.headers["x-agentx-callback-capability"];
+  const claims = token ? verifyProjectSetupCapability(dependencies.callbackSigningKey, token) : undefined;
+  if (!claims || claims.setupExecutionId !== setupExecutionId || !claims.actions.includes(action)) throw agentXError("CALLBACK_FORBIDDEN", "setup capability does not authorize this artifact action");
+  const [executionItem, operationItem, sessionItem] = await Promise.all([
+    getItem<Record<string, unknown>>(dependencies, projectSetupExecutionKey(setupExecutionId)),
+    getItem<Record<string, unknown>>(dependencies, projectSetupOperationKey(setupExecutionId, claims.operationId)),
+    getItem<Record<string, unknown>>(dependencies, projectSetupSessionKey(setupExecutionId)),
+  ]);
+  const execution = ProjectSetupExecutionSchema.safeParse(projectSetupDomainRecord(executionItem, projectSetupExecutionKey(setupExecutionId), "PROJECT_SETUP_EXECUTION"));
+  const operation = ProjectSetupOperationSchema.safeParse(projectSetupDomainRecord(operationItem, projectSetupOperationKey(setupExecutionId, claims.operationId), "PROJECT_SETUP_OPERATION"));
+  const session = ProjectSetupSessionSchema.safeParse(projectSetupDomainRecord(sessionItem, projectSetupSessionKey(setupExecutionId), "PROJECT_SETUP_SESSION"));
+  if (!execution.success || !operation.success || !session.success || execution.data.state !== "DISPATCHING"
+    || operation.data.status !== "DISPATCHING" && operation.data.status !== "DELIVERED"
+    || execution.data.operationId !== claims.operationId || execution.data.subjectId !== claims.subjectId
+    || execution.data.transportCorrelationId !== claims.transportCorrelationId || execution.data.approvalRevision !== claims.approvalRevision
+    || execution.data.fence !== claims.fence || operation.data.fence !== claims.fence || session.data.state !== "READY"
+    || session.data.generation !== execution.data.runtimeGeneration || session.data.bindingDigest !== execution.data.bindingDigest) {
+    throw agentXError("STALE_FENCE", "setup artifact operation is no longer current");
+  }
+  if (!(await setupAdmissionMatchesExecution(dependencies, execution.data))) {
+    throw agentXError("STALE_FENCE", "immutable setup admission no longer matches its stored execution identity");
+  }
+  const project = await requireProject(dependencies, execution.data.projectName, execution.data.projectRevision);
+  if (project.runtimeBinding.deploymentMode !== "ec2-ebs") throw agentXError("RUNTIME_UNAVAILABLE", "project setup requires the configured EC2 setup runtime");
+  const approval = await getItem<Record<string, unknown>>(dependencies, { pk: `PROJECT_SETUP#${execution.data.projectName}`, sk: `PROPOSAL#${execution.data.proposalSha256}` });
+  if (project.registeredBy !== execution.data.ownerKey || project.setupApproval?.decision !== "approve"
+    || project.setupApproval.proposalSha256 !== execution.data.proposalSha256 || !approval || approval.ownerKey !== execution.data.ownerKey
+    || approval.decision !== "approve" || approval.proposalRef !== execution.data.proposalRef || approval.policyDigest !== execution.data.policyDigest) {
+    throw agentXError("CALLBACK_FORBIDDEN", "current project setup approval is no longer valid");
+  }
+  const member = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${execution.data.ownerKey}`, sk: `PROJECT#${execution.data.projectName}` });
+  const catalogId = dependencies.projectSetupRuntimeCatalogId;
+  if (member?.role !== "administrator" || !catalogId) throw agentXError("CALLBACK_FORBIDDEN", "project setup owner authority or runtime catalog is unavailable");
+  const catalogItem = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName,
+    Key: projectSetupRuntimeKey(catalogId, execution.data.bindingDigest), ConsistentRead: true }));
+  const runtimeKey = projectSetupRuntimeKey(catalogId, execution.data.bindingDigest);
+  const runtime = ProjectSetupRuntimeRecordSchema.safeParse(projectSetupRuntimeRecord(catalogItem.Item, runtimeKey));
+  if (!runtime.success || runtime.data.runtimeCatalogId !== execution.data.runtimeCatalogId
+    || runtime.data.catalogRevision !== execution.data.runtimeCatalogRevision
+    || runtime.data.transportCorrelationId !== execution.data.transportCorrelationId || runtime.data.generation !== execution.data.runtimeGeneration
+    || !admitProjectSetupRuntime(runtime.data, { runtimeCatalogId: catalogId, binding: project.runtimeBinding, scope: "source-interface", now: Date.now() })) {
+    throw agentXError("STALE_FENCE", "current configured setup runtime is no longer qualified");
+  }
+  return { execution: execution.data, claims, runtime: runtime.data, session: session.data };
+}
+
+async function setupAdmissionMatchesExecution(
+  dependencies: AwsBrokerDependencies,
+  execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>,
+): Promise<boolean> {
+  const text = await readStoredText(dependencies.s3, dependencies.artifactBucketName, execution.executionRef.key, MAX_SETUP_PROPOSAL_BYTES);
+  if (text === undefined || Buffer.byteLength(text, "utf8") !== execution.executionRef.byteLength
+    || createHash("sha256").update(text, "utf8").digest("hex") !== execution.executionRef.sha256) return false;
+  let admission: unknown;
+  try { admission = JSON.parse(text); } catch { return false; }
+  if (!admission || typeof admission !== "object" || Array.isArray(admission)) return false;
+  const value = admission as Record<string, unknown>;
+  const runtime = value.runtime && typeof value.runtime === "object" && !Array.isArray(value.runtime)
+    ? value.runtime as Record<string, unknown> : undefined;
+  return value.domain === "project-setup-source-interface/v1" && value.setupExecutionId === execution.setupExecutionId
+    && value.subjectId === execution.subjectId && value.transportCorrelationId === execution.transportCorrelationId
+    && value.candidateDigest === execution.candidateDigest && runtime?.runtimeCatalogId === execution.runtimeCatalogId
+    && runtime.catalogRevision === execution.runtimeCatalogRevision && runtime.bindingDigest === execution.bindingDigest
+    && runtime.generation === execution.runtimeGeneration && runtime.transportCorrelationId === execution.transportCorrelationId;
+}
+
+async function handleProjectSetupCallback(
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+  setupExecutionId: string,
+  operationId: string,
+): Promise<{ accepted: true; parked?: true; qualification?: "UNKNOWN" }> {
+  const token = request.headers["x-agentx-callback-capability"];
+  const claims = token ? verifyProjectSetupCapability(dependencies.callbackSigningKey, token) : undefined;
+  if (!claims || claims.setupExecutionId !== setupExecutionId || claims.operationId !== operationId) {
+    throw agentXError("CALLBACK_FORBIDDEN", "callback capability is outside the project setup result scope");
+  }
+  const body = z.object({
+    domain: z.literal("project-setup-source-interface/v1"), setupExecutionId: z.string().uuid(), operationId: z.string().uuid(),
+    candidateDigest: z.string().regex(/^[a-f0-9]{64}$/), processStatus: z.enum(["SUCCEEDED", "FAILED", "UNKNOWN"]),
+    qualification: z.enum(["PASS", "FAILED", "UNKNOWN"]), cleanupConfirmed: z.boolean(),
+    evidenceRef: z.object({ key: z.string().min(1).max(512), sha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
+  }).strict().parse(parseBody(request.body));
+  const authorized = await requireProjectSetupCapability(dependencies, request, setupExecutionId, "result").catch(async (error: unknown) => {
+    if (!(error instanceof AgentXError) || !["CALLBACK_FORBIDDEN", "STALE_FENCE", "RUNTIME_UNAVAILABLE"].includes(error.code)) throw error;
+    const parked = await parkProjectSetupResultAfterAuthorityChange(dependencies, setupExecutionId, operationId, claims, {
+      setupExecutionId: body.setupExecutionId, operationId: body.operationId, candidateDigest: body.candidateDigest,
+      processStatus: body.processStatus, qualification: body.qualification, cleanupConfirmed: body.cleanupConfirmed,
+      ...(body.evidenceRef ? { evidenceRef: body.evidenceRef } : {}),
+    });
+    if (!parked) throw error;
+    return undefined;
+  });
+  if (!authorized) return { accepted: true, parked: true, qualification: "UNKNOWN" };
+  const current = authorized.execution;
+  if (body.setupExecutionId !== current.setupExecutionId || body.operationId !== current.operationId) {
+    throw agentXError("CALLBACK_FORBIDDEN", "project setup result does not match its immutable source execution");
+  }
+  if (body.candidateDigest === "0".repeat(64)) {
+    if ((body.processStatus !== "FAILED" && body.processStatus !== "UNKNOWN") || body.qualification !== "UNKNOWN"
+      || body.cleanupConfirmed !== false || body.evidenceRef !== undefined) {
+      throw agentXError("CALLBACK_FORBIDDEN", "an unbound worker failure may only report an unknown, unqualified terminal result");
+    }
+    const now = new Date().toISOString();
+    const parkedResult = { domain: body.domain, candidateDigest: current.candidateDigest, processStatus: "UNKNOWN", qualification: "UNKNOWN",
+      cleanupConfirmed: false, reportedCandidateDigest: body.candidateDigest, reportedProcessStatus: body.processStatus, reportedQualification: body.qualification,
+      reportedCleanupConfirmed: body.cleanupConfirmed, parkReason: "worker-failure-without-candidate" };
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session),
+      { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
+        UpdateExpression: "SET #state = :parked, updatedAt = :now, completedAt = :now, #result = :result",
+        ConditionExpression: "#state = :dispatching AND operationId = :operationId AND subjectId = :subjectId AND fence = :fence AND approvalRevision = :approvalRevision AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#state": "state", "#result": "result" }, ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING",
+          ":now": now, ":result": parkedResult, ":operationId": operationId, ":subjectId": current.subjectId, ":fence": current.fence,
+          ":approvalRevision": current.approvalRevision, ":correlation": current.transportCorrelationId } } },
+      { Update: { TableName: dependencies.tableName, Key: projectSetupOperationKey(setupExecutionId, operationId),
+        UpdateExpression: "SET #status = :parked, updatedAt = :now, #result = :result",
+        ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#status": "status", "#result": "result" }, ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING",
+          ":delivered": "DELIVERED", ":now": now, ":result": parkedResult, ":setupExecutionId": setupExecutionId,
+          ":operationId": operationId, ":fence": current.fence, ":correlation": current.transportCorrelationId } } },
+    ] }));
+    return { accepted: true, parked: true, qualification: "UNKNOWN" };
+  }
+  if (body.candidateDigest !== current.candidateDigest) {
+    throw agentXError("CALLBACK_FORBIDDEN", "project setup result does not match its immutable source execution");
+  }
+  const verified = body.evidenceRef ? await verifyProjectSetupSmokeEvidence(dependencies, current, body.evidenceRef, authorized.runtime.runnerEnvironment, authorized.runtime.runnerToolchain) : undefined;
+  const processStatus = verified?.processStatus ?? "UNKNOWN";
+  const qualification = verified?.qualification ?? "UNKNOWN";
+  const cleanupConfirmed = verified?.cleanupConfirmed ?? false;
+  const terminalState = processStatus === "SUCCEEDED" ? "SUCCEEDED" : processStatus === "FAILED" ? "FAILED" : "PARKED";
+  const persistedResult = { domain: body.domain, candidateDigest: current.candidateDigest, processStatus,
+    qualification, cleanupConfirmed, ...(verified?.evidenceRef ? { evidenceRef: verified.evidenceRef } : {}) };
+  const terminalAt = new Date().toISOString();
+  if (Date.parse(authorized.runtime.qualifiedAt) > Date.parse(terminalAt) || Date.parse(authorized.runtime.expiresAt) <= Date.parse(terminalAt)) {
+    const parked = await parkProjectSetupResultAfterAuthorityChange(dependencies, setupExecutionId, operationId, claims, {
+      setupExecutionId: body.setupExecutionId, operationId: body.operationId, candidateDigest: body.candidateDigest,
+      processStatus, qualification, cleanupConfirmed, ...(verified?.evidenceRef ? { evidenceRef: verified.evidenceRef } : {}),
+    });
+    if (parked) return { accepted: true, parked: true, qualification: "UNKNOWN" };
+    throw agentXError("STALE_FENCE", "qualified setup runtime expired before terminal persistence");
+  }
+  const terminalItems = [
+    ...projectSetupTerminalAuthorityChecks(dependencies.tableName, current, authorized.runtime, authorized.session),
+    { Update: { TableName: dependencies.tableName, Key: projectSetupExecutionKey(setupExecutionId),
+      UpdateExpression: "SET #state = :state, completedAt = :now, #result = :result",
+      ConditionExpression: "#state = :dispatching AND operationId = :operationId AND fence = :fence",
+      ExpressionAttributeNames: { "#state": "state", "#result": "result" },
+      ExpressionAttributeValues: { ":state": terminalState, ":now": terminalAt, ":result": persistedResult,
+        ":dispatching": "DISPATCHING", ":operationId": operationId, ":fence": claims.fence } } },
+    { Update: { TableName: dependencies.tableName, Key: projectSetupOperationKey(setupExecutionId, operationId),
+      UpdateExpression: "SET #status = :status, updatedAt = :now, #result = :result",
+      ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND fence = :fence",
+      ExpressionAttributeNames: { "#status": "status", "#result": "result" },
+      ExpressionAttributeValues: { ":status": terminalState, ":now": terminalAt, ":result": persistedResult,
+        ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":fence": claims.fence } } },
+  ];
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: terminalItems }));
+  } catch (error) {
+    const cancellationReasons = error && typeof error === "object"
+      ? (error as { CancellationReasons?: Array<{ Code?: unknown }> }).CancellationReasons : undefined;
+    const authorityConditionFailed = error instanceof Error && error.name === "TransactionCanceledException"
+      && cancellationReasons?.slice(0, 5).some((reason) => reason.Code === "ConditionalCheckFailed");
+    if (!authorityConditionFailed) throw error;
+    const parked = await parkProjectSetupResultAfterAuthorityChange(dependencies, setupExecutionId, operationId, claims, {
+      setupExecutionId: body.setupExecutionId, operationId: body.operationId, candidateDigest: body.candidateDigest,
+      processStatus, qualification, cleanupConfirmed, ...(verified?.evidenceRef ? { evidenceRef: verified.evidenceRef } : {}),
+    });
+    if (!parked) throw error;
+    return { accepted: true, parked: true, qualification: "UNKNOWN" };
+  }
+  return { accepted: true };
+}
+
+async function parkProjectSetupResultAfterAuthorityChange(
+  dependencies: AwsBrokerDependencies,
+  setupExecutionId: string,
+  operationId: string,
+  claims: NonNullable<ReturnType<typeof verifyProjectSetupCapability>>,
+  body: { setupExecutionId: string; operationId: string; candidateDigest: string; processStatus: "SUCCEEDED" | "FAILED" | "UNKNOWN";
+    qualification: "PASS" | "FAILED" | "UNKNOWN"; cleanupConfirmed: boolean; evidenceRef?: { key: string; sha256: string } },
+): Promise<boolean> {
+  const executionKey = projectSetupExecutionKey(setupExecutionId);
+  const operationKey = projectSetupOperationKey(setupExecutionId, operationId);
+  const [executionItem, operationItem] = await Promise.all([
+    getItem<Record<string, unknown>>(dependencies, executionKey), getItem<Record<string, unknown>>(dependencies, operationKey),
+  ]);
+  const execution = ProjectSetupExecutionSchema.safeParse(projectSetupDomainRecord(executionItem, executionKey, "PROJECT_SETUP_EXECUTION"));
+  const operation = ProjectSetupOperationSchema.safeParse(projectSetupDomainRecord(operationItem, operationKey, "PROJECT_SETUP_OPERATION"));
+  if (!execution.success || !operation.success || execution.data.state !== "DISPATCHING"
+    || !["DISPATCHING", "DELIVERED"].includes(operation.data.status)
+    || claims.setupExecutionId !== setupExecutionId || claims.operationId !== operationId || claims.actions.includes("result") === false
+    || execution.data.operationId !== operationId || execution.data.subjectId !== claims.subjectId || execution.data.fence !== claims.fence
+    || execution.data.transportCorrelationId !== claims.transportCorrelationId || execution.data.approvalRevision !== claims.approvalRevision
+    || operation.data.fence !== claims.fence || body.setupExecutionId !== setupExecutionId || body.operationId !== operationId
+    || body.candidateDigest !== execution.data.candidateDigest) return false;
+  const now = new Date().toISOString();
+  const parkedResult = { domain: "project-setup-source-interface/v1", candidateDigest: execution.data.candidateDigest,
+    processStatus: "UNKNOWN", qualification: "UNKNOWN", cleanupConfirmed: false,
+    reportedProcessStatus: body.processStatus, reportedQualification: body.qualification, reportedCleanupConfirmed: body.cleanupConfirmed,
+    ...(body.evidenceRef ? { unqualifiedEvidenceRef: body.evidenceRef } : {}), parkReason: "current-setup-authority-changed" };
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: { TableName: dependencies.tableName, Key: executionKey,
+        UpdateExpression: "SET #state = :parked, updatedAt = :now, completedAt = :now, #result = :result",
+        ConditionExpression: "#state = :dispatching AND operationId = :operationId AND subjectId = :subjectId AND fence = :fence AND approvalRevision = :approvalRevision AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#state": "state", "#result": "result" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING", ":now": now, ":result": parkedResult,
+          ":operationId": operationId, ":subjectId": claims.subjectId, ":fence": claims.fence, ":approvalRevision": claims.approvalRevision,
+          ":correlation": claims.transportCorrelationId } } },
+      { Update: { TableName: dependencies.tableName, Key: operationKey,
+        UpdateExpression: "SET #status = :parked, updatedAt = :now, #result = :result",
+        ConditionExpression: "(#status = :dispatching OR #status = :delivered) AND setupExecutionId = :setupExecutionId AND operationId = :operationId AND fence = :fence AND transportCorrelationId = :correlation",
+        ExpressionAttributeNames: { "#status": "status", "#result": "result" },
+        ExpressionAttributeValues: { ":parked": "PARKED", ":dispatching": "DISPATCHING", ":delivered": "DELIVERED", ":now": now,
+          ":result": parkedResult, ":setupExecutionId": setupExecutionId, ":operationId": operationId, ":fence": claims.fence,
+          ":correlation": claims.transportCorrelationId } } },
+    ] }));
+    return true;
+  } catch {
+    const [latestExecution, latestOperation] = await Promise.all([
+      getItem<Record<string, unknown>>(dependencies, executionKey), getItem<Record<string, unknown>>(dependencies, operationKey),
+    ]);
+    const latestExec = ProjectSetupExecutionSchema.safeParse(projectSetupDomainRecord(latestExecution, executionKey, "PROJECT_SETUP_EXECUTION"));
+    const latestOp = ProjectSetupOperationSchema.safeParse(projectSetupDomainRecord(latestOperation, operationKey, "PROJECT_SETUP_OPERATION"));
+    return latestExec.success && latestOp.success && latestExec.data.state === "PARKED" && latestOp.data.status === "PARKED"
+      && latestExec.data.operationId === operationId && latestExec.data.fence === claims.fence;
+  }
+}
+
+async function verifyProjectSetupSmokeEvidence(
+  dependencies: AwsBrokerDependencies,
+  execution: ReturnType<typeof ProjectSetupExecutionSchema.parse>,
+  reference: { key: string; sha256: string },
+  approvedRunnerEnvironmentInput: unknown,
+  approvedRunnerToolchainInput: unknown,
+): Promise<{ evidenceRef: { key: string; sha256: string }; processStatus: "SUCCEEDED" | "FAILED" | "UNKNOWN"; qualification: "PASS" | "FAILED" | "UNKNOWN"; cleanupConfirmed: boolean } | undefined> {
+  const approvedRunnerEnvironment = ProjectSetupRunnerEnvironmentSchema.safeParse(approvedRunnerEnvironmentInput);
+  const approvedRunnerToolchain = ProjectSetupRunnerToolchainSchema.safeParse(approvedRunnerToolchainInput);
+  if (!approvedRunnerEnvironment.success || !approvedRunnerToolchain.success) return undefined;
+  if (reference.key !== `project-setup-evidence/sha256/${reference.sha256}.json`) return undefined;
+  const evidenceText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.key, execution.evidenceByteLimit);
+  if (evidenceText === undefined || createHash("sha256").update(evidenceText, "utf8").digest("hex") !== reference.sha256) return undefined;
+  let evidence: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(evidenceText);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    evidence = parsed as Record<string, unknown>;
+  } catch { return undefined; }
+  if (evidence.schemaVersion !== "project-setup-smoke-evidence/v1" || evidence.setupExecutionId !== execution.setupExecutionId
+    || evidence.subjectId !== execution.subjectId || evidence.transportCorrelationId !== execution.transportCorrelationId
+    || evidence.executionRefSha256 !== execution.executionRef.sha256 || evidence.candidateDigest !== execution.candidateDigest
+    || canonicalJson(evidence.runnerToolchain) !== canonicalJson(approvedRunnerToolchain.data)) return undefined;
+  const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, execution.executionRef.key, MAX_SETUP_PROPOSAL_BYTES);
+  if (admissionText === undefined || createHash("sha256").update(admissionText, "utf8").digest("hex") !== execution.executionRef.sha256) return undefined;
+  let admission: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(admissionText);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    admission = parsed as Record<string, unknown>;
+  } catch { return undefined; }
+  const admittedRuntime = admission.runtime && typeof admission.runtime === "object" && !Array.isArray(admission.runtime)
+    ? admission.runtime as Record<string, unknown> : undefined;
+  if (admittedRuntime?.runtimeCatalogId !== execution.runtimeCatalogId
+    || admittedRuntime.catalogRevision !== execution.runtimeCatalogRevision
+    || admittedRuntime.bindingDigest !== execution.bindingDigest
+    || admittedRuntime.generation !== execution.runtimeGeneration
+    || admittedRuntime.transportCorrelationId !== execution.transportCorrelationId) return undefined;
+  if (typeof admission.planDigest !== "string" || evidence.planDigest !== admission.planDigest) return undefined;
+  if (admission.domain !== "project-setup-source-interface/v1" || admission.setupExecutionId !== execution.setupExecutionId
+    || admission.subjectId !== execution.subjectId || admission.transportCorrelationId !== execution.transportCorrelationId
+    || admission.candidateDigest !== execution.candidateDigest
+    || !admission.sourceSnapshot || typeof admission.sourceSnapshot !== "object" || !admission.selectionInput || typeof admission.selectionInput !== "object"
+    || !admission.setupRunContext || typeof admission.setupRunContext !== "object" || !Array.isArray(admission.scenarios)) return undefined;
+  try {
+    const sourceRecord = admission.sourceSnapshot as Record<string, unknown>;
+    if (!Array.isArray(sourceRecord.sources)) return undefined;
+    const snapshot = { ...sourceRecord, sources: sourceRecord.sources.map((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid source row");
+      const source = raw as Record<string, unknown>;
+      if (typeof source.path !== "string" || typeof source.sha256 !== "string" || source.kind !== "blob" || typeof source.bytesBase64 !== "string") throw new Error("invalid source row");
+      return { path: source.path, sha256: source.sha256, kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") };
+    }) } as unknown as E2ESourceSnapshot;
+    verifyE2ESourceSnapshot(snapshot, snapshot.candidate);
+    const sourceInspection = inspectE2ERepository(snapshot, snapshot.candidate).inspection;
+    const discoveredTargetIds = sourceInspection.proposedTargets.map((target) => target.targetId).sort();
+    if (canonicalJson(admission.discoveredApplications) !== canonicalJson(sourceInspection.applications)
+      || canonicalJson(admission.discoveryMissingInputs) !== canonicalJson(sourceInspection.missingInputs)
+      || canonicalJson(admission.discoveredTargetIds) !== canonicalJson(discoveredTargetIds)
+      || canonicalJson(evidence.discoveredApplications) !== canonicalJson(sourceInspection.applications)
+      || canonicalJson(evidence.discoveryMissingInputs) !== canonicalJson(sourceInspection.missingInputs)
+      || canonicalJson(evidence.discoveredTargetIds) !== canonicalJson(discoveredTargetIds)) return undefined;
+    E2EPolicySchema.parse(admission.policy);
+    const selectionInput = { ...(admission.selectionInput as Record<string, unknown>), sourceSnapshot: snapshot };
+    const plan = selectE2EExecutionPlan(selectionInput as never);
+    if (plan.groups.length === 0) return undefined;
+    const bundleBody = { schemaVersion: 1 as const, planDigest: admission.planDigest, templateVersion: "trusted-e2e/v1", scenarios: admission.scenarios, bundleDigest: "0".repeat(64) };
+    const bundle = E2EScenarioBundleSchema.parse({ ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) });
+    const runContext = admission.setupRunContext as Record<string, unknown>;
+    const round = E2ERoundSchema.parse((evidence.round) ?? null);
+    const groupAdmissions = runContext.groupAdmissions;
+    if (!Array.isArray(groupAdmissions) || groupAdmissions.length !== plan.groups.length || plan.groups.length === 0
+      || canonicalJson(runContext.plan) !== canonicalJson(plan) || canonicalJson(runContext.bundle) !== canonicalJson(bundle)
+      || canonicalJson(runContext.round) !== canonicalJson(round) || canonicalJson(runContext.runnerEnvironment) !== canonicalJson(approvedRunnerEnvironment.data)
+      || canonicalJson(runContext.runnerToolchain) !== canonicalJson(approvedRunnerToolchain.data)
+      || runContext.runnerToolchainDigest !== createHash("sha256").update(canonicalJson(approvedRunnerToolchain.data)).digest("hex")
+      || !Array.isArray(evidence.groupRuns) || evidence.groupRuns.length !== plan.groups.length) return undefined;
+    const authenticatedGroupAdmissions = groupAdmissions as unknown as unknown[];
+    const submittedGroupRuns = evidence.groupRuns as unknown as unknown[];
+    const unsupportedTargetIds = admission.unsupportedTargetIds;
+    const selectedTargetIds = Array.isArray(admission.selectedTargetIds) ? admission.selectedTargetIds : [];
+    const expectedNotExecutedTargetIds = discoveredTargetIds.filter((targetId) => !selectedTargetIds.includes(targetId));
+    if (!Array.isArray(unsupportedTargetIds) || canonicalJson(evidence.unsupportedTargetIds) !== canonicalJson(unsupportedTargetIds)) return undefined;
+    if (canonicalJson(unsupportedTargetIds) !== canonicalJson(expectedNotExecutedTargetIds)
+      || canonicalJson(admission.notExecutedTargetIds) !== canonicalJson(expectedNotExecutedTargetIds)
+      || canonicalJson(evidence.notExecutedTargetIds) !== canonicalJson(expectedNotExecutedTargetIds)) return undefined;
+    const semanticApprovalDigests = new Map(bundle.scenarios.map((scenario) => [scenario.scenarioId, (admission.semanticApproval as { digest: string }).digest]));
+    const qualifications: Array<"PASS" | "FAILED" | "UNKNOWN"> = [];
+    const cleanupStates: boolean[] = [];
+    const processStates: boolean[] = [];
+    for (const [index, group] of plan.groups.entries()) {
+      const admissionGroup = authenticatedGroupAdmissions[index];
+      const rawGroupRun = submittedGroupRuns[index];
+      if (!admissionGroup || !rawGroupRun || typeof admissionGroup !== "object" || typeof rawGroupRun !== "object" || Array.isArray(rawGroupRun)) return undefined;
+      const admitted = admissionGroup as Record<string, unknown>;
+      const groupRun = rawGroupRun as Record<string, unknown>;
+      const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput, executionPlan: plan, group } as never);
+      if (canonicalJson(admitted.group) !== canonicalJson(group) || admitted.expectedConfigDigest !== compiled.expectedConfigDigest
+        || admitted.compiledInventoryDigest !== compiled.inventory.digest || admitted.selectionPacketPath !== compiled.selectionPacketPath
+        || canonicalJson(admitted.expectedCases) !== canonicalJson(compiled.expectedCases)) return undefined;
+      const binding = E2ERunBindingSchema.parse(admitted.binding);
+      if (binding.operationId !== execution.operationId || binding.operationFence !== execution.fence || binding.workflowRevision !== execution.projectRevision
+        || binding.candidateDigest !== execution.candidateDigest || binding.planDigest !== admission.planDigest || binding.groupId !== group.groupId
+        || canonicalJson(round.groupBindings[index]) !== canonicalJson(binding) || canonicalJson(groupRun.group) !== canonicalJson(group)
+        || canonicalJson(groupRun.binding) !== canonicalJson(binding)) return undefined;
+      const selection = JSON.parse(compiled.files.get(compiled.selectionPacketPath) ?? "null") as unknown;
+      if (canonicalJson(groupRun.selection) !== canonicalJson(selection) || !Array.isArray(groupRun.hostRequestIds)) return undefined;
+      const hostRequestIds = new Map<string, string>();
+      for (const row of groupRun.hostRequestIds) {
+        if (!Array.isArray(row) || row.length !== 2 || typeof row[0] !== "string" || typeof row[1] !== "string" || hostRequestIds.has(row[0])) return undefined;
+        hostRequestIds.set(row[0], row[1]);
+      }
+      if (hostRequestIds.size !== compiled.hostRequestPayloads.size || [...compiled.hostRequestPayloads.keys()].some((caseId) => !hostRequestIds.has(caseId))) return undefined;
+      const actualValue = groupRun.actual;
+      if (!actualValue || typeof actualValue !== "object" || Array.isArray(actualValue)) return undefined;
+      const actualRecord = actualValue as Record<string, unknown>;
+      if (canonicalJson(actualRecord.runnerToolchain) !== canonicalJson(approvedRunnerToolchain.data)) return undefined;
+      if (typeof actualRecord.launchId !== "string" || typeof actualRecord.rawReportBase64 !== "string" || typeof actualRecord.runStartCaptureBase64 !== "string"
+        || !Array.isArray(actualRecord.candidateCaptures) || !Array.isArray(actualRecord.assertionReceipts)
+        || typeof actualRecord.cleanupConfirmed !== "boolean" || typeof actualRecord.cleanupServerListening !== "boolean") return undefined;
+      const rawReportBytes = Buffer.from(actualRecord.rawReportBase64, "base64");
+      const runStartCaptureBytes = Buffer.from(actualRecord.runStartCaptureBase64, "base64");
+      const runStartCapture = parseE2EFirstPartyCapture(runStartCaptureBytes, actualRecord.launchId);
+      const actual = { launchId: actualRecord.launchId, launchConfigDigest: actualRecord.launchConfigDigest, fixedAssetDigests: actualRecord.fixedAssetDigests,
+        publicList: actualRecord.publicList, selected: actualRecord.selected, filtered: actualRecord.filtered,
+        rawReportBytes: new Uint8Array(rawReportBytes), runStartCaptureBytes: new Uint8Array(runStartCaptureBytes), runStartCapture,
+        assertionReceipts: actualRecord.assertionReceipts, declaredMockComponentIds: actualRecord.declaredMockComponentIds,
+        candidateCaptures: actualRecord.candidateCaptures, listProcess: actualRecord.listProcess, runProcess: actualRecord.runProcess,
+        cleanupConfirmed: actualRecord.cleanupConfirmed, cleanupServerListening: actualRecord.cleanupServerListening, evidenceDirectory: "" } as never;
+      const actualQualification = collectE2EActualCliRun({ actual, compiled, binding, round, selection: selection as never,
+        sourceDigest: e2eSnapshotSourceDigest(compiled, snapshot.sources.map(({ path, sha256 }) => ({ path, sha256 }))), semanticApprovalDigests, hostRequestIds,
+        declaredMockComponentIds: Array.isArray(actualRecord.declaredMockComponentIds) ? actualRecord.declaredMockComponentIds as string[] : [],
+        environment: approvedRunnerEnvironment.data,
+        usage: { discoveredResults: Number(actualRecord.selected) + Number(actualRecord.filtered), maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 },
+        limits: { maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 } });
+      qualifications.push(actualQualification.qualification?.status ?? "UNKNOWN");
+      cleanupStates.push(actualRecord.cleanupConfirmed === true && actualRecord.cleanupServerListening === false);
+      const runProcess = actualRecord.runProcess as Record<string, unknown> | undefined;
+      processStates.push(runProcess?.status === 0 && runProcess.signal === null && runProcess.aborted === false && runProcess.timedOut === false);
+    }
+    const cleanupConfirmed = cleanupStates.length === plan.groups.length && cleanupStates.every(Boolean);
+    const processStatus = processStates.every(Boolean) ? "SUCCEEDED" : "FAILED";
+    const qualification = qualifications.includes("FAILED") ? "FAILED" : qualifications.length === plan.groups.length && qualifications.every((item) => item === "PASS") ? "PASS" : "UNKNOWN";
+    return { evidenceRef: reference, processStatus, qualification: cleanupConfirmed ? qualification : "UNKNOWN", cleanupConfirmed };
+  } catch {
+    return undefined;
+  }
+}
+
+interface WorkflowE2EVerificationDiagnostic {
+  reason?: string;
+  /** Exact authority rows validated for this result, carried into the same task-state transaction. */
+  authorityChecks?: Array<Record<string, unknown>>;
+}
+
+/**
+ * A terminal CHECKS operation's broker timestamp may anchor a later re-collection only when
+ * the task still carries the exact canonical outcome written from that operation's immutable
+ * admission and evidence. This never supplies a receipt for an active or first-time result.
+ */
+function workflowE2ETerminalReceiptAt(
+  operation: OperationRecord,
+  task: DeveloperTaskRecord,
+  candidateDigest: string,
+  reference: E2EWorkflowAdmissionRef,
+  round: ReturnType<typeof E2ERoundSchema.parse>,
+  allowStaleProjection: boolean,
+): { at: string; outcome: "PASS" | "FAILED" } | undefined {
+  if (operation.kind !== "task" || operation.workflowMode !== "CHECKS"
+    || operation.status !== "SUCCEEDED" && operation.status !== "FAILED"
+    || operation.workflowE2EAdmission === undefined || canonicalJson(operation.workflowE2EAdmission) !== canonicalJson(reference)
+    || operation.workflowE2EEvidenceRef === undefined || operation.workflowE2EEvidenceRef.key !== `workflow-e2e-evidence/sha256/${operation.workflowE2EEvidenceRef.sha256}.json`
+    || reference.taskId !== task.taskId || reference.candidateDigest !== candidateDigest || reference.roundId !== round.roundId
+    || reference.workflowRevision !== round.workflowRevision || canonicalJson(reference.groupRunIds) !== canonicalJson(round.groupBindings.map((binding) => binding.runId))
+    || new Set(operation.workflowE2EGroupRunIds ?? []).size !== reference.groupRunIds.length
+    || canonicalJson([...(operation.workflowE2EGroupRunIds ?? [])].sort()) !== canonicalJson([...reference.groupRunIds].sort())) return undefined;
+  const receiptTime = Date.parse(operation.updatedAt);
+  if (!Number.isFinite(receiptTime) || new Date(receiptTime).toISOString() !== operation.updatedAt
+    || receiptTime > Date.parse(round.deadlineAt)) return undefined;
+
+  const workflowE2E = task.workflow?.e2e;
+  if (operation.status === "SUCCEEDED" && !allowStaleProjection) {
+    const qualified = workflowE2E?.qualifiedRound;
+    if (!qualified || qualified.candidateDigest !== candidateDigest
+      || qualified.roundId !== reference.roundId || canonicalJson(qualified.groupRunIds) !== canonicalJson(reference.groupRunIds)
+      || qualified.admissionSha256 !== reference.admissionRef.sha256 || qualified.evidenceSha256 !== operation.workflowE2EEvidenceRef.sha256
+      || qualified.contractDigest !== workflowE2E.contractDigest || qualified.policyDigest !== workflowE2E.policyDigest
+      || qualified.bundleDigest !== workflowE2E.bundleDigest || qualified.executionPlanDigest !== workflowE2E.executionPlanDigest
+      || workflowE2E.currentRoundId !== qualified.roundId || canonicalJson(workflowE2E.currentGroupRunIds) !== canonicalJson(qualified.groupRunIds)) return undefined;
+    return { at: operation.updatedAt, outcome: "PASS" };
+  }
+  const failed = workflowE2E?.failedRound;
+  if (!allowStaleProjection || failed?.status !== "FAILED" || failed.candidateDigest !== candidateDigest
+    || failed.roundId !== reference.roundId || canonicalJson(failed.groupRunIds) !== canonicalJson(reference.groupRunIds)
+    || failed.admissionSha256 !== reference.admissionRef.sha256 || failed.evidenceSha256 !== operation.workflowE2EEvidenceRef.sha256) return undefined;
+  return { at: operation.updatedAt, outcome: "FAILED" };
+}
+
+/** Independently recompiles and collects every group; worker-supplied verdict fields are ignored. */
+async function verifyWorkflowE2EEvidence(
+  dependencies: AwsBrokerDependencies, operation: OperationRecord, task: DeveloperTaskRecord, candidate: ReturnType<typeof CandidateManifestSchema.parse>,
+  projection?: { plan?: unknown; round?: unknown; results: unknown[]; allowStaleProjection?: boolean },
+  diagnostic?: WorkflowE2EVerificationDiagnostic,
+): Promise<"PASS" | "FAILED" | "UNKNOWN"> {
+  const unavailable = (reason: string): "UNKNOWN" => { if (diagnostic !== undefined) diagnostic.reason = reason; return "UNKNOWN"; };
+  try {
+    const workflow = task.workflow;
+    if (workflow === undefined) return unavailable("workflow-missing");
+    const reference = operation.workflowE2EAdmission;
+    const evidenceRef = operation.workflowE2EEvidenceRef;
+    const groupEvidenceRefs = operation.workflowE2EGroupEvidenceRefs ?? [];
+    const groupEvidenceRunIds = operation.workflowE2EGroupRunIds ?? [];
+    const staleProjection = projection?.allowStaleProjection === true;
+    if (!reference || reference.taskId !== task.taskId || reference.candidateDigest !== candidate.digest
+      || (!staleProjection && (workflow.e2e?.currentRoundId !== reference.roundId
+        || canonicalJson(workflow.e2e.currentGroupRunIds) !== canonicalJson(reference.groupRunIds)))) return unavailable("current-admission-reference-mismatch");
+    const admissionText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.admissionRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
+    const evidenceText = evidenceRef === undefined ? undefined
+      : await readStoredText(dependencies.s3, dependencies.artifactBucketName, evidenceRef.key, WORKFLOW_E2E_ADMISSION_MAX_BYTES);
+    if (admissionText === undefined || createHash("sha256").update(admissionText).digest("hex") !== reference.admissionRef.sha256
+      || Buffer.byteLength(admissionText) !== reference.admissionRef.byteLength
+      || evidenceRef !== undefined && (evidenceText === undefined || evidenceRef.key !== `workflow-e2e-evidence/sha256/${evidenceRef.sha256}.json`
+        || createHash("sha256").update(evidenceText).digest("hex") !== evidenceRef.sha256 || Buffer.byteLength(evidenceText) !== evidenceRef.byteLength)) {
+      return unavailable("admission-or-evidence-reference-integrity");
+    }
+    const admission = JSON.parse(admissionText) as Record<string, unknown>;
+    const evidence = evidenceText === undefined ? undefined : JSON.parse(evidenceText) as Record<string, unknown>;
+    if (admission.schemaVersion !== "workflow-e2e-admission/v1" || evidence !== undefined && (evidence.schemaVersion !== "workflow-e2e-evidence/v1"
+      || evidence.admissionSha256 !== reference.admissionRef.sha256 || evidence.taskId !== task.taskId || evidence.operationId !== operation.id
+      || evidence.operationFence !== operation.fence || evidence.workflowRevision !== reference.workflowRevision || evidence.candidateDigest !== candidate.digest)) {
+      return unavailable("admission-or-evidence-subject-binding");
+    }
+    const sourceRecord = admission.sourceSnapshot as Record<string, unknown>;
+    if (!sourceRecord || !Array.isArray(sourceRecord.sources)) return unavailable("admitted-source-snapshot-shape");
+    const snapshot = { ...sourceRecord, sources: sourceRecord.sources.map((raw) => {
+      const row = raw as Record<string, unknown>;
+      if (typeof row.path !== "string" || typeof row.sha256 !== "string" || row.kind !== "blob" || typeof row.bytesBase64 !== "string") throw new Error("invalid source row");
+      const bytes = Buffer.from(row.bytesBase64, "base64");
+      if (bytes.toString("base64") !== row.bytesBase64) throw new Error("invalid source encoding");
+      return { path: row.path, sha256: row.sha256, kind: "blob" as const, bytes };
+    }) } as unknown as E2ESourceSnapshot;
+    verifyE2ESourceSnapshot(snapshot, candidate);
+    E2EPolicySchema.parse(admission.policy);
+    const selectionInput = { ...(admission.selectionInput as Record<string, unknown>), sourceSnapshot: snapshot };
+    const plan = selectE2EExecutionPlan(selectionInput as never);
+    const bundle = E2EScenarioBundleSchema.parse(admission.bundle);
+    const round = E2ERoundSchema.parse(admission.round);
+    const projectionResults: unknown[] = [];
+    const runtime = admission.runtime as Record<string, unknown>;
+    const runnerEnvironment = ProjectSetupRunnerEnvironmentSchema.parse(runtime.runnerEnvironment);
+    const runnerToolchain = ProjectSetupRunnerToolchainSchema.parse(runtime.runnerToolchain);
+    const groupAdmissions = admission.groupAdmissions as Array<Record<string, unknown>>;
+    const aggregateGroupRuns = evidence?.groupRuns;
+    if (admission.taskId !== task.taskId || admission.operationId !== operation.id || admission.operationFence !== operation.fence
+      || admission.workflowRevision !== reference.workflowRevision || admission.candidateDigest !== candidate.digest
+      || round.roundId !== reference.roundId || round.taskId !== task.taskId || round.operationId !== operation.id || round.operationFence !== operation.fence
+      || round.workflowRevision !== reference.workflowRevision || plan.groups.length === 0 || plan.groups.length !== groupAdmissions.length
+      || plan.groups.length !== reference.groupRunIds.length
+      || canonicalJson(plan) !== canonicalJson(admission.plan) || bundle.bundleDigest !== e2eScenarioBundleDigest(bundle)) return unavailable("current-plan-round-or-group-binding");
+    if (evidence !== undefined && (!Array.isArray(aggregateGroupRuns) || aggregateGroupRuns.length !== reference.groupRunIds.length)) return unavailable("aggregate-group-results-incomplete");
+    if (groupEvidenceRefs.length !== groupEvidenceRunIds.length
+      || canonicalJson(groupEvidenceRefs.map((raw) => E2EWorkflowGroupEvidenceRefSchema.parse(raw).groupRunId)) !== canonicalJson(groupEvidenceRunIds)
+      || new Set(groupEvidenceRunIds).size !== groupEvidenceRunIds.length
+      || groupEvidenceRunIds.some((runId) => !reference.groupRunIds.includes(runId))) return unavailable("accepted-group-reference-list-invalid");
+    if (evidence === undefined && groupEvidenceRefs.length === 0) return unavailable("group-results-not-yet-accepted");
+    const aggregateByRun = new Map<string, Record<string, unknown>>();
+    if (Array.isArray(aggregateGroupRuns)) {
+      for (const raw of aggregateGroupRuns) {
+        if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return unavailable("aggregate-group-result-shape");
+        const run = raw as Record<string, unknown>;
+        const binding = run.binding as Record<string, unknown> | undefined;
+        if (typeof binding?.runId !== "string" || aggregateByRun.has(binding.runId)) return unavailable("aggregate-group-result-identity");
+        aggregateByRun.set(binding.runId, run);
+      }
+    }
+    const groupRunsById = new Map<string, Record<string, unknown>>();
+    for (const raw of groupEvidenceRefs) {
+      const parsedRef = E2EWorkflowGroupEvidenceRefSchema.safeParse(raw);
+      if (!parsedRef.success) return unavailable("accepted-group-reference-schema");
+      const { groupRunId, evidenceRef: storedGroupRef } = parsedRef.data;
+      const index = reference.groupRunIds.indexOf(groupRunId);
+      if (index < 0 || groupRunsById.has(groupRunId) || storedGroupRef.key !== `workflow-e2e-group-evidence/sha256/${storedGroupRef.sha256}.json`) {
+        return unavailable("accepted-group-reference-subject");
+      }
+      const expectedCaseCount = groupAdmissions[index]?.expectedCases;
+      if (!Array.isArray(expectedCaseCount)) return unavailable("admitted-group-case-count");
+      const groupText = await readStoredText(dependencies.s3, dependencies.artifactBucketName, storedGroupRef.key,
+        Math.min(WORKFLOW_E2E_ADMISSION_MAX_BYTES, e2ePrivateTransferMaxBytes(expectedCaseCount.length, 1)));
+      if (groupText === undefined || Buffer.byteLength(groupText) !== storedGroupRef.byteLength
+        || createHash("sha256").update(groupText).digest("hex") !== storedGroupRef.sha256) return unavailable("accepted-group-evidence-integrity");
+      const envelope = JSON.parse(groupText) as Record<string, unknown>;
+      const groupRun = envelope.groupRun as Record<string, unknown> | undefined;
+      if (!groupRun || envelope.schemaVersion !== "workflow-e2e-group-evidence/v1" || envelope.admissionSha256 !== reference.admissionRef.sha256
+        || envelope.taskId !== task.taskId || envelope.operationId !== operation.id || envelope.operationFence !== operation.fence
+        || envelope.workflowRevision !== reference.workflowRevision || envelope.candidateDigest !== candidate.digest
+        || canonicalJson(envelope.round) !== canonicalJson(round) || canonicalJson(groupRun.binding) !== canonicalJson(round.groupBindings[index])
+        || canonicalJson(groupRun.group) !== canonicalJson(plan.groups[index])) return unavailable("accepted-group-evidence-subject");
+      const aggregateRun = aggregateByRun.get(groupRunId);
+      if (evidence !== undefined && (aggregateRun === undefined || canonicalJson(aggregateRun) !== canonicalJson(groupRun))) return unavailable("aggregate-group-evidence-mismatch");
+      groupRunsById.set(groupRunId, groupRun);
+    }
+    if (evidence !== undefined && (groupEvidenceRefs.length !== reference.groupRunIds.length
+      || canonicalJson([...groupRunsById.keys()].sort()) !== canonicalJson([...reference.groupRunIds].sort())
+      || canonicalJson([...aggregateByRun.keys()].sort()) !== canonicalJson([...reference.groupRunIds].sort()))) return unavailable("aggregate-does-not-cover-accepted-groups");
+    const semantic = (admission.portableApprovalBinding as { semanticApproval?: { digest?: unknown } } | undefined)?.semanticApproval?.digest;
+    if (typeof semantic !== "string" || !/^[a-f0-9]{64}$/u.test(semantic)) return unavailable("semantic-approval-binding");
+    const semanticApprovalDigests = new Map(bundle.scenarios.map((scenario) => [scenario.scenarioId, semantic]));
+    const terminalReceipt = workflowE2ETerminalReceiptAt(operation, task, candidate.digest, reference, round, staleProjection);
+    const qualifications: Array<"PASS" | "FAILED" | "UNKNOWN"> = [];
+    for (const [index, group] of plan.groups.entries()) {
+      const admitted = groupAdmissions[index]; const run = groupRunsById.get(reference.groupRunIds[index]!);
+      if (!admitted || canonicalJson(admitted.group) !== canonicalJson(group)) return unavailable("admitted-group-identity");
+      const compiled = compileE2EScenarios(bundle, plan.effectiveTargets, group, { selectionInput, executionPlan: plan, group } as never);
+      if (admitted.expectedConfigDigest !== compiled.expectedConfigDigest || admitted.compiledInventoryDigest !== compiled.inventory.digest
+        || admitted.selectionPacketPath !== compiled.selectionPacketPath || canonicalJson(admitted.expectedCases) !== canonicalJson(compiled.expectedCases)) return unavailable("compiled-group-expectations");
+      const binding = E2ERunBindingSchema.parse(admitted.binding);
+      if (binding.runId !== reference.groupRunIds[index] || binding.taskId !== task.taskId || binding.operationId !== operation.id
+        || binding.operationFence !== operation.fence || binding.workflowRevision !== reference.workflowRevision || binding.candidateDigest !== candidate.digest
+        || binding.roundId !== reference.roundId || canonicalJson(round.groupBindings[index]) !== canonicalJson(binding)) return unavailable("group-run-binding");
+      if (run === undefined) { qualifications.push("UNKNOWN"); continue; }
+      if (canonicalJson(run.group) !== canonicalJson(group) || canonicalJson(run.binding) !== canonicalJson(binding)) return unavailable("group-run-result-binding");
+      const selection = JSON.parse(compiled.files.get(compiled.selectionPacketPath) ?? "null") as unknown;
+      if (canonicalJson(run.selection) !== canonicalJson(selection) || !Array.isArray(run.hostRequestIds)) return unavailable("compiled-selection-or-host-request-list");
+      const hostRequestIds = new Map<string, string>();
+      for (const entry of run.hostRequestIds) {
+        if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== "string" || typeof entry[1] !== "string" || hostRequestIds.has(entry[0])) return unavailable("host-request-identity-list");
+        hostRequestIds.set(entry[0], entry[1]);
+      }
+      if (hostRequestIds.size !== compiled.hostRequestPayloads.size) return unavailable("host-request-count");
+      const rawActual = run.actual as Record<string, unknown>;
+      if (!rawActual || typeof rawActual.launchId !== "string" || typeof rawActual.rawReportBase64 !== "string" || typeof rawActual.runStartCaptureBase64 !== "string"
+        || canonicalJson(rawActual.runnerToolchain) !== canonicalJson(runnerToolchain) || !Array.isArray(rawActual.candidateCaptures)
+        || !Array.isArray(rawActual.assertionReceipts) || typeof rawActual.cleanupConfirmed !== "boolean" || typeof rawActual.cleanupServerListening !== "boolean") return unavailable("actual-run-capture-shape-or-toolchain");
+      const rawReportBytes = Buffer.from(rawActual.rawReportBase64, "base64");
+      const runStartCaptureBytes = Buffer.from(rawActual.runStartCaptureBase64, "base64");
+      if (rawReportBytes.toString("base64") !== rawActual.rawReportBase64 || runStartCaptureBytes.toString("base64") !== rawActual.runStartCaptureBase64) return unavailable("actual-run-capture-encoding");
+      const actual = { ...rawActual, rawReportBytes: new Uint8Array(rawReportBytes), runStartCaptureBytes: new Uint8Array(runStartCaptureBytes),
+        runStartCapture: parseE2EFirstPartyCapture(runStartCaptureBytes, rawActual.launchId), evidenceDirectory: "" } as never;
+      const result = collectE2EActualCliRun({ actual, compiled, binding, round, selection: selection as never,
+        sourceDigest: e2eSnapshotSourceDigest(compiled, snapshot.sources.map(({ path, sha256 }) => ({ path, sha256 }))),
+        semanticApprovalDigests, hostRequestIds,
+        declaredMockComponentIds: Array.isArray(rawActual.declaredMockComponentIds) ? rawActual.declaredMockComponentIds as string[] : [],
+        environment: runnerEnvironment,
+        usage: { discoveredResults: Number(rawActual.selected) + Number(rawActual.filtered), maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0, maxModelCallsInStep: 0, maxActionStepsInStep: 0 },
+        limits: { maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 } });
+      const qualification = terminalReceipt !== undefined && result.collection !== null && result.oracle !== null
+        ? qualifyE2ECollection(result.oracle, { ...result.collection, receivedAt: terminalReceipt.at })
+        : result.qualification;
+      const process = rawActual.runProcess as Record<string, unknown> | undefined;
+      if (qualification?.result !== null && qualification?.result !== undefined) {
+        // This is a broker-side projection of the independently re-collected result. The raw
+        // collector labels its structural output exploratory; only this verified path promotes
+        // the projection after matching the stored admission, source, round, capture and receipts.
+        projectionResults.push({ ...qualification.result, producer: "broker-independent-e2e-verifier", qualification: "trusted",
+          ...(process?.status === 0 && process.signal === null && process.aborted === false && process.timedOut === false ? {} : { status: "failed", reason: "host-process-failed" }) });
+      }
+      if (process?.status !== 0 || process.signal !== null || process.aborted !== false || process.timedOut !== false) qualifications.push("FAILED");
+      else if (terminalReceipt?.outcome === "FAILED" && qualification?.status !== "FAILED") qualifications.push("UNKNOWN");
+      else qualifications.push(qualification?.status ?? "UNKNOWN");
+    }
+    // Re-collect every supported admitted group for an honest scoped projection even when a
+    // required criterion has no executable source-interface case. That criterion still holds
+    // aggregate readiness: incomplete required coverage can never become PASS.
+    const currentAuthorityValid = await workflowE2ECurrentAuthorityIsValid(dependencies, task, candidate, admission, snapshot, diagnostic);
+    if (projection !== undefined) {
+      projection.plan = plan;
+      projection.round = round;
+      if (currentAuthorityValid) projection.results.push(...projectionResults);
+    }
+    if (!currentAuthorityValid) return unavailable(diagnostic?.reason ?? "current-owner-policy-source-or-runtime-authority");
+    if (!e2ePlanHasCompleteRequiredCriteria(plan)) return unavailable("required-criteria-unavailable");
+    return qualifications.includes("FAILED") ? "FAILED" : qualifications.every((item) => item === "PASS") ? "PASS" : "UNKNOWN";
+  } catch { return unavailable("verification-exception"); }
+}
+
+/** Rebuilds the admitted feature context from current canonical approval, project policy, source and runtime rows. */
+async function workflowE2ECurrentAuthorityIsValid(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord,
+  candidate: ReturnType<typeof CandidateManifestSchema.parse>,
+  admission: Record<string, unknown>,
+  admittedSnapshot: E2ESourceSnapshot,
+  diagnostic?: WorkflowE2EVerificationDiagnostic,
+): Promise<boolean> {
+  const reject = (reason: string): false => { if (diagnostic !== undefined) diagnostic.reason = reason; return false; };
+  let stage = "workflow";
+  try {
+    const workflow = task.workflow;
+    const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
+    if (!workflow || workflow.e2e?.required !== true || workflow.candidate?.digest !== candidate.digest || !catalogId
+      || task.closedAt !== undefined) return reject("current-task-or-approval-missing");
+    const artifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
+    if (artifact === undefined || workflow.e2e.contractDigest !== artifact.sha256) return reject("current-canonical-plan-missing-or-stale");
+    stage = "canonical-artifact";
+    const approved = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), artifact, {});
+    if (approved?.format !== "structured") return reject("canonical-artifact-or-owner-decision-mismatch");
+    const canonicalApproval = resolveWorkflowE2ECanonicalApproval({ taskId: task.taskId,
+      workflow: workflow as NonNullable<typeof workflow> & { artifacts: Array<{ id: string; type: string; sha256: string }>;
+        decisions: Array<{ decision: string; actorId: string; artifactDigest?: string; workBreakdownDigest?: string; workflowRevision: number }> },
+      artifact, plan: approved.plan });
+    if (canonicalApproval === undefined) return reject("canonical-artifact-or-owner-decision-mismatch");
+    const e2eIntent = approved.plan.e2e;
+    if (e2eIntent === undefined) return reject("canonical-e2e-intent-missing");
+    stage = "project-record";
+    const project = await requireProject(dependencies, task.project, task.startingRevision);
+    const latestProject = await requireLatestProject(dependencies, task.project);
+    if (latestProject.setupApproval === undefined) return reject("current-project-setup-approval-unavailable");
+    const catalogKey = projectCatalogKey(task.project);
+    const projectCatalog = await getItem<Record<string, unknown>>(dependencies, catalogKey);
+    if (projectCatalog?.entityType !== "PROJECT_CATALOG" || projectCatalog.name !== task.project
+      || projectCatalog.latestRevision !== latestProject.definition.revision) return reject("current-project-latest-revision-unavailable");
+    const policy = E2EPolicySchema.parse(latestProject.definition.e2e);
+    const pinnedPolicy = E2EPolicySchema.parse(project.definition.e2e);
+    if (canonicalJson(policy) !== canonicalJson(pinnedPolicy)
+      || canonicalJson(parseRuntimeBinding(latestProject.runtimeBinding)) !== canonicalJson(parseRuntimeBinding(project.runtimeBinding))) {
+      return reject("current-project-policy-or-runtime-changed");
+    }
+    stage = "creator-project-access";
+    const creator = await getWorkflowE2ECreatorIdentity(dependencies, task.developerId);
+    if (creator === undefined || creator.revoked || dependencies.developer === undefined) return reject("current-creator-identity-unavailable");
+    let creatorAccess: Awaited<ReturnType<typeof checkProjectAccess>>;
+    try {
+      creatorAccess = await checkProjectAccess({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+        developer: dependencies.developer, now: Date.now },
+      { developerId: task.developerId, ...(creator.slackUserId === undefined ? {} : { slackUserId: creator.slackUserId }) }, task.project);
+    } catch { return reject("current-creator-project-access-unavailable"); }
+    const creatorMembershipKey = { pk: `MEMBER#${task.developerId}`, sk: `PROJECT#${task.project}` };
+    const creatorMembership = await getItem<Record<string, unknown>>(dependencies, creatorMembershipKey);
+    const creatorAuthority = await workflowE2ECreatorAuthorityProof(dependencies, task, creatorMembership, creatorAccess);
+    if (creatorAuthority === undefined || canonicalJson(admission.creatorAuthority) !== canonicalJson(creatorAuthority)) {
+      return reject("creator-membership-proof-changed-or-unavailable");
+    }
+    stage = "candidate-source-operation";
+    const sourceOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
+      .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "IMPLEMENT")
+      .map((item) => item as unknown as OperationRecord)
+      .filter((item) => item.candidateSourceRef?.candidateDigest === candidate.digest)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    const sourceOperation = sourceOperations[0];
+    if (!sourceOperation) return reject("candidate-source-operation-missing");
+    stage = "candidate-source-export";
+    const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, sourceOperation, candidate);
+    if (!sourceExport || sourceExport.repositories.length !== 1) return reject("candidate-source-export-missing-or-ambiguous");
+    const repository = sourceExport.repositories[0]!;
+    const snapshot: E2ESourceSnapshot = { candidate, commitSha: repository.commitSha, treeSha: repository.treeSha, treeComplete: true,
+      treePaths: repository.treePaths, sources: repository.sources.map((source) => ({ path: source.path, sha256: source.sha256,
+        kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") })) };
+    stage = "current-feature-runtime";
+    const featureRow = await getItem<Record<string, unknown>>(dependencies, e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId));
+    const runtimeBinding = parseRuntimeBinding(project.runtimeBinding);
+    const parsedFeatureRow = featureRow === undefined || typeof featureRow.pk !== "string" || typeof featureRow.sk !== "string"
+      ? undefined : E2EFeatureVerifierRecordSchema.safeParse(Object.fromEntries(Object.entries(featureRow).filter(([key]) => key !== "pk" && key !== "sk")));
+    if (parsedFeatureRow === undefined || !parsedFeatureRow.success) return reject("current-feature-runtime-schema-invalid");
+    const admittedRuntime = admitE2EFeatureVerifier(featureRow, { runtimeCatalogId: catalogId, profileId: policy.defaultSandboxProfileId,
+      binding: runtimeBinding, scope: E2E_FEATURE_PROCESS_RESPONSE_SCOPE, now: Date.now() });
+    if (!admittedRuntime) {
+      const record = parsedFeatureRow.data;
+      const expectedKey = e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId);
+      if (featureRow?.pk !== expectedKey.pk || featureRow.sk !== expectedKey.sk) return reject("current-feature-runtime-storage-key-mismatch");
+      if (record.state !== "READY") return reject("current-feature-runtime-not-ready");
+      if (record.runtimeCatalogId !== catalogId || record.profileId !== policy.defaultSandboxProfileId) return reject("current-feature-runtime-catalog-or-profile-mismatch");
+      if (record.bindingDigest !== projectSetupBindingDigest(runtimeBinding) || canonicalJson(record.binding) !== canonicalJson(runtimeBinding)) return reject("current-feature-runtime-binding-mismatch");
+      if (!record.supportedFeatureScopes.includes(E2E_FEATURE_PROCESS_RESPONSE_SCOPE)) return reject("current-feature-runtime-scope-mismatch");
+      if (Date.parse(record.qualifiedAt) > Date.now() || Date.parse(record.expiresAt) <= Date.now()) return reject("current-feature-runtime-freshness-mismatch");
+      return reject("current-feature-runtime-admission-mismatch");
+    }
+    const planDigest = createHash("sha256").update(canonicalJson({
+      domain: "workflow-feature-e2e-approved-plan/v1", taskId: task.taskId, artifactId: canonicalApproval.artifactId, artifactSha256: canonicalApproval.artifactDigest,
+      graphDigest: canonicalApproval.graphDigest, graphRunId: canonicalApproval.runId, workflowRevision: canonicalApproval.workflowRevision, actorId: canonicalApproval.actorId,
+    })).digest("hex");
+    stage = "current-admission-derivation";
+    const currentAdmission = deriveE2EFeatureExecutionAdmission({ intent: e2eIntent, snapshot, artifactId: artifact.id,
+      artifactSha256: artifact.sha256, planDigest, policy, runtimeCatalogId: catalogId, runtimeBinding,
+      featureVerifier: featureRow, now: Date.now() });
+    const binding = admission.portableApprovalBinding as { semanticApproval?: { artifactId?: unknown; digest?: unknown }; planDigest?: unknown } | undefined;
+    const semantic = binding?.semanticApproval;
+    if (semantic?.artifactId !== artifact.id || semantic.digest !== artifact.sha256 || binding?.planDigest !== planDigest) return reject("canonical-approval-binding-mismatch");
+    const approvalRecord = canonicalApproval;
+    const authorityMatches = workflowE2ECurrentAuthorityMatches({
+      admission: { candidateDigest: candidate.digest, intent: admission.intent, policy: admission.policy, runtime: admission.runtime,
+        portableApprovalBinding: admission.portableApprovalBinding, creatorAuthority: admission.creatorAuthority, approval: approvalRecord },
+      current: { candidateDigest: candidate.digest, intent: e2eIntent, policy, runtime: currentAdmission.runtime,
+        portableApprovalBinding: currentAdmission.portableApprovalBinding, creatorAuthority, approval: approvalRecord, approvedDecision: true,
+        creatorHasProjectAccess: true, now: Date.now() },
+    }) && canonicalJson(admission.plan) === canonicalJson(currentAdmission.plan)
+      && canonicalJson(admission.bundle) === canonicalJson(currentAdmission.bundle)
+      && sameE2ESourceSnapshot(admittedSnapshot, snapshot);
+    if (!authorityMatches) return reject("current-admission-runtime-plan-or-source-mismatch");
+    const key = e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId);
+    const feature = parsedFeatureRow.data;
+    const authorityChecks: Array<Record<string, unknown>> = [
+      { ConditionCheck: { TableName: dependencies.tableName, Key: catalogKey,
+        ConditionExpression: "entityType = :entity AND #name = :name AND latestRevision = :revision",
+        ExpressionAttributeNames: { "#name": "name" },
+        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": task.project, ":revision": latestProject.definition.revision } } },
+      { ConditionCheck: { TableName: dependencies.tableName, Key: projectKey(task.project, latestProject.definition.revision),
+        ConditionExpression: "entityType = :entity AND registeredBy = :registeredBy AND #definition.#e2e = :policy AND runtimeBinding = :binding AND setupApproval = :setupApproval",
+        ExpressionAttributeNames: { "#definition": "definition", "#e2e": "e2e" },
+        ExpressionAttributeValues: { ":entity": "PROJECT", ":registeredBy": latestProject.registeredBy, ":policy": policy,
+          ":binding": latestProject.runtimeBinding, ":setupApproval": latestProject.setupApproval } } },
+      { ConditionCheck: { TableName: dependencies.developer.signInTableName, Key: { pk: `DEVELOPER#${task.developerId}`, sk: "META" },
+        ConditionExpression: "entityType = :entity AND revoked = :notRevoked",
+        ExpressionAttributeValues: { ":entity": "DEVELOPER", ":notRevoked": false } } },
+      { ConditionCheck: { TableName: dependencies.tableName, Key: key,
+        ConditionExpression: "entityType = :entity AND #state = :ready AND runtimeCatalogId = :catalog AND catalogRevision = :catalogRevision AND profileId = :profile AND bindingDigest = :bindingDigest AND binding = :binding AND manifestDigest = :manifestDigest AND runnerEnvironmentDigest = :environmentDigest AND runnerEnvironment = :environment AND runnerToolchainDigest = :toolchainDigest AND runnerToolchain = :toolchain AND generation = :generation AND transportCorrelationId = :correlation AND supportedFeatureScopes = :scopes AND qualifiedAt = :qualifiedAt AND expiresAt = :expiresAt",
+        ExpressionAttributeNames: { "#state": "state" },
+        ExpressionAttributeValues: { ":entity": "E2E_FEATURE_VERIFIER", ":ready": "READY", ":catalog": feature.runtimeCatalogId,
+          ":catalogRevision": feature.catalogRevision, ":profile": feature.profileId, ":bindingDigest": feature.bindingDigest, ":binding": feature.binding,
+          ":manifestDigest": feature.manifestDigest, ":environmentDigest": feature.runnerEnvironmentDigest, ":environment": feature.runnerEnvironment,
+          ":toolchainDigest": feature.runnerToolchainDigest, ":toolchain": feature.runnerToolchain, ":generation": feature.generation,
+          ":correlation": feature.transportCorrelationId, ":scopes": feature.supportedFeatureScopes, ":qualifiedAt": feature.qualifiedAt, ":expiresAt": feature.expiresAt } } },
+    ];
+    if (creatorAuthority.kind === "direct-membership") {
+      authorityChecks.push({ ConditionCheck: { TableName: dependencies.tableName, Key: creatorMembershipKey,
+      ConditionExpression: "entityType = :entity AND ownerKey = :ownerKey AND projectName = :project AND #role = :role AND grantId = :grantId",
+      ExpressionAttributeNames: { "#role": "role" },
+      ExpressionAttributeValues: { ":entity": "MEMBERSHIP", ":ownerKey": task.developerId, ":project": task.project,
+        ":role": creatorAuthority.role, ":grantId": creatorAuthority.grantId } } });
+    }
+    if (creatorAccess.access === "channel") {
+      const teamId = dependencies.developer.slackTeamId;
+      if (teamId === undefined || creatorAccess.channelIds.length === 0) return reject("current-channel-access-proof-unavailable");
+      for (const channelId of creatorAccess.channelIds) {
+        const bindingKey: { pk: string; sk: string } = { pk: `SLACK_BINDING#${teamId}`, sk: `CHANNEL#${channelId}` };
+        const binding: Record<string, unknown> | undefined = await getItem<Record<string, unknown>>(dependencies, bindingKey);
+        if (binding?.teamId !== teamId || binding.channelId !== channelId || binding.projectName !== task.project
+          || typeof binding.updatedAt !== "string" || binding.updatedAt.length === 0) return reject("current-channel-binding-unavailable");
+        authorityChecks.push({ ConditionCheck: { TableName: dependencies.tableName, Key: bindingKey,
+          ConditionExpression: "teamId = :teamId AND channelId = :channelId AND projectName = :projectName AND updatedAt = :updatedAt",
+          ExpressionAttributeValues: { ":teamId": teamId, ":channelId": channelId, ":projectName": task.project, ":updatedAt": binding.updatedAt } } });
+      }
+    }
+    if (diagnostic !== undefined) diagnostic.authorityChecks = authorityChecks;
+    return true;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message.replace(/[^A-Za-z0-9 _./:-]/gu, "?").slice(0, 120) : "unknown-error";
+    return reject(`current-authority-loader-exception:${stage}:${detail || "empty-error"}`);
+  }
+}
+
+async function workflowE2ECreatorAuthorityProof(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord,
+  membership: Record<string, unknown> | undefined,
+  access: Awaited<ReturnType<typeof checkProjectAccess>>,
+): Promise<({ kind: "direct-membership"; developerId: string; project: string; role: "developer" | "administrator"; grantId: string }
+  | { kind: "channel-access"; developerId: string; project: string; teamId: string; channelIds: string[]; bindings: Array<{ channelId: string; updatedAt: string }> }) | undefined> {
+  if (membership?.entityType === "MEMBERSHIP" && membership.ownerKey === task.developerId && membership.projectName === task.project
+    && (membership.role === "developer" || membership.role === "administrator") && typeof membership.grantId === "string"
+    && /^[0-9a-f-]{36}$/iu.test(membership.grantId)) {
+    return { kind: "direct-membership", developerId: task.developerId, project: task.project, role: membership.role, grantId: membership.grantId };
+  }
+  if (access.access !== "channel" || dependencies.developer?.slackTeamId === undefined || access.channelIds.length === 0) return undefined;
+  const teamId = dependencies.developer.slackTeamId;
+  const channelIds = [...new Set(access.channelIds)].sort();
+  const bindings: Array<{ channelId: string; updatedAt: string }> = [];
+  for (const channelId of channelIds) {
+    const row = await getItem<Record<string, unknown>>(dependencies, { pk: `SLACK_BINDING#${teamId}`, sk: `CHANNEL#${channelId}` });
+    if (row?.teamId !== teamId || row.channelId !== channelId || row.projectName !== task.project
+      || typeof row.updatedAt !== "string" || row.updatedAt.length === 0) return undefined;
+    bindings.push({ channelId, updatedAt: row.updatedAt });
+  }
+  return { kind: "channel-access", developerId: task.developerId, project: task.project, teamId, channelIds, bindings };
+}
+
+function sameE2ESourceSnapshot(left: E2ESourceSnapshot, right: E2ESourceSnapshot): boolean {
+  if (canonicalJson(left.candidate) !== canonicalJson(right.candidate) || left.commitSha !== right.commitSha || left.treeSha !== right.treeSha
+    || left.treeComplete !== right.treeComplete || canonicalJson(left.treePaths) !== canonicalJson(right.treePaths)
+    || left.sources.length !== right.sources.length) return false;
+  const rightByPath = new Map(right.sources.map((source) => [source.path, source]));
+  return left.sources.every((source) => {
+    const actual = rightByPath.get(source.path);
+    return actual !== undefined && source.sha256 === actual.sha256 && source.kind === actual.kind
+      && Buffer.from(source.bytes).equals(Buffer.from(actual.bytes));
+  });
+}
+
+/** Builds task projections only after reloading and independently qualifying the stored current CHECKS evidence. */
+async function workflowE2EPresentation(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord,
+  operations: readonly unknown[],
+  actor: "owner" | "viewer",
+): Promise<NonNullable<DeveloperTaskView["e2ePresentation"]> | undefined> {
+  const workflow = task.workflow;
+  const progress = workflow?.e2e;
+  const candidateResult = CandidateManifestSchema.safeParse(workflow?.candidate);
+  if (workflow === undefined || progress?.required !== true
+    || candidateResult.success !== true || candidateResult.data.digest !== workflow.candidate?.digest) return undefined;
+  if (task.closedAt !== undefined) {
+    const qualified = progress.qualifiedRound;
+    const failed = progress.failedRound;
+    const round = qualified ?? failed;
+    const roundMatchesClosedTask = round !== undefined && round.candidateDigest === candidateResult.data.digest
+      && round.roundId === progress.currentRoundId && round.groupRunIds.length === progress.currentGroupRunIds.length
+      && round.groupRunIds.every((runId, index) => runId === progress.currentGroupRunIds[index]);
+    let captured: Awaited<ReturnType<typeof readWorkflowE2ENotifierProjection>>;
+    if (roundMatchesClosedTask && round !== undefined && progress.displayRef !== undefined) {
+      captured = await readWorkflowE2ENotifierProjection({
+        ref: progress.displayRef, ownerKey: task.ownerKey, workspaceId: task.workspaceId,
+        current: { candidateDigest: round.candidateDigest, roundId: round.roundId, groupRunIds: [...round.groupRunIds],
+          admissionSha256: round.admissionSha256, evidenceSha256: round.evidenceSha256 },
+        readPrivateObject: async (key, maxBytes) => {
+          try {
+            const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: key })) as { ContentLength?: number; Body?: { transformToByteArray(): Promise<Uint8Array> } };
+            if (!Number.isSafeInteger(object.ContentLength) || object.ContentLength! > maxBytes) return undefined;
+            const bytes = await object.Body?.transformToByteArray();
+            return bytes !== undefined && bytes.byteLength === object.ContentLength && bytes.byteLength <= maxBytes ? bytes : undefined;
+          } catch { return undefined; }
+        },
+      });
+    }
+    const current = E2ESharedViewSchema.parse({ schemaVersion: 1,
+      setup: { status: "unavailable", selectedTargetIds: [], executionPlanDigest: null, blockingInputIds: [], mockSubstitutableInputIds: [] },
+      e2e: { status: "UNKNOWN", label: "Current eligibility unavailable: task closed.", executionPlanDigest: null,
+        expectedGroups: 0, receivedGroups: 0, executedCases: 0, qualifiedCriteria: 0, requiredCriteria: 0,
+        unavailableCriteria: 0, optionalUnavailableCriteria: 0, mockedComponentIds: [], observedMockedComponentIds: [],
+        unexercisedBehaviors: [], policyPresence: "absent", workflowPhase: "closed", requiredUnexercisedCriteriaIds: [] }, actions: [] });
+    const historyMatchesCloseTime = captured !== undefined && Date.parse(captured.capturedAt) <= Date.parse(task.closedAt);
+    const history = historyMatchesCloseTime && captured !== undefined && (qualified !== undefined ? captured.view.e2e.status === "PASS"
+      : failed !== undefined && captured.view.e2e.status === "FAILED") ? captured : undefined;
+    const historicalHtml = history === undefined ? "" : `<section aria-labelledby="e2e-historical-${history.roundId}"><h2 id="e2e-historical-${history.roundId}">Recorded historical E2E result</h2><p>Recorded ${history.view.e2e.status} at ${history.capturedAt}; this is not current eligibility.</p>${renderE2EPageHtml(history.view).replaceAll("e2e-summary", `e2e-historical-summary-${history.roundId}`)}</section>`;
+    const scope = history === undefined
+      ? "Current eligibility unavailable: task closed. No verified historical E2E display is available."
+      : `Current eligibility unavailable: task closed. Recorded historical ${history.view.e2e.status} at ${history.capturedAt}, candidate ${history.candidateDigest}, round ${history.roundId}; groups ${history.view.e2e.receivedGroups}/${history.view.e2e.expectedGroups}, cases ${history.view.e2e.executedCases}, criteria ${history.view.e2e.qualifiedCriteria}/${history.view.e2e.requiredCriteria}; these counts are historical only.`;
+    const currentHtml = `<section aria-labelledby="e2e-current-eligibility"><h2 id="e2e-current-eligibility">Current E2E eligibility</h2><p>Unavailable because the task is closed. No current run counts are available.</p></section>`;
+    const currentSlack = { type: "section", text: { type: "mrkdwn", text: "*Current E2E eligibility: UNKNOWN*\nTask closed. No current run counts are available." } };
+    return { shared: current,
+      slackBlocks: [currentSlack, ...(history === undefined ? [] : renderE2ENotifierSlackBlocks(history.view,
+        { candidateDigest: history.candidateDigest, roundId: history.roundId, capturedAt: history.capturedAt }))].slice(0, 16),
+      pageHtml: `${currentHtml}${historicalHtml}`.slice(0, 65_536),
+      mcp: { ...renderE2EMcpProjection(current), scope: `${renderE2EMcpProjection(current).scope} ${scope}`.slice(0, 2_000) } };
+  }
+  const failedRound = progress.failedRound;
+  const staleFailure = workflow.stage === "IMPLEMENT" && failedRound?.status === "FAILED"
+    && failedRound.candidateDigest === candidateResult.data.digest;
+  const presentationRoundId = staleFailure ? failedRound.roundId : progress.currentRoundId;
+  if (presentationRoundId === undefined) return undefined;
+  for (const raw of operations) {
+    if (typeof raw !== "object" || raw === null || !("id" in raw) || typeof raw.id !== "string" || !("workflowMode" in raw) || raw.workflowMode !== "CHECKS") continue;
+    const operation = await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, raw.id));
+    const admission = operation?.workflowE2EAdmission;
+    if (operation === undefined || operation.kind !== "task" || operation.workflowMode !== "CHECKS" || admission === undefined
+      || admission.taskId !== task.taskId || admission.roundId !== presentationRoundId
+      || admission.candidateDigest !== candidateResult.data.digest
+      || operation.workflowE2EEvidenceRef === undefined && (operation.workflowE2EGroupEvidenceRefs?.length ?? 0) === 0) continue;
+    if (staleFailure && (operation.workflowE2EEvidenceRef === undefined || failedRound.admissionSha256 !== admission.admissionRef.sha256
+      || failedRound.evidenceSha256 !== operation.workflowE2EEvidenceRef.sha256
+      || canonicalJson(failedRound.groupRunIds) !== canonicalJson(admission.groupRunIds))) continue;
+    const projection: { plan?: unknown; round?: unknown; results: unknown[]; allowStaleProjection: boolean } = { results: [], allowStaleProjection: staleFailure };
+    await verifyWorkflowE2EEvidence(dependencies, operation, task, candidateResult.data, projection);
+    if (projection.plan === undefined || projection.round === undefined) return undefined;
+    const selectedTargetIds: string[] = [];
+    const plan = projection.plan as Record<string, unknown>;
+    if (typeof plan.digest !== "string" || !Array.isArray(plan.effectiveTargets)) return undefined;
+    for (const target of plan.effectiveTargets as unknown[]) {
+      if (typeof target !== "object" || target === null || Array.isArray(target)
+        || !("targetId" in target) || typeof target.targetId !== "string") return undefined;
+      selectedTargetIds.push(target.targetId);
+    }
+    const shared = buildE2ESharedView({
+      plan: projection.plan,
+      currentRound: projection.round,
+      // After SendBack the old receipts are retained for explanation, but they cannot qualify the new candidate.
+      // Keeping the authenticated plan and round with no current results preserves the obligation as UNKNOWN.
+      results: staleFailure ? [] : projection.results,
+      setup: { status: "unavailable", selectedTargetIds, executionPlanDigest: plan.digest, blockingInputIds: [], mockSubstitutableInputIds: [] },
+      actor,
+      control: { policyPresent: true, workflowPhase: "e2e", ownerActionProposals: [] },
+    });
+    return { shared, slackBlocks: renderE2ESlackBlocks(shared), pageHtml: renderE2EPageHtml(shared), mcp: renderE2EMcpProjection(shared) };
+  }
+  return undefined;
+}
+
+/** Reloads the exact current CHECKS evidence for publication and returns its final-effect fences. */
+async function workflowE2EPublicationChecks(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord,
+  operations: readonly unknown[],
+): Promise<TransactItems | undefined> {
+  if (task.workflow?.e2e?.required !== true) return [];
+  const candidate = CandidateManifestSchema.safeParse(task.workflow.candidate);
+  const roundId = task.workflow.e2e.currentRoundId;
+  if (!candidate.success || roundId === undefined || task.closedAt !== undefined) return undefined;
+  const candidates = operations.flatMap((raw) => {
+    if (typeof raw !== "object" || raw === null || !("id" in raw) || typeof raw.id !== "string") return [];
+    return [raw.id];
+  });
+  const checks: OperationRecord[] = [];
+  for (const id of candidates) {
+    const operation = await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, id));
+    if (operation?.entityType === "OPERATION" && operation.kind === "task" && operation.workflowMode === "CHECKS"
+      && operation.workflowE2EAdmission?.taskId === task.taskId && operation.workflowE2EAdmission.roundId === roundId
+      && operation.workflowE2EAdmission.candidateDigest === candidate.data.digest && operation.workflowE2EEvidenceRef !== undefined) checks.push(operation);
+  }
+  checks.sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const operation = checks[0];
+  if (operation === undefined) return undefined;
+  const diagnostic: WorkflowE2EVerificationDiagnostic = {};
+  if (await verifyWorkflowE2EEvidence(dependencies, operation, task, candidate.data, undefined, diagnostic) !== "PASS"
+    || diagnostic.authorityChecks === undefined || diagnostic.authorityChecks.length === 0) return undefined;
+  return diagnostic.authorityChecks;
+}
+
+/** Shared loader for authenticated task detail, page, and notifier projections. */
+export async function loadWorkflowE2EPresentation(
+  dependencies: AwsBrokerDependencies,
+  task: DeveloperTaskRecord,
+  operations: readonly unknown[],
+  actor: "owner" | "viewer" = "viewer",
+): Promise<NonNullable<DeveloperTaskView["e2ePresentation"]> | undefined> {
+  return workflowE2EPresentation(dependencies, task, operations, actor);
+}
+
+function projectSetupDomainRecord(item: Record<string, unknown> | undefined, key: { pk: string; sk: string }, entityType: string): Record<string, unknown> {
+  if (!item) return {};
+  if (item.pk !== key.pk || item.sk !== key.sk || item.entityType !== entityType) return {};
+  const { pk: _pk, sk: _sk, entityType: _entityType, ...domain } = item;
+  void _pk; void _sk; void _entityType;
+  return domain;
+}
+
+/** Runtime catalog's strict domain schema includes entityType; validate storage identity before preserving it. */
+function projectSetupRuntimeRecord(item: Record<string, unknown> | undefined, key: { pk: string; sk: string }): Record<string, unknown> {
+  const domain = projectSetupDomainRecord(item, key, "PROJECT_SETUP_RUNTIME");
+  return Object.keys(domain).length === 0 ? domain : { ...domain, entityType: "PROJECT_SETUP_RUNTIME" };
 }
 
 /**
@@ -5519,13 +7845,37 @@ async function reconcilePullRequest(
   // must be the reported commit, and that commit's tree the checked one, before the pull request opens from the branch.
   const github = dependencies.githubPullRequests;
   const expectedTree = expected.expectedTreeSha;
+  const expectedCommit = expected.expectedCommitSha;
   const expectedBase = expected.expectedBaseCommit;
-  // The commit's only parent must be the task's pinned base: the commit is the checked change on that base, nothing more.
-  const onPinnedBase = async (commit: string) => expectedBase === undefined
-    || JSON.stringify(await github.getCommitParents!(expected.repositoryUrl, commit)) === JSON.stringify([expectedBase]);
+  const publicationMode = expected.publicationMode;
+  if (expectedTree !== undefined) await assertCurrentWorkflowPublication(dependencies, operation);
+  // The exact admitted commit may contain more than one owner-approved edit commit. Its ancestry must still contain
+  // the pinned base, while the worker and GitHub head remain exactly the checked commit.
+  const onPinnedBase = async (commit: string) => {
+    if (expectedBase === undefined) return true;
+    if (github.getCommitParents === undefined) return false;
+    const pending = [commit];
+    const seen = new Set<string>();
+    while (pending.length > 0 && seen.size < 512) {
+      const current = pending.shift()!;
+      if (current === expectedBase) return true;
+      if (seen.has(current)) continue;
+      seen.add(current);
+      for (const parent of await github.getCommitParents(expected.repositoryUrl, current)) {
+        if (!/^[a-f0-9]{40,64}$/u.test(parent)) return false;
+        pending.push(parent);
+      }
+    }
+    return false;
+  };
   if (expectedTree !== undefined) {
-    if (github.getCommitTree === undefined || github.getBranchHead === undefined || (expectedBase !== undefined && github.getCommitParents === undefined)) {
+    if (publicationMode === undefined || (publicationMode === "COMMITTED_HEAD" && expectedCommit === undefined)
+      || github.getCommitTree === undefined || github.getBranchHead === undefined || (expectedBase !== undefined && github.getCommitParents === undefined)) {
       throw agentXError("RUNTIME_UNAVAILABLE", "cannot verify the pushed tree");
+    }
+    if (publicationMode === "COMMITTED_HEAD" && input.commit !== expectedCommit) {
+      await blockUncheckedPublication(dependencies, operation);
+      throw agentXError("CALLBACK_FORBIDDEN", "the pushed commit is not the checked commit");
     }
     const head = await github.getBranchHead(expected.repositoryUrl, expected.headBranch);
     if (head !== input.commit || await github.getCommitTree(expected.repositoryUrl, input.commit) !== expectedTree || !await onPinnedBase(input.commit)) {
@@ -6603,8 +8953,9 @@ async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies
     const workflow = task?.workflow;
     const deleteRow = { Delete: { TableName: dependencies.tableName, Key: key, ...sameRow } };
     // The stage and state the row was due in, and the plain reason the owner sees when AgentX gives up on it.
-    const [stage, state, reason] = item.kind === "REVIEW"
-      ? ["REVIEW", "WAITING", WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE] as const
+    const [stage, state, reason] = item.kind === "CHECKS"
+      ? ["VERIFY", "WAITING", WORKFLOW_BLOCK_REASONS.checksUnconfirmed] as const
+      : item.kind === "REVIEW" ? ["REVIEW", "WAITING", WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE] as const
       : ["PULL_REQUEST", "READY", WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE] as const;
     // A fix AgentX gave up pushing: the task waits for the merge, blocked, naming the pull request.
     const updating = item.kind === "UPDATE" && workflow !== undefined ? nextWorkflowPullRequestUpdate(workflow) : undefined;
@@ -6636,6 +8987,242 @@ async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies
  */
 type AccessPausedWorkflowDispatch = WorkflowDispatchRecord & { taskAccessPausedAt?: string };
 
+/** A deterministic source-reference mismatch returns the same owner-approved candidate to plan review. */
+async function returnWorkflowToCorrectE2EPlan(dependencies: AwsBrokerDependencies, item: WorkflowDispatchRecord,
+  error: E2EPortablePlanReferenceError): Promise<boolean> {
+  if (item.kind !== "CHECKS") return false;
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
+  const workflow = task?.workflow;
+  const artifact = workflow?.artifacts.filter((entry) => entry.type === "plan").at(-1);
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || artifact === undefined
+    || workflow.revision !== item.workflowRevision || workflow.stage !== "VERIFY" || workflow.state !== "WAITING"
+    || workflow.e2e?.required !== true || workflow.candidate?.digest !== item.candidateDigest) return false;
+  const {
+    e2e: _e2e, verification: _verification, reviews: _reviews, acceptedFindings: _acceptedFindings,
+    regressedChecks: _regressedChecks, workflowDependenciesApproval: _workflowDependenciesApproval,
+    workflowDependenciesOperationId: _workflowDependenciesOperationId,
+    workflowDependenciesProgress: _workflowDependenciesProgress, feedbackDispatchApproval: _feedbackDispatchApproval,
+    outcome: _outcome, ...retained
+  } = workflow;
+  void _e2e; void _verification; void _reviews; void _acceptedFindings; void _regressedChecks;
+  void _workflowDependenciesApproval; void _workflowDependenciesOperationId; void _workflowDependenciesProgress;
+  void _feedbackDispatchApproval; void _outcome;
+  const now = new Date().toISOString();
+  const next = WorkflowSnapshotSchema.parse({ ...retained, revision: workflow.revision + 1, stage: "PLAN_REVIEW", state: "WAITING",
+    updatedAt: now, blockReason: E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON });
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Delete: { TableName: dependencies.tableName, Key: { pk: item.pk, sk: item.sk },
+        ConditionExpression: "attribute_exists(pk) AND workflowRevision = :revision AND #kind = :checks AND candidateDigest = :candidate",
+        ExpressionAttributeNames: { "#kind": "kind" }, ExpressionAttributeValues: {
+          ":revision": item.workflowRevision, ":checks": "CHECKS", ":candidate": item.candidateDigest,
+        } } },
+      { Update: { TableName: dependencies.tableName, Key: taskKey(item.taskId),
+        UpdateExpression: "SET workflow = :workflow, e2ePlanCorrection = :correction, updatedAt = :now",
+        ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.e2e.required = :required AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
+        ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
+          ":workflow": next, ":correction": { artifactId: artifact.id, artifactSha256: artifact.sha256,
+            candidateDigest: item.candidateDigest, reasonCode: error.reasonCode, requiredE2E: true }, ":now": now,
+          ":revision": item.workflowRevision, ":verify": "VERIFY", ":waiting": "WAITING", ":required": true,
+          ":candidate": item.candidateDigest,
+        } } },
+    ] }));
+    console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_plan_reference_rejected", taskId: item.taskId,
+      reasonCode: error.reasonCode, artifactId: artifact.id }));
+    return true;
+  } catch (caught) {
+    if (isConditional(caught)) return false;
+    throw caught;
+  }
+}
+
+type WorkflowE2EReadinessResult = { status: "WAITING" } | { status: "STALE" } | { status: "READY"; task: DeveloperTaskRecord };
+
+async function blockWorkflowE2EReadiness(dependencies: AwsBrokerDependencies, item: WorkflowDispatchRecord, reason: string): Promise<void> {
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== item.workflowRevision
+    || workflow.stage !== "VERIFY" || workflow.state !== "WAITING" || workflow.candidate?.digest !== item.candidateDigest) {
+    await dependencies.documentClient.send(new DeleteCommand({ TableName: dependencies.tableName, Key: { pk: item.pk, sk: item.sk },
+      ConditionExpression: "attribute_exists(pk) AND workflowRevision = :revision AND candidateDigest = :candidate",
+      ExpressionAttributeValues: { ":revision": item.workflowRevision, ":candidate": item.candidateDigest } }));
+    return;
+  }
+  const now = new Date().toISOString();
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Delete: { TableName: dependencies.tableName, Key: { pk: item.pk, sk: item.sk },
+      ConditionExpression: "attribute_exists(pk) AND workflowRevision = :revision AND candidateDigest = :candidate",
+      ExpressionAttributeValues: { ":revision": item.workflowRevision, ":candidate": item.candidateDigest } } },
+    { Update: { TableName: dependencies.tableName, Key: taskKey(item.taskId),
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
+        ":workflow": blockWorkflow(workflow, reason, now), ":now": now, ":revision": item.workflowRevision,
+        ":verify": "VERIFY", ":waiting": "WAITING", ":candidate": item.candidateDigest,
+      } } },
+  ] }));
+}
+
+/**
+ * Required native E2E rounds are admitted only after the existing EC2 outbox path reports the exact
+ * READY session generation. The readiness operation has no feature payload and never reaches a worker.
+ */
+/** Rechecks the original task creator's live project grant before warm-up and round admission. */
+async function requireWorkflowE2ECreatorAuthority(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord) {
+  const creatorRecord = await getWorkflowE2ECreatorIdentity(dependencies, task.developerId);
+  if (creatorRecord?.revoked === true) {
+    throw agentXError("TASK_ACCESS_DENIED", "the original task creator's account has been revoked");
+  }
+  if (creatorRecord === undefined || dependencies.developer === undefined) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the original creator identity is unavailable for this E2E round");
+  }
+  let creatorAccess: Awaited<ReturnType<typeof checkProjectAccess>>;
+  try {
+    creatorAccess = await checkProjectAccess({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+      developer: dependencies.developer, now: Date.now },
+    { developerId: task.developerId, ...(creatorRecord.slackUserId === undefined ? {} : { slackUserId: creatorRecord.slackUserId }) }, task.project);
+  } catch (error) {
+    if (error instanceof AgentXError && error.code === "PROJECT_ACCESS_DENIED") {
+      throw agentXError("TASK_ACCESS_DENIED", "the original creator no longer has current access to this task's project");
+    }
+    throw agentXError("RUNTIME_UNAVAILABLE", "the original creator's current project access is unavailable");
+  }
+  const creatorMembership = await getItem<Record<string, unknown>>(dependencies, { pk: `MEMBER#${task.developerId}`, sk: `PROJECT#${task.project}` });
+  const creatorAuthority = await workflowE2ECreatorAuthorityProof(dependencies, task, creatorMembership, creatorAccess);
+  if (creatorAuthority === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the creator has no versioned direct or locally bound channel access proof for this E2E round");
+  return creatorAuthority;
+}
+
+async function ensureWorkflowE2EComputeReadiness(
+  dependencies: AwsBrokerDependencies,
+  routeDependencies: Parameters<typeof startTaskWorkflowE2EChecksFromSystem>[0],
+  item: WorkflowDispatchRecord,
+): Promise<WorkflowE2EReadinessResult> {
+  const dispatchKey = { pk: item.pk, sk: item.sk };
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== item.workflowRevision
+    || workflow.stage !== "VERIFY" || workflow.state !== "WAITING" || workflow.e2e?.required !== true
+    || workflow.candidate?.digest !== item.candidateDigest) return { status: "STALE" };
+  const row = await getItem<WorkflowDispatchRecord>(dependencies, dispatchKey);
+  if (row === undefined || row.workflowRevision !== item.workflowRevision || row.kind !== "CHECKS" || row.candidateDigest !== item.candidateDigest) {
+    return { status: "STALE" };
+  }
+  // Keep the original creator's current project access in front of every warm-up start or resume.
+  // The feature-round admission rechecks this authority again after compute becomes ready.
+  await requireWorkflowE2ECreatorAuthority(dependencies, task);
+  if (row.readinessOperationId === undefined) {
+    const accessFence = await systemTaskDispatchAccessFence(routeDependencies, task);
+    const workspaceResult = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName,
+      Key: workspaceKey(task.workspaceId), ConsistentRead: true }));
+    const workspace = WorkspaceInstanceSchema.safeParse(workspaceResult.Item === undefined ? undefined : workspaceRecordFields(workspaceResult.Item));
+    if (!workspace.success || !["READY", "STOPPED"].includes(workspace.data.status) || workspace.data.activeOperationId !== null) {
+      throw agentXError("WORKSPACE_BUSY", "the task workspace cannot start its bounded E2E readiness operation");
+    }
+    const now = new Date().toISOString();
+    const marker: WorkflowE2EReadinessMarker = { purpose: "workflow-e2e-readiness", taskId: item.taskId,
+      workflowRevision: item.workflowRevision, candidateDigest: item.candidateDigest, dispatchSk: item.sk };
+    const operationId = workflowRequestId("agentx-workflow-e2e-readiness", item.taskId, item.workflowRevision, item.candidateDigest);
+    const requestId = operationId;
+    const fence = workspace.data.fence + 1;
+    const operation = operationRecord({ id: operationId, workspaceId: task.workspaceId, kind: "resume", requestId,
+      payloadHash: hashJson(marker), status: "ACCEPTED", fence, createdAt: now, updatedAt: now });
+    const outboxId = workflowRequestId("agentx-workflow-e2e-readiness-outbox", item.taskId, item.workflowRevision, item.candidateDigest);
+    operation.workflowE2EReadiness = { ...marker, outboxId };
+    const invocation: WorkerInvocation = { protocolVersion: AGENTX_PROTOCOL_VERSION, kind: "resume", operationId,
+      workspaceId: task.workspaceId, fence, projectRevision: workspace.data.projectRevision,
+      callbackCapability: issueCapability(dependencies, task.workspaceId, operationId, fence), payload: {} };
+    const generatedOutbox = outboxRecord(workspace.data, invocation);
+    const outbox = { ...generatedOutbox, id: outboxId, pk: `OUTBOX#${outboxId}`, workflowE2EReadiness: marker };
+    try {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        { ConditionCheck: { TableName: dependencies.tableName, Key: taskKey(item.taskId),
+          ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.e2e.required = :required AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
+          ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
+            ":revision": item.workflowRevision, ":verify": "VERIFY", ":waiting": "WAITING", ":required": true, ":candidate": item.candidateDigest,
+          } } },
+        { Update: { TableName: dependencies.tableName, Key: workspaceKey(task.workspaceId),
+          UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
+          ConditionExpression: "attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped) AND fence = :previousFence",
+          ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: {
+            ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operationId,
+            ":fence": fence, ":previousFence": workspace.data.fence, ":now": now,
+          } } },
+        { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
+        { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
+        { Update: { TableName: dependencies.tableName, Key: dispatchKey,
+          UpdateExpression: "SET readinessOperationId = :operation",
+          ConditionExpression: "attribute_not_exists(readinessOperationId) AND workflowRevision = :revision AND #kind = :checks AND candidateDigest = :candidate",
+          ExpressionAttributeNames: { "#kind": "kind" }, ExpressionAttributeValues: {
+            ":operation": operationId, ":revision": item.workflowRevision, ":checks": "CHECKS", ":candidate": item.candidateDigest,
+          } } },
+        ...(accessFence === undefined ? [] : [accessFence]),
+      ] }));
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      const current = await getItem<WorkflowDispatchRecord>(dependencies, dispatchKey);
+      return current?.readinessOperationId === undefined ? { status: "WAITING" } : { status: "WAITING" };
+    }
+    return { status: "WAITING" };
+  }
+
+  const operation = await getItem<OperationRecord>(dependencies, operationKey(task.workspaceId, row.readinessOperationId));
+  const marker = operation?.workflowE2EReadiness;
+  const expectedMarker = { purpose: "workflow-e2e-readiness", taskId: item.taskId, workflowRevision: item.workflowRevision,
+    candidateDigest: item.candidateDigest, dispatchSk: item.sk } as const;
+  if (operation === undefined || operation.kind !== "resume" || marker === undefined || marker.purpose !== expectedMarker.purpose
+    || marker.taskId !== expectedMarker.taskId || marker.workflowRevision !== expectedMarker.workflowRevision
+    || marker.candidateDigest !== expectedMarker.candidateDigest || marker.dispatchSk !== expectedMarker.dispatchSk
+    || marker.outboxId !== workflowRequestId("agentx-workflow-e2e-readiness-outbox", item.taskId, item.workflowRevision, item.candidateDigest)) {
+    await blockWorkflowE2EReadiness(dependencies, item, "E2E compute readiness could not be verified; no feature round was admitted.");
+    return { status: "STALE" };
+  }
+  if (operation.status !== "SUCCEEDED") {
+    if (["FAILED", "CANCELLED", "INTERRUPTED"].includes(operation.status)) {
+      await blockWorkflowE2EReadiness(dependencies, item, "E2E compute readiness failed; no feature round was admitted.");
+      return { status: "STALE" };
+    }
+    return { status: "WAITING" };
+  }
+  const generation = marker.readyGeneration;
+  if (!Number.isInteger(generation) || generation! < 1) {
+    await blockWorkflowE2EReadiness(dependencies, item, "E2E compute readiness completed without a valid READY session witness.");
+    return { status: "STALE" };
+  }
+  const accessFence = await systemTaskDispatchAccessFence(routeDependencies, task);
+  const now = new Date().toISOString();
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      { Update: { TableName: dependencies.tableName, Key: workspaceSessionKey(task.workspaceId),
+        UpdateExpression: "SET lastActivityAt = :now",
+        ConditionExpression: "#state = :ready AND generation = :generation",
+        ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":now": now, ":ready": "READY", ":generation": generation } } },
+      { ConditionCheck: { TableName: dependencies.tableName, Key: taskKey(item.taskId),
+        ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.e2e.required = :required AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
+        ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
+          ":revision": item.workflowRevision, ":verify": "VERIFY", ":waiting": "WAITING", ":required": true, ":candidate": item.candidateDigest,
+        } } },
+      { ConditionCheck: { TableName: dependencies.tableName, Key: dispatchKey,
+        ConditionExpression: "readinessOperationId = :operation AND workflowRevision = :revision AND candidateDigest = :candidate",
+        ExpressionAttributeValues: { ":operation": row.readinessOperationId, ":revision": item.workflowRevision, ":candidate": item.candidateDigest } } },
+      ...(accessFence === undefined ? [] : [accessFence]),
+    ] }));
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const session = await getItem<{ state?: unknown; generation?: unknown }>(dependencies, workspaceSessionKey(task.workspaceId));
+    if (session?.state !== "READY" || session.generation !== generation) {
+      await blockWorkflowE2EReadiness(dependencies, item, "The exact E2E-ready compute session is no longer available; no feature round was admitted.");
+      return { status: "STALE" };
+    }
+    return { status: "WAITING" };
+  }
+  const freshTask = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
+  if (freshTask === undefined || freshTask.closedAt !== undefined || freshTask.workflow?.revision !== item.workflowRevision
+    || freshTask.workflow.stage !== "VERIFY" || freshTask.workflow.state !== "WAITING"
+    || freshTask.workflow.candidate?.digest !== item.candidateDigest) return { status: "STALE" };
+  return { status: "READY", task: freshTask };
+}
+
 async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: AccessPausedWorkflowDispatch): Promise<"DISPATCHED" | "STALE" | "RETRY"> {
   const key = { pk: item.pk, sk: item.sk };
   const remove = async () => {
@@ -6651,7 +9238,8 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     if (item.taskAccessPausedAt !== undefined) return "RETRY";
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
     const workflow = task?.workflow;
-    const due = item.kind === "REVIEW" ? workflow?.stage === "REVIEW" && workflow.state === "WAITING"
+    const due = item.kind === "CHECKS" ? workflow?.stage === "VERIFY" && workflow.state === "WAITING"
+      : item.kind === "REVIEW" ? workflow?.stage === "REVIEW" && workflow.state === "WAITING"
       : item.kind === "PUBLISH" || item.kind === "UPDATE" ? workflow?.stage === "PULL_REQUEST" && workflow.state === "READY" : false;
     if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.revision !== item.workflowRevision
       || !due || dependencies.developer === undefined) {
@@ -6662,15 +9250,38 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     const routeDependencies = developerTaskRouteDependencies({
       documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
       now: Date.now, tasks: developerTaskActions(dependencies), refreshTaskFeedback: (taskId) => refreshTaskFeedbackForOwnerDecision(dependencies, taskId),
+      workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
+      workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
     }, caller, undefined, null);
     const expected = { workflowRevision: item.workflowRevision, candidateDigest: item.candidateDigest };
     // A fix for the pull requests already open is pushed to them by the same start, which sees they exist.
-    const outcome = item.kind === "PUBLISH" || item.kind === "UPDATE"
-      ? await startTaskWorkflowPublicationFromSystem(routeDependencies, item.taskId, expected, { taskPageUrl: taskPageUrl(dependencies.developer.issuer, item.taskId) })
-      : await startTaskWorkflowReviewFromSystem(routeDependencies, item.taskId, expected);
+    let outcome: "STARTED" | "DUPLICATE" | "STALE";
+    if (item.kind === "CHECKS") {
+      const readiness = await ensureWorkflowE2EComputeReadiness(dependencies, routeDependencies, item);
+      if (readiness.status === "WAITING") return "DISPATCHED";
+      if (readiness.status === "STALE") {
+        await remove();
+        return "STALE";
+      }
+      outcome = await startWorkflowE2EChecksDispatch(dependencies, routeDependencies, readiness.task, expected, caller);
+    } else {
+      outcome = item.kind === "PUBLISH" || item.kind === "UPDATE"
+        ? await startTaskWorkflowPublicationFromSystem(routeDependencies, item.taskId, expected, { taskPageUrl: taskPageUrl(dependencies.developer.issuer, item.taskId) })
+        : await startTaskWorkflowReviewFromSystem(routeDependencies, item.taskId, expected);
+    }
     await remove();
     return outcome === "STALE" ? "STALE" : "DISPATCHED";
   } catch (error) {
+    if (error instanceof E2EPortablePlanReferenceError) {
+      try {
+        if (await returnWorkflowToCorrectE2EPlan(dependencies, item, error)) return "STALE";
+      } catch (recoveryError) {
+        console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_plan_correction_failed", taskId: item.taskId,
+          error: recoveryError instanceof Error ? recoveryError.name : "unknown" }));
+      }
+      await recordWorkflowDispatchFailure(dependencies, item);
+      return "RETRY";
+    }
     // PEOPLE-backed work with no current freshly qualified owner stays parked on its durable
     // dispatch row. It does not consume the bounded infrastructure failure budget; only a later
     // explicit owner action can start or redrive work.
@@ -6697,6 +9308,122 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     await recordWorkflowDispatchFailure(dependencies, item);
     return "RETRY";
   }
+}
+
+/** Reads the original creator from its authoritative, separately scoped sign-in table. */
+async function getWorkflowE2ECreatorIdentity(dependencies: AwsBrokerDependencies, developerId: string): Promise<Pick<DeveloperRecord, "revoked" | "slackUserId"> & { entityType?: unknown } | undefined> {
+  const signInTableName = dependencies.developer?.signInTableName;
+  if (signInTableName === undefined) return undefined;
+  const response = await dependencies.documentClient.send(new GetCommand({
+    TableName: signInTableName,
+    Key: { pk: `DEVELOPER#${developerId}`, sk: "META" },
+    ConsistentRead: true,
+  })) as unknown as { Item?: Pick<DeveloperRecord, "revoked" | "slackUserId"> & { entityType?: unknown } };
+  return response.Item?.entityType === "DEVELOPER" ? response.Item : undefined;
+}
+
+/** Creates the content-addressed admission and starts the separate current CHECKS operation. */
+async function startWorkflowE2EChecksDispatch(
+  dependencies: AwsBrokerDependencies,
+  routeDependencies: Parameters<typeof startTaskWorkflowE2EChecksFromSystem>[0],
+  task: DeveloperTaskRecord,
+  expected: { workflowRevision: number; candidateDigest: string },
+  caller: Parameters<typeof startTaskWorkflowReviewFromSystem>[3],
+): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  const workflow = task.workflow;
+  const candidate = workflow?.candidate;
+  const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
+  if (workflow?.e2e?.required !== true || workflow.stage !== "VERIFY" || workflow.state !== "WAITING"
+    || workflow.revision !== expected.workflowRevision || candidate?.digest !== expected.candidateDigest
+    || catalogId === undefined || dependencies.projectSetupRuntimeCatalogId === undefined) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the current approved feature E2E admission is unavailable");
+  }
+  const artifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
+  if (artifact === undefined || workflow.e2e.contractDigest !== artifact.sha256) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the current canonical feature E2E plan is unavailable or stale");
+  }
+  const approved = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), artifact, {});
+  if (approved?.format !== "structured") {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the canonical Owner-approved E2E intent is unavailable or stale");
+  }
+  const canonicalApproval = resolveWorkflowE2ECanonicalApproval({ taskId: task.taskId,
+    workflow: workflow as NonNullable<typeof workflow> & { artifacts: Array<{ id: string; type: string; sha256: string }>;
+      decisions: Array<{ decision: string; actorId: string; artifactDigest?: string; workBreakdownDigest?: string; workflowRevision: number }> },
+    artifact, plan: approved.plan });
+  if (canonicalApproval === undefined) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the canonical Owner-approved E2E intent is unavailable or stale");
+  }
+  const e2eIntent = approved.plan.e2e;
+  if (e2eIntent === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the canonical E2E intent is unavailable");
+  const sourceOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
+    .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "IMPLEMENT")
+    .map((item) => item as unknown as OperationRecord)
+    .filter((operation) => operation.candidateSourceRef?.candidateDigest === candidate.digest)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const sourceOperation = sourceOperations[0];
+  if (sourceOperation === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the current candidate has no first-party committed source export");
+  const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, sourceOperation, candidate);
+  if (sourceExport === undefined || sourceExport.repositories.length !== 1) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the current candidate source export is unavailable for portable feature checks");
+  }
+  const sourceRepository = sourceExport.repositories[0]!;
+  const snapshot: E2ESourceSnapshot = {
+    candidate, commitSha: sourceRepository.commitSha, treeSha: sourceRepository.treeSha,
+    treeComplete: true, treePaths: sourceRepository.treePaths,
+    sources: sourceRepository.sources.map((source) => ({ path: source.path, sha256: source.sha256, kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") })),
+  };
+  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  if (project.runtimeBinding.deploymentMode !== "ec2-ebs") throw agentXError("RUNTIME_UNAVAILABLE", "the qualified feature verifier binding is not an EC2 runtime");
+  const policy = E2EPolicySchema.parse(project.definition.e2e);
+  const featureRecord = await getItem<Record<string, unknown>>(dependencies, e2eFeatureVerifierKey(catalogId, policy.defaultSandboxProfileId));
+  if (featureRecord === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the separately qualified feature verifier is unavailable");
+  const planDigest = createHash("sha256").update(canonicalJson({
+    domain: "workflow-feature-e2e-approved-plan/v1", taskId: task.taskId, artifactId: canonicalApproval.artifactId, artifactSha256: canonicalApproval.artifactDigest,
+    graphDigest: canonicalApproval.graphDigest, graphRunId: canonicalApproval.runId, workflowRevision: canonicalApproval.workflowRevision, actorId: canonicalApproval.actorId,
+  })).digest("hex");
+  const featureAdmission = deriveE2EFeatureExecutionAdmission({
+    intent: e2eIntent, snapshot, artifactId: artifact.id, artifactSha256: artifact.sha256, planDigest,
+    policy, runtimeCatalogId: catalogId, runtimeBinding: project.runtimeBinding, featureVerifier: featureRecord, now: Date.now(),
+  });
+  const creatorAuthority = await requireWorkflowE2ECreatorAuthority(dependencies, task);
+  const workspace = await routeDependencies.actions.workspace(task.workspaceId);
+  const operationId = randomUUID();
+  const fence = workspace.fence + 1;
+  const workflowRevision = workflow.revision + 1;
+  const roundId = randomUUID();
+  const runIds = featureAdmission.plan.groups.map(() => randomUUID());
+  const admittedAtMs = Date.now();
+  const admittedAt = new Date(admittedAtMs).toISOString();
+  const deadlineAt = new Date(admittedAtMs + policy.limits.runTimeoutMs).toISOString();
+  const built = buildE2EFeatureRound({ admission: featureAdmission, taskId: task.taskId, operationId, operationFence: fence,
+    workflowRevision, roundId, runIds, admittedAt, deadlineAt });
+  const { sourceSnapshot: _selectionSourceSnapshot, ...storedSelectionInput } = featureAdmission.selectionInput;
+  void _selectionSourceSnapshot;
+  const admissionObject = {
+    schemaVersion: "workflow-e2e-admission/v1", taskId: task.taskId, operationId, operationFence: fence, workflowRevision,
+    candidateDigest: candidate.digest, sourceSnapshot: { ...snapshot, sources: snapshot.sources.map((source) => ({ path: source.path,
+      sha256: source.sha256, kind: source.kind, bytesBase64: Buffer.from(source.bytes).toString("base64") })) },
+    intent: e2eIntent, policy, runtime: featureAdmission.runtime, plan: featureAdmission.plan, bundle: featureAdmission.bundle,
+    selectionInput: storedSelectionInput, portableApprovalBinding: featureAdmission.portableApprovalBinding, creatorAuthority,
+    round: built.round, groupAdmissions: built.groupAdmissions,
+  };
+  const admissionBytes = Buffer.from(canonicalJson(admissionObject), "utf8");
+  const admissionSha = createHash("sha256").update(admissionBytes).digest("hex");
+  const admissionRef = E2EWorkflowAdmissionRefSchema.parse({ schemaVersion: 1, taskId: task.taskId, workflowRevision,
+    candidateDigest: candidate.digest, roundId, groupRunIds: built.round.groupBindings.map((binding) => binding.runId),
+    admissionRef: { key: `workflow-e2e-admissions/sha256/${admissionSha}.json`, sha256: admissionSha, byteLength: admissionBytes.byteLength } });
+  if (admissionBytes.byteLength > 24 * 1024 * 1024) throw agentXError("CONFIG_INVALID", "the immutable E2E admission exceeds its bounded object size");
+  try {
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: admissionRef.admissionRef.key,
+      Body: admissionBytes, ContentType: "application/json", Metadata: { sha256: admissionSha, task: task.taskId, candidate: candidate.digest }, IfNoneMatch: "*" }));
+  } catch (error) {
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (status !== 412 && (error as { name?: unknown } | undefined)?.name !== "PreconditionFailed") throw error;
+    if (await readStoredText(dependencies.s3, dependencies.artifactBucketName, admissionRef.admissionRef.key, admissionBytes.byteLength + 1) !== admissionBytes.toString("utf8")) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "the content-addressed E2E admission object conflicts with its digest");
+    }
+  }
+  return startTaskWorkflowE2EChecksFromSystem(routeDependencies, task.taskId, expected, admissionRef, operationId, caller);
 }
 
 /** Run the task's dispatch rows right after the result that wrote them committed. Never throws. */
@@ -6909,6 +9636,24 @@ async function completedPullRequestUpdateItems(
     ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "UPDATE", next.candidate.digest, now)] : [])];
 }
 
+async function loadWorkflowCandidateSourceExport(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  expectedCandidate: ReturnType<typeof createCandidateManifest>,
+): Promise<z.infer<ReturnType<typeof workflowCandidateSourceExportSchema>> | undefined> {
+  const reference = operation.candidateSourceRef;
+  if (!reference || reference.candidateDigest !== expectedCandidate.digest || reference.byteLength <= 0
+    || reference.byteLength > MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES || !/^[a-f0-9]{64}$/.test(reference.sha256)) return undefined;
+  const text = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.key, MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES);
+  if (text === undefined) return undefined;
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.byteLength !== reference.byteLength || createHash("sha256").update(bytes).digest("hex") !== reference.sha256) return undefined;
+  const parsed = workflowCandidateSourceExportSchema().safeParse(JSON.parse(text) as unknown);
+  if (!parsed.success || parsed.data.candidate.digest !== expectedCandidate.digest
+    || canonicalJson(parsed.data.candidate) !== canonicalJson(expectedCandidate)) return undefined;
+  return parsed.data;
+}
+
 async function completedWorkflowItems(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
@@ -6923,6 +9668,8 @@ async function completedWorkflowItems(
   plannerReplies?: PlannerReplies[],
   /** A cancel may terminalize only this exact current graph IMPLEMENT operation. */
   graphCancelTarget?: OperationRecord,
+  /** A cancel may terminalize only this exact current native E2E CHECKS round. */
+  e2eCancelTarget?: OperationRecord,
 ): Promise<TransactItems> {
   if (pointer === undefined) return [];
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
@@ -7023,6 +9770,7 @@ async function completedWorkflowItems(
   let evidenceJob: { artifactId: string; artifactSha256: string } | undefined;
   /** The record of the comments the planner answered, committed with the plan it answered them in. */
   let recordedReplies: ReturnType<typeof plannerRepliesItem> | undefined;
+  let e2eAuthorityChecks: Array<Record<string, unknown>> = [];
   if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") {
     const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
     const dependencyBinding = operation.workflowDependencies;
@@ -7076,6 +9824,7 @@ async function completedWorkflowItems(
       let verificationDetail: string | undefined;
       // Review only: the tests the rerun found regressed, for the owner's message and a send-back.
       let regressedChecks: string[] | undefined;
+      let failedE2ERound: { status: "FAILED"; candidateDigest: string; roundId: string; groupRunIds: string[]; admissionSha256: string; evidenceSha256: string } | undefined;
       try {
         if (dependencyBinding !== undefined && (!dependencyResultValid || !graphItemsComplete)) {
           verificationFailure = "approved work breakdown result is missing, stale or incomplete";
@@ -7115,6 +9864,46 @@ async function completedWorkflowItems(
         const expectedRepositoryIds = project.definition.repositories.map((repository) => repository.name).sort();
         const candidateInput = repositories as CandidateRepository[];
         const candidate = createCandidateManifest(candidateInput);
+        if (task.workflow.e2e?.required === true && operation.workflowMode === "IMPLEMENT") {
+          const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, operation, candidate);
+          if (sourceExport === undefined) {
+            verificationFailure = WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON;
+            throw new Error(verificationFailure);
+          }
+        }
+        let e2eQualification: { candidateDigest: string; contractDigest: string; policyDigest: string; bundleDigest: string; executionPlanDigest: string;
+          roundId: string; groupRunIds: string[]; admissionSha256: string; evidenceSha256: string } | undefined;
+        if (operation.workflowMode === "CHECKS" && task.workflow.e2e?.required === true) {
+          if (task.workflow.e2e.currentGroupRunIds.length === 0 || task.workflow.e2e.currentRoundId === undefined
+            || operation.workflowE2EAdmission === undefined || operation.workflowE2EEvidenceRef === undefined) {
+            verificationFailure = "the current candidate-bound E2E round or its private evidence is missing";
+            throw new Error(verificationFailure);
+          }
+          const e2eDiagnostic: WorkflowE2EVerificationDiagnostic = {};
+          const qualification = await verifyWorkflowE2EEvidence(dependencies, operation, task, candidate, undefined, e2eDiagnostic);
+          e2eAuthorityChecks = e2eDiagnostic.authorityChecks ?? [];
+          if (e2eAuthorityChecks.length === 0) {
+            verificationFailure = "current E2E authority snapshot could not be fenced at terminal persistence";
+            throw new Error(verificationFailure);
+          }
+          if (qualification !== "PASS") {
+            if (qualification === "FAILED" && operation.workflowE2EAdmission !== undefined && operation.workflowE2EEvidenceRef !== undefined) {
+              failedE2ERound = { status: "FAILED", candidateDigest: candidate.digest, roundId: operation.workflowE2EAdmission.roundId,
+                groupRunIds: [...operation.workflowE2EAdmission.groupRunIds], admissionSha256: operation.workflowE2EAdmission.admissionRef.sha256,
+                evidenceSha256: operation.workflowE2EEvidenceRef.sha256 };
+            }
+            verificationFailure = qualification === "FAILED" ? "one or more admitted E2E groups failed"
+              : `admitted E2E evidence is incomplete or unknown${e2eDiagnostic.reason === undefined ? "" : ` (${e2eDiagnostic.reason})`}`;
+            throw new Error(verificationFailure);
+          }
+          const admittedE2E = task.workflow.e2e;
+          const admissionRef = operation.workflowE2EAdmission;
+          const evidenceRef = operation.workflowE2EEvidenceRef;
+          if (!admittedE2E || !admissionRef || !evidenceRef) throw new Error("trusted E2E aggregate references are unavailable");
+          e2eQualification = { candidateDigest: candidate.digest, contractDigest: admittedE2E.contractDigest, policyDigest: admittedE2E.policyDigest,
+            bundleDigest: admittedE2E.bundleDigest, executionPlanDigest: admittedE2E.executionPlanDigest, roundId: admissionRef.roundId,
+            groupRunIds: [...admissionRef.groupRunIds], admissionSha256: admissionRef.admissionRef.sha256, evidenceSha256: evidenceRef.sha256 };
+        }
         const checkedCandidate = createCandidateManifest(checkedRepositories as CandidateRepository[]);
         if (dependencyBinding !== undefined && dependencyResult?.success === true && dependencyResult.data.candidateDigest !== candidate.digest) {
           verificationFailure = "work breakdown result does not bind the final combined candidate";
@@ -7210,11 +9999,13 @@ async function completedWorkflowItems(
             ...(reviewOnly ? { reviewOnly: true } : {}),
           },
           now,
+          ...(e2eQualification === undefined ? {} : { e2eQualification }),
         });
       } catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "workflow.verification_blocked", taskId: task.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown", reason: verificationFailure, ...(verificationDetail === undefined ? {} : { detail: verificationDetail }) }));
         next = verificationFailure === WORKFLOW_BLOCK_REASONS.fixChangedNothing ? blockWorkflow(task.workflow, verificationFailure, now)
-          : blockWorkflow(verifying, verificationFailure, now, regressedChecks === undefined ? {} : { regressedChecks });
+          : blockWorkflow(verifying, verificationFailure, now, { ...(regressedChecks === undefined ? {} : { regressedChecks }),
+            ...(failedE2ERound === undefined ? {} : { failedE2ERound }) });
       }
     }
   } else if (operation.workflowMode === "REVIEW") {
@@ -7230,6 +10021,22 @@ async function completedWorkflowItems(
         const candidate = createCandidateManifest(repositories as CandidateRepository[]);
         if (task.workflow.stage !== "REVIEW" || task.workflow.candidate?.digest !== candidate.digest) {
           throw new Error("review result is stale, incomplete, or came from another operation");
+        }
+        if (task.workflow.e2e?.required === true) {
+          const currentRoundId = task.workflow.e2e.currentRoundId;
+          const checksOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
+            .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "CHECKS")
+            .map((item) => item as unknown as OperationRecord)
+            .filter((item) => item.workflowE2EAdmission?.candidateDigest === candidate.digest
+              && item.workflowE2EAdmission.roundId === currentRoundId && item.workflowE2EEvidenceRef !== undefined)
+            .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+          const checksOperation = checksOperations[0];
+          const e2eDiagnostic: WorkflowE2EVerificationDiagnostic = {};
+          if (checksOperation === undefined || await verifyWorkflowE2EEvidence(dependencies, checksOperation, task, candidate, undefined, e2eDiagnostic) !== "PASS") {
+            throw new Error("current E2E evidence is not independently qualified for review");
+          }
+          e2eAuthorityChecks = e2eDiagnostic.authorityChecks ?? [];
+          if (e2eAuthorityChecks.length === 0) throw new Error("current E2E authority snapshot could not be fenced at review persistence");
         }
         // Validate every report's complete contract and provenance before deciding that a role is missing.
         for (const review of reviews) {
@@ -7327,7 +10134,10 @@ async function completedWorkflowItems(
   // right after this commit, and the recovery sweep runs it if that is lost.
   // Only a coding or check run makes reviews due: a review run's own result never queues another review.
   // Task 12: both reviews passed, so the draft pull request is due the same way; AgentX opens it with no one asking.
-  const dispatch = (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS")
+  const dispatch = operation.workflowMode === "IMPLEMENT" && task.workflow.e2e?.required === true
+    && next.stage === "VERIFY" && next.state === "WAITING" && next.candidate !== undefined
+    ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "CHECKS", next.candidate.digest, now)]
+    : (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS")
     && next.stage === "REVIEW" && next.state === "WAITING" && next.candidate !== undefined
     ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "REVIEW", next.candidate.digest, now)]
     // Item 7: a fix of pull requests already open is pushed to them, not opened as new ones.
@@ -7336,15 +10146,33 @@ async function completedWorkflowItems(
       : [];
   // A saved plan forgets the reasons an earlier answer was unreadable; an unreadable answer keeps its own for Retry planning.
   const forget = planUnreadable === null && task.planUnreadable !== undefined;
+  if (operation.kind === "task" && operation.workflowMode === "CHECKS" && task.workflow.e2e?.required === true
+    && operation.workflowE2EAdmission !== undefined && operation.workflowE2EEvidenceRef !== undefined
+    && next.e2e !== undefined && task.workflow.candidate !== undefined) {
+    const rawOperations = await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#");
+    const presentation = await workflowE2EPresentation(dependencies, task, rawOperations, "viewer");
+    const display = presentation === undefined ? undefined : createWorkflowE2EDisplayObject({ ownerKey: task.ownerKey, workspaceId: task.workspaceId, capturedAt: new Date(now).toISOString(),
+      view: presentation.shared, current: { candidateDigest: task.workflow.candidate.digest, roundId: operation.workflowE2EAdmission.roundId,
+        groupRunIds: [...operation.workflowE2EAdmission.groupRunIds],
+        admissionSha256: operation.workflowE2EAdmission.admissionRef.sha256, evidenceSha256: operation.workflowE2EEvidenceRef.sha256 } });
+    if (display !== undefined) {
+      await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: display.ref.key, Body: display.bytes,
+        ContentType: "application/json", Metadata: { sha256: display.ref.sha256 } }));
+      next = WorkflowSnapshotSchema.parse({ ...next, e2e: { ...next.e2e, displayRef: display.ref } });
+    }
+  }
   const graphApproval = graphCancelTarget?.workflowDependencies?.approval;
   const graphCancelCondition = graphCancelTarget?.workflowDependencies === undefined ? "" :
     " AND workflow.workflowDependenciesOperationId = :graphOperationId AND workflow.workflowDependenciesApproval.graphDigest = :graphDigest AND workflow.workflowDependenciesApproval.runId = :graphRunId AND workflow.workflowDependenciesApproval.artifactDigest = :graphArtifactDigest AND workflow.workflowDependenciesApproval.workflowRevision = :graphApprovalRevision AND workflow.workflowDependenciesApproval.actorId = :graphActorId";
-  return [{ Update: {
+  const e2eCancelAdmission = e2eCancelTarget?.workflowE2EAdmission;
+  const e2eCancelCondition = e2eCancelAdmission === undefined ? ""
+    : " AND workflow.e2e.required = :e2eRequired AND workflow.e2e.currentRoundId = :e2eRoundId AND workflow.candidate.digest = :e2eCandidateDigest";
+  return [...e2eAuthorityChecks, { Update: {
     TableName: dependencies.tableName,
     Key: taskKey(task.taskId),
     // A stored plan quoted the replies fed so far; the next plan's window starts after them.
     UpdateExpression: `SET workflow = :workflow, updatedAt = :now${planUnreadable === undefined || planUnreadable === null ? "" : ", planUnreadable = :unreadable"}${planUnreadable === null && task.threadNotesFedThrough !== undefined ? ", threadNotesFedFrom = :fedFrom" : ""}${forget ? " REMOVE planUnreadable" : ""}`,
-    ConditionExpression: `workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running${graphCancelCondition}`,
+    ConditionExpression: `workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running${graphCancelCondition}${e2eCancelCondition}`,
     ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
     ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": task.workflow.stage, ":running": "RUNNING",
       ...(planUnreadable === undefined || planUnreadable === null ? {} : { ":unreadable": planUnreadable }),
@@ -7356,7 +10184,9 @@ async function completedWorkflowItems(
         ":graphArtifactDigest": graphApproval.artifactDigest,
         ":graphApprovalRevision": graphApproval.workflowRevision,
         ":graphActorId": graphApproval.actorId,
-      }) },
+      }),
+      ...(e2eCancelAdmission === undefined ? {} : { ":e2eRequired": true, ":e2eRoundId": e2eCancelAdmission.roundId,
+        ":e2eCandidateDigest": e2eCancelAdmission.candidateDigest }) },
   } }, ...dispatch,
   ...(evidenceJob === undefined ? [] : [{ Put: { TableName: dependencies.tableName, Item: planEvidenceJobItem({ taskId: task.taskId, ...evidenceJob, now: Date.parse(now) }), ConditionExpression: "attribute_not_exists(pk)" } }]),
   ...(recordedReplies === undefined ? [] : [{ Put: recordedReplies }])];
@@ -7433,7 +10263,7 @@ async function storePlanAnswer(
   const prefix = `private/${task.ownerKey}/${task.workspaceId}/plan-documents/${artifactId}`;
   const sha = (text: string) => createHash("sha256").update(text, "utf8").digest("hex");
   await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: `${prefix}.json`, Body: canonical, ContentType: "application/json" }));
-  const next = submitWorkflowArtifact(workflow, {
+  let next = submitWorkflowArtifact(workflow, {
     expectedRevision: workflow.revision,
     now,
     ...(parsed.proposal === undefined ? {} : { proposal: parsed.proposal }),
@@ -7443,6 +10273,11 @@ async function storePlanAnswer(
       format: "structured",
     },
   });
+  if (next.blockReason === E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON) {
+    const { blockReason: _priorE2EPlanReferenceFailure, ...withoutPriorPlanFailure } = next;
+    void _priorE2EPlanReferenceFailure;
+    next = WorkflowSnapshotSchema.parse(withoutPriorPlanFailure);
+  }
   const replies = plannerRepliesFor(content, plan, step, task, { artifactId, version: next.artifacts.at(-1)?.version ?? 1 });
   const withReplies = replies === undefined ? {} : { plannerReplies: replies };
   if (!planCitesCode(plan)) return { next, planUnreadable: null, ...withReplies };
@@ -7670,6 +10505,25 @@ async function cancelledGraphWorkflowItems(
   return completedWorkflowItems(dependencies, target, pointer, "CANCELLED", now, undefined, undefined, undefined, undefined, target);
 }
 
+/** Apply a native CHECKS cancellation only to the task's currently admitted round. */
+async function cancelledE2EWorkflowItems(
+  dependencies: AwsBrokerDependencies,
+  pointer: DeveloperTaskPointerRecord | undefined,
+  target: OperationRecord | undefined,
+  now: string,
+): Promise<TransactItems> {
+  const admission = target?.workflowE2EAdmission;
+  if (target === undefined || pointer === undefined || target.kind !== "task" || target.workflowMode !== "CHECKS"
+    || admission === undefined || admission.taskId !== pointer.taskId) return [];
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || task.workspaceId !== target.workspaceId || workflow === undefined
+    || workflow.stage !== "VERIFY" || workflow.state !== "RUNNING" || workflow.e2e?.required !== true
+    || workflow.candidate?.digest !== admission.candidateDigest || workflow.e2e.currentRoundId !== admission.roundId
+    || admission.workflowRevision !== workflow.revision) return [];
+  return completedWorkflowItems(dependencies, target, pointer, "CANCELLED", now, undefined, undefined, undefined, undefined, undefined, target);
+}
+
 async function recordTerminalResult(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
@@ -7723,8 +10577,13 @@ async function recordTerminalResult(
     : await currentGraphCancelTarget(dependencies, operation, cancelTargetOperation);
   const graphCancelBoundTarget = cancelTargetOperation?.kind === "task" && cancelTargetOperation.workflowMode === "IMPLEMENT"
     && cancelTargetOperation.workflowDependencies !== undefined ? cancelTargetOperation : undefined;
+  const e2eCancelBoundTarget = cancelTargetOperation?.kind === "task" && cancelTargetOperation.workflowMode === "CHECKS"
+    && cancelTargetOperation.workflowE2EAdmission !== undefined ? cancelTargetOperation : undefined;
   if (graphCancelBoundTarget !== undefined && graphCancelBoundTarget.fence !== operation.fence) {
     throw agentXError("STALE_FENCE", "cancel and graph target no longer share the current workspace fence");
+  }
+  if (e2eCancelBoundTarget !== undefined && (e2eCancelBoundTarget.fence !== operation.fence || e2eCancelBoundTarget.status !== "CANCEL_REQUESTED")) {
+    throw agentXError("STALE_FENCE", "cancel and E2E CHECKS target no longer share the current workspace fence");
   }
   const workspaceStatus =
     operation.kind === "prepare"
@@ -7819,10 +10678,13 @@ async function recordTerminalResult(
       inlineEvidence.length = 0;
       plannerReplies.length = 0;
       const workflow = await completedWorkflowItems(dependencies, operation, pointer, terminalStatus, now, result, error, inlineEvidence, plannerReplies);
+      const cancelledE2E = e2eCancelBoundTarget === undefined ? []
+        : await cancelledE2EWorkflowItems(dependencies, pointer, e2eCancelBoundTarget, now);
       const cancelledGraph = graphCancellation === undefined ? []
         : await cancelledGraphWorkflowItems(dependencies, pointer, graphCancellation.target, now);
-      recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed, ...workflow, ...cancelledGraph], workspaceUpdate, send);
-      evidenceJobs = [...workflow, ...cancelledGraph].flatMap((item) => {
+      recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now,
+        [...transactItems, ...completed, ...workflow, ...cancelledGraph, ...cancelledE2E], workspaceUpdate, send);
+      evidenceJobs = [...workflow, ...cancelledGraph, ...cancelledE2E].flatMap((item) => {
         const row = item.Put?.Item as Partial<PlanEvidenceJob> | undefined;
         return row?.pk === PLAN_EVIDENCE_PK && row.taskId !== undefined && row.artifactId !== undefined ? [planEvidenceEvent(row.taskId, row.artifactId)] : [];
       });
@@ -8473,7 +11335,7 @@ function workspaceItem(workspace: WorkspaceInstance) {
 }
 
 function membershipRecord(ownerKey: string, projectName: string, role: MembershipRecord["role"]): MembershipRecord {
-  return { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey, projectName, role };
+  return { pk: `MEMBER#${ownerKey}`, sk: `PROJECT#${projectName}`, entityType: "MEMBERSHIP", ownerKey, projectName, role, grantId: randomUUID() };
 }
 
 function githubRepositoryFullName(repositoryUrl: string): string {
@@ -8559,6 +11421,8 @@ async function exchangeRepositoryCredential(
   if (typeof input.repositoryUrl !== "string" || input.repositoryUrl.length > 2_048) {
     throw agentXError("CONFIG_INVALID", "repositoryUrl is invalid");
   }
+  const operation = await requireOperation(dependencies, workspaceId, operationId);
+  if (operation.kind === "publish") await assertCurrentWorkflowPublication(dependencies, operation);
   return dependencies.repositoryGrants.exchange(grant, {
     workspaceId,
     operationId,
@@ -8566,6 +11430,43 @@ async function exchangeRepositoryCredential(
     repositoryUrl: input.repositoryUrl,
     access,
   });
+}
+
+/** A stored mode is a selector, not continuing authority: reload the current task and project before issuing push credentials. */
+async function assertCurrentWorkflowPublication(dependencies: AwsBrokerDependencies, operation: OperationRecord): Promise<void> {
+  const publication = operation.publication;
+  if (publication?.expectedTreeSha === undefined) return;
+  const taskPointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
+  const task = taskPointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskPointer.taskId));
+  const workflow = task?.workflow;
+  const candidate = workflow?.candidate === undefined ? undefined : CandidateManifestSchema.safeParse(workflow.candidate);
+  const repository = candidate?.success ? candidate.data.repositories.find((item) => item.repositoryId === publication.repository) : undefined;
+  if (task === undefined || task.workspaceId !== operation.workspaceId || task.closedAt !== undefined || workflow?.stage !== "PULL_REQUEST"
+    || workflow.state !== "READY" || workflow.candidate?.digest !== publication.candidateDigest || repository === undefined
+    || repository.treeSha !== publication.expectedTreeSha
+    || (publication.publicationMode === "COMMITTED_HEAD" && (repository.commitSha !== publication.expectedCommitSha || publication.expectedCommitSha === undefined))
+    || (publication.publicationMode === "CHECKED_TREE" && publication.expectedCommitSha !== undefined)
+    || publication.publicationMode === undefined) {
+    throw agentXError("CALLBACK_FORBIDDEN", "workflow publication authority is stale");
+  }
+  const baseCommitSha = (workflow.reviewBase ?? task.preparedBase)?.find((item) => item.repositoryId === repository.repositoryId)?.baseCommitSha;
+  if (baseCommitSha !== publication.expectedBaseCommit) throw agentXError("CALLBACK_FORBIDDEN", "workflow publication base is stale");
+  const currentAuthority = await currentWorkflowPublicationAuthorityForTask({
+    actions: developerTaskActions(dependencies),
+    tableName: dependencies.tableName,
+    workflowE2EPresentation: (input) => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
+    workflowE2EPublicationChecks: (input) => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+  }, task);
+  if (currentAuthority === undefined || currentAuthority.mode !== publication.publicationMode
+    || currentAuthority.pinnedRevision !== publication.admittedPinnedRevision
+    || currentAuthority.latestRevision !== publication.admittedLatestRevision
+    || currentAuthority.materialDigest !== publication.admittedMaterialDigest
+    || currentAuthority.workflowRevision !== publication.admittedWorkflowRevision
+    || canonicalJson(currentAuthority.planArtifact) !== canonicalJson(publication.admittedPlanArtifact)
+    || canonicalJson(currentAuthority.ownerApproval) !== canonicalJson(publication.admittedOwnerApproval)
+    || currentAuthority.workflowAuthorityDigest !== publication.admittedWorkflowAuthorityDigest) {
+    throw agentXError("CALLBACK_FORBIDDEN", "workflow publication policy or admitted project material changed");
+  }
 }
 
 function verifyCapability(
@@ -8784,6 +11685,13 @@ export const handler = createAwsBrokerHandler({
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrants,
   githubPullRequests: githubCredentials,
+  projectSetupSource: { capture: ({ repositoryUrl, ref }) => githubCredentials.captureE2ESourceSnapshot(repositoryUrl, ref) },
+  ...(process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID
+    ? { projectSetupRuntimeCatalogId: process.env.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID }
+    : {}),
+  ...(process.env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID
+    ? { e2eFeatureRuntimeCatalogId: process.env.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID }
+    : {}),
   githubWebhookSecret: github.webhookSecret,
   checkRepositoryAccess: (repository) => githubCredentials.checkRepository(repository),
   githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },

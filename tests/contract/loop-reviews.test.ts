@@ -68,14 +68,15 @@ describe("the loop's reviews (#358)", () => {
     expect(await h.state()).toMatchObject({ reviewRounds: 1 });
     expect(h.world.pushes).toEqual([]);
 
-    // Fixed: advice and what was already there do not block; the report goes into the evidence and the pull request.
+    // Fixed: advice and what was already there do not block; the report goes into the pull request.
     expect(await h.complete("Read RETRIES in send().")).toContain("Accepted");
     await h.runOwnSteps();
     expect(await h.step()).toBe("pr-open");
     expect(await h.state()).toMatchObject({ reviewRounds: 0 });
     const body = h.world.pullRequests[0]!.body;
     expect(body).toContain("## Reviews\n\n### Code review: passed\n\nNot blocking:\n- already there: **MEDIUM** send() already swallows timeouts (`src/client.ts:40`)\n- advisory: **LOW** A jittered backoff would spread the retries\n\n### Security review: passed");
-    expect(h.world.loopCommits).toEqual(["docs/rovara/42/evidence/checks.md, docs/rovara/42/evidence/reviews.md: chore(rovara): evidence for #42"]);
+    // Reports stay outside the exact candidate the checks and reviews qualified.
+    expect(h.world.loopCommits).toEqual([]);
   });
 
   it("waits for a person after the configured rounds still block, and publishes on their approval", async () => {

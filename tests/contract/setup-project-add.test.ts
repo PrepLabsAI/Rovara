@@ -4,16 +4,19 @@ import { join } from "node:path";
 import type { Command } from "commander";
 import YAML from "yaml";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { E2EPolicy } from "@agentx/contracts";
+import { inspectE2ERepository, proposeE2ESetup } from "../../packages/broker/src/e2e/discovery.js";
 import { loadProjectConfig } from "../../packages/cli/src/config.js";
 import { firstProjectStep } from "../../packages/cli/src/init/finish-steps.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { realSetupContext, type SetupCommandContext, type SetupRun } from "../../packages/cli/src/setup/command-context.js";
 import { unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
 import { addProject, ec2Binding, registerRevision } from "../../packages/cli/src/setup/project-add.js";
+import { addConnectorRevision } from "../../packages/cli/src/setup/connectors/revision.js";
 import { SETUP_TIMEOUT, TEST_TIMEOUT } from "../../packages/cli/src/setup/project-files.js";
 import { fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, scriptedPrompter, TEST_PRIVATE_KEY, type TestInitContext } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
-import { CONTROL_PLANE, STAGING_SETTINGS, accessToken, fakeControlPlane, fakeRepositories, fakeSlackChannels, memoryTokenStore, setupServices } from "../support/setup-fakes.js";
+import { CONTROL_PLANE, STAGING_SETTINGS, accessToken, bindSetupSourceProvider, fakeControlPlane, fakeRepositories, fakeSlackChannels, memoryTokenStore, setupServices } from "../support/setup-fakes.js";
 
 const FOUNDATION = { Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0", Ec2WorkerSubnets: "us-east-1a=subnet-0aaa1111bbbb2222c,us-east-1b=subnet-0ddd3333eeee4444f" };
 let configDir: string;
@@ -21,13 +24,23 @@ beforeEach(async () => { configDir = await mkdtemp(join(tmpdir(), "agentx-projec
 afterEach(async () => { await rm(configDir, { recursive: true, force: true }); });
 
 const repositoriesFake = () => fakeRepositories({
-  "acme/payments-api": { files: { "package.json": JSON.stringify({ scripts: { test: "vitest run" } }), "package-lock.json": "{}" } },
+  "acme/payments-api": { files: { "package.json": JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } }), "package-lock.json": "{}" } },
   "acme/docs": { files: {} },
 });
-const services = (plane = fakeControlPlane(), repositories = repositoriesFake()) => ({
-  fetch: plane.fetch, repositories, configDir, stackOutputs: async (name: string) => (name === "agentx-staging-foundation" ? FOUNDATION : undefined),
-});
+const services = (plane = fakeControlPlane(), repositories = repositoriesFake()) => {
+  bindSetupSourceProvider(plane, repositories);
+  return { fetch: plane.fetch, repositories, configDir, stackOutputs: async (name: string) => (name === "agentx-staging-foundation" ? FOUNDATION : undefined) };
+};
 const session = { controlPlaneUrl: CONTROL_PLANE, accessToken: "admin-token" };
+const sourceBackedSetup = async (bytes: Buffer) => {
+  const repositories = fakeRepositories({ "acme/payments-api": { files: { "package.json": bytes.toString("utf8"), "package-lock.json": "{}" } } });
+  const snapshot = await repositories.snapshotAll("synthetic-source-read", "acme/payments-api", "main");
+  const candidate = snapshot.candidate;
+  const inspection = inspectE2ERepository(snapshot, candidate).inspection;
+  const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate });
+  const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [], targets: proposal.targets, defaultSandboxProfileId: "default-sandbox", fallback: "mock-unconnected", modelRouteRevision: null, capture: { screenshots: false, traces: false, video: false, downloads: false }, limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000, maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } };
+  return { proposal, policy, snapshot, repositories };
+};
 
 describe("the ec2-ebs binding from the foundation's outputs", () => {
   it("uses the launch template and every zone's subnet, 20 GiB gp3", () => {
@@ -63,11 +76,201 @@ describe("agentx project add (FR-040)", () => {
       repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
       setup: [{ executable: "npm", args: ["ci"] }], readiness: [{ executable: "npm", args: ["test"] }],
     });
-    expect(lines.join("\n")).toContain("Proposed from package.json and package-lock.json: npm ci");
+    expect(lines.join("\n")).toContain("Detected source-backed E2E setup.");
     const file = await readFile(result.file, "utf8");
     expect(file).toContain("name: payments-api");
     expect(file).not.toContain("admin-token");
     expect(file).not.toContain("ghs_x");
+  });
+
+  it("registers a source-backed E2E setup proposal after one plan confirmation and asks for no typed commands", async () => {
+    const plane = fakeControlPlane();
+    const bytes = Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } }));
+    const { proposal, policy, snapshot, repositories } = await sourceBackedSetup(bytes);
+    const prompter = scriptedPrompter(["acme/payments-api", "", true]);
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter, write: () => undefined, services: services(plane, repositories), flags: {}, e2eSetup: { proposal, policy, snapshot } });
+    const definition = (plane.registered[0] as { definition: { e2e?: E2EPolicy } }).definition;
+    expect(definition.e2e).toEqual(policy);
+    expect(prompter.asked.some((question) => question.startsWith("Setup command") || question.startsWith("Test command"))).toBe(false);
+    expect(prompter.asked.filter((question) => question.startsWith("Use this project setup plan?")).length).toBe(1);
+  });
+
+  it("does not register E2E enablement when the single setup-plan confirmation is declined", async () => {
+    const plane = fakeControlPlane();
+    const bytes = Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } }));
+    const { proposal, policy, snapshot, repositories } = await sourceBackedSetup(bytes);
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", false]), write: () => undefined, services: services(plane, repositories), flags: {}, e2eSetup: { proposal, policy, snapshot } });
+    const definition = (plane.registered[0] as { definition: { e2e?: E2EPolicy; setup: unknown[]; readiness: unknown[] } }).definition;
+    expect(definition.e2e).toBeUndefined();
+    expect(definition.setup).toEqual([]);
+    expect(definition.readiness).toEqual([]);
+  });
+
+  it("connects the project when bounded source testing exploration is unavailable, and keeps the missing evidence visible", async () => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const unavailable = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path === "/v1/admin/projects/setup-proposals") {
+        return new Response(JSON.stringify({ error: { code: "RUNTIME_UNAVAILABLE", message: "selected immutable source set exceeds 4 MiB" } }), { status: 503, headers: { "content-type": "application/json" } });
+      }
+      return plane.fetch(url, init);
+    }) as typeof fetch };
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([true]), write: (line) => lines.push(line), services: unavailable,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } });
+    const registration = plane.registered[0] as { definition: { setup: unknown[]; readiness: unknown[]; e2e?: unknown }; setupApproval?: unknown };
+    expect(registration.definition).toMatchObject({ setup: [{ executable: "npm", args: ["ci"] }], readiness: [{ executable: "npm", args: ["test"] }] });
+    expect(registration.definition.e2e).toBeUndefined();
+    expect(registration.setupApproval).toBeUndefined();
+    expect(plane.requests.some((request) => request.path === "/v1/admin/projects/setup-approvals")).toBe(false);
+    expect(lines.join("\n")).toContain("Testing exploration not done: source capture exceeded its time or size bound, or the discovery service was unavailable; E2E evidence remains unknown.");
+    expect(lines.findIndex((line) => line.startsWith("Registered project payments-api"))).toBeLessThan(lines.findIndex((line) => line.startsWith("Testing exploration not done:")));
+    expect(lines.join("\n")).toContain("Registered project payments-api");
+  });
+
+  it("does not treat setup-discovery authorization failures as an unavailable exploration", async () => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const forbidden = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path === "/v1/admin/projects/setup-proposals") {
+        return new Response(JSON.stringify({ error: { code: "FORBIDDEN", message: "administrator claim is required" } }), { status: 403, headers: { "content-type": "application/json" } });
+      }
+      return plane.fetch(url, init);
+    }) as typeof fetch };
+    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: forbidden,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } })).rejects.toThrow("FORBIDDEN");
+    expect(plane.registered).toEqual([]);
+  });
+
+  it("does not degrade an HTTP authentication failure with an untrusted error code", async () => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const unauthorized = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path === "/v1/admin/projects/setup-proposals") {
+        return new Response(JSON.stringify({ error: { code: "RUNTIME_UNAVAILABLE", message: "authentication required" } }), { status: 401, headers: { "content-type": "application/json" } });
+      }
+      return plane.fetch(url, init);
+    }) as typeof fetch };
+    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: unauthorized,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } })).rejects.toThrow("AUTH_REQUIRED");
+    expect(plane.registered).toEqual([]);
+  });
+
+  it("continues configured project setup after a source-capture transport error without exposing its raw text", async () => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const unavailable = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path === "/v1/admin/projects/setup-proposals") {
+        expect(init?.signal).toBeInstanceOf(AbortSignal);
+        throw new TypeError("transport included credential=private-value");
+      }
+      return plane.fetch(url, init);
+    }) as typeof fetch };
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([true]), write: (line) => lines.push(line), services: unavailable,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } });
+    expect(plane.registered).toHaveLength(1);
+    expect(lines.join("\n")).not.toContain("private-value");
+    expect(lines.join("\n")).toContain("E2E evidence remains unknown.");
+  });
+
+  it.each([
+    ["QUEUED", "Warning: E2E testing setup was queued; project registration is complete, but testing is not ready."],
+    ["UNAVAILABLE", "Warning: E2E testing setup is unavailable; project registration is complete, but testing is not ready."],
+  ])("reports a registered project separately from E2E setup execution (%s)", async (setupRuntime, notice) => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const setupUnavailable = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const response = await plane.fetch(url, init);
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path !== "/v1/admin/projects" || !response.ok) return response;
+      const body = await response.json() as Record<string, unknown>;
+      return new Response(JSON.stringify({ ...body, setupRuntime }), { status: response.status, headers: { "content-type": "application/json" } });
+    }) as typeof fetch };
+    const { proposal, policy, snapshot, repositories } = await sourceBackedSetup(Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } })));
+    const servicesWithRuntimeNotice = { ...setupUnavailable, repositories };
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: (line) => lines.push(line), services: servicesWithRuntimeNotice, flags: {}, e2eSetup: { proposal, policy, snapshot } });
+    expect(lines.join("\n")).toContain(notice);
+    expect(lines.join("\n")).toContain("Registered project payments-api");
+  });
+
+  it("quarantines malformed proposal evidence and completes ordinary project setup", async () => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const malformed = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path === "/v1/admin/projects/setup-proposals") return new Response(JSON.stringify({ proposal: {} }), { status: 200, headers: { "content-type": "application/json" } });
+      return plane.fetch(url, init);
+    }) as typeof fetch };
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([true]), write: (line) => lines.push(line), services: malformed,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } });
+    const registration = plane.registered[0] as { definition: { e2e?: unknown }; setupApproval?: unknown };
+    expect(registration.definition.e2e).toBeUndefined();
+    expect(registration.setupApproval).toBeUndefined();
+    expect(plane.requests.some((request) => request.path === "/v1/admin/projects/setup-approvals")).toBe(false);
+    expect(lines.join("\n")).toContain("Testing exploration not done: source-backed proposal was malformed or unbound; E2E evidence remains unknown.");
+  });
+
+  it("quarantines an unbound proposal digest without registering its policy", async () => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const unbound = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const response = await plane.fetch(url, init);
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path !== "/v1/admin/projects/setup-proposals" || !response.ok) return response;
+      const body = await response.json() as Record<string, unknown>;
+      return new Response(JSON.stringify({ ...body, candidateDigest: "f".repeat(64) }), { status: response.status, headers: { "content-type": "application/json" } });
+    }) as typeof fetch };
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: (line) => lines.push(line), services: unbound, flags: {} });
+    const registration = plane.registered[0] as { definition: { e2e?: unknown }; setupApproval?: unknown };
+    expect(registration.definition.e2e).toBeUndefined();
+    expect(registration.setupApproval).toBeUndefined();
+    expect(plane.requests.some((request) => request.path === "/v1/admin/projects/setup-approvals")).toBe(false);
+    expect(lines.join("\n")).toContain("Testing exploration not done: source-backed proposal was malformed or unbound; E2E evidence remains unknown.");
+  });
+
+  it.each([
+    ["invalid JSON", "{"],
+    ["null", "null"],
+    ["array", "[]"],
+    ["primitive", "42"],
+  ])("quarantines an HTTP-200 %s discovery response and completes ordinary project setup", async (_label, responseText) => {
+    const plane = fakeControlPlane();
+    const base = services(plane);
+    const malformed = { ...base, fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      if (path === "/v1/admin/projects/setup-proposals") return new Response(responseText, { status: 200, headers: { "content-type": "application/json" } });
+      return plane.fetch(url, init);
+    }) as typeof fetch };
+    const lines: string[] = [];
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([true]), write: (line) => lines.push(line), services: malformed,
+      flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" } });
+    const registration = plane.registered[0] as { definition: { e2e?: unknown }; setupApproval?: unknown };
+    expect(registration.definition.e2e).toBeUndefined();
+    expect(registration.setupApproval).toBeUndefined();
+    expect(plane.requests.some((request) => request.path === "/v1/admin/projects/setup-approvals")).toBe(false);
+    expect(lines.join("\n")).toContain("Testing exploration not done: source-backed proposal was malformed or unbound; E2E evidence remains unknown.");
+  });
+
+  it("does not carry a declined setup decision into a later non-E2E connector revision", async () => {
+    const plane = fakeControlPlane();
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", false]), write: () => undefined, services: services(plane), flags: {} });
+    const result = await addConnectorRevision({
+      env: "staging", session, projectName: "payments-api", services: { fetch: plane.fetch, configDir, stackOutputs: async () => FOUNDATION },
+      write: () => undefined, rerun: "agentx --env staging connector add linear --project payments-api",
+      connector: { name: "linear", type: "linear", credentialRef: "linear", scopes: [{ alias: "pay", teamId: "c408e946-78aa-4db8-923e-f78053dd954f" }], tools: [{ name: "list_issues", access: "read" }] },
+    });
+    expect(result).toEqual({ revision: 2 });
+    expect(plane.registered.at(-1)).toMatchObject({ definition: { revision: 2 } });
+    expect((plane.registered.at(-1) as { definition: { e2e?: unknown } }).definition.e2e).toBeUndefined();
+    expect((plane.registered.at(-1) as { setupApproval?: unknown }).setupApproval).toBeUndefined();
   });
 
   it("writes a file agentx admin project register --file reads back, whose header gives the whole register command (F27)", async () => {
@@ -81,39 +284,38 @@ describe("agentx project add (FR-040)", () => {
 
   it("uses the shared timeouts for the proposed and the typed commands (F22)", async () => {
     const plane = fakeControlPlane();
-    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", false, "npm install", "npm run test:unit"]), write: () => undefined, services: services(plane), flags: {} });
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: () => undefined, services: services(plane), flags: {} });
     const definition = (plane.registered[0] as { definition: { setup: Array<{ timeoutSeconds: number }>; readiness: Array<{ timeoutSeconds: number }> } }).definition;
     expect(definition.setup[0]!.timeoutSeconds).toBe(SETUP_TIMEOUT);
     expect(definition.readiness[0]!.timeoutSeconds).toBe(TEST_TIMEOUT);
   });
 
-  it("takes every answer from flags, asking nothing", async () => {
+  it("uses command flags while still asking for the source-backed setup-plan decision", async () => {
     const plane = fakeControlPlane();
+    const prompter = scriptedPrompter([true]);
     const result = await addProject({
-      env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: services(plane),
+      env: "staging", session, githubToken: "ghs_x", prompter, write: () => undefined, services: services(plane),
       flags: { repository: "acme/docs", projectName: "docs", setupCommand: "", testCommand: "make check" },
     });
     expect(result.name).toBe("docs");
+    expect(prompter.asked).toHaveLength(1);
+    expect(prompter.asked[0]).toContain("Use this project setup plan?");
     expect((plane.registered[0] as { definition: { setup: unknown[]; readiness: Array<{ executable: string }> } }).definition.setup).toEqual([]);
     expect((plane.registered[0] as { definition: { readiness: Array<{ executable: string; args: string[] }> } }).definition.readiness).toMatchObject([{ executable: "make", args: ["check"] }]);
   });
 
-  it("lets the engineer type the commands when they do not accept the proposal", async () => {
+  it("keeps ordinary commands empty when the owner declines the source-backed plan", async () => {
     const plane = fakeControlPlane();
-    const prompter = scriptedPrompter(["acme/payments-api", "", false, "npm install", "npm run test:unit"]);
-    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter, write: () => undefined, services: services(plane), flags: {} });
-    expect((plane.registered[0] as { definition: { setup: Array<{ args: string[] }>; readiness: Array<{ args: string[] }> } }).definition).toMatchObject({ setup: [{ args: ["install"] }], readiness: [{ args: ["run", "test:unit"] }] });
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", false]), write: () => undefined, services: services(plane), flags: {} });
+    expect((plane.registered[0] as { definition: { setup: unknown[]; readiness: unknown[] } }).definition).toMatchObject({ setup: [], readiness: [] });
   });
 
-  it("asks for the commands, offering none, when no build file is known", async () => {
+  it("keeps empty-target obligations visible when no build file is known", async () => {
     const plane = fakeControlPlane();
-    const lines: string[] = [];
-    // repository, project name (default), setup (default: none), test
-    const prompter = scriptedPrompter(["acme/docs", "", "", "make check"]);
-    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter, write: (line) => lines.push(line), services: services(plane), flags: {} });
-    expect(lines.join("\n")).toContain("No build file AgentX knows in acme/docs. AgentX will propose checks for each task; you can add project checks later.");
-    expect(prompter.asked).toContain("Test command (empty to let AgentX propose checks per task)");
-    expect((plane.registered[0] as { definition: { setup: unknown[]; readiness: Array<{ args: string[] }> } }).definition).toMatchObject({ setup: [], readiness: [{ executable: "make", args: ["check"] }] });
+    const prompter = scriptedPrompter(["acme/docs", "", true]);
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter, write: () => undefined, services: services(plane), flags: {} });
+    expect(prompter.asked.some((question) => question.includes("no targets detected"))).toBe(true);
+    expect((plane.registered[0] as { definition: { setup: unknown[]; readiness: unknown[]; e2e?: E2EPolicy } }).definition).toMatchObject({ setup: [], readiness: [], e2e: { targets: [] } });
   });
 
   it("refuses a repository the app cannot see, naming the ones it can", async () => {
@@ -136,7 +338,7 @@ describe("agentx project add (FR-040)", () => {
   it("refuses when the control plane lists no GitHub App credential, before registering", async () => {
     const plane = fakeControlPlane();
     plane.credentials.length = 0;
-    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: services(plane), flags: { repository: "acme/docs", projectName: "docs", setupCommand: "", testCommand: "" } }))
+    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([true]), write: () => undefined, services: services(plane), flags: { repository: "acme/docs", projectName: "docs", setupCommand: "", testCommand: "" } }))
       .rejects.toThrow("the control plane lists no GitHub App credential; check the control-plane stack's GitHubAppId parameter");
     expect(plane.registered).toEqual([]);
   });
@@ -144,7 +346,7 @@ describe("agentx project add (FR-040)", () => {
   it("registers no second revision when run again with the same answers, and asks GitHub and the control plane nothing (fix round 1)", async () => {
     const plane = fakeControlPlane();
     const flags = { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "npm ci", testCommand: "npm test" };
-    const first = await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: services(plane), flags });
+    const first = await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([true]), write: () => undefined, services: services(plane), flags });
     const requestsBefore = plane.requests.length;
     const repositories = repositoriesFake();
     let listed = 0;
@@ -193,7 +395,7 @@ describe("agentx project add (FR-040)", () => {
 
   it("refuses to overwrite an existing project with different answers, saying how to change it", async () => {
     const plane = fakeControlPlane();
-    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([""]), write: () => undefined, services: services(plane), flags: { repository: "acme/payments-api", setupCommand: "npm ci", testCommand: "npm test" } });
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["", true]), write: () => undefined, services: services(plane), flags: { repository: "acme/payments-api", setupCommand: "npm ci", testCommand: "npm test" } });
     await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([""]), write: () => undefined, services: services(plane), flags: { repository: "acme/payments-api", setupCommand: "npm install", testCommand: "npm test" } }))
       .rejects.toThrow(`project payments-api already exists (${join(configDir, "payments-api.yaml")}) with a different setup command; to change it, edit that file, raise its revision, and register it as its header says, or choose another --project-name`);
     expect(plane.registered).toHaveLength(1);
@@ -201,7 +403,7 @@ describe("agentx project add (FR-040)", () => {
 
   it("refuses a rerun that names a different repository for an existing project", async () => {
     const plane = fakeControlPlane();
-    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: services(plane), flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "", testCommand: "" } });
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([true]), write: () => undefined, services: services(plane), flags: { repository: "acme/payments-api", projectName: "payments-api", setupCommand: "", testCommand: "" } });
     await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([]), write: () => undefined, services: services(plane), flags: { repository: "acme/docs", projectName: "payments-api", setupCommand: "", testCommand: "" } }))
       .rejects.toThrow("project payments-api already exists");
     expect(plane.registered).toHaveLength(1);
@@ -211,18 +413,96 @@ describe("agentx project add (FR-040)", () => {
     const plane = fakeControlPlane();
     const first = await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: () => undefined, services: services(plane), flags: {} });
     const definition = { ...(plane.registered[0] as { definition: Record<string, unknown> }).definition, revision: 2 } as never;
-    const again = await registerRevision({ env: "staging", session, definition, services: services(plane) });
+    const approvalRequest = plane.requests.find((request) => request.path === "/v1/admin/projects/setup-approvals")?.body as { proposalRef: string; proposalSha256: string; decision: "approve" | "decline" };
+    const again = await registerRevision({ env: "staging", session, definition, services: services(plane), setupApproval: approvalRequest });
     expect(again.revision).toBe(2);
     expect(again.file).toBe(first.file);
     expect(YAML.parse(await readFile(first.file, "utf8"))).toMatchObject({ revision: 2 });
   });
 
+  it("carries the exact stored source decision through an unchanged E2E connector revision", async () => {
+    const plane = fakeControlPlane();
+    const { proposal, policy, snapshot, repositories } = await sourceBackedSetup(Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } })));
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: () => undefined,
+      services: services(plane, repositories), flags: {}, e2eSetup: { proposal, policy, snapshot } });
+    const approvalRequest = plane.requests.find((request) => request.path === "/v1/admin/projects/setup-approvals")?.body as { projectName: string; proposalRef: string; proposalSha256: string; decision: "approve" };
+    expect(approvalRequest).toMatchObject({ projectName: "payments-api", decision: "approve" });
+    expect(typeof approvalRequest.proposalSha256).toBe("string");
+    const originalDecision = { proposalRef: approvalRequest.proposalRef, proposalSha256: approvalRequest.proposalSha256, decision: approvalRequest.decision };
+    const sidecar = JSON.parse(await readFile(join(configDir, "payments-api.yaml.setup-approval.json"), "utf8")) as Record<string, unknown>;
+    expect(sidecar).toMatchObject({ schemaVersion: 1, env: "staging", controlPlaneUrl: CONTROL_PLANE, projectName: "payments-api", repositoryUrl: "https://github.com/acme/payments-api.git", setupApproval: originalDecision });
+    const before = plane.requests.length;
+    const result = await addConnectorRevision({
+      env: "staging", session, projectName: "payments-api", services: { fetch: plane.fetch, configDir, stackOutputs: async () => FOUNDATION },
+      write: () => undefined, rerun: "agentx --env staging connector add linear --project payments-api",
+      connector: { name: "linear", type: "linear", credentialRef: "linear", scopes: [{ alias: "pay", teamId: "c408e946-78aa-4db8-923e-f78053dd954f" }], tools: [{ name: "list_issues", access: "read" }] },
+    });
+    expect(result).toEqual({ revision: 2 });
+    const registration = plane.requests.slice(before).find((request) => request.path === "/v1/admin/projects")?.body as { setupApproval?: unknown; definition?: { e2e?: E2EPolicy } };
+    expect(registration.setupApproval).toEqual(originalDecision);
+    expect(registration.definition?.e2e).toEqual(policy);
+    expect(plane.requests.slice(before).some((request) => request.path === "/v1/admin/projects/setup-approvals")).toBe(false);
+    expect(plane.registered.at(-1)).toMatchObject({ definition: { revision: 2, e2e: policy } });
+  });
+
+  it("retains the normal registration refusal when an E2E revision has no stored owner decision", async () => {
+    const plane = fakeControlPlane();
+    const { policy } = await sourceBackedSetup(Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } })));
+    const definition = {
+      name: "payments-api", revision: 1,
+      repositories: [{ name: "payments-api", url: "https://github.com/acme/payments-api.git", path: "repo/payments-api", defaultBranch: "main", credentialRef: "github-agentx-sdlc" }],
+      setup: [], readiness: [], orchestratorInstructions: "Delegate every repository read, edit, build, and test to the remote AgentX worker.", e2e: policy,
+    };
+    await expect(registerRevision({ env: "staging", session, definition, services: services(plane) })).rejects.toThrow("project registration failed with HTTP 403");
+    expect(plane.registered).toEqual([]);
+    expect(plane.requests.at(-1)?.path).toBe("/v1/admin/projects");
+  });
+
+  it("holds connector registration when the local decision no longer matches the E2E policy", async () => {
+    const plane = fakeControlPlane();
+    const { proposal, policy, snapshot, repositories } = await sourceBackedSetup(Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } })));
+    const first = await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: () => undefined,
+      services: services(plane, repositories), flags: {}, e2eSetup: { proposal, policy, snapshot } });
+    const fileText = await readFile(first.file, "utf8");
+    await writeFile(first.file, fileText.replace("policyRevision: 1", "policyRevision: 2"));
+    const requestCount = plane.requests.length;
+    await expect(addConnectorRevision({
+      env: "staging", session, projectName: "payments-api", services: { fetch: plane.fetch, configDir, stackOutputs: async () => FOUNDATION },
+      write: () => undefined, rerun: "agentx --env staging connector add linear --project payments-api",
+      connector: { name: "linear", type: "linear", credentialRef: "linear", scopes: [{ alias: "pay", teamId: "c408e946-78aa-4db8-923e-f78053dd954f" }], tools: [{ name: "list_issues", access: "read" }] },
+    })).rejects.toThrow("no longer matches its project, environment, control plane, repository, or E2E policy");
+    expect(plane.requests).toHaveLength(requestCount);
+    expect(plane.registered).toHaveLength(1);
+    expect(policy.policyRevision).toBe(1);
+  });
+
+  it("preserves the broker refusal when an otherwise matching sidecar carries a foreign proposal reference", async () => {
+    const plane = fakeControlPlane();
+    const { proposal, policy, snapshot, repositories } = await sourceBackedSetup(Buffer.from(JSON.stringify({ name: "payments-api", scripts: { test: "vitest run" } })));
+    await addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["acme/payments-api", "", true]), write: () => undefined,
+      services: services(plane, repositories), flags: {}, e2eSetup: { proposal, policy, snapshot } });
+    const sidecarPath = join(configDir, "payments-api.yaml.setup-approval.json");
+    const sidecar = JSON.parse(await readFile(sidecarPath, "utf8")) as { setupApproval: { proposalRef: string } };
+    sidecar.setupApproval.proposalRef = `project-setup-proposals/foreign/${"f".repeat(64)}.json`;
+    await writeFile(sidecarPath, `${JSON.stringify(sidecar, null, 2)}\n`);
+    await expect(addConnectorRevision({
+      env: "staging", session, projectName: "payments-api", services: { fetch: plane.fetch, configDir, stackOutputs: async () => FOUNDATION },
+      write: () => undefined, rerun: "agentx --env staging connector add linear --project payments-api",
+      connector: { name: "linear", type: "linear", credentialRef: "linear", scopes: [{ alias: "pay", teamId: "c408e946-78aa-4db8-923e-f78053dd954f" }], tools: [{ name: "list_issues", access: "read" }] },
+    })).rejects.toThrow("project registration failed with HTTP 403");
+    expect(plane.registered).toHaveLength(1);
+    expect(plane.requests.at(-1)?.path).toBe("/v1/admin/projects");
+  });
+
   it("writes no file when the control plane refuses the registration", async () => {
     const plane = fakeControlPlane();
-    const refusing = { ...services(plane), fetch: (async (url: string | URL | Request, init?: RequestInit) => (init?.method === "POST"
-      ? new Response(JSON.stringify({ error: { code: "CONFIG_INVALID", message: "revision 1 of payments-api already exists" } }), { status: 409, headers: { "content-type": "application/json" } })
-      : plane.fetch(url, init))) as typeof fetch };
-    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter([""]), write: () => undefined, services: refusing, flags: { repository: "acme/payments-api", setupCommand: "", testCommand: "" } }))
+    const refusing = { ...services(plane), fetch: (async (url: string | URL | Request, init?: RequestInit) => {
+      const path = new URL(typeof url === "string" ? url : url instanceof URL ? url.href : url.url).pathname;
+      return init?.method === "POST" && path === "/v1/admin/projects"
+        ? new Response(JSON.stringify({ error: { code: "CONFIG_INVALID", message: "revision 1 of payments-api already exists" } }), { status: 409, headers: { "content-type": "application/json" } })
+        : plane.fetch(url, init);
+    }) as typeof fetch };
+    await expect(addProject({ env: "staging", session, githubToken: "ghs_x", prompter: scriptedPrompter(["", true]), write: () => undefined, services: refusing, flags: { repository: "acme/payments-api", setupCommand: "", testCommand: "" } }))
       .rejects.toThrow("project registration failed with HTTP 409: revision 1 of payments-api already exists");
     await expect(readFile(join(configDir, "payments-api.yaml"), "utf8")).rejects.toThrow("ENOENT");
   });
@@ -270,7 +550,7 @@ describe("the first-project init step", () => {
   it("takes the answers from init's flags", async () => {
     const plane = fakeControlPlane();
     context = initContext({
-      secrets: githubSecret(), prompter: scriptedPrompter([]),
+      secrets: githubSecret(), prompter: scriptedPrompter([true]),
       flags: { repository: "acme/docs", projectName: "docs", setupCommand: "", testCommand: "make check", channel: "docs" },
       setup: setupServices({ fetch: plane.fetch, repositories: repositoriesFake(), configDir, stackOutputs: async () => FOUNDATION, slackChannels: slackChannels() }),
     });
@@ -300,7 +580,7 @@ describe("agentx project add on the command line", () => {
         env: "staging", settings: STAGING_SETTINGS,
         secrets: memoryInitSecrets({ "agentx/staging/github-app": JSON.stringify({ appId: "42", slug: "agentx-acme", account: "acme", privateKey: TEST_PRIVATE_KEY }) }),
         services: setupServices({ fetch: plane.fetch, repositories: repositoriesFake(), configDir, stackOutputs: async () => FOUNDATION }),
-        prompter: scriptedPrompter([]), write: () => undefined,
+        prompter: scriptedPrompter([true]), write: () => undefined,
         sleep: async () => undefined, now: () => Date.parse("2026-09-27T00:00:00.000Z"),
         print: () => undefined,
       };

@@ -9,7 +9,7 @@ import { loadProjectConfig } from "../../config.js";
 import type { InitSecrets, FinishFlags } from "../../init/context.js";
 import type { ConnectorType } from "../../init/install-state.js";
 import type { Prompter } from "../../init/prompts.js";
-import { projectFilePath, registerRevision } from "../project-add.js";
+import { projectFilePath, registerRevision, setupDecisionForRevision } from "../project-add.js";
 import type { AdminSession, SetupServices } from "../services.js";
 
 export interface ConnectorAddInput {
@@ -85,7 +85,8 @@ export async function addConnectorRevision(input: {
   const current = await loadProjectFile({ projectName: input.projectName, configDir: input.services.configDir, rerun: input.rerun });
   const others = (current.integrations?.connectors ?? []).filter((entry) => entry.name !== input.connector.name);
   const definition = { ...current, revision: current.revision + 1, integrations: { ...current.integrations, connectors: [...others, input.connector] } };
-  const registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services });
+  const setupApproval = await setupDecisionForRevision({ configDir: input.services.configDir, env: input.env, session: input.session, definition });
+  const registered = await registerRevision({ env: input.env, session: input.session, definition, services: input.services, ...(setupApproval === undefined ? {} : { setupApproval }) });
   const report = registered.preflight.find((entry) => entry.name === input.connector.name);
   for (const warning of registered.warnings) input.write(`Warning: ${warning}`);
   // A missing preflight report, one that failed to parse, or one that simply never mentions this

@@ -42,4 +42,56 @@ describe("FakeDynamoDb faults and limits", () => {
       { Put: { TableName: "other", Item: { pk: "A", sk: "META" } } },
     ] }));
   });
+
+  it("evaluates nested document paths for size and contains without accepting a missing nested value", async () => {
+    const db = new FakeDynamoDb();
+    await db.send(new PutCommand({ TableName: "t", Item: { pk: "PROJECT#orders", sk: "REV#1", runtimeBinding: {
+      subnets: [{ subnetId: "subnet-a", availabilityZone: "us-east-1a" }, { subnetId: "subnet-b", availabilityZone: "us-east-1b" }],
+    } } }));
+    const check = (subnet: string) => db.send(new TransactWriteCommand({ TransactItems: [{ ConditionCheck: {
+      TableName: "t", Key: { pk: "PROJECT#orders", sk: "REV#1" },
+      ConditionExpression: "size(runtimeBinding.#subnets) = :count AND contains(runtimeBinding.#subnets, :subnet)",
+      ExpressionAttributeNames: { "#subnets": "subnets" },
+      ExpressionAttributeValues: { ":count": 2, ":subnet": { subnetId: subnet, availabilityZone: "us-east-1a" } },
+    } }] }));
+    await expect(check("subnet-a")).resolves.toEqual({});
+    await expect(check("subnet-foreign")).rejects.toMatchObject({ name: "TransactionCanceledException" });
+  });
+
+  it("evaluates indexed nested list paths so reordered bindings fail", async () => {
+    const db = new FakeDynamoDb();
+    const subnetA = { subnetId: "subnet-a", availabilityZone: "us-east-1a" };
+    const subnetB = { subnetId: "subnet-b", availabilityZone: "us-east-1b" };
+    await db.send(new PutCommand({ TableName: "t", Item: { pk: "PROJECT#ordered", sk: "REV#1", runtimeBinding: { subnets: [subnetA, subnetB] } } }));
+    await db.send(new PutCommand({ TableName: "t", Item: { pk: "PROJECT#swapped", sk: "REV#1", runtimeBinding: { subnets: [subnetB, subnetA] } } }));
+    const check = (pk: string) => db.send(new TransactWriteCommand({ TransactItems: [{ ConditionCheck: {
+      TableName: "t", Key: { pk, sk: "REV#1" },
+      ConditionExpression: "runtimeBinding.#subnets[0].availabilityZone = :az0 AND runtimeBinding.#subnets[0].subnetId = :id0 AND runtimeBinding.#subnets[1].availabilityZone = :az1 AND runtimeBinding.#subnets[1].subnetId = :id1",
+      ExpressionAttributeNames: { "#subnets": "subnets" },
+      ExpressionAttributeValues: { ":az0": subnetA.availabilityZone, ":id0": subnetA.subnetId, ":az1": subnetB.availabilityZone, ":id1": subnetB.subnetId },
+    } }] }));
+    await expect(check("PROJECT#ordered")).resolves.toEqual({});
+    await expect(check("PROJECT#swapped")).rejects.toMatchObject({ name: "TransactionCanceledException" });
+  });
+
+  it("compares complete binding snapshots, rejecting reordered lists and extra nested fields", async () => {
+    const db = new FakeDynamoDb();
+    const binding = { deploymentMode: "ec2-ebs", launchTemplateId: "lt-12345678", subnets: [
+      { subnetId: "subnet-a", availabilityZone: "us-east-1a" }, { subnetId: "subnet-b", availabilityZone: "us-east-1b" },
+    ], volumeSizeGiB: 20, volumeType: "gp3" };
+    await db.send(new PutCommand({ TableName: "t", Item: { pk: "PROJECT#exact", sk: "REV#1", runtimeBinding: structuredClone(binding) } }));
+    await db.send(new PutCommand({ TableName: "t", Item: { pk: "PROJECT#extra", sk: "REV#1", runtimeBinding: {
+      ...structuredClone(binding), subnets: [{ ...binding.subnets[0], unexpected: true }, binding.subnets[1]],
+    } } }));
+    await db.send(new PutCommand({ TableName: "t", Item: { pk: "PROJECT#swapped-map", sk: "REV#1", runtimeBinding: {
+      ...structuredClone(binding), subnets: [binding.subnets[1], binding.subnets[0]],
+    } } }));
+    const check = (pk: string) => db.send(new TransactWriteCommand({ TransactItems: [{ ConditionCheck: {
+      TableName: "t", Key: { pk, sk: "REV#1" }, ConditionExpression: "runtimeBinding = :binding",
+      ExpressionAttributeValues: { ":binding": binding },
+    } }] }));
+    await expect(check("PROJECT#exact")).resolves.toEqual({});
+    await expect(check("PROJECT#extra")).rejects.toMatchObject({ name: "TransactionCanceledException" });
+    await expect(check("PROJECT#swapped-map")).rejects.toMatchObject({ name: "TransactionCanceledException" });
+  });
 });

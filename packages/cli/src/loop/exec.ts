@@ -11,15 +11,33 @@ export const realExec: Exec = (command, args, options = {}) => new Promise((reso
   const child = spawn(command, [...args], { cwd: options.cwd, shell: false, stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
+  let stdinFailure: NodeJS.ErrnoException | undefined;
+  let settled = false;
+  const input = options.input ?? "";
+  const finish = (result: ExecResult) => {
+    if (settled) return;
+    settled = true;
+    resolve(result);
+  };
   const timer = setTimeout(() => { child.kill("SIGTERM"); }, options.timeoutMs ?? 60_000);
   child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
   child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
   child.on("error", (error: NodeJS.ErrnoException) => {
     clearTimeout(timer);
-    resolve({ code: error.code === "ENOENT" ? 127 : 1, stdout, stderr: `${stderr}${error.message}` });
+    finish({ code: error.code === "ENOENT" ? 127 : 1, stdout, stderr: `${stderr}${error.message}` });
   });
-  child.on("close", (code) => { clearTimeout(timer); resolve({ code: code ?? 1, stdout, stderr }); });
-  child.stdin.end(options.input ?? "");
+  child.stdin.on("error", (error: NodeJS.ErrnoException) => { stdinFailure = error; });
+  child.on("close", (code) => {
+    clearTimeout(timer);
+    const childCode = code ?? 1;
+    // EPIPE is an expected race when a command exits without reading an empty
+    // input stream. A failed non-empty write, or any other stdin error, is a
+    // failed execution even if the child happened to exit successfully.
+    const failedInput = stdinFailure !== undefined && !(input.length === 0 && stdinFailure.code === "EPIPE");
+    const failureText = failedInput ? `stdin write failed (${stdinFailure?.code ?? "unknown"})` : "";
+    finish({ code: failedInput && childCode === 0 ? 1 : childCode, stdout, stderr: [stderr, failureText].filter(Boolean).join("\n") });
+  });
+  child.stdin.end(input);
 });
 
 /** The program's output, or an error naming the program and its first line of complaint. */

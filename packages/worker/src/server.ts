@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { AgentXError, WORKER_INVOCATION_FEATURES, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, redactText, type WorkerInvocation } from "@agentx/contracts";
+import { AgentXError, WORKER_INVOCATION_FEATURES, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, redactText, type WorkerInvocation, type WorkerInvocationFeature } from "@agentx/contracts";
 import type { OperationJournal } from "./journal.js";
 import { WorkerOperationCancelledError } from "./cancel.js";
 import {
@@ -13,6 +13,10 @@ const MAX_INVOCATION_BYTES = 1_048_576;
 
 export interface WorkerExecutor {
   execute(invocation: WorkerInvocation): Promise<unknown>;
+  /** Explicitly implemented invocation extensions; never inferred from parser acceptance alone. */
+  invocationFeatures?: readonly WorkerInvocationFeature[];
+  /** Feature-specific optional runtime gates are reported independently of ordinary worker health. */
+  invocationFeatureDiagnostics?: Readonly<Record<string, unknown>>;
 }
 
 export interface WorkerTerminalResult {
@@ -39,6 +43,8 @@ export interface WorkerServerState {
   executor: WorkerExecutor;
   callbacks: WorkerServerCallbacks;
   activeOperations: Set<string>;
+  invocationFeatures: readonly string[];
+  invocationFeatureDiagnostics?: Readonly<Record<string, unknown>>;
   /** Required by the deployed worker; injectable for in-process tests. */
   invokeAuthentication?: InvokeAuthentication;
 }
@@ -54,6 +60,8 @@ export function createWorkerServerState(
     executor,
     callbacks,
     activeOperations: new Set(),
+    invocationFeatures: [...WORKER_INVOCATION_FEATURES, ...(executor.invocationFeatures ?? [])],
+    ...(executor.invocationFeatureDiagnostics === undefined ? {} : { invocationFeatureDiagnostics: executor.invocationFeatureDiagnostics }),
     ...(invokeAuthentication === undefined ? {} : { invokeAuthentication }),
   };
 }
@@ -65,7 +73,8 @@ export async function handleWorkerRequest(request: Request, state: WorkerServerS
       status: state.activeOperations.size === 0 ? "Healthy" : "HealthyBusy",
       activeOperations: state.activeOperations.size,
       // Spec 053: the optional invocation fields this build parses; the dispatcher sends one only when listed.
-      [WORKER_PING_FEATURES_FIELD]: [...WORKER_INVOCATION_FEATURES],
+      [WORKER_PING_FEATURES_FIELD]: [...state.invocationFeatures],
+      ...(state.invocationFeatureDiagnostics === undefined ? {} : { invocationFeatureDiagnostics: state.invocationFeatureDiagnostics }),
     });
   }
   if (request.method === "POST" && url.pathname === "/invocations") {

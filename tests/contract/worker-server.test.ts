@@ -3,6 +3,7 @@ import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkerInvocation } from "@agentx/contracts";
+import { inspectContainedRuntimeReadinessForHost } from "@agentx/verifier";
 import {
   type JournalStatus,
   OperationJournal,
@@ -10,9 +11,72 @@ import {
   handleWorkerRequest,
 } from "../../packages/worker/src/index.js";
 import { WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
+import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRuntime } from "../../packages/worker/src/project-setup-executor.js";
 import { describe, expect, it, vi } from "vitest";
 
+function hasProjectSetupSmokeFeature(body: unknown): boolean {
+  if (typeof body !== "object" || body === null || !("invocationFeatures" in body)
+    || !Array.isArray(body.invocationFeatures)) return true;
+  return body.invocationFeatures.includes("project.setupSmoke");
+}
+
 describe("worker HTTP contract", () => {
+  it("composes real unavailable Linux readiness with healthy worker service and a refused setup invocation", async () => {
+    const readiness = await inspectContainedRuntimeReadinessForHost("linux", "arm64");
+    expect(readiness.status).toBe("unavailable");
+    if (readiness.status !== "unavailable") return;
+    const root = await mkdtemp(join(tmpdir(), "agentx-setup-runtime-gate-"));
+    const journal = new OperationJournal(root);
+    const runtime = createReadinessGatedProjectSetupRuntime(readiness, () => createDefaultProjectSetupExecutor({
+      sourceRoot: "/mnt/workspace",
+      evidenceRoot: "/mnt/workspace/.agentx-runtime/evidence",
+      controlPlaneUrl: "https://control.example.test",
+    }));
+    const state = createWorkerServerState(journal, {
+      execute: (invocation) => invocation.kind === "project-setup-smoke" ? runtime.execute(invocation) : Promise.resolve(),
+      invocationFeatures: runtime.invocationFeatures,
+      invocationFeatureDiagnostics: runtime.invocationFeatureDiagnostics,
+    });
+    const pingResponse = await handleWorkerRequest(new Request("http://worker/ping"), state);
+    const pingBody: unknown = await pingResponse.json();
+    expect(pingBody).toMatchObject({
+      status: "Healthy",
+      invocationFeatureDiagnostics: { "project.setupSmoke": readiness },
+    });
+    expect(hasProjectSetupSmokeFeature(pingBody)).toBe(false);
+    const invocation: WorkerInvocation = {
+      protocolVersion: 1,
+      operationId: randomUUID(),
+      workspaceId: randomUUID(),
+      fence: 1,
+      projectRevision: 1,
+      callbackCapability: "setup-capability-".padEnd(32, "x"),
+      kind: "project-setup-smoke",
+      payload: { domain: "project-setup-source-interface/v1", setupExecutionId: randomUUID(), subjectId: randomUUID(), approvalRevision: 1,
+        transportCorrelationId: randomUUID(), executionRef: { key: `project-setup-executions/sha256/${"a".repeat(64)}.json`, sha256: "a".repeat(64), byteLength: 1 } },
+    };
+    await handleWorkerRequest(invocationRequest(invocation), state);
+    await vi.waitFor(async () => expect((await journal.get(invocation.operationId))?.status).toBe("FAILED"));
+    expect((await journal.get(invocation.operationId))?.error).toContain(`project.setupSmoke is unavailable: ${readiness.reason}`);
+  });
+
+  it("keeps ordinary worker health available and reports an unavailable optional setup feature", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-optional-feature-"));
+    const state = createWorkerServerState(new OperationJournal(root), {
+      execute: async () => undefined,
+      invocationFeatures: [],
+      invocationFeatureDiagnostics: { "project.setupSmoke": { status: "unavailable", reason: "pinned-contained-image-unavailable" } },
+    });
+    const ping = await handleWorkerRequest(new Request("http://worker/ping"), state);
+    expect(ping.status).toBe(200);
+    const pingBody: unknown = await ping.json();
+    expect(pingBody).toMatchObject({
+      status: "Healthy",
+      invocationFeatureDiagnostics: { "project.setupSmoke": { status: "unavailable", reason: "pinned-contained-image-unavailable" } },
+    });
+    expect(hasProjectSetupSmokeFeature(pingBody)).toBe(false);
+  });
+
   it("journals before acknowledging and reports HealthyBusy during background execution", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentx-journal-"));
     const journal = new OperationJournal(root);
@@ -53,7 +117,7 @@ describe("worker HTTP contract", () => {
     // Spec 053: what this build parses, so the dispatcher sends the thinking level only to it; spec 051 adds readiness,
     // and publish's reportChecks (P-2), so only this build is asked to publish despite a failing check.
     await expect((await handleWorkerRequest(new Request("http://worker/ping"), state)).json())
-      .resolves.toMatchObject({ invocationFeatures: ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "model.chatgpt", "task.workflowDependencies"] });
+      .resolves.toMatchObject({ invocationFeatures: ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission"] });
   });
 
   // The journal reads SUCCEEDED a moment before the operation leaves the active set: the write lands,

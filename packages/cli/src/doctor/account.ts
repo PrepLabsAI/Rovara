@@ -1,7 +1,7 @@
 // FR-050's model access, alert subscription and budget; the region's capacity (the vCPU quota and
 // free Elastic IPs init checks, item 5); and spec 025 FR-046's sign-in checks, unchanged.
 import { environmentStackName } from "@agentx/contracts";
-import { modelCheckProblem, NAT_ELASTIC_IPS, type ModelRole } from "../init/prerequisites.js";
+import { EC2_WORKER_VCPU_REQUIREMENT, modelCheckProblem, NAT_ELASTIC_IPS, type ModelRole } from "../init/prerequisites.js";
 import { plainMessage } from "../output.js";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 
@@ -88,9 +88,9 @@ export async function capacityChecks(context: DoctorContext): Promise<DoctorChec
   const checks: DoctorCheck[] = [];
   try {
     const quota = await services.checks.ec2Quota();
-    checks.push(quota >= 1
+    checks.push(quota >= EC2_WORKER_VCPU_REQUIREMENT
       ? check("capacity", "EC2 vCPUs", "ok", `the Standard on-demand vCPU quota is ${quota} in ${region}`)
-      : check("capacity", "EC2 vCPUs", "fail", `the Standard on-demand vCPU quota is ${quota} in ${region}, so no worker can start`, `request an increase of L-1216C47A in Service Quotas for ${region}`));
+      : check("capacity", "EC2 vCPUs", "fail", `the Standard on-demand vCPU quota is ${quota} in ${region}; an m6g.large worker needs ${EC2_WORKER_VCPU_REQUIREMENT} vCPUs`, `request an increase of L-1216C47A in Service Quotas for ${region}`));
   } catch (error) {
     checks.push(check("capacity", "EC2 vCPUs", "warn", `could not read the vCPU quota: ${plainMessage(error)}`));
   }

@@ -356,7 +356,8 @@ describe("Suite 11: MCP parity", () => {
       options: () => ({ model: { plan: PLAN, edits: EDITS } }),
       reach: async (e2e) => { await openDraftPr(e2e); },
       slack: async (e2e) => { await e2e.click("agentx_workflow_close"); await e2e.submitView({}); },
-      mcp: async (e2e) => { await tool(e2e, "agentx_close_task", { task_id: e2e.taskId() }); } },
+      // The confirmed Slack modal explicitly authorizes discarding unpublished changes; match that owner intent here.
+      mcp: async (e2e) => { await tool(e2e, "agentx_close_task", { task_id: e2e.taskId(), discard_unpublished: true }); } },
   ];
   for (const recovery of recoveries) {
     it(`11.4 ${recovery.name}: the same state change and thread messages`, async () => {
@@ -375,6 +376,25 @@ describe("Suite 11: MCP parity", () => {
       expect(outcomes[0]!.said.length).toBeGreaterThan(0);
     }, 120_000);
   }
+
+  it("11.4 agentx_close_task preserves unpublished work without explicit discard authorization", async () => {
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
+    await openDraftPr(e2e);
+    const answer = await tool(e2e, "agentx_close_task", { task_id: e2e.taskId() });
+    expect(answer.value.closed).toBe(false);
+    await e2e.settle();
+    const task = e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META");
+    const workspaceId = String(task?.workspaceId);
+    const workspace = e2e.db.get(`WORKSPACE#${workspaceId}`, "META");
+    const close = e2e.db.find((row) => row.pk === `WORKSPACE#${workspaceId}` && row.kind === "close")[0];
+    const closeResult = close?.result as { safeToClose?: boolean; repositories?: Array<{ reasons?: string[] }> } | undefined;
+    expect(task?.closedAt).toBeUndefined();
+    expect(workspace).toMatchObject({ status: "READY", closeError: "workspace contains unpublished work" });
+    expect(closeResult?.safeToClose).toBe(false);
+    expect(closeResult?.repositories?.some((repository) => repository.reasons?.includes("unpushed_branch"))).toBe(true);
+    expect(e2e.github.pullRequests).toHaveLength(1);
+    expect(e2e.github.pullRequests[0]?.state).toBe("open");
+  }, 120_000);
 
   it("11.5 [R4] PR feedback approved through MCP: the Slack card is retired, the thread says what a press says, and the fix is pushed", async () => {
     const { e2e, pullRequest, card } = await feedbackProposed();

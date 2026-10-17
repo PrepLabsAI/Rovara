@@ -41,6 +41,8 @@ export interface PrerequisiteChecks {
 
 /** The foundation stack gives each of its two NAT gateways its own Elastic IP. */
 export const NAT_ELASTIC_IPS = 2;
+/** A worker runs the Linux Docker sandbox with two vCPUs (EC2 m6g.large). */
+export const EC2_WORKER_VCPU_REQUIREMENT = 2;
 
 export type ModelRole = "orchestrator" | "classifier" | "worker";
 export type OpenRouterCheckConfig = Partial<NonNullable<ModelsAnswers["openRouter"]>>;
@@ -213,8 +215,8 @@ async function accountChecks(input: { region: string; checks: PrerequisiteChecks
   const { region, checks, audience, failed, passed } = input;
   try {
     const quota = await checks.ec2Quota();
-    if (!Number.isFinite(quota) || quota < 1) {
-      failed("EC2 vCPU quota", `EC2 Standard on-demand vCPU quota in ${region} must be at least 1 for an m6g.medium worker; request an increase in Service Quotas`);
+    if (!Number.isFinite(quota) || quota < EC2_WORKER_VCPU_REQUIREMENT) {
+      failed("EC2 vCPU quota", `EC2 Standard on-demand vCPU quota in ${region} must be at least ${EC2_WORKER_VCPU_REQUIREMENT} for an m6g.large worker; request an increase in Service Quotas`);
     } else passed("EC2 vCPU quota", `ok EC2 Standard on-demand vCPU quota is ${quota} in ${region}`);
   } catch (error) {
     failed("EC2 vCPU quota", `could not check EC2 vCPU quota in ${region}: ${errorMessage(error)}; check Service Quotas read permission and your network`);

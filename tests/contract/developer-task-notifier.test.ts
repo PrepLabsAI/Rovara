@@ -134,6 +134,21 @@ type Post = (input: { channel: string; threadTs?: string; text: string }) => Pro
 
 type Client = { send(command: unknown): Promise<unknown> };
 
+function checkedWorkflowCandidate(h: { db: FakeDynamoDb; taskId: string; workspaceId: string }, candidateDigest: string) {
+  const workspace = h.db.get(`WORKSPACE#${h.workspaceId}`, "META") as { projectRevision: number };
+  const artifactDigest = "e".repeat(64);
+  return {
+    repositoryId: "demo", commitSha: "c".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "d".repeat(40), candidateDigest,
+    publicationMode: "COMMITTED_HEAD" as const,
+    admittedPinnedRevision: workspace.projectRevision, admittedLatestRevision: workspace.projectRevision,
+    admittedMaterialDigest: "f".repeat(64), admittedWorkflowRevision: 8,
+    admittedPlanArtifact: { id: "plan-1", type: "plan", version: 1, objectKey: "plans/plan-1.md", sha256: artifactDigest, format: "markdown" as const },
+    admittedOwnerApproval: { requestId: randomUUID(), workflowRevision: 7, actorId: "owner-1", actorRole: "TASK_OWNER" as const,
+      artifactDigest, workBreakdownDigest: null, at: new Date(0).toISOString() },
+    admittedWorkflowAuthorityDigest: "a".repeat(64),
+  };
+}
+
 async function notifierHarness(body: Record<string, unknown> = { shareToChannel: true }, options: {
   post?: Post;
   documentClient?: (db: FakeDynamoDb) => Client;
@@ -142,6 +157,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   createPlanCanvas?: (input: { channel: string; taskId: string; title: string; version: number; markdown: string }) => Promise<{ canvasId: string; permalink: string }>;
   closeTaskCanvases?: (taskId: string, expectedManifestDigest?: string) => Promise<{ status: "COMPLETE" | "ARCHIVE_PENDING"; reason?: string }>;
   reviewUrlBase?: string;
+  workflowE2EBlocks?: NotifierDependencies["workflowE2EBlocks"];
 } = {}) {
   const harness = await createDeveloperTaskBroker();
   const postOverride = options.post;
@@ -171,6 +187,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
     ...(options.readArtifact === undefined ? {} : { readArtifact: options.readArtifact }),
     ...(options.createPlanCanvas === undefined ? {} : { createPlanCanvas: options.createPlanCanvas }),
     ...(options.closeTaskCanvases === undefined ? {} : { closeTaskCanvases: options.closeTaskCanvases }),
+    ...(options.workflowE2EBlocks === undefined ? {} : { workflowE2EBlocks: options.workflowE2EBlocks }),
     ...(options.reviewUrlBase === undefined ? {} : { reviewUrlBase: options.reviewUrlBase }),
     now: () => clock, log: (entry) => logs.push(entry), deliveryFailed,
   });
@@ -213,6 +230,33 @@ describe("refused Slack presses (Task 19)", () => {
     const notice = { id: String(delivered[0]!.noticeId), kind: "workflow_refusal", taskId: h.taskId, at: new Date(h.now()).toISOString() };
     await h.handle({ Records: [{ eventSource: "aws:sqs", messageId: "again", receiptHandle: "again", body: JSON.stringify(notice) }] });
     expect(h.strict.ephemerals).toHaveLength(1);
+  });
+});
+
+describe("required E2E notifier fallback", () => {
+  it("shows UNKNOWN and links the task when the bounded display projection is missing", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
+      workflowE2EBlocks: async () => undefined,
+      reviewUrlBase: "https://agentx.example.test",
+    });
+    await h.pump();
+    const current = h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: Record<string, unknown> };
+    const candidateDigest = "a".repeat(64);
+    const workflow = { ...current.workflow, revision: 9, stage: "VERIFY", state: "RUNNING", candidate: { digest: candidateDigest },
+      e2e: { contractDigest: "b".repeat(64), policyDigest: "c".repeat(64), bundleDigest: "d".repeat(64), executionPlanDigest: "e".repeat(64),
+        required: true, currentRoundId: "11111111-1111-4111-8111-111111111111", currentGroupRunIds: ["22222222-2222-4222-8222-222222222222"], resultRefs: [] } };
+    await h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" }, UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ExpressionAttributeValues: { ":workflow": workflow, ":now": new Date(h.now()).toISOString() } }));
+    const share = (h.db.get(`DEVTASK#${h.taskId}`, "META") as { share: { sharedAt: string } }).share;
+    const noticeAt = new Date(Math.max(h.now(), Date.parse(share.sharedAt) + 1)).toISOString();
+    await h.handle({ Records: [{ eventSource: "aws:sqs", messageId: "e2e-fallback", receiptHandle: "e2e-fallback",
+      body: JSON.stringify({ id: `${h.taskId}:workflow:9`, kind: "workflow", taskId: h.taskId, workflowRevision: 9, at: noticeAt }) }] });
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "workflow", outcome: "posted" }));
+    const blocks = JSON.stringify(h.posts.at(-1)?.blocks ?? []);
+    expect(blocks).toContain("Required E2E status: UNKNOWN");
+    expect(blocks).toContain("Manifest/results unavailable");
+    expect(blocks).toContain(`/review/${h.taskId}/task`);
+    expect(blocks).not.toContain("0/0");
   });
 });
 
@@ -392,7 +436,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
     const task = h.db.get(`DEVTASK#${h.taskId}`, "META") as Parameters<typeof developerTaskIdentity>[0];
     const accepted = await h.actions.acceptPullRequest(developerTaskIdentity(task), h.workspaceId, { requestId: randomUUID(), repository: "demo", title: "AgentX: fix", draft: true },
-      () => [], { workflowCandidate: { repositoryId: "demo", treeSha: "b".repeat(40), candidateDigest } });
+      () => [], { workflowCandidate: checkedWorkflowCandidate(h, candidateDigest) });
     await h.finish(h.workspaceId, accepted.operation.id, "FAILED", { error: "GitHub refused the push" });
     await h.pump();
     const failed = h.posts.at(-1)!;
@@ -403,7 +447,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     }), expect.objectContaining({ action_id: "agentx_workflow_close" })] }));
     // The workspace no longer holds the checked code: said in plain words, with no retry that would fail the same way.
     const changed = await h.actions.acceptPullRequest(developerTaskIdentity(task), h.workspaceId, { requestId: randomUUID(), repository: "demo", title: "AgentX: fix", draft: true },
-      () => [], { workflowCandidate: { repositoryId: "demo", treeSha: "b".repeat(40), candidateDigest } });
+      () => [], { workflowCandidate: checkedWorkflowCandidate(h, candidateDigest) });
     await h.finish(h.workspaceId, changed.operation.id, "FAILED", { error: "CONFIG_INVALID: the code changed after its checks and reviews; AgentX did not publish it" });
     await h.pump();
     const changedPost = h.posts.at(-1)!;
@@ -448,7 +492,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
     const task = h.db.get(`DEVTASK#${h.taskId}`, "META") as Parameters<typeof developerTaskIdentity>[0];
     const accepted = await h.actions.acceptPullRequest(developerTaskIdentity(task), h.workspaceId, { requestId: randomUUID(), repository: "demo", title: "AgentX: fix", draft: true },
-      () => [], { workflowCandidate: { repositoryId: "demo", treeSha: "b".repeat(40), candidateDigest } });
+      () => [], { workflowCandidate: checkedWorkflowCandidate(h, candidateDigest) });
     await setWorkflow({ revision: 9, stage: "PULL_REQUEST", state: "BLOCKED", blockReason: WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE });
     await h.finish(h.workspaceId, accepted.operation.id, "FAILED", { error: "the pull request is not the checked code" });
     await h.handle({ Records: h.stream.take().map((record) => ({ ...record, eventSource: "aws:dynamodb" })) });
@@ -481,7 +525,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
     const task = h.db.get(`DEVTASK#${h.taskId}`, "META") as Parameters<typeof developerTaskIdentity>[0];
     const accepted = await h.actions.acceptPullRequest(developerTaskIdentity(task), h.workspaceId, { requestId: randomUUID(), repository: "demo", title: "AgentX: fix", draft: true },
-      () => [], { workflowCandidate: { repositoryId: "demo", treeSha: "b".repeat(40), candidateDigest } });
+      () => [], { workflowCandidate: checkedWorkflowCandidate(h, candidateDigest) });
     const before = h.posts.length;
     // The broker refused the publication's callback and blocked the task; then the worker's own failure arrived.
     await setWorkflow({ revision: 9, stage: "PULL_REQUEST", state: "BLOCKED", blockReason: WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE });

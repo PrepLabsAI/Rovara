@@ -16,7 +16,8 @@ describe("model prices", () => {
     expect(estimate.lines.slice(-3).map((line) => [line.item, line.usd])).toEqual([
       ["Main model (Claude Sonnet 4.6)", 25], ["Safety check model (Claude Haiku 4.5)", 2.5], ["Coding model (Claude Sonnet 4.6)", 75],
     ]);
-    expect(estimate.totalUsd).toBe(211.13);
+    expect(estimate.lines.find((line) => line.item.startsWith("Coding machines"))).toMatchObject({ item: "Coding machines (m6g.large)", usd: 4.62, basis: "60 machine-hours at $0.077/hour" });
+    expect(estimate.totalUsd).toBe(213.44);
   });
 
   it("FR-082: every model offered as a choice has a price or says price not on file", () => {
@@ -49,8 +50,8 @@ describe("the budget default", () => {
   it("an unpriced model is named, left out of the total, and noted in the budget help", () => {
     const estimate = estimateMonthlyCost({ ...DEFAULTS, worker: "us.anthropic.claude-opus-4-1-20250805-v1:0" });
     expect(estimate.lines.at(-1)).toEqual({ item: "Coding model (us.anthropic.claude-opus-4-1-20250805-v1:0)", usd: undefined, basis: "not priced: price not on file for us.anthropic.claude-opus-4-1-20250805-v1:0" });
-    expect(estimate.totalUsd).toBe(136.13);
+    expect(estimate.totalUsd).toBe(138.44);
     expect(suggestedBudgetUsd(estimate)).toBe(170);
-    expect(budgetWhy(estimate)).toBe("AgentX's estimate is about $136.13 a month, not counting Coding model (us.anthropic.claude-opus-4-1-20250805-v1:0), whose price is not on file. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.");
+    expect(budgetWhy(estimate)).toBe("AgentX's estimate is about $138.44 a month, not counting Coding model (us.anthropic.claude-opus-4-1-20250805-v1:0), whose price is not on file. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.");
   });
 });

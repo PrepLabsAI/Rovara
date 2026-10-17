@@ -2,7 +2,7 @@
 // broker builds it (createDeveloperTaskActions) over the existing handlers, so the routes never
 // reach into broker.ts internals.
 import type { TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
-import type { ChannelTurn, Operation, OperationRequest, ProjectCommand, PullRequestLifecycleRequest, PullRequestRequest, WorkflowDependencyInvocation, WorkflowFeedbackApprovalBinding, WorkflowReviewBase, WorkflowReviewChecks, WorkflowReviewFeedback, WorkflowReviewPlan, WorkspaceInstance } from "@agentx/contracts";
+import type { ChannelTurn, E2EWorkflowAdmissionRef, Operation, OperationRequest, ProjectCommand, PullRequestLifecycleRequest, PullRequestRequest, WorkflowDependencyInvocation, WorkflowFeedbackApprovalBinding, WorkflowReviewBase, WorkflowReviewChecks, WorkflowReviewFeedback, WorkflowReviewPlan, WorkspaceInstance } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import type { StoredEvent } from "../developer/task-records.js";
 import type { RegisteredProjectRecord } from "./broker.js";
@@ -36,6 +36,8 @@ export interface DeveloperTaskActions {
   operations(workspaceId: string): Promise<Operation[]>;
   /** The exact worker binding for one stored operation; routes use it to partition graph checkpoints by attempt. */
   workflowBinding(workspaceId: string, operationId: string): Promise<WorkflowDependencyInvocation | undefined>;
+  /** Whether the exact operation already owns a committed candidate source export. */
+  workflowCandidateSourceExportDigest(workspaceId: string, operationId: string): Promise<string | undefined>;
   /** At most `limit` events, newest first. Unchecked: callers must load the owned task and check project access first. */
   eventsNewestFirst(operationId: string, limit: number): Promise<StoredEvent[]>;
   /** The operation's artifacts, across all pages. Unchecked: callers must load the owned task and check project access first. */
@@ -45,13 +47,13 @@ export interface DeveloperTaskActions {
   /** The workspace's pull requests, across all pages. Unchecked: callers must load the owned task and check project access first. */
   pullRequests(workspaceId: string): Promise<StoredPullRequest[]>;
   /** `sharedTask`: the task is shared, so the worker's prompt gets the re-read line (25c note 1). */
-  acceptTask(identity: AuthenticatedIdentity, workspaceId: string, request: OperationRequest, extra: ExtraItems, options?: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[] }): Promise<{ operation: Operation; duplicate: boolean }>;
+  acceptTask(identity: AuthenticatedIdentity, workspaceId: string, request: OperationRequest, extra: ExtraItems, options?: { sharedTask?: boolean; operationId?: string; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowE2EAdmission?: E2EWorkflowAdmissionRef; workflowDependencies?: WorkflowDependencyInvocation; workflowBase?: WorkflowReviewBase; workflowReviewChecks?: WorkflowReviewChecks; workflowReviewPlan?: WorkflowReviewPlan; workflowReviewFeedback?: WorkflowReviewFeedback; retiredClaimIds?: readonly string[] }): Promise<{ operation: Operation; duplicate: boolean }>;
   /**
    * `workflowCandidate`: the workflow's own draft publication of the tree its checks and reviews passed on, the only
    * pull request a workflow task's workspace accepts. The worker refuses a workspace that no longer has that tree, and
    * the broker checks the pushed commit's tree before opening the pull request.
    */
-  acceptPullRequest(identity: AuthenticatedIdentity, workspaceId: string, request: PullRequestRequest, extra: ExtraItems, options?: { workflowCandidate?: { repositoryId: string; treeSha: string; candidateDigest: string; baseCommitSha?: string } }): Promise<{ operation: Operation; duplicate: boolean }>;
+  acceptPullRequest(identity: AuthenticatedIdentity, workspaceId: string, request: PullRequestRequest, extra: ExtraItems, options?: { workflowCandidate?: { repositoryId: string; treeSha: string; commitSha?: string; candidateDigest: string; baseCommitSha?: string; publicationMode: "COMMITTED_HEAD" | "CHECKED_TREE"; admittedPinnedRevision: number; admittedLatestRevision: number; admittedMaterialDigest: string; admittedWorkflowRevision: number; admittedPlanArtifact: { id: string; type: string; version: number; objectKey: string; sha256: string; format: "markdown" | "structured" }; admittedOwnerApproval: { requestId: string; workflowRevision: number; actorId: string; actorRole: "TASK_OWNER" | "PROJECT_ADMIN"; artifactDigest: string; workBreakdownDigest: string | null; at: string }; admittedWorkflowAuthorityDigest: string } }): Promise<{ operation: Operation; duplicate: boolean }>;
   /**
    * The workflow's push of a fix whose checks and reviews passed to its existing pull request: an append of exactly the
    * reviewed tree (on the task's pinned base) onto the head the workflow recorded. STALE_FENCE when the pull request

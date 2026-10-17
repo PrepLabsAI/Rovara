@@ -30,6 +30,26 @@ function workflowDependencyEnvironmentEntries(template: TemplateJson) {
   return Object.entries(template.Resources ?? {}).filter(([id, resource]) => id.startsWith("Broker") && resource.Type === "AWS::Lambda::Function");
 }
 
+function runtimeCatalogEnvironmentEntries(template: TemplateJson) {
+  const brokers = workflowDependencyEnvironmentEntries(template);
+  const dispatchers = Object.entries(template.Resources ?? {}).filter(([id, resource]) => id.startsWith("Dispatcher") && resource.Type === "AWS::Lambda::Function");
+  expect(brokers, "one Broker owns both runtime catalog IDs").toHaveLength(1);
+  expect(dispatchers, "one Dispatcher owns the project setup catalog ID").toHaveLength(1);
+  const brokerVariables = brokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
+  const dispatcherVariables = dispatchers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
+  return { broker: brokerVariables.Variables, dispatcher: dispatcherVariables.Variables };
+}
+
+function expectRuntimeCatalogEnvironment(template: TemplateJson, prefix: string) {
+  const { broker, dispatcher } = runtimeCatalogEnvironmentEntries(template);
+  const setupId = `${prefix}-project-setup-runtime-v1`;
+  const featureId = `${prefix}-e2e-mock-runtime-v1`;
+  expect(broker.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID).toBe(setupId);
+  expect(broker.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID).toBe(featureId);
+  expect(dispatcher.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID).toBe(setupId);
+  expect(dispatcher).not.toHaveProperty("AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID");
+}
+
 function appControlPlane(env: string): TemplateJson {
   const stacks = buildAgentXApp({ agentxEnv: env }).node.children.filter((child): child is Stack => Stack.isStack(child));
   const stack = stacks.find((candidate) => candidate.stackName === `agentx-${env}-control-plane`);
@@ -56,6 +76,20 @@ function parentRemainderDigest(template: TemplateJson): string {
   for (const [id] of workflowDependencyEnvironmentEntries(remainder)) {
     const brokerVariables = resources[id]!.Properties!.Environment as { Variables: Record<string, unknown> };
     delete brokerVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED;
+    delete brokerVariables.Variables.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID;
+    delete brokerVariables.Variables.AGENTX_E2E_FEATURE_RUNTIME_CATALOG_ID;
+  }
+  for (const [, resource] of Object.entries(resources).filter(([id, resource]) => id.startsWith("Dispatcher") && resource.Type === "AWS::Lambda::Function")) {
+    const dispatcherVariables = resource.Properties!.Environment as { Variables: Record<string, unknown> };
+    delete dispatcherVariables.Variables.AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID;
+  }
+  // This separately tested, least-privilege creator fence is the only additional sign-in-table
+  // statement. Remove only its exact action/resource pair so historical parent hashes stay scoped.
+  for (const entry of developerSignInConditionCheckEntries(remainder)) {
+    const policy = resources[entry.policyId]!;
+    const document = policy.Properties!.PolicyDocument as { Statement: unknown };
+    if (Array.isArray(document.Statement)) document.Statement.splice(entry.index, 1);
+    else delete (document as { Statement?: unknown }).Statement;
   }
   const establishedAssetHashNormalization = JSON.stringify(remainder).replace(/[a-f0-9]{64}/g, "<asset-hash>");
   return createHash("sha256").update(establishedAssetHashNormalization).digest("hex");
@@ -73,6 +107,34 @@ function realAppControlPlane(env?: string): TemplateJson {
 function normalizeSingleton(value: unknown): unknown {
   // CDK may emit one IAM Action/Resource as a scalar or a singleton array; normalize only that shape.
   return Array.isArray(value) && value.length === 1 ? value[0] : value;
+}
+
+function developerSignInConditionCheckEntries(template: TemplateJson): Array<{ policyId: string; index: number; statement: Record<string, unknown>; tableId: string }> {
+  const resources = template.Resources ?? {};
+  const signInTable = Object.entries(resources).find(([id, resource]) => id.startsWith("DeveloperSignInTable") && resource.Type === "AWS::DynamoDB::Table");
+  const brokerRole = Object.entries(resources).find(([id, resource]) => id.startsWith("BrokerServiceRole") && resource.Type === "AWS::IAM::Role");
+  if (signInTable === undefined || brokerRole === undefined) return [];
+  const [tableId] = signInTable;
+  const roleId = brokerRole[0];
+  const expectedResource = { "Fn::GetAtt": [tableId, "Arn"] };
+  const entries: Array<{ policyId: string; index: number; statement: Record<string, unknown>; tableId: string }> = [];
+  for (const [policyId, resource] of Object.entries(resources)) {
+    if (resource.Type !== "AWS::IAM::Policy") continue;
+    const properties = resource.Properties as { Roles?: unknown; PolicyDocument?: { Statement?: unknown } } | undefined;
+    const roles = Array.isArray(properties?.Roles) ? properties.Roles as Array<Record<string, unknown>> : [];
+    if (!roles.some((role) => role.Ref === roleId)) continue;
+    const rawStatements = properties?.PolicyDocument?.Statement;
+    const statements = Array.isArray(rawStatements) ? rawStatements : rawStatements === undefined ? [] : [rawStatements];
+    statements.forEach((value, index) => {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) return;
+      const statement = value as Record<string, unknown>;
+      if (normalizeSingleton(statement.Action) === "dynamodb:ConditionCheckItem"
+        && JSON.stringify(statement.Resource) === JSON.stringify(expectedResource)) {
+        entries.push({ policyId, index, statement, tableId });
+      }
+    });
+  }
+  return entries;
 }
 
 describe("the named TEST proof-only installation gate", () => {
@@ -103,6 +165,9 @@ describe("the named TEST proof-only installation gate", () => {
     const named = realAppControlPlane("agentxlivetest123");
     const foreign = realAppControlPlane("staging");
     const legacy = realAppControlPlane();
+    expectRuntimeCatalogEnvironment(named, "agentx-agentxlivetest123");
+    expectRuntimeCatalogEnvironment(foreign, "agentx-staging");
+    expectRuntimeCatalogEnvironment(legacy, "agentx-production");
 
     for (const [label, template] of [["staging", foreign], ["legacy", legacy]] as const) {
       expect(template.Parameters?.TaskPersonProofEnabled, `${label} has no proof-only parameter`).toBeUndefined();
@@ -130,9 +195,54 @@ describe("the named TEST proof-only installation gate", () => {
     const legacyVariables = legacyBrokers[0]![1].Properties!.Environment as { Variables: Record<string, unknown> };
     expect(legacyVariables.Variables.AGENTX_WORKFLOW_DEPENDENCIES_ENABLED, "legacy has no workflow flag").toBeUndefined();
 
-    expect(parentRemainderDigest(named)).toBe("80dc8e7ce5dd33accdf00adf195b66a40c94f534bc9fa5ffbc39b959ce0b18e1");
-    expect(parentRemainderDigest(foreign)).toBe("9ea051a264736c3ce74ee99cba71fe580119087a5399344f455b9a7d2b6a8cc4");
-    expect(parentRemainderDigest(legacy)).toBe("59e51035978191661fbeb033626a3c12430cdcc80cf67575c799ad768aa132ec");
+    const digestCases = [
+      {
+        label: "named",
+        template: named,
+        withRoute: "fb2ed5726ab117b68d0c91cef2ae3d53a2a02587035789fd0cb761813f373714",
+        withoutRoute: "80dc8e7ce5dd33accdf00adf195b66a40c94f534bc9fa5ffbc39b959ce0b18e1",
+      },
+      {
+        label: "foreign",
+        template: foreign,
+        withRoute: "099fbac6b5c6e54e421093f0eb9ce9e877b5a952bae8681cfff7f3676ec724d6",
+        withoutRoute: "9ea051a264736c3ce74ee99cba71fe580119087a5399344f455b9a7d2b6a8cc4",
+      },
+      {
+        label: "legacy",
+        template: legacy,
+        withRoute: "90538bb14942947a38a426cbad433627680a1a44e41e5a3cce7a836a1953bc2b",
+        withoutRoute: "59e51035978191661fbeb033626a3c12430cdcc80cf67575c799ad768aa132ec",
+      },
+    ] as const;
+    for (const { label, template, withRoute, withoutRoute } of digestCases) {
+      const creatorChecks = developerSignInConditionCheckEntries(template);
+      if (label === "legacy") {
+        expect(creatorChecks, "legacy has no new sign-in creator identity fence").toHaveLength(0);
+      } else {
+        expect(creatorChecks, `${label} has exactly one broker creator identity fence`).toHaveLength(1);
+        expect(creatorChecks[0]!.statement, `${label} checks only the exact sign-in table key namespace`).toEqual({
+          Action: "dynamodb:ConditionCheckItem",
+          Condition: {
+            "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVELOPER#*"] },
+            Null: { "dynamodb:LeadingKeys": "false" },
+          },
+          Effect: "Allow",
+          Resource: { "Fn::GetAtt": [creatorChecks[0]!.tableId, "Arn"] },
+        });
+      }
+      expect(template.Resources?.ProjectSetupExecutionReadRoute, `${label} has the approved setup read route`).toMatchObject({
+        Type: "AWS::ApiGatewayV2::Route",
+        Properties: {
+          AuthorizationType: "NONE",
+          RouteKey: "GET /v1/internal/project-setups/{setupExecutionId}/execution",
+        },
+      });
+      expect(parentRemainderDigest(template), `${label} parent remainder with the route`).toBe(withRoute);
+      const priorRemainder = structuredClone(template);
+      delete priorRemainder.Resources?.ProjectSetupExecutionReadRoute;
+      expect(parentRemainderDigest(priorRemainder), `${label} parent remainder with only the approved route removed`).toBe(withoutRoute);
+    }
   });
 
   it("conditions the isolated proof resources on the switch, exact account and region", () => {

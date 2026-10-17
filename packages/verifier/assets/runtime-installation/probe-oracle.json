@@ -1,0 +1,1 @@
+{"schemaVersion":"runtime-install-probe-oracle/v1","source":{"exports":[{"name":"listRows","kind":"callable"},{"name":"otherRows","kind":"callable"}],"protocol":"registered-module-export-inventory/v1"},"feature":{"inputPositive":{"qualificationProbe":"positive"},"inputNegative":{"qualificationProbe":"negative"},"output":{"rows":[1]},"negativeAssertion":{"rows":[9]}}}

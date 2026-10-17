@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -9,9 +9,58 @@ import { describe, expect, it } from "vitest";
 import { prepareWorkspace, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
 import { assertWorkspaceReady, evaluateReadiness } from "../../packages/worker/src/readiness.js";
 import { projectCheckKey, readCheckHistory } from "../../packages/worker/src/verification/check-history.js";
+import { linkInstalledRuntimeDependencies } from "../../packages/verifier/src/runtime-cli.js";
 
 const run = promisify(execFile);
 describe("workspace preparation", () => {
+  it("allows retained runtime dependency links at the trusted top-level backing root and still rejects repo links", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-runtime-workspace-"));
+    const source = await createGitFixture("runtime-backing");
+    const project = fixtureProject([{ name: "runtime-backing", commit: source.commit }]);
+    const optionsWithoutBacking = {
+      rootPath: root,
+      project,
+      materializer: async (_repository: StoredProjectDefinition["repositories"][number], destination: string) => {
+        await run("git", ["clone", "--quiet", source.directory, destination]);
+      },
+    };
+    await prepareWorkspace(optionsWithoutBacking);
+
+    const backing = join(root, ".agentx-runtime");
+    await mkdir(join(backing, "evidence", "actual-cli", "project"), { recursive: true, mode: 0o755 });
+    await chmod(backing, 0o755);
+    const owner = await stat(backing);
+    const runtimeBackingOwner = { uid: owner.uid, gid: owner.gid };
+    await linkInstalledRuntimeDependencies(join(backing, "evidence", "actual-cli", "project"), root);
+
+    await expect(prepareWorkspace({ ...optionsWithoutBacking, trustedRuntimeBackingOwner: runtimeBackingOwner })).resolves.toMatchObject({ complete: true });
+    await expect(prepareWorkspace({
+      ...optionsWithoutBacking,
+      trustedRuntimeBackingOwner: { ...runtimeBackingOwner, uid: runtimeBackingOwner.uid + 1 },
+    })).rejects.toThrow("trusted verifier runtime backing directory is not the fixed private root");
+
+    const repositoryRoot = join(root, "repo", "runtime-backing");
+    await symlink(join(source.directory, "README.md"), join(repositoryRoot, "outside-repository-link"));
+    await expect(prepareWorkspace({ ...optionsWithoutBacking, trustedRuntimeBackingOwner: runtimeBackingOwner })).rejects.toThrow(
+      "workspace path escapes its root",
+    );
+  });
+
+  it("does not allow a configured repository to overlap the trusted verifier runtime backing directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-runtime-repository-"));
+    const source = await createGitFixture("runtime-repository");
+    const project = fixtureProject([{ name: "runtime-repository", commit: source.commit }]);
+    const runtimeRepositoryProject: ProjectDefinition = {
+      ...project,
+      repositories: [{ ...project.repositories[0]!, path: ".agentx-runtime" }],
+    };
+    await expect(prepareWorkspace({
+      rootPath: root,
+      project: runtimeRepositoryProject,
+      trustedRuntimeBackingOwner: { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 },
+    })).rejects.toThrow("repository path overlaps the reserved verifier runtime backing directory");
+  });
+
   it("materializes the working tree after a no-checkout clone", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
     const source = await createGitFixture("no-checkout");
