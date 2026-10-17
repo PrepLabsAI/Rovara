@@ -36,7 +36,7 @@ export function expectedE2EApplicationConfigDigest(input: {
   } } };
   const sanitized = {
     projectId: input.projectId, tests: [...input.tests], workers: 1, retries: 0, timeout: input.timeout,
-    cache: "off", ...(agents === undefined ? {} : { agents }),
+    cache: "off", reporters: [], ...(agents === undefined ? {} : { agents }),
     targets: [{ name: target.targetId, platform: target.engine?.platform ?? "api", app: sanitizeApp(target.app),
       ...(target.engine === null ? {} : { engine: sanitizeEngine(target.engine) }) }],
   };

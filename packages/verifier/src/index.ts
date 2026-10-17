@@ -19,6 +19,27 @@ export { createE2EAppAdapterPacket } from "./runtime-adapter.js";
 export type { E2EAppAdapterPacket } from "./runtime-adapter.js";
 export { runE2EActualCli } from "./runtime-cli.js";
 export type { E2EActualCliRun } from "./runtime-cli.js";
+export { E2E_APPLICATION_RUNTIME_ASSET_VERSION, createE2EApplicationRuntimeAssets } from "./application-runtime-assets.js";
+export type { E2EApplicationRuntimeAssets } from "./application-runtime-assets.js";
+export { registerE2EApplicationCliHost, installE2EApplicationCliBridge, prepareE2EApplicationCliConfig,
+  readE2EApplicationCliSupervisorReadback } from "./application-runtime-bootstrap.js";
+export type { E2EApplicationCliHost, E2EApplicationCliLaunchContext } from "./application-runtime-bootstrap.js";
+export { runE2EApplicationActualCli } from "./application-runtime-cli.js";
+export { createInstalledE2EApplicationSupervisorReadbackClient } from "./application-runtime-cli.js";
+export type { E2EActualApplicationCliInput, E2EApplicationSupervisorReadbackExpected, E2EApplicationSupervisorReadbackClient } from "./application-runtime-cli.js";
+export { E2EApplicationReportSchema, E2E_APPLICATION_REPORT_MAX_BYTES, parseE2EApplicationReport } from "./application-report-schema.js";
+export type { E2EApplicationReport, ParsedE2EApplicationReport } from "./application-report-schema.js";
+export { E2EApplicationProducerSchema, E2EApplicationProofBytesSchema, E2EApplicationSupervisorReadbackSchema,
+  E2EApplicationOwnedSubjectSchema, E2EApplicationCaseCaptureSchema, readE2EApplicationSupervisorProof,
+  E2EApplicationCollectionSchema, E2EApplicationCollectionOracleSchema, E2EApplicationGroupResultEnvelopeSchema,
+  e2eApplicationPrivateTransferMaxBytes, createE2EApplicationCollectionOracleFromCompiledSuite,
+  qualifyE2EApplicationCollection, mapE2EApplicationGroupResult } from "./application-result-adapter.js";
+export type { E2EApplicationProducer, E2EApplicationProofBytes, E2EApplicationSupervisorReadback, E2EApplicationOwnedSubject, E2EApplicationCaseCapture,
+  E2EApplicationMockConsumption, E2EApplicationCollection, E2EApplicationCollectionOracle, E2EApplicationGroupResultEnvelope } from "./application-result-adapter.js";
+export { collectE2EApplicationRun } from "./application-collection.js";
+export type { E2EActualApplicationRun, E2EActualApplicationShard } from "./application-collection.js";
+export { runIsolatedE2EApplication } from "./application-runtime.js";
+export type { E2EApplicationRuntimePorts, E2EIsolatedApplicationRun } from "./application-runtime.js";
 export { CONTAINED_IMAGE, CONTAINED_RUNTIME_PROFILE, CONTAINED_SOCKET, containedRuntimeProfileForHost, inspectContainedRuntimeReadiness, inspectContainedRuntimeReadinessForHost } from "./contained-candidate.js";
 export type { ContainedRuntimeProfile } from "./container-envelope.js";
 export type { ContainedRuntimeReadiness } from "./contained-runtime-readiness.js";
