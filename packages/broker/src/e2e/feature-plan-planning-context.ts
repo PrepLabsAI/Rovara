@@ -6,6 +6,12 @@ import { e2eApplicationMetadataSourceRefs } from "./application-plan-binding.js"
 import * as ts from "typescript";
 
 const MAX_PLANNING_CONTEXT_BYTES = 12_000;
+const nativeApplicationIdentityPath = /(?:^|\/)(?:AndroidManifest\.xml|Info\.plist|[^/]+\.xcodeproj\/project\.pbxproj|[^/]+\.xcworkspace\/contents\.xcworkspacedata|[^/]+\.csproj|[^/]+\.sln|CMakeLists\.txt|meson\.build)$/i;
+
+function accountContextIdentityPath(applicationSourcePaths: readonly string[]): string | undefined {
+  return applicationSourcePaths.find((path) => /(^|\/)package\.json$/i.test(path))
+    ?? applicationSourcePaths.find((path) => nativeApplicationIdentityPath.test(path));
+}
 
 export type FeatureE2EPlanningContext = {
   status: "available";
@@ -163,8 +169,10 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     }
     const applications = new Set(targets.map((target) => target.applicationId));
     const accountContextRefs = targets.flatMap((target) => {
+      const application = discovered.inspection.applications.find((item) => item.applicationId === target.applicationId);
       const applicationRef = applicationRefs.find((item) => item.applicationId === target.applicationId);
-      const sourceRef = applicationRef?.sourceRefs[0];
+      const identityPath = application === undefined ? undefined : accountContextIdentityPath(application.sourcePaths);
+      const sourceRef = identityPath === undefined ? undefined : applicationRef?.sourceRefs.find((ref) => ref.path === identityPath);
       return sourceRef === undefined || !applications.has(target.applicationId) ? [] : [{ applicationId: target.applicationId,
         profileId: target.accountProfileId, sourcePath: sourceRef.path, sourceSha256: sourceRef.sha256 }];
     }).filter((item, index, values) => values.findIndex((candidate) => candidate.applicationId === item.applicationId && candidate.profileId === item.profileId) === index).slice(0, 32);

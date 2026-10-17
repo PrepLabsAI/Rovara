@@ -195,6 +195,56 @@ describe("source-bound application approval and build identity", () => {
       .toMatchObject({ candidateDigest: final.candidate.digest, applicationId: "ordinary-orders" });
   });
 
+  it("keeps account-context provenance on application identity when root build metadata sorts first", () => {
+    const base = snapshot("f".repeat(40), "1".repeat(40));
+    const ancillaryFiles = [
+      { path: "go.mod", bytes: Buffer.from("module example.com/ancillary\ngo 1.23\n") },
+      { path: "build.gradle", bytes: Buffer.from("plugins { id 'base' }\n") },
+    ].map((item) => ({ ...item, sha256: sha(item.bytes), kind: "blob" as const }));
+    const source: E2ESourceSnapshot = { ...base, treePaths: [...base.treePaths, ...ancillaryFiles.map((item) => item.path)],
+      sources: [...base.sources, ...ancillaryFiles] };
+    const context = buildFeatureE2EPlanningContext(policy, source);
+    expect(context.status).toBe("available");
+    if (context.status !== "available") return;
+    expect(context.accountContextRefs).toMatchObject([{ applicationId: "ordinary-orders", profileId: "synthetic", sourcePath: "package.json" }]);
+    const application = context.applicationRefs?.find((item) => item.applicationId === "ordinary-orders");
+    const runtime = context.runtimeRefs?.find((item) => item.targetId === "web-1");
+    if (!application || !runtime || runtime.recipeDigest === null) throw new Error("context must provide a source-backed application recipe");
+    const intent: E2EApplicationPlanIntent = {
+      ...planIntent(source), accountContextRefs: context.accountContextRefs,
+      applicationRuntimeRefs: [{ targetId: runtime.targetId, applicationId: runtime.applicationId, recipeDigest: runtime.recipeDigest,
+        sourceRefs: application.sourceRefs, runtimeProfileId: "qualified-chromium", accountProfileId: runtime.accountProfileId }],
+    };
+    const binding = approval(source, setupFor(source), intent);
+    const manifest = buildManifest(source, binding);
+    expect(validateE2EAppBuildBinding({ finalSnapshot: source, binding, manifest, artifacts: artifactRefs(manifest) }))
+      .toMatchObject({ candidateDigest: source.candidate.digest, applicationId: "ordinary-orders" });
+  });
+
+  it("uses native application identity for account provenance when no package manifest exists", () => {
+    const commitSha = "2".repeat(40);
+    const treeSha = "3".repeat(40);
+    const candidate = createCandidateManifest([{ repositoryId: "native-orders", commitSha, treeSha }]);
+    const files = [
+      { path: "android/app/src/main/AndroidManifest.xml", bytes: Buffer.from('<manifest package="com.example.orders"/>\n') },
+      { path: "android/app/build.gradle", bytes: Buffer.from("plugins { id 'com.android.application' }\n") },
+      { path: "android/app/gradle.lockfile", bytes: Buffer.from("com.android.tools.build:gradle:8.0=8.0\n") },
+    ].map((item) => ({ ...item, sha256: sha(item.bytes), kind: "blob" as const }));
+    const source: E2ESourceSnapshot = { candidate, commitSha, treeSha, treeComplete: true,
+      treePaths: files.map((file) => file.path), sources: files };
+    const inspection = inspectE2ERepository(source, candidate).inspection;
+    const target = inspection.proposedTargets.find((item) => item.kind === "mobile" && item.os === "android");
+    if (!target || target.kind !== "mobile") throw new Error("fixture must discover a native Android target");
+    const nativePolicy: E2EPolicy = { ...policy, targets: [target] };
+    const context = buildFeatureE2EPlanningContext(nativePolicy, source);
+    expect(context.status).toBe("available");
+    if (context.status !== "available") return;
+    expect(context.accountContextRefs).toMatchObject([{ applicationId: target.applicationId, profileId: "synthetic",
+      sourcePath: "android/app/src/main/AndroidManifest.xml" }]);
+    expect(context.applicationRefs?.find((item) => item.applicationId === target.applicationId)?.sourceRefs.map((ref) => ref.path))
+      .toContain("android/app/build.gradle");
+  });
+
   it("selects native project identity and owned build metadata without requiring package.json", () => {
     const source = snapshot("d".repeat(40), "e".repeat(40));
     const nativeFiles = [
