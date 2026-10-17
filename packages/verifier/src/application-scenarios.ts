@@ -1,5 +1,6 @@
 import { types } from "node:util";
 import { createHash } from "node:crypto";
+import { z } from "zod";
 import { E2EApplicationApprovalBindingSchema, E2EApplicationBuildSourceManifestSchema,
   E2EApplicationBuildSourceRefSchema, E2EApplicationCliHostDescriptorSchema, E2EApplicationLaunchTargetSchema,
   E2EApplicationPreparedGroupFactsSchema, E2EAppArtifactRefSchema, E2EAppBuildManifestSchema,
@@ -28,6 +29,7 @@ import { E2E_APPLICATION_DECLARATION_PATH, E2E_APPLICATION_GENERATED_CONFIG_PATH
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const applicationTestPath = ".agentx/e2e/generated-application.test.ts";
 const groupInventoryProtocol = E2E_APPLICATION_GROUP_COMPILER_PROTOCOL;
+const applicationModelRouteSchema = z.object({ routeId: z.string().trim().min(1).max(120), routeRevision: z.string().trim().min(1).max(120) }).strict().nullable();
 
 export type E2EApplicationCompiledShard = Readonly<{
   shardId: string; targetId: string; files: ReadonlyMap<string, string>; inventory: E2EApplicationCompiledInventory;
@@ -177,7 +179,7 @@ function selectedContextCopy(input: unknown): E2EApplicationCompilationContext {
   const launchTargets = ordinaryArray(context.launchTargets, 12, "application launch targets", (raw) => E2EApplicationLaunchTargetSchema.parse(bounded(raw)));
   const cliHostsByProfile = mapCopy(context.cliHostsByProfile, 12, "application CLI hosts", (raw) => E2EApplicationCliHostDescriptorSchema.parse(bounded(raw)));
   const preparedEnvironmentsByGroup = mapCopy(context.preparedEnvironmentsByGroup, 4, "application prepared environments", (raw) => E2EApplicationPreparedGroupFactsSchema.parse(bounded(raw)));
-  const modelRoute = context.modelRoute === null ? null : bounded(context.modelRoute) as { routeId: string; routeRevision: string };
+  const modelRoute = applicationModelRouteSchema.parse(bounded(context.modelRoute));
   return { selectionInput, executionPlan: E2EExecutionPlanSchema.parse(bounded(context.executionPlan)), bundle: E2EScenarioBundleSchema.parse(bounded(context.bundle)),
     applicationBindings, runtimeBindings, launchTargets, modelRoute, cliHostsByProfile, preparedEnvironmentsByGroup };
 }
@@ -263,7 +265,11 @@ function validateBindings(context: E2EApplicationCompilationContext, plan: E2EEx
     validateE2EApplicationLaunchTarget(target, launch, runtime, context.selectionInput.policy.capture);
   }
   if (context.runtimeBindings.size !== profileIds.length || [...context.runtimeBindings.keys()].some((id) => !profileIds.includes(id))) throw new Error("runtime binding map contains a missing or foreign profile");
-  const selectedRuntimeByProfile = new Map(context.selectionInput.registeredRuntimes.map((runtime) => [runtime.profileId, runtime]));
+  const selectedRuntimeRows = context.selectionInput.registeredRuntimes.filter((runtime) => profileIds.includes(runtime.profileId));
+  if (new Set(selectedRuntimeRows.map((runtime) => runtime.profileId)).size !== selectedRuntimeRows.length) {
+    throw new Error("selection input contains an ambiguous registered runtime profile");
+  }
+  const selectedRuntimeByProfile = new Map(selectedRuntimeRows.map((runtime) => [runtime.profileId, runtime]));
   for (const profileId of profileIds) {
     const selectedRuntime = selectedRuntimeByProfile.get(profileId);
     const suppliedRuntime = context.runtimeBindings.get(profileId);

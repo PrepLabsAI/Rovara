@@ -334,6 +334,17 @@ describe("application scenario compilation", () => {
       runtimeCatalogId: "another-catalog", endpoint: "http://127.0.0.1:9999", transportCorrelationId: "99999999-9999-4999-8999-999999999999" });
     expect(() => compileE2EApplicationScenarios({ context: { ...context, runtimeBindings: new Map([...runtimeBindings, [runtimeProfileId, foreignRuntime]]) } as never,
       groupId: appGroup.groupId })).toThrow(/exact selected registered runtime row/);
+    expect(() => compileE2EApplicationScenarios({ context: { ...context,
+      selectionInput: { ...selectionInput, registeredRuntimes: [...selectionInput.registeredRuntimes, foreignRuntime] },
+      runtimeBindings: new Map([...runtimeBindings, [runtimeProfileId, foreignRuntime]]) } as never, groupId: appGroup.groupId }))
+      .toThrow(/ambiguous registered runtime profile/);
+    expect(() => compileE2EApplicationScenarios({ context: { ...context, modelRoute: {
+      routeId: "route-1", routeRevision: "route-v1", providerOptions: { apiKey: "synthetic-sentinel-only" },
+      permitToken: "synthetic-sentinel-only",
+    } } as never, groupId: appGroup.groupId })).toThrow();
+    expect(() => compileE2EApplicationScenarios({ context: { ...context, modelRoute: {
+      routeId: "r".repeat(121), routeRevision: "route-v1",
+    } } as never, groupId: appGroup.groupId })).toThrow();
     expect(compiledApplication.expectedCases.map((item) => item.caseId)).toEqual(appGroup.expectedCases.map((item) => item.caseId));
     expect(compiledApplication.shards.map((item) => item.targetId).sort()).toEqual([target.targetId, blogTarget.targetId].sort());
     expect(compiledApplication.shards.every((shard) => shard.expectedCases.every((item) => item.targetId === shard.targetId))).toBe(true);
@@ -459,6 +470,11 @@ describe("application scenario compilation", () => {
     const foreignRuntimeAdmission = resignAdmission({ ...decoded, runtimeBindings: decoded.runtimeBindings.map((entry) => entry.key === runtimeProfileId
       ? { ...entry, value: foreignRuntime } : entry) });
     expect(() => validateE2EApplicationExecutionAdmission(foreignRuntimeAdmission)).toThrow(/exact selected registered runtime row/);
+    const ambiguousRuntimeAdmission = resignAdmission({ ...decoded,
+      selectionInput: { ...decoded.selectionInput, registeredRuntimes: [...decoded.selectionInput.registeredRuntimes, foreignRuntime] },
+      runtimeBindings: decoded.runtimeBindings.map((entry) => entry.key === runtimeProfileId ? { ...entry, value: foreignRuntime } : entry),
+    });
+    expect(() => validateE2EApplicationExecutionAdmission(ambiguousRuntimeAdmission)).toThrow(/ambiguous registered runtime profile/);
     const portableGroupIds = decoded.groups.filter((item) => item.protocol === "trusted-e2e/v1").map((item) => item.childBinding.groupId);
     const childRunIds = new Map(decoded.groups.filter((item) => item.protocol === "trusted-e2e/v1")
       .map((item) => [item.childBinding.groupId, item.childBinding.runId]));
