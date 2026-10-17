@@ -5,14 +5,15 @@ import { E2EApplicationApprovalBindingSchema, E2EApplicationPlanIntentSchema, E2
 import { e2eApplicationMetadataSourcePaths, e2eApplicationMetadataSourceRefs } from "./e2e-application-metadata.js";
 import { selectE2EExecutionPlan, type E2EPlanSelectionInput } from "./e2e-execution-plan.js";
 import { E2EExecutionPlanSchema, E2EPolicySchema, E2ERuntimeAvailabilitySchema, E2EScenarioBundleSchema, E2ESetupProposalSchema,
-  e2eExecutionPlanDigest, e2eScenarioBundleDigest, type E2EExpectedCase, type E2EExecutionPlan, type E2EScenario, type E2EScenarioBundle,
-  type E2ESetupProposal } from "./e2e.js";
+  E2EApiMockFixtureSchema, e2eExecutionPlanDigest, e2eScenarioBundleDigest, validateE2EScenarioBundleForPolicy,
+  type E2EExpectedCase, type E2EExecutionPlan, type E2EMockSpec, type E2EScenario, type E2EScenarioBundle, type E2ESetupProposal } from "./e2e.js";
 import { e2eApplicationUpstreamTestIdFromIdentity, e2eCaseIdFromIdentity } from "./e2e-case-identity.js";
 import { inspectE2ERepository } from "./e2e-catalog.js";
 import { verifyE2ESourceSnapshot } from "./e2e-source.js";
 import { E2EPortableApprovalBindingSchema, type E2EPortableApprovalBinding } from "./e2e-portable.js";
 import { E2ERegisteredRuntimeSchema, type E2ERegisteredRuntime } from "./e2e-runtime-registration.js";
 import { resolveE2ERuntimeReadiness } from "./e2e-runtime-capabilities.js";
+import { createE2EOpenApiFixtureDescriptor, validateE2EOpenApiFixtureResponse } from "./e2e-openapi-fixture.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const stableId = (prefix: string, value: unknown) => prefix + sha256(canonicalJson(value));
@@ -43,6 +44,25 @@ function operationStep(scenario: E2EScenario): { operationId: string; kind: "inv
   const step = scenario.steps[0];
   if ((step?.kind === "invoke-contract" || step?.kind === "inspect-contract") && scenario.steps.length === 1) return step;
   return undefined;
+}
+function deriveApprovedApplicationMocks(input: E2EApplicationPlanSelectionInput,
+  discovered: ReturnType<typeof inspectE2ERepository>): NonNullable<E2EPlanSelectionInput["mockableComponents"]> {
+  return (input.intent.mockFixtureRefs ?? []).map((reference) => {
+    const target = discovered.inspection.proposedTargets.find((candidate) => candidate.targetId === reference.requestedTargetId);
+    const edge = target === undefined ? undefined : discovered.inspection.dependencyEdges.find((candidate) => candidate.fromApplicationId === target.applicationId
+      && candidate.toComponentId === reference.componentId && candidate.sourcePaths.some((path) => /(^|\/)(?:openapi|swagger)\.json$/i.test(path)));
+    const schemaPath = edge?.sourcePaths.find((path) => /(^|\/)(?:openapi|swagger)\.json$/i.test(path));
+    const schemaSource = schemaPath === undefined ? undefined : input.sourceSnapshot.sources.find((source) => source.path === schemaPath && source.kind === "blob");
+    const fixtureSource = input.sourceSnapshot.sources.find((source) => source.path === reference.sourcePath && source.sha256 === reference.sourceSha256 && source.kind === "blob");
+    if (!target || !edge || !schemaSource || !fixtureSource) throw new Error("approved application mock does not match a protected API schema edge and fixture source");
+    let raw: unknown;
+    try { raw = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(fixtureSource.bytes)) as unknown; }
+    catch { throw new Error("approved source-backed API fixture is not valid UTF-8 JSON"); }
+    const fixture = E2EApiMockFixtureSchema.parse(raw);
+    if (fixture.operationId !== reference.operationId) throw new Error("approved application API fixture operation differs from its canonical source reference");
+    return { componentId: reference.componentId, requestedTargetId: reference.requestedTargetId, kind: "api" as const,
+      sourceRefs: [{ path: schemaSource.path, sha256: schemaSource.sha256 }], fixture };
+  });
 }
 function portablePairs(input: E2EApplicationPlanSelectionInput): Set<string> {
   const binding = input.portableApprovalBinding ? E2EPortableApprovalBindingSchema.parse(input.portableApprovalBinding) : undefined;
@@ -81,6 +101,10 @@ function validateFullInput(input: E2EApplicationPlanSelectionInput): {
     || input.expectedCandidate.digest !== input.candidateDigest || input.sourceSnapshot.candidate.digest !== input.candidateDigest) throw new Error("application candidate or full plan identity is invalid");
   verifyE2ESourceSnapshot(input.sourceSnapshot, input.expectedCandidate);
   if (!same(intent.scenarios, input.scenarios)) throw new Error("application selection scenarios differ from the complete approved intent");
+  const fullBundleBody = { schemaVersion: 1 as const, planDigest: input.planDigest, templateVersion: "trusted-e2e-application/v1",
+    scenarios: intent.scenarios, bundleDigest: "0".repeat(64) };
+  const fullBundle = E2EScenarioBundleSchema.parse({ ...fullBundleBody, bundleDigest: e2eScenarioBundleDigest(fullBundleBody) });
+  validateE2EScenarioBundleForPolicy(fullBundle, policy);
   if (intent.scenarios.some((scenario) => scenario.steps.some((step) => step.kind === "invoke-contract" || step.kind === "inspect-contract")
     && !operationStep(scenario))) throw new Error("portable operation scenarios cannot mix portable and application steps");
   if (!same([...intent.requestedTargetIds].sort(), [...input.selectedTargetIds].sort())) throw new Error("application selection targets must equal the complete approved target inventory");
@@ -88,6 +112,12 @@ function validateFullInput(input: E2EApplicationPlanSelectionInput): {
   if (setupProposal.state !== "proposed") throw new Error("approved setup proposal still has unresolved blocking inputs");
   if (!same(intent.runtimeAccountRefs, input.runtimeAccountRefs)) throw new Error("runtime account revisions differ from the complete approved intent");
   const discovered = inspectE2ERepository(input.sourceSnapshot, input.expectedCandidate);
+  const derivedMocks = deriveApprovedApplicationMocks({ ...input, intent }, discovered);
+  const suppliedMocks = input.mockableComponents ?? [];
+  const sortedCanonical = (items: readonly unknown[]) => [...items].sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+  if (!same(sortedCanonical(derivedMocks), sortedCanonical(suppliedMocks))) {
+    throw new Error("application source-backed mock selections do not exactly match the full approved intent and protected source");
+  }
   const sourceTargets = new Map(discovered.inspection.proposedTargets.map((target) => [target.targetId, target]));
   const setupTargets = new Map(setupProposal.targets.map((target) => [target.targetId, target]));
   const setupApplications = new Map(setupProposal.applications.map((application) => [application.applicationId, application]));
@@ -165,7 +195,8 @@ export function projectE2EApplicationPortableSelection(input: E2EApplicationPlan
 
 /** Composes a complete criterion inventory with the unchanged portable v1 plan. */
 export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelectionInput): E2EExecutionPlan {
-  const { intent, policy } = validateFullInput(input);
+  const { intent, policy, discovered } = validateFullInput(input);
+  const approvedMocks = input.mockableComponents ?? [];
   const semantic = input.approvedSemanticApproval;
   const realRefs = intent.applicationRuntimeRefs;
   const realTargets = new Set(realRefs.map((ref) => ref.targetId));
@@ -289,9 +320,38 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
       if (groupCases.length > 64) throw new Error("application execution group exceeds the 64-case limit");
       const profile = realTargetProfiles.get(selected[0]!)!;
       const groupId = stableId("group-", ["real-application", groupKey, selected]);
+      const requiredRealIds = new Set(groupCases.flatMap((item) => item.requiredRealComponentIds));
+      const groupMocks: E2EMockSpec[] = selected.flatMap((targetId) => approvedMocks
+        .filter((item) => item.requestedTargetId === targetId && !requiredRealIds.has(item.componentId))
+        .map((item) => {
+          const target = policy.targets.find((candidate) => candidate.targetId === targetId)!;
+          const edge = discovered.inspection.dependencyEdges.find((candidate) => candidate.fromApplicationId === target.applicationId
+            && candidate.toComponentId === item.componentId && candidate.sourcePaths.includes(item.sourceRefs[0]!.path));
+          const schemaSource = input.sourceSnapshot.sources.find((source) => source.path === item.sourceRefs[0]!.path && source.sha256 === item.sourceRefs[0]!.sha256);
+          const descriptor = schemaSource && createE2EOpenApiFixtureDescriptor(schemaSource.bytes);
+          const fixture = E2EApiMockFixtureSchema.safeParse(item.fixture);
+          const operation = fixture.success ? descriptor?.operations.find((candidate) => candidate.operationId === fixture.data.operationId
+            && candidate.method === fixture.data.method && candidate.path === fixture.data.path) : undefined;
+          const success = fixture.success ? fixture.data.variants.find((variant) => variant.id === "success") : undefined;
+          const refusal = fixture.success ? fixture.data.variants.find((variant) => variant.id === "refusal") : undefined;
+          const invalid = fixture.success ? fixture.data.variants.find((variant) => variant.id === "invalid-data") : undefined;
+          const validated = edge !== undefined && descriptor !== undefined && fixture.success && operation !== undefined && success !== undefined && refusal !== undefined && invalid !== undefined
+            && success.status >= 200 && success.status < 300
+            && validateE2EOpenApiFixtureResponse({ descriptor, method: fixture.data.method, path: fixture.data.path, status: success.status, body: success.body })
+            && refusal.status >= 400 && refusal.status < 500
+            && validateE2EOpenApiFixtureResponse({ descriptor, method: fixture.data.method, path: fixture.data.path, status: refusal.status, body: refusal.body })
+            && invalid.status >= 200 && invalid.status < 300
+            && !validateE2EOpenApiFixtureResponse({ descriptor, method: fixture.data.method, path: fixture.data.path, status: invalid.status, body: invalid.body });
+          if (!validated || !descriptor || !edge || !fixture.success) throw new Error("approved application API fixture does not validate against its protected OpenAPI contract");
+          return { componentId: item.componentId, requestedTargetId: targetId, effectiveTargetId: targetId, kind: "api" as const,
+            contractDigest: sha256(canonicalJson({ descriptor, sourceRefs: item.sourceRefs, contractRef: edge.contractRef,
+              fixtureProfile: null, explicitFixture: fixture.data })), fixtureVersion: descriptor.version, sourceRefs: item.sourceRefs,
+            reason: "phase-unavailable" as const, apiFixture: fixture.data };
+        }));
+      mocks.push(...groupMocks);
       effectiveTargets.push(...selected.map((targetId) => realTargetProfiles.get(targetId)!.target));
-      groups.push({ groupId, targetIds: selected, runtimeProfileId: profile.ref.runtimeProfileId, mode: "real-runtime",
-        mockManifestDigest: sha256(canonicalJson([])), expectedCases: groupCases });
+      groups.push({ groupId, targetIds: selected, runtimeProfileId: profile.ref.runtimeProfileId, mode: groupMocks.length > 0 ? "hybrid" : "real-runtime",
+        mockManifestDigest: sha256(canonicalJson(groupMocks)), expectedCases: groupCases });
     }
   }
   if (criteria.length === 0) throw new Error("complete application selection produced no approved criteria");

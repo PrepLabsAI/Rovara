@@ -29,7 +29,7 @@ export class E2EPortablePlanReferenceError extends Error {
   }
 }
 
-function deriveApprovedMockSelections(input: { intent: E2EFeaturePlanIntent; snapshot: E2ESourceSnapshot;
+function deriveApprovedMockSelections(input: { intent: Pick<E2EFeaturePlanIntent, "mockFixtureRefs">; snapshot: E2ESourceSnapshot;
   inspection: ReturnType<typeof inspectE2ERepository>["inspection"] }): Array<{ componentId: string; requestedTargetId: string; kind: "api";
   sourceRefs: Array<{ path: string; sha256: string }>; fixture: unknown }> {
   return (input.intent.mockFixtureRefs ?? []).map((reference) => {
@@ -48,6 +48,15 @@ function deriveApprovedMockSelections(input: { intent: E2EFeaturePlanIntent; sna
     return { componentId: reference.componentId, requestedTargetId: reference.requestedTargetId, kind: "api" as const,
       sourceRefs: [{ path: schemaSource.path, sha256: schemaSource.sha256 }], fixture };
   });
+}
+
+/** Re-derives approved API mock selections from a full application intent and protected source. */
+export function deriveE2EFeatureApprovedMockSelections(input: { intent: Pick<E2EFeaturePlanIntent, "mockFixtureRefs">;
+  snapshot: E2ESourceSnapshot }): Array<{ componentId: string; requestedTargetId: string; kind: "api";
+  sourceRefs: Array<{ path: string; sha256: string }>; fixture: unknown }> {
+  verifyE2ESourceSnapshot(input.snapshot, input.snapshot.candidate);
+  const discovered = inspectE2ERepository(input.snapshot, input.snapshot.candidate);
+  return deriveApprovedMockSelections({ ...input, inspection: discovered.inspection });
 }
 
 /** Derives feature invocation registrations only from canonical Owner-approved refs and the protected final source snapshot. */

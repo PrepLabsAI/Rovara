@@ -98,9 +98,25 @@ describe("application execution plan selection", () => {
   it("keeps native baseline scope outside a model-free portable compiler projection", () => {
     const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
     const candidate = createCandidateManifest([{ repositoryId: "mixed-apps", commitSha: "e".repeat(40), treeSha: "f".repeat(40) }]);
+    const openApi = { openapi: "3.1.0", info: { title: "Orders", version: "1" }, paths: { "/orders": { get: {
+      operationId: "listOrders", parameters: [{ name: "mode", in: "query", required: true, schema: { type: "string", enum: ["success", "refusal", "invalid-data"] } }],
+      responses: {
+        "200": { description: "orders", content: { "application/json": { schema: { type: "object",
+          properties: { orders: { type: "array", items: { type: "object", properties: { name: { type: "string" } }, required: ["name"], additionalProperties: false } } },
+          required: ["orders"], additionalProperties: false } } } },
+        "403": { description: "refused", content: { "application/json": { schema: { type: "object", properties: { error: { type: "string" } },
+          required: ["error"], additionalProperties: false } } } },
+      },
+    } } } };
+    const mockFixture = { schemaVersion: "source-backed-api-fixtures/v1", operationId: "listOrders", method: "GET", path: "/orders", inputField: "mode",
+      variants: [{ id: "success", inputValue: "success", status: 200, body: { orders: [{ name: "Sample order" }] } },
+        { id: "refusal", inputValue: "refusal", status: 403, body: { error: "refused" } },
+        { id: "invalid-data", inputValue: "invalid-data", status: 200, body: { orders: "bad" } }] };
     const files = [
       { path: "apps/web/package.json", bytes: Buffer.from(JSON.stringify({ name: "web-app", type: "module", scripts: { start: "node server.js" }, exports: { "./ops": "./src/ops.js" } })) },
       { path: "apps/web/src/ops.js", bytes: Buffer.from("export function list() { return { ok: true }; }\n") },
+      { path: "apps/web/openapi.json", bytes: Buffer.from(JSON.stringify(openApi)) },
+      { path: "apps/web/fixtures/orders-mocks.json", bytes: Buffer.from(JSON.stringify(mockFixture)) },
       { path: "apps/mobile/android/app/src/main/AndroidManifest.xml", bytes: Buffer.from('<manifest package="com.example.mobile"><application/></manifest>\n') },
       { path: "apps/mobile/android/app/build.gradle", bytes: Buffer.from('plugins { id "com.android.application" }\n') },
     ];
@@ -129,6 +145,10 @@ describe("application execution plan selection", () => {
     const realScenario = { scenarioId: "web-ui", requirementId: "web-ui-visible", requestedTargetIds: [web.targetId], required: true,
       accountProfileId: web.accountProfileId, minimumEvidence: "runtime" as const, requiredRealComponentIds: [],
       steps: [{ kind: "navigate" as const, path: "/" }], assertions: [{ kind: "visible" as const, testId: "home", equals: true }] };
+    const agentScenario = { scenarioId: "web-agent", requirementId: "web-agent-visible", requestedTargetIds: [web.targetId], required: true,
+      accountProfileId: web.accountProfileId, minimumEvidence: "runtime" as const, requiredRealComponentIds: [],
+      steps: [{ kind: "agent" as const, goal: "inspect the home page", maxActions: 3 }],
+      assertions: [{ kind: "visible" as const, testId: "home", equals: true }] };
     const setupProposal = proposeE2ESetup({ inspection: discovery.inspection, snapshot, expectedCandidate: candidate });
     const setupApproval = { artifactId: "setup", digest: hash(canonicalJson(setupProposal)) };
     const semanticApproval = { artifactId: "full-plan", digest: "1".repeat(64) };
@@ -137,8 +157,12 @@ describe("application execution plan selection", () => {
     const runtimeRef = { targetId: web.targetId, applicationId: web.applicationId, recipeDigest: webApplication.recipe!.recipeDigest,
       sourceRefs: e2eApplicationMetadataSourceRefs(snapshot, web.applicationId, webApplication.sourcePaths), runtimeProfileId: "qualified-chromium", accountProfileId: web.accountProfileId };
     const runtimeAccountRef = { applicationId: web.applicationId, profileId: web.accountProfileId, revision: 1, definitionDigest: "2".repeat(64) };
+    const mockComponentId = `api-schema-${hash(Buffer.from("apps/web/openapi.json")).slice(0, 12)}`;
+    const mockFixtureBytes = files.find((file) => file.path === "apps/web/fixtures/orders-mocks.json")!.bytes;
+    const mockFixtureRef = { componentId: mockComponentId, requestedTargetId: web.targetId, operationId: "listOrders",
+      sourcePath: "apps/web/fixtures/orders-mocks.json", sourceSha256: hash(mockFixtureBytes) };
     const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [web.targetId, android.targetId],
-      portableOperationRefs: [operationRef], mockFixtureRefs: [], accountContextRefs, scenarios: [realScenario, portableScenario, nativeScenario],
+      portableOperationRefs: [operationRef], mockFixtureRefs: [], accountContextRefs, scenarios: [realScenario, agentScenario, portableScenario, nativeScenario],
       semanticExportDeltas: [], applicationRuntimeRefs: [runtimeRef], runtimeAccountRefs: [runtimeAccountRef],
       unavailableTargetRefs: [{ targetId: android.targetId, applicationId: android.applicationId, accountProfileId: android.accountProfileId,
         sourceRefs: e2eApplicationMetadataSourceRefs(snapshot, android.applicationId, nativeApplication.sourcePaths) }] });
@@ -199,6 +223,9 @@ describe("application execution plan selection", () => {
     const readyInput = { ...input, now, registeredRuntimes: [qualifiedWebRuntime(runtimeRef.runtimeProfileId, now)],
       runtimeAvailability: [{ targetId: web.targetId, profileId: runtimeRef.runtimeProfileId, connection: "connected" as const,
         approval: "approved" as const, qualification: "qualified" as const, authorizationRevision: "web-auth-r1" }] };
+    const agentIntent = E2EApplicationPlanIntentSchema.parse({ ...intent, scenarios: [agentScenario, portableScenario, nativeScenario] });
+    expect(() => selectE2EApplicationExecutionPlan({ ...input, policy: { ...policy, modelRouteRevision: null },
+      intent: agentIntent, scenarios: agentIntent.scenarios, intentDigest: hash(canonicalJson(agentIntent)) })).toThrow(/agent steps require an approved model route revision/);
     const ready = selectE2EApplicationExecutionPlan(readyInput);
     expect(ready.criteria.find((item) => item.scenarioId === "web-ui")?.expectedCaseIds).toHaveLength(1);
     expect(ready.groups.find((item) => item.mode === "real-runtime")?.expectedCases[0]?.upstreamTestId)
@@ -225,12 +252,50 @@ describe("application execution plan selection", () => {
       runtimeBinding: null as never, featureVerifier: null, now: Date.parse("2026-10-17T18:00:00.000Z") });
     expect(facade.applicationApprovalBinding?.runtimeRefs).toEqual([runtimeRef]);
     expect(facade.portableApprovalBinding).not.toBeNull();
-    expect(facade.plan.criteria.map((item) => item.scenarioId)).toEqual(["web-export", "web-ui", "native-home"]);
+    expect(facade.plan.criteria.map((item) => item.scenarioId)).toEqual(["web-export", "web-ui", "web-agent", "native-home"]);
     expect(facade.plan.criteria.find((item) => item.scenarioId === "native-home")?.expectedCaseIds).toEqual([]);
     expect(facade.plan.unavailableCriteria.some((item) => item.criterionId === nativeCriterion.criterionId)).toBe(true);
     expect(facade.selectionInput.policy.modelRouteRevision).toBe("route-v1");
     expect(facade.portableProjection?.selectionInput.policy.modelRouteRevision).toBeNull();
+    expect(facade.portableProjection?.selectionInput.policy.limits.maxModelRequests).toBe(1);
     expect(facade.portableProjection?.executionPlan.groups).toEqual([]);
+
+    const realOnlyIntent = E2EApplicationPlanIntentSchema.parse({ ...intent, requestedTargetIds: [web.targetId],
+      portableOperationRefs: [], mockFixtureRefs: [mockFixtureRef], accountContextRefs: [accountContextRefs[0]!],
+      scenarios: [realScenario], applicationRuntimeRefs: [runtimeRef], runtimeAccountRefs: [runtimeAccountRef], unavailableTargetRefs: [],
+      semanticExportDeltas: [] });
+    const realOnlySelection = deriveE2EApplicationFeatureExecutionSelection({ intent: realOnlyIntent, snapshot,
+      artifactId: semanticApproval.artifactId, artifactSha256: semanticApproval.digest, planDigest,
+      approvedSemanticApproval: semanticApproval, setupProposal, setupApproval, policy: { ...policy, baselineScenarioIds: [], targets: [web] },
+      registeredRuntimes: [qualifiedWebRuntime(runtimeRef.runtimeProfileId, Date.parse("2026-10-17T18:00:00.000Z"))],
+      runtimeAvailability: [{ targetId: web.targetId, profileId: runtimeRef.runtimeProfileId, connection: "connected", approval: "approved",
+        qualification: "qualified", authorizationRevision: "web-auth-r1" }], runtimeAccountRefs: [runtimeAccountRef], runtimeCatalogId: "catalog",
+      runtimeBinding: null as never, featureVerifier: null, now: Date.parse("2026-10-17T18:00:00.000Z") });
+    expect(realOnlySelection.portableApprovalBinding).toBeNull();
+    expect(realOnlySelection.selectionInput.mockableComponents).toHaveLength(1);
+    expect(realOnlySelection.selectionInput.mockableComponents?.[0]).toMatchObject({ componentId: mockComponentId, requestedTargetId: web.targetId });
+    expect(realOnlySelection.plan.groups).toHaveLength(1);
+    expect(realOnlySelection.plan.groups[0]).toMatchObject({ mode: "hybrid", targetIds: [web.targetId] });
+    expect(realOnlySelection.plan.mocks).toHaveLength(1);
+    expect(realOnlySelection.plan.mocks[0]).toMatchObject({ componentId: mockComponentId, requestedTargetId: web.targetId,
+      effectiveTargetId: web.targetId, kind: "api", fixtureVersion: "openapi-json-fixture-v1", reason: "phase-unavailable",
+      sourceRefs: [{ path: "apps/web/openapi.json", sha256: hash(files.find((file) => file.path === "apps/web/openapi.json")!.bytes) }], apiFixture: mockFixture });
+    expect(realOnlySelection.plan.groups[0]?.mockManifestDigest)
+      .toBe(createHash("sha256").update(canonicalJson(realOnlySelection.plan.mocks)).digest("hex"));
+    expect(() => selectE2EApplicationExecutionPlan({ ...realOnlySelection.selectionInput, mockableComponents: [] }))
+      .toThrow(/do not exactly match the full approved intent and protected source/);
+    const requiredRealIntent = E2EApplicationPlanIntentSchema.parse({ ...realOnlyIntent, scenarios: [{ ...realScenario,
+      requiredRealComponentIds: [mockComponentId] }] });
+    const requiredRealSelection = deriveE2EApplicationFeatureExecutionSelection({ intent: requiredRealIntent, snapshot,
+      artifactId: semanticApproval.artifactId, artifactSha256: semanticApproval.digest, planDigest,
+      approvedSemanticApproval: semanticApproval, setupProposal, setupApproval, policy: { ...policy, baselineScenarioIds: [], targets: [web] },
+      registeredRuntimes: [qualifiedWebRuntime(runtimeRef.runtimeProfileId, Date.parse("2026-10-17T18:00:00.000Z"))],
+      runtimeAvailability: [{ targetId: web.targetId, profileId: runtimeRef.runtimeProfileId, connection: "connected", approval: "approved",
+        qualification: "qualified", authorizationRevision: "web-auth-r1" }], runtimeAccountRefs: [runtimeAccountRef], runtimeCatalogId: "catalog",
+      runtimeBinding: null as never, featureVerifier: null, now: Date.parse("2026-10-17T18:00:00.000Z") });
+    expect(requiredRealSelection.plan.groups[0]).toMatchObject({ mode: "real-runtime" });
+    expect(requiredRealSelection.plan.mocks).toEqual([]);
+    expect(requiredRealSelection.plan.groups[0]?.expectedCases[0]?.requiredRealComponentIds).toEqual([mockComponentId]);
 
     const allUnavailableIntent = E2EApplicationPlanIntentSchema.parse({ ...intent, applicationRuntimeRefs: [], runtimeAccountRefs: [],
       unavailableTargetRefs: [
@@ -247,6 +312,6 @@ describe("application execution plan selection", () => {
     expect(allUnavailable.portableApprovalBinding).not.toBeNull();
     expect(allUnavailable.portableProjection).not.toBeNull();
     expect(allUnavailable.plan.groups).toEqual([]);
-    expect(allUnavailable.plan.criteria.map((item) => item.scenarioId)).toEqual(["web-export", "web-ui", "native-home"]);
+    expect(allUnavailable.plan.criteria.map((item) => item.scenarioId)).toEqual(["web-export", "web-ui", "web-agent", "native-home"]);
   });
 });

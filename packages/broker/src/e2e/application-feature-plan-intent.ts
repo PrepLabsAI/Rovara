@@ -6,7 +6,7 @@ import {
   type E2ERegisteredRuntime, type E2ERuntimeAvailability, type E2ERuntimeAccountRef,
 } from "@agentx/contracts";
 import { deriveE2EApplicationApprovalBinding } from "./application-plan-binding.js";
-import { deriveE2EFeaturePortableApprovalBinding } from "./feature-plan-intent.js";
+import { deriveE2EFeatureApprovedMockSelections, deriveE2EFeaturePortableApprovalBinding } from "./feature-plan-intent.js";
 import { projectE2EApplicationPortableSelection, selectE2EApplicationExecutionPlan, type E2EApplicationPlanSelectionInput,
   type E2EApplicationPortableProjection } from "@agentx/contracts";
 import { admitE2EFeatureVerifier, E2E_FEATURE_PROCESS_RESPONSE_SCOPE, type E2EFeatureVerifierRecord } from "../aws/e2e-feature-verifier-catalog.js";
@@ -87,10 +87,7 @@ export function deriveE2EApplicationFeatureExecutionSelection(input: E2EApplicat
     sandboxRuntime = admitE2EFeatureVerifier(input.featureVerifier, { runtimeCatalogId: input.runtimeCatalogId,
       profileId: policy.defaultSandboxProfileId, binding: input.runtimeBinding, scope: E2E_FEATURE_PROCESS_RESPONSE_SCOPE, now: input.now }) ?? null;
   }
-  const mockableComponents = (portableApprovalBinding?.mockFixtures ?? []).map((fixture) => ({
-    componentId: fixture.componentId, requestedTargetId: fixture.requestedTargetId, kind: fixture.kind, sourceRefs: fixture.sourceRefs,
-    ...(fixture.fixture === undefined ? { fixtureProfile: fixture.fixtureProfile! } : { fixture: fixture.fixture }),
-  }));
+  const mockableComponents = deriveE2EFeatureApprovedMockSelections({ intent, snapshot: input.snapshot });
   const selectionInput: E2EApplicationPlanSelectionInput = {
     candidateDigest: input.snapshot.candidate.digest, expectedCandidate: input.snapshot.candidate, sourceSnapshot: input.snapshot,
     planDigest: input.planDigest, policy, scenarios: intent.scenarios, selectedTargetIds: intent.requestedTargetIds,
