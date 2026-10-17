@@ -47,6 +47,8 @@ export * from "./e2e-runtime-registration.js";
 export * from "./e2e-application.js";
 export * from "./e2e-application-metadata.js";
 export * from "./e2e-application-execution-plan.js";
+export * from "./e2e-application-execution.js";
+export * from "./e2e-application-build-binding.js";
 export * from "./e2e-view.js";
 export * from "./e2e-catalog.js";
 export * from "./e2e-execution-plan.js";

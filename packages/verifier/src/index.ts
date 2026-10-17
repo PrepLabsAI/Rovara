@@ -2,6 +2,12 @@
 export const VERIFIER_PROTOCOL = "trusted-e2e/v1" as const;
 export { compileE2EScenarios } from "./scenarios.js";
 export type { E2ECompiledSuite, E2EImmutableCompilationContext } from "./scenarios.js";
+export { compileE2EApplicationScenarios, validateE2ECompiledApplicationAdmission, createE2EApplicationPortableChildBindings,
+  encodeE2EApplicationExecutionAdmission, decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "./application-scenarios.js";
+export type { E2EApplicationCompilationContext, E2ECompiledApplicationSuite, ValidatedE2EApplicationAdmission } from "./application-scenarios.js";
+export { createE2EApplicationSelectionPacket, compareE2EApplicationPublicList } from "./application-identity.js";
+export { buildE2EApplication } from "./application-build.js";
+export { encodeE2EApplicationBuildSourceArchive, materializeE2EApplicationBuildSource, validateE2EApplicationBuildSourceManifest } from "./application-build-source.js";
 export { runIsolatedE2E } from "./runtime.js";
 export type { E2EIndependentAssertionReceipt } from "./runtime-assertions.js";
 export { evaluateE2EAssertions } from "./runtime-assertions.js";

@@ -1,17 +1,17 @@
 import { createHash } from "node:crypto";
 import {
-  canonicalJson, E2EApplicationApprovalBindingSchema, E2EApplicationPlanIntentSchema, E2EAppArtifactRefSchema,
-  E2EAppBuildManifestSchema, E2EAppRecipeSchema, E2ESetupProposalSchema, PlanApprovalRefSchema, e2eAppBuildManifestDigest,
+  canonicalJson, E2EApplicationApprovalBindingSchema, E2EApplicationPlanIntentSchema,
+  E2EAppRecipeSchema, E2ESetupProposalSchema, PlanApprovalRefSchema,
   e2eApplicationApprovalBindingDigest, inspectE2ERepository, verifyE2ESourceSnapshot,
-  type E2EApplicationApprovalBinding, type E2EApplicationPlanIntent, type E2EAppArtifactRef,
-  type E2EAppBuildManifest, type E2EAppRecipe, type E2ESetupProposal, type SourceRef,
+  type E2EApplicationApprovalBinding, type E2EApplicationPlanIntent,
+  type E2EAppRecipe, type E2ESetupProposal, type SourceRef,
   type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { e2eApplicationMetadataSourcePaths, e2eApplicationMetadataSourceRefs } from "@agentx/contracts";
 export { e2eApplicationMetadataSourceRefs } from "@agentx/contracts";
+export { validateE2EAppBuildBinding } from "@agentx/contracts";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
-const dependencyLockfileName = /^(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lock(?:b)?|gradle\.lockfile|packages\.lock\.json|Podfile\.lock|Package\.resolved|Cargo\.lock|Gemfile\.lock|composer\.lock|poetry\.lock|Pipfile\.lock|uv\.lock|go\.sum)$/i;
 function parsedRecipe(recipe: unknown, applicationId: string): E2EAppRecipe {
   if (recipe === null || recipe === undefined) throw new Error(`application ${applicationId} has no source-backed launch recipe`);
   const parsed = E2EAppRecipeSchema.parse(recipe);
@@ -144,81 +144,4 @@ export function deriveE2EApplicationApprovalBinding(input: {
     applications, runtimeRefs, accountRefs,
   };
   return E2EApplicationApprovalBindingSchema.parse({ ...body, bindingDigest: e2eApplicationApprovalBindingDigest(body) });
-}
-
-function lockfileRefs(sourceRefs: readonly SourceRef[]): SourceRef[] {
-  return sourceRefs.filter((ref) => dependencyLockfileName.test(ref.path.slice(ref.path.lastIndexOf("/") + 1)));
-}
-
-function expectedOutputPlatform(target: ReturnType<typeof inspectE2ERepository>["inspection"]["proposedTargets"][number]): string {
-  if (target.kind === "mobile") return target.os;
-  if (target.kind === "desktop") return target.os;
-  return target.kind;
-}
-
-export function validateE2EAppBuildBinding(input: {
-  finalSnapshot: E2ESourceSnapshot;
-  binding: E2EApplicationApprovalBinding;
-  manifest: E2EAppBuildManifest;
-  artifacts: E2EAppArtifactRef[];
-}): { candidateDigest: string; applicationId: string; buildManifestDigest: string; artifactRefs: E2EAppArtifactRef[] } {
-  const binding = E2EApplicationApprovalBindingSchema.parse(input.binding);
-  const manifest = E2EAppBuildManifestSchema.parse(input.manifest);
-  const artifactRefs = zParseArtifactRefs(input.artifacts);
-  const discovered = assertSnapshot(input.finalSnapshot);
-  const approvedApplication = binding.applications.find((application) => application.applicationId === manifest.applicationId);
-  const currentApplication = discovered.inspection.applications.find((application) => application.applicationId === manifest.applicationId);
-  if (!approvedApplication || !currentApplication) throw new Error(`build manifest application ${manifest.applicationId} is not approved and present in final source`);
-  const currentRecipe = parsedRecipe(currentApplication.recipe, manifest.applicationId);
-  if (canonicalJson(currentRecipe) !== canonicalJson(approvedApplication.recipe) || manifest.recipeDigest !== approvedApplication.recipe.recipeDigest) {
-    throw new Error(`application ${manifest.applicationId} recipe changed after approval; replan is required`);
-  }
-  const currentRefs = e2eApplicationMetadataSourceRefs(input.finalSnapshot, manifest.applicationId, currentApplication.sourcePaths);
-  if (!sameRefs(currentRefs, approvedApplication.sourceRefs)) throw new Error(`application ${manifest.applicationId} source-owned identity or lockfile metadata changed after approval`);
-  for (const ref of approvedApplication.sourceRefs) {
-    const currentSource = input.finalSnapshot.sources.find((source) => source.path === ref.path && source.kind === "blob");
-    if (!currentSource || currentSource.sha256 !== ref.sha256) throw new Error(`approved application source reference changed or is missing: ${ref.path}`);
-  }
-  const approvedRuntimeRefs = binding.runtimeRefs.filter((ref) => ref.applicationId === manifest.applicationId);
-  if (approvedRuntimeRefs.length === 0) throw new Error(`application ${manifest.applicationId} has no approved runtime target`);
-  for (const ref of approvedRuntimeRefs) {
-    const target = discovered.inspection.proposedTargets.find((candidate) => candidate.targetId === ref.targetId);
-    if (!target || target.applicationId !== manifest.applicationId) throw new Error(`approved target ${ref.targetId} no longer identifies application ${manifest.applicationId}`);
-    if (!sameRefs(ref.sourceRefs, approvedApplication.sourceRefs) || ref.recipeDigest !== approvedApplication.recipe.recipeDigest) {
-      throw new Error(`approved target ${ref.targetId} application source or recipe identity changed`);
-    }
-  }
-
-  const expectedLocks = lockfileRefs(approvedApplication.sourceRefs);
-  if (!sameRefs(manifest.lockfileRefs, expectedLocks)) throw new Error("build manifest lockfile references differ from the exact approved lockfile set");
-  if (manifest.candidateDigest !== input.finalSnapshot.candidate.digest || manifest.repository.repositoryId !== input.finalSnapshot.candidate.repositories[0]?.repositoryId
-    || manifest.repository.commitSha !== input.finalSnapshot.commitSha || manifest.repository.treeSha !== input.finalSnapshot.treeSha) {
-    throw new Error("build manifest candidate and repository identity do not match the complete final protected source");
-  }
-  if (manifest.manifestDigest !== e2eAppBuildManifestDigest(manifest)) throw new Error("build manifest digest does not match its canonical content");
-  const expectedArtifacts = manifest.outputs.map((output) => ({ ...output, buildManifestDigest: manifest.manifestDigest }));
-  if (canonicalJson([...artifactRefs].sort((a, b) => a.artifactId.localeCompare(b.artifactId)))
-    !== canonicalJson([...expectedArtifacts].sort((a, b) => a.artifactId.localeCompare(b.artifactId)))) {
-    throw new Error("artifact references do not match the exact build manifest output identities and hashes");
-  }
-  const assignedTargets = approvedRuntimeRefs.map((ref) => discovered.inspection.proposedTargets.find((target) => target.targetId === ref.targetId)!);
-  for (const output of manifest.outputs) {
-    const outputIdentityMatches = assignedTargets.some((target) => expectedOutputPlatform(target) === output.platform
-      && output.appId === ("appId" in target ? target.appId : manifest.applicationId));
-    if (!outputIdentityMatches) throw new Error(`build output ${output.artifactId} does not match a source-owned application platform and app ID`);
-  }
-  for (const target of assignedTargets) {
-    if (!manifest.outputs.some((output) => expectedOutputPlatform(target) === output.platform
-      && output.appId === ("appId" in target ? target.appId : manifest.applicationId))) {
-      throw new Error(`build manifest has no output for approved application target ${target.targetId}`);
-    }
-  }
-  return { candidateDigest: input.finalSnapshot.candidate.digest, applicationId: manifest.applicationId,
-    buildManifestDigest: manifest.manifestDigest, artifactRefs: expectedArtifacts };
-}
-
-function zParseArtifactRefs(value: E2EAppArtifactRef[]): E2EAppArtifactRef[] {
-  const parsed = value.map((item) => E2EAppArtifactRefSchema.parse(item));
-  if (new Set(parsed.map((item) => item.artifactId)).size !== parsed.length) throw new Error("artifact references contain duplicate artifact IDs");
-  return parsed;
 }
