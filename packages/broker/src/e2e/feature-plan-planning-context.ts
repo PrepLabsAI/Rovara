@@ -1,6 +1,6 @@
 import {
   E2EApiMockFixtureSchema, canonicalJson, createE2EOpenApiFixtureDescriptor, inspectE2EPortableSource, inspectE2ERepository, redactSecrets,
-  verifyE2ESourceSnapshot, type E2EPolicy, type E2ESourceSnapshot,
+  verifyE2ESourceSnapshot, type E2EAppRecipe, type E2EPolicy, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import * as ts from "typescript";
 
@@ -12,6 +12,9 @@ export type FeatureE2EPlanningContext = {
     preparedCommitStatus: "MATCHED" | "UNKNOWN"; preparedCommitSha: string | null; currentCheckoutUnverified: boolean };
   baselineScenarioIds: string[];
   targets: Array<{ targetId: string; applicationId: string; kind: string; accountProfileId: string }>;
+  applicationRefs?: Array<{ applicationId: string; kind: string; sourceRefs: Array<{ path: string; sha256: string }>; recipe: E2EAppRecipe | null }>;
+  runtimeRefs?: Array<{ targetId: string; applicationId: string; recipeDigest: string | null; sourceRefs: Array<{ path: string; sha256: string }>;
+    runtimeProfileId: string; accountProfileId: string }>;
   portableOperations: Array<{ operationId: string; applicationId: string; requestedTargetIds: string[]; packageExportSubpath: string;
     moduleSpecifier: string; callableSelectors: Array<{ selector: { kind: "default" } | { kind: "named"; exportName: string }; firstInputParameter?: string }>;
     sourceRefs: Array<{ path: string; sha256: string }> }>;
@@ -86,6 +89,21 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     const discovered = inspectE2ERepository(snapshot, snapshot.candidate);
     const sourceByPath = new Map(snapshot.sources.map((source) => [source.path, source]));
     const inspectionSourceByPath = new Map(discovered.inspection.sources.map((source) => [source.path, source]));
+    const applicationRefs = discovered.inspection.applications.map((application) => {
+      const packagePath = application.sourcePaths.find((path) => /(^|\/)package\.json$/i.test(path));
+      const packageDirectory = packagePath === undefined ? undefined : packagePath.includes("/") ? packagePath.slice(0, packagePath.lastIndexOf("/")) : ".";
+      const lockfileName = /^(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lock(?:b)?)$/i;
+      const identityPath = /(?:^|\/)(?:AndroidManifest\.xml|Info\.plist|[^/]+\.xcodeproj\/project\.pbxproj|[^/]+\.csproj|[^/]+\.sln|CMakeLists\.txt|meson\.build)$/i;
+      const paths = [...new Set([
+        ...(packagePath === undefined ? [] : [packagePath]),
+        ...application.sourcePaths.filter((path) => identityPath.test(path)),
+        ...snapshot.sources.filter((source) => packageDirectory !== undefined
+          && (source.path.includes("/") ? source.path.slice(0, source.path.lastIndexOf("/")) : ".") === packageDirectory
+          && lockfileName.test(source.path.slice(source.path.lastIndexOf("/") + 1))).map((source) => source.path),
+      ])].sort((left, right) => left.localeCompare(right));
+      return { applicationId: application.applicationId, kind: application.kind, recipe: application.recipe,
+        sourceRefs: paths.flatMap((path) => { const source = sourceByPath.get(path); return source === undefined ? [] : [{ path, sha256: source.sha256 }]; }) };
+    });
     const targets = policy.targets.flatMap((configured) => {
       const found = discovered.inspection.proposedTargets.find((target) => target.targetId === configured.targetId
         && target.applicationId === configured.applicationId && target.kind === configured.kind && target.accountProfileId === configured.accountProfileId);
@@ -94,6 +112,13 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     if (targets.length === 0) return { status: "unknown", reason: "the pinned policy targets do not match any target discovered from the prepared source commit" };
 
     const selectedTargetIds = new Set(targets.map((target) => target.targetId));
+    const runtimeRefs = targets.flatMap((target) => {
+      const discoveredTarget = discovered.inspection.proposedTargets.find((item) => item.targetId === target.targetId);
+      const applicationRef = applicationRefs.find((item) => item.applicationId === target.applicationId);
+      return discoveredTarget === undefined || applicationRef === undefined ? [] : [{ targetId: target.targetId,
+        applicationId: target.applicationId, recipeDigest: applicationRef.recipe?.recipeDigest ?? null,
+        sourceRefs: applicationRef.sourceRefs, runtimeProfileId: discoveredTarget.runtimeProfileId, accountProfileId: target.accountProfileId }];
+    });
     const portableOperations = discovered.portableOperations.flatMap((operation) => {
       const requestedTargetIds = operation.targetIds.filter((targetId) => selectedTargetIds.has(targetId));
       if (requestedTargetIds.length === 0) return [];
@@ -159,7 +184,7 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       status: "available", source: { origin: sourceOrigin, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha,
         candidateDigest: snapshot.candidate.digest, preparedCommitStatus: preparedCommitSha === null ? "UNKNOWN" : "MATCHED", preparedCommitSha,
         currentCheckoutUnverified: identity.origin === "approved-setup" },
-      baselineScenarioIds: policy.baselineScenarioIds, targets, portableOperations, mockFixtures: mockFixtures.slice(0, 32), accountContextRefs,
+      baselineScenarioIds: policy.baselineScenarioIds, targets, applicationRefs, runtimeRefs, portableOperations, mockFixtures: mockFixtures.slice(0, 32), accountContextRefs,
     };
     if (Buffer.byteLength(canonicalJson(context), "utf8") > MAX_PLANNING_CONTEXT_BYTES) {
       return { status: "unknown", reason: "source-backed planning references exceed the bounded prompt context" };

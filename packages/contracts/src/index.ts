@@ -44,6 +44,7 @@ export * from "./eval-stats.js";
 export * from "./e2e.js";
 export * from "./e2e-runtime-capabilities.js";
 export * from "./e2e-runtime-registration.js";
+export * from "./e2e-application.js";
 export * from "./e2e-view.js";
 export * from "./e2e-catalog.js";
 export * from "./e2e-execution-plan.js";
