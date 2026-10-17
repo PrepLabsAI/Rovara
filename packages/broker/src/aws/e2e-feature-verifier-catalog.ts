@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   canonicalJson, Ec2RuntimeBindingSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema, type Ec2RuntimeBinding,
+  E2ERegisteredRuntimeSchema, type E2ERegisteredRuntime,
 } from "@agentx/contracts";
 import { z } from "zod";
 
@@ -31,6 +32,8 @@ export const E2EFeatureVerifierRecordSchema = z.object({
   if (Date.parse(record.qualifiedAt) >= Date.parse(record.expiresAt)) context.addIssue({ code: "custom", path: ["expiresAt"], message: "feature verifier expiry must follow qualification" });
 });
 export type E2EFeatureVerifierRecord = z.infer<typeof E2EFeatureVerifierRecordSchema>;
+export const E2EFeatureVerifierCatalogRecordSchema = z.union([E2EFeatureVerifierRecordSchema, E2ERegisteredRuntimeSchema]);
+export type E2EFeatureVerifierCatalogRecord = E2EFeatureVerifierRecord | E2ERegisteredRuntime;
 
 export function e2eFeatureVerifierKey(runtimeCatalogId: string, profileId: string): { pk: string; sk: string } {
   return { pk: `E2E_FEATURE_VERIFIER#${runtimeCatalogId}`, sk: `PROFILE#${profileId}` };
