@@ -12,7 +12,10 @@ import {
 
 const id = (max = 120) => z.string().trim().min(1).max(max);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
-const unique = <T extends z.ZodType>(item: T) => z.array(item).refine((values) => new Set(values).size === values.length, "capabilities must be unique");
+const unique = <T extends z.ZodType>(item: T, bounds: { min?: number; max?: number } = {}) => z.array(item)
+  .min(bounds.min ?? 0)
+  .max(bounds.max ?? Number.MAX_SAFE_INTEGER)
+  .refine((values) => new Set(values).size === values.length, "capabilities must be unique");
 
 const stepKinds = ["navigate", "fill", "click", "agent", "request", "invoke-contract", "inspect-contract", "launch-app", "tap", "swipe", "deep-link", "restart-app", "set-permission", "choose-file"] as const satisfies readonly E2EStep["kind"][];
 const assertionKinds = ["text", "visible", "csv", "http-status", "json", "state", "file"] as const satisfies readonly E2EAssertion["kind"][];
@@ -22,18 +25,18 @@ const common = {
   host: z.object({ os: z.enum(["linux", "darwin", "win32"]), arch: z.enum(["arm64", "x64"]) }).strict(),
   engine: z.object({ name: id(120), version: id(120), spiVersion: z.literal(1) }).strict(),
   runtimeManifestDigest: digest,
-  supportedSteps: unique(z.enum(stepKinds)),
-  supportedAssertions: unique(z.enum(assertionKinds)),
-  evidenceScopes: unique(E2EEvidenceScopeSchema),
+  supportedSteps: unique(z.enum(stepKinds), { max: 14 }),
+  supportedAssertions: unique(z.enum(assertionKinds), { max: 7 }),
+  evidenceScopes: unique(E2EEvidenceScopeSchema, { max: 4 }),
   networkPolicyDigest: digest,
 };
-const webDetails = { browsers: unique(z.enum(["chromium", "firefox", "webkit"])) };
-const apiDetails = { protocols: unique(z.literal("http")) };
+const webDetails = { browsers: unique(z.enum(["chromium", "firefox", "webkit"]), { min: 1, max: 3 }) };
+const apiDetails = { protocols: unique(z.literal("http"), { min: 1, max: 1 }) };
 const mobileDetails = {
-  os: z.enum(["android", "ios"]),
-  deviceKinds: unique(z.enum(["emulator", "simulator", "physical"])),
-  deviceProfileIds: unique(id(120)),
+  deviceProfileIds: unique(id(120), { max: 64 }),
 };
+const androidDeviceKinds = unique(z.enum(["emulator", "physical"]), { min: 1, max: 2 });
+const iosDeviceKinds = unique(z.enum(["simulator", "physical"]), { min: 1, max: 2 });
 const desktopDetails = {
   os: z.enum(["linux", "macos", "windows"]),
   driver: z.enum(["electron", "native"]),
@@ -41,11 +44,11 @@ const desktopDetails = {
 };
 
 export const E2ERuntimeCapabilityDescriptorSchema = z.discriminatedUnion("kind", [
-  z.object({ ...common, kind: z.literal("default-sandbox") }).strict(),
+  z.object({ ...common, kind: z.literal("default-sandbox"), evidenceScopes: unique(z.enum(["source", "mock-contract"]), { max: 4 }) }).strict(),
   z.object({ ...common, kind: z.literal("web"), ...webDetails }).strict(),
   z.object({ ...common, kind: z.literal("api"), ...apiDetails }).strict(),
-  z.object({ ...common, kind: z.literal("android"), ...mobileDetails, os: z.literal("android") }).strict(),
-  z.object({ ...common, kind: z.literal("ios"), ...mobileDetails, os: z.literal("ios") }).strict(),
+  z.object({ ...common, kind: z.literal("android"), ...mobileDetails, os: z.literal("android"), deviceKinds: androidDeviceKinds }).strict(),
+  z.object({ ...common, kind: z.literal("ios"), ...mobileDetails, os: z.literal("ios"), deviceKinds: iosDeviceKinds }).strict(),
   z.object({ ...common, kind: z.literal("electron"), ...desktopDetails, driver: z.literal("electron") }).strict(),
   z.object({ ...common, kind: z.literal("native-desktop"), ...desktopDetails, driver: z.literal("native") }).strict(),
 ]).superRefine((descriptor, context) => {
@@ -56,7 +59,7 @@ export const E2ERuntimeCapabilityDescriptorSchema = z.discriminatedUnion("kind",
 });
 export type E2ERuntimeCapabilityDescriptor = z.infer<typeof E2ERuntimeCapabilityDescriptorSchema>;
 
-const DefaultSandboxTargetSchema = z.object({ targetId: id(80), runtimeProfileId: id(120), kind: z.literal("default-sandbox") }).strict();
+const DefaultSandboxTargetSchema = z.object({ targetId: z.literal("default-sandbox"), runtimeProfileId: id(120), kind: z.literal("default-sandbox") }).strict();
 const TargetInputSchema = z.union([E2ETargetSchema, DefaultSandboxTargetSchema]);
 const readinessStatuses = ["READY", "MISSING", "EXPIRED", "UNQUALIFIED", "INCOMPATIBLE", "ACCESS_REQUIRED", "DISABLED"] as const;
 const suggestedActions = ["install", "renew", "connect", "approve"] as const;
@@ -95,6 +98,27 @@ const capabilityLabels = (steps: readonly string[], assertions: readonly string[
 
 function hostOsForTarget(os: "linux" | "macos" | "windows"): "linux" | "darwin" | "win32" {
   return os === "macos" ? "darwin" : os === "windows" ? "win32" : "linux";
+}
+
+function parseStrictUtcIsoTimestamp(value: string): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/.exec(value);
+  if (match === null) return null;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText, fraction = ""] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const millis = Number(fraction.slice(0, 3).padEnd(3, "0"));
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCHours(hour, minute, second, millis);
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day
+    || date.getUTCHours() !== hour || date.getUTCMinutes() !== minute || date.getUTCSeconds() !== second
+    || date.getUTCMilliseconds() !== millis) return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) && timestamp === date.getTime() ? timestamp : null;
 }
 
 function profileKindMatches(target: E2ERuntimeReadinessInput["target"], descriptor: E2ERuntimeCapabilityDescriptor): boolean {
@@ -137,19 +161,18 @@ function readiness(input: E2ERuntimeReadinessInput, status: E2ERuntimeReadiness[
 export function resolveE2ERuntimeReadiness(input: E2ERuntimeReadinessInput): E2ERuntimeReadiness {
   const target = TargetInputSchema.safeParse(input.target);
   if (!target.success) throw new TypeError("runtime readiness target is invalid");
-  if (!Number.isSafeInteger(input.now) || input.now < 0) return readiness(input, "EXPIRED", "INVALID_CLOCK");
   if (!input.activationEnabled) return readiness(input, "DISABLED", "ACTIVATION_DISABLED");
   if (input.capabilities === null) return readiness(input, "MISSING", "PROFILE_MISSING", input.installationEnabled ? "install" : null);
-  const parsedDescriptor = E2ERuntimeCapabilityDescriptorSchema.safeParse(input.capabilities);
-  if (!parsedDescriptor.success) return readiness({ ...input, capabilities: null }, "INCOMPATIBLE", "INVALID_DESCRIPTOR");
   if (input.connection !== "connected") return readiness(input, "ACCESS_REQUIRED", "CONNECTION_REQUIRED", "connect");
   if (input.approval !== "approved") return readiness(input, "ACCESS_REQUIRED", "APPROVAL_REQUIRED", "approve");
   if (input.qualification !== "qualified" || input.state !== "READY") return readiness(input, "UNQUALIFIED", input.qualification !== "qualified" ? "NOT_QUALIFIED" : "PROFILE_NOT_READY");
-  if (input.expiresAt !== null) {
-    const expiry = Date.parse(input.expiresAt);
-    if (!Number.isFinite(expiry) || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$/.test(input.expiresAt)) return readiness(input, "EXPIRED", "INVALID_EXPIRY");
-    if (input.now >= expiry) return readiness(input, "EXPIRED", "PROFILE_EXPIRED", "renew");
-  }
+  if (!Number.isSafeInteger(input.now) || input.now < 0) return readiness(input, "EXPIRED", "INVALID_CLOCK");
+  if (input.expiresAt === null) return readiness(input, "EXPIRED", "EXPIRY_REQUIRED");
+  const expiry = parseStrictUtcIsoTimestamp(input.expiresAt);
+  if (expiry === null) return readiness(input, "EXPIRED", "INVALID_EXPIRY");
+  if (input.now >= expiry) return readiness(input, "EXPIRED", "PROFILE_EXPIRED", "renew");
+  const parsedDescriptor = E2ERuntimeCapabilityDescriptorSchema.safeParse(input.capabilities);
+  if (!parsedDescriptor.success) return readiness({ ...input, capabilities: null }, "INCOMPATIBLE", "INVALID_DESCRIPTOR");
   const descriptor = parsedDescriptor.data;
   if (!targetCompatible(target.data, descriptor)) return readiness(input, "INCOMPATIBLE", "TARGET_PROFILE_MISMATCH");
   const required = capabilityLabels(input.requiredSteps, input.requiredAssertions, []);
