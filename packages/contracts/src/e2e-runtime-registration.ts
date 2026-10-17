@@ -7,6 +7,7 @@ import { Ec2RuntimeBindingSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSe
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
 const identifier = (max = 120) => z.string().trim().min(1).max(max);
 const uniqueIds = (max = 64) => z.array(identifier()).min(1).max(max).refine((items) => new Set(items).size === items.length, "probe identifiers must be unique");
+const sha256 = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 
 function parseStrictUtcIsoTimestamp(value: string): number | null {
   const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?Z$/.exec(value);
@@ -54,14 +55,15 @@ const probeManifestFields = {
 const E2ERuntimeProbeManifestContentSchema = z.object(probeManifestFields).strict()
   .refine((manifest) => manifest.positiveProbeIds.every((id) => !manifest.negativeProbeIds.includes(id)), "positive and negative probes must be distinct");
 export const E2ERuntimeProbeManifestSchema = z.object({ ...probeManifestFields, manifestDigest: digest }).strict().superRefine((manifest, context) => {
-  if (manifest.positiveProbeIds.some((id) => manifest.negativeProbeIds.includes(id))) {
+  if (Array.isArray(manifest.positiveProbeIds) && Array.isArray(manifest.negativeProbeIds)
+    && manifest.positiveProbeIds.some((id) => manifest.negativeProbeIds.includes(id))) {
     context.addIssue({ code: "custom", path: ["negativeProbeIds"], message: "positive and negative probes must be distinct" });
   }
   const { manifestDigest, ...content } = manifest;
   void manifestDigest;
   const parsed = E2ERuntimeProbeManifestContentSchema.safeParse(content);
   if (!parsed.success) return;
-  const expected = createHash("sha256").update(canonicalJson(parsed.data)).digest("hex");
+  const expected = sha256(parsed.data);
   if (manifest.manifestDigest !== expected) context.addIssue({ code: "custom", path: ["manifestDigest"], message: "probe manifest digest must identify its canonical content" });
 });
 export type E2ERuntimeProbeManifest = z.infer<typeof E2ERuntimeProbeManifestSchema>;
@@ -92,10 +94,7 @@ const runtimeRecordFields = {
   generation: z.number().int().positive(),
   binding: Ec2RuntimeBindingSchema,
   bindingDigest: digest,
-  endpoint: z.string().url().max(512).refine((value) => {
-    const parsed = new URL(value);
-    return parsed.username === "" && parsed.password === "";
-  }, "runtime endpoint must not include credentials"),
+  endpoint: z.string().url().max(512).refine(endpointHasNoCredentials, "runtime endpoint must not include credentials"),
   transportCorrelationId: z.string().uuid(),
   manifestDigest: digest,
   runnerEnvironment: ProjectSetupRunnerEnvironmentSchema,
@@ -110,33 +109,51 @@ const runtimeRecordFields = {
   probeManifest: E2ERuntimeProbeManifestSchema,
   qualificationEvidenceRef: E2EQualificationEvidenceRefSchema,
 };
+function endpointHasNoCredentials(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.username === "" && parsed.password === "";
+  } catch { return false; }
+}
+
 export const E2ERegisteredRuntimeSchema = z.object(runtimeRecordFields).strict().superRefine((record, context) => {
-  const checkDigest = (path: string, value: unknown, expected: string) => {
-    if (createHash("sha256").update(canonicalJson(value)).digest("hex") !== expected) {
+  const checkDigest = <T extends z.ZodType>(path: string, schema: T, value: unknown, expected: string) => {
+    const parsed = schema.safeParse(value);
+    if (parsed.success && sha256(parsed.data) !== expected) {
       context.addIssue({ code: "custom", path: [path], message: `${path} must identify its exact canonical value` });
     }
   };
-  checkDigest("bindingDigest", record.binding, record.bindingDigest);
-  checkDigest("runnerEnvironmentDigest", record.runnerEnvironment, record.runnerEnvironmentDigest);
-  checkDigest("runnerToolchainDigest", record.runnerToolchain, record.runnerToolchainDigest);
-  if (e2eRuntimeCapabilityDigest(record.capabilities) !== record.capabilityDigest) {
+  checkDigest("bindingDigest", Ec2RuntimeBindingSchema, record.binding, record.bindingDigest);
+  checkDigest("runnerEnvironmentDigest", ProjectSetupRunnerEnvironmentSchema, record.runnerEnvironment, record.runnerEnvironmentDigest);
+  checkDigest("runnerToolchainDigest", ProjectSetupRunnerToolchainSchema, record.runnerToolchain, record.runnerToolchainDigest);
+  const descriptor = E2ERuntimeCapabilityDescriptorSchema.safeParse(record.capabilities);
+  const probe = E2ERuntimeProbeManifestSchema.safeParse(record.probeManifest);
+  if (descriptor.success && sha256(descriptor.data) !== record.capabilityDigest) {
     context.addIssue({ code: "custom", path: ["capabilityDigest"], message: "capability digest must identify the exact descriptor" });
   }
-  if (record.capabilities.profileId !== record.profileId || record.probeManifest.profileId !== record.profileId) {
+  if (descriptor.success && probe.success && (descriptor.data.profileId !== record.profileId || probe.data.profileId !== record.profileId)) {
     context.addIssue({ code: "custom", path: ["profileId"], message: "runtime, capability, and probe profile identities must match" });
   }
-  if (record.probeManifest.capabilityDigest !== record.capabilityDigest) {
-    context.addIssue({ code: "custom", path: ["probeManifest", "capabilityDigest"], message: "probe manifest must identify the registered capabilities" });
-  }
-  if (record.probeManifest.runtimeManifestDigest !== record.capabilities.runtimeManifestDigest) {
-    context.addIssue({ code: "custom", path: ["probeManifest", "runtimeManifestDigest"], message: "probe and capability runtime manifests must match" });
-  }
-  if (record.manifestDigest !== record.probeManifest.manifestDigest) {
-    context.addIssue({ code: "custom", path: ["manifestDigest"], message: "record and probe manifest digests must match" });
-  }
-  if (record.capabilities.host.os !== record.runnerToolchain.platform || record.capabilities.host.arch !== record.runnerToolchain.arch
-    || record.runnerEnvironment.arch !== record.runnerToolchain.arch) {
-    context.addIssue({ code: "custom", path: ["runnerToolchain"], message: "capability host and runner toolchain identities must match" });
+  if (descriptor.success && probe.success) {
+    if (probe.data.capabilityDigest !== record.capabilityDigest) {
+      context.addIssue({ code: "custom", path: ["probeManifest", "capabilityDigest"], message: "probe manifest must identify the registered capabilities" });
+    }
+    if (probe.data.runtimeManifestDigest !== descriptor.data.runtimeManifestDigest
+      || record.manifestDigest !== descriptor.data.runtimeManifestDigest) {
+      context.addIssue({ code: "custom", path: ["manifestDigest"], message: "record, capability, and probe runtime manifest digests must match" });
+    }
+    const runnerEnvironment = ProjectSetupRunnerEnvironmentSchema.safeParse(record.runnerEnvironment);
+    const runnerToolchain = ProjectSetupRunnerToolchainSchema.safeParse(record.runnerToolchain);
+    if (runnerEnvironment.success && runnerToolchain.success) {
+      const { os, arch, runtime } = runnerEnvironment.data;
+      const toolchain = runnerToolchain.data;
+      const osMatches = os === toolchain.platform || (os.startsWith(`${toolchain.platform} `)
+        && os.slice(toolchain.platform.length + 1).trim().length > 0);
+      if (descriptor.data.host.os !== toolchain.platform || descriptor.data.host.arch !== toolchain.arch
+        || arch !== toolchain.arch || !osMatches || runtime !== `node ${toolchain.version}`) {
+        context.addIssue({ code: "custom", path: ["runnerEnvironment"], message: "runtime capability host and environment must identify the registered Node toolchain" });
+      }
+    }
   }
   const qualifiedAt = parseStrictUtcIsoTimestamp(record.qualifiedAt);
   const expiresAt = parseStrictUtcIsoTimestamp(record.expiresAt);

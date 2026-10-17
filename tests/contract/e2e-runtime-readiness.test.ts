@@ -24,7 +24,7 @@ const toolchain = { execPath: "/opt/node/bin/node", version: "v22.23.2", platfor
 const registration = {
   schemaVersion: 2, entityType: "E2E_FEATURE_VERIFIER", runtimeCatalogId: "runtime-catalog", catalogRevision: 3,
   profileId: "web-profile", generation: 4, binding, bindingDigest: sha(binding), endpoint: "http://10.0.0.8:8080",
-  transportCorrelationId: "11111111-1111-4111-8111-111111111111", manifestDigest: probe.manifestDigest,
+  transportCorrelationId: "11111111-1111-4111-8111-111111111111", manifestDigest: capabilities.runtimeManifestDigest,
   runnerEnvironment: environment, runnerEnvironmentDigest: sha(environment), runnerToolchain: toolchain, runnerToolchainDigest: sha(toolchain),
   capabilities, capabilityDigest: e2eRuntimeCapabilityDigest(capabilities), probeManifest: probe,
   qualificationEvidenceRef: { key: "runtime-evidence/qual-4.json", sha256: "e".repeat(64), byteLength: 128 },
@@ -50,6 +50,11 @@ describe("registered E2E runtime readiness", () => {
     expect(projectE2ERuntimeReadiness(input())).toMatchObject({ targetId: "web-app", profileId: "web-profile", status: "READY" });
     expect(projectE2ERuntimeReadiness(input({ ...key, ...registration, capabilityDigest: "f".repeat(64) }))).toMatchObject({ status: "INCOMPATIBLE" });
     expect(projectE2ERuntimeReadiness(input({ ...key, ...registration, pk: "E2E_FEATURE_VERIFIER#foreign" }))).toMatchObject({ status: "INCOMPATIBLE" });
+    expect(projectE2ERuntimeReadiness(input({ ...key, ...registration, pk: "E2E_FEATURE_VERIFIER#foreign" }, { activationEnabled: false }))).toMatchObject({ status: "DISABLED", supportedCapabilities: [] });
+    expect(projectE2ERuntimeReadiness(input({ ...key, ...registration, pk: "E2E_FEATURE_VERIFIER#foreign" }))).toMatchObject({ supportedCapabilities: [] });
+    const malformedCapabilities = { ...capabilities, supportedSteps: ["navigate", "navigate"] };
+    expect(() => projectE2ERuntimeReadiness(input({ ...key, ...registration, capabilities: malformedCapabilities }))).not.toThrow();
+    expect(projectE2ERuntimeReadiness(input({ ...key, ...registration, capabilities: malformedCapabilities }))).toMatchObject({ status: "INCOMPATIBLE", supportedCapabilities: [] });
   });
 
   it("preserves missing, expired, unqualified and access readiness states", () => {

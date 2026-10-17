@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import {
   canonicalJson,
   E2ERegisteredRuntimeSchema,
-  E2ERuntimeCapabilityDescriptorSchema,
   E2ERuntimeReadinessSchema,
   Ec2RuntimeBindingSchema,
   resolveE2ERuntimeReadiness,
@@ -87,29 +86,30 @@ const capabilityLabels = (steps: readonly string[], assertions: readonly string[
 ].sort();
 
 function forcedReadiness(input: RuntimeReadinessInput, status: E2ERuntimeReadiness["status"], reasonCode: string): E2ERuntimeReadiness {
-  const descriptor = E2ERuntimeCapabilityDescriptorSchema.safeParse(
-    input.record !== null && typeof input.record === "object" && !Array.isArray(input.record)
-      ? (input.record as Record<string, unknown>).capabilities : undefined,
-  );
   return E2ERuntimeReadinessSchema.parse({
     targetId: input.target.targetId,
     profileId: input.target.runtimeProfileId,
     status,
     reasonCode,
     requiredCapabilities: capabilityLabels(input.requiredSteps, input.requiredAssertions, [input.minimumEvidence]),
-    supportedCapabilities: descriptor.success
-      ? capabilityLabels(descriptor.data.supportedSteps, descriptor.data.supportedAssertions, descriptor.data.evidenceScopes)
-      : [],
+    supportedCapabilities: [],
     suggestedAction: null,
   });
 }
 
 /** Projects the exact stored catalog fact through Task 1 capability/access readiness. */
 export function projectE2ERuntimeReadiness(input: RuntimeReadinessInput): E2ERuntimeReadiness {
+  if (!input.activationEnabled) {
+    return resolveE2ERuntimeReadiness({
+      target: input.target, requiredSteps: input.requiredSteps, requiredAssertions: input.requiredAssertions, minimumEvidence: input.minimumEvidence,
+      installationEnabled: input.installationEnabled, activationEnabled: false, connection: input.connection, approval: input.approval,
+      qualification: "unqualified", state: "UNAVAILABLE", expiresAt: null, now: input.expected.now, capabilities: null,
+    });
+  }
   if (input.record === undefined || input.record === null) {
     return resolveE2ERuntimeReadiness({
       target: input.target, requiredSteps: input.requiredSteps, requiredAssertions: input.requiredAssertions, minimumEvidence: input.minimumEvidence,
-      installationEnabled: input.installationEnabled, activationEnabled: input.activationEnabled, connection: input.connection, approval: input.approval,
+      installationEnabled: input.installationEnabled, activationEnabled: true, connection: input.connection, approval: input.approval,
       qualification: "unqualified", state: "UNAVAILABLE", expiresAt: null, now: input.expected.now, capabilities: null,
     });
   }
@@ -118,20 +118,20 @@ export function projectE2ERuntimeReadiness(input: RuntimeReadinessInput): E2ERun
   if (runtime.state !== "READY") {
     return resolveE2ERuntimeReadiness({
       target: input.target, requiredSteps: input.requiredSteps, requiredAssertions: input.requiredAssertions, minimumEvidence: input.minimumEvidence,
-      installationEnabled: input.installationEnabled, activationEnabled: input.activationEnabled, connection: input.connection, approval: input.approval,
+      installationEnabled: input.installationEnabled, activationEnabled: true, connection: input.connection, approval: input.approval,
       qualification: "qualified", state: runtime.state, expiresAt: runtime.expiresAt, now: input.expected.now, capabilities: runtime.capabilities,
     });
   }
   if (Date.parse(runtime.qualifiedAt) > input.expected.now) {
     return resolveE2ERuntimeReadiness({
       target: input.target, requiredSteps: input.requiredSteps, requiredAssertions: input.requiredAssertions, minimumEvidence: input.minimumEvidence,
-      installationEnabled: input.installationEnabled, activationEnabled: input.activationEnabled, connection: input.connection, approval: input.approval,
+      installationEnabled: input.installationEnabled, activationEnabled: true, connection: input.connection, approval: input.approval,
       qualification: "unqualified", state: "READY", expiresAt: runtime.expiresAt, now: input.expected.now, capabilities: runtime.capabilities,
     });
   }
   return resolveE2ERuntimeReadiness({
     target: input.target, requiredSteps: input.requiredSteps, requiredAssertions: input.requiredAssertions, minimumEvidence: input.minimumEvidence,
-    installationEnabled: input.installationEnabled, activationEnabled: input.activationEnabled, connection: input.connection, approval: input.approval,
+    installationEnabled: input.installationEnabled, activationEnabled: true, connection: input.connection, approval: input.approval,
     qualification: "qualified", state: runtime.state, expiresAt: runtime.expiresAt, now: input.expected.now, capabilities: runtime.capabilities,
   });
 }

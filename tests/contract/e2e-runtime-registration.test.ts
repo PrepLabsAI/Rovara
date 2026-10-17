@@ -45,7 +45,7 @@ const registration = {
   schemaVersion: 2 as const, entityType: "E2E_FEATURE_VERIFIER" as const,
   runtimeCatalogId: "runtime-catalog", catalogRevision: 3, profileId: capabilities.profileId,
   generation: 4, binding, bindingDigest: digest(binding), endpoint: "http://10.0.0.8:8080",
-  transportCorrelationId: "11111111-1111-4111-8111-111111111111", manifestDigest: probe.manifestDigest,
+  transportCorrelationId: "11111111-1111-4111-8111-111111111111", manifestDigest: capabilities.runtimeManifestDigest,
   runnerEnvironment, runnerEnvironmentDigest: digest(runnerEnvironment), runnerToolchain, runnerToolchainDigest: digest(runnerToolchain),
   capabilities, capabilityDigest: e2eRuntimeCapabilityDigest(capabilities), probeManifest: probe,
   qualificationEvidenceRef: { key: "runtime-evidence/qual-4.json", sha256: "e".repeat(64), byteLength: 128 },
@@ -76,6 +76,9 @@ describe("authenticated E2E runtime catalog projection", () => {
 
   it("cross-checks registration identities and admits only a ready current catalog row", () => {
     const parsed = E2ERegisteredRuntimeSchema.parse(registration);
+    expect(parsed.manifestDigest).toBe(parsed.capabilities.runtimeManifestDigest);
+    expect(parsed.manifestDigest).toBe(parsed.probeManifest.runtimeManifestDigest);
+    expect(parsed.manifestDigest).not.toBe(parsed.probeManifest.manifestDigest);
     const key = e2eRegisteredRuntimeKey(parsed.runtimeCatalogId, parsed.profileId);
     expect(key).toEqual({ pk: "E2E_FEATURE_VERIFIER#runtime-catalog", sk: "PROFILE#web-profile" });
     const row = { ...key, ...parsed };
@@ -86,10 +89,9 @@ describe("authenticated E2E runtime catalog projection", () => {
     expect(admitE2ERegisteredRuntime({ ...row, profileId: "other" }, expected)).toBeUndefined();
     expect(admitE2ERegisteredRuntime({ ...row, binding: { ...binding, volumeSizeGiB: 64 } }, expected)).toBeUndefined();
     expect(admitE2ERegisteredRuntime({ ...row, capabilityDigest: "f".repeat(64) }, expected)).toBeUndefined();
-    expect(admitE2ERegisteredRuntime({ ...row, probeManifest: probeManifest({ suiteDigest: "f".repeat(64) }) }, expected)).toBeUndefined();
+    expect(() => assertE2ERuntimeProbeManifestIdentity(probeManifest({ suiteDigest: "f".repeat(64) }), probe)).toThrow();
     const changedDriverManifest = probeManifest({ runtimeManifestDigest: "f".repeat(64) });
-    expect(E2ERegisteredRuntimeSchema.safeParse({ ...registration, manifestDigest: changedDriverManifest.manifestDigest,
-      probeManifest: changedDriverManifest }).success).toBe(false);
+    expect(E2ERegisteredRuntimeSchema.safeParse({ ...registration, probeManifest: changedDriverManifest }).success).toBe(false);
     expect(admitE2ERegisteredRuntime({ ...row, qualifiedAt: "2026-10-13T12:31:00.000Z" }, expected)).toBeUndefined();
     expect(E2EFeatureVerifierCatalogRecordSchema.safeParse(parsed).success).toBe(true);
     expect(E2EFeatureVerifierCatalogRecordSchema.safeParse(E2EFeatureVerifierRecordSchema.parse({
@@ -112,5 +114,35 @@ describe("authenticated E2E runtime catalog projection", () => {
     expect(E2ERegisteredRuntimeSchema.safeParse({ ...registration, capabilities: { ...capabilities, profileId: "other" } }).success).toBe(false);
     expect(E2ERegisteredRuntimeSchema.safeParse({ ...registration, runnerToolchain: { ...runnerToolchain, arch: "arm64" } }).success).toBe(false);
     expect(E2ERegisteredRuntimeSchema.safeParse({ ...registration, endpoint: "http://user:pass@10.0.0.8:8080" }).success).toBe(false);
+  });
+
+  it("returns validation failures instead of throwing for malformed nested schemas and URLs", () => {
+    const malformedCapabilities = { ...capabilities, supportedSteps: ["navigate", "navigate"] };
+    expect(() => E2ERegisteredRuntimeSchema.safeParse({ ...registration, capabilities: malformedCapabilities })).not.toThrow();
+    expect(E2ERegisteredRuntimeSchema.safeParse({ ...registration, capabilities: malformedCapabilities }).success).toBe(false);
+    expect(() => E2ERegisteredRuntimeSchema.safeParse({ ...registration, endpoint: "not-a-url" })).not.toThrow();
+    expect(E2ERegisteredRuntimeSchema.safeParse({ ...registration, endpoint: "not-a-url" }).success).toBe(false);
+
+    const row = { ...e2eRegisteredRuntimeKey(registration.runtimeCatalogId, registration.profileId), ...registration, capabilities: malformedCapabilities };
+    expect(() => admitE2ERegisteredRuntime(row, expected)).not.toThrow();
+    expect(admitE2ERegisteredRuntime(row, expected)).toBeUndefined();
+  });
+
+  it("binds runner OS, architecture and Node runtime to the registered toolchain", () => {
+    const mismatchedOs = { ...runnerEnvironment, os: "win32 Windows Server 2022" };
+    expect(E2ERegisteredRuntimeSchema.safeParse({ ...registration, runnerEnvironment: mismatchedOs,
+      runnerEnvironmentDigest: digest(mismatchedOs) }).success).toBe(false);
+    const mismatchedRuntime = { ...runnerEnvironment, runtime: "node v1.0.0" };
+    expect(E2ERegisteredRuntimeSchema.safeParse({ ...registration, runnerEnvironment: mismatchedRuntime,
+      runnerEnvironmentDigest: digest(mismatchedRuntime) }).success).toBe(false);
+    const windowsCapabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ ...capabilities, host: { os: "win32", arch: "x64" } });
+    const windowsProbe = probeManifest({ capabilityDigest: e2eRuntimeCapabilityDigest(windowsCapabilities) });
+    const windowsEnvironment = { ...runnerEnvironment, os: "win32 Windows Server 2022" };
+    const windowsToolchain = { ...runnerToolchain, platform: "win32" };
+    expect(E2ERegisteredRuntimeSchema.safeParse({ ...registration,
+      runnerEnvironment: windowsEnvironment, runnerEnvironmentDigest: digest(windowsEnvironment),
+      runnerToolchain: windowsToolchain, runnerToolchainDigest: digest(windowsToolchain),
+      capabilities: windowsCapabilities, capabilityDigest: e2eRuntimeCapabilityDigest(windowsCapabilities), probeManifest: windowsProbe,
+    }).success).toBe(true);
   });
 });
