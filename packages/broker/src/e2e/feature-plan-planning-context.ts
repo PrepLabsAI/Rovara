@@ -2,6 +2,7 @@ import {
   E2EApiMockFixtureSchema, canonicalJson, createE2EOpenApiFixtureDescriptor, inspectE2EPortableSource, inspectE2ERepository, redactSecrets,
   verifyE2ESourceSnapshot, type E2EAppRecipe, type E2EPolicy, type E2ESourceSnapshot,
 } from "@agentx/contracts";
+import { e2eApplicationMetadataSourceRefs } from "./application-plan-binding.js";
 import * as ts from "typescript";
 
 const MAX_PLANNING_CONTEXT_BYTES = 12_000;
@@ -88,21 +89,9 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     }
     const discovered = inspectE2ERepository(snapshot, snapshot.candidate);
     const sourceByPath = new Map(snapshot.sources.map((source) => [source.path, source]));
-    const inspectionSourceByPath = new Map(discovered.inspection.sources.map((source) => [source.path, source]));
     const applicationRefs = discovered.inspection.applications.map((application) => {
-      const packagePath = application.sourcePaths.find((path) => /(^|\/)package\.json$/i.test(path));
-      const packageDirectory = packagePath === undefined ? undefined : packagePath.includes("/") ? packagePath.slice(0, packagePath.lastIndexOf("/")) : ".";
-      const lockfileName = /^(?:package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lock(?:b)?)$/i;
-      const identityPath = /(?:^|\/)(?:AndroidManifest\.xml|Info\.plist|[^/]+\.xcodeproj\/project\.pbxproj|[^/]+\.csproj|[^/]+\.sln|CMakeLists\.txt|meson\.build)$/i;
-      const paths = [...new Set([
-        ...(packagePath === undefined ? [] : [packagePath]),
-        ...application.sourcePaths.filter((path) => identityPath.test(path)),
-        ...snapshot.sources.filter((source) => packageDirectory !== undefined
-          && (source.path.includes("/") ? source.path.slice(0, source.path.lastIndexOf("/")) : ".") === packageDirectory
-          && lockfileName.test(source.path.slice(source.path.lastIndexOf("/") + 1))).map((source) => source.path),
-      ])].sort((left, right) => left.localeCompare(right));
       return { applicationId: application.applicationId, kind: application.kind, recipe: application.recipe,
-        sourceRefs: paths.flatMap((path) => { const source = sourceByPath.get(path); return source === undefined ? [] : [{ path, sha256: source.sha256 }]; }) };
+        sourceRefs: e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths) };
     });
     const targets = policy.targets.flatMap((configured) => {
       const found = discovered.inspection.proposedTargets.find((target) => target.targetId === configured.targetId
@@ -174,11 +163,10 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     }
     const applications = new Set(targets.map((target) => target.applicationId));
     const accountContextRefs = targets.flatMap((target) => {
-      const application = discovered.inspection.applications.find((item) => item.applicationId === target.applicationId);
-      const manifestPath = application?.sourcePaths.find((path) => /(^|\/)package\.json$/i.test(path));
-      const source = manifestPath === undefined ? undefined : inspectionSourceByPath.get(manifestPath);
-      return source === undefined || !applications.has(target.applicationId) ? [] : [{ applicationId: target.applicationId,
-        profileId: target.accountProfileId, sourcePath: source.path, sourceSha256: source.sha256 }];
+      const applicationRef = applicationRefs.find((item) => item.applicationId === target.applicationId);
+      const sourceRef = applicationRef?.sourceRefs[0];
+      return sourceRef === undefined || !applications.has(target.applicationId) ? [] : [{ applicationId: target.applicationId,
+        profileId: target.accountProfileId, sourcePath: sourceRef.path, sourceSha256: sourceRef.sha256 }];
     }).filter((item, index, values) => values.findIndex((candidate) => candidate.applicationId === item.applicationId && candidate.profileId === item.profileId) === index).slice(0, 32);
     const context: FeatureE2EPlanningContext = {
       status: "available", source: { origin: sourceOrigin, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha,

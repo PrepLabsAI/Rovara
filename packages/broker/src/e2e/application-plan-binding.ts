@@ -27,16 +27,20 @@ function appMetadataPaths(appSourcePaths: readonly string[], sourcePaths: readon
   if (packagePath === undefined && identityPaths.length === 0) throw new Error(`application ${applicationId} has no source-owned package or native project identity metadata`);
   const appDirectory = packagePath === undefined ? undefined : packagePath.includes("/") ? packagePath.slice(0, packagePath.lastIndexOf("/")) : ".";
   const nativeRoots = identityPaths.map((path) => {
-    const platformRoot = /(^|\/)(android|ios)\//i.exec(path);
-    if (platformRoot) return path.slice(0, platformRoot.index + platformRoot[0].length - 1);
+    const androidProject = /^(.*?)(?:\/src\/main\/)AndroidManifest\.xml$/i.exec(path);
+    if (androidProject) return androidProject[1] || ".";
     const projectMatch = /^(.*?)(?:\/[^/]+\.xcodeproj)\/project\.pbxproj$/i.exec(path);
     if (projectMatch) return projectMatch[1] || ".";
     return path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".";
   });
   const withinRoot = (path: string, root: string) => root === "." || path === root || path.startsWith(root + "/");
-  const relatedSourcePaths = sourcePaths.filter((path) => appDirectory !== undefined
-    ? withinRoot(path, appDirectory)
-    : nativeRoots.some((root) => withinRoot(path, root)));
+  const relatedSourcePaths = sourcePaths.filter((path) => {
+    const directory = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : ".";
+    const lockOrBuildMetadataApplies = (root: string) => directory === root
+      || (root !== "." && (directory === "." || root.startsWith(`${directory}/`)));
+    return (appDirectory !== undefined && lockOrBuildMetadataApplies(appDirectory))
+      || nativeRoots.some((root) => lockOrBuildMetadataApplies(root) || withinRoot(path, root));
+  });
   const authorityPaths = relatedSourcePaths.filter((path) => dependencyLockfileName.test(path.slice(path.lastIndexOf("/") + 1))
     || buildMetadataName.test(path) || applicationIdentityName.test(path));
   const paths = [...new Set([...(packagePath === undefined ? [] : [packagePath]), ...identityPaths, ...authorityPaths])].sort((left, right) => left.localeCompare(right));
@@ -44,7 +48,7 @@ function appMetadataPaths(appSourcePaths: readonly string[], sourcePaths: readon
   return paths;
 }
 
-function appMetadataRefs(snapshot: E2ESourceSnapshot, applicationId: string, appSourcePaths: readonly string[]): SourceRef[] {
+export function e2eApplicationMetadataSourceRefs(snapshot: E2ESourceSnapshot, applicationId: string, appSourcePaths: readonly string[]): SourceRef[] {
   const paths = appMetadataPaths(appSourcePaths, snapshot.sources.map((source) => source.path), applicationId);
   const packagePath = paths.find((path) => /(^|\/)package\.json$/i.test(path));
   if (packagePath !== undefined) {
@@ -113,7 +117,7 @@ export function deriveE2EApplicationApprovalBinding(input: {
     const recipe = parsedRecipe(sourceApplication.recipe, applicationId);
     const priorRecipe = parsedRecipe(priorApplication.recipe, applicationId);
     if (canonicalJson(recipe) !== canonicalJson(priorRecipe)) throw new Error(`application ${applicationId} recipe metadata changed since setup approval; replan is required`);
-    const selectedRefs = appMetadataRefs(input.preparedSnapshot, applicationId, sourceApplication.sourcePaths);
+    const selectedRefs = e2eApplicationMetadataSourceRefs(input.preparedSnapshot, applicationId, sourceApplication.sourcePaths);
     const previousPaths = appMetadataPaths(priorApplication.sourcePaths, setupProposal.sources.map((ref) => ref.path), applicationId);
     if (canonicalJson(previousPaths) !== canonicalJson(selectedRefs.map((ref) => ref.path))) throw new Error(`application ${applicationId} identity or lockfile source set changed since setup approval`);
     const priorRefs = new Map(setupProposal.sources.map((ref) => [ref.path, ref.sha256]));
@@ -131,6 +135,9 @@ export function deriveE2EApplicationApprovalBinding(input: {
       || sourceTarget.applicationId !== ref.applicationId || priorTarget.applicationId !== ref.applicationId
       || canonicalJson(sourceTarget) !== canonicalJson(priorTarget)) {
       throw new Error(`application runtime target ${ref.targetId} differs from the source-derived and setup-approved target identity`);
+    }
+    if (ref.accountProfileId !== sourceTarget.accountProfileId) {
+      throw new Error(`application runtime target ${ref.targetId} account profile differs from its source-derived and setup-approved assignment`);
     }
     if (!intent.scenarios.some((scenario) => scenario.requestedTargetIds.includes(ref.targetId)
       && scenario.accountProfileId === ref.accountProfileId
@@ -163,6 +170,13 @@ export function deriveE2EApplicationApprovalBinding(input: {
     for (const targetId of scenario.requestedTargetIds) {
       const target = targetById.get(targetId);
       if (!target || !setupTargets.has(targetId)) throw new Error(`scenario target ${targetId} is not source-discovered and setup-approved`);
+      const runtimeRef = runtimeRefs.find((ref) => ref.targetId === targetId);
+      const approvedAccount = intent.runtimeAccountRefs.some((account) => account.applicationId === target.applicationId
+        && account.profileId === scenario.accountProfileId);
+      if (!runtimeRef || runtimeRef.applicationId !== target.applicationId || runtimeRef.accountProfileId !== scenario.accountProfileId
+        || scenario.accountProfileId !== target.accountProfileId || !approvedAccount) {
+        throw new Error(`scenario account profile for target ${targetId} differs from its source-derived and approved account assignment`);
+      }
       if (target.kind === "web" || target.kind === "api" || target.kind === "mobile" || target.kind === "desktop") {
         if (intent.applicationRuntimeRefs.some((ref) => ref.targetId === targetId) && !scenario.steps.some((step) => step.kind !== "invoke-contract" && step.kind !== "inspect-contract")) {
           throw new Error(`real application target ${targetId} cannot be represented only by a portable operation reference`);
@@ -209,7 +223,7 @@ export function validateE2EAppBuildBinding(input: {
   if (canonicalJson(currentRecipe) !== canonicalJson(approvedApplication.recipe) || manifest.recipeDigest !== approvedApplication.recipe.recipeDigest) {
     throw new Error(`application ${manifest.applicationId} recipe changed after approval; replan is required`);
   }
-  const currentRefs = appMetadataRefs(input.finalSnapshot, manifest.applicationId, currentApplication.sourcePaths);
+  const currentRefs = e2eApplicationMetadataSourceRefs(input.finalSnapshot, manifest.applicationId, currentApplication.sourcePaths);
   if (!sameRefs(currentRefs, approvedApplication.sourceRefs)) throw new Error(`application ${manifest.applicationId} source-owned identity or lockfile metadata changed after approval`);
   for (const ref of approvedApplication.sourceRefs) {
     const currentSource = input.finalSnapshot.sources.find((source) => source.path === ref.path && source.kind === "blob");

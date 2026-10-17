@@ -9,6 +9,7 @@ import {
 } from "@agentx/contracts";
 import {
   deriveE2EApplicationApprovalBinding, validateE2EAppBuildBinding,
+  e2eApplicationMetadataSourceRefs,
 } from "../../packages/broker/src/e2e/application-plan-binding.js";
 import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
 
@@ -23,6 +24,8 @@ function snapshot(commit: string, tree: string, implementation = implementationB
     { path: "package.json", bytes: packageBytes },
     { path: "pnpm-lock.yaml", bytes: lockfileBytes },
     { path: "src/index.mjs", bytes: implementation },
+    { path: "fixtures/unrelated/pnpm-lock.yaml", bytes: Buffer.from("lockfileVersion: 9\n# unrelated fixture\n") },
+    { path: "fixtures/unrelated/native/Podfile", bytes: Buffer.from("platform :ios, '17.0'\n") },
   ];
   return {
     candidate, commitSha: commit, treeSha: tree, treeComplete: true,
@@ -61,8 +64,8 @@ function setupFor(source: E2ESourceSnapshot) {
   return proposeE2ESetup({ inspection, snapshot: source, expectedCandidate: source.candidate });
 }
 
-function approval(source: E2ESourceSnapshot, setup = setupFor(source)) {
-  return deriveE2EApplicationApprovalBinding({ preparedSnapshot: source, intent: planIntent(source), artifactId: "feature-plan",
+function approval(source: E2ESourceSnapshot, setup = setupFor(source), intent = planIntent(source)) {
+  return deriveE2EApplicationApprovalBinding({ preparedSnapshot: source, intent, artifactId: "feature-plan",
     artifactSha256: "b".repeat(64), planDigest: "c".repeat(64), setupProposal: setup,
     setupApproval: { artifactId: "setup-proposal", digest: sha(canonicalJson(setup)) } });
 }
@@ -151,9 +154,61 @@ describe("source-bound application approval and build identity", () => {
     const foreignApplication = { ...intent, applicationRuntimeRefs: [{ ...intent.applicationRuntimeRefs[0]!, applicationId: "foreign-app" }] };
     const foreignAccount = { ...intent, runtimeAccountRefs: [{ ...intent.runtimeAccountRefs[0]!, profileId: "foreign-account" }] };
     const foreignScenario = { ...intent, scenarios: [{ ...scenario, accountProfileId: "other-account" }] };
+    const additionalUnapprovedScenario = { ...intent, scenarios: [scenario, { ...scenario, scenarioId: "admin-orders", accountProfileId: "unapproved-admin" }] };
     expect(E2EApplicationPlanIntentSchema.safeParse(foreignApplication).success).toBe(false);
     expect(E2EApplicationPlanIntentSchema.safeParse(foreignAccount).success).toBe(false);
     expect(E2EApplicationPlanIntentSchema.safeParse(foreignScenario).success).toBe(false);
+    expect(E2EApplicationPlanIntentSchema.safeParse(additionalUnapprovedScenario).success).toBe(false);
+
+    const unauthorizedPlan = {
+      ...intent,
+      accountContextRefs: [...intent.accountContextRefs, { ...intent.accountContextRefs[0]!, profileId: "unapproved-admin" }],
+      scenarios: [scenario, { ...scenario, scenarioId: "admin-orders", accountProfileId: "unapproved-admin" }],
+      applicationRuntimeRefs: [{ ...intent.applicationRuntimeRefs[0]!, accountProfileId: "unapproved-admin" }],
+      runtimeAccountRefs: [{ ...intent.runtimeAccountRefs[0]!, profileId: "unapproved-admin" }],
+    };
+    const source = snapshot("8".repeat(40), "a".repeat(40));
+    const setup = setupFor(source);
+    expect(() => deriveE2EApplicationApprovalBinding({ preparedSnapshot: source, intent: unauthorizedPlan,
+      artifactId: "feature-plan", artifactSha256: "b".repeat(64), planDigest: "c".repeat(64), setupProposal: setup,
+      setupApproval: { artifactId: "setup-proposal", digest: sha(canonicalJson(setup)) } })).toThrow(/account|profile|source-derived/i);
+  });
+
+  it("keeps planning-context and binding metadata selection aligned across unrelated descendant files", () => {
+    const prepared = snapshot("a".repeat(40), "b".repeat(40));
+    const context = buildFeatureE2EPlanningContext(policy, prepared);
+    expect(context.status).toBe("available");
+    if (context.status !== "available") return;
+    const application = context.applicationRefs?.find((item) => item.applicationId === "ordinary-orders");
+    expect(application?.sourceRefs.map((ref) => ref.path)).toEqual(["package.json", "pnpm-lock.yaml"]);
+    const preparedIntent = planIntent(prepared);
+    preparedIntent.scenarios = [scenario, { ...scenario, scenarioId: "orders-refresh" }];
+    expect(E2EApplicationPlanIntentSchema.safeParse(preparedIntent).success).toBe(true);
+    const binding = approval(prepared, setupFor(prepared), preparedIntent);
+    expect(binding.applications[0]?.sourceRefs).toEqual(application?.sourceRefs);
+    const final = snapshot("c".repeat(40), "d".repeat(40));
+    const finalIntent = planIntent(final);
+    finalIntent.scenarios = [scenario, { ...scenario, scenarioId: "orders-refresh" }];
+    const finalBinding = approval(final, setupFor(final), finalIntent);
+    const manifest = buildManifest(final, finalBinding);
+    expect(validateE2EAppBuildBinding({ finalSnapshot: final, binding: finalBinding, manifest, artifacts: artifactRefs(manifest) }))
+      .toMatchObject({ candidateDigest: final.candidate.digest, applicationId: "ordinary-orders" });
+  });
+
+  it("selects native project identity and owned build metadata without requiring package.json", () => {
+    const source = snapshot("d".repeat(40), "e".repeat(40));
+    const nativeFiles = [
+      { path: "android/app/src/main/AndroidManifest.xml", bytes: Buffer.from('<manifest package="com.example.orders"/>\n') },
+      { path: "android/app/build.gradle", bytes: Buffer.from("plugins { id 'com.android.application' }\n") },
+      { path: "android/app/gradle.lockfile", bytes: Buffer.from("com.android.tools.build:gradle:8.0=8.0\n") },
+      { path: "android/build.gradle", bytes: Buffer.from("plugins { id 'com.android.application' apply false }\n") },
+    ].map((item) => ({ ...item, sha256: sha(item.bytes), kind: "blob" as const }));
+    const refs = e2eApplicationMetadataSourceRefs({ ...source, sources: [...source.sources, ...nativeFiles] },
+      "native-orders", ["android/app/src/main/AndroidManifest.xml"]);
+    expect(refs.map((ref) => ref.path)).toEqual([
+      "android/app/build.gradle", "android/app/gradle.lockfile", "android/app/src/main/AndroidManifest.xml", "android/build.gradle", "pnpm-lock.yaml",
+    ]);
+    expect(refs.some((ref) => ref.path === "fixtures/unrelated/native/Podfile")).toBe(false);
   });
 
   it("rejects an ambiguous source recipe instead of choosing start or dev", () => {

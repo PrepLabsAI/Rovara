@@ -72,6 +72,14 @@ export const E2EApplicationPlanIntentSchema = z.object({
     if (scenario.requestedTargetIds.length === 0 || scenario.requestedTargetIds.some((targetId) => !requested.has(targetId))) {
       context.addIssue({ code: "custom", path: ["scenarios"], message: "every scenario must bind at least one requested target" });
     }
+    for (const targetId of scenario.requestedTargetIds) {
+      const assignment = refsByTarget.get(targetId);
+      if (!assignment || assignment.accountProfileId !== scenario.accountProfileId
+        || !intent.accountContextRefs.some((account) => account.applicationId === assignment.applicationId && account.profileId === scenario.accountProfileId)
+        || !intent.runtimeAccountRefs.some((account) => account.applicationId === assignment.applicationId && account.profileId === scenario.accountProfileId)) {
+        context.addIssue({ code: "custom", path: ["scenarios"], message: `scenario account profile is not approved for target ${targetId}` });
+      }
+    }
   }
   const contextAccountKeys = intent.accountContextRefs.map((ref) => `${ref.applicationId}\0${ref.profileId}`);
   if (new Set(contextAccountKeys).size !== contextAccountKeys.length) context.addIssue({ code: "custom", path: ["accountContextRefs"], message: "account context references must be unique by application and profile" });
