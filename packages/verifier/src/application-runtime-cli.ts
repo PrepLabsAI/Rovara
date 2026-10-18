@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
 import type { Stats } from "node:fs";
 import { lstat, mkdir, open, readFile, realpath, symlink } from "node:fs/promises";
@@ -7,14 +7,16 @@ import { spawn } from "node:child_process";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { E2ERoundSchema, E2ERunBindingSchema, E2EApplicationCliHostDescriptorSchema, E2EApplicationEvidenceRefSchema,
+  E2ETargetSchema,
   ProjectSetupRunnerToolchainSchema, canonicalJson, copyBoundedE2EJsonData,
   type E2ERound, type E2ERunBinding, type ProjectSetupRunnerToolchain } from "@agentx/contracts";
 import { compareE2EApplicationPublicList, type E2EApplicationSelectionPacket } from "./application-identity.js";
 import { validateE2ECompiledApplicationAdmission, type E2ECompiledApplicationSuite } from "./application-scenarios.js";
 import { createE2EApplicationRuntimeAssets } from "./application-runtime-assets.js";
+import type { E2EApplicationCliLaunchContext } from "./application-runtime-bootstrap.js";
 import type { E2EActualApplicationRun, E2EActualApplicationShard } from "./application-collection.js";
 import { E2EApplicationSupervisorReadbackSchema, e2eApplicationPrivateTransferMaxBytes,
-  validateE2EApplicationSupervisorReadbackStructure } from "./application-result-adapter.js";
+  e2eApplicationSupervisorEvidenceEntryMax, normalizeE2EApplicationPublicList, validateE2EApplicationSupervisorReadbackStructure } from "./application-result-adapter.js";
 import type { E2EApplicationSupervisorReadback } from "./application-result-adapter.js";
 import { z } from "zod";
 
@@ -47,7 +49,7 @@ async function canonicalInstalledFile(path: string, root: string): Promise<Buffe
 
 export type E2EApplicationSupervisorReadbackExpected = Readonly<{ transportId: string; transportCorrelationId: string;
   bindingDigest: string; compiledInventoryDigest: string; preparedEnvironmentDigest: string;
-  launches: readonly Readonly<{ shardId: string; launchId: string; upstreamRunId: string }>[]; maxWireBytes: number }>;
+  launches: readonly Readonly<{ shardId: string; launchId: string; upstreamRunId: string }>[]; caseCount: number; maxWireBytes: number }>;
 export type E2EApplicationSupervisorReadbackClient = Readonly<{ read(expected: E2EApplicationSupervisorReadbackExpected,
   signal: AbortSignal): Promise<E2EApplicationSupervisorReadback> }>;
 type CliDescriptor = { entryPointId: string; entryPointManifestDigest: string };
@@ -56,7 +58,7 @@ const assignmentLaunchSchema = z.object({ shardId: z.string().min(1).max(120), l
 const expectedReadbackSchema = z.object({ transportId: z.string().min(1).max(256), transportCorrelationId: z.string().uuid(),
   bindingDigest: z.string().regex(/^[a-f0-9]{64}$/), compiledInventoryDigest: z.string().regex(/^[a-f0-9]{64}$/),
   preparedEnvironmentDigest: z.string().regex(/^[a-f0-9]{64}$/), launches: z.array(assignmentLaunchSchema).min(1).max(3),
-  maxWireBytes: z.number().int().positive().max(26_214_400) }).strict().superRefine((value, context) => {
+  caseCount: z.number().int().min(1).max(64), maxWireBytes: z.number().int().positive().max(26_214_400) }).strict().superRefine((value, context) => {
     if (new Set(value.launches.map((row) => row.shardId)).size !== value.launches.length
       || canonicalJson(value.launches) !== canonicalJson([...value.launches].sort((a, b) => a.shardId.localeCompare(b.shardId)))) {
       context.addIssue({ code: "custom", path: ["launches"], message: "expected launches must be sorted and unique" });
@@ -83,9 +85,23 @@ const assignmentSchema = z.object({ schemaVersion: z.literal("e2e-application-su
       context.addIssue({ code: "custom", path: ["launches"], message: "assignment launches must be sorted and unique" });
     }
   });
+const launchAssignmentSchema = z.object({ schemaVersion: z.literal("e2e-application-cli-launch-assignment/v1"), bindingDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  groupCompiledInventoryDigest: z.string().regex(/^[a-f0-9]{64}$/), preparedEnvironmentDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  transportId: z.string().min(1).max(256), transportCorrelationId: z.string().uuid(), deadlineAt: z.string().datetime({ offset: true }),
+  launches: z.array(z.object({ schemaVersion: z.literal("e2e-application-cli-launch/v1"), launchId: z.string().uuid(), shardId: z.string().min(1).max(120),
+    compiledInventoryDigest: z.string().regex(/^[a-f0-9]{64}$/), groupCompiledInventoryDigest: z.string().regex(/^[a-f0-9]{64}$/),
+    bindingDigest: z.string().regex(/^[a-f0-9]{64}$/), roundId: z.string().uuid(), runId: z.string().uuid(),
+    cliHost: z.object({ profileId: z.string().min(1).max(120), descriptor: descriptorSchema }).strict(), selectedTarget: E2ETargetSchema,
+    transportId: z.string().min(1).max(256), transportCorrelationId: z.string().uuid(), deadlineAt: z.string().datetime({ offset: true }) }).strict()).min(1).max(3) }).strict().superRefine((assignment, context) => {
+  if (new Set(assignment.launches.map((item) => item.shardId)).size !== assignment.launches.length
+    || new Set(assignment.launches.map((item) => item.launchId)).size !== assignment.launches.length
+    || canonicalJson(assignment.launches) !== canonicalJson([...assignment.launches].sort((a, b) => a.shardId.localeCompare(b.shardId)))) {
+    context.addIssue({ code: "custom", path: ["launches"], message: "launch assignment rows must be sorted and uniquely identified" });
+  }
+});
 const spoolProofSchema = z.object({ ref: z.unknown(), bytesBase64: z.string().max(35_000_000) }).strict();
 const spoolWireSchema = z.object({ schemaVersion: z.literal("e2e-application-supervisor-readback/v1"), receipt: spoolProofSchema,
-  evidence: z.array(spoolProofSchema).max(250_000) }).strict();
+  evidence: z.array(spoolProofSchema).max(e2eApplicationSupervisorEvidenceEntryMax(64)) }).strict();
 
 function spoolUnavailable(message: string): Error { return new Error(`application supervisor spool unavailable: ${message}`); }
 function parseSpoolJson(bytes: Uint8Array): unknown {
@@ -183,9 +199,22 @@ async function createSpoolClient(packageRoot: string, input: { profileId: string
       const wireBytes = await readProtectedFile(spoolPath, correlationRoot, mapping.ownerUid, maxWireBytes, bounded.signal, conformance?.onSpoolStream);
       if (signal.aborted || bounded.signal.aborted || Date.now() >= harvestDeadlineAt) throw spoolUnavailable("readback completed after cancellation or harvest deadline");
       const wireText = new TextDecoder("utf-8", { fatal: true }).decode(wireBytes);
-      const raw = copyBoundedE2EJsonData(JSON.parse(wireText), { maxBytes: maxWireBytes, maxDepth: 48, maxNodes: 300_000 });
+      const raw = copyBoundedE2EJsonData(JSON.parse(wireText), { maxBytes: maxWireBytes, maxDepth: 48, maxNodes: 4_000_000 });
       if (canonicalJson(raw) !== wireText) throw spoolUnavailable("wire bytes are not canonical UTF-8 JSON");
       const wire = spoolWireSchema.parse(raw);
+      if (wire.evidence.length > e2eApplicationSupervisorEvidenceEntryMax(expected.caseCount)) throw spoolUnavailable("proof entry count exceeds the exact case bound");
+      let declaredProofBytes = 0;
+      const validateEncodedLength = (proof: z.infer<typeof spoolProofSchema>) => {
+        const ref = E2EApplicationEvidenceRefSchema.parse(proof.ref);
+        const encodedLength = Math.ceil(ref.byteLength / 3) * 4;
+        if (ref.byteLength > 26_214_400 || proof.bytesBase64.length !== encodedLength || proof.bytesBase64.length > 35_000_000) {
+          throw spoolUnavailable("proof entry exceeds its preallocation byte bound");
+        }
+        declaredProofBytes += ref.byteLength;
+        if (declaredProofBytes > maxWireBytes) throw spoolUnavailable("declared proof entries exceed the active transfer ceiling");
+      };
+      validateEncodedLength(wire.receipt);
+      for (const proof of wire.evidence) validateEncodedLength(proof);
       const decode = (proof: z.infer<typeof spoolProofSchema>) => {
         const ref = E2EApplicationEvidenceRefSchema.parse(proof.ref); const bytes = Buffer.from(proof.bytesBase64, "base64");
         if (bytes.toString("base64") !== proof.bytesBase64 || bytes.byteLength !== ref.byteLength || sha(bytes) !== ref.sha256) throw spoolUnavailable("proof bytes differ from immutable ref metadata");
@@ -195,7 +224,7 @@ async function createSpoolClient(packageRoot: string, input: { profileId: string
       const proofBytes = result.receipt.bytes.byteLength + result.evidence.reduce((sum, item) => sum + item.bytes.byteLength, 0);
       if (Buffer.byteLength(wireText) > maxWireBytes || proofBytes > maxWireBytes || signal.aborted || bounded.signal.aborted
         || Date.now() >= harvestDeadlineAt) throw spoolUnavailable("readback exceeds active bounds or original deadline");
-      validateE2EApplicationSupervisorReadbackStructure(result);
+      validateE2EApplicationSupervisorReadbackStructure(result, expected.caseCount);
       const receiptFrame = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(result.receipt.bytes)) as {
         context: { bindingDigest: string; compiledInventoryDigest: string; preparedEnvironmentDigest: string; producer: { transportCorrelationId: string } };
         launches: readonly { shardId: string; launchId: string; upstreamRunId: string }[];
@@ -217,6 +246,62 @@ async function createSpoolClient(packageRoot: string, input: { profileId: string
 /** Fixed package-relative installed reader; the caller cannot choose paths, URLs, modules, or read callbacks. */
 export function createInstalledE2EApplicationSupervisorReadbackClient(input: Readonly<{ profileId: string; descriptor: CliDescriptor }>): Promise<E2EApplicationSupervisorReadbackClient> {
   return createSpoolClient(resolve(dirname(fileURLToPath(import.meta.url)), ".."), input);
+}
+
+/** Reads the parent-issued exact shard tuple from the fixed installed private transport mapping. */
+export async function readInstalledE2EApplicationCliLaunchAssignments(input: { compiled: E2ECompiledApplicationSuite; binding: E2ERunBinding;
+  round: E2ERound; supervisorAssignment: { transportId: string; transportCorrelationId: string }; signal: AbortSignal }): Promise<readonly E2EApplicationCliLaunchContext[]> {
+  if (input.signal.aborted) throw spoolUnavailable("launch assignment read cancelled before lookup");
+  const snapshot = validateE2ECompiledApplicationAdmission(input.compiled, input.compiled.runtimeAdmissionContext.selectionInput.sourceSnapshot);
+  const binding = E2ERunBindingSchema.parse(input.binding); const round = E2ERoundSchema.parse(input.round);
+  const assignmentRef = z.object({ transportId: z.string().min(1).max(256), transportCorrelationId: z.string().uuid() }).strict().parse(input.supervisorAssignment);
+  if (binding.groupId !== input.compiled.group.groupId || binding.roundId !== round.roundId || binding.deadlineAt !== round.deadlineAt
+    || binding.runId !== round.groupBindings.find((row) => row.groupId === binding.groupId)?.runId
+    || binding.candidateDigest !== snapshot.candidate.digest || canonicalJson(binding.expectedCases) !== canonicalJson(input.compiled.expectedCases)) {
+    throw spoolUnavailable("launch assignment request differs from the original admitted group");
+  }
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+  const registryPath = join(root, "assets/application-runtime-v1/supervisor-spools.json");
+  const registryBytes = await canonicalInstalledFile(registryPath, root);
+  const registry = spoolRegistrySchema.parse(copyBoundedE2EJsonData(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(registryBytes)), { maxBytes: MAX_ASSIGNMENT, maxDepth: 24 }));
+  const mappings = registry.entries.filter((row) => row.profileId === input.compiled.cliHost.profileId
+    && canonicalJson(row.descriptor) === canonicalJson(input.compiled.cliHost.descriptor) && row.transportId === assignmentRef.transportId);
+  if (mappings.length !== 1 || input.signal.aborted) throw spoolUnavailable("parent transport does not resolve to one fixed installed assignment mapping");
+  const mapping = mappings[0]!;
+  await checkProtectedDirectory(mapping.assignmentRoot, mapping.ownerUid);
+  if (input.signal.aborted) throw spoolUnavailable("launch assignment read cancelled before file open");
+  const correlationRoot = join(mapping.assignmentRoot, assignmentRef.transportCorrelationId);
+  const path = join(correlationRoot, "launch-assignment.json");
+  const bytes = await readProtectedFile(path, mapping.assignmentRoot, mapping.ownerUid, MAX_ASSIGNMENT, input.signal);
+  if (input.signal.aborted || Date.now() >= Date.parse(round.deadlineAt)) throw spoolUnavailable("launch assignment read completed after abort or the original deadline");
+  const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  const assignment = launchAssignmentSchema.parse(parseSpoolJson(bytes));
+  const bindingDigest = createHash("sha256").update(canonicalJson(binding)).digest("hex");
+  const expectedShards = [...input.compiled.shards].sort((a, b) => a.shardId.localeCompare(b.shardId));
+  const effectiveTargets = input.compiled.runtimeAdmissionContext.executionPlan.effectiveTargets
+    .filter((target) => input.compiled.group.targetIds.includes(target.targetId));
+  if (effectiveTargets.length !== input.compiled.group.targetIds.length) throw spoolUnavailable("compiled group does not resolve its exact selected target inventory");
+  if (canonicalJson(assignment) !== text || assignment.bindingDigest !== bindingDigest
+    || assignment.groupCompiledInventoryDigest !== input.compiled.inventory.digest
+    || assignment.preparedEnvironmentDigest !== input.compiled.preparedEnvironmentDigest
+    || assignment.transportId !== mapping.transportId || assignment.transportCorrelationId !== assignmentRef.transportCorrelationId
+    || assignment.deadlineAt !== round.deadlineAt || Date.parse(assignment.deadlineAt) <= Date.now()
+    || assignment.launches.length !== expectedShards.length || input.signal.aborted) {
+    throw spoolUnavailable("parent launch assignment differs from the exact admitted tuple, group inventory, or original deadline");
+  }
+  for (let index = 0; index < expectedShards.length; index++) {
+    const shard = expectedShards[index]!; const launch = assignment.launches[index]!;
+    const selectedTarget = effectiveTargets.find((target) => target.targetId === shard.targetId);
+    if (launch.shardId !== shard.shardId || launch.compiledInventoryDigest !== shard.inventory.digest
+      || launch.groupCompiledInventoryDigest !== input.compiled.inventory.digest || launch.bindingDigest !== bindingDigest
+      || launch.roundId !== round.roundId || launch.runId !== binding.runId
+      || canonicalJson(launch.cliHost) !== canonicalJson(input.compiled.cliHost) || !selectedTarget
+      || canonicalJson(launch.selectedTarget) !== canonicalJson(selectedTarget) || launch.transportId !== assignment.transportId
+      || launch.transportCorrelationId !== assignment.transportCorrelationId || launch.deadlineAt !== round.deadlineAt) {
+      throw spoolUnavailable("parent launch assignment contains a foreign or altered shard tuple");
+    }
+  }
+  return Object.freeze(assignment.launches.map((launch) => Object.freeze(launch)));
 }
 
 /** @internal Controlled installed-layout fixture seam, not accepted by production bootstrap inputs. */
@@ -259,6 +344,7 @@ type ProcessResult = { status: number | null; signal: NodeJS.Signals | null; std
   timedOut: boolean; aborted: boolean; outputExceeded: boolean };
 function runProcess(executable: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; deadlineAt: number; signal: AbortSignal }): Promise<ProcessResult> {
   return new Promise((resolveProcess, rejectProcess) => {
+    if (options.signal.aborted) { rejectProcess(new Error("application CLI launch cancelled before process dispatch")); return; }
     if (Date.now() >= options.deadlineAt) { rejectProcess(new Error("application CLI original round deadline elapsed")); return; }
     const startedAt = new Date().toISOString();
     const child = spawn(executable, [...args], { cwd: options.cwd, env: options.env, stdio: ["ignore", "pipe", "pipe"], shell: false });
@@ -283,7 +369,7 @@ function processRecord(result: ProcessResult) {
 function parseJson(bytes: Uint8Array): unknown { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown; }
 
 export type E2EActualApplicationCliInput = Readonly<{ compiled: E2ECompiledApplicationSuite; snapshot: unknown; binding: E2ERunBinding; round: E2ERound;
-  runnerToolchain: ProjectSetupRunnerToolchain; evidenceDirectory: string; signal: AbortSignal }>;
+  runnerToolchain: ProjectSetupRunnerToolchain; evidenceDirectory: string; supervisorAssignment: { transportId: string; transportCorrelationId: string }; signal: AbortSignal }>;
 
 /** Runs the pinned public CLI list and run commands for each exact one-target compiled shard. */
 export async function runE2EApplicationActualCli(input: E2EActualApplicationCliInput): Promise<E2EActualApplicationRun> {
@@ -301,20 +387,23 @@ export async function runE2EApplicationActualCli(input: E2EActualApplicationCliI
   if (!info.isDirectory() || info.isSymbolicLink() || info.uid !== process.getuid?.() || (info.mode & 0o077) !== 0) throw new Error("application evidence directory must be private and owned");
   const deadlineAt = Date.parse(round.deadlineAt);
   if (!Number.isFinite(deadlineAt) || deadlineAt <= Date.now() || input.signal.aborted) throw new Error("application CLI round deadline or cancellation prevents launch");
+  const assignedLaunches = await readInstalledE2EApplicationCliLaunchAssignments({ compiled: input.compiled, binding, round,
+    supervisorAssignment: input.supervisorAssignment, signal: input.signal });
+  if (input.signal.aborted || Date.now() >= deadlineAt) throw new Error("application CLI launch assignment was read after abort or the original deadline");
   const root = installedRuntimeRoot(); const e2eRoot = join(root, "node_modules", "e2e"); const cliPath = join(e2eRoot, "dist", "cli", "bin.js");
   const packageBytes = await readFile(join(e2eRoot, "package.json")); const pkg = JSON.parse(packageBytes.toString("utf8")) as { version?: unknown };
   if (pkg.version !== "0.20.0") throw new Error("installed application runner is not pinned e2e 0.20.0");
   const shards: E2EActualApplicationShard[] = []; let selected = 0; let filtered = 0;
   for (const compiledShard of input.compiled.shards) {
     if (Date.now() >= deadlineAt || input.signal.aborted) throw new Error("application shard launch refused after the original group deadline");
+    const launchContext = assignedLaunches.find((item) => item.shardId === compiledShard.shardId);
+    if (!launchContext) throw new Error("parent launch assignment omits a compiled application shard");
     const shardRoot = join(evidenceDirectory, `application-${sha(Buffer.from(compiledShard.shardId)).slice(0, 16)}`);
-    const assets = await createE2EApplicationRuntimeAssets({ compiled: input.compiled, shardId: compiledShard.shardId, ownedDirectory: shardRoot });
+    const assets = await createE2EApplicationRuntimeAssets({ compiled: input.compiled, shardId: compiledShard.shardId,
+      launchId: launchContext.launchId, ownedDirectory: shardRoot });
     const project = shardRoot;
     const privateRoot = join(project, ".agentx", "e2e");
-    const launch = { schemaVersion: "e2e-application-cli-launch/v1", launchId: assets.launchId, shardId: compiledShard.shardId,
-      compiledInventoryDigest: compiledShard.inventory.digest, bindingDigest: createHash("sha256").update(canonicalJson(binding)).digest("hex"),
-      roundId: round.roundId, runId: binding.runId, cliHost: input.compiled.cliHost, transportId: randomUUID(),
-      transportCorrelationId: randomUUID(), deadlineAt: round.deadlineAt };
+    const launch = launchContext;
     const inventory = { schemaVersion: "e2e-application-cli-inventory/v1", compiledInventoryDigest: compiledShard.inventory.digest,
       shardId: compiledShard.shardId, inventory: compiledShard.inventory, selection: compiledShard.selection,
       expectedCases: compiledShard.expectedCases };
@@ -326,12 +415,16 @@ export async function runE2EApplicationActualCli(input: E2EActualApplicationCliI
     const home = join(project, ".home"); const tmp = join(project, ".tmp"); await mkdir(home, { mode: 0o700 }); await mkdir(tmp, { mode: 0o700 });
     const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp, CI: "1", E2E_TELEMETRY_DISABLED: "1", DO_NOT_TRACK: "1" };
     const configPath = join(project, "e2e.config.mjs");
+    if (input.signal.aborted || Date.now() >= deadlineAt) throw new Error("application list dispatch refused after assignment materialization or original deadline");
     const list = await runProcess(toolchain.execPath, [cliPath, "list", "--config", configPath, "--reporter", "json"], { cwd: project, env, deadlineAt, signal: input.signal });
     if (list.status !== 0 || list.signal || list.timedOut || list.aborted || list.outputExceeded) throw new Error("pinned application CLI list did not complete cleanly within its output bounds");
-    const publicList = copyBoundedE2EJsonData(parseJson(list.stdout), { maxBytes: MAX_OUTPUT, maxDepth: 32, maxNodes: 65_536 });
+    const boundedPublicList = copyBoundedE2EJsonData(parseJson(list.stdout), { maxBytes: MAX_OUTPUT, maxDepth: 32, maxNodes: 65_536 });
+    const parsedPublicList = JSON.parse(canonicalJson(boundedPublicList)) as unknown;
     const selection: E2EApplicationSelectionPacket = compiledShard.selection;
+    const publicList = normalizeE2EApplicationPublicList(parsedPublicList, selection.targetId);
     const listed = compareE2EApplicationPublicList(selection, publicList);
     selected += listed.selected.length; filtered += listed.filtered.length;
+    if (input.signal.aborted || Date.now() >= deadlineAt) throw new Error("application run dispatch refused after list observation or original deadline");
     const run = await runProcess(toolchain.execPath, [cliPath, "run", "--config", configPath, "--reporter", "json", "--output", ".agentx-run-output",
       "--no-cache", "--workers", "1", "--retries", "0"], { cwd: project, env, deadlineAt, signal: input.signal });
     const reportBytes = run.stdout;

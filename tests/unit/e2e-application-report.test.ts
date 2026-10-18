@@ -46,6 +46,14 @@ describe("application report parser", () => {
     expect(module.parseE2EApplicationReport(Buffer.from(JSON.stringify(api))).kind).toBe("parsed");
   });
 
+  it("accepts report-1 fractional estimated cost while keeping usage keys closed", () => {
+    const fractional = report();
+    Object.assign(fractional.run.usage, { estimatedCostUsd: 0.125 });
+    expect(E2EApplicationReportSchema.safeParse(fractional).success).toBe(true);
+    expect(E2EApplicationReportSchema.safeParse({ ...fractional, run: { ...fractional.run,
+      usage: { ...fractional.run.usage, guessedCounter: 3 } } }).success).toBe(false);
+  });
+
   it("rejects contradictory or unknown nested step data instead of stripping it", async () => {
     const module = await import("../../packages/verifier/src/application-report-schema.js").catch(() => null);
     expect(module).not.toBeNull();

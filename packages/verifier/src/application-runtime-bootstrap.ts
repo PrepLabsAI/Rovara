@@ -3,7 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { E2EApplicationCliHostDescriptorSchema, E2EApplicationLaunchTargetSchema, E2EExpectedCaseSchema, APPLICATION_E2E_TEST_PATH, canonicalJson, copyBoundedE2EJsonData } from "@agentx/contracts";
+import { E2EApplicationCliHostDescriptorSchema, E2EApplicationLaunchTargetSchema, E2EExpectedCaseSchema, E2ETargetSchema, APPLICATION_E2E_TEST_PATH, canonicalJson, copyBoundedE2EJsonData } from "@agentx/contracts";
 import type { E2EConfig, ModelInstance, Reporter } from "e2e";
 import { isEngineHandle, type EngineHandle } from "e2e/engine";
 import { z } from "zod";
@@ -12,7 +12,7 @@ import type { E2EApplicationCompiledShard } from "./application-scenarios.js";
 import { E2E_APPLICATION_DECLARATION_PATH, E2E_APPLICATION_GENERATED_CONFIG_PATH, E2E_APPLICATION_SELECTION_PACKET_PATH,
   expectedE2EApplicationConfigDigest, renderE2EApplicationConfigWrapper } from "./application-templates.js";
 import { expectedE2EApplicationReporterDigest } from "./application-runtime-assets.js";
-import { E2EApplicationSupervisorReadbackSchema, e2eApplicationPrivateTransferMaxBytes } from "./application-result-adapter.js";
+import { E2EApplicationSupervisorReadbackSchema, e2eApplicationPrivateTransferMaxBytes, e2eApplicationSupervisorEvidenceEntryMax } from "./application-result-adapter.js";
 import type { E2EApplicationSupervisorReadback } from "./application-result-adapter.js";
 import { createInstalledE2EApplicationSupervisorReadbackClient } from "./application-runtime-cli.js";
 
@@ -21,9 +21,9 @@ const HOSTS_REGISTRY = "assets/application-runtime-v1/cli-hosts.json";
 const MAX_FILE = 1_048_576;
 
 export type E2EApplicationCliLaunchContext = Readonly<{
-  schemaVersion: "e2e-application-cli-launch/v1"; launchId: string; shardId: string; compiledInventoryDigest: string;
+  schemaVersion: "e2e-application-cli-launch/v1"; launchId: string; shardId: string; compiledInventoryDigest: string; groupCompiledInventoryDigest: string;
   bindingDigest: string; roundId: string; runId: string; cliHost: { profileId: string; descriptor: { entryPointId: string; entryPointManifestDigest: string } };
-  transportId: string; transportCorrelationId: string; deadlineAt: string;
+  selectedTarget: z.infer<typeof E2ETargetSchema>; transportId: string; transportCorrelationId: string; deadlineAt: string;
 }>;
 export type E2EApplicationCliHost = Readonly<{ profileId: string; descriptor: { entryPointId: string; entryPointManifestDigest: string };
   launchContext: E2EApplicationCliLaunchContext; installedModule: string; engine?: EngineHandle; modelFactory?: () => ModelInstance;
@@ -33,9 +33,11 @@ type E2EApplicationCliHostFactoryResult = Readonly<{ profileId: string; descript
 
 const launchSchema = z.object({ schemaVersion: z.literal("e2e-application-cli-launch/v1"),
   launchId: z.string().uuid(), shardId: z.string().min(1).max(120),
-  compiledInventoryDigest: z.string().regex(/^[a-f0-9]{64}$/), bindingDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  compiledInventoryDigest: z.string().regex(/^[a-f0-9]{64}$/), groupCompiledInventoryDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  bindingDigest: z.string().regex(/^[a-f0-9]{64}$/),
   roundId: z.string().uuid(), runId: z.string().uuid(),
   cliHost: z.object({ profileId: z.string().min(1).max(120), descriptor: E2EApplicationCliHostDescriptorSchema }).strict(),
+  selectedTarget: E2ETargetSchema,
   transportId: z.string().min(1).max(256), transportCorrelationId: z.string().uuid(),
   deadlineAt: z.string().datetime({ offset: true }) }).strict();
 
@@ -97,6 +99,7 @@ export function registerE2EApplicationCliHost(host: E2EApplicationCliHost): void
 /** Reads only through the selected installed host's fixed supervisor channel; callers cannot supply paths or endpoints. */
 export async function readE2EApplicationCliSupervisorReadback(input: {
   expected: { bindingDigest: string; compiledInventoryDigest: string; preparedEnvironmentDigest: string;
+    groupCompiledInventoryDigest: string;
     launches: readonly { shardId: string; launchId: string; upstreamRunId: string }[]; caseCount: number };
   signal: AbortSignal;
 }): Promise<E2EApplicationSupervisorReadback> {
@@ -110,18 +113,19 @@ export async function readE2EApplicationCliSupervisorReadback(input: {
   const launch = registration.launch;
   const expectedLaunch = input.expected.launches.find((item) => item.shardId === launch.shardId);
   if (!expectedLaunch || expectedLaunch.launchId !== launch.launchId || launch.bindingDigest !== input.expected.bindingDigest
-    || launch.compiledInventoryDigest !== input.expected.compiledInventoryDigest) throw new Error("installed supervisor proof read is outside its exact private launch assignment");
+    || launch.groupCompiledInventoryDigest !== input.expected.groupCompiledInventoryDigest) throw new Error("installed supervisor proof read is outside its exact private launch assignment");
   const client = await createInstalledE2EApplicationSupervisorReadbackClient({ profileId: launch.cliHost.profileId, descriptor: launch.cliHost.descriptor });
   const rawParsed = await client.read({ transportId: launch.transportId, transportCorrelationId: launch.transportCorrelationId,
-    bindingDigest: input.expected.bindingDigest, compiledInventoryDigest: input.expected.compiledInventoryDigest,
+    bindingDigest: input.expected.bindingDigest, compiledInventoryDigest: input.expected.groupCompiledInventoryDigest,
     preparedEnvironmentDigest: input.expected.preparedEnvironmentDigest, launches: [...input.expected.launches].sort((a, b) => a.shardId.localeCompare(b.shardId)),
+    caseCount: input.expected.caseCount,
     maxWireBytes: Math.min(26_214_400, e2eApplicationPrivateTransferMaxBytes(input.expected.caseCount, input.expected.launches.length)) }, input.signal);
   if (input.signal.aborted) throw new Error("installed supervisor proof read was cancelled and cannot be adopted");
   const parsedInput = E2EApplicationSupervisorReadbackSchema.parse(rawParsed);
   const parsed: E2EApplicationSupervisorReadback = Object.freeze({ schemaVersion: parsedInput.schemaVersion,
     receipt: Object.freeze({ ref: Object.freeze({ ...parsedInput.receipt.ref }), bytes: Uint8Array.from(parsedInput.receipt.bytes) }),
     evidence: Object.freeze(parsedInput.evidence.map((item) => Object.freeze({ ref: Object.freeze({ ...item.ref }), bytes: Uint8Array.from(item.bytes) }))) });
-  const maxEvidenceEntries = 65 + input.expected.caseCount * (2 + 200 + 100 * 32 + 20 + 2 * 100);
+  const maxEvidenceEntries = e2eApplicationSupervisorEvidenceEntryMax(input.expected.caseCount);
   if (parsed.evidence.length > maxEvidenceEntries) throw new Error("installed supervisor proof byte inventory exceeds its exact global case bound");
   const totalBytes = parsed.receipt.bytes.byteLength + parsed.evidence.reduce((sum, item) => sum + item.bytes.byteLength, 0);
   const wireBytes = Buffer.byteLength(canonicalJson({ schemaVersion: parsed.schemaVersion,
@@ -199,12 +203,21 @@ export async function prepareE2EApplicationCliConfig(input: { configUrl: string 
   const declaration = declarationSchema.parse(json(declarationBytes)) as Declaration;
   const launch = launchSchema.parse(json(launchBytes)) as E2EApplicationCliLaunchContext;
   const inventory = inventorySidecarSchema.parse(json(inventoryBytes));
+  const selectedPlatform = launch.selectedTarget.kind === "mobile" || launch.selectedTarget.kind === "desktop"
+    ? launch.selectedTarget.os : launch.selectedTarget.kind;
+  const selectedApplicationIdentityMatches = declaration.target.app === null
+    ? declaration.originByApplicationId.some((item) => item.applicationId === launch.selectedTarget.applicationId)
+    : declaration.target.app.identity === launch.selectedTarget.applicationId;
   if (declaration.schemaVersion !== "e2e-application-cli-declaration/v1" || declaration.cliHost.profileId !== launch.cliHost.profileId
     || canonicalJson(declaration.cliHost.descriptor) !== canonicalJson(launch.cliHost.descriptor) || inventory.schemaVersion !== "e2e-application-cli-inventory/v1"
     || inventory.compiledInventoryDigest !== launch.compiledInventoryDigest || inventory.shardId !== launch.shardId
+    || launch.selectedTarget.targetId !== declaration.target.targetId || launch.selectedTarget.runtimeProfileId !== declaration.target.profileId
+    || (declaration.target.engine === null ? launch.selectedTarget.kind !== "api" : selectedPlatform !== declaration.target.engine.platform)
+    || !selectedApplicationIdentityMatches
     || declaration.cases.some((item) => item.targetId !== declaration.target.targetId)
     || new Set(declaration.cases.map((item) => item.caseId)).size !== declaration.cases.length
     || canonicalJson(declaration.cases.map((item) => item.caseId).sort()) !== canonicalJson(inventory.expectedCases.map((item) => item.caseId).sort())
+    || inventory.expectedCases.some((item) => item.targetId !== launch.selectedTarget.targetId || item.accountProfileId !== launch.selectedTarget.accountProfileId)
     || canonicalJson(declaration.cases.map((item) => item.upstreamTestId).sort()) !== canonicalJson(inventory.selection.tuples.map((item) => item.upstreamTestId).sort())) throw new Error("application declaration, launch context and inventory disagree");
   const inv = inventory.inventory;
   const { digest, ...body } = inv;

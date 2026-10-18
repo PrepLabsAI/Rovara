@@ -6,10 +6,16 @@ import { dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import process from "node:process";
 import { canonicalJson, ProjectSetupRunnerToolchainSchema } from "@agentx/contracts";
+import type { E2EConfig } from "e2e";
 import { z } from "zod";
 import { ModuleKind, ScriptTarget, transpileModule } from "typescript";
 import { createCompiledApiApplicationFixture } from "../support/e2e-application-fixture.js";
+import type { E2EActualApplicationRun } from "../../packages/verifier/src/application-collection.js";
+import type { E2EActualApplicationCliInput } from "../../packages/verifier/src/application-runtime-cli.js";
 import { createE2EApplicationRuntimeAssets } from "../../packages/verifier/src/application-runtime-assets.js";
+
+type InstalledBootstrap = { prepareE2EApplicationCliConfig(input: { configUrl: string }): Promise<E2EConfig> };
+type InstalledRunner = { runE2EApplicationActualCli(input: E2EActualApplicationCliInput): Promise<E2EActualApplicationRun> };
 
 describe("application actual CLI and lifecycle", () => {
   it("exposes the actual-spawn runtime path and distinct process-local bootstrap", async () => {
@@ -79,9 +85,11 @@ export function createE2EApplicationCliHost({ launchContext }) {
       const runtime = [...compiled.runtimeBindings.values()][0]!;
       const bindingDigest = hash(canonicalJson(fixture.binding));
       const launch = { schemaVersion: "e2e-application-cli-launch/v1", launchId, shardId: shard.shardId,
-        compiledInventoryDigest: shard.inventory.digest, bindingDigest, roundId: fixture.binding.roundId, runId: fixture.binding.runId,
-        cliHost: compiled.cliHost, transportId: "fixture-private-transport", transportCorrelationId: runtime.transportCorrelationId,
-        deadlineAt: new Date(Date.now() + 120_000).toISOString() };
+        compiledInventoryDigest: shard.inventory.digest, groupCompiledInventoryDigest: compiled.inventory.digest,
+        bindingDigest, roundId: fixture.binding.roundId, runId: fixture.binding.runId,
+        cliHost: compiled.cliHost, selectedTarget: compiled.runtimeAdmissionContext.executionPlan.effectiveTargets.find((target) => target.targetId === shard.targetId)!,
+        transportId: "fixture-private-transport", transportCorrelationId: runtime.transportCorrelationId,
+        deadlineAt: fixture.round.deadlineAt };
       const inventory = { schemaVersion: "e2e-application-cli-inventory/v1", compiledInventoryDigest: shard.inventory.digest,
         shardId: shard.shardId, inventory: shard.inventory, selection: shard.selection, expectedCases: shard.expectedCases };
       for (const [name, value] of [["application-cli-launch.json", launch], ["application-cli-inventory.json", inventory]] as const) {
@@ -136,6 +144,101 @@ else { const parent = await resolveListAndGenerate(); const child = fork(fileURL
         expect(processResult.afterGenerate).toEqual({ factoryCalls: 1, generationCalls: 1, runCaseCalls: 0 });
       }
       expect(result.parent.listed).toEqual(result.worker.listed);
+      const installedBootstrap = (await import(pathToFileURL(join(packageRoot, "dist/application-runtime-bootstrap.js")).href)) as InstalledBootstrap;
+      const launchPath = join(privateRoot, "application-cli-launch.json");
+      const accountMismatch = { ...launch, selectedTarget: { ...launch.selectedTarget, accountProfileId: "foreign-account-profile" } };
+      await writeFile(launchPath, JSON.stringify(accountMismatch), { mode: 0o600 }); await chmod(launchPath, 0o600);
+      await expect(installedBootstrap.prepareE2EApplicationCliConfig({ configUrl: pathToFileURL(configPath).href })).rejects.toThrow(/declaration|inventory/u);
+      const platformMismatch = { ...launch, selectedTarget: { targetId: launch.selectedTarget.targetId,
+        applicationId: launch.selectedTarget.applicationId, runtimeProfileId: launch.selectedTarget.runtimeProfileId,
+        accountProfileId: launch.selectedTarget.accountProfileId, kind: "contract", requestedTargetId: "api-target",
+        adapterProfileId: "wrong-adapter" } };
+      await writeFile(launchPath, JSON.stringify(platformMismatch), { mode: 0o600 }); await chmod(launchPath, 0o600);
+      await expect(installedBootstrap.prepareE2EApplicationCliConfig({ configUrl: pathToFileURL(configPath).href })).rejects.toThrow(/target|platform|declaration/u);
+
+      const actualFixture = createCompiledApiApplicationFixture({ now: new Date(Date.now() - 10_000).toISOString(), hostManifestDigest: hash(factoryBytes) });
+      const actualCompiled = actualFixture.compiled; const actualShard = actualCompiled.shards[0]!;
+      const transportId = "fixed-test-transport"; const transportCorrelationId = randomUUID();
+      const assignmentRoot = join(root, "assigned-launches"); const correlationRoot = join(assignmentRoot, transportCorrelationId);
+      await mkdir(correlationRoot, { recursive: true, mode: 0o700 });
+      await writeFile(join(installedHostRoot, "supervisor-spools.json"), JSON.stringify({ schemaVersion: "e2e-application-supervisor-spools/v1",
+        entries: [{ profileId, descriptor, transportId, assignmentRoot, ownerUid: process.getuid!() }] }), { mode: 0o600 });
+      const actualBindingDigest = hash(canonicalJson(actualFixture.binding));
+      const assignedLaunch = { schemaVersion: "e2e-application-cli-launch/v1", launchId: randomUUID(), shardId: actualShard.shardId,
+        compiledInventoryDigest: actualShard.inventory.digest, groupCompiledInventoryDigest: actualCompiled.inventory.digest,
+        bindingDigest: actualBindingDigest, roundId: actualFixture.binding.roundId, runId: actualFixture.binding.runId, cliHost: actualCompiled.cliHost,
+        selectedTarget: actualCompiled.runtimeAdmissionContext.executionPlan.effectiveTargets.find((target) => target.targetId === actualShard.targetId)!,
+        transportId, transportCorrelationId, deadlineAt: actualFixture.round.deadlineAt };
+      const assignedLaunches = [assignedLaunch];
+      await writeFile(join(correlationRoot, "launch-assignment.json"), canonicalJson({ schemaVersion: "e2e-application-cli-launch-assignment/v1",
+        bindingDigest: actualBindingDigest, groupCompiledInventoryDigest: actualCompiled.inventory.digest,
+        preparedEnvironmentDigest: actualCompiled.preparedEnvironmentDigest, transportId, transportCorrelationId,
+        deadlineAt: actualFixture.round.deadlineAt, launches: assignedLaunches }), { mode: 0o600 });
+      const actualEvidenceDirectory = join(root, "actual-default-cli-evidence"); await mkdir(actualEvidenceDirectory, { mode: 0o700 });
+      const installedRunner = (await import(pathToFileURL(join(packageRoot, "dist/application-runtime-cli.js")).href)) as InstalledRunner;
+      await writeFile(join(correlationRoot, "launch-assignment.json"), canonicalJson({ schemaVersion: "e2e-application-cli-launch-assignment/v1",
+        bindingDigest: actualBindingDigest, groupCompiledInventoryDigest: actualCompiled.inventory.digest,
+        preparedEnvironmentDigest: actualCompiled.preparedEnvironmentDigest, transportId, transportCorrelationId,
+        deadlineAt: actualFixture.round.deadlineAt, launches: [{ ...assignedLaunch, deadlineAt: new Date(Date.parse(actualFixture.round.deadlineAt) - 1_000).toISOString() }] }), { mode: 0o600 });
+      await expect(installedRunner.runE2EApplicationActualCli({ compiled: actualCompiled, snapshot: actualFixture.snapshot,
+        binding: actualFixture.binding, round: actualFixture.round,
+        runnerToolchain: ProjectSetupRunnerToolchainSchema.parse({ execPath: process.execPath, version: process.version,
+          platform: process.platform, arch: process.arch }), evidenceDirectory: actualEvidenceDirectory,
+        supervisorAssignment: { transportId, transportCorrelationId }, signal: new AbortController().signal })).rejects.toThrow();
+      expect(await readdir(actualEvidenceDirectory)).toEqual([]);
+      await writeFile(join(correlationRoot, "launch-assignment.json"), canonicalJson({ schemaVersion: "e2e-application-cli-launch-assignment/v1",
+        bindingDigest: actualBindingDigest, groupCompiledInventoryDigest: actualCompiled.inventory.digest,
+        preparedEnvironmentDigest: actualCompiled.preparedEnvironmentDigest, transportId, transportCorrelationId,
+        deadlineAt: actualFixture.round.deadlineAt, launches: assignedLaunches }), { mode: 0o600 });
+      const actualRun = await installedRunner.runE2EApplicationActualCli({ compiled: actualCompiled, snapshot: actualFixture.snapshot,
+        binding: actualFixture.binding, round: actualFixture.round,
+        runnerToolchain: ProjectSetupRunnerToolchainSchema.parse({ execPath: process.execPath, version: process.version,
+          platform: process.platform, arch: process.arch }), evidenceDirectory: actualEvidenceDirectory,
+        supervisorAssignment: { transportId, transportCorrelationId }, signal: new AbortController().signal });
+      expect(actualRun.shards.map((item) => item.shardId)).toEqual([actualShard.shardId]);
+      expect(actualRun.shards).toHaveLength(1);
+      const actualShardRun = actualRun.shards[0]!;
+      expect(actualShardRun.listProcess).toMatchObject({ status: 0, signal: null, timedOut: false, aborted: false });
+      expect(actualShardRun.runProcess).toMatchObject({ status: 0, signal: null, timedOut: false, aborted: false });
+      const actualListBytes = JSON.parse(Buffer.from(actualShardRun.listStdoutBytes).toString("utf8")) as unknown;
+      expect(actualListBytes).toEqual({ pairs: actualShardRun.publicList && typeof actualShardRun.publicList === "object"
+        && "pairs" in actualShardRun.publicList ? actualShardRun.publicList.pairs : [] });
+      const installedAdapter = await import(pathToFileURL(join(packageRoot, "dist/application-result-adapter.js")).href) as {
+        normalizeE2EApplicationPublicList(raw: unknown, targetId: string): unknown;
+      };
+      expect(installedAdapter.normalizeE2EApplicationPublicList(actualListBytes, actualShard.selection.targetId)).toEqual(actualShardRun.publicList);
+      const actualReport = JSON.parse(Buffer.from(actualShardRun.rawReportBytes).toString("utf8")) as {
+        run?: { status?: string; exitCode?: number; summary?: { selected?: number; executed?: number; passed?: number };
+          results?: Array<{ id?: string; status?: string; selected?: boolean }> };
+      };
+      expect(actualReport.run).toMatchObject({ status: "passed", exitCode: 0, summary: { selected: 1, executed: 1, passed: 1 } });
+      expect(actualReport.run?.results).toHaveLength(1);
+      expect(actualReport.run?.results?.[0]).toMatchObject({ id: actualShard.selection.tuples[0]!.upstreamResultId,
+        status: "passed", selected: true });
+      expect(actualRun.supervisorReadback).toBeNull();
+      expect(actualRun.cleanupConfirmed).toBeNull();
+      const completeReport = JSON.parse(Buffer.from(actualShardRun.rawReportBytes).toString("utf8")) as {
+        run: { environment: { ci: boolean; trustNoticeShown: boolean; os: string; arch: string; runtime: string };
+          usage: Record<string, number>; limits: Record<string, number> };
+      };
+      const postCloseJoin = await import("../../packages/verifier/src/application-collection.js");
+      const collectActual = (actual: E2EActualApplicationRun) => postCloseJoin.collectE2EApplicationRun({ actual, compiled: actualCompiled, binding: actualFixture.binding,
+        round: actualFixture.round, environment: completeReport.run.environment, usage: completeReport.run.usage, limits: completeReport.run.limits,
+        expectedSupervisorReceiptRefs: [], ownedResourceInventoryDigest: hash("conformance-owned-resource-inventory"),
+        observationBindings: null, assertionAssets: [], governedModelReceipts: null, ownedClosedAt: null });
+      const joined = collectActual(actualRun);
+      expect(joined.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
+      expect(joined.unavailableReason).toMatch(/readback|cleanup|owned/u);
+      const mismatchedListRun = { ...actualRun, shards: actualRun.shards.map((shard) => ({ ...shard, publicList: { pairs: [] } })) };
+      expect(collectActual(mismatchedListRun).unavailableReason).toMatch(/list bytes do not bind/u);
+      const cancelledEvidenceDirectory = join(root, "cancelled-default-cli-evidence"); await mkdir(cancelledEvidenceDirectory, { mode: 0o700 });
+      const cancelled = new AbortController(); cancelled.abort();
+      await expect(installedRunner.runE2EApplicationActualCli({ compiled: actualCompiled, snapshot: actualFixture.snapshot,
+        binding: actualFixture.binding, round: actualFixture.round,
+        runnerToolchain: ProjectSetupRunnerToolchainSchema.parse({ execPath: process.execPath, version: process.version,
+          platform: process.platform, arch: process.arch }), evidenceDirectory: cancelledEvidenceDirectory,
+        supervisorAssignment: { transportId, transportCorrelationId }, signal: cancelled.signal })).rejects.toThrow();
+      expect(await readdir(cancelledEvidenceDirectory)).toEqual([]);
     } finally { await rm(root, { recursive: true, force: true }); }
   });
 

@@ -6,6 +6,9 @@ import { E2EReportSchema } from "./report-schema.js";
 const count = z.number().int().nonnegative();
 const text = z.string().max(16_384);
 const sha = /^[a-f0-9]{64}$/;
+const usage = z.object({ discoveredResults: count, maxAgentContextBytes: count, maxLedgerBytes: count, maxObservationBytes: count,
+  artifactBytes: count, downloads: count, events: count, modelTokens: count, modelCachedTokens: count.optional(),
+  maxModelCallsInStep: count, maxActionStepsInStep: count, estimatedCostUsd: z.number().finite().nonnegative().optional() }).strict();
 const source = z.object({ file: z.string().min(1).max(1024), line: z.number().int().positive(), column: z.number().int().positive() }).strict();
 const error = E2EReportSchema.shape.run.shape.results.element.shape.attempts.element.shape.secondaryErrors.element;
 const event = z.object({ kind: z.enum(["poll", "observation", "model", "policy", "engine", "schema", "navigation"]),
@@ -46,7 +49,7 @@ const attempt = E2EReportSchema.shape.run.shape.results.element.shape.attempts.e
 const result = E2EReportSchema.shape.run.shape.results.element.extend({ attempts: z.array(attempt).max(3), skip: skip.optional() });
 const target = E2EReportSchema.shape.run.shape.targets.element.extend({ baseOrigin: z.string().url().max(512).optional() });
 export const E2EApplicationReportSchema = E2EReportSchema.extend({ run: E2EReportSchema.shape.run.extend({
-  targets: z.array(target).max(12), results: z.array(result).max(192),
+  targets: z.array(target).max(12), results: z.array(result).max(192), usage,
 }) });
 export type E2EApplicationReport = z.infer<typeof E2EApplicationReportSchema>;
 export type ParsedE2EApplicationReport = { kind: "parsed"; report: E2EApplicationReport; rawSha256: string } | { kind: "unavailable"; reason: string };

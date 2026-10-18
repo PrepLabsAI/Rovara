@@ -61,29 +61,52 @@ function registeredApiRuntime(profileId: string, now: number, supportsAgent = fa
 }
 
 /** A source-derived, engine-less API group used only for offline collector conformance. */
-export function createCompiledApiApplicationFixture(options: { modelRoute?: { routeId: string; routeRevision: string }; hostManifestDigest?: string } = {}): { compiled: E2ECompiledApplicationSuite; binding: ReturnType<typeof E2ERunBindingSchema.parse>;
+export function createCompiledApiApplicationFixture(options: { modelRoute?: { routeId: string; routeRevision: string }; hostManifestDigest?: string; now?: string; withApiMock?: boolean;
+  agentAfterRequest?: boolean } = {}): { compiled: E2ECompiledApplicationSuite; binding: ReturnType<typeof E2ERunBindingSchema.parse>;
   admission: unknown;
   round: ReturnType<typeof E2ERoundSchema.parse>; snapshot: E2ESourceSnapshot; now: string } {
   const packageBytes = Buffer.from(JSON.stringify({ name: "service", scripts: { start: "node server.js" }, dependencies: { express: "1.0.0" } }));
-  const sourceBlobId = gitBlob(packageBytes);
-  const treeEntries = [{ path: "apps/service/package.json", mode: "100644", objectId: sourceBlobId }];
+  const openApiBytes = Buffer.from(JSON.stringify({ openapi: "3.0.0", info: { title: "Service", version: "1" }, paths: {
+    "/health": { get: { operationId: "getHealth", responses: {
+      "200": { description: "healthy", content: { "application/json": { schema: { type: "object", properties: { healthy: { type: "boolean" } }, required: ["healthy"], additionalProperties: false } } } },
+      "403": { description: "refused", content: { "application/json": { schema: { type: "object", properties: { error: { type: "string" } }, required: ["error"], additionalProperties: false } } } },
+    } } },
+  } }));
+  const apiFixture = { schemaVersion: "source-backed-api-fixtures/v1" as const, operationId: "getHealth", method: "GET" as const,
+    path: "/health", inputField: "kind", variants: [
+      { id: "success" as const, inputValue: "success", status: 200, body: { healthy: true } },
+      { id: "refusal" as const, inputValue: "refusal", status: 403, body: { error: "refused" } },
+      { id: "invalid-data" as const, inputValue: "invalid", status: 200, body: { healthy: "invalid" } },
+    ] };
+  const fixtureBytes = Buffer.from(canonicalJson(apiFixture));
+  const sourceFiles = [{ path: "apps/service/package.json", bytes: packageBytes },
+    ...(options.withApiMock ? [{ path: "apps/service/openapi.json", bytes: openApiBytes }, { path: "apps/service/e2e-fixture.json", bytes: fixtureBytes }] : [])];
+  const treeEntries = sourceFiles.map((item) => ({ path: item.path, mode: "100644", objectId: gitBlob(item.bytes) }));
   const treeSha = gitTreeSha(treeEntries);
   const candidate = createCandidateManifest([{ repositoryId: "fixture/api", commitSha: "a".repeat(40), treeSha }]);
   const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha, treeComplete: true,
-    treePaths: ["apps/service/package.json"], sources: [{ path: "apps/service/package.json", bytes: packageBytes, sha256: hash(packageBytes), kind: "blob" }] };
+    treePaths: sourceFiles.map((item) => item.path).sort(), sources: sourceFiles.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
   const discovery = inspectE2ERepository(snapshot, candidate);
   const target = discovery.inspection.proposedTargets.find((item) => item.kind === "api")!;
   const application = discovery.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
   const accountContext = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths)[0]!;
   const scenario = { scenarioId: "service-health", requirementId: "health-status", requestedTargetIds: [target.targetId], required: true,
     accountProfileId: target.accountProfileId, minimumEvidence: "runtime" as const, requiredRealComponentIds: [],
-    steps: [...(options.modelRoute ? [{ kind: "agent" as const, goal: "Inspect the service response without external effects", maxActions: 1 }] : []),
-      { kind: "request" as const, requestId: "health", path: "/health", method: "GET" as const, body: {} }],
+    steps: options.modelRoute && !options.agentAfterRequest
+      ? [{ kind: "agent" as const, goal: "Inspect the service response without external effects", maxActions: 1 },
+        { kind: "request" as const, requestId: "health", path: "/health", method: "GET" as const, body: options.withApiMock ? { kind: "success" } : {} }]
+      : [{ kind: "request" as const, requestId: "health", path: "/health", method: "GET" as const, body: options.withApiMock ? { kind: "success" } : {} },
+        ...(options.modelRoute ? [{ kind: "agent" as const, goal: "Inspect the service response without external effects", maxActions: 1 }] : [])],
     assertions: [{ kind: "http-status" as const, path: "/health", method: "GET" as const, equals: 200 }] };
   const accountRef = { applicationId: application.applicationId, profileId: target.accountProfileId, revision: 1, definitionDigest: "8".repeat(64) };
-  const nowMs = Date.now() + 30_000; const now = new Date(nowMs).toISOString();
+  const nowMs = options.now ? Date.parse(options.now) : Date.now() + 30_000;
+  if (!Number.isFinite(nowMs)) throw new Error("API conformance fixture admission time must be a finite timestamp");
+  const now = new Date(nowMs).toISOString();
   const runtimeProfileId = "api-runtime"; const runtime = registeredApiRuntime(runtimeProfileId, nowMs, options.modelRoute !== undefined);
-  const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [], mockFixtureRefs: [],
+  const componentId = `api-schema-${createHash("sha256").update("apps/service/openapi.json").digest("hex").slice(0, 12)}`;
+  const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [],
+    mockFixtureRefs: options.withApiMock ? [{ componentId, requestedTargetId: target.targetId, operationId: "getHealth",
+      sourcePath: "apps/service/e2e-fixture.json", sourceSha256: hash(fixtureBytes) }] : [],
     accountContextRefs: [{ applicationId: application.applicationId, profileId: target.accountProfileId, sourcePath: accountContext.path, sourceSha256: accountContext.sha256 }],
     scenarios: [scenario], semanticExportDeltas: [], applicationRuntimeRefs: [{ targetId: target.targetId, applicationId: application.applicationId,
       recipeDigest: application.recipe!.recipeDigest, sourceRefs: e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths),
@@ -104,17 +127,19 @@ export function createCompiledApiApplicationFixture(options: { modelRoute?: { ro
     runtimeAvailability: [{ targetId: target.targetId, profileId: runtimeProfileId, connection: "connected" as const,
       approval: "approved" as const, qualification: "qualified" as const, authorizationRevision: "api-auth-r1" }],
     portableApprovalBinding: { schemaVersion: "portable-approval-binding/v1" as const, planDigest, semanticApproval, operations: [], accountContexts: [],
-      bindingDigest: "0".repeat(64) }, approvedSemanticApproval: semanticApproval, mockableComponents: [] };
+      bindingDigest: "0".repeat(64) }, approvedSemanticApproval: semanticApproval,
+    mockableComponents: options.withApiMock ? [{ componentId, requestedTargetId: target.targetId, kind: "api" as const,
+      sourceRefs: [{ path: "apps/service/openapi.json", sha256: hash(openApiBytes) }], fixture: apiFixture }] : [] };
   selectionInput.portableApprovalBinding.bindingDigest = hash(canonicalJson(Object.fromEntries(Object.entries(selectionInput.portableApprovalBinding)
     .filter(([key]) => key !== "bindingDigest"))));
   const executionPlan = selectE2EApplicationExecutionPlan(selectionInput); const group = executionPlan.groups[0]!;
-  const archive = encodeE2EApplicationBuildSourceArchive([{ path: "apps/service/package.json", mode: "100644", bytes: packageBytes }]);
-  const manifestTreeEntries = [{ path: "apps/service/package.json", mode: "100644" as const, objectId: sourceBlobId }];
+  const archive = encodeE2EApplicationBuildSourceArchive(sourceFiles.map((item) => ({ ...item, mode: "100644" as const })));
+  const manifestTreeEntries = sourceFiles.map((item) => ({ path: item.path, mode: "100644" as const, objectId: gitBlob(item.bytes) }));
   const sourceBody = { schemaVersion: "e2e-application-build-source-manifest/v1" as const, candidateDigest: candidate.digest,
     repository: { repositoryId: "fixture/api", commitSha: snapshot.commitSha, treeSha }, sourceState: "candidate-index-tree" as const,
     pathPolicy: "existing-safe-e2e-source-path/v1" as const, treeEntries: manifestTreeEntries,
-    files: [{ path: "apps/service/package.json", mode: "100644" as const, gitBlobId: sourceBlobId, sha256: hash(packageBytes), byteLength: packageBytes.byteLength }], omissions: [],
-    archive: { format: "e2e-application-build-source-archive/v1" as const, sha256: archive.sha256, byteLength: archive.byteLength, fileCount: 1 } };
+    files: sourceFiles.map((item) => ({ path: item.path, mode: "100644" as const, gitBlobId: gitBlob(item.bytes), sha256: hash(item.bytes), byteLength: item.bytes.byteLength })), omissions: [],
+    archive: { format: "e2e-application-build-source-archive/v1" as const, sha256: archive.sha256, byteLength: archive.byteLength, fileCount: sourceFiles.length } };
   const buildSourceManifest = { ...sourceBody, manifestDigest: hash(canonicalJson(sourceBody)) };
   const buildSource = { manifest: buildSourceManifest, reference: { artifactId: "api-source-archive", sha256: archive.sha256,
     byteLength: archive.byteLength, manifestDigest: buildSourceManifest.manifestDigest } };
@@ -140,7 +165,7 @@ export function createCompiledApiApplicationFixture(options: { modelRoute?: { ro
     executionPlanDigest: executionPlan.digest, executionMode: group.mode, mockManifestDigest: group.mockManifestDigest,
     authorizationRevision: "api-auth-r1", candidateDigest: candidate.digest, planDigest, policyDigest: e2ePolicyDigest(policy), bundleDigest: bundle.bundleDigest,
     appBuildDigest: hash(canonicalJson(compiled.inventory)), environmentDigest: preparedEnvironmentDigest, runtimeManifestDigest: runtime.manifestDigest,
-    modelRouteRevision: null, expectedCases: compiled.expectedCases, admittedAt: now, deadlineAt: new Date(Date.parse(now) + 60_000).toISOString() });
+    modelRouteRevision: options.modelRoute?.routeRevision ?? null, expectedCases: compiled.expectedCases, admittedAt: now, deadlineAt: new Date(Date.parse(now) + 60_000).toISOString() });
   const round = E2ERoundSchema.parse({ schemaVersion: 1, roundId, taskId: binding.taskId, operationId: binding.operationId, operationFence: binding.operationFence,
     workflowRevision: binding.workflowRevision, executionPlanDigest: executionPlan.digest, admittedAt: now, deadlineAt: binding.deadlineAt,
     limits: policy.limits, groupBindings: [binding] });
@@ -164,6 +189,108 @@ export function createCompiledApiApplicationFixture(options: { modelRoute?: { ro
     admissionDigest: hash(canonicalJson(admissionBody)) } as never)));
   return { compiled, binding, round, snapshot, now, admission };
 }
+
+/** Two independently compiled API target shards for heterogeneous usage conformance. */
+export function createCompiledTwoShardApiApplicationFixture(options: { now?: string; modelRoute?: { routeId: string; routeRevision: string } } = {}) {
+  const packageValues = ["service-one", "service-two"].map((name) => ({
+    path: `apps/${name}/package.json`, bytes: Buffer.from(JSON.stringify({ name, scripts: { start: "node server.js" }, dependencies: { express: "1.0.0" } })) }));
+  const treeEntries = packageValues.map((item) => ({ path: item.path, mode: "100644", objectId: gitBlob(item.bytes) }));
+  const treeSha = gitTreeSha(treeEntries);
+  const candidate = createCandidateManifest([{ repositoryId: "fixture/api", commitSha: "a".repeat(40), treeSha }]);
+  const nowMs = options.now ? Date.parse(options.now) : Date.now() - 10_000;
+  if (!Number.isFinite(nowMs)) throw new Error("two-shard API fixture admission time must be finite");
+  const now = new Date(nowMs).toISOString();
+  const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha, treeComplete: true,
+    treePaths: packageValues.map((item) => item.path).sort(), sources: packageValues.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
+  const discovery = inspectE2ERepository(snapshot, candidate);
+  const targets = discovery.inspection.proposedTargets.filter((item) => item.kind === "api").sort((a, b) => a.targetId.localeCompare(b.targetId));
+  if (targets.length !== 2) throw new Error("two-shard API fixture did not derive two independent source targets");
+  const runtimeProfileId = "api-runtime";
+  const runtime = registeredApiRuntime(runtimeProfileId, nowMs, true);
+  const scenarios = targets.map((target, index) => ({ scenarioId: `api-shard-${index + 1}`, requirementId: `api-shard-${index + 1}-health`,
+    requestedTargetIds: [target.targetId], required: true, accountProfileId: target.accountProfileId, minimumEvidence: "runtime" as const,
+    requiredRealComponentIds: [], steps: [{ kind: "agent" as const, goal: `Inspect ${target.targetId} without external effects`, maxActions: 1 },
+      { kind: "request" as const, requestId: `health-${index + 1}`, path: "/health", method: "GET" as const, body: {} }],
+    assertions: [{ kind: "http-status" as const, path: "/health", method: "GET" as const, equals: 200 }] }));
+  const runtimeRefs = targets.map((target) => ({ targetId: target.targetId, applicationId: target.applicationId,
+    recipeDigest: discovery.inspection.applications.find((item) => item.applicationId === target.applicationId)!.recipe!.recipeDigest,
+    sourceRefs: e2eApplicationMetadataSourceRefs(snapshot, target.applicationId,
+      discovery.inspection.applications.find((item) => item.applicationId === target.applicationId)!.sourcePaths),
+    runtimeProfileId, accountProfileId: target.accountProfileId }));
+  const accountRefs = targets.map((target) => ({ applicationId: target.applicationId, profileId: target.accountProfileId,
+    revision: 1, definitionDigest: (indexToDigest(target.targetId)) }));
+  const accountContextRefs = targets.map((target) => {
+    const row = e2eApplicationMetadataSourceRefs(snapshot, target.applicationId,
+      discovery.inspection.applications.find((item) => item.applicationId === target.applicationId)!.sourcePaths)[0]!;
+    return { applicationId: target.applicationId, profileId: target.accountProfileId, sourcePath: row.path, sourceSha256: row.sha256 };
+  });
+  const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: targets.map((item) => item.targetId), portableOperationRefs: [],
+    mockFixtureRefs: [], accountContextRefs, scenarios, semanticExportDeltas: [], applicationRuntimeRefs: runtimeRefs, runtimeAccountRefs: accountRefs, unavailableTargetRefs: [] });
+  const setupProposal = proposeE2ESetup({ inspection: discovery.inspection, snapshot, expectedCandidate: candidate });
+  const setupApproval = { artifactId: "two-shard-setup-approval", digest: hash(canonicalJson(setupProposal)) };
+  const planDigest = "c".repeat(64); const semanticApproval = { artifactId: "two-shard-semantic-approval", digest: "d".repeat(64) };
+  const applicationApprovalBinding = deriveE2EApplicationApprovalBinding({ preparedSnapshot: snapshot, intent,
+    artifactId: semanticApproval.artifactId, artifactSha256: semanticApproval.digest, planDigest, setupProposal, setupApproval });
+  const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: scenarios.map((item) => item.scenarioId),
+    targets: discovery.inspection.proposedTargets, defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected",
+    modelRouteRevision: options.modelRoute?.routeRevision ?? null, capture: { screenshots: false, traces: false, video: false, downloads: false },
+    limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000,
+      maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } };
+  const portableApprovalBinding = { schemaVersion: "portable-approval-binding/v1" as const, planDigest, semanticApproval, operations: [], accountContexts: [], bindingDigest: "0".repeat(64) };
+  portableApprovalBinding.bindingDigest = hash(canonicalJson(Object.fromEntries(Object.entries(portableApprovalBinding).filter(([key]) => key !== "bindingDigest"))));
+  const selectionInput = { candidateDigest: candidate.digest, expectedCandidate: candidate, sourceSnapshot: snapshot, planDigest, policy, scenarios,
+    selectedTargetIds: targets.map((item) => item.targetId), intent, intentDigest: hash(canonicalJson(intent)), setupProposal, setupApproval, applicationApprovalBinding,
+    registeredRuntimes: [runtime], runtimeAccountRefs: accountRefs, now: nowMs, sandboxAvailability: null,
+    runtimeAvailability: targets.map((target) => ({ targetId: target.targetId, profileId: runtimeProfileId, connection: "connected" as const,
+      approval: "approved" as const, qualification: "qualified" as const, authorizationRevision: "api-auth-r1" })),
+    portableApprovalBinding, approvedSemanticApproval: semanticApproval, mockableComponents: [] };
+  const executionPlan = selectE2EApplicationExecutionPlan(selectionInput); const group = executionPlan.groups[0]!;
+  const archive = encodeE2EApplicationBuildSourceArchive(packageValues.map((item) => ({ ...item, mode: "100644" as const })));
+  const treeManifestEntries = packageValues.map((item) => ({ path: item.path, mode: "100644" as const, objectId: gitBlob(item.bytes) }));
+  const sourceManifestBody = { schemaVersion: "e2e-application-build-source-manifest/v1" as const, candidateDigest: candidate.digest,
+    repository: { repositoryId: "fixture/api", commitSha: snapshot.commitSha, treeSha }, sourceState: "candidate-index-tree" as const,
+    pathPolicy: "existing-safe-e2e-source-path/v1" as const, treeEntries: treeManifestEntries,
+    files: packageValues.map((item) => ({ path: item.path, mode: "100644" as const, gitBlobId: gitBlob(item.bytes), sha256: hash(item.bytes), byteLength: item.bytes.byteLength })),
+    omissions: [], archive: { format: "e2e-application-build-source-archive/v1" as const, sha256: archive.sha256, byteLength: archive.byteLength, fileCount: packageValues.length } };
+  const buildSourceManifest = { ...sourceManifestBody, manifestDigest: hash(canonicalJson(sourceManifestBody)) };
+  const buildSource = { manifest: buildSourceManifest, reference: { artifactId: "two-shard-source-archive", sha256: archive.sha256,
+    byteLength: archive.byteLength, manifestDigest: buildSourceManifest.manifestDigest } };
+  const applicationBindings = new Map(targets.map((target, index) => {
+    const application = discovery.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
+    const output = { artifactId: `two-shard-build-${index + 1}`, sha256: (String(index + 5)).repeat(64).slice(0, 64), appId: target.applicationId, platform: "api" as const };
+    const buildBody = { schemaVersion: "e2e-app-build/v1" as const, candidateDigest: candidate.digest, applicationId: target.applicationId,
+      repository: { repositoryId: "fixture/api", commitSha: snapshot.commitSha, treeSha }, recipeDigest: application.recipe!.recipeDigest,
+      lockfileRefs: [], toolchainManifestDigest: "6".repeat(64), outputs: [output], createdAt: now };
+    const build = { ...buildBody, manifestDigest: e2eAppBuildManifestDigest(buildBody) };
+    return [target.applicationId, { approval: applicationApprovalBinding, build,
+      artifacts: [{ ...output, buildManifestDigest: build.manifestDigest }], buildSource }] as const;
+  }));
+  const preparedEnvironmentDigest = "7".repeat(64); const runtimeBindings = new Map([[runtimeProfileId, runtime]]);
+  const cliHostsByProfile = new Map([[runtimeProfileId, { entryPointId: "api-cli", entryPointManifestDigest: "9".repeat(64) }]]);
+  const launchTargets = targets.map((target) => ({ targetId: target.targetId, profileId: runtimeProfileId, factoryId: "api-host",
+    factoryManifestDigest: runtime.manifestDigest, engine: null, artifactCapabilities: [] as Array<"screenshot" | "video">, stateCapability: false, app: null }));
+  const bundleBody = { schemaVersion: 1 as const, planDigest, templateVersion: "trusted-e2e-application/v1" as const, scenarios, bundleDigest: "0".repeat(64) };
+  const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };
+  const context = { selectionInput, executionPlan, bundle, applicationBindings, runtimeBindings, launchTargets, modelRoute: options.modelRoute ?? null, cliHostsByProfile,
+    preparedEnvironmentsByGroup: new Map([[group.groupId, { preparedEnvironmentDigest,
+      originByApplicationId: targets.map((target, index) => ({ applicationId: target.applicationId, origin: `https://service-${index + 1}.test` })) }]]) };
+  const compiled = compileE2EApplicationScenarios({ context, groupId: group.groupId });
+  if (compiled.shards.length !== 2) throw new Error("two-shard fixture did not compile into exactly two target shards");
+  const roundId = "a0000000-0000-4000-8000-000000000030";
+  const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId: "a0000000-0000-4000-8000-000000000031", roundId, taskId: "task-two-shard",
+    operationId: "b0000000-0000-4000-8000-000000000003", operationFence: 1, workflowRevision: 1, groupId: group.groupId,
+    executionPlanDigest: executionPlan.digest, executionMode: group.mode, mockManifestDigest: group.mockManifestDigest, authorizationRevision: "api-auth-r1",
+    candidateDigest: candidate.digest, planDigest, policyDigest: e2ePolicyDigest(policy), bundleDigest: bundle.bundleDigest,
+    appBuildDigest: hash(canonicalJson(compiled.inventory)), environmentDigest: preparedEnvironmentDigest, runtimeManifestDigest: runtime.manifestDigest,
+    modelRouteRevision: options.modelRoute?.routeRevision ?? null, expectedCases: compiled.expectedCases, admittedAt: now,
+    deadlineAt: new Date(Date.parse(now) + 60_000).toISOString() });
+  const round = E2ERoundSchema.parse({ schemaVersion: 1, roundId, taskId: binding.taskId, operationId: binding.operationId,
+    operationFence: binding.operationFence, workflowRevision: binding.workflowRevision, executionPlanDigest: executionPlan.digest,
+    admittedAt: now, deadlineAt: binding.deadlineAt, limits: policy.limits, groupBindings: [binding] });
+  return { compiled, binding, round, snapshot, now };
+}
+
+function indexToDigest(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 
 /** Source-derived, portable-only admission used to exercise genuine child and outer IDs offline. */
 export function createPortableApplicationChildFixture() {
