@@ -26,6 +26,10 @@ export class FakeDockerCli implements DockerCli {
   networkCreateFails = false;
   /** Images the host does not hold: `image inspect` fails for them until they are pulled. */
   readonly missingImages = new Set<string>();
+  /** `docker pull` calls that fail before one succeeds, and whether the image is on the host by the time the first of them reports failure (another process pulled it). */
+  pullFailures = 0;
+  imageArrivesDuringFailedPull = false;
+  pullStderr = "pull access denied";
   appStartFails = false;
   /** When set, the executor "container" ignores the abort signal and finishes (with its normal output) after this many milliseconds. */
   executorIgnoresAbortForMs: number | null = null;
@@ -116,7 +120,15 @@ export class FakeDockerCli implements DockerCli {
     }
     if (command === "logs") return { code: 0, stdout: "", stderr: this.resources.get(args[args.length - 1]!)?.logs ?? this.logs.get(args[args.length - 1]!) ?? "" };
     if (command === "image" && sub === "inspect") return this.missingImages.has(args[2]!) ? { code: 1, stdout: "", stderr: "No such image" } : { code: 0, stdout: "", stderr: "" };
-    if (command === "pull") { this.missingImages.delete(args[1]!); return { code: 0, stdout: "", stderr: "" }; }
+    if (command === "pull") {
+      if (this.pullFailures > 0) {
+        this.pullFailures -= 1;
+        if (this.imageArrivesDuringFailedPull) this.missingImages.delete(args[1]!);
+        return { code: 1, stdout: "", stderr: this.pullStderr };
+      }
+      this.missingImages.delete(args[1]!);
+      return { code: 0, stdout: "", stderr: "" };
+    }
     if (command === "run") return this.runContainer(args, opts);
     return { code: 0, stdout: "", stderr: "" };
   }

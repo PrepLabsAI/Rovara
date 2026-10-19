@@ -18,7 +18,7 @@ const collectionSentinel = { marker: "collection-inputs" };
 const sentinel = { protocol: "e2e-actual-application-run/v1", cleanupConfirmed: true, cleanupServerListening: false, supervisorReadback: { marker: "assembled" } };
 type Setup = Awaited<ReturnType<typeof setup>>;
 
-async function setup(options: { fake: FakeDockerCli; deadlineMs?: number; recipeBuild?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeBuild"];
+async function setup(options: { fake: FakeDockerCli; imagePullRetryMs?: number; deadlineMs?: number; recipeBuild?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeBuild"];
   recipeStart?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeStart"]; runRoot?: string; role?: "owner" | "viewer";
   onRunOutput?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["onRunOutput"]> }) {
   const fixture: OrdersExecutorFixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}),
@@ -28,7 +28,7 @@ async function setup(options: { fake: FakeDockerCli; deadlineMs?: number; recipe
   const assemble = vi.fn<(input: unknown) => never>(() => sentinel as never);
   const assembleCollectionInputs = vi.fn<(input: unknown) => never>(() => collectionSentinel as never);
   const host = createDockerApplicationHost({ docker: options.fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, now: () => Date.now(),
-    admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir: source, appPollMs: 10, deadlineGraceMs: 60, assemble, assembleCollectionInputs,
+    admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir: source, appPollMs: 10, deadlineGraceMs: 60, assemble, assembleCollectionInputs, ...(options.imagePullRetryMs ? { imagePullRetryMs: options.imagePullRetryMs } : {}),
     ...(options.onRunOutput ? { onRunOutput: options.onRunOutput } : {}) });
   const { compiled, plan } = fixture;
   const binding = plan.admission.round.groupBindings[0]!;
@@ -247,6 +247,28 @@ describe("docker application host", () => {
     expect(fake.timeouts[pullIndex]).toBeLessThanOrEqual(5_000);
     expect(pullIndex).toBeLessThan(fake.calls.findIndex((args) => args[0] === "run" && args.includes("-d")));
     for (const kind of ["app", "executor"] as const) expect(fake.argsFor(kind)).toContain("--pull=never");
+  });
+
+  it("carries on when another process pulled the same image while this pull was failing", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake, imagePullRetryMs: 1 }); fake.onExecutor = okOutput(s);
+    // Parallel runs on one host race to pull the same image; the loser's pull fails although the image is then there.
+    fake.missingImages.add("node:build-test"); fake.pullFailures = 1; fake.imageArrivesDuringFailedPull = true;
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    expect(fake.calls.filter((args) => args[0] === "pull")).toHaveLength(1);
+  });
+
+  it("retries a pull that fails for a transient reason, and says why when it never succeeds", async () => {
+    const transient = new FakeDockerCli(); const t = await setup({ fake: transient, imagePullRetryMs: 1 }); transient.onExecutor = okOutput(t);
+    transient.missingImages.add("node:build-test"); transient.pullFailures = 2;
+    expect((await runWith(t)).unavailableReason).toBeNull();
+    expect(transient.calls.filter((args) => args[0] === "pull")).toHaveLength(3);
+    const hopeless = new FakeDockerCli(); const h = await setup({ fake: hopeless, imagePullRetryMs: 1 });
+    hopeless.missingImages.add("node:build-test"); hopeless.pullFailures = 99; hopeless.pullStderr = "toomanyrequests: rate limit exceeded";
+    const result = await runWith(h);
+    expect(result.unavailableReason).toContain("executor-failed");
+    expect(hopeless.calls.filter((args) => args[0] === "pull")).toHaveLength(3);
+    // The diagnostic names the image and docker's own words, so a CI failure explains itself.
+    expect(h.host.readDiagnostics(h.runId).buildLogTail).toMatch(/node:build-test is not available on the host: toomanyrequests: rate limit exceeded/);
   });
 
   it("reports an app container that cannot start as app-exited", async () => {

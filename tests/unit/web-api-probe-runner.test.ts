@@ -1,11 +1,12 @@
-import { cp, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, canonicalJson, webApiProbeRunId } from "../../packages/contracts/src/index.js";
-import { createWebApiProbeRunner } from "../../packages/verifier/src/host/web-api-probe-runner.js";
+import { MAX_BLOCKED_REQUESTS_BYTES, createWebApiProbeRunner, readBlockedRequests } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { webApiBuildProbeCommand } from "../../packages/verifier/src/host/web-api-probe-plan.js";
+import { loadWebApiQualificationProbeAssets } from "../../packages/verifier/src/application-runtime-probes.js";
 import { installedWebApiQualificationAppRoot } from "../../packages/verifier/src/host/web-api-qualification-app.js";
 import { verifyWebApiProbeRecord } from "../../packages/verifier/src/web-api-probe-evidence.js";
 import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.js";
@@ -105,5 +106,53 @@ describe("the production web/API probe runner", () => {
       await runner("build-imds-denial-v1");
     }
     expect(await readdir(evidenceRoot)).toHaveLength(2);
+  });
+
+  it("clears what an earlier attempt of the same run left behind before it stages and allocates", async () => {
+    const { fake, runRoot, runner } = await setup();
+    fake.failOn("build", 7);
+    const runId = webApiProbeRunId(challenge, "build-imds-denial-v1");
+    // A candidate copy, a run workspace, a network and a container, all labeled for this run, as a killed qualification leaves them.
+    await mkdir(join(runRoot, `candidate-${runId}`), { recursive: true });
+    await writeFile(join(runRoot, `candidate-${runId}`, "stale.txt"), "stale");
+    await mkdir(join(runRoot, runId, "out"), { recursive: true });
+    await writeFile(join(runRoot, runId, "out", "stale.txt"), "stale");
+    await fake.run(["network", "create", "--internal", "--label", `rovara.run=${runId}`, `rovara-e2e-${runId}`], { signal: new AbortController().signal, timeoutMs: 1_000 });
+    await fake.run(["run", "-d", "--name", `rovara-app-${runId}`, "--label", `rovara.run=${runId}`], { signal: new AbortController().signal, timeoutMs: 1_000 }).catch(() => undefined);
+    expect(fake.networks()).toEqual([`rovara-e2e-${runId}`]);
+    const before = fake.calls.length;
+    const run = await runner("build-imds-denial-v1");
+    expect(run.observation).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: 7 });
+    expect(fake.networks()).toEqual([]);
+    expect(fake.liveResources(`rovara.run=${runId}`)).toEqual([]);
+    expect(await readdir(runRoot)).toEqual([]);
+    // The clearing came first: the leftover network was removed before the host created this attempt's.
+    const calls = fake.calls.slice(before).map((args) => args.join(" "));
+    expect(calls.indexOf(`network rm rovara-e2e-${runId}`)).toBeGreaterThanOrEqual(0);
+    expect(calls.indexOf(`network rm rovara-e2e-${runId}`)).toBeLessThan(calls.findIndex((call) => call.startsWith("network create")));
+  });
+
+  it("refuses an installed probe asset that is not the pinned one, before it touches Docker", async () => {
+    const root = join(await temp(), "assets");
+    await cp(join(installedWebApiQualificationAppRoot(), "../application-runtime-v1/probes"), root, { recursive: true });
+    await writeFile(join(root, "web-csv-positive-v1.json"), `${await readFile(join(root, "web-csv-positive-v1.json"), "utf8")} `);
+    const { fake, runner } = await setup({ probeAssetsRoot: root });
+    await expect(runner("web-csv-positive-v1")).rejects.toThrow("probe-asset-digest-mismatch:web-csv-positive-v1");
+    expect(fake.calls).toEqual([]);
+    expect(() => loadWebApiQualificationProbeAssets(root)).toThrow("probe-asset-digest-mismatch:web-csv-positive-v1");
+  });
+});
+
+describe("the blocked-requests file the runner keeps", () => {
+  it("is read whole when it fits the evidence schema's base64 bound and dropped when it does not", async () => {
+    const dir = await temp();
+    const write = (size: number) => writeFile(join(dir, "blocked-requests.json"), Buffer.alloc(size, 97));
+    await write(MAX_BLOCKED_REQUESTS_BYTES);
+    expect((await readBlockedRequests(dir))?.byteLength).toBe(MAX_BLOCKED_REQUESTS_BYTES);
+    // The largest accepted file is the largest that stays within the schema's 262144 base64 characters.
+    expect(Math.ceil(MAX_BLOCKED_REQUESTS_BYTES / 3) * 4).toBeLessThanOrEqual(262_144);
+    await write(MAX_BLOCKED_REQUESTS_BYTES + 1);
+    expect(await readBlockedRequests(dir)).toBeNull();
+    expect(await readBlockedRequests(join(dir, "absent"))).toBeNull();
   });
 });

@@ -81,6 +81,8 @@ export type DockerApplicationHostDeps = Readonly<{
   groupId: string;
   /** An already-extracted tree of the exact candidate commit (`git archive`); never written to. */
   candidateSourceDir: string;
+  /** How long to wait before pulling a missing image again after a failed pull. Default 2000. */
+  imagePullRetryMs?: number;
   /** How often the app container is checked while the executor runs. Default 1000. */
   appPollMs?: number;
   /** How long past the plan deadline the host waits for the executor to exit by itself before killing it. Default 15000. */
@@ -267,10 +269,24 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     return "ok";
   }
 
-  /** The images are pulled here, never by `docker run`, so a run can only start what the host already holds. */
+  /**
+   * The images are pulled here, never by `docker run`, so a run can only start what the host already holds. Runs on one host race to pull the same
+   * image, and the loser's pull can fail although the image is then there, so every failed pull is followed by a fresh look and, if the image is still
+   * missing, up to two more tries. When it never arrives the log carries docker's own words.
+   */
   async function ensureImage(image: string, signal: AbortSignal): Promise<boolean> {
+    let failure = "";
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      if ((await admin(["image", "inspect", image], signal)).code === 0) return true;
+      const pulled = await docker.run(["pull", image], { signal, timeoutMs: Math.min(IMAGE_PULL_TIMEOUT_MS, left()) });
+      if (pulled.code === 0) return true;
+      failure = `${pulled.stderr}${pulled.stdout}`.trim().split("\n").at(-1) ?? "";
+      if (signal.aborted || left() <= 1) break;
+      if (attempt < 3) await new Promise<void>((done) => setTimeout(done, deps.imagePullRetryMs ?? 2_000));
+    }
     if ((await admin(["image", "inspect", image], signal)).code === 0) return true;
-    return (await docker.run(["pull", image], { signal, timeoutMs: Math.min(IMAGE_PULL_TIMEOUT_MS, left()) })).code === 0;
+    appendBuildLog(`image ${image} is not available on the host${failure === "" ? "" : `: ${failure}`}\n`);
+    return false;
   }
 
   async function appStatus(): Promise<{ running: boolean; exitCode: number | null }> {
@@ -289,7 +305,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       return { kind: "unavailable", reason: "build-failed" };
     }
     for (const image of [deps.buildImage, deps.executorImage]) {
-      if (!(await ensureImage(image, signal))) { appendBuildLog(`image ${image} is not available on the host\n`); return { kind: "unavailable", reason: signal.aborted ? stopReason() : "executor-failed" }; }
+      if (!(await ensureImage(image, signal))) return { kind: "unavailable", reason: signal.aborted ? stopReason() : "executor-failed" };
     }
     // Build, or take the source as it is when the recipe builds nothing; either way the app sees /app read-only.
     if (recipe.build.length > 0) {

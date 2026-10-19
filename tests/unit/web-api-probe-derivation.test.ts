@@ -66,6 +66,7 @@ describe("deriving a probe's observation from its retained evidence", () => {
     const pins = (patch: (probe: (typeof WEB_API_REQUIRED_PROBES)[number]) => Record<string, unknown>) => WEB_API_REQUIRED_PROBES.map((probe) => ({ ...probe, ...patch(probe) })) as unknown as typeof WEB_API_REQUIRED_PROBES;
     expect(derive("web-csv-positive-v1", fixtureEvidence("web-csv-positive-v1"), pins((probe) => (probe.probeId === "web-csv-positive-v1" ? { scenarioDigest: "f".repeat(64) } : {})))).toEqual({ ok: false, reason: "probe-evidence-mismatch:web-csv-positive-v1" });
     expect(derive("build-imds-denial-v1", fixtureEvidence("build-imds-denial-v1"), pins((probe) => (probe.probeId === "build-imds-denial-v1" ? { buildCommandDigest: "f".repeat(64) } : {})))).toEqual({ ok: false, reason: "probe-evidence-mismatch:build-imds-denial-v1" });
+    expect(derive("web-csv-positive-v1", fixtureEvidence("web-csv-positive-v1"), pins((probe) => (probe.probeId === "web-csv-positive-v1" ? { bundleDigest: "f".repeat(64) } : {})))).toEqual({ ok: false, reason: "probe-evidence-mismatch:web-csv-positive-v1" });
     // A collected run for a probe that pins no scenario (the build probe) is not a run of it.
     expect(derive("build-imds-denial-v1", { ...collected("web-csv-positive-v1"), runId: webApiProbeRunId(challenge, "build-imds-denial-v1") })).toEqual({ ok: false, reason: "probe-evidence-mismatch:build-imds-denial-v1" });
   });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { E2ERunBindingSchema, WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, runtimeInstallChallengeDigest,
+import { E2ERunBindingSchema, WEB_API_CHALLENGE_LIFETIME_MS, WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, runtimeInstallChallengeDigest,
   webApiProbeRunId } from "../../packages/contracts/src/index.js";
 import { webApiChallenge } from "../support/web-api-qualification.js";
 
@@ -27,6 +27,23 @@ describe("web/API probe run binding", () => {
       if (probe.kind === "build") expect([probe.probeId, probe.buildCommandDigest, probe.scenarioDigest]).toEqual([probe.probeId, expect.stringMatching(/^[a-f0-9]{64}$/), null]);
       else expect([probe.probeId, probe.scenarioDigest, probe.buildCommandDigest]).toEqual([probe.probeId, expect.stringMatching(/^[a-f0-9]{64}$/), null]);
     }
+  });
+
+  it("pins the bundle each collected probe runs under", () => {
+    for (const probe of WEB_API_REQUIRED_PROBES) expect([probe.probeId, probe.bundleDigest]).toEqual([probe.probeId, probe.kind === "build" ? null : expect.stringMatching(/^[a-f0-9]{64}$/)]);
+  });
+
+  it("gives a web/API challenge an hour, long enough for six container runs", () => {
+    expect(WEB_API_CHALLENGE_LIFETIME_MS).toBe(60 * 60_000);
+  });
+
+  it("holds build evidence to its own shape: the source copy (command 0) has no command, a recipe command (1 and up) always has one", () => {
+    const runId = "11111111-1111-4111-8111-111111111111";
+    const build = (commandIndex: number, command: Record<string, unknown> | null) => WebApiProbeEvidenceSchema.safeParse({ kind: "unavailable", runId, reason: "build-failed", build: { commandIndex, exitCode: 7, command } }).success;
+    expect(build(0, null)).toBe(true);
+    expect(build(1, { program: "node" })).toBe(true);
+    expect(build(0, { program: "node" })).toBe(false);
+    expect(build(1, null)).toBe(false);
   });
 
   it("bounds the whole proposal at 5 MiB", () => {

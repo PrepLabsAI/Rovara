@@ -15,11 +15,11 @@ import {
   e2eRegisteredRuntimeKey,
 } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { E2EFeatureVerifierCatalogRecordSchema, E2EFeatureVerifierRecordSchema, WEB_API_WEB_ENGINE, webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
-import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "../../packages/broker/src/aws/runtime-installation.js";
+import { RUNTIME_PROPOSAL_MAX_BYTES, issueRuntimeInstallChallenge, registerRuntimeInstallation, retainImmutableProposal, type RuntimeInstallationDependencies } from "../../packages/broker/src/aws/runtime-installation.js";
 import type { AuthenticatedIdentity } from "../../packages/broker/src/auth.js";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "../../packages/verifier/src/rovara-http-engine-descriptor.js";
 import { qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
-import { WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_REQUIRED_PROBES, runtimeInstallationProposalSha256, webApiRuntimeInstallProposalSha256, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";
+import { WEB_API_CHALLENGE_LIFETIME_MS, WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_REQUIRED_PROBES, runtimeInstallationProposalSha256, webApiRuntimeInstallProposalSha256, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";
 import { proposalFor } from "../support/p0-runtime-proposal.js";
 import { createFakeRuntimeRegistry } from "../support/runtime-registry-fakes.js";
 import { fakeLinuxEnvironment, fakeProbeRunner, privateEvidenceRoot, webApiChallenge } from "../support/web-api-qualification.js";
@@ -162,12 +162,12 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
   const at = Date.parse("2026-10-19T12:00:00.000Z");
 
   async function setup(options: { challenge?: Partial<RuntimeInstallChallenge>; toolchain?: Record<string, string>; runner?: Parameters<typeof fakeProbeRunner>[0] } = {}) {
-    const { deps, items, objects, transactions, seedChallenge } = createFakeRuntimeRegistry(at);
+    const { deps, items, objects, transactions, seedChallenge, setNow } = createFakeRuntimeRegistry(at);
     const challenge = webApiChallenge(at, options.challenge);
     seedChallenge(challenge);
     const proposal = await qualifyInstalledWebApiRuntime({ challenge, evidenceRoot: await privateEvidenceRoot(), runProbe: fakeProbeRunner(options.runner).runProbe,
       environment: fakeLinuxEnvironment(at, options.toolchain ? { nodeExecPath: options.toolchain.execPath! } : {}) });
-    return { deps, items, objects, transactions, challenge, proposal, request: (value: unknown = proposal) => ({ proposal: value, proposalSha256: webApiRuntimeInstallProposalSha256(proposal) }) };
+    return { deps, items, objects, transactions, setNow, challenge, proposal, request: (value: unknown = proposal) => ({ proposal: value, proposalSha256: webApiRuntimeInstallProposalSha256(proposal) }) };
   }
 
   it("lets an administrator open a challenge for the new profile", async () => {
@@ -367,10 +367,10 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
     it("refuses a recorded observation the embedded evidence does not show", async () => {
       const t = await setup();
       // The evidence of a passing csv run, claimed as a failing one, and the reverse for the positive probe.
-      await expectRefused(t, tampered(t, "web-csv-positive-v1", (probe) => { probe.observation = { ...probe.observation, collectorStatus: "FAILED", failedAssertionKinds: ["csv"] }; }), /probe-evidence-mismatch:web-csv-positive-v1|positive-probe-failed/);
-      await expectRefused(t, tampered(t, "api-egress-denial-v1", (probe) => { probe.observation = { ...probe.observation, failedAssertionKinds: ["http-status", "json"] }; }), /probe-evidence-mismatch:api-egress-denial-v1|probe-wrong-cause/);
+      await expectRefused(t, tampered(t, "web-csv-positive-v1", (probe) => { probe.observation = { ...probe.observation, collectorStatus: "FAILED", failedAssertionKinds: ["csv"] }; }), /positive-probe-failed:web-csv-positive-v1/);
+      await expectRefused(t, tampered(t, "api-egress-denial-v1", (probe) => { probe.observation = { ...probe.observation, failedAssertionKinds: ["http-status", "json"] }; }), /probe-wrong-cause:api-egress-denial-v1/);
       await expectRefused(t, tampered(t, "web-csv-positive-v1", (probe) => { probe.observation = { ...probe.observation, evidenceDigest: "f".repeat(64) }; }), /probe-evidence-mismatch:web-csv-positive-v1/);
-      await expectRefused(t, tampered(t, "web-csv-positive-v1", (probe) => { probe.observation = { ...probe.observation, attempts: 2 }; }), /probe-retried|probe-evidence-mismatch/);
+      await expectRefused(t, tampered(t, "web-csv-positive-v1", (probe) => { probe.observation = { ...probe.observation, attempts: 2 }; }), /probe-retried:web-csv-positive-v1/);
     });
 
     it("refuses evidence that carries another run id", async () => {
@@ -423,7 +423,7 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
       await expectRefused(t, tampered(t, "web-egress-denial-v1", (probe) => { probe.evidence.blockedRequestsBase64 = file({ runId: "11111111-1111-4111-8111-111111111111" }); }), /probe-evidence-mismatch:web-egress-denial-v1/);
       await expectRefused(t, tampered(t, "web-egress-denial-v1", (probe) => { probe.evidence.blockedRequestsBase64 = file({ shards: [] }); }), /probe-evidence-mismatch:web-egress-denial-v1/);
       // Dropping the blocked entries changes what the evidence shows, so the recorded blocked host no longer re-derives.
-      await expectRefused(t, tampered(t, "web-egress-denial-v1", (probe) => { probe.evidence.blockedRequestsBase64 = file({ blocked: [] }); }), /probe-evidence-mismatch:web-egress-denial-v1|probe-wrong-cause/);
+      await expectRefused(t, tampered(t, "web-egress-denial-v1", (probe) => { probe.evidence.blockedRequestsBase64 = file({ blocked: [] }); }), /probe-evidence-mismatch:web-egress-denial-v1/);
       await expectRefused(t, tampered(t, "web-egress-denial-v1", (probe) => { probe.evidence.blockedRequestsBase64 = null; }), /probe-evidence-mismatch:web-egress-denial-v1/);
     });
 
@@ -431,7 +431,7 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
       const t = await setup();
       await expectRefused(t, tampered(t, "build-imds-denial-v1", (probe) => { probe.evidence.build!.exitCode = 3; }), /probe-evidence-mismatch:build-imds-denial-v1/);
       await expectRefused(t, tampered(t, "build-imds-denial-v1", (probe) => { probe.evidence.build!.command!.args = ["-e", "process.exit(7)"]; }), /probe-evidence-mismatch:build-imds-denial-v1/);
-      await expectRefused(t, tampered(t, "build-imds-denial-v1", (probe) => { probe.evidence.build = null; }), /probe-evidence-mismatch:build-imds-denial-v1|probe-wrong-cause/);
+      await expectRefused(t, tampered(t, "build-imds-denial-v1", (probe) => { probe.evidence.build = null; }), /probe-evidence-mismatch:build-imds-denial-v1/);
       await expectRefused(t, tampered(t, "build-imds-denial-v1", (probe) => { probe.evidence.runId = "11111111-1111-4111-8111-111111111111"; }), /probe-evidence-unbound:build-imds-denial-v1/);
     });
 
@@ -465,9 +465,48 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
       expect(result.evidence.byteLength).toBe(size);
     });
 
-    it("keeps the standard proposal's 1 MiB retention bound for the P0 profile", async () => {
-      const p0 = proposalFor(webApiChallenge(at, { profileId: "linux-arm64-docker-v1" }));
-      expect(Buffer.byteLength(canonicalJson(p0))).toBeLessThan(1_048_576);
+    it("issues a web/API challenge with an hour and a P0 challenge with five minutes, and the stored row follows the issued expiry", async () => {
+      const stored = new Map<string, Record<string, unknown>>();
+      const deps = { documentClient: { send: async (command: { input: { Item: Record<string, unknown> } }) => { stored.set(String(command.input.Item.pk), command.input.Item); return {}; } },
+        s3: {}, tableName: "state", artifactBucketName: "artifacts", setupCatalogId: "configured-setup", featureCatalogId: "configured-feature", now: () => at } as unknown as RuntimeInstallationDependencies;
+      for (const [profileId, lifetime] of [["linux-arm64-web-api-v1", 60 * 60_000], ["linux-arm64-docker-v1", 5 * 60_000]] as const) {
+        stored.clear();
+        const challenge = await issueRuntimeInstallChallenge(deps, admin, { binding: webApiChallenge(at).binding, endpoint: "http://10.0.2.15:8080", generation: 3,
+          transportCorrelationId: webApiChallenge(at).transportCorrelationId, profileId });
+        expect(Date.parse(challenge.expiresAt) - Date.parse(challenge.issuedAt)).toBe(lifetime);
+        const [row] = [...stored.values()];
+        expect(row).toMatchObject({ expiresAt: challenge.expiresAt, ttl: Math.ceil(Date.parse(challenge.expiresAt) / 1000) });
+      }
+      expect(WEB_API_CHALLENGE_LIFETIME_MS).toBe(60 * 60_000);
+    });
+
+    it("registers a proposal late in the challenge's hour, and refuses one presented after it", async () => {
+      const late = await setup();
+      late.setNow(Date.parse(late.challenge.issuedAt) + 55 * 60_000);
+      await expect(registerRuntimeInstallation(late.deps, admin, late.request())).resolves.toMatchObject({ featureRevisions: { web: 1, api: 1 } });
+      const after = await setup();
+      after.setNow(Date.parse(after.challenge.expiresAt) + 1);
+      await expect(registerRuntimeInstallation(after.deps, admin, after.request())).rejects.toThrow(/expired or from the future/);
+      expect(after.transactions).toHaveLength(0);
+    });
+
+    it("refuses when the challenge expires between retaining the evidence and the registration transaction", async () => {
+      const t = await setup();
+      t.setNow(Date.parse(t.challenge.expiresAt) - 1_000);
+      const send = (t.deps as unknown as { s3: { send: (command: unknown) => Promise<unknown> } }).s3.send;
+      (t.deps as unknown as { s3: { send: (command: unknown) => Promise<unknown> } }).s3.send = async (command) => { const result = await send(command); t.setNow(Date.parse(t.challenge.expiresAt) + 1_000); return result; };
+      await expect(registerRuntimeInstallation(t.deps, admin, t.request())).rejects.toThrow(/expired before its registration transaction/);
+      expect(t.transactions).toHaveLength(0);
+    });
+
+    it("keeps the standard 1 MiB retention bound for the P0 profile and gives the web/API one its own", async () => {
+      const registry = createFakeRuntimeRegistry(at);
+      const big = { padding: "x".repeat(1_048_576 + 1) };
+      const sha256 = sha(canonicalJson(big));
+      await expect(retainImmutableProposal(registry.deps, big, sha256, RUNTIME_PROPOSAL_MAX_BYTES)).rejects.toThrow(/exceeds its evidence bound/);
+      expect(registry.objects.size).toBe(0);
+      await expect(retainImmutableProposal(registry.deps, big, sha256, WEB_API_PROBE_PROPOSAL_MAX_BYTES)).resolves.toMatchObject({ byteLength: Buffer.byteLength(canonicalJson(big)) });
+      expect(RUNTIME_PROPOSAL_MAX_BYTES).toBe(1_048_576);
     });
   });
 });

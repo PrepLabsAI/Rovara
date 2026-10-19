@@ -22,8 +22,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // Only the worker identity and the installed-manifest read are replaced: this CI host is not the EC2 worker and has no installed root.
     // The manifest still hashes the probe assets and the qualification app in this checkout, so a changed file fails against its pinned digest.
     const fake = fakeLinuxEnvironment(now);
-    // Six container runs outlast the usual five-minute challenge window.
-    const challenge = webApiChallenge(now, { expiresAt: new Date(now + 2 * 3_600_000).toISOString() });
+    // A web/API challenge lives an hour, which six container runs fit inside.
+    const challenge = webApiChallenge(now);
     const { runRoot, evidenceRoot } = await linuxProbeScratch();
     const outputRoot = (await linuxProbeScratch()).evidenceRoot;
     const challengeFile = join(outputRoot, "challenge.json");

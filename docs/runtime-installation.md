@@ -56,7 +56,7 @@ docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/v
   --out /mnt/agentx-runtime/evidence/runtime-install-proposal.json
 ```
 
-Copy the proposal out and register it as above (`agentx admin runtime-installation register --proposal-file ...`); the same command registers a P0 or a web/API proposal. A qualification takes several minutes (six container runs, including a build), so request the challenge with enough lifetime for it.
+Copy the proposal out and register it as above (`agentx admin runtime-installation register --proposal-file ...`); the same command registers a P0 or a web/API proposal. A qualification takes several minutes (six container runs, including a build), so the broker issues a `linux-arm64-web-api-v1` challenge with a 60 minute lifetime (a `linux-arm64-docker-v1` challenge keeps its 5 minutes); there is no lifetime option. Qualify and register within that hour, since registration is refused once the challenge has expired. A qualification interrupted part-way can be run again with the same challenge: the runner clears the containers, network and files its earlier attempt left for each probe before starting it.
 
 ### What the registrar verifies, and what it does not
 

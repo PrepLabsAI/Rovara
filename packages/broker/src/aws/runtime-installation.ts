@@ -6,7 +6,7 @@ import {
   canonicalJson, RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema, runtimeInstallChallengeDigest,
   runtimeInstallationProposalSha256, type RuntimeInstallChallenge, type RuntimeInstallationProposal,
   ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
-  WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_RUNTIME_PROFILE_ID, WebApiRuntimeInstallProposalSchema, webApiRuntimeInstallProposalSha256, type WebApiRuntimeInstallProposal,
+  WEB_API_CHALLENGE_LIFETIME_MS, WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_RUNTIME_PROFILE_ID, WebApiRuntimeInstallProposalSchema, webApiRuntimeInstallProposalSha256, type WebApiRuntimeInstallProposal,
   agentXError,
 } from "@agentx/contracts";
 import { parseE2EReport, verifyWebApiProbeRecord } from "@agentx/verifier";
@@ -15,7 +15,11 @@ import { projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeR
 import { e2eFeatureVerifierKey, e2eWebApiRuntimeRecords, E2E_FEATURE_PROCESS_RESPONSE_SCOPE, E2EFeatureVerifierRecordSchema } from "./e2e-feature-verifier-catalog.js";
 import { e2eRegisteredRuntimeKey } from "./e2e-runtime-readiness.js";
 
-const MAX_PROPOSAL_BYTES = 1_048_576;
+/** The standard (P0) proposal's retention bound; the web/API proposal has its own, larger one. */
+export const RUNTIME_PROPOSAL_MAX_BYTES = 1_048_576;
+const MAX_PROPOSAL_BYTES = RUNTIME_PROPOSAL_MAX_BYTES;
+/** A P0 challenge covers three quick probes; a web/API one covers six container runs and gets `WEB_API_CHALLENGE_LIFETIME_MS`. */
+const STANDARD_CHALLENGE_LIFETIME_MS = 5 * 60_000;
 const PROFILE_ID = "default-sandbox";
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
 
@@ -61,7 +65,7 @@ export async function issueRuntimeInstallChallenge(
   const id = (deps.randomUUID ?? randomUUID)();
   const challenge = RuntimeInstallChallengeSchema.parse({
     schemaVersion: "runtime-install-challenge/v1", challengeId: id, challengeSecret: randomBytes(32).toString("base64"),
-    issuedAt: new Date(issuedAtMs).toISOString(), expiresAt: new Date(issuedAtMs + (deps.challengeLifetimeMs ?? 5 * 60_000)).toISOString(),
+    issuedAt: new Date(issuedAtMs).toISOString(), expiresAt: new Date(issuedAtMs + (deps.challengeLifetimeMs ?? (request.profileId === WEB_API_RUNTIME_PROFILE_ID ? WEB_API_CHALLENGE_LIFETIME_MS : STANDARD_CHALLENGE_LIFETIME_MS))).toISOString(),
     issuedByOwnerKey: identity.ownerKey, issuedBySubject: identity.subject,
     binding: request.binding, setupCatalogId: deps.setupCatalogId, featureCatalogId: deps.featureCatalogId,
     profileId: request.profileId, endpoint: request.endpoint, generation: request.generation, transportCorrelationId: request.transportCorrelationId,
@@ -107,7 +111,7 @@ export function runtimeInstallationRecords(input: {
   return { setup, feature };
 }
 
-async function retainImmutableProposal(deps: RuntimeInstallationDependencies, proposal: object, proposalSha256: string, maxBytes: number): Promise<{ key: string; sha256: string; byteLength: number }> {
+export async function retainImmutableProposal(deps: RuntimeInstallationDependencies, proposal: object, proposalSha256: string, maxBytes: number): Promise<{ key: string; sha256: string; byteLength: number }> {
   const body = canonicalJson(proposal);
   const bytes = Buffer.from(body, "utf8");
   if (bytes.byteLength > maxBytes || sha(bytes) !== proposalSha256) throw agentXError("CONFIG_INVALID", "runtime proposal exceeds its evidence bound or its digest changed");

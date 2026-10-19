@@ -8,7 +8,7 @@ import { WebApiQualificationRejected, qualifyInstalledWebApiRuntime } from "../.
 import { main as qualificationCli, webApiProbeRunnerConfig } from "../../packages/verifier/src/install-qualification-cli.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { loadWebApiQualificationProbeAssets } from "../../packages/verifier/src/application-runtime-probes.js";
-import { fakeLinuxEnvironment, fakeProbeRunner, goodWebApiObservations, privateEvidenceRoot, webApiChallenge } from "../support/web-api-qualification.js";
+import { fakeLinuxEnvironment, fakeProbeRunner, goodWebApiObservation, privateEvidenceRoot, webApiChallenge } from "../support/web-api-qualification.js";
 
 const now = Date.parse("2026-10-19T12:00:00.000Z");
 async function qualify(overrides: Parameters<typeof fakeProbeRunner>[0] = {}, extra: Partial<Parameters<typeof qualifyInstalledWebApiRuntime>[0]> = {}) {
@@ -124,8 +124,8 @@ describe("web/API runtime qualification", () => {
 
 describe("web/API qualification oracle and proposal", () => {
   it("is deterministic over the observation alone", () => {
-    for (const required of WEB_API_REQUIRED_PROBES) expect(evaluateWebApiProbeObservation(required.probeId, goodWebApiObservations[required.probeId])).toEqual({ ok: true });
-    expect(evaluateWebApiProbeObservation("web-auth-viewer-refusal-v1", goodWebApiObservations["web-csv-positive-v1"])).toEqual({ ok: false, reason: "unknown-probe:web-auth-viewer-refusal-v1" });
+    for (const required of WEB_API_REQUIRED_PROBES) expect(evaluateWebApiProbeObservation(required.probeId, goodWebApiObservation(required.probeId))).toEqual({ ok: true });
+    expect(evaluateWebApiProbeObservation("web-auth-viewer-refusal-v1", goodWebApiObservation("web-csv-positive-v1"))).toEqual({ ok: false, reason: "unknown-probe:web-auth-viewer-refusal-v1" });
   });
 
   it("cannot be made READY by editing the label: the schema re-judges the recorded evidence", async () => {

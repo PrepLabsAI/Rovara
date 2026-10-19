@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { mkdtemp, chmod, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
-import { WEB_API_QUALIFICATION_APP_MANIFEST_PREFIX, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, canonicalJson, webApiProbeAssetManifestPath,
+import { WEB_API_CHALLENGE_LIFETIME_MS, WEB_API_QUALIFICATION_APP_MANIFEST_PREFIX, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, canonicalJson, webApiProbeAssetManifestPath,
   type RuntimeInstallChallenge, type WebApiProbeEvidence, type WebApiProbeObservation, type WebApiProbeRun } from "../../packages/contracts/src/index.js";
 import { deriveWebApiProbeObservation } from "../../packages/verifier/src/web-api-probe-evidence.js";
 import type { WebApiQualificationEnvironment } from "../../packages/verifier/src/install-qualification.js";
@@ -19,7 +19,7 @@ export const WEB_API_FIXTURE_NOW = Date.parse("2026-10-19T12:00:00.000Z");
  */
 export function webApiChallenge(now: number, overrides: Partial<RuntimeInstallChallenge> = {}): RuntimeInstallChallenge {
   return { schemaVersion: "runtime-install-challenge/v1", challengeId: "5d1f0f4e-3c2a-4b8e-9f64-7a1c2b3d4e5f", challengeSecret: `${"B".repeat(43)}=`,
-    issuedAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now + 240_000).toISOString(), issuedByOwnerKey: "admin", issuedBySubject: "admin",
+    issuedAt: new Date(now - 60_000).toISOString(), expiresAt: new Date(now - 60_000 + WEB_API_CHALLENGE_LIFETIME_MS).toISOString(), issuedByOwnerKey: "admin", issuedBySubject: "admin",
     binding: { deploymentMode: "ec2-ebs", launchTemplateId: "lt-01234567", subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-01234567" }], volumeSizeGiB: 32, volumeType: "gp3" },
     setupCatalogId: "configured-setup", featureCatalogId: "configured-feature", profileId: "linux-arm64-web-api-v1", endpoint: "http://10.0.2.15:8080",
     generation: 3, transportCorrelationId: "7b0e9c52-6d41-4f1e-8a3b-2c5d6e7f8091",
@@ -42,8 +42,8 @@ export function fixtureProbeRuns(challenge: RuntimeInstallChallenge = webApiChal
   }));
 }
 
-/** The observations a healthy, contained runtime produces for each required probe. */
-export const goodWebApiObservations: Record<string, WebApiProbeObservation> = Object.fromEntries(Object.entries(fixtureProbeRuns()).map(([probeId, run]) => [probeId, run.observation]));
+/** The observation a healthy, contained runtime produces for a required probe. Read from the committed evidence when asked, so stale evidence can be regenerated. */
+export function goodWebApiObservation(probeId: string): WebApiProbeObservation { return fixtureProbeRuns()[probeId]!.observation; }
 
 /**
  * A fake probe runner replaying the committed evidence, with per-probe overrides of the recorded observation. An override changes only the claimed

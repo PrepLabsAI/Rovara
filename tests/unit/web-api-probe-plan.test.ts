@@ -16,6 +16,8 @@ describe("the production web/API probe plan", () => {
     const plan = createWebApiProbePlan({ probe: driver.probe, appRoot, runId: webApiProbeRunId(challenge, probe.probeId) });
     expect(sha(canonicalJson(plan.scenario))).toBe(probe.scenarioDigest);
     expect(plan.compiled.bundle.scenarios.map(canonicalJson)).toEqual([canonicalJson(plan.scenario)]);
+    // The bundle is deterministic too, so its digest is pinned and a run admitted under any other bundle cannot be this probe's.
+    expect(plan.compiled.bundle.bundleDigest).toBe(probe.bundleDigest);
   });
 
   it("pins the build command of the IMDS probe, which comes from the installed probe asset", () => {

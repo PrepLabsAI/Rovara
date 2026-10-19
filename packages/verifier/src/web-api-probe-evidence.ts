@@ -59,7 +59,7 @@ export function deriveWebApiProbeObservation(input: Readonly<{ challenge: Runtim
   if (!bundle.success || !oracle.success || !collection.success) return mismatch(required.probeId);
   const scenario = bundle.data.scenarios[0];
   if (bundle.data.scenarios.length !== 1 || !scenario || sha(canonicalJson(scenario)) !== required.scenarioDigest
-    || oracle.data.binding.bundleDigest !== bundle.data.bundleDigest) return mismatch(required.probeId);
+    || bundle.data.bundleDigest !== required.bundleDigest || oracle.data.binding.bundleDigest !== bundle.data.bundleDigest) return mismatch(required.probeId);
   if (oracle.data.binding.runId !== evidence.runId) return { ok: false, reason: `probe-evidence-unbound:${required.probeId}` };
 
   const qualification = qualifyE2EApplicationCollection(oracle.data, collection.data);

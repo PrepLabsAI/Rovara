@@ -46,7 +46,7 @@ describe.runIf(enabled)("production probe runner around the real executor (local
     const docker = new LocalExecutorDocker(); dockers.push(docker);
     docker.failOn("build", 7);
     const now = Date.now();
-    const challenge = webApiChallenge(now, { expiresAt: new Date(now + 2 * 3_600_000).toISOString() });
+    const challenge = webApiChallenge(now);
     const evidenceRoot = join(root, "evidence"); await mkdir(evidenceRoot, { mode: 0o700 });
     await writeFile(join(root, "challenge.json"), canonicalJson(challenge));
     const proposalFile = join(root, "proposal.json");

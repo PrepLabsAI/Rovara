@@ -4,6 +4,9 @@ import { canonicalJson } from "./canonical-json.js";
 import { RuntimeInstallChallengeSchema, RuntimeInstallManifestSchema, runtimeInstallChallengeDigest, type RuntimeInstallChallenge } from "./runtime-installation.js";
 import { ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema } from "./session.js";
 
+/** How long a web/API challenge lives: six probe runs, including a build, take far longer than the five minutes a P0 challenge gets. */
+export const WEB_API_CHALLENGE_LIFETIME_MS = 60 * 60_000;
+
 /** The web/API application runtime profile and the one scope its qualification proves. */
 export const WEB_API_RUNTIME_PROFILE_ID = "linux-arm64-web-api-v1" as const;
 export const WEB_API_RUNTIME_SCOPE = "application-web-api/v1" as const;
@@ -18,6 +21,8 @@ type ExpectedFailureCause =
 type RequiredProbe = Readonly<{ probeId: string; /** sha256 of the installed probe asset file; a test keeps it equal to the shipped bytes. */ assetDigest: string; kind: "web" | "api" | "build"; expectedOutcome: "PASS" | "EXPECTED_FAILURE"; cause: ExpectedFailureCause | null;
   /** sha256 of the canonical scenario the probe runs through the real collector; null for the build probe. A test recomputes it from the production plan builder. */
   scenarioDigest: string | null;
+  /** The digest of the whole scenario bundle the probe is admitted under (deterministic for the pinned app); null for the build probe. */
+  bundleDigest: string | null;
   /** sha256 of the canonical build command the probe runs; null unless the probe is a build probe. A test recomputes it from the installed probe asset. */
   buildCommandDigest: string | null }>;
 
@@ -26,13 +31,13 @@ export const webApiProbeAssetManifestPath = (probeId: string) => `packages/verif
 
 /** The exact probe set M1.1 requires, in the order a proposal carries it. The auth and tenant probes belong to M1.3. */
 const requiredProbes: RequiredProbe[] = [
-  { probeId: "web-csv-positive-v1", assetDigest: "3fd4928bf1fd9db70994ea733caede591f5fdab1574e340b89f397d9000985e4", kind: "web", expectedOutcome: "PASS", cause: null, scenarioDigest: "a7cd24dfbb78f5760995b3d8ac1a977a422ccf7d5601cfbaaafd6e0f8201cf5e", buildCommandDigest: null },
-  { probeId: "web-csv-negative-v1", assetDigest: "91b591d3551262a6f8800e530ae502b9ed02e7066411194b0d9bfdc8aa079d14", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "csv" }, scenarioDigest: "a7cd24dfbb78f5760995b3d8ac1a977a422ccf7d5601cfbaaafd6e0f8201cf5e", buildCommandDigest: null },
-  { probeId: "web-egress-denial-v1", assetDigest: "a7e28d356365d736b8b1251344df6ca89194ea78ebd2ea977790bc03d9cf9e19", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "blocked-host", host: "probe.example.com" }, scenarioDigest: "8f823b398850bad62569c6744e255576129fc2616edcb0be8aa616c2491e37e0", buildCommandDigest: null },
-  { probeId: "api-state-positive-v1", assetDigest: "5fa681bbcf60bdcbee9804d8bfe9bbd56c60d6a35925b5f9e929c42d9773cbc7", kind: "api", expectedOutcome: "PASS", cause: null, scenarioDigest: "fd333864038602a5788fbca3324f27f3e2d38cee12b4c8de3b5a0385fc4097dc", buildCommandDigest: null },
+  { probeId: "web-csv-positive-v1", assetDigest: "3fd4928bf1fd9db70994ea733caede591f5fdab1574e340b89f397d9000985e4", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "7469c1ac56ae5f5453d41d8c66a6f5e5be07a921530268e0976f22165b8652d8", scenarioDigest: "a7cd24dfbb78f5760995b3d8ac1a977a422ccf7d5601cfbaaafd6e0f8201cf5e", buildCommandDigest: null },
+  { probeId: "web-csv-negative-v1", assetDigest: "91b591d3551262a6f8800e530ae502b9ed02e7066411194b0d9bfdc8aa079d14", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "csv" }, bundleDigest: "7469c1ac56ae5f5453d41d8c66a6f5e5be07a921530268e0976f22165b8652d8", scenarioDigest: "a7cd24dfbb78f5760995b3d8ac1a977a422ccf7d5601cfbaaafd6e0f8201cf5e", buildCommandDigest: null },
+  { probeId: "web-egress-denial-v1", assetDigest: "a7e28d356365d736b8b1251344df6ca89194ea78ebd2ea977790bc03d9cf9e19", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "blocked-host", host: "probe.example.com" }, bundleDigest: "3554e2486a31a410d70bba007270ee12160fb043a29f7c6587250ea6f99ad88f", scenarioDigest: "8f823b398850bad62569c6744e255576129fc2616edcb0be8aa616c2491e37e0", buildCommandDigest: null },
+  { probeId: "api-state-positive-v1", assetDigest: "5fa681bbcf60bdcbee9804d8bfe9bbd56c60d6a35925b5f9e929c42d9773cbc7", kind: "api", expectedOutcome: "PASS", cause: null, bundleDigest: "033b193aaa1ab0ed459770bf2a91141b33b5c247d6e23ec713630a0f95b74dc4", scenarioDigest: "fd333864038602a5788fbca3324f27f3e2d38cee12b4c8de3b5a0385fc4097dc", buildCommandDigest: null },
   // The app, not the browser, makes this request, so the executor cannot record the blocked host; the dependency check fails instead.
-  { probeId: "api-egress-denial-v1", assetDigest: "ccfebb5c1e33d3f5a5d80d99cb51d42b29f2c6bd02ad76f81a746684276ade47", kind: "api", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "http-status" }, scenarioDigest: "f44a7c49ba550068840d67e45a431575751e83bd254bbd2c53b9159ab7696975", buildCommandDigest: null },
-  { probeId: "build-imds-denial-v1", assetDigest: "c6494ae44cf33f9824944dfe6606d82ac6c3a0240e355508d03785361adc23ac", kind: "build", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "build-failed" }, scenarioDigest: null, buildCommandDigest: "e8c2c552f1e011563ceeb18fc08bc03dd5e51a142a2e1e6e9327d8422ac4f6cd" },
+  { probeId: "api-egress-denial-v1", assetDigest: "ccfebb5c1e33d3f5a5d80d99cb51d42b29f2c6bd02ad76f81a746684276ade47", kind: "api", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "http-status" }, bundleDigest: "da196373fe0a42577122bf6f37f90371195fc631dda6cb2bf31279d68f261f71", scenarioDigest: "f44a7c49ba550068840d67e45a431575751e83bd254bbd2c53b9159ab7696975", buildCommandDigest: null },
+  { probeId: "build-imds-denial-v1", assetDigest: "c6494ae44cf33f9824944dfe6606d82ac6c3a0240e355508d03785361adc23ac", kind: "build", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "build-failed" }, bundleDigest: null, scenarioDigest: null, buildCommandDigest: "e8c2c552f1e011563ceeb18fc08bc03dd5e51a142a2e1e6e9327d8422ac4f6cd" },
 ];
 export const WEB_API_REQUIRED_PROBES: readonly RequiredProbe[] = Object.freeze(requiredProbes.map((probe) => Object.freeze(probe)));
 export const WEB_API_REQUIRED_PROBE_IDS = WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId) as [string, ...string[]];
@@ -68,7 +73,7 @@ export const WebApiProbeObservationSchema = z.object({
 }).strict();
 export type WebApiProbeObservation = z.infer<typeof WebApiProbeObservationSchema>;
 
-/** The whole canonical proposal, evidence included, may not exceed this; the registrar refuses a larger one before parsing it. */
+/** The whole canonical proposal, evidence included, may not exceed this: the proposal schema refuses a larger one (`probe-evidence-oversized`), so the registrar writes nothing for it. */
 export const WEB_API_PROBE_PROPOSAL_MAX_BYTES = 5 * 1024 * 1024;
 
 /**
@@ -96,7 +101,9 @@ export const WebApiProbeEvidenceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("collected"), runId: runIdSchema, scenarioBundle: jsonObject, collection: jsonObject, oracle: jsonObject,
     blockedRequestsBase64: z.string().max(262_144).regex(/^[A-Za-z0-9+/]*={0,2}$/).nullable() }).strict(),
   z.object({ kind: z.literal("unavailable"), runId: runIdSchema, reason: z.string().min(1).max(200),
-    build: z.object({ commandIndex: z.number().int().min(0).max(64), exitCode: z.number().int().min(0).max(255).nullable(), command: jsonObject.nullable() }).strict().nullable() }).strict(),
+    // Command 0 is the source copy, which has no recipe command; every recipe command (1 and up) is named.
+    build: z.object({ commandIndex: z.number().int().min(0).max(64), exitCode: z.number().int().min(0).max(255).nullable(), command: jsonObject.nullable() }).strict()
+      .refine((build) => (build.commandIndex === 0) === (build.command === null), { message: "build command index 0 is the source copy and has no command; recipe commands are named" }).nullable() }).strict(),
 ]);
 export type WebApiProbeEvidence = z.infer<typeof WebApiProbeEvidenceSchema>;
 /** What a probe runner returns: the observed facts and the evidence they were derived from. */

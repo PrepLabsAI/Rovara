@@ -7,6 +7,7 @@ import type { RuntimeInstallationDependencies } from "../../packages/broker/src/
  * one issued challenge row a registration consumes. Nothing here is a real AWS client.
  */
 export function createFakeRuntimeRegistry(at: number) {
+  let current = at;
   const items = new Map<string, Record<string, unknown>>();
   const objects = new Map<string, Buffer>();
   const transactions: Array<Array<Record<string, unknown>>> = [];
@@ -30,7 +31,7 @@ export function createFakeRuntimeRegistry(at: number) {
     if (command.constructor.name === "PutObjectCommand") { objects.set(command.input.Key, Buffer.from(command.input.Body!)); return {}; }
     throw new Error("unexpected object-store command");
   } };
-  const deps = { documentClient, s3, tableName: "state", artifactBucketName: "artifacts", setupCatalogId: "configured-setup", featureCatalogId: "configured-feature", now: () => at } as unknown as RuntimeInstallationDependencies;
+  const deps = { documentClient, s3, tableName: "state", artifactBucketName: "artifacts", setupCatalogId: "configured-setup", featureCatalogId: "configured-feature", now: () => current } as unknown as RuntimeInstallationDependencies;
   /** The row `issueRuntimeInstallChallenge` writes for this challenge, so a registration of a proposal answering it can consume it. */
   const seedChallenge = (challenge: RuntimeInstallChallenge) => {
     items.set(`RUNTIME_INSTALL_CHALLENGE#${challenge.challengeId}|CHALLENGE`, { pk: `RUNTIME_INSTALL_CHALLENGE#${challenge.challengeId}`, sk: "CHALLENGE",
@@ -38,5 +39,7 @@ export function createFakeRuntimeRegistry(at: number) {
       secretSha256: createHash("sha256").update(Buffer.from(challenge.challengeSecret, "base64")).digest("hex"), issuedByOwnerKey: challenge.issuedByOwnerKey, issuedBySubject: challenge.issuedBySubject,
       issuedAt: challenge.issuedAt, expiresAt: challenge.expiresAt });
   };
-  return { deps, items, objects, transactions, seedChallenge };
+  /** Moves the registrar's clock, which starts at `at`. */
+  const setNow = (ms: number) => { current = ms; };
+  return { deps, items, objects, transactions, seedChallenge, setNow };
 }

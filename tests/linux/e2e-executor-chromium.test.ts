@@ -2,8 +2,12 @@ import { afterAll, describe, expect, it } from "vitest";
 import { blockedHosts, caseStatuses, csvRows, failedAssertionKinds } from "../support/e2e-executor-output.js";
 import { removeProbeDirs, runProbe, type ProbeRun } from "../support/linux-runtime.js";
 
-/** Everything a failing run left to explain it: why it was unavailable, and the redacted log tails. */
-const why = (r: ProbeRun) => `${r.run.unavailableReason ?? ""}\n${JSON.stringify(r.host.readDiagnostics(r.fixture.plan.runId))}`;
+/** Everything a failing run left to explain it, labelled: why it was unavailable and each redacted log tail, so a CI failure names its own cause. */
+const why = (r: ProbeRun) => {
+  const logs = r.host.readDiagnostics(r.fixture.plan.runId);
+  return `the run was ${r.run.unavailableReason === null ? "available" : `unavailable (${r.run.unavailableReason})`}; executor exit code ${String(r.exitCode)}\n`
+    + `build log: ${logs.buildLogTail || "(empty)"}\napp log: ${logs.appLogTail || "(empty)"}\nexecutor log: ${logs.executorLogTail || "(empty)"}`;
+};
 const outOf = (r: ProbeRun) => { if (r.outDir === null) throw new Error(`the run was unavailable: ${why(r)}`); return r.outDir; };
 
 // Real Docker, the real executor image and a real Chromium on a per-run internal network. It runs only in the CI
@@ -14,6 +18,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
 
   it("web-csv-positive: real Chromium downloads the exact CSV", async () => {
     const r = await runProbe("web-csv-positive-v1", { defect: null });
+    expect(r.run.unavailableReason, why(r)).toBeNull();
     expect(r.exitCode, why(r)).toBe(0);
     expect(caseStatuses(outOf(r), r.fixture)).toEqual({ "web-csv-positive-v1": "passed" });
     // The rows are the fixture's own: tests/fixtures/e2e-web-api-app/fixtures/orders.json for tenant-a, as the CSV probe oracle lists them.

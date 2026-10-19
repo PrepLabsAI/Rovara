@@ -66,13 +66,14 @@ export type E2EWebApiQualificationProbeAsset = Readonly<{ probeId: string; kind:
 
 /**
  * Loads exactly the probe assets `linux-arm64-web-api-v1` requires (the auth and tenant probes belong to a later milestone), each bound
- * to its fixed identity. The qualification ids are the asset file names, `web-csv-positive-v1` for `web-csv-positive/v1`.
+ * to its fixed identity and to the digest pinned in contracts. The qualification ids are the asset file names, `web-csv-positive-v1` for `web-csv-positive/v1`.
  */
-export function loadWebApiQualificationProbeAssets(): readonly E2EWebApiQualificationProbeAsset[] {
+export function loadWebApiQualificationProbeAssets(root = join(dirname(fileURLToPath(import.meta.url)), "../assets/application-runtime-v1/probes")): readonly E2EWebApiQualificationProbeAsset[] {
   return WEB_API_REQUIRED_PROBES.map((required) => {
-    const path = join(dirname(fileURLToPath(import.meta.url)), "../assets/application-runtime-v1/probes", `${required.probeId}.json`);
-    const bytes = readFileSync(path);
+    const bytes = readFileSync(join(root, `${required.probeId}.json`));
     if (bytes.byteLength > 16_384) throw new Error("installed runtime probe asset exceeds its bound");
+    // The asset is the one pinned in contracts or nothing is built from it.
+    if (sha(bytes) !== required.assetDigest) throw new Error(`probe-asset-digest-mismatch:${required.probeId}`);
     const probe = probeSchema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
     const assetId = required.probeId.replace(/-v1$/, "/v1");
     if (probe.probeId !== assetId || probe.templateId !== assetId || probe.kind !== required.kind
