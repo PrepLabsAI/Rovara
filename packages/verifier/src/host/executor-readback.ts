@@ -65,6 +65,12 @@ export function validateExecutorResult(result: ExecutorResultFile, binding: Pick
   if (result.exitCode === 2 || result.runId !== binding.runId || result.groupId !== binding.groupId) throw new Error("executor result is not a completed run of this group");
 }
 
+/** A directory the executor created inside its own out directory: a link in its place would read whatever it points at. */
+async function requireRealDirectory(path: string, label: string): Promise<void> {
+  const info = await lstat(path);
+  if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`executor output ${label} is not a real directory`);
+}
+
 const observationSchema = z.object({ schemaVersion: z.literal("e2e-executor-observation/v1"), artifactId: z.string().min(1).max(200), kind: z.string(),
   mediaType: z.string().min(1).max(120), sha256: z.string().regex(/^[a-f0-9]{64}$/), byteLength: z.number().int().nonnegative(),
   encoding: z.enum(["utf8", "base64"]).optional(), content: z.string().optional(), file: z.string().optional() }).passthrough();
@@ -81,14 +87,17 @@ export const executorShardDirectory = (shardId: string): string => sha(shardId).
 export async function snapshotExecutorOutput(outDir: string, result: ExecutorResultFile): Promise<ExecutorOutputSnapshot> {
   const budget = { total: 0 };
   const shardFiles = new Map<string, ShardFiles>();
+  if (result.shards.length > 0) await requireRealDirectory(join(outDir, "shards"), "shards");
   for (const shard of result.shards) {
     const directory = `shards/${executorShardDirectory(shard.shardId)}`;
     if (!SAFE_DIR.test(directory.slice("shards/".length))) throw new Error("executor shard directory name is invalid");
+    await requireRealDirectory(join(outDir, directory), directory);
     shardFiles.set(shard.shardId, Object.freeze({
       list: await readRegular(outDir, `${directory}/list.stdout.json`, budget), listStderr: await readRegular(outDir, `${directory}/list.stderr.txt`, budget),
       report: await readRegular(outDir, `${directory}/report.json`, budget), runStderr: await readRegular(outDir, `${directory}/run.stderr.txt`, budget),
       runStart: await readRegular(outDir, `${directory}/run-start.jsonl`, budget) }));
   }
+  await requireRealDirectory(join(outDir, "observations"), "observations");
   const names = (await readdir(join(outDir, "observations"))).filter((name) => /^ev-[A-Za-z0-9_-]+\.json$/.test(name)).sort();
   if (names.length > MAX_FILES) throw new Error("executor output holds more evidence items than the host reads");
   const evidence: OutputEvidence[] = [];
@@ -97,6 +106,7 @@ export async function snapshotExecutorOutput(outDir: string, result: ExecutorRes
     let bytes: Uint8Array;
     if (row.file !== undefined) {
       if (!/^downloads\/[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/.test(row.file) || row.file.includes("..")) throw new Error("executor evidence file path is outside downloads");
+      await requireRealDirectory(join(outDir, "downloads"), "downloads");
       bytes = await readRegular(outDir, row.file, budget);
     } else if (row.content !== undefined && row.encoding !== undefined) bytes = Uint8Array.from(Buffer.from(row.content, row.encoding === "base64" ? "base64" : "utf8"));
     else throw new Error("executor evidence row carries neither content nor a file");
@@ -224,8 +234,10 @@ export function assembleExecutorActualRun(input: { snapshot: ExecutorOutputSnaps
     // behaviors not exercised are the assertions that did not pass.
     const coverage = { ...original.coverage, executedCandidateParts: original.coverage.observedScope === "source" ? [] : [original.applicationId],
       unexercisedBehaviors: original.assertions.filter((assertion) => assertion.outcome !== "passed").map((assertion) => assertion.digest) };
-    const capture = E2EApplicationCaseCaptureSchema.parse({ ...original, coverage, cleanup: "confirmed" });
-    const sealed = proof(capture, item.ref.mediaType, item.ref.artifactId);
+    // The sealed frame is a new artifact and lists the executor's original capture among its artifacts, so the original bytes stay in the
+    // closure and an auditor can compare the two: only `cleanup` and `coverage` differ.
+    const capture = E2EApplicationCaseCaptureSchema.parse({ ...original, coverage, cleanup: "confirmed", artifacts: [...original.artifacts, item.ref] });
+    const sealed = proof(capture, item.ref.mediaType, `${item.ref.artifactId}-sealed`);
     const resealed: OutputEvidence = Object.freeze({ ref: sealed.ref, bytes: sealed.bytes, kind: item.kind });
     sealedCaptures.set(item.ref.artifactId, resealed);
     return { capture, item: resealed };
@@ -241,7 +253,7 @@ export function assembleExecutorActualRun(input: { snapshot: ExecutorOutputSnaps
     mockConsumptions: [], cleanupRef: cleanupFrame.ref, additionalSupervisorReceiptRefs: [cleanupReceipt.ref] },
   "application/json", `rovara-supervisor-receipt-${binding.runId}`);
 
-  const evidence: E2EApplicationProofBytes[] = [...snapshot.evidence.map((item) => sealedCaptures.get(item.ref.artifactId) ?? item).map(({ ref, bytes }) => ({ ref, bytes })), cleanupReceipt, cleanupFrame]
+  const evidence: E2EApplicationProofBytes[] = [...snapshot.evidence.map(({ ref, bytes }) => ({ ref, bytes })), ...[...sealedCaptures.values()].map(({ ref, bytes }) => ({ ref, bytes })), cleanupReceipt, cleanupFrame]
     .sort((a, b) => compare(a.ref.artifactId, b.ref.artifactId));
   const supervisorReceiptRefs = [receiptFrame.ref, cleanupReceipt.ref].sort((a, b) => compare(a.artifactId, b.artifactId));
   return Object.freeze({ protocol: "e2e-actual-application-run/v1" as const, runnerToolchain: toolchain, shards: Object.freeze(shards),

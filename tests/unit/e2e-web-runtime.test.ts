@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { canonicalJson } from "@agentx/contracts";
 import { evaluateE2EApplicationRawAssertion } from "../../packages/verifier/src/application-services.js";
-import { createWebApplicationCliHost, executeWebSteps, runInsideAssertionSteps, type E2EWebRuntimePorts } from "../../packages/verifier/src/web-runtime.js";
+import { createWebApplicationCliHost, executeWebSteps, type E2EWebRuntimePorts } from "../../packages/verifier/src/web-runtime.js";
 import { readE2EApplicationInstalledFileFixture } from "../../packages/verifier/src/application-runtime-assets.js";
 import type { E2EApplicationCliLaunchContext } from "../../packages/verifier/src/application-runtime-bootstrap.js";
 
@@ -147,40 +147,5 @@ describe("web application runtime", () => {
     const malformed = evaluateE2EApplicationRawAssertion({ assertion, schemaBytes: schema, bytes: Buffer.from('{"version":"1","ids":["a1","a2"]}') });
     expect(good).toMatchObject({ supported: true, passed: true });
     expect(malformed).toMatchObject({ supported: true, passed: false });
-  });
-});
-
-describe("approved assertions as report steps", () => {
-  /** The runner's own bookkeeping: a step takes the next index when it starts and fails when its body throws. */
-  function recorder(wrap = false) {
-    const steps: { index: number; status: "passed" | "failed" }[] = [];
-    return { steps, fixture: { async step(_requested: number, body: () => Promise<void>) {
-      const record = { index: steps.length, status: "passed" as "passed" | "failed" };
-      steps.push(record);
-      try { await body(); } catch (error) { record.status = "failed"; throw wrap ? new Error("step failed", { cause: error }) : error; }
-    } } };
-  }
-
-  it.each([[false], [true]])("fails exactly the step of the first assertion that did not hold, at its own index (wrapped errors: %s)", async (wrap) => {
-    const { steps, fixture } = recorder(wrap);
-    const chain = await runInsideAssertionSteps(fixture, 3, async () => ({ failedIndex: 1, unavailableIndex: 2 }));
-    expect(chain).toEqual({ outcome: { failedIndex: 1, unavailableIndex: 2 }, error: undefined });
-    expect(steps).toEqual([{ index: 0, status: "passed" }, { index: 1, status: "failed" }, { index: 2, status: "passed" }]);
-  });
-
-  it("fails no step when every assertion held or the first one failed before the rest were observed", async () => {
-    for (const [failedIndex, expected] of [[-1, ["passed", "passed"]], [0, ["failed", "passed"]]] as const) {
-      const { steps, fixture } = recorder();
-      await runInsideAssertionSteps(fixture, 2, async () => ({ failedIndex, unavailableIndex: failedIndex === 0 ? 1 : -1 }));
-      expect(steps.map((step) => step.status)).toEqual(expected);
-    }
-  });
-
-  it("never blames an assertion step for a failure that is not an assertion", async () => {
-    const { steps, fixture } = recorder();
-    const navigationError = new Error("net::ERR_EMPTY_RESPONSE");
-    const chain = await runInsideAssertionSteps(fixture, 3, async () => { throw navigationError; });
-    expect(chain).toEqual({ outcome: null, error: navigationError });
-    expect(steps.map((step) => step.status)).toEqual(["passed", "passed", "passed"]);
   });
 });

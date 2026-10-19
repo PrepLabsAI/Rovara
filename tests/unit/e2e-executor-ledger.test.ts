@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -131,6 +131,23 @@ describe("file case ledger", () => {
     const file = join(dir, "observations", `binding-${caseId.replaceAll(":", "_")}.json`);
     await writeFile(file, (await readFile(file, "utf8")).replace("rovara-session-1", "rovara-session-2"));
     await expect(snapshotExecutorOutput(dir, result)).rejects.toThrow(/digest the executor recorded/);
+  });
+
+  it("refuses to read the output of a run whose evidence directories are links", async () => {
+    const result: ExecutorResultFile = { schemaVersion: "e2e-executor-result/v1", exitCode: 0, reason: null, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+      node: { version: "v22.23.2", execPath: "/usr/local/bin/node", platform: "linux", arch: "arm64" }, runId: resolved.binding.runId, groupId: resolved.binding.groupId, shards: [] };
+    for (const name of ["observations", "downloads"]) {
+      const dir = await root(); const elsewhere = await root();
+      const ledger = createFileCaseLedger(dir, plan);
+      await ledger.evidence.recordCaseEvidence({ caseId, kind: "download", bytes: Buffer.from("id\r\n"), mediaType: "text/csv" }, signal);
+      await expect(snapshotExecutorOutput(dir, result)).resolves.toBeDefined();
+      // Swap the real directory for a link to a directory the executor does not own, keeping its contents readable through it.
+      await rm(join(elsewhere, name), { recursive: true, force: true });
+      await rename(join(dir, name), join(elsewhere, name));
+      await symlink(join(elsewhere, name), join(dir, name), "dir");
+      if (name === "downloads") await mkdir(join(dir, "observations"), { recursive: true });
+      await expect(snapshotExecutorOutput(dir, result), name).rejects.toThrow(new RegExp(`${name} is not a real directory`));
+    }
   });
 
   it("closes after the run deadline", async () => {

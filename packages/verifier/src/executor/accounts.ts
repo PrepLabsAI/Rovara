@@ -130,7 +130,7 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
     return { confirmed: session.closed };
   }
 
-  async function request(raw: { sessionRef: string; origin: string; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string; body?: unknown }, signal: AbortSignal): Promise<E2EApiRuntimeResponse> {
+  async function request(raw: { sessionRef: string; origin: string; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string; body?: unknown; requestId?: string }, signal: AbortSignal): Promise<E2EApiRuntimeResponse> {
     const session = must(raw.sessionRef);
     if (raw.origin !== origin) throw new Error("API request origin differs from the only origin an executor run may reach");
     const body = raw.body === undefined || raw.method === "GET" ? undefined : JSON.stringify(raw.body);
@@ -138,7 +138,7 @@ export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetch
       headers: { cookie: `${COOKIE_NAME}=${session.token}`, ...(body === undefined ? {} : { "content-type": "application/json" }) },
       ...(body === undefined ? {} : { body }) });
     const bytes = await readBounded(response);
-    return { requestId: `req-${randomUUID()}`, responseId: `res-${randomUUID()}`, method: raw.method, path: raw.path, status: response.status,
+    return { requestId: raw.requestId ?? `req-${randomUUID()}`, responseId: `res-${randomUUID()}`, method: raw.method, path: raw.path, status: response.status,
       body: bytes, contentType: response.headers.get("content-type") ?? "application/octet-stream", origin, observedAt: new Date().toISOString() };
   }
 

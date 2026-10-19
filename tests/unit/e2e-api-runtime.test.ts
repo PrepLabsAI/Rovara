@@ -4,6 +4,7 @@ import { canonicalJson, E2EApplicationPreparedEnvironmentSchema, e2eApplicationP
 import { createAPIApplicationCliHost, executeE2EAPIApplicationScenario, validateE2EAPIApplicationPath, type E2EApiRuntimePorts } from "../../packages/verifier/src/api-runtime.js";
 import type { E2EApplicationCliLaunchContext } from "../../packages/verifier/src/application-runtime-bootstrap.js";
 import { createE2EApplicationRuntimePorts, prepareE2EApplicationEnvironment, sealE2EApplicationEnvironment } from "../../packages/verifier/src/application-services.js";
+import { isPinnedRovaraHttpEngine } from "../../packages/verifier/src/rovara-http-engine-descriptor.js";
 import { createCompiledApiApplicationFixture } from "../support/e2e-application-fixture.js";
 
 const sha = "b".repeat(64);
@@ -36,7 +37,9 @@ describe("API application runtime", () => {
       preparedEnvironmentDigest: sha, target: { targetId: "api-target", app: null },
       originByApplicationId: [{ applicationId: "orders-api", origin: "http://127.0.0.1:43124" }], cases: [],
     } });
-    expect((host as { engine?: unknown }).engine).toBeUndefined();
+    // The engine is Rovara's first-party HTTP engine: the runner sees exactly the pinned descriptor and its one fixture.
+    const engine = host.engine as unknown as { name: string; version: string; spiVersion: number; platform: string; capabilities: ReadonlySet<string> };
+    expect(isPinnedRovaraHttpEngine({ name: engine.name, version: engine.version, spiVersion: engine.spiVersion, platform: engine.platform, capabilities: [...engine.capabilities] })).toBe(true);
     expect(host.profileId).toBe("api-profile");
   });
 

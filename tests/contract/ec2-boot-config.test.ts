@@ -164,6 +164,8 @@ describe("EC2 worker user data", () => {
     expect(bootScript).toContain("RemainAfterExit=yes");
     expect(bootScript).toMatch(/\[Unit\][^]*?After=docker\.service\nBefore=\$WORKER_UNIT/);
     expect(bootScript).toContain("ExecStart=/bin/bash /usr/local/libexec/rovara-imds-drop");
+    // A worker must not start unless the drop is in place: it requires and follows the drop unit.
+    expect(bootScript).toContain("Requires=docker.service $IMDS_DROP_UNIT\nAfter=docker.service $IMDS_DROP_UNIT network-online.target");
     expect(bootScript).toContain('systemctl enable "$IMDS_DROP_UNIT" && bash /usr/local/libexec/rovara-imds-drop || fail');
     expect(bootScript).toContain('docker pull "$EXECUTOR_IMAGE"');
     // Unset until the control plane sets it: the pull is skipped, never a boot failure.

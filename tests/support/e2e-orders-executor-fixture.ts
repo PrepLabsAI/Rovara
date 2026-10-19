@@ -8,6 +8,7 @@ import { E2E_EXECUTOR_APP_ORIGIN, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationEx
 import { deriveE2EApplicationApprovalBinding } from "../../packages/broker/src/e2e/application-plan-binding.js";
 import { compileE2EApplicationScenarios, encodeE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "../../packages/verifier/src/application-scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../../packages/verifier/src/application-build-source.js";
+import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "../../packages/verifier/src/rovara-http-engine-descriptor.js";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID } from "../../packages/verifier/src/executor/host-registry.js";
 import { gitBlob, gitTreeSha, hash } from "./e2e-application-fixture.js";
 
@@ -18,7 +19,7 @@ export const ORDERS_FIXTURE_ROOT = fixtureRoot;
 export const ORDERS_APP_ORIGIN = E2E_EXECUTOR_COMPILED_ORIGIN;
 
 /** The scenarios a probe runs. Each is an ordinary source-style scenario that the real compiler turns into a CLI suite. */
-export type OrdersProbeName = "web-csv-positive-v1" | "web-egress-denial-v1" | "api-state-positive-v1";
+export type OrdersProbeName = "web-csv-positive-v1" | "web-egress-denial-v1" | "api-state-positive-v1" | "api-status-mismatch-v1";
 const probeOracle = (name: string) => (JSON.parse(readFileSync(join(repoRoot, "packages/verifier/assets/application-runtime-v1/probes", `${name}.json`), "utf8")) as {
   oracle: { columns: string[]; rows: string[][] } }).oracle;
 
@@ -35,6 +36,11 @@ function scenarioFor(probe: OrdersProbeName, targetId: string, accountProfileId:
     return { ...common, scenarioId: probe, steps: [{ kind: "navigate" as const, path: "/" }],
       assertions: [{ kind: "text" as const, testId: "network-denial", equals: "reachable" }] };
   }
+  if (probe === "api-status-mismatch-v1") {
+    // A healthy app answers 200; the scenario claims 503, so this assertion definitively does not hold.
+    return { ...common, scenarioId: probe, steps: [{ kind: "request" as const, requestId: "health", path: "/health", method: "GET" as const, body: {} }],
+      assertions: [{ kind: "http-status" as const, path: "/health", method: "GET" as const, equals: 503 }] };
+  }
   return { ...common, scenarioId: probe, steps: [{ kind: "request" as const, requestId: "health", path: "/health", method: "GET" as const, body: {} }],
     assertions: [{ kind: "state" as const, probeId: "api-state-positive/v1", equals: { orders: "ready", version: 1 }, pollTimeoutMs: 5_000 }] };
 }
@@ -42,7 +48,7 @@ function scenarioFor(probe: OrdersProbeName, targetId: string, accountProfileId:
 function registeredRuntime(kind: "web" | "api", profileId: string, now: number) {
   const web = kind === "web";
   const capabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ schemaVersion: "e2e-runtime-capabilities/v1", profileId, kind,
-    host: { os: "linux", arch: "arm64" }, engine: { name: web ? "web" : "api-supervisor", version: web ? "0.14.0" : "1.0.0", spiVersion: 1 },
+    host: { os: "linux", arch: "arm64" }, engine: web ? { name: "web", version: "0.14.0", spiVersion: 1 } : { name: ROVARA_HTTP_ENGINE_DESCRIPTOR.name, version: ROVARA_HTTP_ENGINE_DESCRIPTOR.version, spiVersion: 1 },
     runtimeManifestDigest: (web ? "a" : "f").repeat(64), supportedSteps: web ? ["navigate", "click", "fill"] : ["request"],
     supportedAssertions: web ? ["text", "visible", "csv", "state"] : ["http-status", "state"], evidenceScopes: ["runtime"],
     networkPolicyDigest: "1".repeat(64), ...(web ? { browsers: ["chromium"] } : { protocols: ["http"] }) });
@@ -168,8 +174,11 @@ export function createOrdersExecutorPlan(options: { probe: OrdersProbeName; dead
   const launchTargets = [{ targetId: target.targetId, profileId: runtimeProfileId, factoryId: "executor-host", factoryManifestDigest: runtime.manifestDigest,
     // The real @e2e-dev/web 0.14.0 engine descriptor, as the pinned runner's own report states it for a web target.
     engine: kind === "web" ? { name: "web", version: "0.14.0", spiVersion: 1 as const, platform: "web",
-      capabilities: ["actions", "artifacts", "browser", "keyboard", "location", "observation", "pointer", "state"] } : null,
-    artifactCapabilities: kind === "web" ? ["screenshot" as const, "video" as const] : [], stateCapability: kind === "api" || kind === "web",
+      capabilities: ["actions", "artifacts", "browser", "keyboard", "location", "observation", "pointer", "state"] }
+      // An API target runs on Rovara's pinned first-party HTTP engine, which contributes only the assertion-step fixture.
+      : { name: ROVARA_HTTP_ENGINE_DESCRIPTOR.name, version: ROVARA_HTTP_ENGINE_DESCRIPTOR.version, spiVersion: 1 as const, platform: "api",
+        capabilities: [...ROVARA_HTTP_ENGINE_DESCRIPTOR.capabilities] },
+    artifactCapabilities: kind === "web" ? ["screenshot" as const, "video" as const] : [], stateCapability: kind === "web",
     app: kind === "web" ? { url: ORDERS_APP_ORIGIN, identity: application.applicationId, environment: "test" as const } : null }];
   const bundleBody = { schemaVersion: 1 as const, planDigest, templateVersion: "trusted-e2e-application/v1" as const, scenarios: [scenario], bundleDigest: "0".repeat(64) };
   const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };

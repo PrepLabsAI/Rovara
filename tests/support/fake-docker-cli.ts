@@ -24,6 +24,8 @@ export class FakeDockerCli implements DockerCli {
   /** The order of the moments a test may need to compare: an executor finishing, and containers being force-removed. */
   readonly events: string[] = [];
   networkCreateFails = false;
+  /** Images the host does not hold: `image inspect` fails for them until they are pulled. */
+  readonly missingImages = new Set<string>();
   appStartFails = false;
   /** When set, the executor "container" ignores the abort signal and finishes (with its normal output) after this many milliseconds. */
   executorIgnoresAbortForMs: number | null = null;
@@ -113,6 +115,8 @@ export class FakeDockerCli implements DockerCli {
       return item ? { code: 0, stdout: `${item.state} ${item.exitCode}`, stderr: "" } : { code: 1, stdout: "", stderr: "No such object" };
     }
     if (command === "logs") return { code: 0, stdout: "", stderr: this.resources.get(args[args.length - 1]!)?.logs ?? this.logs.get(args[args.length - 1]!) ?? "" };
+    if (command === "image" && sub === "inspect") return this.missingImages.has(args[2]!) ? { code: 1, stdout: "", stderr: "No such image" } : { code: 0, stdout: "", stderr: "" };
+    if (command === "pull") { this.missingImages.delete(args[1]!); return { code: 0, stdout: "", stderr: "" }; }
     if (command === "run") return this.runContainer(args, opts);
     return { code: 0, stdout: "", stderr: "" };
   }

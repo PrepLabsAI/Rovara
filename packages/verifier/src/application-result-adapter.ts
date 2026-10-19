@@ -11,6 +11,7 @@ import type { E2ECompiledApplicationSuite } from "./application-scenarios.js";
 import { validateE2EApplicationExecutionAdmission, validateE2ECompiledApplicationAdmission } from "./application-scenarios.js";
 import { compareE2EApplicationPublicList, E2EApplicationSelectionPacketSchema } from "./application-identity.js";
 import { expectedE2EApplicationReporterDigest } from "./application-runtime-assets.js";
+import { isPinnedRovaraHttpEngine } from "./rovara-http-engine-descriptor.js";
 
 const sha = z.string().regex(/^[a-f0-9]{64}$/);
 const id = (max = 256) => z.string().min(1).max(max);
@@ -834,6 +835,27 @@ export function e2eApplicationPrivateTransferMaxBytes(caseCount: number, shardCo
     + (shardCount - 1) * Math.ceil((E2E_REPORT_MAX_BYTES + E2E_APP_RPC_FRAME_MAX_BYTES) * 4 / 3);
 }
 
+type ReportTarget = E2EApplicationReport["run"]["targets"][number];
+type ExpectedTarget = Pick<E2EApplicationCollectionOracle["applicationIdsByCase"][number], "platform" | "artifactCapabilities" | "stateCapability" | "engine">;
+/**
+ * Whether the runner's own account of a target is the target the oracle compiled. An engine-less target reports the runner's "none"
+ * engine; an engine target reports exactly its name, version, SPI and capabilities. An API target may only ever be engine-less or
+ * Rovara's pinned HTTP engine, so a report naming any other engine for it never matches, whatever the oracle holds.
+ */
+export function e2eApplicationReportTargetMatches(reportTarget: ReportTarget, expectedTarget: ExpectedTarget): boolean {
+  if (reportTarget.platform !== expectedTarget.platform
+    || canonicalJson([...reportTarget.artifactCapabilities].sort()) !== canonicalJson([...expectedTarget.artifactCapabilities].sort())
+    || reportTarget.stateCapability !== expectedTarget.stateCapability) return false;
+  const engine = expectedTarget.engine;
+  if (engine === null) {
+    return reportTarget.engine.name === "none" && reportTarget.engine.version === "unversioned" && reportTarget.engine.spiVersion === 1
+      && reportTarget.capabilities.length === 0 && reportTarget.artifactCapabilities.length === 0 && !reportTarget.stateCapability;
+  }
+  if (expectedTarget.platform === "api" && !isPinnedRovaraHttpEngine(engine)) return false;
+  return reportTarget.engine?.name === engine.name && reportTarget.engine.version === engine.version && reportTarget.engine.spiVersion === engine.spiVersion
+    && reportTarget.platform === engine.platform && canonicalJson([...reportTarget.capabilities].sort()) === canonicalJson([...engine.capabilities].sort());
+}
+
 type Environment = Readonly<{ ci: boolean; trustNoticeShown: boolean; os: string; arch: string; runtime: string }>;
 export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { compiled: E2ECompiledApplicationSuite; binding: E2ERunBinding; round: E2ERound;
   environment: Environment; usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>;
@@ -863,6 +885,9 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
     const target = input.compiled.runtimeAdmissionContext.launchTargets.find((item) => item.targetId === expected.targetId);
     if (!scenario || !runtimeRef || !application || !runtime || !accountRef || !target) throw new Error("compiled case lacks exact scenario, application, runtime, account, or target binding");
     const originEntry = input.compiled.originByApplicationId.find((item) => item.applicationId === runtimeRef.applicationId);
+    if (target.engine?.platform === "api" && !isPinnedRovaraHttpEngine(target.engine)) {
+      throw new Error("an API application target may use only Rovara's pinned HTTP engine");
+    }
     appIds.set(expected.caseId, { caseId: expected.caseId, applicationId: runtimeRef.applicationId, buildManifestDigest: application.build.manifestDigest,
       buildSourceManifestDigest: application.buildSource.manifest.manifestDigest, buildSourceArchiveSha256: application.buildSource.reference.sha256,
       runtimeManifestDigest: runtime.manifestDigest, accountRef, origin: originEntry?.origin ?? null,
@@ -1128,18 +1153,12 @@ export function qualifyE2EApplicationCollection(oracleInput: E2EApplicationColle
         .filter((entry): entry is [string, number] => entry[1] !== undefined)));
       const expectedTarget = oracle.applicationIdsByCase.find((item) => item.targetId === expectedPacket.targetId);
       const reportTarget = parsed.report.run.targets.find((item) => item.id === expectedPacket.targetId);
-      if (!expectedTarget || !reportTarget || reportTarget.platform !== expectedTarget.platform
-        || canonicalJson([...reportTarget.artifactCapabilities].sort()) !== canonicalJson([...expectedTarget.artifactCapabilities].sort())
-        || reportTarget.stateCapability !== expectedTarget.stateCapability || (expectedTarget.engine === null
-        ? reportTarget.engine.name !== "none" || reportTarget.engine.version !== "unversioned" || reportTarget.engine.spiVersion !== 1
-          || reportTarget.capabilities.length !== 0 || reportTarget.artifactCapabilities.length !== 0 || reportTarget.stateCapability
-        : reportTarget.engine?.name !== expectedTarget.engine.name || reportTarget.engine.version !== expectedTarget.engine.version
-          || reportTarget.engine.spiVersion !== expectedTarget.engine.spiVersion || reportTarget.platform !== expectedTarget.engine.platform
-          || canonicalJson([...reportTarget.capabilities].sort()) !== canonicalJson([...expectedTarget.engine.capabilities].sort()))) {
+      if (!expectedTarget || !reportTarget || !e2eApplicationReportTargetMatches(reportTarget, expectedTarget)) {
         return unknown("application report target engine, platform, or capabilities differ from the immutable runtime oracle", oracle.binding.runId, parsed.rawSha256);
       }
       const targetOrigin = oracle.originByApplicationId.find((item) => item.applicationId === expectedTarget.applicationId)?.origin;
-      const reportOriginMatches = expectedTarget.engine === null
+      // An API target has no app of its own, with or without Rovara's HTTP engine, so its report names no base origin.
+      const reportOriginMatches = expectedTarget.engine === null || expectedTarget.platform === "api"
         ? reportTarget.baseOrigin === undefined
         : targetOrigin === null || targetOrigin === undefined ? reportTarget.baseOrigin === undefined : reportTarget.baseOrigin === targetOrigin;
       if (expectedTarget.origin !== targetOrigin || !reportOriginMatches) {

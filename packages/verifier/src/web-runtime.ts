@@ -3,7 +3,8 @@ import { E2EApplicationCliHostDescriptorSchema, E2EScenarioSchema, E2ERunBinding
   canonicalJson, type E2ERuntimeAccountRef, type E2EScenario, type E2EApplicationAccountPorts, type E2EApplicationPreparedEnvironment,
   type E2EApplicationSupervisorPorts } from "@agentx/contracts";
 import type { TestFixtures } from "e2e";
-import type { EngineFixtureContext, EngineHandle } from "e2e/engine";
+import type { EngineHandle } from "e2e/engine";
+import { ASSERTION_FIXTURE, assertionStepFixture, assertionStepsOf, runInsideAssertionSteps, type AssertionSteps } from "./assertion-steps.js";
 import { surfaceOf, web } from "@e2e-dev/web";
 import type { Browser } from "@e2e-dev/web";
 import type { BrowserContext, FileChooser, Page } from "playwright-core";
@@ -58,65 +59,21 @@ type WebDeclaration = Readonly<{
   cases: readonly { caseId: string; upstreamTestId: string; targetId: string; assertionBindings: readonly { index: number; kind: string; digest: string }[] }[];
 }>;
 
-/**
- * The one fixture the host's engine contributes: an operation the runner records as an `assertion` step. The case adapter opens one
- * such step per approved assertion before it does anything else, so the upstream report names a failed approved assertion by the
- * step at its own index, which is where the collector looks.
- */
-const ASSERTION_FIXTURE = "agentxAssertions";
-type AssertionSteps = Readonly<{ step(index: number, body: () => Promise<void>): Promise<void> }>;
 type WebFixtures = TestFixtures & Readonly<{ browser: Browser; [ASSERTION_FIXTURE]: AssertionSteps }>;
 function fixturesOf(value: unknown): WebFixtures {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("owned web fixture set is unavailable");
   const row = value as Partial<WebFixtures>;
   if (!row.app || typeof row.app.open !== "function" || !row.screen || typeof row.screen.getByTestId !== "function"
-    || !row.browser || typeof row.browser.goto !== "function" || typeof row.browser.waitForDownload !== "function"
-    || !row[ASSERTION_FIXTURE] || typeof row[ASSERTION_FIXTURE].step !== "function") {
-    throw new Error("installed web engine did not provide its exact app, screen, browser, and assertion-step fixtures");
+    || !row.browser || typeof row.browser.goto !== "function" || typeof row.browser.waitForDownload !== "function") {
+    throw new Error("installed web engine did not provide its exact app, screen, and browser fixtures");
   }
+  assertionStepsOf(row);
   return row as WebFixtures;
 }
 
-/** The engine as the runner sees it: the pinned web engine plus the assertion-step fixture. Its live surface stays on the original. */
+/** The engine as the runner sees it: the pinned web engine plus the shared assertion-step fixture. Its live surface stays on the original. */
 function withAssertionSteps(base: ReturnType<typeof web>) {
-  // A fresh surface per attempt: the runner wraps the declared method in place.
-  const factory = (context: EngineFixtureContext) => context.fixture<{ step(index: number, body: () => Promise<void>): Promise<void> }>(ASSERTION_FIXTURE,
-    { async step(_index, body) { await body(); } }, { step: { kind: "assertion", label: (index: number) => `approved assertion ${index}`, timeout: false } });
-  return Object.freeze({ ...base, fixtures: Object.freeze({ ...base.fixtures, [ASSERTION_FIXTURE]: factory }) });
-}
-
-/** Thrown inside the assertion step of the first approved assertion that did not hold, so exactly that step fails. */
-class ApprovedAssertionMismatch extends Error {
-  constructor(readonly assertionIndex: number) { super(`approved assertion ${assertionIndex} did not hold`); }
-}
-const isMismatch = (error: unknown): boolean => error instanceof ApprovedAssertionMismatch
-  || (error instanceof Error && error.cause instanceof ApprovedAssertionMismatch);
-
-type CaseOutcome = Readonly<{ failedIndex: number; unavailableIndex: number }>;
-type ChainResult = Readonly<{ outcome: CaseOutcome | null; error: unknown }>;
-
-/**
- * Runs `work` inside one nested `assertion` step per approved assertion. The runner numbers steps in the order they start, so step k
- * of the report is approved assertion k only when these are the first steps of the attempt, which is why nothing else may run before
- * this. Only the step of an assertion that did not hold fails. Any other failure (navigation, a crashed app, a missing element) is
- * carried out of the chain as an error and thrown after every step has closed, so no assertion step is ever blamed for it.
- */
-export async function runInsideAssertionSteps(assertions: AssertionSteps, count: number, work: () => Promise<CaseOutcome>): Promise<ChainResult> {
-  const open = async (level: number): Promise<ChainResult> => {
-    if (level === count) {
-      try { return { outcome: await work(), error: undefined }; }
-      catch (error) { return { outcome: null, error }; }
-    }
-    let inner: ChainResult = { outcome: null, error: undefined };
-    try {
-      await assertions.step(level, async () => {
-        inner = await open(level + 1);
-        if (inner.outcome?.failedIndex === level) throw new ApprovedAssertionMismatch(level);
-      });
-    } catch (error) { if (!isMismatch(error)) throw error; }
-    return inner;
-  };
-  return open(0);
+  return Object.freeze({ ...base, fixtures: Object.freeze({ ...base.fixtures, [ASSERTION_FIXTURE]: assertionStepFixture }) });
 }
 
 async function recordJson(ports: E2EWebRuntimePorts, caseId: string, kind: "case-capture" | "step-observation" | "assertion-observation" | "download", value: unknown, signal: AbortSignal) {

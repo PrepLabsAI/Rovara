@@ -9,6 +9,8 @@ import { createE2EApplicationCaseCaptureFrame, createE2EApplicationAssertionObse
 import type { E2EApplicationCliHost, E2EApplicationCliLaunchContext } from "./application-runtime-bootstrap.js";
 import { prepareE2EApplicationEnvironment, sealE2EApplicationEnvironment, type E2EApplicationEnvironmentPorts,
   type E2EApplicationPreparationInputs } from "./application-services.js";
+import { assertionStepsOf, runInsideAssertionSteps } from "./assertion-steps.js";
+import { createRovaraHttpEngine } from "./rovara-http-engine.js";
 import { runIsolatedE2EApplication, type E2EApplicationRuntimePorts } from "./application-runtime.js";
 import { createE2EApplicationRuntimePorts } from "./application-services.js";
 import type { E2ECompiledApplicationSuite } from "./application-scenarios.js";
@@ -44,7 +46,9 @@ export type E2EApiRuntimePorts = Readonly<{
   }>;
   closeCaseSession(sessionRef: string, signal: AbortSignal): Promise<{ confirmed: boolean }>;
   /** Fixed owned request client; it receives no caller URL, headers, or ambient credentials. */
-  request(input: { sessionRef: string; origin: string; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string; body?: unknown }, signal: AbortSignal): Promise<E2EApiRuntimeResponse>;
+  request(input: { sessionRef: string; origin: string; method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE"; path: string; body?: unknown;
+    /** The approved scenario step's own request id: the client names the request it makes by it, which is how an observation is tied to its step. */
+    requestId?: string }, signal: AbortSignal): Promise<E2EApiRuntimeResponse>;
   originFor(applicationId: string, preparedEnvironmentDigest: string): string;
   /** Reads only an installed, source-approved assertion schema asset by its exact approved ID. */
   readApprovedJsonSchema(input: { caseId: string; assertionIndex: number; schemaRef: string }, signal: AbortSignal): Promise<{
@@ -98,7 +102,7 @@ export async function executeE2EAPIApplicationScenario(input: { caseId: string; 
     let response: E2EApiRuntimeResponse;
     try {
       response = await input.ports.request({ sessionRef: input.sessionRef, origin: input.origin,
-        method: step.method, path, body: step.body }, input.signal);
+        method: step.method, path, body: step.body, requestId: step.requestId }, input.signal);
     } catch (requestError) {
       const finished = await input.ports.actionWindows.finish(action, input.signal).catch(() => null);
       if (!finished || finished.confirmed !== true) throw new Error("protected API action outcome is uncertain because its action window did not finish", { cause: requestError });
@@ -261,14 +265,18 @@ export async function executeE2EAPIApplicationScenario(input: { caseId: string; 
   return { steps, assertions, artifacts };
 }
 
-/** Construct an API host with no engine or browser; all case effects remain on the installed owned session/request channel. */
-export function createAPIApplicationCliHost(input: { launchContext: E2EApplicationCliLaunchContext; declaration: ApiDeclaration; ports: E2EApiRuntimePorts }): Omit<E2EApplicationCliHost, "launchContext" | "installedModule" | "engine"> {
+/**
+ * Construct an API host with no browser: all case effects remain on the installed owned session/request channel. Its engine is Rovara's
+ * first-party HTTP engine, which drives nothing and contributes only the assertion-step fixture the case opens its approved assertions with.
+ */
+export function createAPIApplicationCliHost(input: { launchContext: E2EApplicationCliLaunchContext; declaration: ApiDeclaration; ports: E2EApiRuntimePorts }): Omit<E2EApplicationCliHost, "launchContext" | "installedModule"> {
   const { launchContext, declaration, ports } = input;
   if (launchContext.selectedTarget.kind !== "api" || declaration.target.app !== null
     || declaration.target.targetId !== launchContext.selectedTarget.targetId) throw new Error("API host requires the exact selected API target and a compiler declaration with no synthetic app or UI engine");
   const descriptor = E2EApplicationCliHostDescriptorSchema.parse(launchContext.cliHost.descriptor);
-  return Object.freeze({ profileId: launchContext.cliHost.profileId, descriptor,
-    async runCase(caseId: string): Promise<void> {
+  const engine = createRovaraHttpEngine();
+  return Object.freeze({ profileId: launchContext.cliHost.profileId, descriptor, engine,
+    async runCase(caseId: string, rawFixtures: unknown): Promise<void> {
       const caseStartedAt = Date.now();
       const launchSignal = AbortSignal.timeout(Math.max(1, Date.parse(launchContext.deadlineAt) - caseStartedAt));
       const plan = await readValidatedE2EApplicationCliCasePlan({ reader: ports.casePlans, launchContext, declaration, caseId, signal: launchSignal });
@@ -295,6 +303,8 @@ export function createAPIApplicationCliHost(input: { launchContext: E2EApplicati
       let caseError: unknown;
       let sessionClosed: boolean;
       try {
+        const assertionSteps = assertionStepsOf(rawFixtures);
+        const chain = await runInsideAssertionSteps(assertionSteps, scenario.assertions.length, async () => {
         const protectedObservation = await readValidatedE2EApplicationCaseObservation({ reader: ports.caseObservations,
           launchContext, plan, ownedClientRef: session.sessionRef, expectedSubjectKind: "service", signal: operationSignal });
         if (protectedObservation.binding.sessionRef !== session.sessionRef || protectedObservation.binding.accountIdDigest !== session.accountIdDigest
@@ -316,6 +326,10 @@ export function createAPIApplicationCliHost(input: { launchContext: E2EApplicati
           upstreamRunId: protectedObservation.upstreamRunId, observedAt: at, steps: result.steps, assertions: result.assertions,
           artifacts: [...protectedObservation.identityEvidence.map((item) => item.ref), ...result.artifacts], terminal });
         await writeJson(ports, caseId, "case-capture", capture, operationSignal);
+        return { failedIndex, unavailableIndex };
+        });
+        if (chain.outcome === null) throw chain.error;
+        const { failedIndex, unavailableIndex } = chain.outcome;
         if (failedIndex >= 0) throw new Error(`API assertion ${failedIndex} failed against the actual owned response bytes`);
         if (unavailableIndex >= 0) throw new Error(`API assertion ${unavailableIndex} is unavailable on the installed fixed API client`);
       } catch (error) {

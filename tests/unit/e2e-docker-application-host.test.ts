@@ -82,6 +82,7 @@ describe("docker application host", () => {
     for (const args of builds) {
       expect(args).toEqual(expect.arrayContaining(["--cap-drop=ALL", "--security-opt", "no-new-privileges", "--memory", "2g", "--memory-swap", "2g", "--pids-limit", "1024", "--cpus", "2"]));
       expect(args).toContain("NODE_OPTIONS=");
+      expect(args).toContain("--pull=never");
       expect(args).not.toContain("--network");
       expect(args.join(" ")).not.toMatch(/docker\.sock|AWS_|AGENTX_|PI_|GIT_|TOKEN|SECRET|(^| )-p /);
       expect(args.some((value) => value.endsWith(":/src:ro"))).toBe(true);
@@ -159,6 +160,19 @@ describe("docker application host", () => {
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
   });
 
+  it("treats a run stopped while the output hook ran as stopped, whatever the hook saw", async () => {
+    const controller = new AbortController();
+    const fake = new FakeDockerCli(); const hook = vi.fn(async () => { controller.abort(new Error("operator cancelled")); });
+    const s = await setup({ fake, onRunOutput: hook });
+    fake.onExecutor = okOutput(s);
+    const result = await runWith(s, controller.signal);
+    expect(hook).toHaveBeenCalledTimes(1);
+    expect(result.actualRun).toBeNull();
+    expect(s.assemble).not.toHaveBeenCalled();
+    await expect(s.host.readActualRun(new AbortController().signal)).rejects.toThrow("cancelled");
+    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  });
+
   it("waits for an execution still in flight at the deadline before removing anything, and never returns its late result", async () => {
     const fake = new FakeDockerCli(); const hook = vi.fn(async () => undefined);
     const s = await setup({ fake, deadlineMs: 300, onRunOutput: hook });
@@ -221,6 +235,18 @@ describe("docker application host", () => {
     const inside = new FakeDockerCli(); const t = await setup({ fake: inside, deadlineMs: 600_000, recipeBuild: [{ program: "npm", args: ["run", "build"], cwd: ".", timeoutMs: 45_000, env: {} }] });
     inside.failOn("build", 124);
     expect((await runWith(t)).unavailableReason).toBe("build-failed");
+  });
+
+  it("pulls a missing image itself, within the plan deadline, and never leaves it to docker run", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake, deadlineMs: 5_000 }); fake.onExecutor = okOutput(s);
+    fake.missingImages.add("node:build-test");
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBeNull();
+    const pullIndex = fake.calls.findIndex((args) => args[0] === "pull");
+    expect(fake.calls[pullIndex]).toEqual(["pull", "node:build-test"]);
+    expect(fake.timeouts[pullIndex]).toBeLessThanOrEqual(5_000);
+    expect(pullIndex).toBeLessThan(fake.calls.findIndex((args) => args[0] === "run" && args.includes("-d")));
+    for (const kind of ["app", "executor"] as const) expect(fake.argsFor(kind)).toContain("--pull=never");
   });
 
   it("reports an app container that cannot start as app-exited", async () => {

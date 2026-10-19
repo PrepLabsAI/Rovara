@@ -63,6 +63,26 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(verdict!.assertionReceipts[0]!.assertionDigest).toBe(r.fixture.compiled.expectedCases[0]!.assertionDigests[0]);
   }, 300_000);
 
+  it("collects the API state positive as PASS and an API status mismatch as FAILED, on Rovara's HTTP engine", async () => {
+    const pass = await runProbe("api-state-positive-v1", { defect: null });
+    expect(pass.run.unavailableReason, JSON.stringify(pass.host.readDiagnostics(pass.fixture.plan.runId))).toBeNull();
+    const passed = await collectLikeTheWorker(pass);
+    expect(passed.unavailableReason, passed.unavailableReason ?? "").toBeNull();
+    expect(passed.qualification?.status).toBe("PASS");
+    const fail = await runProbe("api-status-mismatch-v1", { defect: null });
+    expect(fail.exitCode, JSON.stringify(fail.host.readDiagnostics(fail.fixture.plan.runId))).toBe(1);
+    const failed = await collectLikeTheWorker(fail);
+    expect(failed.unavailableReason, failed.unavailableReason ?? "").toBeNull();
+    expect(failed.qualification?.status).toBe("FAILED");
+    expect(failed.qualification!.result!.cases[0]!.assertionReceipts.map((receipt) => [receipt.assertionIndex, receipt.status])).toEqual([[0, "failed"]]);
+  }, 600_000);
+
+  it("never collects an API state that does not settle as PASS or FAILED", async () => {
+    const r = await runProbe("api-state-positive-v1", { defect: "state-contract.json" });
+    const collected = await collectLikeTheWorker(r);
+    expect(collected.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
+  }, 300_000);
+
   it("reports build-failed, with the build log, when a build command fails, and removes everything", async () => {
     const r = await runThroughHost({ probe: "web-csv-positive-v1", recipeBuild: [{ program: "npm", args: ["run", "does-not-exist"], cwd: ".", timeoutMs: 120_000, env: {} }] });
     expect(r.run.unavailableReason).toBe("build-failed");

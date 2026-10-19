@@ -20,6 +20,7 @@ import { compileE2EScenarios } from "./scenarios.js";
 
 export type { E2EApplicationCompilationContext };
 import { validateE2EApplicationBuildSourceManifest } from "./application-build-source.js";
+import { isPinnedRovaraHttpEngine } from "./rovara-http-engine-descriptor.js";
 import { createE2EApplicationSelectionPacket, type E2EApplicationSourcePosition } from "./application-identity.js";
 import { E2E_APPLICATION_DECLARATION_PATH, E2E_APPLICATION_GENERATED_CONFIG_PATH, E2E_APPLICATION_GROUP_COMPILER_PROTOCOL,
   E2E_APPLICATION_COMPILER_PROTOCOL, E2E_APPLICATION_SELECTION_PACKET_PATH, expectedE2EApplicationConfigDigest,
@@ -199,12 +200,18 @@ export function validateE2EApplicationLaunchTarget(target: E2EExecutionPlan["eff
     || launch.factoryManifestDigest !== runtime.manifestDigest) throw new Error("application launch target differs from its source target or installed runtime descriptor");
   const capability = E2ERuntimeCapabilityDescriptorSchema.parse(runtime.capabilities);
   const expectedArtifacts = [capture.screenshots ? "screenshot" : null, capture.video ? "video" : null].filter((item): item is "screenshot" | "video" => item !== null);
-  if (canonicalJson(launch.artifactCapabilities) !== canonicalJson(expectedArtifacts)
-    || launch.stateCapability !== capability.supportedAssertions.includes("state")) {
+  // An API target runs on Rovara's own HTTP engine, which has no state hook: its `state` assertions are the runtime's approved probes,
+  // so the engine's state capability is false whatever assertions the runtime supports.
+  const expectedState = target.kind === "api" && launch.engine !== null ? false : capability.supportedAssertions.includes("state");
+  if (canonicalJson(launch.artifactCapabilities) !== canonicalJson(expectedArtifacts) || launch.stateCapability !== expectedState) {
     throw new Error("application launch artifact or state capabilities differ from the approved capture policy and installed runtime");
   }
   if (target.kind === "api") {
-    if (launch.engine !== null || launch.app !== null || capability.kind !== "api") throw new Error("API application target must remain engine-less and app-less");
+    // Engine-less, or exactly Rovara's pinned HTTP engine that the runtime profile also advertises; no other engine, and never an app.
+    if (launch.app !== null || capability.kind !== "api" || (launch.engine !== null && (!isPinnedRovaraHttpEngine(launch.engine)
+      || launch.engine.name !== capability.engine.name || launch.engine.version !== capability.engine.version || launch.engine.spiVersion !== capability.engine.spiVersion))) {
+      throw new Error("API application target must be engine-less or use Rovara's pinned HTTP engine, and stay app-less");
+    }
   } else {
     if (launch.engine === null || launch.app === null) throw new Error("UI application target requires its real installed engine and application identity");
     if (launch.engine.name !== capability.engine.name || launch.engine.version !== capability.engine.version || launch.engine.spiVersion !== capability.engine.spiVersion

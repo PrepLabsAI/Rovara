@@ -404,8 +404,8 @@ write_worker_unit() {
   cat >"/etc/systemd/system/$WORKER_UNIT" <<EOF
 [Unit]
 Description=AgentX worker for workspace $AGENTX_WORKSPACE_ID generation $AGENTX_SESSION_GENERATION
-Requires=docker.service
-After=docker.service network-online.target
+Requires=docker.service $IMDS_DROP_UNIT
+After=docker.service $IMDS_DROP_UNIT network-online.target
 Wants=network-online.target
 RequiresMountsFor=$MOUNT_PATH
 

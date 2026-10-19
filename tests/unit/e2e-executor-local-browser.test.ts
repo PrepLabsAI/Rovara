@@ -1,7 +1,8 @@
 import { afterAll, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { readFileSync, realpathSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -119,43 +120,64 @@ async function assembleFrom(run: Awaited<ReturnType<typeof runProbe>>) {
     inputs: assembleDockerCollectionInputs({ snapshot, binding: resolved.binding, cleanup }) };
 }
 
+type Verdict = "PASS" | "FAILED" | "UNKNOWN";
+/** probe, defect, what the real collector must say, and the one assertion kind that is the cause when it says FAILED. */
+const verdicts: readonly (readonly [OrdersProbeName, string | undefined, Verdict, string | null])[] = [
+  ["web-csv-positive-v1", undefined, "PASS", null],
+  ["api-state-positive-v1", undefined, "PASS", null],
+  ["web-csv-positive-v1", "extra-order.json", "FAILED", "csv"],
+  ["api-status-mismatch-v1", undefined, "FAILED", "http-status"],
+  // A state that never settles on the approved value is unavailable by the evaluator's own rules (only a settled sample is a verdict),
+  // so a wrong contract is never PASS and never FAILED.
+  ["api-state-positive-v1", "state-contract.json", "UNKNOWN", null],
+];
+
 describe.runIf(enabled)("host readback of a real executor run (local, no Docker)", () => {
-  it.each([["web-csv-positive-v1" as const, undefined], ["api-state-positive-v1" as const, undefined], ["web-csv-positive-v1" as const, "extra-order.json"]])(
-    "%s (%s) assembles into a readback the supervisor proof accepts", async (probe, defect) => {
-      const run = await runProbe(probe, defect ? { defect } : {});
-      const { actual, inputs } = await assembleFrom(run);
-      const proof = proveActualRun(actual, run.fixture.plan);
-      expect(proof.captures.map((capture) => capture.caseId)).toEqual(run.fixture.compiled.expectedCases.map((item) => item.caseId));
-      expect(proof.captures.map((capture) => capture.terminal.kind)).toEqual([defect ? "assertion-failed" : "completed"]);
-      expect(proof.captures.map((capture) => capture.assertions.map((assertion) => assertion.outcome))).toEqual([[defect ? "failed" : "passed"]]);
-      // The real collector, with the protected inputs the host exposes, judges the run: no result is ever PASS without them.
-      // The engine-less API target is excluded: the collector requires its report to claim no state capability while the compiler binds the
-      // launch descriptor to the runtime's `state` assertion support, so a state probe cannot reach PASS yet (Task 1.5 owns that).
-      if (probe.startsWith("web-")) {
-        const collected = collectHostRun(actual, inputs, run.fixture.plan);
-        if (defect) {
-          // An approved assertion that did not hold is FAILED, decided through the report's own failed `assertion` step for that assertion.
-          expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
-          expect(collected.qualification?.status).toBe("FAILED");
-          const [verdict] = collected.qualification!.result!.cases;
-          expect(verdict!.status).toBe("failed");
-          expect(verdict!.assertionReceipts.map((receipt) => [receipt.assertionIndex, receipt.status])).toEqual([[0, "failed"]]);
-          expect(verdict!.assertionReceipts[0]!.assertionDigest).toBe(run.fixture.compiled.expectedCases[0]!.assertionDigests[0]);
-          // The csv assertion is the cause: it is the only assertion, and the report's one failed step is its step.
-          const report = readReport(run.outDir).run.results[0]!.attempts[0]!;
-          const failed = report.steps.filter((step) => step.status === "failed");
-          expect(failed.map((step) => [step.kind, step.index, step.label])).toEqual([["assertion", 0, "approved assertion 0"]]);
-        } else {
-          expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
-          expect(collected.qualification?.status).toBe("PASS");
-        }
-      }
-      expect(actual.selected).toBe(1);
-      expect(actual.filtered).toBe(0);
-      const text = JSON.stringify([...actual.supervisorReadback!.evidence.map((item) => Buffer.from(item.bytes).toString("latin1")), actual.shards.map((shard) => Buffer.from(shard.rawReportBytes).toString("latin1"))]);
-      expect(text).not.toContain(run.fixture.account.password);
-      expect(text).not.toContain(run.fixture.account.email);
-    }, 300_000);
+  it.each(verdicts)("%s (%s) collects as %s", async (probe, defect, verdict, cause) => {
+    const run = await runProbe(probe, defect ? { defect } : {});
+    const { actual, inputs } = await assembleFrom(run);
+    const proof = proveActualRun(actual, run.fixture.plan);
+    expect(proof.captures.map((capture) => capture.caseId)).toEqual(run.fixture.compiled.expectedCases.map((item) => item.caseId));
+    const terminal = verdict === "PASS" ? "completed" : verdict === "FAILED" ? "assertion-failed" : "unavailable";
+    expect(proof.captures.map((capture) => capture.terminal.kind)).toEqual([terminal]);
+    // The real collector, with the protected inputs the host exposes, judges the run: no result is ever PASS without them.
+    const collected = collectHostRun(actual, inputs, run.fixture.plan);
+    expect(collected.qualification?.status ?? "UNKNOWN", collected.unavailableReason ?? "").toBe(verdict);
+    if (verdict === "UNKNOWN") {
+      expect(proof.captures.map((capture) => capture.assertions.map((assertion) => assertion.outcome))).toEqual([["unavailable"]]);
+    } else {
+      expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
+      const [result] = collected.qualification!.result!.cases;
+      expect(result!.status).toBe(verdict === "PASS" ? "passed" : "failed");
+      expect(result!.assertionReceipts.map((receipt) => [receipt.assertionIndex, receipt.status])).toEqual([[0, verdict === "PASS" ? "passed" : "failed"]]);
+      expect(result!.assertionReceipts[0]!.assertionDigest).toBe(run.fixture.compiled.expectedCases[0]!.assertionDigests[0]);
+    }
+    if (verdict === "FAILED") {
+      // The failing assertion is the cause, and the report's one failed step is its own `assertion` step at its own index.
+      const scenario = run.fixture.compiled.bundle.scenarios[0]!;
+      expect(scenario.assertions.map((assertion) => assertion.kind)).toEqual([cause]);
+      const report = readReport(run.outDir).run.results[0]!.attempts[0]!;
+      expect(report.steps.filter((step) => step.status === "failed").map((step) => [step.kind, step.index, step.label])).toEqual([["assertion", 0, "approved assertion 0"]]);
+    }
+    // The sealed capture is its own artifact and names the executor's original: the original bytes are in the readback and match the executor's file.
+    const [sealed] = actual.applicationCaptures;
+    const sealedEvidence = actual.supervisorReadback!.evidence.filter((item) => item.ref.artifactId.endsWith("-sealed"));
+    expect(sealedEvidence).toHaveLength(1);
+    const originalRef = sealed!.artifacts.find((ref) => ref.artifactId === sealedEvidence[0]!.ref.artifactId.replace(/-sealed$/, ""))!;
+    expect(originalRef).toBeDefined();
+    const original = actual.supervisorReadback!.evidence.find((item) => item.ref.artifactId === originalRef.artifactId)!;
+    const onDisk = JSON.parse(readFileSync(join(run.outDir, "observations", `${originalRef.artifactId}.json`), "utf8")) as { sha256: string };
+    expect(onDisk.sha256).toBe(originalRef.sha256);
+    expect(createHash("sha256").update(original.bytes).digest("hex")).toBe(originalRef.sha256);
+    const originalFrame = JSON.parse(Buffer.from(original.bytes).toString("utf8")) as { cleanup: string; coverage: unknown };
+    expect(originalFrame.cleanup).toBe("pending");
+    expect(sealed!.cleanup).toBe("confirmed");
+    expect(actual.selected).toBe(1);
+    expect(actual.filtered).toBe(0);
+    const text = JSON.stringify([...actual.supervisorReadback!.evidence.map((item) => Buffer.from(item.bytes).toString("latin1")), actual.shards.map((shard) => Buffer.from(shard.rawReportBytes).toString("latin1"))]);
+    expect(text).not.toContain(run.fixture.account.password);
+    expect(text).not.toContain(run.fixture.account.email);
+  }, 300_000);
 });
 
 describe.runIf(enabled)("a failure that is not an assertion is never FAILED (local, no Docker)", () => {

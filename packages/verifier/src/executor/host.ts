@@ -9,6 +9,7 @@ import { createAPIApplicationCliHost, type E2EApiRuntimePorts } from "../api-run
 import { createWebApplicationCliHost, type E2EWebRuntimePorts } from "../web-runtime.js";
 import type { E2EApplicationCliHost, E2EApplicationCliLaunchContext } from "../application-runtime-bootstrap.js";
 import { readE2EApplicationInstalledFileFixture } from "../application-runtime-assets.js";
+import { isPinnedRovaraHttpEngine } from "../rovara-http-engine-descriptor.js";
 import { createExecutorSessionStore } from "./accounts.js";
 import { createFileCaseLedger } from "./case-ledger.js";
 import { casePlanFor, resolveE2EExecutorSuite } from "./suite.js";
@@ -39,7 +40,7 @@ const STATE_PROBE_SCHEMAS: Readonly<Record<string, unknown>> = Object.freeze({
 
 type Declaration = Readonly<{
   preparedEnvironmentDigest: string;
-  target: { targetId: string; app: { identity: string } | null };
+  target: { targetId: string; app: { identity: string } | null; engine: { name: string; version: string; spiVersion: number; platform: string; workers?: number; capabilities: readonly string[] } | null };
   originByApplicationId: readonly { applicationId: string; origin: string }[];
   cases: readonly { caseId: string; upstreamTestId: string; targetId: string; assertionBindings: readonly { index: number; kind: string; digest: string }[] }[];
 }>;
@@ -199,6 +200,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
 
   if (launchContext.selectedTarget.kind === "api") {
     if (declaration.target.app !== null) throw new Error("API declaration must keep the compiler's app:null target");
+    if (!isPinnedRovaraHttpEngine(declaration.target.engine)) throw new Error("API declaration must name Rovara's pinned HTTP engine");
     const ports: E2EApiRuntimePorts = Object.freeze({ ...shared, request: store.request,
       readApprovedJsonSchema: async () => { throw new Error("no JSON schema assets are installed in this executor"); },
       readApprovedStateProbe: async (request: { caseId: string; assertionIndex: number; probeId: string }) => {

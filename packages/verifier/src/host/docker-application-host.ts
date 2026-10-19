@@ -93,7 +93,8 @@ export type DockerApplicationHostDeps = Readonly<{
   /**
    * Called once with the out directory of a run the executor completed (exit 0 or 1, a result file that agrees and names this run and
    * group), before the run's resources are removed. It is never called for a run without a trustworthy result, and never with a
-   * credential: `containsCredential` answers whether bytes carry one of the run's account credentials.
+   * credential: `containsCredential` answers whether bytes carry one of the run's account credentials. A call is advisory: it may
+   * happen for a run that is then stopped by the deadline or a cancellation, so it never implies a result, let alone PASS.
    */
   onRunOutput?(run: { outDir: string; accountProfileIds: readonly string[]; containsCredential(bytes: Uint8Array): boolean }): Promise<void>;
   /** Test seams: build the lifecycle's readback and the collector's protected inputs once cleanup is confirmed. */
@@ -228,7 +229,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   /** "deadline" means the plan deadline, not the command, ended the build. */
   async function build(signal: AbortSignal): Promise<"ok" | "failed" | "deadline"> {
     const mounts = ["-v", `${deps.candidateSourceDir}:/src:ro`, "-v", `${dirs.app}:/out`];
-    const common = (name: string) => ["run", "--rm", "--name", name, ...hardening(), ...limits("2g", "1024", "2"), "--user", "1000:1000", ...mounts];
+    const common = (name: string) => ["run", "--rm", "--name", name, "--pull=never", ...hardening(), ...limits("2g", "1024", "2"), "--user", "1000:1000", ...mounts];
     const copyTimeout = Math.min(BUILD_COPY_TIMEOUT_MS, left());
     const copy = await docker.run([...common(`rovara-build-${runId}-0`), ...BLANKED_ENV, "--entrypoint", "cp", deps.buildImage, "-R", "--no-preserve=all", "/src/.", "/out/"],
       { signal, timeoutMs: copyTimeout });
@@ -256,7 +257,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   /** The images are pulled here, never by `docker run`, so a run can only start what the host already holds. */
   async function ensureImage(image: string, signal: AbortSignal): Promise<boolean> {
     if ((await admin(["image", "inspect", image], signal)).code === 0) return true;
-    return (await docker.run(["pull", image], { signal, timeoutMs: IMAGE_PULL_TIMEOUT_MS })).code === 0;
+    return (await docker.run(["pull", image], { signal, timeoutMs: Math.min(IMAGE_PULL_TIMEOUT_MS, left()) })).code === 0;
   }
 
   async function appStatus(): Promise<{ running: boolean; exitCode: number | null }> {
@@ -342,6 +343,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
         // A run that was stopped (the deadline or the caller) while the output was being read has no result, and nothing is handed out.
         if (signal.aborted) return { kind: "unavailable", reason: stopReason() };
         await deps.onRunOutput?.({ outDir: dirs.out, accountProfileIds: profileIds, containsCredential: (bytes) => state.redactor.contains(bytes) });
+        // The hook is advisory evidence capture and never implies a result: a run stopped while it ran is still not one.
+        if (signal.aborted) return { kind: "unavailable", reason: stopReason() };
         return { kind: "completed", exitCode: executor.code, snapshot };
       } catch { return { kind: "unavailable", reason: "executor-failed" }; }
     }
