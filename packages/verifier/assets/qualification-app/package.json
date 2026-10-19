@@ -1,0 +1,42 @@
+{
+  "name": "@agentx/orders-web-api-fixture",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": { "start": "node server.mjs" },
+  "agentx": {
+    "e2e": {
+      "schemaVersion": "e2e-application-project/v1",
+      "recipe": {
+        "schemaVersion": 1,
+        "recipeDigest": "22fe496a0adedb28849e2fce400eea3a84ee0d6c884ec3337a9b8819a7c038cb",
+        "build": [],
+        "launch": {
+          "kind": "service",
+          "start": { "program": "node", "args": ["server.mjs"], "cwd": ".", "timeoutMs": 60000, "env": {} },
+          "health": { "path": "/health", "expectedStatus": 200 }
+        },
+        "serviceProfileIds": ["node-http/v1"],
+        "seedProfileId": "orders-seed/v1",
+        "accountProfileIds": ["synthetic", "orders-owner", "orders-viewer"],
+        "allowedOrigins": ["orders-api", "inventory-v1"]
+      },
+      "service": {
+        "listenPort": 4317,
+        "portEnv": "APP_PORT",
+        "originBindings": [
+          { "originRef": "orders-api", "envName": "ORDERS_API_ORIGIN" },
+          { "originRef": "inventory-v1", "envName": "INVENTORY_ORIGIN" }
+        ]
+      },
+      "accountProfiles": [
+        { "profileId": "synthetic", "scope": "synthetic-test", "authProfileId": "orders-auth/v1", "seedProfileId": "orders-seed/v1", "tenantRef": "tenant-a", "roleRef": "viewer", "identityProbeId": "orders-identity/v1" },
+        { "profileId": "orders-owner", "scope": "synthetic-test", "authProfileId": "orders-auth/v1", "seedProfileId": "orders-seed/v1", "tenantRef": "tenant-a", "roleRef": "owner", "identityProbeId": "orders-identity/v1" },
+        { "profileId": "orders-viewer", "scope": "synthetic-test", "authProfileId": "orders-auth/v1", "seedProfileId": "orders-seed/v1", "tenantRef": "tenant-a", "roleRef": "viewer", "identityProbeId": "orders-identity/v1" }
+      ],
+      "targetAccounts": [
+        { "baseTargetId": "web-1", "profileId": "orders-owner" },
+        { "baseTargetId": "web-1", "profileId": "orders-viewer" }
+      ]
+    }
+  }
+}

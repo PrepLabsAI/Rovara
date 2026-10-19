@@ -7,8 +7,9 @@ import {
   e2eScenarioBundleDigest, e2ePortableOperationDescriptorDigest, inspectE2ERepository, selectE2EExecutionPlan,
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot, type RuntimeInstallChallenge,
   RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema,
-  WEB_API_REQUIRED_PROBES, WEB_API_RUNTIME_PROFILE_ID, webApiProbeAssetManifestPath, WEB_API_RUNTIME_SCOPE, WebApiProbeObservationSchema, WebApiRuntimeInstallProposalSchema,
-  evaluateWebApiProbeObservation, type WebApiProbeObservation, type WebApiRuntimeInstallProposal,
+  WEB_API_QUALIFICATION_APP_MANIFEST_PREFIX, WEB_API_QUALIFICATION_APP_TREE_DIGEST, WEB_API_REQUIRED_PROBES, WEB_API_RUNTIME_PROFILE_ID, webApiProbeAssetManifestPath,
+  webApiQualificationAppTreeDigest, WEB_API_RUNTIME_SCOPE, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, WebApiRuntimeInstallProposalSchema,
+  evaluateWebApiProbeObservation, type WebApiProbeObservation, type WebApiProbeRun, type WebApiRuntimeInstallProposal,
 } from "@agentx/contracts";
 import { compileE2EScenarios, type E2EImmutableCompilationContext } from "./scenarios.js";
 import { runE2EActualCli } from "./runtime-cli.js";
@@ -220,12 +221,13 @@ export class WebApiQualificationRejected extends Error {
 
 /**
  * Qualifies the web/API application runtime. Each required probe runs through the supplied runner (the real Docker host and the
- * real collector in production), and its observed facts are judged by the same pure oracle the registrar re-runs. Any probe that is
+ * real collector in production), which returns the facts it observed together with the retained evidence they were derived from. The facts are
+ * judged by the same pure oracle the registrar re-runs, and the evidence travels in the proposal so the registrar can re-derive them. Any probe that is
  * wrong, missing, skipped, flaky or retried rejects the whole qualification; nothing here returns a partial proposal.
  */
 export async function qualifyInstalledWebApiRuntime(input: Readonly<{
   challenge: RuntimeInstallChallenge; evidenceRoot: string;
-  runProbe: (probeId: string) => Promise<WebApiProbeObservation>;
+  runProbe: (probeId: string) => Promise<WebApiProbeRun>;
   environment?: Partial<WebApiQualificationEnvironment>;
 }>): Promise<WebApiRuntimeInstallProposal> {
   const challenge = RuntimeInstallChallengeSchema.parse(input.challenge);
@@ -242,18 +244,25 @@ export async function qualifyInstalledWebApiRuntime(input: Readonly<{
   const manifest = await environment.observeManifest();
   // The installed manifest hashes the real asset files, so it proves the installed probes are the pinned ones.
   const installedAssets = new Map(manifest.entries.map((entry) => [entry.path, entry.sha256]));
+  // So does the qualification app every probe runs against: a tree that is not the pinned one qualifies nothing.
+  const installedApp = manifest.entries.filter((entry) => entry.path.startsWith(WEB_API_QUALIFICATION_APP_MANIFEST_PREFIX))
+    .map((entry) => ({ path: entry.path.slice(WEB_API_QUALIFICATION_APP_MANIFEST_PREFIX.length), sha256: entry.sha256 }));
+  if (installedApp.length === 0 || webApiQualificationAppTreeDigest(installedApp) !== WEB_API_QUALIFICATION_APP_TREE_DIGEST) throw new WebApiQualificationRejected(["qualification-app-not-installed-as-pinned"]);
   const probes: WebApiRuntimeInstallProposal["probes"] = [];
   const reasons: string[] = [];
   for (const required of WEB_API_REQUIRED_PROBES) {
     if (installedAssets.get(webApiProbeAssetManifestPath(required.probeId)) !== required.assetDigest) { reasons.push(`probe-asset-not-installed-as-pinned:${required.probeId}`); continue; }
-    let observation: WebApiProbeObservation;
-    try { observation = WebApiProbeObservationSchema.parse(await input.runProbe(required.probeId)); }
-    catch { reasons.push(`probe-run-failed:${required.probeId}`); continue; }
+    let observation: WebApiProbeObservation; let evidence: WebApiProbeRun["evidence"];
+    try {
+      const run = await input.runProbe(required.probeId);
+      observation = WebApiProbeObservationSchema.parse(run.observation);
+      evidence = WebApiProbeEvidenceSchema.parse(run.evidence);
+    } catch { reasons.push(`probe-run-failed:${required.probeId}`); continue; }
     await writeFile(join(evidenceDirectory, `${required.probeId}.json`), `${canonicalJson(observation)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
     const verdict = evaluateWebApiProbeObservation(required.probeId, observation);
     if (!verdict.ok) { reasons.push(verdict.reason); continue; }
     probes.push({ probeId: required.probeId, kind: required.kind, expectedOutcome: required.expectedOutcome, observedOutcome: required.expectedOutcome,
-      assetDigest: required.assetDigest, observation });
+      assetDigest: required.assetDigest, observation, evidence });
   }
   if (reasons.length > 0) throw new WebApiQualificationRejected(reasons);
   const toolchain = { execPath: environment.nodeExecPath, version: environment.nodeVersion as "v22.23.2", platform: environment.platform, arch: environment.arch };

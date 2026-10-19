@@ -226,7 +226,10 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
       blocked = (await readFile(join(outDir, E2E_EXECUTOR_BLOCKED_LOG), "utf8")).split("\n").filter(Boolean).map((line) => JSON.parse(line) as unknown);
       await rm(join(outDir, E2E_EXECUTOR_BLOCKED_LOG), { force: true });
     } catch { /* no request was blocked */ }
-    await writeFile(join(outDir, "blocked-requests.json"), `${JSON.stringify({ schemaVersion: "e2e-executor-blocked-requests/v1", blocked }, null, 2)}\n`);
+    // The file names the run, group and upstream runs it belongs to, so a registrar can tie it to the evidence the collector read.
+    await writeFile(join(outDir, "blocked-requests.json"), `${JSON.stringify({ schemaVersion: "e2e-executor-blocked-requests/v1",
+      runId: resolved?.binding.runId ?? null, groupId: resolved?.suite.group.groupId ?? null,
+      shards: shards.map((item) => ({ shardId: item.shardId, upstreamRunId: item.upstreamRunId })), blocked }, null, 2)}\n`);
     // Last line of defense: nothing under the out directory may carry an account credential.
     // The scan fails closed: a file it cannot read in full, or a tree it cannot walk in full, leaves no trustworthy result.
     const failScan = async (why: string) => {

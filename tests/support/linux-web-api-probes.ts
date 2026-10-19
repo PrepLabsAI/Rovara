@@ -1,69 +1,36 @@
-import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { chmod, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalJson, type WebApiProbeObservation } from "../../packages/contracts/src/index.js";
-import { loadWebApiQualificationProbeAssets } from "../../packages/verifier/src/application-runtime-probes.js";
-import { collectHostRun } from "./e2e-actual-run-proof.js";
-import { blockedHosts, readReport } from "./e2e-executor-output.js";
-import { runProbe, type ProbeOptions, type ProbeRun } from "./linux-runtime.js";
-import type { OrdersProbeName } from "./e2e-orders-executor-fixture.js";
-
-const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
-/** The outside host the egress probes try to reach; the qualification oracle requires exactly this one to be recorded as blocked. */
-const OUTSIDE_URL = "https://probe.example.com/ping";
-
-type ProbePlan = Readonly<{ probe: OrdersProbeName; options: ProbeOptions }>;
-
-/** How each required qualification probe is driven through the fixture app; the oracle in contracts judges the outcome, not this table. */
-function planFor(probeId: string): ProbePlan {
-  switch (probeId) {
-    case "web-csv-positive-v1": return { probe: "web-csv-positive-v1", options: { defect: null } };
-    case "web-csv-negative-v1": return { probe: "web-csv-positive-v1", options: { defect: "extra-order.json" } };
-    case "web-egress-denial-v1": return { probe: "web-egress-denial-v1", options: { defect: null, appEnv: { FIXTURE_EGRESS_PROBE_URL: OUTSIDE_URL } } };
-    case "api-state-positive-v1": return { probe: "api-state-positive-v1", options: { defect: null } };
-    case "api-egress-denial-v1": return { probe: "api-egress-denial-v1", options: { defect: null, appEnv: { INVENTORY_ORIGIN: "https://probe.example.com" } } };
-    case "build-imds-denial-v1": {
-      // The build command and its expected exit code come from the installed probe asset, so the probe the qualifier records is the one that ran.
-      const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === probeId)!;
-      if (asset.probe.oracle.kind !== "build-command-failure") throw new Error("the IMDS probe asset has no build command");
-      return { probe: "web-csv-positive-v1", options: { defect: null, recipeBuild: [asset.probe.oracle.build] } };
-    }
-    default: throw new Error(`no probe plan for ${probeId}`);
-  }
-}
-
-/** The worker's own join after close: the host's actual run and protected inputs through the real collector. */
-async function collectLikeTheWorker(r: ProbeRun) {
-  const inputs = await r.host.readCollectionInputs(new AbortController().signal);
-  const original = process.execPath;
-  process.execPath = r.run.actualRun!.runnerToolchain.execPath;
-  try { return collectHostRun(r.run.actualRun!, inputs, r.fixture.plan); } finally { process.execPath = original; }
-}
+import { collectE2EApplicationRun } from "../../packages/verifier/src/application-collection.js";
+import { createProcessDockerCli } from "../../packages/verifier/src/host/docker-application-host.js";
+import { createWebApiProbeRunner, type WebApiProbeRunnerDeps } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 
 /**
- * Runs one qualification probe through the production Docker host and the real collector, and reports only what happened.
- * Judging the outcome is the qualifier's job; this reads the verdict, the failed assertions, the blocked hosts and the upstream
- * report's retry, skip and flaky counts straight from the run's own evidence.
+ * The CI runner is not the EC2 worker: its Node sits at a different path than the executor container's, and the collector checks that the toolchain
+ * the executor reported is the one reading the result. So this swaps in the reported path for the duration of that one check; nothing else about
+ * the production runner is changed.
  */
-export async function observeWebApiProbe(probeId: string): Promise<WebApiProbeObservation> {
-  const plan = planFor(probeId);
-  const r = await runProbe(plan.probe, plan.options);
-  const diagnostics = r.host.readDiagnostics(r.fixture.plan.runId);
-  if (r.run.unavailableReason !== null || r.run.actualRun === null) {
-    const buildExit = /exit code (\d+)/.exec(diagnostics.buildLogTail)?.[1];
-    return { collectorStatus: null, runUnavailableReason: r.run.unavailableReason ?? "unavailable", failedAssertionKinds: [], blockedHosts: [],
-      buildExitCode: buildExit === undefined ? null : Number(buildExit), attempts: 1, skipped: 0, flaky: 0, evidenceDigest: sha(canonicalJson({ probeId, diagnostics })) };
-  }
-  const collected = await collectLikeTheWorker(r);
-  const status = collected.unavailableReason === null ? collected.qualification?.status ?? "UNKNOWN" : "UNKNOWN";
-  const scenario = r.fixture.compiled.bundle.scenarios[0]!;
-  const failedAssertionKinds = (collected.qualification?.result?.cases ?? []).flatMap((verdict) => verdict.assertionReceipts
-    .filter((receipt) => receipt.status === "failed").map((receipt) => scenario.assertions[receipt.assertionIndex]!.kind));
-  const outDir = r.outDir;
-  const report = outDir === null ? null : readReport(outDir);
-  return { collectorStatus: status === "PASS" || status === "FAILED" ? status : "UNKNOWN", runUnavailableReason: null, failedAssertionKinds,
-    blockedHosts: outDir === null ? [] : blockedHosts(outDir), buildExitCode: null,
-    attempts: Math.max(1, ...(report?.run.results.map((result) => result.attempts.length) ?? [1])),
-    skipped: report?.run.summary.skipped ?? 0, flaky: report?.run.summary.flaky ?? 0,
-    evidenceDigest: sha(outDir === null ? canonicalJson({ probeId, diagnostics }) : readFileSync(join(outDir, "report.json"))) };
+const collectOnThisHost: typeof collectE2EApplicationRun = (input) => {
+  const original = process.execPath;
+  process.execPath = input.actual.runnerToolchain.execPath;
+  try { return collectE2EApplicationRun(input); } finally { process.execPath = original; }
+};
+
+/** The production probe runner on this host's real Docker; the Linux tests' only way to run a qualification probe. */
+export function createLinuxProbeRunner(input: Omit<WebApiProbeRunnerDeps, "docker" | "collect">) {
+  return createWebApiProbeRunner({ ...input, docker: createProcessDockerCli(), collect: collectOnThisHost });
+}
+
+const scratch: string[] = [];
+/** A throwaway run root (shared with the Docker host at the same path) and a private evidence root for one qualification. */
+export async function linuxProbeScratch(): Promise<{ runRoot: string; evidenceRoot: string }> {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "rovara-web-api-probes-")));
+  scratch.push(root);
+  const evidenceRoot = join(root, "evidence");
+  await mkdir(evidenceRoot, { mode: 0o700 });
+  await chmod(evidenceRoot, 0o700);
+  return { runRoot: join(root, "runs"), evidenceRoot };
+}
+export async function removeWebApiProbeScratch(): Promise<void> {
+  for (const dir of scratch.splice(0)) await rm(dir, { recursive: true, force: true }).catch(() => undefined);
 }

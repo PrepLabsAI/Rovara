@@ -57,6 +57,10 @@ async function runProbe(probe: OrdersProbeName, options: { defect?: string; appE
   return { fixture, outDir, result, stderr };
 }
 
+function readExecutorShardRunIds(outDir: string): (string | null)[] {
+  return (JSON.parse(readFileSync(join(outDir, "executor-result.json"), "utf8")) as { shards: { upstreamRunId: string | null }[] }).shards.map((shard) => shard.upstreamRunId);
+}
+
 async function everything(dir: string): Promise<string> {
   const parts: string[] = [];
   for (const entry of await readdir(dir, { withFileTypes: true, recursive: true })) {
@@ -94,6 +98,10 @@ describe.runIf(enabled)("executor against a real Chromium and the fixture app (l
     expect(run.result.exitCode).toBe(1);
     expect(caseStatuses(run.outDir, run.fixture)["web-egress-denial-v1"]).not.toBe("passed");
     expect(blockedHosts(run.outDir)).toContain("probe.example.com");
+    // The file is bound to the run and shard it came from, which is what lets a registrar tie it to the collected evidence.
+    const file = JSON.parse(readFileSync(join(run.outDir, "blocked-requests.json"), "utf8")) as { runId: string; groupId: string; shards: { shardId: string; upstreamRunId: string | null }[] };
+    expect(file).toMatchObject({ runId: run.fixture.plan.runId, groupId: run.fixture.plan.groupId });
+    expect(file.shards.map((shard) => shard.upstreamRunId)).toEqual(readExecutorShardRunIds(run.outDir));
   }, 300_000);
 
   it("third-party assets are blocked and recorded, not fatal", async () => {

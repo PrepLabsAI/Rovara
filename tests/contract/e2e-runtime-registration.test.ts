@@ -19,8 +19,9 @@ import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type Runtime
 import type { AuthenticatedIdentity } from "../../packages/broker/src/auth.js";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "../../packages/verifier/src/rovara-http-engine-descriptor.js";
 import { qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
-import { runtimeInstallChallengeDigest, runtimeInstallationProposalSha256, webApiRuntimeInstallProposalSha256, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";
+import { WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_REQUIRED_PROBES, runtimeInstallationProposalSha256, webApiRuntimeInstallProposalSha256, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";
 import { proposalFor } from "../support/p0-runtime-proposal.js";
+import { createFakeRuntimeRegistry } from "../support/runtime-registry-fakes.js";
 import { fakeLinuxEnvironment, fakeProbeRunner, privateEvidenceRoot, webApiChallenge } from "../support/web-api-qualification.js";
 
 const digest = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
@@ -161,35 +162,9 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
   const at = Date.parse("2026-10-19T12:00:00.000Z");
 
   async function setup(options: { challenge?: Partial<RuntimeInstallChallenge>; toolchain?: Record<string, string>; runner?: Parameters<typeof fakeProbeRunner>[0] } = {}) {
-    const items = new Map<string, Record<string, unknown>>();
-    const objects = new Map<string, Buffer>();
-    const transactions: Array<Array<Record<string, unknown>>> = [];
-    const k = (key: Record<string, unknown>) => `${String(key.pk)}|${String(key.sk)}`;
-    const documentClient = { send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
-      const { input } = command;
-      if (command.constructor.name === "GetCommand") return { Item: items.get(k(input.Key as Record<string, unknown>)) };
-      if (command.constructor.name === "PutCommand") { items.set(k(input.Item as Record<string, unknown>), input.Item as Record<string, unknown>); return {}; }
-      if (command.constructor.name === "TransactWriteCommand") {
-        const writes = input.TransactItems as Array<Record<string, { Item?: Record<string, unknown>; Key?: Record<string, unknown> }>>;
-        transactions.push(writes);
-        for (const write of writes) {
-          if (write.Put?.Item) items.set(k(write.Put.Item), write.Put.Item);
-          if (write.Update?.Key) items.set(k(write.Update.Key), { ...items.get(k(write.Update.Key))!, state: "CONSUMED" });
-        }
-        return {};
-      }
-      throw new Error(`unexpected datastore command ${command.constructor.name}`);
-    } };
-    const s3 = { send: async (command: { constructor: { name: string }; input: { Key: string; Body?: Buffer } }) => {
-      if (command.constructor.name === "PutObjectCommand") { objects.set(command.input.Key, Buffer.from(command.input.Body!)); return {}; }
-      throw new Error("unexpected object-store command");
-    } };
-    const deps = { documentClient, s3, tableName: "state", artifactBucketName: "artifacts", setupCatalogId: "configured-setup", featureCatalogId: "configured-feature", now: () => at } as unknown as RuntimeInstallationDependencies;
+    const { deps, items, objects, transactions, seedChallenge } = createFakeRuntimeRegistry(at);
     const challenge = webApiChallenge(at, options.challenge);
-    items.set(`RUNTIME_INSTALL_CHALLENGE#${challenge.challengeId}|CHALLENGE`, { pk: `RUNTIME_INSTALL_CHALLENGE#${challenge.challengeId}`, sk: "CHALLENGE",
-      entityType: "RUNTIME_INSTALL_CHALLENGE", state: "ISSUED", challengeDigest: runtimeInstallChallengeDigest(challenge),
-      secretSha256: sha(Buffer.from(challenge.challengeSecret, "base64")), issuedByOwnerKey: challenge.issuedByOwnerKey, issuedBySubject: challenge.issuedBySubject,
-      issuedAt: challenge.issuedAt, expiresAt: challenge.expiresAt });
+    seedChallenge(challenge);
     const proposal = await qualifyInstalledWebApiRuntime({ challenge, evidenceRoot: await privateEvidenceRoot(), runProbe: fakeProbeRunner(options.runner).runProbe,
       environment: fakeLinuxEnvironment(at, options.toolchain ? { nodeExecPath: options.toolchain.execPath! } : {}) });
     return { deps, items, objects, transactions, challenge, proposal, request: (value: unknown = proposal) => ({ proposal: value, proposalSha256: webApiRuntimeInstallProposalSha256(proposal) }) };
@@ -328,5 +303,152 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
     const relabelled = { ...p0, challenge: { ...p0.challenge, profileId: "linux-arm64-web-api-v1" } };
     await expect(registerRuntimeInstallation(t.deps, admin, { proposal: relabelled, proposalSha256: "c".repeat(64) })).rejects.toThrow(/challenge-bound runtime profile and socket/);
     expect(t.transactions).toHaveLength(0);
+  });
+
+  describe("run-bound probe evidence (Ruling Z)", () => {
+    type Probe = Awaited<ReturnType<typeof setup>>["proposal"]["probes"][number];
+    /** The parts of a probe's embedded evidence these tests edit; the collector's own wire format is checked by the registrar, not here. */
+    type EditableProbe = { observation: Probe["observation"]; evidence: { runId: string; blockedRequestsBase64: string | null;
+      collection: { padding?: string; shards: { rawReport: { bytesBase64: string; byteLength: number; sha256: string }; runProcess: { stdoutSha256: string; stdoutBytes: number } }[] };
+      oracle: { binding: { runId: string } }; scenarioBundle: { scenarios: { assertions: { rows?: string[][] }[] }[] };
+      build: { exitCode: number | null; command: { args: string[] } | null } | null } };
+    const probeIndex = (id: string) => WEB_API_REQUIRED_PROBES.findIndex((probe) => probe.probeId === id);
+    /**
+     * Edits one probe's embedded evidence (and optionally its recorded observation) in a copy of the proposal. A forger who edits the evidence also fixes the
+     * observation's evidence digest, so a refusal has to come from re-deriving the bytes and not from the digest alone.
+     */
+    function tampered(t: Awaited<ReturnType<typeof setup>>, probeId: string, edit: (probe: EditableProbe) => void) {
+      const proposal = structuredClone(t.proposal);
+      const probe = proposal.probes[probeIndex(probeId)]! as unknown as EditableProbe;
+      const before = canonicalJson(probe.evidence);
+      edit(probe);
+      if (canonicalJson(probe.evidence) !== before) probe.observation = { ...probe.observation, evidenceDigest: sha(canonicalJson(probe.evidence)) };
+      return proposal;
+    }
+    async function expectRefused(t: Awaited<ReturnType<typeof setup>>, proposal: unknown, reason: RegExp) {
+      // A proposal the schema itself refuses has no digest; any digest then does, because the reason is raised before the digest is compared.
+      let proposalSha256 = "a".repeat(64);
+      try { proposalSha256 = webApiRuntimeInstallProposalSha256(proposal); } catch { /* refused by the schema */ }
+      const body = { proposal, proposalSha256 };
+      await expect(registerRuntimeInstallation(t.deps, admin, body)).rejects.toThrow(reason);
+      // Nothing is written: no row, no evidence object, and the challenge is still spendable.
+      expect(t.transactions).toHaveLength(0);
+      expect(t.objects.size).toBe(0);
+      expect(t.items.get(`RUNTIME_INSTALL_CHALLENGE#${t.challenge.challengeId}|CHALLENGE`)!.state).toBe("ISSUED");
+    }
+
+    it("registers the untampered proposal the production runner's evidence produces", async () => {
+      const t = await setup();
+      expect(t.proposal.probes.map((probe) => probe.evidence.kind)).toEqual(["collected", "collected", "collected", "collected", "collected", "unavailable"]);
+      await expect(registerRuntimeInstallation(t.deps, admin, t.request())).resolves.toMatchObject({ featureRevisions: { web: 1, api: 1 } });
+    });
+
+    it("refuses a FAILED csv report edited to PASS inside the embedded bytes, even when every digest is made to agree", async () => {
+      const t = await setup();
+      const proposal = tampered(t, "web-csv-negative-v1", (probe) => {
+        const shard = probe.evidence.collection.shards[0]!;
+        const report = JSON.parse(Buffer.from(shard.rawReport.bytesBase64, "base64").toString("utf8")) as { run: { status: string; summary: Record<string, number>; results: { status: string }[] } };
+        report.run.status = "passed"; report.run.summary.passed = report.run.summary.failed ?? 0; report.run.summary.failed = 0;
+        for (const result of report.run.results) result.status = "passed";
+        const bytes = Buffer.from(JSON.stringify(report));
+        shard.rawReport = { bytesBase64: bytes.toString("base64"), byteLength: bytes.byteLength, sha256: sha(bytes) };
+        shard.runProcess.stdoutSha256 = sha(bytes); shard.runProcess.stdoutBytes = bytes.byteLength;
+      });
+      await expectRefused(t, proposal, /probe-evidence-mismatch:web-csv-negative-v1/);
+    });
+
+    it("refuses edited evidence whose observation still carries the digest of the original bytes", async () => {
+      const t = await setup();
+      const proposal = structuredClone(t.proposal);
+      (proposal.probes[probeIndex("api-state-positive-v1")]!.evidence as { oracle: { padding?: string } }).oracle.padding = "edited";
+      await expectRefused(t, proposal, /probe-evidence-mismatch:api-state-positive-v1/);
+    });
+
+    it("refuses a recorded observation the embedded evidence does not show", async () => {
+      const t = await setup();
+      // The evidence of a passing csv run, claimed as a failing one, and the reverse for the positive probe.
+      await expectRefused(t, tampered(t, "web-csv-positive-v1", (probe) => { probe.observation = { ...probe.observation, collectorStatus: "FAILED", failedAssertionKinds: ["csv"] }; }), /probe-evidence-mismatch:web-csv-positive-v1|positive-probe-failed/);
+      await expectRefused(t, tampered(t, "api-egress-denial-v1", (probe) => { probe.observation = { ...probe.observation, failedAssertionKinds: ["http-status", "json"] }; }), /probe-evidence-mismatch:api-egress-denial-v1|probe-wrong-cause/);
+      await expectRefused(t, tampered(t, "web-csv-positive-v1", (probe) => { probe.observation = { ...probe.observation, evidenceDigest: "f".repeat(64) }; }), /probe-evidence-mismatch:web-csv-positive-v1/);
+      await expectRefused(t, tampered(t, "web-csv-positive-v1", (probe) => { probe.observation = { ...probe.observation, attempts: 2 }; }), /probe-retried|probe-evidence-mismatch/);
+    });
+
+    it("refuses evidence that carries another run id", async () => {
+      const t = await setup();
+      const other = "11111111-1111-4111-8111-111111111111";
+      await expectRefused(t, tampered(t, "web-csv-positive-v1", (probe) => { probe.evidence.runId = other; }), /probe-evidence-unbound:web-csv-positive-v1/);
+      // The report and capture inside the evidence name the run too: a collected run whose own binding names another run is not this probe's run.
+      await expectRefused(t, tampered(t, "api-state-positive-v1", (probe) => { probe.evidence.oracle.binding.runId = other; }), /probe-evidence-unbound:api-state-positive-v1/);
+      // One probe's genuine evidence cannot stand in for another's.
+      await expectRefused(t, tampered(t, "api-state-positive-v1", (probe) => { Object.assign(probe, { evidence: structuredClone(t.proposal.probes[probeIndex("web-csv-positive-v1")]!.evidence) }); }), /probe-evidence-unbound:api-state-positive-v1/);
+    });
+
+    it("refuses evidence recorded for another challenge", async () => {
+      // The same genuine evidence, answered under a challenge whose digest (and so every derived run id) differs.
+      const t = await setup({ challenge: { generation: 4 } });
+      await expect(registerRuntimeInstallation(t.deps, admin, t.request())).rejects.toThrow(/probe-evidence-unbound:web-csv-positive-v1/);
+      expect(t.transactions).toHaveLength(0);
+    });
+
+    it("refuses missing evidence by name, before any write", async () => {
+      const t = await setup();
+      const proposal = structuredClone(t.proposal) as { probes: Record<string, unknown>[] };
+      delete proposal.probes[probeIndex("web-egress-denial-v1")]!.evidence;
+      await expect(registerRuntimeInstallation(t.deps, admin, { proposal, proposalSha256: "a".repeat(64) })).rejects.toThrow(/probe-evidence-unbound:web-egress-denial-v1/);
+      const broken = structuredClone(t.proposal) as { probes: { evidence: Record<string, unknown> }[] };
+      delete broken.probes[probeIndex("api-state-positive-v1")]!.evidence.collection;
+      await expect(registerRuntimeInstallation(t.deps, admin, { proposal: broken, proposalSha256: "a".repeat(64) })).rejects.toThrow(/probe-evidence-mismatch:api-state-positive-v1/);
+      expect(t.transactions).toHaveLength(0);
+      expect(t.objects.size).toBe(0);
+    });
+
+    it("refuses a scenario other than the one pinned for the probe", async () => {
+      const t = await setup();
+      const proposal = tampered(t, "web-csv-positive-v1", (probe) => {
+        const bundle = probe.evidence.scenarioBundle;
+        bundle.scenarios[0]!.assertions[0]!.rows = [["a1", "Ada", "1", "ready"]];
+      });
+      await expectRefused(t, proposal, /probe-evidence-mismatch:web-csv-positive-v1/);
+    });
+
+    it("refuses a blocked-requests file that is not the run's own, and one that hides the blocked host", async () => {
+      const t = await setup();
+      const file = (patch: Record<string, unknown>) => {
+        const original = fixtureBlockedRequests();
+        return Buffer.from(JSON.stringify({ ...original, ...patch })).toString("base64");
+      };
+      const fixtureBlockedRequests = () => JSON.parse(Buffer.from(t.proposal.probes[probeIndex("web-egress-denial-v1")]!.evidence.kind === "collected"
+        ? (t.proposal.probes[probeIndex("web-egress-denial-v1")]!.evidence as { blockedRequestsBase64: string }).blockedRequestsBase64 : "", "base64").toString("utf8")) as Record<string, unknown>;
+      expect(fixtureBlockedRequests().blocked).not.toEqual([]);
+      await expectRefused(t, tampered(t, "web-egress-denial-v1", (probe) => { probe.evidence.blockedRequestsBase64 = file({ runId: "11111111-1111-4111-8111-111111111111" }); }), /probe-evidence-mismatch:web-egress-denial-v1/);
+      await expectRefused(t, tampered(t, "web-egress-denial-v1", (probe) => { probe.evidence.blockedRequestsBase64 = file({ shards: [] }); }), /probe-evidence-mismatch:web-egress-denial-v1/);
+      // Dropping the blocked entries changes what the evidence shows, so the recorded blocked host no longer re-derives.
+      await expectRefused(t, tampered(t, "web-egress-denial-v1", (probe) => { probe.evidence.blockedRequestsBase64 = file({ blocked: [] }); }), /probe-evidence-mismatch:web-egress-denial-v1|probe-wrong-cause/);
+      await expectRefused(t, tampered(t, "web-egress-denial-v1", (probe) => { probe.evidence.blockedRequestsBase64 = null; }), /probe-evidence-mismatch:web-egress-denial-v1/);
+    });
+
+    it("refuses a build result the host did not report: another exit code, another command, another run", async () => {
+      const t = await setup();
+      await expectRefused(t, tampered(t, "build-imds-denial-v1", (probe) => { probe.evidence.build!.exitCode = 3; }), /probe-evidence-mismatch:build-imds-denial-v1/);
+      await expectRefused(t, tampered(t, "build-imds-denial-v1", (probe) => { probe.evidence.build!.command!.args = ["-e", "process.exit(7)"]; }), /probe-evidence-mismatch:build-imds-denial-v1/);
+      await expectRefused(t, tampered(t, "build-imds-denial-v1", (probe) => { probe.evidence.build = null; }), /probe-evidence-mismatch:build-imds-denial-v1|probe-wrong-cause/);
+      await expectRefused(t, tampered(t, "build-imds-denial-v1", (probe) => { probe.evidence.runId = "11111111-1111-4111-8111-111111111111"; }), /probe-evidence-unbound:build-imds-denial-v1/);
+    });
+
+    it("refuses an oversized proposal and never retains it", async () => {
+      const t = await setup();
+      const proposal = tampered(t, "web-csv-positive-v1", (probe) => { probe.evidence.collection.padding = "x".repeat(WEB_API_PROBE_PROPOSAL_MAX_BYTES); });
+      await expect(registerRuntimeInstallation(t.deps, admin, { proposal, proposalSha256: "a".repeat(64) })).rejects.toThrow(/probe-evidence-oversized/);
+      expect(t.transactions).toHaveLength(0);
+      expect(t.objects.size).toBe(0);
+    });
+
+    it("accepts a proposal that is large but inside the bound, and retains exactly its bytes", async () => {
+      const t = await setup();
+      expect(Buffer.byteLength(canonicalJson(t.proposal))).toBeLessThan(WEB_API_PROBE_PROPOSAL_MAX_BYTES);
+      const result = await registerRuntimeInstallation(t.deps, admin, t.request());
+      expect(t.objects.get(result.evidence.key)!.byteLength).toBe(Buffer.byteLength(canonicalJson(t.proposal)));
+      expect(result.evidence.byteLength).toBeGreaterThan(1_048_576 / 8);
+    });
   });
 });

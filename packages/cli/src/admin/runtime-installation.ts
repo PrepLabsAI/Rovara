@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { Ec2RuntimeBindingSchema, RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema, canonicalJson } from "@agentx/contracts";
+import { Ec2RuntimeBindingSchema, RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema, WebApiRuntimeInstallProposalSchema, canonicalJson, webApiRuntimeInstallProposalSha256 } from "@agentx/contracts";
 import { z } from "zod";
 import { adminResponseBody } from "./http.js";
 
@@ -35,9 +35,16 @@ export async function requestRuntimeInstallChallenge(input: Auth & {
   return { challengeId: challenge.challengeId, outputFile: destination, expiresAt: challenge.expiresAt };
 }
 
-/** Submits the exact strict proposal bytes through the current administrator session. */
+/**
+ * Submits the exact strict proposal through the current administrator session: a standard P0 proposal, or a web/API one (its own schema and digest,
+ * with the retained evidence the registrar re-derives every observation from). Anything that is neither never leaves this machine.
+ */
 export async function submitRuntimeInstallProposal(input: Auth & { proposalFile: string }, fetchImplementation: Fetcher = fetch): Promise<unknown> {
   const proposal: unknown = JSON.parse(await readFile(resolve(input.proposalFile), "utf8"));
+  if ((proposal as { schemaVersion?: unknown } | null)?.schemaVersion === "runtime-installation-proposal/v2") {
+    const webApi = WebApiRuntimeInstallProposalSchema.parse(proposal);
+    return post(input, "/v1/admin/runtime-installation/registrations", { proposal: webApi, proposalSha256: webApiRuntimeInstallProposalSha256(webApi) }, fetchImplementation);
+  }
   const parsed = RuntimeInstallationProposalSchema.parse(proposal);
   const proposalSha256 = createHash("sha256").update(canonicalJson(parsed)).digest("hex");
   return post(input, "/v1/admin/runtime-installation/registrations", { proposal: parsed, proposalSha256 }, fetchImplementation);

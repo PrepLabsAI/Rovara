@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runIsolatedE2EApplication, type E2EIsolatedApplicationRun } from "../../packages/verifier/src/application-runtime.js";
 import { createDockerApplicationHost, createProcessDockerCli, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
+import { webApiProbeRunInput } from "../../packages/verifier/src/host/web-api-probe-plan.js";
+import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { ORDERS_FIXTURE_ROOT, createOrdersExecutorPlan, type OrdersExecutorFixture, type OrdersProbeName } from "./e2e-orders-executor-fixture.js";
 
 /** The same pinned base the executor image is built from; the fixture app needs nothing but Node. */
-export const APP_NODE_IMAGE = "public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5";
+export const APP_NODE_IMAGE = WEB_API_BUILD_IMAGE;
 export const EXECUTOR_IMAGE = process.env.ROVARA_EXECUTOR_IMAGE ?? "rovara-e2e-executor:ci";
 
 /** What every Linux test hands the production host: a real Docker, the two images, and a throwaway run root. */
@@ -25,17 +27,7 @@ export async function createLinuxHost(fixture: OrdersExecutorFixture, options: O
 }
 
 /** The fixture's lifecycle input for one group, shaped like the broker's, for `runIsolatedE2EApplication`. */
-export function linuxRunInput(fixture: OrdersExecutorFixture) {
-  const { compiled, plan } = fixture;
-  const ref = compiled.runtimeAdmissionContext.selectionInput.intent.applicationRuntimeRefs[0]!;
-  const app = compiled.applicationBindings.get(ref.applicationId)!; const runtime = compiled.runtimeBindings.get(ref.runtimeProfileId)!;
-  return { binding: plan.admission.round.groupBindings[0]!, suite: { bundle: compiled.bundle, files: compiled.shards[0]!.files, expectedCases: compiled.expectedCases },
-    profile: { profileId: runtime.profileId, kind: "web", runtimeManifestDigest: runtime.manifestDigest,
-      applications: [{ applicationId: ref.applicationId, appBuildManifestDigest: app.build.manifestDigest,
-        appRecipe: app.approval.applications.find((item) => item.applicationId === ref.applicationId)!.recipe }],
-      networkPolicyDigest: runtime.capabilities.networkPolicyDigest, seedDigest: "a".repeat(64), limits: runtime.binding,
-      capture: compiled.runtimeAdmissionContext.selectionInput.policy.capture }, modelPermit: null };
-}
+export const linuxRunInput = webApiProbeRunInput;
 
 export type ProbeOptions = Readonly<{
   /** A defect file name under tests/fixtures/e2e-web-api-app/defects, placed in the owned mount and named by ORDERS_TEST_DEFECT_FILE. */

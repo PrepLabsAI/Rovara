@@ -439,6 +439,41 @@ describe("docker application host", () => {
   });
 });
 
+describe("structured build result", () => {
+  it("reports the exit code docker returned for the failing command, never a number read out of the log", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep });
+    // The log claims a different exit code than the one the build container returned, and nothing in it may be believed.
+    fake.failOn("build", 7); fake.buildOutput = "build command 1 (npm) ended with exit code 3\n";
+    expect((await runWith(s)).unavailableReason).toBe("build-failed");
+    expect(s.host.readBuildResult(s.runId)).toEqual({ commandIndex: 1, exitCode: 7, command: buildStep[0] });
+  });
+
+  it("reports no exit code when the build timed out or the run ended it", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep });
+    fake.failOn("build", 124);
+    await runWith(s);
+    expect(s.host.readBuildResult(s.runId)).toEqual({ commandIndex: 1, exitCode: null, command: buildStep[0] });
+  });
+
+  it("reports the last command's success, and nothing for a recipe without a build or for another run", async () => {
+    const built = new FakeDockerCli(); const withBuild = await setup({ fake: built, recipeBuild: buildStep }); built.onExecutor = okOutput(withBuild);
+    await runWith(withBuild);
+    expect(withBuild.host.readBuildResult(withBuild.runId)).toEqual({ commandIndex: 2, exitCode: 0, command: buildStep[1] });
+    expect(withBuild.host.readBuildResult("another-run")).toBeNull();
+    const plain = new FakeDockerCli(); const noBuild = await setup({ fake: plain }); plain.onExecutor = okOutput(noBuild);
+    await runWith(noBuild);
+    expect(noBuild.host.readBuildResult(noBuild.runId)).toBeNull();
+  });
+
+  it("reports the exit code of a failed source copy as command 0", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep });
+    const run = fake.run.bind(fake);
+    fake.run = async (args, opts) => (args.includes("--entrypoint") && args.includes("cp") ? { code: 5, stdout: "", stderr: "cp: cannot read" } : run(args, opts));
+    expect((await runWith(s)).unavailableReason).toBe("build-failed");
+    expect(s.host.readBuildResult(s.runId)).toEqual({ commandIndex: 0, exitCode: 5, command: null });
+  });
+});
+
 describe("process docker cli", () => {
   async function shim(script: string) { const dir = await temp("docker-shim-"); const path = join(dir, "docker"); await writeFile(path, `#!/bin/sh\n${script}\n`); await chmod(path, 0o755); return createProcessDockerCli(path); }
   const signal = () => new AbortController().signal;

@@ -19,7 +19,7 @@ export class FakeDockerCli implements DockerCli {
   private appExit: { code: number; logs: string } | null = null;
   private releaseExecutor: ((code: number) => void) | null = null;
   /** Writes the files a finished executor would leave in its out directory. */
-  onExecutor: (outDir: string, args: string[]) => void = () => undefined;
+  onExecutor: (outDir: string, args: string[]) => void | Promise<void> = () => undefined;
   logs = new Map<string, string>();
   /** The order of the moments a test may need to compare: an executor finishing, and containers being force-removed. */
   readonly events: string[] = [];
@@ -149,7 +149,7 @@ export class FakeDockerCli implements DockerCli {
         return { code, stdout: "", stderr: "" };
       }
       if (this.executorIgnoresAbortForMs !== null) await new Promise((done) => setTimeout(done, this.executorIgnoresAbortForMs!));
-      this.onExecutor(outMount, args);
+      await this.onExecutor(outMount, args);
       this.events.push("executor finished");
       return { code: this.executorExit, stdout: this.executorStdout, stderr: "" };
     }

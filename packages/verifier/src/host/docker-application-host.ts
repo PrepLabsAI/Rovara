@@ -102,9 +102,18 @@ export type DockerApplicationHostDeps = Readonly<{
   assembleCollectionInputs?: typeof assembleDockerCollectionInputs;
 }>;
 
+/** One build container's outcome as the host saw it. `exitCode` is the exit code docker returned, or null when the command timed out or the run ended it. */
+export type DockerBuildResult = Readonly<{ /** 0 is the source copy; 1 and up are the recipe's commands in order. */ commandIndex: number; exitCode: number | null;
+  command: Readonly<{ program: string; args: readonly string[]; cwd: string; timeoutMs: number; env: Readonly<Record<string, string>> }> | null }>;
+
 export type DockerApplicationHost = E2EApplicationRuntimePorts & Readonly<{
   /** Redacted log tails of the run (64 KiB at most each); empty for a run this host did not allocate. */
   readDiagnostics(runId: string): { appLogTail: string; buildLogTail: string; executorLogTail: string };
+  /**
+   * The structured outcome of the last build container that ran: the failing command for a build that failed, the last command for one that
+   * succeeded, null when no build container ran (or for a run this host did not allocate). Read this, never the build log, for an exit code.
+   */
+  readBuildResult(runId: string): DockerBuildResult | null;
   /**
    * The inputs `collectE2EApplicationRun` needs besides the actual run, the compiled suite, the binding and the round: the
    * observation bindings and assertion assets the executor persisted, the cleanup receipt and inventory digest, the close time
@@ -192,7 +201,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const deadlineAt = Date.parse(binding.deadlineAt);
 
   const state = { allocated: false, closed: false, cleanupConfirmed: false, outcome: null as Outcome | null, executing: null as Promise<unknown> | null, startedAt: "", cleanup: null as null | { removedAt: string; containers: string[] },
-    appLogTail: "", buildLogTail: "", executorLogTail: "", redactor: createCredentialRedactor([]), createdAt: 0 };
+    appLogTail: "", buildLogTail: "", executorLogTail: "", buildResult: null as DockerBuildResult | null, redactor: createCredentialRedactor([]), createdAt: 0 };
   const redact = (text: string) => tailOf(state.redactor.text(redactText(text)), MAX_TAIL_BYTES);
   const admin = (args: string[], signal: AbortSignal = new AbortController().signal) => docker.run(args, { signal, timeoutMs: ADMIN_TIMEOUT_MS });
   /** A signal that fired at or after the plan deadline is the deadline, not a cancellation. */
@@ -226,6 +235,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     return { confirmed: !left && workspaceGone, containers };
   }
 
+  /** The CLI's 124 (timed out) and 130 (stopped) are not exit codes of the command, which never got to finish. */
+  const ended = (code: number): number | null => (code === 124 || code === 130 ? null : code);
   /** "deadline" means the plan deadline, not the command, ended the build. */
   async function build(signal: AbortSignal): Promise<"ok" | "failed" | "deadline"> {
     const mounts = ["-v", `${deps.candidateSourceDir}:/src:ro`, "-v", `${dirs.app}:/out`];
@@ -234,6 +245,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const copy = await docker.run([...common(`rovara-build-${runId}-0`), ...BLANKED_ENV, "--entrypoint", "cp", deps.buildImage, "-R", "--no-preserve=all", "/src/.", "/out/"],
       { signal, timeoutMs: copyTimeout });
     appendBuildLog(`${copy.stdout}${copy.stderr}`);
+    state.buildResult = Object.freeze({ commandIndex: 0, exitCode: ended(copy.code), command: null });
     if (copy.code !== 0) return copy.code === 124 && copyTimeout < BUILD_COPY_TIMEOUT_MS ? "deadline" : "failed";
     let index = 0;
     for (const command of recipe.build) {
@@ -244,6 +256,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       const result = await docker.run([...common(`rovara-build-${runId}-${index}`), "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=1g", "-w", containerCwd("/out", command.cwd), ...env,
         deps.buildImage, command.program, ...command.args], { signal, timeoutMs });
       appendBuildLog(`${result.stdout}${result.stderr}`);
+      state.buildResult = Object.freeze({ commandIndex: index, exitCode: ended(result.code), command: Object.freeze({ ...command }) });
       if (result.code !== 0) {
         if (result.code === 124) await admin(["rm", "-f", `rovara-build-${runId}-${index}`]);
         const clamped = result.code === 124 && timeoutMs < command.timeoutMs;
@@ -441,6 +454,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
 
   return Object.freeze({
     allocate, readActualRun, readCollectionInputs,
+    readBuildResult: (requestedRunId: string) => (requestedRunId === runId ? state.buildResult : null),
     readDiagnostics: (requestedRunId: string) => requestedRunId === runId
       ? { appLogTail: state.appLogTail, buildLogTail: state.buildLogTail, executorLogTail: state.executorLogTail }
       : { appLogTail: "", buildLogTail: "", executorLogTail: "" },

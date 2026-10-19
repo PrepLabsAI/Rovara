@@ -71,6 +71,8 @@ describe("runE2EExecutor unavailable outcomes", () => {
     expect(result).toEqual({ exitCode: 2, reason: "plan-invalid" });
     expect(await readFile(join(out, "executor.log"), "utf8")).toContain("plan-invalid");
     expect(JSON.parse(await readFile(join(out, "executor-result.json"), "utf8"))).toMatchObject({ exitCode: 2, reason: "plan-invalid" });
+    // The blocked-requests file names the run it belongs to; a run that never resolved a plan has none to name.
+    expect(JSON.parse(await readFile(join(out, "blocked-requests.json"), "utf8"))).toEqual({ schemaVersion: "e2e-executor-blocked-requests/v1", runId: null, groupId: null, shards: [], blocked: [] });
   });
 
   it.runIf(built)("exits 2 with app-unhealthy and leaves no credential in any output file", async () => {

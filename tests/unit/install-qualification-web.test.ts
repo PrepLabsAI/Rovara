@@ -5,7 +5,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { WEB_API_REQUIRED_PROBES, WebApiRuntimeInstallProposalSchema, canonicalJson, evaluateWebApiProbeObservation, webApiProbeAssetManifestPath } from "../../packages/contracts/src/index.js";
 import { WebApiQualificationRejected, qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
-import { main as qualificationCli } from "../../packages/verifier/src/install-qualification-cli.js";
+import { main as qualificationCli, webApiProbeRunnerConfig } from "../../packages/verifier/src/install-qualification-cli.js";
+import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { loadWebApiQualificationProbeAssets } from "../../packages/verifier/src/application-runtime-probes.js";
 import { fakeLinuxEnvironment, fakeProbeRunner, goodWebApiObservations, privateEvidenceRoot, webApiChallenge } from "../support/web-api-qualification.js";
 
@@ -199,11 +200,31 @@ describe("install qualification CLI", () => {
     return { dir, args: ["--challenge-file", join(dir, "challenge.json"), "--evidence-root", dir, "--out", join(dir, "proposal.json")] };
   }
 
-  it("fails closed with --profile linux-arm64-web-api-v1 when no probe runner is installed", async () => {
+  it("fails closed with --profile linux-arm64-web-api-v1 when the worker has no executor image configured", async () => {
     const { dir, args } = await challengeFile("linux-arm64-web-api-v1");
     try {
-      await expect(qualificationCli([...args, "--profile", "linux-arm64-web-api-v1"])).rejects.toThrow(/probe runner is not installed/);
+      for (const environment of [{}, { EXECUTOR_IMAGE: "" }, { EXECUTOR_IMAGE: "  " }, { EXECUTOR_IMAGE: "--privileged" }, { EXECUTOR_IMAGE: "two words" }]) {
+        await expect(qualificationCli([...args, "--profile", "linux-arm64-web-api-v1"], { environment })).rejects.toThrow(/EXECUTOR_IMAGE/);
+      }
       await expect(stat(join(dir, "proposal.json"))).rejects.toThrow();
+    } finally { await rm(dir, { recursive: true, force: true }); }
+  });
+
+  it("takes the executor image from EXECUTOR_IMAGE, the build image from the pin, and the run root from the worker's runtime directory", () => {
+    const image = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-e2e-executor@sha256:${"d".repeat(64)}`;
+    expect(webApiProbeRunnerConfig({ EXECUTOR_IMAGE: image }, "linux", "arm64")).toEqual({ executorImage: image, buildImage: WEB_API_BUILD_IMAGE, runRoot: "/mnt/agentx-runtime/candidates/web-api-probes" });
+    expect(WEB_API_BUILD_IMAGE).toBe("public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5");
+    expect(() => webApiProbeRunnerConfig({ EXECUTOR_IMAGE: image }, "win32", "x64")).toThrow(/runtime directory/);
+  });
+
+  it("builds the production runner from the challenge and evidence root before qualifying, and writes no proposal when qualification stops", async () => {
+    const { dir, args } = await challengeFile("linux-arm64-web-api-v1");
+    try {
+      const seen: unknown[] = [];
+      await expect(qualificationCli([...args, "--profile", "linux-arm64-web-api-v1"], { environment: { EXECUTOR_IMAGE: "executor:test" }, host: { platform: "linux", arch: "arm64" },
+        createProbeRunner: (config) => { seen.push(config); return async () => { throw new Error("stop here"); }; } })).rejects.toThrow(/actual host|exact installed Node|boot-injected workspace identity/);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toMatchObject({ executorImage: "executor:test", buildImage: WEB_API_BUILD_IMAGE, evidenceRoot: dir });
     } finally { await rm(dir, { recursive: true, force: true }); }
   });
 

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
-import { RuntimeInstallChallengeSchema, RuntimeInstallManifestSchema } from "./runtime-installation.js";
+import { RuntimeInstallChallengeSchema, RuntimeInstallManifestSchema, runtimeInstallChallengeDigest, type RuntimeInstallChallenge } from "./runtime-installation.js";
 import { ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema } from "./session.js";
 
 /** The web/API application runtime profile and the one scope its qualification proves. */
@@ -15,26 +15,40 @@ type ExpectedFailureCause =
   | Readonly<{ kind: "assertion"; assertionKind: "csv" | "http-status" }>
   | Readonly<{ kind: "blocked-host"; host: string }>
   | Readonly<{ kind: "build-failed" }>;
-type RequiredProbe = Readonly<{ probeId: string; /** sha256 of the installed probe asset file; a test keeps it equal to the shipped bytes. */ assetDigest: string; kind: "web" | "api" | "build"; expectedOutcome: "PASS" | "EXPECTED_FAILURE"; cause: ExpectedFailureCause | null }>;
+type RequiredProbe = Readonly<{ probeId: string; /** sha256 of the installed probe asset file; a test keeps it equal to the shipped bytes. */ assetDigest: string; kind: "web" | "api" | "build"; expectedOutcome: "PASS" | "EXPECTED_FAILURE"; cause: ExpectedFailureCause | null;
+  /** sha256 of the canonical scenario the probe runs through the real collector; null for the build probe. A test recomputes it from the production plan builder. */
+  scenarioDigest: string | null;
+  /** sha256 of the canonical build command the probe runs; null unless the probe is a build probe. A test recomputes it from the installed probe asset. */
+  buildCommandDigest: string | null }>;
 
 /** Where each probe's asset sits in the installed-runtime manifest, which therefore proves the installed bytes. */
 export const webApiProbeAssetManifestPath = (probeId: string) => `packages/verifier/assets/application-runtime-v1/probes/${probeId}.json`;
 
 /** The exact probe set M1.1 requires, in the order a proposal carries it. The auth and tenant probes belong to M1.3. */
 const requiredProbes: RequiredProbe[] = [
-  { probeId: "web-csv-positive-v1", assetDigest: "3fd4928bf1fd9db70994ea733caede591f5fdab1574e340b89f397d9000985e4", kind: "web", expectedOutcome: "PASS", cause: null },
-  { probeId: "web-csv-negative-v1", assetDigest: "91b591d3551262a6f8800e530ae502b9ed02e7066411194b0d9bfdc8aa079d14", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "csv" } },
-  { probeId: "web-egress-denial-v1", assetDigest: "a7e28d356365d736b8b1251344df6ca89194ea78ebd2ea977790bc03d9cf9e19", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "blocked-host", host: "probe.example.com" } },
-  { probeId: "api-state-positive-v1", assetDigest: "5fa681bbcf60bdcbee9804d8bfe9bbd56c60d6a35925b5f9e929c42d9773cbc7", kind: "api", expectedOutcome: "PASS", cause: null },
+  { probeId: "web-csv-positive-v1", assetDigest: "3fd4928bf1fd9db70994ea733caede591f5fdab1574e340b89f397d9000985e4", kind: "web", expectedOutcome: "PASS", cause: null, scenarioDigest: "a7cd24dfbb78f5760995b3d8ac1a977a422ccf7d5601cfbaaafd6e0f8201cf5e", buildCommandDigest: null },
+  { probeId: "web-csv-negative-v1", assetDigest: "91b591d3551262a6f8800e530ae502b9ed02e7066411194b0d9bfdc8aa079d14", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "csv" }, scenarioDigest: "a7cd24dfbb78f5760995b3d8ac1a977a422ccf7d5601cfbaaafd6e0f8201cf5e", buildCommandDigest: null },
+  { probeId: "web-egress-denial-v1", assetDigest: "a7e28d356365d736b8b1251344df6ca89194ea78ebd2ea977790bc03d9cf9e19", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "blocked-host", host: "probe.example.com" }, scenarioDigest: "8f823b398850bad62569c6744e255576129fc2616edcb0be8aa616c2491e37e0", buildCommandDigest: null },
+  { probeId: "api-state-positive-v1", assetDigest: "5fa681bbcf60bdcbee9804d8bfe9bbd56c60d6a35925b5f9e929c42d9773cbc7", kind: "api", expectedOutcome: "PASS", cause: null, scenarioDigest: "fd333864038602a5788fbca3324f27f3e2d38cee12b4c8de3b5a0385fc4097dc", buildCommandDigest: null },
   // The app, not the browser, makes this request, so the executor cannot record the blocked host; the dependency check fails instead.
-  { probeId: "api-egress-denial-v1", assetDigest: "ccfebb5c1e33d3f5a5d80d99cb51d42b29f2c6bd02ad76f81a746684276ade47", kind: "api", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "http-status" } },
-  { probeId: "build-imds-denial-v1", assetDigest: "c6494ae44cf33f9824944dfe6606d82ac6c3a0240e355508d03785361adc23ac", kind: "build", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "build-failed" } },
+  { probeId: "api-egress-denial-v1", assetDigest: "ccfebb5c1e33d3f5a5d80d99cb51d42b29f2c6bd02ad76f81a746684276ade47", kind: "api", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "http-status" }, scenarioDigest: "f44a7c49ba550068840d67e45a431575751e83bd254bbd2c53b9159ab7696975", buildCommandDigest: null },
+  { probeId: "build-imds-denial-v1", assetDigest: "c6494ae44cf33f9824944dfe6606d82ac6c3a0240e355508d03785361adc23ac", kind: "build", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "build-failed" }, scenarioDigest: null, buildCommandDigest: "e8c2c552f1e011563ceeb18fc08bc03dd5e51a142a2e1e6e9327d8422ac4f6cd" },
 ];
 export const WEB_API_REQUIRED_PROBES: readonly RequiredProbe[] = Object.freeze(requiredProbes.map((probe) => Object.freeze(probe)));
 export const WEB_API_REQUIRED_PROBE_IDS = WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId) as [string, ...string[]];
 const probeIdSchema = z.enum(WEB_API_REQUIRED_PROBE_IDS);
 
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
+
+/** Where the qualification app (the fixture every probe runs against) sits in the installed-runtime manifest, which therefore proves its installed bytes. */
+export const WEB_API_QUALIFICATION_APP_MANIFEST_PREFIX = "packages/verifier/assets/qualification-app/" as const;
+/** The digest of the installed qualification app tree; a test keeps it equal to the shipped files. */
+export const WEB_API_QUALIFICATION_APP_TREE_DIGEST = "ccb78d0bfa3dbbab5b19f6c2c5c2a496977c022e3d2397b15bcf73c127edad14";
+/** The digest of a file tree given as app-relative paths and file digests, independent of listing order. */
+export function webApiQualificationAppTreeDigest(files: readonly Readonly<{ path: string; sha256: string }>[]): string {
+  const sorted = files.map((file) => ({ path: file.path, sha256: file.sha256 })).sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
+  return createHash("sha256").update(canonicalJson({ schemaVersion: "web-api-qualification-app-tree/v1", files: sorted })).digest("hex");
+}
 
 /** The facts about one probe run that qualification judges. It is evidence, never a verdict. */
 export const WebApiProbeObservationSchema = z.object({
@@ -53,6 +67,40 @@ export const WebApiProbeObservationSchema = z.object({
   evidenceDigest: digest,
 }).strict();
 export type WebApiProbeObservation = z.infer<typeof WebApiProbeObservationSchema>;
+
+/** The whole canonical proposal, evidence included, may not exceed this; the registrar refuses a larger one before parsing it. */
+export const WEB_API_PROBE_PROPOSAL_MAX_BYTES = 5 * 1024 * 1024;
+
+/**
+ * The run id of one probe, derived from the challenge it answers: a UUID taken from the challenge digest (which covers the
+ * challenge id and secret) and the probe id. The qualifier runs the probe under exactly this id and the registrar requires the retained
+ * evidence to carry it, so a run recorded for another challenge cannot stand in for this one.
+ */
+export function webApiProbeRunId(challenge: RuntimeInstallChallenge, probeId: string): string {
+  const bytes = createHash("sha256").update(`web-api-probe-run/v1\0${runtimeInstallChallengeDigest(challenge)}\0${probeId}`).digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+const jsonObject = z.record(z.string(), z.unknown());
+const runIdSchema = z.string().uuid();
+/**
+ * The retained bytes one probe's observation is derived from, embedded in the proposal like P0 embeds its report bytes. The registrar re-derives the
+ * observation from this and nothing else. `collected` is a run the real collector read: the scenario bundle that ran, the collector's wire
+ * collection (every raw report and proof byte, base64) and its oracle, and, for web probes, the executor's blocked-requests file. `unavailable`
+ * is a run that produced nothing to collect, with the host's structured build result when the build is what stopped it.
+ */
+export const WebApiProbeEvidenceSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("collected"), runId: runIdSchema, scenarioBundle: jsonObject, collection: jsonObject, oracle: jsonObject,
+    blockedRequestsBase64: z.string().max(262_144).regex(/^[A-Za-z0-9+/]*={0,2}$/).nullable() }).strict(),
+  z.object({ kind: z.literal("unavailable"), runId: runIdSchema, reason: z.string().min(1).max(200),
+    build: z.object({ commandIndex: z.number().int().min(0).max(64), exitCode: z.number().int().min(0).max(255).nullable(), command: jsonObject.nullable() }).strict().nullable() }).strict(),
+]);
+export type WebApiProbeEvidence = z.infer<typeof WebApiProbeEvidenceSchema>;
+/** What a probe runner returns: the observed facts and the evidence they were derived from. */
+export type WebApiProbeRun = Readonly<{ observation: WebApiProbeObservation; evidence: WebApiProbeEvidence }>;
 
 export type WebApiProbeVerdict = Readonly<{ ok: true }> | Readonly<{ ok: false; reason: string }>;
 
@@ -87,15 +135,13 @@ export function evaluateWebApiProbeObservation(probeId: string, observationInput
 
 const ProbeRecordSchema = z.object({
   probeId: probeIdSchema, kind: z.enum(["web", "api", "build"]), expectedOutcome: z.enum(["PASS", "EXPECTED_FAILURE"]),
-  observedOutcome: z.enum(["PASS", "EXPECTED_FAILURE"]), assetDigest: digest, observation: WebApiProbeObservationSchema,
+  observedOutcome: z.enum(["PASS", "EXPECTED_FAILURE"]), assetDigest: digest, observation: WebApiProbeObservationSchema, evidence: WebApiProbeEvidenceSchema,
 }).strict();
 
 /**
- * TODO(task-1.5b, Ruling Z): each probe's `evidenceDigest` must come to bind retained, run-bound evidence (the executor report and collector
- * result of the actual run, tied to this challenge), checked by the registrar (`assertRunBoundProbeEvidence`). Until then the observations are
- * operator-supplied facts and this profile's registration is not for live use.
- *
- * The web/API qualification proposal. Its `state` is a label, not an authority: the schema re-judges every recorded observation
+ * The web/API qualification proposal. Each probe record carries the retained evidence its observation was derived from; this schema checks
+ * its shape, the pinned assets and the size bound, and the registrar re-derives every observation from the evidence and checks that it
+ * binds to the challenge (`assertRunBoundProbeEvidence`). Its `state` is a label, not an authority: the schema re-judges every recorded observation
  * with the same pure oracle the qualifier used, so a proposal can only parse as READY when its evidence shows the required outcomes.
  */
 export const WebApiRuntimeInstallProposalSchema = z.object({
@@ -112,6 +158,12 @@ export const WebApiRuntimeInstallProposalSchema = z.object({
   if (proposal.runnerToolchain.platform !== "linux" || proposal.runnerToolchain.arch !== "arm64") context.addIssue({ code: "custom", path: ["runnerToolchain"], message: "web/API runtime qualifies only on a Linux ARM64 host" });
   if (proposal.runnerEnvironment.arch !== proposal.runnerToolchain.arch || !proposal.runnerEnvironment.os.toLowerCase().startsWith("linux ")
     || proposal.runnerEnvironment.runtime !== `node ${proposal.runnerToolchain.version}`) context.addIssue({ code: "custom", path: ["runnerEnvironment"], message: "runner environment must retain the observed OS release, architecture, and exact Node runtime" });
+  const installedApp = proposal.manifest.entries.filter((entry) => entry.path.startsWith(WEB_API_QUALIFICATION_APP_MANIFEST_PREFIX))
+    .map((entry) => ({ path: entry.path.slice(WEB_API_QUALIFICATION_APP_MANIFEST_PREFIX.length), sha256: entry.sha256 }));
+  if (installedApp.length === 0 || webApiQualificationAppTreeDigest(installedApp) !== WEB_API_QUALIFICATION_APP_TREE_DIGEST) {
+    context.addIssue({ code: "custom", path: ["manifest", "entries"], message: "qualification-app-not-installed-as-pinned" });
+  }
+  if (Buffer.byteLength(canonicalJson(proposal)) > WEB_API_PROBE_PROPOSAL_MAX_BYTES) context.addIssue({ code: "custom", path: ["probes"], message: "probe-evidence-oversized" });
   WEB_API_REQUIRED_PROBES.forEach((required, index) => {
     const probe = proposal.probes[index];
     if (!probe) return;

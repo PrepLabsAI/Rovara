@@ -42,6 +42,30 @@ The endpoint and EC2 binding remain administrator-selected inputs. The broker do
 
 `linux-arm64-web-api-v1` qualifies the browser and API runtime (scope `application-web-api/v1`) with `install-qualification-cli.js --profile linux-arm64-web-api-v1`, after a challenge issued for that profile. It runs six probes through the production Docker host and the real collector: the CSV and API state positives must pass; the CSV defect must fail on its `csv` assertion; the web egress probe must fail with `probe.example.com` recorded as blocked; the API egress probe must fail on its `http-status` assertion; and the build command that reaches the instance metadata service must fail with exit 7 and `build-failed`. A probe that passes when it should fail, fails for another cause, or is skipped, flaky or retried rejects the whole qualification (for example `negative-probe-passed:web-csv-negative-v1`).
 
-Registration of the resulting proposal writes two v2 catalog rows, one per target kind (`PROFILE#linux-arm64-web-api-v1#web` and `#api`), in the same one-use-challenge transaction. The broker re-judges every recorded probe observation before it writes anything; the proposal's `READY` state is never trusted on its own. The six probe asset digests are pinned in `@agentx/contracts`; a proposal parses only when its recorded digests and the installed manifest's entries for those files equal them, and registration refuses to move either row to an older worker generation.
+Registration of the resulting proposal writes two v2 catalog rows, one per target kind (`PROFILE#linux-arm64-web-api-v1#web` and `#api`), in the same one-use-challenge transaction. The broker re-judges every recorded probe observation, and re-derives each one from the retained evidence in the proposal, before it writes anything; the proposal's `READY` state is never trusted on its own. The six probe asset digests are pinned in `@agentx/contracts`; a proposal parses only when its recorded digests and the installed manifest's entries for those files equal them, and registration refuses to move either row to an older worker generation.
 
-**Not for live use yet.** The probe runner that drives the Docker host is not installed on the worker, so the CLI fails closed for this profile. Registration also does not yet verify that each probe observation is bound to retained, run-bound evidence of the actual run; that check (`assertRunBoundProbeEvidence`) is a required part of Task 1.5b. Until both exist, do not register `linux-arm64-web-api-v1` outside tests.
+### Operator command
+
+The worker container needs the `EXECUTOR_IMAGE` environment variable (the executor image its boot script pulled) and the Docker socket, as P0 does. The qualifier fails closed when `EXECUTOR_IMAGE` is unset or is not a plain image reference, and uses the pinned Node 22.23.2 base image to build the qualification app. Probe runs are staged under `/mnt/agentx-runtime/candidates/web-api-probes`, a path the worker shares with the Docker host. Each probe runs under the run ID derived from the challenge, and the raw evidence of each probe is also kept privately under a `web-api-probe-evidence-<challengeId>-<random>/` directory in the evidence root.
+
+```sh
+docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/verifier/dist/install-qualification-cli.js \
+  --profile linux-arm64-web-api-v1 \
+  --challenge-file /mnt/agentx-runtime/evidence/runtime-install-challenge.json \
+  --evidence-root /mnt/agentx-runtime/evidence \
+  --out /mnt/agentx-runtime/evidence/runtime-install-proposal.json
+```
+
+Copy the proposal out and register it as above (`agentx admin runtime-installation register --proposal-file ...`); the same command registers a P0 or a web/API proposal. A qualification takes several minutes (six container runs, including a build), so request the challenge with enough lifetime for it.
+
+### What the registrar verifies, and what it does not
+
+The probes run against the qualification app, an installed copy of the orders fixture (`packages/verifier/assets/qualification-app`, covered by the installed-runtime manifest). Its tree digest is pinned in `@agentx/contracts`; the qualifier refuses to start unless the installed tree is exactly the pinned one, and the proposal parses only when its manifest lists exactly those files.
+
+Each probe record embeds the bounded evidence its observation was derived from, like P0 embeds its report bytes: the scenario bundle that ran, the collector's complete wire collection and oracle (every raw executor report and proof byte), the executor's `blocked-requests.json` for web probes, or, for a run that produced nothing to collect, the host's structured build result. The registrar re-derives every observation from those bytes with the same pure functions the runner used (`deriveWebApiProbeObservation`) and registers nothing unless each recorded observation equals what its bytes show:
+
+- `probe-evidence-mismatch:<probeId>`: the evidence does not re-derive to the recorded observation (an edited report, a collection whose digests do not hold, a scenario other than the one pinned for that probe, a blocked-requests file naming another run or shard, a build command or exit code the host did not report).
+- `probe-evidence-unbound:<probeId>`: the evidence is not a run of this challenge's probe. Every probe run ID is derived from the challenge digest and the probe ID, and the evidence, the collector's run binding and the blocked-requests file must carry it; evidence recorded for another challenge, or copied from another probe, is unbound. Missing evidence is unbound too.
+- `probe-evidence-oversized`: the whole canonical proposal may not exceed 5 MiB.
+
+Trust limits. The binding proves that the recorded outcomes follow from the retained bytes and that those bytes belong to this challenge's runs of the pinned scenarios. It does not prove that a hostile qualifying host ran them honestly: the evidence is produced on the operator-selected host, so a host that fabricated a complete, internally consistent collection would pass. The blocked-requests file is tied to its run only by the run, group and upstream run IDs it names, and the build result is the Docker host's own account of the exit code it received (a fabricated build result is consistent with itself). This is operator-managed qualification evidence, not hardware attestation, as for P0.

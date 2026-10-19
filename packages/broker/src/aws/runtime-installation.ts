@@ -9,7 +9,7 @@ import {
   WEB_API_RUNTIME_PROFILE_ID, WebApiRuntimeInstallProposalSchema, webApiRuntimeInstallProposalSha256, type WebApiRuntimeInstallProposal,
   agentXError,
 } from "@agentx/contracts";
-import { parseE2EReport } from "@agentx/verifier";
+import { parseE2EReport, verifyWebApiProbeRecord } from "@agentx/verifier";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
 import { e2eFeatureVerifierKey, e2eWebApiRuntimeRecords, E2E_FEATURE_PROCESS_RESPONSE_SCOPE, E2EFeatureVerifierRecordSchema } from "./e2e-feature-verifier-catalog.js";
@@ -248,11 +248,31 @@ async function readWebApiCatalogRow(deps: RuntimeInstallationDependencies, key: 
 }
 
 /**
- * TODO(task-1.5b, Ruling Z): the retained-evidence check goes here. Registration must not rely on the operator-supplied probe
- * observations alone; it has to verify that each probe's `evidenceDigest` binds retained, run-bound evidence (the executor report and
- * collector result of the actual run, tied to this challenge). Until that exists, linux-arm64-web-api-v1 registration is not for live use.
+ * Ruling Z: registration does not rest on what the runner says it saw. Each probe record carries the retained bytes its observation was derived from; this
+ * re-derives the observation from them with the same pure functions the production runner used (the collector's own qualification, the pinned scenario, the
+ * run's blocked-requests file, the host's structured build result) and refuses the whole proposal unless every record equals what its bytes show and every run
+ * carries the id derived from this challenge. `probe-evidence-unbound:<id>` is evidence of another run or challenge (or none); `probe-evidence-mismatch:<id>`
+ * is evidence that does not re-derive to the recorded observation. Nothing has been written when this throws.
  */
-function assertRunBoundProbeEvidence(proposal: WebApiRuntimeInstallProposal): void { void proposal; /* intentionally empty until Task 1.5b */ }
+function assertRunBoundProbeEvidence(proposal: WebApiRuntimeInstallProposal): void {
+  for (const probe of proposal.probes) {
+    const checked = verifyWebApiProbeRecord({ challenge: proposal.challenge, probeId: probe.probeId, observation: probe.observation, evidence: probe.evidence });
+    if (!checked.ok) throw agentXError("CONFIG_INVALID", `runtime probe evidence is not run-bound: ${checked.reason}`);
+  }
+}
+
+/** A proposal that failed its schema because of a probe's evidence is refused by that probe's stable reason: missing evidence is unbound, malformed evidence cannot re-derive. */
+function evidenceRefusal(proposal: unknown, issues: readonly { path: readonly PropertyKey[] }[]): string | undefined {
+  const probes = (proposal as { probes?: unknown } | null)?.probes;
+  if (!Array.isArray(probes)) return undefined;
+  for (const issue of issues) {
+    if (issue.path[0] !== "probes" || typeof issue.path[1] !== "number" || issue.path[2] !== "evidence") continue;
+    const probe = probes[issue.path[1]] as { probeId?: unknown; evidence?: unknown } | null;
+    if (typeof probe?.probeId !== "string") continue;
+    return `${probe.evidence === undefined ? "probe-evidence-unbound" : "probe-evidence-mismatch"}:${probe.probeId}`;
+  }
+  return undefined;
+}
 
 /**
  * Registers the web/API runtime qualification. The proposal's own schema re-judges every recorded probe observation, so a READY label
@@ -265,7 +285,7 @@ async function registerWebApiRuntimeInstallation(
   request: { proposal: unknown; proposalSha256: string },
 ): Promise<WebApiRuntimeRegistrationResult> {
   const parsed = WebApiRuntimeInstallProposalSchema.safeParse(request.proposal);
-  if (!parsed.success) throw agentXError("CONFIG_INVALID", `runtime proposal is not a READY web/API qualification: ${parsed.error.issues[0]?.message ?? "invalid proposal"}`);
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", `runtime proposal is not a READY web/API qualification: ${evidenceRefusal(request.proposal, parsed.error.issues) ?? parsed.error.issues[0]?.message ?? "invalid proposal"}`);
   const proposal = parsed.data;
   assertRunBoundProbeEvidence(proposal);
   const proposalSha256 = webApiRuntimeInstallProposalSha256(proposal);
