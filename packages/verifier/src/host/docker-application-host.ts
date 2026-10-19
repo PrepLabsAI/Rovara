@@ -8,6 +8,7 @@ import type { E2EActualApplicationRun } from "../application-collection.js";
 import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
 import { validateE2EApplicationExecutionAdmission } from "../application-scenarios.js";
 import { createCredentialRedactor } from "../executor/redact.js";
+import { executorContainerArgs } from "./executor-container.js";
 import { verifyExecutorSeccompProfile } from "./executor-seccomp.js";
 import { readRegularFileTail } from "./regular-file.js";
 import { assembleDockerCollectionInputs, assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput, validateExecutorResult,
@@ -373,10 +374,10 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const remaining = Math.max(1, deadlineAt - deps.now()) + graceMs;
     let appGone = false;
     const watching = new AbortController();
-    const executorRun = docker.run(["run", "--name", executorName, "--pull=never", ...hardening(["--network", network]), "--init", "--read-only", "--shm-size", "1g",
-      // Only the executor leaves Docker's default profile, and only for the namespace syscalls Chromium's own sandbox needs; no capability is added.
-      "--security-opt", `seccomp=${seccompProfile}`,
-      "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=512m", ...limits("2g", "1024", "2"), "-v", `${dirs.plan}:/run/rovara/plan.json:ro`, "-v", `${dirs.out}:/out`, ...BLANKED_ENV,
+    const executorRun = docker.run(["run", "--name", executorName, "--pull=never", "--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`, "--network", network,
+      // The executor's sandbox and limits are one shared definition (the image smoke test runs with the same). Only the executor leaves Docker's default seccomp
+      // profile, and only for the namespace syscalls Chromium's own sandbox needs; no capability is added.
+      ...executorContainerArgs(seccompProfile), "-v", `${dirs.plan}:/run/rovara/plan.json:ro`, "-v", `${dirs.out}:/out`, ...BLANKED_ENV,
       deps.executorImage], { signal: executorSignal, timeoutMs: remaining });
     const watch = (async () => {
       while (!watching.signal.aborted && !executorSignal.aborted) {

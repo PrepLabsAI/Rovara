@@ -59,7 +59,14 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
 
   it("smoke-tests the executor image from CI and from the release path through one definition, with the production sandbox flags", async () => {
     const shared = readFileSync("scripts/executor-smoke.ts", "utf8");
-    for (const flag of ["--init", "--cap-drop=ALL", "no-new-privileges", "seccomp=${profilePath}", "--read-only", "--network", "--tmpfs"]) expect(shared, flag).toContain(flag);
+    // The smoke command takes its sandbox and limit flags from the verifier's executor definition (what the Docker host builds its executor command from) and
+    // checks the profile with the host's own verification; it adds only the network and the run-and-remove flags.
+    expect(shared).toContain("executorContainerArgs(verifyExecutorSeccompProfile(profilePath))");
+    expect(shared).toContain('"--network", "none"');
+    expect(shared).not.toMatch(/--cap-drop|seccomp=|--read-only/);
+    const container = readFileSync("packages/verifier/src/host/executor-container.ts", "utf8");
+    for (const flag of ["--init", "--cap-drop=ALL", "no-new-privileges", "seccomp=${seccompProfile}", "--read-only", "--tmpfs", "--memory", "--pids-limit", "--cpus"]) expect(container, flag).toContain(flag);
+    expect(readFileSync("packages/verifier/src/host/docker-application-host.ts", "utf8")).toContain("...executorContainerArgs(seccompProfile)");
     // The release path (and so test-deploy, which takes smokeTestExecutor from it) builds its command from that definition and spells no flags of its own.
     const release = readFileSync("scripts/release-common.ts", "utf8");
     const body = release.slice(release.indexOf("export async function smokeTestExecutor"), release.indexOf("export async function smokeTestWorker"));

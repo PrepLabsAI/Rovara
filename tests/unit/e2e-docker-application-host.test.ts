@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { E2EExecutorPlanSchema } from "@agentx/contracts";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
 import { createDockerApplicationHost, createProcessDockerCli, e2eRunNetworks, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
+import { executorContainerArgs } from "../../packages/verifier/src/host/executor-container.js";
 import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
 import { createOrdersExecutorPlan, type OrdersExecutorFixture } from "../support/e2e-orders-executor-fixture.js";
 import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.js";
@@ -83,6 +84,10 @@ describe("docker application host", () => {
     const securityOptions = (args: string[]) => args.filter((value, index) => args[index - 1] === "--security-opt");
     expect(securityOptions(fake.argsFor("executor"))).toEqual(["no-new-privileges", `seccomp=${installedExecutorSeccompProfilePath()}`]);
     expect(fake.argsFor("executor")).toContain("--cap-drop=ALL");
+    // The executor's sandbox and limit flags are the shared definition the image smoke test runs with, in order and unchanged.
+    const shared = executorContainerArgs(installedExecutorSeccompProfilePath());
+    const executorArgs = fake.argsFor("executor");
+    expect(executorArgs.slice(executorArgs.indexOf(shared[0]!), executorArgs.indexOf(shared[0]!) + shared.length)).toEqual(shared);
     // No other container of the run (app, source copy, build commands, cleanup) leaves Docker's default profile.
     const others = fake.calls.filter((args) => args[0] === "run" && !args[args.indexOf("--name") + 1]?.startsWith("rovara-executor-"));
     expect(others.length).toBeGreaterThan(2);

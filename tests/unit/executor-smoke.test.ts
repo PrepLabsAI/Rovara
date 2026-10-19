@@ -1,8 +1,9 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
+import { executorContainerArgs } from "../../packages/verifier/src/host/executor-container.js";
 import { executorSmokeDockerArgs, explainExecutorSmokeFailure, repoExecutorSeccompProfilePath } from "../../scripts/executor-smoke.js";
 import { smokeTestExecutor, type Runner } from "../../scripts/release-common.js";
 
@@ -28,6 +29,16 @@ describe("the executor image smoke command", () => {
     expect(args.join(" ")).not.toMatch(/--privileged|--cap-add|seccomp=unconfined|--no-sandbox/);
   });
 
+  it("carries the executor container's own sandbox and limit flags, from the one definition the Docker host builds its executor command from", () => {
+    const args = executorSmokeDockerArgs("image");
+    const shared = executorContainerArgs(repoExecutorSeccompProfilePath());
+    // The shared flags appear in order and unchanged (the limits 2g/1024/2 included); only network, run-and-remove and the command are the smoke test's own.
+    const start = args.indexOf(shared[0]!);
+    expect(args.slice(start, start + shared.length)).toEqual(shared);
+    expect(shared).toEqual(expect.arrayContaining(["--memory", "2g", "--pids-limit", "1024", "--cpus", "2"]));
+    expect(args.slice(0, start)).toEqual(["run", "--rm", "--network", "none"]);
+  });
+
   it("points at the pinned profile in this checkout, which is the one the worker image ships", () => {
     expect(repoExecutorSeccompProfilePath()).toBe(installedExecutorSeccompProfilePath());
   });
@@ -42,6 +53,10 @@ describe("the executor image smoke command", () => {
 });
 
 describe("the release path's executor smoke test", () => {
+  // The release path echoes the smoke run's stderr for the operator; keep the test output pristine.
+  beforeEach(() => { vi.spyOn(process.stderr, "write").mockImplementation(() => true); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
   it("runs exactly that command through docker", async () => {
     const { runner, calls } = recordingRunner({ status: 0 });
     await smokeTestExecutor(runner, "executor:local");
@@ -57,6 +72,18 @@ describe("the release path's executor smoke test", () => {
     expect(error?.message).toContain("colima ssh -- sudo sysctl -w");
     expect(error?.message).toMatch(/never runs Chromium with --no-sandbox/);
     expect(error?.message).not.toMatch(/(?:run|use|pass|add) --no-sandbox/);
+  });
+
+  it("matches on stdout as well as stderr", async () => {
+    const { runner } = recordingRunner({ status: 1, stdout: "FATAL: No usable sandbox!\n", stderr: "" });
+    await expect(smokeTestExecutor(runner, "executor:local")).rejects.toThrow(/Chromium's sandbox could not start in this Docker VM/);
+  });
+
+  it("does not blame the sandbox for an early exit alone: it says probably the sandbox, or another early crash", () => {
+    const text = explainExecutorSmokeFailure("chromium smoke failed: chromium exited before it opened a debugging port: segfault")!;
+    expect(text).toMatch(/probably its sandbox, or another early crash/);
+    expect(text).not.toMatch(/sandbox could not start in this Docker VM/);
+    expect(text).toContain("kernel.apparmor_restrict_unprivileged_userns=0");
   });
 
   it("keeps the plain failure for a smoke test that failed for another reason", async () => {
