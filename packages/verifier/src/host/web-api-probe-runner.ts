@@ -6,7 +6,7 @@ import { loadWebApiQualificationProbeAssets } from "../application-runtime-probe
 import { runIsolatedE2EApplication } from "../application-runtime.js";
 import { resolveE2EExecutorSuite } from "../executor/suite.js";
 import { deriveWebApiProbeObservation } from "../web-api-probe-evidence.js";
-import { createDockerApplicationHost, type DockerCli } from "./docker-application-host.js";
+import { createDockerApplicationHost, e2eRunNetworks, type DockerCli } from "./docker-application-host.js";
 import { createWebApiProbePlan, webApiProbeDriver, webApiProbeRunInput } from "./web-api-probe-plan.js";
 import { installedWebApiQualificationAppRoot, stageWebApiQualificationApp, verifyWebApiQualificationApp } from "./web-api-qualification-app.js";
 
@@ -67,7 +67,7 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
     await stageWebApiQualificationApp(appRoot, staged);
     try {
       const plan = createWebApiProbePlan({ probe: driver.probe, appRoot: staged, runId,
-        recipeStart: { env: { ...(driver.defect ? { ORDERS_TEST_DEFECT_FILE: DEFECT_FILE_IN_OWNED_MOUNT } : {}), ...driver.appEnv } },
+        recipeStart: { env: { ...(driver.defect ? { ORDERS_TEST_DEFECT_FILE: DEFECT_FILE_IN_OWNED_MOUNT } : {}), ...driver.appEnv }, ...(driver.startArgs ? { args: [...driver.startArgs] } : {}) },
         ...(driver.recipeBuild ? { recipeBuild: driver.recipeBuild.map((command) => ({ ...command, args: [...command.args], env: { ...command.env } })) } : {}) });
       let blockedRequests: Uint8Array | null = null;
       const host = createDockerApplicationHost({ docker: deps.docker, executorImage: deps.executorImage, buildImage: deps.buildImage, runRoot: deps.runRoot, now,
@@ -120,7 +120,9 @@ async function clearEarlierAttempt(deps: WebApiProbeRunnerDeps, runId: string, s
   const listed = await admin(["ps", "-a", "--filter", `label=rovara.run=${runId}`, "--format", "{{.Names}}"]);
   const containers = listed.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
   if (containers.length > 0) await admin(["rm", "-f", ...containers]);
-  await admin(["network", "rm", `rovara-e2e-${runId}`]);
+  const networks = e2eRunNetworks(runId);
+  await admin(["network", "rm", networks.build]);
+  await admin(["network", "rm", networks.internal]);
   await rm(staged, { recursive: true, force: true });
   const workspace = join(deps.runRoot, runId);
   if (await stat(workspace).then(() => false, () => true)) return;

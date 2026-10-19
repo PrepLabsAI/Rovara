@@ -29,13 +29,19 @@
   - test-deploy uploaded to the unversioned control-plane artifacts bucket; it now uses the versioned access-stack bucket and checks it matches the deployed Lambda code bucket;
   - the post-execute wait polled a consumed change set; it now waits on the stack;
   - the exact-change guard refused CloudFormation's no-op Arn re-evaluations; it now accepts only those, caused by the code units of the run.
+- 2026-10-19: Task H1: network walls for untrusted containers (see "Before M1.2 runs untrusted candidates"). Verified locally (unit and contract tests, fake Docker); the Linux behaviour is verified by the `linux-runtime` CI job.
 - 2026-10-19: TEST cleanup with owner approval: terminated five unregistered P0 qualification instances and deleted their five detached 20 GiB data volumes.
 
 ## Before M1.2 runs untrusted candidates
 
 M1.1 qualifies only Rovara's own fixture. These must be done before a candidate repository's code runs on a qualified runner:
 
-- Build-container egress is broader than "registry egress": the default bridge reaches the VPC, the host (the worker on `0.0.0.0:8080`), other runs and the internet. Fix with DOCKER-USER or INPUT rules, or a registry-only proxy, and add a probe that the app and executor containers cannot reach the worker port.
+- [x] Build-container egress was broader than "registry egress": the default bridge reached the VPC, the host (the worker on `0.0.0.0:8080`), other runs and the internet. Done (H1, 2026-10-19), in code only, not yet deployed:
+  - Builds run on their own per-run bridge `rvb<8 hex>` (not `--internal`: package registries need the internet), app and executor on the per-run `--internal` bridge `rvi<8 hex>`. The default bridge is no longer used, and the source copy runs with `--network none`.
+  - `packages/worker/ec2/boot.sh` installs the host firewall through the reboot-safe `rovara-container-firewall` unit (the worker unit `Requires=` it): `DOCKER-USER` drops from `rvb+` to `10/8`, `172.16/12`, `192.168/16`, `100.64/10`, `169.254/16` and `127/8`; drops from `rvi+` to anything outside an `rvi` bridge; `INPUT` drops from `rvb+` and `rvi+` (no container reaches a host port); IMDS stays dropped; IPv6 gets `INPUT` drops where `ip6tables` exists (Docker IPv6 is off on the worker, so this is defence in depth). Cross-run traffic between two `rvi` bridges is left to Docker's own isolation chains, and the Linux CI test checks it.
+  - DNS: Docker's embedded resolver forwards from the container's network namespace, so the VPC resolver (a private address, exempt from the worker security group) needs an exception. The firewall reads the nameservers in `/etc/resolv.conf` and `/run/systemd/resolve/resolv.conf` and lets `rvb+` reach only those, on port 53. CI cannot reproduce a private resolver (its upstream is public), so this is verified by the contract test and first proven live on the next runner.
+  - Two new required probes: `build-lateral-denial-v1` (the build container connects to its gateway at the worker port and to a private address; exit 7 only if both time out) and `app-host-denial-v1` (the app starts behind a guard that connects to the host on its internal bridge at port 8080 and starts only if that times out). The network policy digest moved to `e2e-web-api-network-policy/v2`.
+  - **Requalify after deploy.** The required probe set and the network policy digest changed, and a running worker only gets the firewall from the boot script of a new instance. The runner registered on 2026-10-19 (`i-0cfe8d699d3b4b7af`) predates the walls: launch a new qualification runner from the new worker image and register it (`scripts/test-qualify-runtime.ts`) before any candidate code runs. A domain allowlist or a registry-only proxy remains a future option.
 - Chromium runs with `--no-sandbox` (Ruling P; the container is the boundary). Revisit with a seccomp profile that allows user namespaces.
 - Group deadlines must stay under the one-hour stale sweep, and orphan workspace directories need a sweep.
 - The flaky `e2e-application-build-source` test: investigate.

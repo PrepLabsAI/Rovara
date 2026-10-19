@@ -25,7 +25,7 @@
   - never receive any `AWS_*`, `AGENTX_*`, `PI_*`, `GIT_*` or `*TOKEN*`/`*SECRET*` variable;
   - run with `--cap-drop=ALL --security-opt no-new-privileges`.
 
-  The build container may use the default bridge for registry egress. IMDS (`169.254.169.254`) must be unreachable from every container.
+  The build container runs on its own per-run internet-only bridge (H1: no default bridge; the host firewall drops it from the host and private ranges). IMDS (`169.254.169.254`) must be unreachable from every container.
 - No host port publishing (`-p`). Every resource carries label `rovara.run=<runId>`; `close()` removes everything with that label.
 - **Result semantics** (unchanged from P0):
   - skipped, flaky, retried, missing or stale results never become PASS;

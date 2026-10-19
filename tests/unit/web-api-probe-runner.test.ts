@@ -32,7 +32,7 @@ describe("the production web/API probe runner", () => {
     const run = await runner("build-imds-denial-v1");
     expect(run.observation).toMatchObject({ collectorStatus: null, runUnavailableReason: "build-failed", buildExitCode: 7, attempts: 1, skipped: 0, flaky: 0 });
     expect(run.evidence).toMatchObject({ kind: "unavailable", reason: "build-failed", runId: webApiProbeRunId(challenge, "build-imds-denial-v1"),
-      build: { commandIndex: 1, exitCode: 7, command: webApiBuildProbeCommand() } });
+      build: { commandIndex: 1, exitCode: 7, command: webApiBuildProbeCommand("build-imds-denial-v1") } });
     expect(WebApiProbeObservationSchema.parse(run.observation)).toEqual(run.observation);
     expect(verifyWebApiProbeRecord({ challenge, probeId: "build-imds-denial-v1", observation: run.observation, evidence: run.evidence })).toEqual({ ok: true });
   });
@@ -56,6 +56,8 @@ describe("the production web/API probe runner", () => {
       // The staged copy of the app is gone; nothing is left in the run root.
       expect(await readdir(runRoot)).toEqual([]);
       expect(fake.calls.some((args) => args.includes(`rovara-e2e-${runId}`))).toBe(true);
+      // Both per-run networks were created and removed.
+      expect(fake.calls.filter((args) => args[0] === "network" && args[1] === "create").map((args) => args.at(-1)).sort()).toEqual([`rovara-e2e-${runId}`, `rovara-e2e-build-${runId}`].sort());
     }
   });
 

@@ -37,8 +37,13 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(job["runs-on"]).toBe("ubuntu-24.04-arm");
     expect(job.if).toBe("needs.scope.outputs.docs_only != 'true'");
     const run = job.steps.map((step) => step.run ?? "").join("\n");
-    expect(run.indexOf("iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP")).toBeGreaterThanOrEqual(0);
-    expect(run.indexOf("iptables")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci ."));
+    // The job installs the firewall by running the heredoc inside boot.sh as it is (never a copy of the rules), before anything builds or runs a container.
+    const firewall = job.steps.map((step) => step.run ?? "").find((text) => text.includes("<<'FIREWALL'"))!;
+    expect(firewall).toContain("packages/worker/ec2/boot.sh");
+    expect(firewall).toContain("sudo bash");
+    expect(firewall).not.toContain("iptables -I");
+    expect(run.indexOf("<<'FIREWALL'")).toBeGreaterThanOrEqual(0);
+    expect(run.indexOf("<<'FIREWALL'")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci ."));
     expect(run).toContain("docker run --rm --network none rovara-e2e-executor:ci node /opt/agentx/packages/verifier/dist/executor/smoke.js");
     expect(run).toContain("npx vitest run tests/linux");
   });

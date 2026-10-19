@@ -20,15 +20,16 @@ async function qualify(overrides: Parameters<typeof fakeProbeRunner>[0] = {}, ex
 const rejection = (promise: Promise<unknown>) => promise.then(() => { throw new Error("qualification unexpectedly succeeded"); }, (error: unknown) => error as Error);
 
 describe("web/API runtime qualification", () => {
-  it("runs the six required probes in order and qualifies a runtime whose outcomes are all as expected", async () => {
+  it("runs the eight required probes in order and qualifies a runtime whose outcomes are all as expected", async () => {
     const { result, runner } = await qualify();
-    expect(runner.calls).toEqual(["web-csv-positive-v1", "web-csv-negative-v1", "web-egress-denial-v1", "api-state-positive-v1", "api-egress-denial-v1", "build-imds-denial-v1"]);
+    expect(runner.calls).toEqual(["web-csv-positive-v1", "web-csv-negative-v1", "web-egress-denial-v1", "api-state-positive-v1", "api-egress-denial-v1", "build-imds-denial-v1", "build-lateral-denial-v1", "app-host-denial-v1"]);
     expect(result.state).toBe("READY");
     expect(result.profileId).toBe("linux-arm64-web-api-v1");
     expect(result.scope).toBe("application-web-api/v1");
     expect(result.probes.map((probe) => [probe.probeId, probe.observedOutcome])).toEqual([
       ["web-csv-positive-v1", "PASS"], ["web-csv-negative-v1", "EXPECTED_FAILURE"], ["web-egress-denial-v1", "EXPECTED_FAILURE"],
-      ["api-state-positive-v1", "PASS"], ["api-egress-denial-v1", "EXPECTED_FAILURE"], ["build-imds-denial-v1", "EXPECTED_FAILURE"]]);
+      ["api-state-positive-v1", "PASS"], ["api-egress-denial-v1", "EXPECTED_FAILURE"], ["build-imds-denial-v1", "EXPECTED_FAILURE"],
+      ["build-lateral-denial-v1", "EXPECTED_FAILURE"], ["app-host-denial-v1", "PASS"]]);
     expect(WebApiRuntimeInstallProposalSchema.parse(JSON.parse(canonicalJson(result)))).toEqual(result);
   });
 
@@ -53,6 +54,7 @@ describe("web/API runtime qualification", () => {
     ["web-egress-denial-v1", { collectorStatus: "PASS" as const, failedAssertionKinds: [], blockedHosts: [] }],
     ["api-egress-denial-v1", { collectorStatus: "PASS" as const, failedAssertionKinds: [] }],
     ["build-imds-denial-v1", { collectorStatus: "PASS" as const, runUnavailableReason: null, buildExitCode: null }],
+    ["build-lateral-denial-v1", { collectorStatus: "PASS" as const, runUnavailableReason: null, buildExitCode: null }],
   ])("rejects a negative probe that passed: %s", async (probeId, observation) => {
     const error = await rejection(qualify({ [probeId]: observation }));
     expect(error).toBeInstanceOf(WebApiQualificationRejected);
@@ -68,12 +70,16 @@ describe("web/API runtime qualification", () => {
     ["api-egress-denial-v1", { collectorStatus: "UNKNOWN" as const, failedAssertionKinds: [] }],
     ["build-imds-denial-v1", { buildExitCode: 1 }],
     ["build-imds-denial-v1", { runUnavailableReason: "app-exited" }],
+    // A build that ends in 0 or 3 did not fail because the host was unreachable: only the probe's own exit 7 counts.
+    ["build-lateral-denial-v1", { buildExitCode: 0 }],
+    ["build-lateral-denial-v1", { buildExitCode: 3 }],
+    ["build-lateral-denial-v1", { runUnavailableReason: "app-exited" }],
   ])("rejects an expected failure that failed for another cause: %s %j", async (probeId, observation) => {
     const error = await rejection(qualify({ [probeId]: observation }));
     expect(error.message).toContain(`probe-wrong-cause:${probeId}`);
   });
 
-  it.each(["web-csv-positive-v1", "api-state-positive-v1"])("rejects a positive probe the collector did not pass: %s", async (probeId) => {
+  it.each(["web-csv-positive-v1", "api-state-positive-v1", "app-host-denial-v1"])("rejects a positive probe the collector did not pass: %s", async (probeId) => {
     for (const observation of [{ collectorStatus: "FAILED" as const, failedAssertionKinds: ["csv"] }, { collectorStatus: "UNKNOWN" as const },
       { collectorStatus: null, runUnavailableReason: "build-failed" }]) {
       expect((await rejection(qualify({ [probeId]: observation }))).message).toContain(`positive-probe-failed:${probeId}`);
@@ -216,7 +222,37 @@ describe("web/API probe assets", () => {
     expect(asset.polarity).toBe("negative");
   });
 
-  it("loads only the six M1.1 probes, not the later auth and tenant probes", () => {
+  it("defines the lateral denial probe as a short connect to the gateway and a private address, exit 7 only when both time out", () => {
+    const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "build-lateral-denial-v1")!;
+    expect(asset.polarity).toBe("negative");
+    expect(asset.probe.oracle).toMatchObject({ kind: "build-command-failure", expectedExitCode: 7, expectedUnavailableReason: "build-failed", build: { program: "node", cwd: ".", timeoutMs: 30000, env: {} } });
+    if (asset.probe.oracle.kind !== "build-command-failure") throw new Error("not a build probe");
+    const script = asset.probe.oracle.build.args[1]!;
+    // The host is the default route's gateway at the worker's port; the private address is one nothing answers on, so only a DROP and never a refusal times out.
+    expect(script).toContain("/proc/net/route");
+    expect(script).toContain("t(g,8080)");
+    expect(script).toContain("t('10.255.255.254',80)");
+    expect(script).toContain("a.every(x=>x==='timeout')?7:0");
+  });
+
+  it("defines the app host probe as a passing probe whose app starts only after a connection to the host times out", () => {
+    const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "app-host-denial-v1")!;
+    expect(asset.polarity).toBe("positive");
+    expect(asset.kind).toBe("api");
+    if (asset.probe.oracle.kind !== "protected-network-denial") throw new Error("not a network denial probe");
+    const { appStart } = asset.probe.oracle;
+    expect(appStart).toMatchObject({ program: "node", args: ["--input-type=module", "-e", expect.any(String)] });
+    const script = appStart!.args[2]!;
+    // The on-link network's first address (the host's bridge address) at the worker's port; anything but a timeout, or no route, exits without starting the app.
+    expect(script).toContain("/proc/net/route");
+    expect(script).toContain("(n>>>24)+1");
+    expect(script).toContain("port:8080");
+    expect(script).toContain("if(!r)process.exit(3)");
+    expect(script).toContain(".on('connect',()=>process.exit(3)).on('error',()=>process.exit(3))");
+    expect(script).toContain("s.on('timeout',()=>{s.destroy();import('./server.mjs').then(m=>m.startOrdersServer())}");
+  });
+
+  it("loads only the eight M1.1 probes, not the later auth and tenant probes", () => {
     expect(loadWebApiQualificationProbeAssets().map((asset) => asset.probeId)).toEqual(WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId));
   });
 });

@@ -243,31 +243,40 @@ ensure_docker() {
   printf '{"data-root": "%s"}\n' "$DOCKER_DATA_ROOT" >/etc/docker/daemon.json
   systemctl enable docker.service
   systemctl restart docker.service
-  block_container_metadata_access
+  wall_off_containers
 }
 
-# Containers must not reach the instance metadata service. Host-network containers (the worker) bypass
-# DOCKER-USER. Docker rebuilds its chains on start, so a oneshot unit re-applies the rule each time.
-readonly IMDS_DROP_UNIT=rovara-imds-drop.service
-block_container_metadata_access() {
+# Untrusted containers (build bridges rvb*, internal app/executor bridges rvi*) cannot reach IMDS, the host or private ranges; only
+# DNS to the VPC resolver stays open (Docker forwards it from the container's namespace). The oneshot unit re-applies the rules
+# after Docker rebuilds its chains, and CI runs this heredoc as is.
+readonly FIREWALL_UNIT=rovara-container-firewall.service
+wall_off_containers() {
   install -d -o root -g root -m 0755 /usr/local/libexec
-  cat >/usr/local/libexec/rovara-imds-drop <<'DROP'
-iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP
-DROP
-  cat >"/etc/systemd/system/$IMDS_DROP_UNIT" <<EOF
+  cat >/usr/local/libexec/rovara-container-firewall <<'FIREWALL'
+set -e
+f() { local c=$1; shift; $c -C "$@" 2>/dev/null || $c -I "$@"; }
+for d in 10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 100.64.0.0/10 169.254.0.0/16 127.0.0.0/8; do f iptables DOCKER-USER -i rvb+ -d $d -j DROP; done
+f iptables DOCKER-USER -i rvi+ ! -o rvi+ -j DROP
+for r in $(awk '$1=="nameserver"&&$2~/^[0-9.]+$/{print $2}' /etc/resolv.conf /run/systemd/resolve/resolv.conf 2>/dev/null); do
+  for p in udp tcp; do f iptables DOCKER-USER -i rvb+ -d $r -p $p --dport 53 -j RETURN; done
+done
+f iptables DOCKER-USER -d 169.254.169.254/32 -j DROP
+for i in rvb+ rvi+; do f iptables INPUT -i $i -j DROP; ! command -v ip6tables >/dev/null || f ip6tables INPUT -i $i -j DROP || true; done
+FIREWALL
+  cat >"/etc/systemd/system/$FIREWALL_UNIT" <<EOF
 [Unit]
-Description=Block container access to the instance metadata service
+Description=Wall untrusted containers off from the host and private networks
 Requires=docker.service
 After=docker.service
 Before=$WORKER_UNIT
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/bin/bash /usr/local/libexec/rovara-imds-drop
+ExecStart=/bin/bash /usr/local/libexec/rovara-container-firewall
 [Install]
 WantedBy=multi-user.target
 EOF
-  systemctl enable "$IMDS_DROP_UNIT" && bash /usr/local/libexec/rovara-imds-drop || fail "could not block container access to the instance metadata service"
+  systemctl enable "$FIREWALL_UNIT" && bash /usr/local/libexec/rovara-container-firewall || fail "could not wall containers off from the host and private networks"
 }
 
 # The password goes from the AWS CLI to Docker through a pipe, never through the log.
@@ -406,8 +415,8 @@ write_worker_unit() {
   cat >"/etc/systemd/system/$WORKER_UNIT" <<EOF
 [Unit]
 Description=AgentX worker for workspace $AGENTX_WORKSPACE_ID generation $AGENTX_SESSION_GENERATION
-Requires=docker.service $IMDS_DROP_UNIT
-After=docker.service $IMDS_DROP_UNIT network-online.target
+Requires=docker.service $FIREWALL_UNIT
+After=docker.service $FIREWALL_UNIT network-online.target
 Wants=network-online.target
 RequiresMountsFor=$MOUNT_PATH
 

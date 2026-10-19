@@ -10,14 +10,18 @@ import { createLinuxProbeRunner, linuxProbeScratch, removeWebApiProbeScratch } f
 import { EXECUTOR_IMAGE, removeProbeDirs } from "../support/linux-runtime.js";
 import { createFakeRuntimeRegistry } from "../support/runtime-registry-fakes.js";
 import { fakeLinuxEnvironment, shippedAssetManifest, webApiChallenge } from "../support/web-api-qualification.js";
+import { assertFirewallInstalled, listenOnAllAddresses } from "../support/linux-network-walls.js";
 
 // The whole qualification through the production CLI path, the production probe runner, the Docker host and the real collector, then the registrar.
-// It runs only in the CI `linux-runtime` job (ubuntu-24.04-arm, ROVARA_DOCKER=1, ROVARA_EXECUTOR_IMAGE, with the DOCKER-USER metadata drop rule applied); elsewhere it skips.
+// It runs only in the CI `linux-runtime` job (ubuntu-24.04-arm, ROVARA_DOCKER=1, ROVARA_EXECUTOR_IMAGE, with the container firewall from boot.sh applied); elsewhere it skips.
 describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1")("web/API runtime qualification on a real Docker host", () => {
   afterAll(async () => { await removeProbeDirs(); await removeWebApiProbeScratch(); }, 120_000);
   const admin: AuthenticatedIdentity = { issuer: "test", subject: "admin", ownerKey: "admin", isAdministrator: true, claims: {} };
 
   it("qualifies linux-arm64-web-api-v1 through the CLI, registers both rows from the proposal file, and refuses it after one flipped byte", async () => {
+    await assertFirewallInstalled();
+    // Where the Rovara worker listens on a runner: the two host-denial probes try this port on the host, so it must be open for a missing wall to show.
+    const workerStandIn = await listenOnAllAddresses(8080).catch(() => null);
     const now = Date.now();
     // Only the worker identity and the installed-manifest read are replaced: this CI host is not the EC2 worker and has no installed root.
     // The manifest still hashes the probe assets and the qualification app in this checkout, so a changed file fails against its pinned digest.
@@ -33,7 +37,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       environment: { EXECUTOR_IMAGE }, host: { platform: "linux", arch: "arm64" }, config: { runRoot },
       // The worker supervisor's Node is at the image's fixed path, which the registrar requires; the CI runner's own Node is elsewhere.
       qualificationEnvironment: { assertHostIdentity: fake.assertHostIdentity!, observeManifest: shippedAssetManifest, now: () => Date.now(), nodeExecPath: fake.nodeExecPath! },
-      createProbeRunner: (input) => createLinuxProbeRunner(input) });
+      createProbeRunner: (input) => createLinuxProbeRunner(input) }).finally(() => { workerStandIn?.server.close(); });
 
     const bytes = await readFile(proposalFile);
     // The measured size of a real proposal, to compare with the 5 MiB bound.
@@ -49,6 +53,9 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(byId.get("web-egress-denial-v1")!.blockedHosts).toContain("probe.example.com");
     expect(byId.get("api-egress-denial-v1")).toMatchObject({ collectorStatus: "FAILED", failedAssertionKinds: ["http-status"] });
     expect(byId.get("build-imds-denial-v1")).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: 7 });
+    expect(byId.get("build-lateral-denial-v1")).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: 7 });
+    // The app of this probe only starts, so the run only passes, when its connection to the host timed out.
+    expect(byId.get("app-host-denial-v1")).toMatchObject({ collectorStatus: "PASS", runUnavailableReason: null });
 
     // The registrar re-derives every observation from the embedded bytes and registers both rows.
     const registry = createFakeRuntimeRegistry(Date.now());

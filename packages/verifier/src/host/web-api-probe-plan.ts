@@ -265,26 +265,42 @@ export const WEB_API_EGRESS_PROBE_HOST = "probe.example.com";
 type BuildCommand = { program: string; args: string[]; cwd: string; timeoutMs: number; env: Record<string, string> };
 /** How one required qualification probe is driven through the qualification app; the oracle in contracts judges the outcome, not this table. */
 export type WebApiProbeDriver = Readonly<{ probe: WebApiProbeName; /** A defect file under the app's defects directory, placed in the owned mount. */ defect: string | null;
-  appEnv: Readonly<Record<string, string>>; recipeBuild: readonly BuildCommand[] | null }>;
+  appEnv: Readonly<Record<string, string>>; recipeBuild: readonly BuildCommand[] | null;
+  /** Replaces the arguments of the app's start command (the program stays `node`); null starts the app as its recipe says. */
+  startArgs: readonly string[] | null }>;
 
 export function webApiProbeDriver(probeId: string): WebApiProbeDriver {
   switch (probeId) {
-    case "web-csv-positive-v1": return { probe: "web-csv-positive-v1", defect: null, appEnv: {}, recipeBuild: null };
-    case "web-csv-negative-v1": return { probe: "web-csv-positive-v1", defect: "extra-order.json", appEnv: {}, recipeBuild: null };
-    case "web-egress-denial-v1": return { probe: "web-egress-denial-v1", defect: null, appEnv: { FIXTURE_EGRESS_PROBE_URL: `https://${WEB_API_EGRESS_PROBE_HOST}/ping` }, recipeBuild: null };
-    case "api-state-positive-v1": return { probe: "api-state-positive-v1", defect: null, appEnv: {}, recipeBuild: null };
-    case "api-egress-denial-v1": return { probe: "api-egress-denial-v1", defect: null, appEnv: { INVENTORY_ORIGIN: `https://${WEB_API_EGRESS_PROBE_HOST}` }, recipeBuild: null };
-    case "build-imds-denial-v1": return { probe: "web-csv-positive-v1", defect: null, appEnv: {}, recipeBuild: [webApiBuildProbeCommand()] };
+    case "web-csv-positive-v1": return { probe: "web-csv-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null };
+    case "web-csv-negative-v1": return { probe: "web-csv-positive-v1", defect: "extra-order.json", appEnv: {}, recipeBuild: null, startArgs: null };
+    case "web-egress-denial-v1": return { probe: "web-egress-denial-v1", defect: null, appEnv: { FIXTURE_EGRESS_PROBE_URL: `https://${WEB_API_EGRESS_PROBE_HOST}/ping` }, recipeBuild: null, startArgs: null };
+    case "api-state-positive-v1": return { probe: "api-state-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null };
+    case "api-egress-denial-v1": return { probe: "api-egress-denial-v1", defect: null, appEnv: { INVENTORY_ORIGIN: `https://${WEB_API_EGRESS_PROBE_HOST}` }, recipeBuild: null, startArgs: null };
+    case "build-imds-denial-v1": return { probe: "web-csv-positive-v1", defect: null, appEnv: {}, recipeBuild: [webApiBuildProbeCommand("build-imds-denial-v1")], startArgs: null };
+    case "build-lateral-denial-v1": return { probe: "web-csv-positive-v1", defect: null, appEnv: {}, recipeBuild: [webApiBuildProbeCommand("build-lateral-denial-v1")], startArgs: null };
+    case "app-host-denial-v1": return { probe: "api-state-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: webApiAppStartGuardArgs() };
     default: throw new Error(`no probe plan for ${probeId}`);
   }
 }
 
 /** The build command and its expected exit code come from the installed probe asset, so the probe the qualifier records is the one that ran. */
-export function webApiBuildProbeCommand(): BuildCommand {
-  const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "build-imds-denial-v1")!;
-  if (asset.probe.oracle.kind !== "build-command-failure") throw new Error("the IMDS probe asset has no build command");
+export function webApiBuildProbeCommand(probeId: "build-imds-denial-v1" | "build-lateral-denial-v1"): BuildCommand {
+  const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === probeId)!;
+  if (asset.probe.oracle.kind !== "build-command-failure") throw new Error(`the ${probeId} probe asset has no build command`);
   const { program, args, cwd, timeoutMs, env } = asset.probe.oracle.build;
   return { program, args: [...args], cwd, timeoutMs, env: { ...env } };
+}
+
+/**
+ * The start command arguments of `app-host-denial-v1`, from the installed probe asset (so the pinned asset digest covers them). The qualification app is
+ * started behind a guard that connects to the host's address on the run's internal bridge (the first address of the on-link network, from the route table)
+ * at port 8080, where the Rovara worker listens on a runner. The app starts, and so the probe can pass, only when that connection times out, which is
+ * what the host firewall's DROP does: a refusal or a connection means the host is reachable, and with no route to read the guard refuses to start too.
+ */
+export function webApiAppStartGuardArgs(): readonly string[] {
+  const asset = loadWebApiQualificationProbeAssets().find((item) => item.probeId === "app-host-denial-v1")!;
+  if (asset.probe.oracle.kind !== "protected-network-denial" || asset.probe.oracle.appStart === undefined) throw new Error("the app host probe asset has no start guard");
+  return Object.freeze([...asset.probe.oracle.appStart.args]);
 }
 
 /** The lifecycle input for the probe's one group, shaped like the broker's, for `runIsolatedE2EApplication`. */

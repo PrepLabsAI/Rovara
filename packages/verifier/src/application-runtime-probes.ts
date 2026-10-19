@@ -13,7 +13,9 @@ const probeOracle = z.discriminatedUnion("kind", [
     expectedStatus: z.literal(403), visibleTestId: z.string().min(1).max(120).optional(), visibleText: z.string().min(1).max(256).optional(),
     identityPath: z.string().startsWith("/").optional(), identityRole: z.literal("viewer").optional() }).strict(),
   z.object({ kind: z.literal("protected-network-denial"), requiresKernelDenialCounter: z.literal(true), requiresAbsenceOfEffect: z.literal(true),
-    candidateUiIsNotEvidence: z.literal(true).optional(), candidateResponseIsNotEvidence: z.literal(true).optional() }).strict(),
+    candidateUiIsNotEvidence: z.literal(true).optional(), candidateResponseIsNotEvidence: z.literal(true).optional(),
+    /** The command the app is started with for this probe (`app-host-denial-v1`), so the asset digest pins it. */
+    appStart: z.object({ program: z.literal("node"), args: z.array(z.string().min(1).max(1_024)).min(1).max(8) }).strict().optional() }).strict(),
   z.object({ kind: z.literal("json-state"), path: z.string().startsWith("/"), expected: z.object({ version: z.number().int().positive(), tenantId: z.string().min(1), orderIds: z.array(z.string().min(1)).min(1).max(10) }).strict() }).strict(),
   z.object({ kind: z.literal("build-command-failure"), build: z.object({ program: z.literal("node"), args: z.array(z.string().min(1).max(512)).min(1).max(8),
     cwd: z.literal("."), timeoutMs: z.number().int().min(1_000).max(120_000), env: z.object({}).strict() }).strict(),

@@ -48,7 +48,7 @@ export class FakeDockerCli implements DockerCli {
   seedStale(input: { runId: string; ageMs: number; now: number }): void {
     const labels = { "rovara.run": input.runId, "rovara.created": String(input.now - input.ageMs) };
     this.resources.set(`rovara-app-${input.runId}`, { kind: "container", name: `rovara-app-${input.runId}`, labels, state: "running", exitCode: 0, logs: "" });
-    this.resources.set(`rovara-e2e-${input.runId}`, { kind: "network", name: `rovara-e2e-${input.runId}`, labels, state: "running", exitCode: 0, logs: "" });
+    for (const name of [`rovara-e2e-${input.runId}`, `rovara-e2e-build-${input.runId}`]) this.resources.set(name, { kind: "network", name, labels, state: "running", exitCode: 0, logs: "" });
   }
 
   liveResources(label: string): string[] {
@@ -103,7 +103,10 @@ export class FakeDockerCli implements DockerCli {
       this.resources.set(name, { kind: "network", name, labels: this.mark(args), state: "running", exitCode: 0, logs: "" });
       return { code: 0, stdout: name, stderr: "" };
     }
-    if (command === "network" && sub === "rm") return this.resources.delete(args[2]!) ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "No such network" };
+    if (command === "network" && sub === "rm") {
+      const removed = args.slice(2).map((name) => this.resources.delete(name));
+      return removed.every(Boolean) ? { code: 0, stdout: "", stderr: "" } : { code: 1, stdout: "", stderr: "No such network" };
+    }
     if (command === "network" && sub === "ls") return this.list("network", args);
     if (command === "ps") return this.list("container", args);
     if (command === "rm") {

@@ -50,6 +50,15 @@ export function createProcessDockerCli(binary = "docker"): DockerCli {
 export const ROVARA_RUN_LABEL = "rovara.run";
 export const ROVARA_CREATED_LABEL = "rovara.created";
 const SAFE_RUN_ID = /^[A-Za-z0-9-]{1,64}$/;
+/**
+ * The two per-run networks and their fixed Linux bridge names. The host firewall (`packages/worker/ec2/boot.sh`) walls bridges off by name:
+ * `rvb*` (builds: the internet, no host, no private ranges) and `rvi*` (app and executor: internal, no host). The suffix is 8 hex of the run id's
+ * digest, so the name is always valid and at most 11 of the 15 characters an interface name may have.
+ */
+export function e2eRunNetworks(runId: string): { internal: string; build: string; internalBridge: string; buildBridge: string } {
+  const suffix = createHash("sha256").update(runId).digest("hex").slice(0, 8);
+  return { internal: `rovara-e2e-${runId}`, build: `rovara-e2e-build-${runId}`, internalBridge: `rvi${suffix}`, buildBridge: `rvb${suffix}` };
+}
 const ADMIN_TIMEOUT_MS = 30_000;
 const MAX_TAIL_BYTES = 64 * 1024;
 const APP_PORT = 4317;
@@ -156,8 +165,8 @@ function containerCwd(root: string, cwd: string): string {
 }
 
 /**
- * Builds the exact candidate in a build container, runs it on a per-run `--internal` network, runs the Rovara executor
- * against it, and removes everything the run created. One host owns one run (the group named in `deps`); concurrent rounds
+ * Builds the exact candidate in a build container on its own per-run bridge (internet only, firewalled from the host and private ranges), runs it
+ * on a per-run `--internal` network, runs the Rovara executor against it, and removes everything the run created. One host owns one run (the group named in `deps`); concurrent rounds
  * use one host each. Allocation prepares the run's network, workspace, seed and plan; execution builds, starts the app and
  * waits for the executor until the plan deadline; `close` removes every resource labeled `rovara.run=<runId>`.
  */
@@ -192,7 +201,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
 
   const { docker } = deps;
   const label = `${ROVARA_RUN_LABEL}=${runId}`;
-  const network = `rovara-e2e-${runId}`;
+  const { internal: network, build: buildNetwork, internalBridge, buildBridge } = e2eRunNetworks(runId);
   const appName = `rovara-app-${runId}`;
   const executorName = `rovara-executor-${runId}`;
   const workspace = join(deps.runRoot, runId);
@@ -223,11 +232,12 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
   }
 
-  /** Removes every container and the network labeled for this run; true only when none is left. */
+  /** Removes every container and both networks labeled for this run; true only when none is left. */
   async function removeOwned(): Promise<{ confirmed: boolean; containers: string[] }> {
     const listed = await admin(["ps", "-a", "--filter", `label=${label}`, "--format", "{{.Names}}"]);
     const containers = listed.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
     if (containers.length > 0) await admin(["rm", "-f", ...containers]);
+    await admin(["network", "rm", buildNetwork]);
     await admin(["network", "rm", network]);
     await removeWorkspace();
     const containersLeft = await admin(["ps", "-a", "--filter", `label=${label}`, "--format", "{{.Names}}"]);
@@ -242,9 +252,10 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   /** "deadline" means the plan deadline, not the command, ended the build. */
   async function build(signal: AbortSignal): Promise<"ok" | "failed" | "deadline"> {
     const mounts = ["-v", `${deps.candidateSourceDir}:/src:ro`, "-v", `${dirs.app}:/out`];
-    const common = (name: string) => ["run", "--rm", "--name", name, "--pull=never", ...hardening(), ...limits("2g", "1024", "2"), "--user", "1000:1000", ...mounts];
+    const common = (name: string, on: string) => ["run", "--rm", "--name", name, "--pull=never", ...hardening(["--network", on]), ...limits("2g", "1024", "2"), "--user", "1000:1000", ...mounts];
     const copyTimeout = Math.min(BUILD_COPY_TIMEOUT_MS, left());
-    const copy = await docker.run([...common(`rovara-build-${runId}-0`), ...BLANKED_ENV, "--entrypoint", "cp", deps.buildImage, "-R", "--no-preserve=all", "/src/.", "/out/"],
+    // Copying the source needs no network at all.
+    const copy = await docker.run([...common(`rovara-build-${runId}-0`, "none"), ...BLANKED_ENV, "--entrypoint", "cp", deps.buildImage, "-R", "--no-preserve=all", "/src/.", "/out/"],
       { signal, timeoutMs: copyTimeout });
     appendBuildLog(`${copy.stdout}${copy.stderr}`);
     state.buildResult = Object.freeze({ commandIndex: 0, exitCode: ended(copy.code), command: null });
@@ -252,10 +263,11 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     let index = 0;
     for (const command of recipe.build) {
       index += 1;
-      // The build runs with registry egress only through the default bridge and holds no credential: HOME and the package cache sit in a tmpfs.
+      // The build reaches the internet (package registries) only through its own run bridge, which the host firewall keeps off the host and every
+      // private range, and it holds no credential: HOME and the package cache sit in a tmpfs.
       const env = ["-e", "HOME=/tmp/home", "-e", "npm_config_cache=/tmp/home/.npm", "-e", "CI=1", ...Object.entries(command.env).flatMap(([name, value]) => ["-e", `${name}=${value}`]), ...BLANKED_ENV];
       const timeoutMs = Math.min(command.timeoutMs, left());
-      const result = await docker.run([...common(`rovara-build-${runId}-${index}`), "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=1g", "-w", containerCwd("/out", command.cwd), ...env,
+      const result = await docker.run([...common(`rovara-build-${runId}-${index}`, buildNetwork), "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=1g", "-w", containerCwd("/out", command.cwd), ...env,
         deps.buildImage, command.program, ...command.args], { signal, timeoutMs });
       appendBuildLog(`${result.stdout}${result.stderr}`);
       state.buildResult = Object.freeze({ commandIndex: index, exitCode: ended(result.code), command: Object.freeze({ ...command }) });
@@ -408,7 +420,11 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       await writeFile(dirs.plan, JSON.stringify(plan), { mode: 0o644 });
       // The executor runs as an unprivileged user that must write its results here.
       await chmod(dirs.out, 0o777); await chmod(dirs.owned, 0o755);
-      const created = await docker.run(["network", "create", "--internal", "--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`, network], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+      const labels = ["--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`];
+      // Fixed bridge names let the host firewall tell build, app and executor traffic apart; the name of the network stays last.
+      const createdBuild = await docker.run(["network", "create", ...labels, "-o", `com.docker.network.bridge.name=${buildBridge}`, buildNetwork], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+      if (createdBuild.code !== 0) throw new Error(`could not create the run build network: ${redact(createdBuild.stderr)}`);
+      const created = await docker.run(["network", "create", "--internal", ...labels, "-o", `com.docker.network.bridge.name=${internalBridge}`, network], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
       if (created.code !== 0) throw new Error(`could not create the run network: ${redact(created.stderr)}`);
     } catch (error) {
       await removeOwned().catch(() => undefined);

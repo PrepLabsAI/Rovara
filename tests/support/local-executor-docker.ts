@@ -33,7 +33,10 @@ export class LocalExecutorDocker extends FakeDockerCli {
       const app = [...this.calls].reverse().find((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith("rovara-app-"))!;
       // The host ends the app container's arguments with the blanked environment, the image, then the recipe's program and arguments.
       const image = app.lastIndexOf("NODE_OPTIONS=") + 1;
-      const command = app.slice(image + 1);
+      // The app-host probe starts the app behind a guard that reads this container's route table and times out against the host firewall. This double has
+      // neither, so it starts the app itself, which is all the guard does once the host is walled off; the real guard runs only in the Linux CI job.
+      const started = app.slice(image + 1);
+      const command = started[1] === "--input-type=module" ? ["node", "server.mjs"] : started;
       const workDir = app.at(app.indexOf("-w") + 1)!.replace(/^\/app/, join(workspace, "app"));
       // The read-only owned mount is a directory inside the app, where the app expects it.
       await cp(join(workspace, "owned"), join(workspace, "app", ".owned"), { recursive: true });

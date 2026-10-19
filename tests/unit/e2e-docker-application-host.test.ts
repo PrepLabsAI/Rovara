@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { E2EExecutorPlanSchema } from "@agentx/contracts";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
-import { createDockerApplicationHost, createProcessDockerCli, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
+import { createDockerApplicationHost, createProcessDockerCli, e2eRunNetworks, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
 import { createOrdersExecutorPlan, type OrdersExecutorFixture } from "../support/e2e-orders-executor-fixture.js";
 import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.js";
 
@@ -66,7 +66,8 @@ describe("docker application host", () => {
         expect(args.some((value, index) => args[index - 1] === "-e" && value === `${name}=`), name).toBe(true);
       }
     }
-    expect(fake.call("network create")).toContain("--internal");
+    const creates = fake.calls.filter((args) => args[0] === "network" && args[1] === "create");
+    expect(creates.filter((args) => args.includes("--internal")).map((args) => args.at(-1))).toEqual([`rovara-e2e-${s.runId}`]);
     expect(fake.mountsFor("executor").find((mount) => mount.endsWith(":/run/rovara/plan.json:ro"))).toBeDefined();
     expect(fake.mountsFor("executor").find((mount) => mount.endsWith(":/out"))).toBeDefined();
     expect(fake.mountsFor("app").some((mount) => mount.endsWith(":/app:ro"))).toBe(true);
@@ -83,7 +84,9 @@ describe("docker application host", () => {
       expect(args).toEqual(expect.arrayContaining(["--cap-drop=ALL", "--security-opt", "no-new-privileges", "--memory", "2g", "--memory-swap", "2g", "--pids-limit", "1024", "--cpus", "2"]));
       expect(args).toContain("NODE_OPTIONS=");
       expect(args).toContain("--pull=never");
-      expect(args).not.toContain("--network");
+      // Never the default bridge: the source copy has no network, every build command has the run's own build bridge.
+      const index = Number(args[args.indexOf("--name") + 1]!.split("-").at(-1));
+      expect(args[args.indexOf("--network") + 1]).toBe(index === 0 ? "none" : `rovara-e2e-build-${s.runId}`);
       expect(args.join(" ")).not.toMatch(/docker\.sock|AWS_|AGENTX_|PI_|GIT_|TOKEN|SECRET|(^| )-p /);
       expect(args.some((value) => value.endsWith(":/src:ro"))).toBe(true);
       expect(args.some((value) => value.endsWith(":/out") && args[args.indexOf(value) - 1] === "-v")).toBe(true);
@@ -92,6 +95,34 @@ describe("docker application host", () => {
     expect(fake.buildTimeouts().slice(1)).toEqual([45_000, 60_000]);
     // The app runs the built tree, and the network was created before anything used it.
     expect(fake.calls.findIndex((args) => args[0] === "network" && args[1] === "create")).toBeLessThan(fake.calls.indexOf(builds[0]!));
+  });
+
+  it("puts builds and the app on bridges with fixed names the host firewall keys on, labels both networks and removes both", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep }); fake.onExecutor = okOutput(s);
+    const signal = new AbortController().signal;
+    const lease = await s.host.allocate(s.input as never, signal);
+    const networks = e2eRunNetworks(s.runId);
+    // 8 hex of the run id's digest after a three-letter kind: valid Linux interface names (at most 15 characters), told apart by prefix.
+    expect(networks.buildBridge).toMatch(/^rvb[0-9a-f]{8}$/);
+    expect(networks.internalBridge).toMatch(/^rvi[0-9a-f]{8}$/);
+    expect(networks.buildBridge.slice(3)).toBe(networks.internalBridge.slice(3));
+    expect(e2eRunNetworks("another-run").buildBridge).not.toBe(networks.buildBridge);
+    const creates = fake.calls.filter((args) => args[0] === "network" && args[1] === "create");
+    expect(creates).toHaveLength(2);
+    const build = creates.find((args) => args.at(-1) === networks.build)!;
+    const internal = creates.find((args) => args.at(-1) === networks.internal)!;
+    expect(build).not.toContain("--internal");
+    expect(internal).toContain("--internal");
+    expect(build).toEqual(expect.arrayContaining(["-o", `com.docker.network.bridge.name=${networks.buildBridge}`, "--label", `rovara.run=${s.runId}`]));
+    expect(internal).toEqual(expect.arrayContaining(["-o", `com.docker.network.bridge.name=${networks.internalBridge}`, "--label", `rovara.run=${s.runId}`]));
+    // Both carry the creation time the stale-run sweep ages them by.
+    for (const args of creates) expect(args.some((value) => /^rovara\.created=\d+$/.test(value))).toBe(true);
+    await lease.execute(signal);
+    // App and executor share the internal network and nothing else; builds never see it.
+    for (const args of [fake.argsFor("app"), fake.argsFor("executor")]) expect(args.filter((value, index) => args[index - 1] === "--network")).toEqual([networks.internal]);
+    await expect(lease.close(signal)).resolves.toEqual({ confirmed: true });
+    expect(fake.networks()).toEqual([]);
+    expect(fake.calls.filter((args) => args[0] === "network" && args[1] === "rm").map((args) => args[2]).sort()).toEqual([networks.build, networks.internal].sort());
   });
 
   it("seeds synthetic credentials for the plan's account profiles and keeps them out of every diagnostic", async () => {
@@ -293,7 +324,7 @@ describe("docker application host", () => {
     const fake = new FakeDockerCli(); const s = await setup({ fake });
     const signal = new AbortController().signal;
     const lease = await s.host.allocate(s.input as never, signal);
-    expect(fake.networks()).toEqual([`rovara-e2e-${s.runId}`]);
+    expect(fake.networks().sort()).toEqual([`rovara-e2e-${s.runId}`, `rovara-e2e-build-${s.runId}`]);
     await expect(lease.close(signal)).resolves.toEqual({ confirmed: true });
     const removals = () => fake.calls.filter((args) => args[0] === "rm" || (args[0] === "network" && args[1] === "rm")).length;
     const before = removals();
@@ -326,7 +357,8 @@ describe("docker application host", () => {
     const runRoot = await temp("sweep-root-"); await mkdir(join(runRoot, "old")); await mkdir(join(runRoot, "fresh"));
     expect(await sweepStaleRovaraRuns(fake, 3_600_000, { now: () => now, runRoot })).toBe(1);
     expect(fake.liveResources("rovara.run=old")).toEqual([]);
-    expect(fake.liveResources("rovara.run=fresh")).toHaveLength(2);
+    // The app container and both networks (internal and build) of the fresh run stay.
+    expect(fake.liveResources("rovara.run=fresh")).toHaveLength(3);
     expect(await readdir(runRoot)).toEqual(["fresh"]);
   });
 

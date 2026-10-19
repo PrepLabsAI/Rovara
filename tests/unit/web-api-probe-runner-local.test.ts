@@ -28,7 +28,7 @@ describe.runIf(enabled)("production probe runner around the real executor (local
   it.each(WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId))("%s runs to its expected outcome and derives from its own evidence", async (probeId) => {
     const root = realpathSync(await mkdtemp(join(tmpdir(), "web-api-local-"))); dirs.push(root);
     const docker = new LocalExecutorDocker(); dockers.push(docker);
-    if (probeId === "build-imds-denial-v1") docker.failOn("build", 7);
+    if (probeId.startsWith("build-")) docker.failOn("build", 7);
     const challenge = webApiChallenge(WEB_API_FIXTURE_NOW);
     const evidenceRoot = join(root, "evidence"); await mkdir(evidenceRoot, { mode: 0o700 });
     const runner = createWebApiProbeRunner({ docker, executorImage: "rovara-executor:local", buildImage: "node:build-test", runRoot: join(root, "runs"), evidenceRoot, challenge });
