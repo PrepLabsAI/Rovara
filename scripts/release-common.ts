@@ -381,7 +381,7 @@ export function stackExists(runner: Runner, region: string, stack: string): bool
   throw new Error(`unable to inspect CloudFormation stack ${stack}`);
 }
 
-export function describeStack(runner: Runner, region: string, stack: string): StackDescription {
+export function describeStack(runner: Pick<Runner, "aws">, region: string, stack: string): StackDescription {
   const result = runner.aws([
     "cloudformation",
     "describe-stacks",

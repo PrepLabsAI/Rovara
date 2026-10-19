@@ -101,7 +101,7 @@ export type TemplatePlan =
 
 export type DeployStep =
   | { id: string; kind: "build-lambda-zip"; unit: "broker" | "dispatcher"; logicalId: string; entry: string; zipPath: string }
-  | { id: string; kind: "upload-artifact"; bucketFromStack: StackKind; from: string; keyPrefix: string }
+  | { id: string; kind: "upload-artifact"; bucketFromStack: "access"; logicalId: string; from: string; keyPrefix: string }
   | { id: string; kind: "ecr-push"; image: "worker" | "executor"; repositoryUri: string; revision: string }
   | {
       id: string;
@@ -149,6 +149,42 @@ export function loadAllowlist(): string[] {
 /** The stacks this deploy may touch, named the way the CLI names a named environment's stacks. */
 export function resolveTestStacks(env: string): Record<StackKind, string> {
   return { "control-plane": environmentStackName(env, "control-plane"), runtime: environmentStackName(env, "runtime") };
+}
+
+/** The access stack owns the versioned artifact bucket the deployed Lambda code and the change-set templates live in. */
+export function resolveAccessStack(env: string): string {
+  return environmentStackName(env, "access");
+}
+
+/** The only AWS reads the bucket guards make; `Runner` satisfies it and the tests pass a fake. */
+export type AwsReader = Pick<Runner, "aws">;
+
+/**
+ * The bucket code zips and change-set templates are uploaded to: the access stack's `ArtifactBucketName`. Refuses unless S3
+ * reports its versioning `Enabled`, because Lambda code and change sets are pinned to object versions.
+ */
+export function resolveArtifactBucket(runner: AwsReader, region: string, env: string): string {
+  const stack = resolveAccessStack(env);
+  const bucket = stackOutput(describeStack(runner, region, stack), "ArtifactBucketName");
+  const versioning = JSON.parse(runner.aws(["s3api", "get-bucket-versioning", "--bucket", bucket, "--region", region, "--output", "json"]).stdout) as { Status?: string };
+  if (versioning.Status !== "Enabled") {
+    throw new Error(`s3://${bucket} (ArtifactBucketName of ${stack}) has versioning ${versioning.Status ?? "never enabled"}, not Enabled; refusing to upload anything to it`);
+  }
+  return bucket;
+}
+
+/** As `resolveArtifactBucket`, and the control-plane stack's deployed `logicalId` Lambda must already read its code from that bucket. */
+export function resolveCodeArtifactBucket(runner: AwsReader, region: string, env: string, logicalId: string): string {
+  const bucket = resolveArtifactBucket(runner, region, env);
+  const stack = resolveTestStacks(env)["control-plane"];
+  const body = runner.aws(["cloudformation", "get-template", "--stack-name", stack, "--template-stage", "Original", "--query", "TemplateBody", "--region", region, "--output", "json"]).stdout;
+  const template = JSON.parse(body) as CfnTemplate;
+  const deployed = (template.Resources?.[logicalId]?.Properties?.Code as { S3Bucket?: unknown } | undefined)?.S3Bucket;
+  if (typeof deployed !== "string") throw new Error(`the deployed ${logicalId} in ${stack} has no literal Code S3Bucket to compare with ${bucket}; stop for review`);
+  if (deployed !== bucket) {
+    throw new Error(`the deployed ${logicalId} reads its code from s3://${deployed}, but the access stack's ArtifactBucketName is s3://${bucket}; refusing to upload code to a bucket the function does not use`);
+  }
+  return bucket;
 }
 
 export function planTestDeploy(
@@ -233,7 +269,7 @@ export function planTestDeploy(
       const { logicalId, entry } = LAMBDAS[unit];
       steps.push(
         { id: `build-${unit}`, kind: "build-lambda-zip", unit, logicalId, entry, zipPath: join(input.artifacts.outputDir, `${unit}-${revision}.zip`) },
-        { id: `upload-${unit}`, kind: "upload-artifact", bucketFromStack: "control-plane", from: `build-${unit}`, keyPrefix: `test-deploy/${revision}/${logicalId}-` },
+        { id: `upload-${unit}`, kind: "upload-artifact", bucketFromStack: "access", logicalId, from: `build-${unit}`, keyPrefix: `test-deploy/${revision}/${logicalId}-` },
       );
     }
     const logicalIds = lambdas.map((unit) => LAMBDAS[unit].logicalId);
@@ -502,7 +538,7 @@ export function formatPlan(steps: readonly DeployStep[]): string {
     const head = `${index + 1}. [${step.id}]`;
     switch (step.kind) {
       case "build-lambda-zip": return `${head} build ${step.logicalId} zip from ${step.entry} -> ${step.zipPath}`;
-      case "upload-artifact": return `${head} upload ${step.from} zip to the control-plane artifact bucket under ${step.keyPrefix}<sha256>.zip`;
+      case "upload-artifact": return `${head} upload ${step.from} zip to the access stack's versioned artifact bucket (after checking versioning is Enabled and that ${step.logicalId} already reads its code from it) under ${step.keyPrefix}<sha256>.zip`;
       case "ecr-push": return `${head} build the ${step.image} image and push it to the existing repository ${step.repositoryUri} (tag test-*), then pin its digest; test-deploy never creates a repository, and stops if this one is missing`;
       case "create-change-set": {
         const changed = step.parameters.flatMap((parameter) => ("value" in parameter ? [`${parameter.key}=${describeRef(parameter.value)}`] : []));
@@ -634,7 +670,7 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
       }))
       : liftResources(deployed, synthesizeLiftSource(context, step.template), step.template.logicalIdPrefix, step.template.parameterNames);
     const body = Buffer.from(`${JSON.stringify(prepared, null, 2)}\n`);
-    const bucket = stackOutput(describeStack(context.runner, context.region, step.stack), "ArtifactBucketName");
+    const bucket = resolveArtifactBucket(context.runner, context.region, context.env);
     const key = `test-deploy/${context.revision}/${step.stackKind}-template-${sha256(body).digest("hex")}.json`;
     const file = join(mkdtempSync(join(tmpdir(), "test-deploy-template-")), "template.json");
     writeFileSync(file, body);
@@ -731,7 +767,7 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
     case "upload-artifact": {
       const built = context.outputs.get(step.from);
       if (built?.zipPath === undefined || built.sha256Hex === undefined) throw new Error(`step ${step.from} built nothing`);
-      const bucket = stackOutput(describeStack(context.runner, context.region, resolveTestStacks(context.env)[step.bucketFromStack]), "ArtifactBucketName");
+      const bucket = resolveCodeArtifactBucket(context.runner, context.region, context.env, step.logicalId);
       const key = `${step.keyPrefix}${built.sha256Hex}.zip`;
       const version = putVerifiedObject(context, bucket, key, built.zipPath, "application/zip");
       recordOutput(context, step.id, { bucket, s3Key: key, s3ObjectVersion: version });

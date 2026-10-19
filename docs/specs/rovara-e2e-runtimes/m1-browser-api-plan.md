@@ -98,7 +98,7 @@ Run: `npx vitest run tests/contract/ec2-worker-infrastructure.test.ts`. Expected
   - Every CloudFormation step is a change set that changes only the listed parameter or Lambda code and sets every other parameter to `UsePreviousValue: true`. This reproduces the P0 procedure recorded in `AgentX-e2e-p0-20261012-evidence/.../deadline-fix/pr400-test-deployment-runtime-plan-2026-10-16.md`.
 
 - [ ] **Step 1: Write the failing tests.**
-  - `planTestDeploy({only:["broker"], ...})` returns exactly: build Broker zip → upload to code-artifact bucket → change set on the control-plane stack changing only `BrokerE1355FD6` Code → execute → verify Lambda `CodeSha256` equals the zip's sha256 (base64).
+  - `planTestDeploy({only:["broker"], ...})` returns exactly: build Broker zip → upload to the access stack's versioned artifact bucket (after checking its versioning is `Enabled` and that the deployed Broker's `Code.S3Bucket` is that bucket; templates for change sets go to the same bucket) → change set on the control-plane stack changing only `BrokerE1355FD6` Code → execute → verify Lambda `CodeSha256` equals the zip's sha256 (base64).
   - With `only:["worker-image"]`: ECR push → runtime stack change set with only `WorkerImageUri` changed.
   - The plan never contains a step touching any stack other than the control-plane and runtime stacks for `--env`.
   - An `env` that is not `agentxlivetest123` (or not listed in `scripts/test-deploy.allowlist.json`) throws `"test-deploy only targets allowlisted TEST installations"`.

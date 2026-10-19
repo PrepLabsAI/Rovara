@@ -8,6 +8,8 @@ import {
   parseTestDeployArgs,
   patchLambdaCode,
   planTestDeploy,
+  resolveArtifactBucket,
+  resolveCodeArtifactBucket,
   resolveTestStacks,
   verifyStackResources,
   waitForChangeSetExecution,
@@ -51,7 +53,8 @@ describe("planTestDeploy", () => {
       Extract<DeployStep, { kind: "verify-lambda-code" }>,
     ];
     expect(build).toMatchObject({ logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker.ts" });
-    expect(upload).toMatchObject({ bucketFromStack: "control-plane", from: build.id });
+    // Code goes to the access stack's versioned artifact bucket, not the control-plane stack's unversioned one.
+    expect(upload).toMatchObject({ bucketFromStack: "access", logicalId: "BrokerE1355FD6", from: build.id });
     expect(changeSet).toMatchObject({
       stack: CONTROL_PLANE,
       template: { source: "lambda-code", patches: [{ logicalId: "BrokerE1355FD6", zip: upload.id }] },
@@ -123,7 +126,8 @@ describe("planTestDeploy", () => {
     const steps = plan(["broker", "dispatcher", "worker-image"]);
     const stacks = new Set(steps.flatMap((step) => ("stack" in step ? [step.stack] : [])));
     expect(stacks).toEqual(new Set([CONTROL_PLANE, RUNTIME]));
-    expect(JSON.stringify(steps)).not.toMatch(/foundation|identity|slack|access/);
+    // The access stack is only read, for its artifact bucket: no step changes it, and the only mention is the upload's bucket source.
+    expect(JSON.stringify(steps).replaceAll('"bucketFromStack":"access"', "")).not.toMatch(/foundation|identity|slack|access/);
   });
 
   it("refuses an env that is not an allowlisted TEST installation", () => {
@@ -209,6 +213,12 @@ describe("planTestDeploy", () => {
     expect(text).toMatch(/never creates a repository/);
   });
 
+  it("states in the printed plan that code goes to the access stack's versioned bucket", () => {
+    const text = formatPlan(plan(["broker"]));
+    expect(text).toContain("access stack's versioned artifact bucket");
+    expect(text).not.toContain("control-plane artifact bucket");
+  });
+
   it("plans qualification-transport as a guarded add-only change set on the control-plane stack", () => {
     const steps = plan(["qualification-transport"]);
     expect(kinds(steps)).toEqual(["create-change-set", "execute-change-set", "verify-stack-resources"]);
@@ -244,6 +254,72 @@ describe("planTestDeploy", () => {
 describe("resolveTestStacks", () => {
   it("names the stacks the way the CLI resolves a named environment", () => {
     expect(resolveTestStacks(ENV)).toEqual({ "control-plane": CONTROL_PLANE, runtime: RUNTIME });
+  });
+});
+
+const ACCESS = "agentx-agentxlivetest123-access";
+const ACCESS_BUCKET = "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13";
+const CONTROL_BUCKET = "agentx-agentxlivetest123-control-artifacts82dd59a1-syx0unxsewcf";
+
+/** A runner that answers the AWS reads the bucket guards make and records every call. */
+function fakeAws(options: { versioning?: string; brokerBucket?: unknown } = {}) {
+  const calls: string[][] = [];
+  const result = (stdout: unknown) => ({ status: 0, stdout: JSON.stringify(stdout), stderr: "" });
+  return {
+    calls,
+    aws(args: readonly string[]) {
+      calls.push([...args]);
+      const stackName = args[args.indexOf("--stack-name") + 1];
+      if (args[0] === "cloudformation" && args[1] === "describe-stacks") {
+        if (stackName === ACCESS) return result({ Outputs: [{ OutputKey: "ArtifactBucketName", OutputValue: ACCESS_BUCKET }] });
+        return result({ Outputs: [{ OutputKey: "ArtifactBucketName", OutputValue: CONTROL_BUCKET }] });
+      }
+      if (args[0] === "cloudformation" && args[1] === "get-template") {
+        return result({ Resources: { BrokerE1355FD6: { Type: "AWS::Lambda::Function", Properties: { Code: { S3Bucket: options.brokerBucket ?? ACCESS_BUCKET, S3Key: "k" } } } } });
+      }
+      if (args[0] === "s3api" && args[1] === "get-bucket-versioning") {
+        return result(options.versioning === undefined ? { Status: "Enabled" } : options.versioning === "" ? {} : { Status: options.versioning });
+      }
+      throw new Error(`unexpected aws call ${args.join(" ")}`);
+    },
+  };
+}
+
+describe("resolveArtifactBucket", () => {
+  it("takes the bucket from the access stack's ArtifactBucketName and checks its versioning", () => {
+    const runner = fakeAws();
+    expect(resolveArtifactBucket(runner, "us-east-1", ENV)).toBe(ACCESS_BUCKET);
+    expect(runner.calls.map((call) => call.slice(0, 2).join(" "))).toEqual(["cloudformation describe-stacks", "s3api get-bucket-versioning"]);
+    expect(runner.calls[0]).toContain(ACCESS);
+    expect(runner.calls.flat()).not.toContain(CONTROL_PLANE);
+    expect(runner.calls[1]).toContain(ACCESS_BUCKET);
+  });
+
+  it.each([["Suspended"], [""]])("refuses a bucket whose versioning is %j, naming it", (versioning) => {
+    expect(() => resolveArtifactBucket(fakeAws({ versioning }), "us-east-1", ENV)).toThrow(new RegExp(`${ACCESS_BUCKET}.*versioning.*Enabled`));
+  });
+});
+
+describe("resolveCodeArtifactBucket", () => {
+  it("returns the versioned access bucket when the deployed Code already uses it", () => {
+    const runner = fakeAws();
+    expect(resolveCodeArtifactBucket(runner, "us-east-1", ENV, "BrokerE1355FD6")).toBe(ACCESS_BUCKET);
+    expect(runner.calls.find((call) => call[1] === "get-template")).toEqual(expect.arrayContaining(["--stack-name", CONTROL_PLANE, "--template-stage", "Original"]));
+  });
+
+  it("refuses, naming both buckets, when the deployed Code uses another one", () => {
+    expect(() => resolveCodeArtifactBucket(fakeAws({ brokerBucket: CONTROL_BUCKET }), "us-east-1", ENV, "BrokerE1355FD6"))
+      .toThrow(new RegExp(`${ACCESS_BUCKET}.*${CONTROL_BUCKET}|${CONTROL_BUCKET}.*${ACCESS_BUCKET}`));
+  });
+
+  it("refuses when the deployed Code does not name a literal bucket", () => {
+    expect(() => resolveCodeArtifactBucket(fakeAws({ brokerBucket: { Ref: "Bucket" } }), "us-east-1", ENV, "BrokerE1355FD6")).toThrow(/S3Bucket/);
+  });
+
+  it("does not look at the deployed Code when the bucket is not versioned", () => {
+    const runner = fakeAws({ versioning: "Suspended" });
+    expect(() => resolveCodeArtifactBucket(runner, "us-east-1", ENV, "BrokerE1355FD6")).toThrow(/versioning/);
+    expect(runner.calls.some((call) => call[1] === "get-template")).toBe(false);
   });
 });
 
