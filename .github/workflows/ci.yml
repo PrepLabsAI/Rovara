@@ -13,7 +13,7 @@ concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# The checks, the test shards and the release check run side by side, each on its own machine. The
+# The checks, the test shards, the release check and the Linux runtime check run side by side, each on its own machine. The
 # job called `local` waits for all of them and is the one check a pull request needs (scripts/ci-gate.ts).
 jobs:
   # A pull request that changes only Markdown under specs/ or docs/, which no test reads, skips the
@@ -111,9 +111,41 @@ jobs:
           diff "$RUNNER_TEMP/release-a/release.json" "$RUNNER_TEMP/release-b/release.json"
           npm run release:verify -- "$RUNNER_TEMP/release-a"
 
+  # Real Chromium E2E checks need a Linux ARM64 Docker host, the platform Rovara's runtime targets. This job
+  # builds the pinned browser executor image, smoke-tests it with no network, then runs tests/linux against
+  # it. Docker's bridge networks on the runner can reach the cloud metadata service; the first step drops
+  # that traffic so the containment tests see what a locked-down host shows.
+  linux-runtime:
+    needs: scope
+    if: needs.scope.outputs.docs_only != 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - name: Drop traffic from containers to the metadata service
+        run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP
+      - name: Build the executor image
+        run: docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci .
+      - name: Smoke-test the executor image without a network
+        run: docker run --rm --network none rovara-e2e-executor:ci node /opt/agentx/packages/verifier/dist/executor/smoke.js
+      - run: npm ci
+      # The packages import each other through their built output.
+      - run: npm run build
+      - name: Linux runtime tests
+        env:
+          ROVARA_DOCKER: "1"
+          ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
+        run: npx vitest run tests/linux --passWithNoTests
+
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:
-    needs: [scope, checks, test, release]
+    needs: [scope, checks, test, release, linux-runtime]
     if: always() && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
