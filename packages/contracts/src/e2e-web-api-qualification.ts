@@ -4,7 +4,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { RuntimeInstallChallengeSchema, RuntimeInstallManifestSchema, runtimeInstallChallengeDigest, type RuntimeInstallChallenge } from "./runtime-installation.js";
 import { ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema } from "./session.js";
 
-/** How long a web/API challenge lives: eight probe runs, including two builds, take far longer than the five minutes a P0 challenge gets. */
+/** How long a web/API challenge lives: nine probe runs, including two builds, take far longer than the five minutes a P0 challenge gets. */
 export const WEB_API_CHALLENGE_LIFETIME_MS = 60 * 60_000;
 
 /** The web/API application runtime profile and the one scope its qualification proves. */
@@ -24,7 +24,9 @@ type RequiredProbe = Readonly<{ probeId: string; /** sha256 of the installed pro
   /** The digest of the whole scenario bundle the probe is admitted under (deterministic for the pinned app); null for the build probe. */
   bundleDigest: string | null;
   /** sha256 of the canonical build command the probe runs; null unless the probe is a build probe. A test recomputes it from the installed probe asset. */
-  buildCommandDigest: string | null }>;
+  buildCommandDigest: string | null;
+  /** True when the probe's retained evidence must carry the executor's Chromium sandbox attestation, and the registrar re-judges it. */
+  chromiumSandbox?: true }>;
 
 /** Where each probe's asset sits in the installed-runtime manifest, which therefore proves the installed bytes. */
 export const webApiProbeAssetManifestPath = (probeId: string) => `packages/verifier/assets/application-runtime-v1/probes/${probeId}.json`;
@@ -42,6 +44,9 @@ const requiredProbes: RequiredProbe[] = [
   { probeId: "build-lateral-denial-v1", assetDigest: "6dea07ac3b128be2226c988534c1c5fbb6715939dc77dbd8302156307c33a755", kind: "build", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "build-failed" }, bundleDigest: null, scenarioDigest: null, buildCommandDigest: "03b9465809bcef8d6bfeb409a89e68b618275e1ed3a19201018e9f9cd9e74c9e" },
   // The app starts behind a guard that connects to the host on the run's internal bridge and starts only when that times out, so it passes only on a firewalled runner.
   { probeId: "app-host-denial-v1", assetDigest: "4a7dffe2f7e1f24d934db7a8717929c577d6414ed8fb719e4d6dfa4de9597ce7", kind: "api", expectedOutcome: "PASS", cause: null, bundleDigest: "033b193aaa1ab0ed459770bf2a91141b33b5c247d6e23ec713630a0f95b74dc4", scenarioDigest: "fd333864038602a5788fbca3324f27f3e2d38cee12b4c8de3b5a0385fc4097dc", buildCommandDigest: null },
+  // The executor's own Chromium runs with its sandbox on: the retained evidence carries what the kernel showed about the renderers (a seccomp filter, a PID namespace and a user
+  // namespace of their own), and the executor refuses to run a case in a browser that does not show it, so a `--no-sandbox` runner fails this probe. It runs the CSV scenario.
+  { probeId: "chromium-sandbox-v1", assetDigest: "e27ceecc03c241669c31cd91dca1088a62d2e47cecadf9eca0b8e2abe44284de", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "7469c1ac56ae5f5453d41d8c66a6f5e5be07a921530268e0976f22165b8652d8", scenarioDigest: "a7cd24dfbb78f5760995b3d8ac1a977a422ccf7d5601cfbaaafd6e0f8201cf5e", buildCommandDigest: null, chromiumSandbox: true },
 ];
 export const WEB_API_REQUIRED_PROBES: readonly RequiredProbe[] = Object.freeze(requiredProbes.map((probe) => Object.freeze(probe)));
 export const WEB_API_REQUIRED_PROBE_IDS = WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId) as [string, ...string[]];
@@ -98,12 +103,14 @@ const runIdSchema = z.string().uuid();
 /**
  * The retained bytes one probe's observation is derived from, embedded in the proposal like P0 embeds its report bytes. The registrar re-derives the
  * observation from this and nothing else. `collected` is a run the real collector read: the scenario bundle that ran, the collector's wire
- * collection (every raw report and proof byte, base64) and its oracle, and, for web probes, the executor's blocked-requests file. `unavailable`
+ * collection (every raw report and proof byte, base64) and its oracle, and, for web probes, the executor's blocked-requests file (and, for the sandbox probe, its Chromium sandbox attestation). `unavailable`
  * is a run that produced nothing to collect, with the host's structured build result when the build is what stopped it.
  */
 export const WebApiProbeEvidenceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("collected"), runId: runIdSchema, scenarioBundle: jsonObject, collection: jsonObject, oracle: jsonObject,
-    blockedRequestsBase64: z.string().max(262_144).regex(/^[A-Za-z0-9+/]*={0,2}$/).nullable() }).strict(),
+    blockedRequestsBase64: z.string().max(262_144).regex(/^[A-Za-z0-9+/]*={0,2}$/).nullable(),
+    /** The executor's `chromium-sandbox.json`, for the probe that pins it (`chromiumSandbox`); absent for every other probe. */
+    chromiumSandboxBase64: z.string().max(65_536).regex(/^[A-Za-z0-9+/]*={0,2}$/).nullable().optional() }).strict(),
   z.object({ kind: z.literal("unavailable"), runId: runIdSchema, reason: z.string().min(1).max(200),
     // Command 0 is the source copy, which has no recipe command; every recipe command (1 and up) is named.
     build: z.object({ commandIndex: z.number().int().min(0).max(64), exitCode: z.number().int().min(0).max(255).nullable(), command: jsonObject.nullable() }).strict()

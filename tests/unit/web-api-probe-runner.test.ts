@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, canonicalJson, webApiProbeRunId } from "../../packages/contracts/src/index.js";
-import { MAX_BLOCKED_REQUESTS_BYTES, createWebApiProbeRunner, readBlockedRequests } from "../../packages/verifier/src/host/web-api-probe-runner.js";
+import { MAX_BLOCKED_REQUESTS_BYTES, createWebApiProbeRunner, readBlockedRequests, readChromiumSandboxAttestation } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { webApiBuildProbeCommand } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 import { loadWebApiQualificationProbeAssets } from "../../packages/verifier/src/application-runtime-probes.js";
 import { installedWebApiQualificationAppRoot } from "../../packages/verifier/src/host/web-api-qualification-app.js";
@@ -156,5 +156,16 @@ describe("the blocked-requests file the runner keeps", () => {
     await write(MAX_BLOCKED_REQUESTS_BYTES + 1);
     expect(await readBlockedRequests(dir)).toBeNull();
     expect(await readBlockedRequests(join(dir, "absent"))).toBeNull();
+  });
+
+  it("reads the executor's Chromium sandbox attestation only when it fits the evidence schema's base64 bound", async () => {
+    const dir = await temp();
+    const write = (size: number) => writeFile(join(dir, "chromium-sandbox.json"), Buffer.alloc(size, 97));
+    await write(49_152);
+    expect((await readChromiumSandboxAttestation(dir))?.byteLength).toBe(49_152);
+    expect(Math.ceil(49_152 / 3) * 4).toBeLessThanOrEqual(65_536);
+    await write(49_153);
+    expect(await readChromiumSandboxAttestation(dir)).toBeNull();
+    expect(await readChromiumSandboxAttestation(join(dir, "absent"))).toBeNull();
   });
 });

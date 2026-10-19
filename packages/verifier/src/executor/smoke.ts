@@ -2,15 +2,21 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright-core";
+import { evaluateChromiumSandbox } from "@agentx/contracts";
+import { inspectChromiumSandbox } from "./chromium-sandbox.js";
 import { launchLocalChromium } from "./local-browser.js";
 
-// Proves the image's Chromium starts as the unprivileged user without any network: load a data URL, read it back, exit.
+// Proves the image's Chromium starts as the unprivileged user without any network, with its own sandbox on (the container must run under the pinned
+// seccomp profile): the renderers must show their own seccomp filter and namespaces, then load a data URL, read it back, exit.
 const downloads = await mkdtemp(join(tmpdir(), "rovara-smoke-"));
 const controller = new AbortController();
 const timer = setTimeout(() => controller.abort(new Error("chromium smoke check timed out")), 60_000);
 let browser: Awaited<ReturnType<typeof launchLocalChromium>> | null = null;
 try {
   browser = await launchLocalChromium({ downloadDir: downloads, signal: controller.signal });
+  const verdict = evaluateChromiumSandbox(await inspectChromiumSandbox({ cdpEndpoint: browser.cdpEndpoint, browserPid: browser.pid, runId: "00000000-0000-4000-8000-000000000000",
+    groupId: "smoke", signal: controller.signal }));
+  if (!verdict.sandboxed) throw new Error(`chromium is not sandboxed: ${verdict.reason}`);
   const connected = await chromium.connectOverCDP(browser.cdpEndpoint);
   const context = await connected.newContext();
   const page = await context.newPage();
@@ -18,7 +24,7 @@ try {
   const text = await page.getByTestId("ok").textContent();
   await connected.close();
   if (text !== "ok") throw new Error(`unexpected page text: ${String(text)}`);
-  process.stdout.write("chromium ok\n");
+  process.stdout.write("chromium ok (sandboxed)\n");
   process.exitCode = 0;
 } catch (error) {
   process.stderr.write(`chromium smoke failed: ${error instanceof Error ? error.message : String(error)}\n`);

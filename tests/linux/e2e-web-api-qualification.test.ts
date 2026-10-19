@@ -26,7 +26,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     // Only the worker identity and the installed-manifest read are replaced: this CI host is not the EC2 worker and has no installed root.
     // The manifest still hashes the probe assets and the qualification app in this checkout, so a changed file fails against its pinned digest.
     const fake = fakeLinuxEnvironment(now);
-    // A web/API challenge lives an hour, which six container runs fit inside.
+    // A web/API challenge lives an hour, which nine container runs fit inside.
     const challenge = webApiChallenge(now);
     const { runRoot, evidenceRoot } = await linuxProbeScratch();
     const outputRoot = (await linuxProbeScratch()).evidenceRoot;
@@ -56,6 +56,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(byId.get("build-lateral-denial-v1")).toMatchObject({ runUnavailableReason: "build-failed", buildExitCode: 7 });
     // The app of this probe only starts, so the run only passes, when its connection to the host timed out.
     expect(byId.get("app-host-denial-v1")).toMatchObject({ collectorStatus: "PASS", runUnavailableReason: null });
+    // Chromium ran with its own sandbox on: the retained attestation (re-judged by the registrar below) shows every renderer behind its own filter and namespaces.
+    expect(byId.get("chromium-sandbox-v1")).toMatchObject({ collectorStatus: "PASS", runUnavailableReason: null });
 
     // The registrar re-derives every observation from the embedded bytes and registers both rows.
     const registry = createFakeRuntimeRegistry(Date.now());

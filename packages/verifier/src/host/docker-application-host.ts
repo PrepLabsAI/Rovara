@@ -8,6 +8,7 @@ import type { E2EActualApplicationRun } from "../application-collection.js";
 import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
 import { validateE2EApplicationExecutionAdmission } from "../application-scenarios.js";
 import { createCredentialRedactor } from "../executor/redact.js";
+import { verifyExecutorSeccompProfile } from "./executor-seccomp.js";
 import { assembleDockerCollectionInputs, assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput, validateExecutorResult,
   type DockerCollectionInputs, type ExecutorOutputSnapshot, type ExecutorResultFile } from "./executor-readback.js";
 
@@ -84,6 +85,11 @@ export type DockerApplicationHostDeps = Readonly<{
   buildImage: string;
   /** A directory on the Docker host at the same path inside the worker container; each run gets `<runRoot>/<runId>`. */
   runRoot: string;
+  /**
+   * The seccomp profile file the executor container runs under (the Docker CLI reads it here, in the worker container, and sends its content to the
+   * daemon). Default: the installed `executor-seccomp.json`. The host refuses to be built over any file whose digest is not the one pinned in contracts.
+   */
+  executorSeccompProfile?: string;
   now(): number;
   /** The admission the round was started from, and the one runnable application group this host owns. */
   admission: E2EApplicationExecutionAdmission;
@@ -199,6 +205,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   });
   const portEnv = contract.service?.portEnv ?? "APP_PORT";
 
+  const seccompProfile = verifyExecutorSeccompProfile(deps.executorSeccompProfile);
   const { docker } = deps;
   const label = `${ROVARA_RUN_LABEL}=${runId}`;
   const { internal: network, build: buildNetwork, internalBridge, buildBridge } = e2eRunNetworks(runId);
@@ -349,6 +356,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     let appGone = false;
     const watching = new AbortController();
     const executorRun = docker.run(["run", "--name", executorName, "--pull=never", ...hardening(["--network", network]), "--init", "--read-only", "--shm-size", "1g",
+      // Only the executor leaves Docker's default profile, and only for the namespace syscalls Chromium's own sandbox needs; no capability is added.
+      "--security-opt", `seccomp=${seccompProfile}`,
       "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=512m", ...limits("2g", "1024", "2"), "-v", `${dirs.plan}:/run/rovara/plan.json:ro`, "-v", `${dirs.out}:/out`, ...BLANKED_ENV,
       deps.executorImage], { signal: executorSignal, timeoutMs: remaining });
     const watch = (async () => {

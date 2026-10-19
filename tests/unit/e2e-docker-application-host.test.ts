@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { E2EExecutorPlanSchema } from "@agentx/contracts";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
 import { createDockerApplicationHost, createProcessDockerCli, e2eRunNetworks, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
+import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
 import { createOrdersExecutorPlan, type OrdersExecutorFixture } from "../support/e2e-orders-executor-fixture.js";
 import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.js";
 
@@ -73,6 +74,28 @@ describe("docker application host", () => {
     expect(fake.mountsFor("app").some((mount) => mount.endsWith(":/app:ro"))).toBe(true);
     expect(fake.mountsFor("app").some((mount) => mount.endsWith(":/app/.owned:ro"))).toBe(true);
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  });
+
+  it("runs the executor, and only the executor, under the pinned seccomp profile, with no capability added and nothing unconfined", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep }); fake.onExecutor = okOutput(s);
+    await runWith(s);
+    const securityOptions = (args: string[]) => args.filter((value, index) => args[index - 1] === "--security-opt");
+    expect(securityOptions(fake.argsFor("executor"))).toEqual(["no-new-privileges", `seccomp=${installedExecutorSeccompProfilePath()}`]);
+    expect(fake.argsFor("executor")).toContain("--cap-drop=ALL");
+    // No other container of the run (app, source copy, build commands, cleanup) leaves Docker's default profile.
+    const others = fake.calls.filter((args) => args[0] === "run" && !args[args.indexOf("--name") + 1]?.startsWith("rovara-executor-"));
+    expect(others.length).toBeGreaterThan(2);
+    for (const args of others) expect(args.join(" ")).not.toMatch(/seccomp/);
+    for (const args of fake.calls) expect(args.join(" ")).not.toMatch(/--privileged|--cap-add|seccomp=unconfined|apparmor=unconfined|--userns|--pid=host|--ipc=host/);
+  });
+
+  it("refuses to be built over a seccomp profile whose digest differs from the pin", async () => {
+    const fake = new FakeDockerCli(); const dir = await temp("seccomp-");
+    const profile = join(dir, "profile.json"); await writeFile(profile, "{}");
+    const fixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1" });
+    expect(() => createDockerApplicationHost({ docker: fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot: dir, now: () => Date.now(),
+      admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir: dir, executorSeccompProfile: profile })).toThrow(/executor-seccomp-profile-digest-mismatch/);
+    expect(fake.calls).toEqual([]);
   });
 
   it("gives the build container the source read-only, no credentials and registry egress only, and runs each command with its own timeout", async () => {

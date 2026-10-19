@@ -136,10 +136,19 @@ jobs:
           sudo bash "$RUNNER_TEMP/container-firewall.sh"
           sudo iptables -S DOCKER-USER
           sudo iptables -S INPUT
+      # Chromium's own sandbox needs unprivileged user namespaces. Ubuntu 24.04 blocks them for AppArmor-confined processes such as Docker containers
+      # (kernel.apparmor_restrict_unprivileged_userns=1); this only turns that CI-runner restriction off. Production runners are Amazon Linux 2023,
+      # which has no such restriction (its kernel only needs user.max_user_namespaces > 0, the default, and the chromium-sandbox-v1 probe fails if not).
+      - name: Allow unprivileged user namespaces for Chromium's sandbox
+        run: |
+          # CI runner only: production runners (Amazon Linux 2023) have no AppArmor userns restriction.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "no AppArmor userns restriction on this kernel"
+          sysctl user.max_user_namespaces
       - name: Build the executor image
         run: docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci .
+      # The executor as the host runs it: Chromium's sandbox on, the pinned seccomp profile, no capability, read-only, no network. The smoke check fails unless the renderer is sandboxed.
       - name: Smoke-test the executor image without a network
-        run: docker run --rm --network none rovara-e2e-executor:ci node /opt/agentx/packages/verifier/dist/executor/smoke.js
+        run: docker run --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges --security-opt seccomp=packages/verifier/assets/executor-seccomp.json --read-only --tmpfs /tmp:rw,exec,nosuid,nodev,size=512m --shm-size 1g rovara-e2e-executor:ci node /opt/agentx/packages/verifier/dist/executor/smoke.js
       - run: npm ci
       # The packages import each other through their built output.
       - run: npm run build

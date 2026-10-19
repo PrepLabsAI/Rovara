@@ -4,7 +4,7 @@ import { appendFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, r
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { E2E_EXECUTOR_COMPILED_ORIGIN, E2EExecutorPlanSchema, copyBoundedE2EJsonData, canonicalJson, type E2EExecutorPlan } from "@agentx/contracts";
+import { E2E_CHROMIUM_SANDBOX_FILE, E2E_EXECUTOR_COMPILED_ORIGIN, E2EExecutorPlanSchema, copyBoundedE2EJsonData, canonicalJson, evaluateChromiumSandbox, type ChromiumSandboxAttestation, type E2EExecutorPlan } from "@agentx/contracts";
 import { compareE2EApplicationPublicList } from "../application-identity.js";
 import { normalizeE2EApplicationPublicList } from "../application-result-adapter.js";
 import { parseE2EApplicationReport } from "../application-report-schema.js";
@@ -13,6 +13,7 @@ import type { E2EApplicationCliLaunchContext } from "../application-runtime-boot
 import { E2E_EXECUTOR_BLOCKED_LOG, E2E_EXECUTOR_CONTEXT_ENV, E2E_EXECUTOR_OUTPUT_DIR, type ExecutorHostContext } from "./host.js";
 import { verifyExecutorHostRegistration } from "./host-registry.js";
 import { startAppForwarder, type AppForwarder } from "./app-forward.js";
+import { inspectChromiumSandbox, type InspectChromiumSandboxInput } from "./chromium-sandbox.js";
 import { launchLocalChromium, type LocalChromium } from "./local-browser.js";
 import { createCredentialRedactor, type CredentialRedactor } from "./redact.js";
 import { createLaunchContexts, resolveE2EExecutorSuite, type ResolvedExecutorSuite } from "./suite.js";
@@ -30,6 +31,8 @@ export type E2EExecutorRunInput = Readonly<{
   localAppUpstream?: string;
   /** Test seam for a Chromium binary other than the pinned Playwright one. */
   chromiumExecutable?: string;
+  /** Test seam for what is read about Chromium's renderer processes; the default reads `/proc`, so a host without it (macOS) cannot run a browser case. */
+  inspectChromiumSandbox?: (input: InspectChromiumSandboxInput) => ReturnType<typeof inspectChromiumSandbox>;
 }>;
 
 type ProcessResult = { status: number | null; signal: NodeJS.Signals | null; stdout: Buffer; stderr: Buffer; startedAt: string; finishedAt: string;
@@ -284,6 +287,22 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
       browser = await launchLocalChromium({ downloadDir: join(outDir, "downloads"), signal: input.signal,
         ...(input.chromiumExecutable === undefined ? {} : { executablePath: input.chromiumExecutable }) });
       await log("chromium is listening on loopback");
+      // Chromium's own sandbox is the second wall after the container: a hostile page has to escape it before it reaches this process and its result files.
+      // Chromium without `--no-sandbox` refuses to start when the sandbox cannot engage; this looks at the renderers it did start and refuses a run
+      // whose renderers do not show it, or whose sandbox cannot be read at all.
+      let attestation: ChromiumSandboxAttestation;
+      try {
+        attestation = await (input.inspectChromiumSandbox ?? inspectChromiumSandbox)({ cdpEndpoint: browser.cdpEndpoint, browserPid: browser.pid,
+          runId: resolved.binding.runId, groupId: resolved.suite.group.groupId, signal: input.signal });
+      } catch (error) {
+        await log(`unavailable: chromium-sandbox-unverifiable: ${error instanceof Error ? error.message : "unreadable"}`);
+        reason = "chromium-sandbox-unverifiable";
+        return;
+      }
+      await writeFile(join(outDir, E2E_CHROMIUM_SANDBOX_FILE), `${JSON.stringify(attestation, null, 2)}\n`);
+      const sandbox = evaluateChromiumSandbox(attestation);
+      if (!sandbox.sandboxed) { await log(`unavailable: chromium-unsandboxed: ${sandbox.reason}`); reason = "chromium-unsandboxed"; return; }
+      await log(`chromium sandbox verified: ${attestation.renderers.length} renderer(s) behind their own seccomp filter, PID and user namespaces`);
     }
     const target = new URL(upstream);
     const compiled = new URL(E2E_EXECUTOR_COMPILED_ORIGIN);

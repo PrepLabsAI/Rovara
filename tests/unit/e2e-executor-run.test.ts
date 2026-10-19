@@ -9,6 +9,8 @@ import { spawn } from "node:child_process";
 import { startAppForwarder } from "../../packages/verifier/src/executor/app-forward.js";
 import { listOutputFiles, runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
+import { fakeChromium } from "../support/fake-chromium.js";
+import { createServer } from "node:http";
 
 type Registry = { hosts: { profileId: string; entryPointId: string; entryPointManifestDigest: string; modulePath: string }[] };
 const repoRoot = join(import.meta.dirname, "../..");
@@ -126,4 +128,62 @@ describe("executor failure handling", () => {
     expect(code).toBe(2);
     expect(stderr).toContain("executor crashed");
   }, 60_000);
+});
+
+describe.runIf(built)("executor Chromium sandbox gate", () => {
+  const signal = new AbortController().signal;
+  const processFacts = { nsPidDepth: 1, seccompFilters: 1, uidMap: "0 0 4294967295" };
+  /** What the kernel would show: an ordinary child process of the browser (a --no-sandbox renderer), or one behind its own filter and namespaces. */
+  const attestationFor = (kind: "plain" | "sandboxed") => async (request: { runId: string; groupId: string; cdpEndpoint?: string }) => ({ schemaVersion: "e2e-executor-chromium-sandbox/v1" as const,
+    runId: request.runId, groupId: request.groupId, browser: { pid: 40, ...processFacts },
+    renderers: [kind === "plain" ? { pid: 41, ...processFacts } : { pid: 41, nsPidDepth: 2, seccompFilters: 2, uidMap: "0 1000 1" }] });
+
+  async function runWebExecutor(inspectChromiumSandbox: (request: { runId: string; groupId: string; cdpEndpoint?: string }) => Promise<unknown>) {
+    const fixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", healthTimeoutMs: 5_000 });
+    const dir = await temp(); const out = join(dir, "out");
+    await writeFile(join(dir, "plan.json"), JSON.stringify(fixture.plan));
+    const app = createServer((_request, response) => { response.writeHead(200, { "content-type": "application/json" }); response.end("{}"); });
+    await new Promise<void>((resolve) => app.listen(0, "127.0.0.1", resolve));
+    const chromium = await fakeChromium("listen"); dirs.push(chromium.directory);
+    try {
+      const result = await runE2EExecutor({ planPath: join(dir, "plan.json"), outDir: out, signal, localAppUpstream: `http://127.0.0.1:${(app.address() as { port: number }).port}`,
+        chromiumExecutable: chromium.executable, inspectChromiumSandbox: inspectChromiumSandbox as never });
+      return { fixture, out, result, launches: await chromium.launches() };
+    } finally { await new Promise<void>((resolve) => app.close(() => resolve())); }
+  }
+
+  it("exits 2 with chromium-unsandboxed when a renderer shows no sandbox, before any case runs, and keeps the facts it saw", async () => {
+    const seen: { runId: string; groupId: string; cdpEndpoint?: string }[] = [];
+    const { fixture, out, result, launches } = await runWebExecutor(async (request) => { seen.push(request); return attestationFor("plain")(request); });
+    expect(result).toEqual({ exitCode: 2, reason: "chromium-unsandboxed" });
+    expect(launches).toHaveLength(1);
+    expect(launches[0]!.filter((arg) => /sandbox/i.test(arg))).toEqual([]);
+    expect(seen.map((request) => [request.runId, request.groupId, request.cdpEndpoint])).toEqual([[fixture.plan.runId, fixture.plan.groupId, "ws://127.0.0.1:9222/devtools/browser/abc"]]);
+    expect(JSON.parse(await readFile(join(out, "chromium-sandbox.json"), "utf8"))).toMatchObject({ schemaVersion: "e2e-executor-chromium-sandbox/v1", runId: fixture.plan.runId, groupId: fixture.plan.groupId });
+    expect(await readFile(join(out, "executor.log"), "utf8")).toContain("chromium-unsandboxed: renderer-has-no-extra-seccomp-filter");
+    expect(JSON.parse(await readFile(join(out, "executor-result.json"), "utf8"))).toMatchObject({ exitCode: 2, reason: "chromium-unsandboxed", shards: [] });
+  });
+
+  it("exits 2 with chromium-sandbox-unverifiable when the kernel cannot show it (no procfs, an old kernel), never assuming a sandbox", async () => {
+    const { out, result } = await runWebExecutor(async () => { throw new Error("cannot read /proc/40/status"); });
+    expect(result).toEqual({ exitCode: 2, reason: "chromium-sandbox-unverifiable" });
+    expect(await readFile(join(out, "executor.log"), "utf8")).toContain("cannot read /proc/40/status");
+  });
+
+  it("goes on to run the cases when every renderer is sandboxed, and records the attestation next to the run", async () => {
+    const { fixture, out, result } = await runWebExecutor(attestationFor("sandboxed"));
+    // The stand-in browser cannot run a case, so the run ends for another reason; what matters is that the gate let it past.
+    expect(result.reason).not.toMatch(/^chromium-/);
+    expect(JSON.parse(await readFile(join(out, "chromium-sandbox.json"), "utf8"))).toMatchObject({ runId: fixture.plan.runId, renderers: [{ nsPidDepth: 2, seccompFilters: 2 }] });
+  });
+
+  it("does not look for a sandbox in an API-only run, which launches no browser", async () => {
+    const fixture = createOrdersExecutorPlan({ probe: "api-state-positive-v1", healthTimeoutMs: 1_000 });
+    const dir = await temp(); const out = join(dir, "out");
+    await writeFile(join(dir, "plan.json"), JSON.stringify(fixture.plan));
+    let inspected = false;
+    await runE2EExecutor({ planPath: join(dir, "plan.json"), outDir: out, signal, localAppUpstream: "http://127.0.0.1:9", inspectChromiumSandbox: async () => { inspected = true; throw new Error("unexpected"); } });
+    expect(inspected).toBe(false);
+    expect(existsSync(join(out, "chromium-sandbox.json"))).toBe(false);
+  });
 });

@@ -1,6 +1,6 @@
 import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { WEB_API_REQUIRED_PROBES, canonicalJson, webApiProbeRunId, type RuntimeInstallChallenge, type WebApiProbeEvidence, type WebApiProbeRun } from "@agentx/contracts";
+import { E2E_CHROMIUM_SANDBOX_FILE, WEB_API_REQUIRED_PROBES, canonicalJson, webApiProbeRunId, type RuntimeInstallChallenge, type WebApiProbeEvidence, type WebApiProbeRun } from "@agentx/contracts";
 import { collectE2EApplicationRun } from "../application-collection.js";
 import { loadWebApiQualificationProbeAssets } from "../application-runtime-probes.js";
 import { runIsolatedE2EApplication } from "../application-runtime.js";
@@ -14,6 +14,8 @@ import { installedWebApiQualificationAppRoot, stageWebApiQualificationApp, verif
 export const WEB_API_BUILD_IMAGE = "public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5";
 /** The most raw bytes of a blocked-requests file kept: 196,608 bytes is exactly the 262,144 base64 characters the evidence schema allows. */
 export const MAX_BLOCKED_REQUESTS_BYTES = 196_608;
+/** The most raw bytes of a Chromium sandbox attestation kept: 49,152 bytes is exactly the 65,536 base64 characters the evidence schema allows. */
+const MAX_CHROMIUM_SANDBOX_BYTES = 49_152;
 const CLEANUP_TIMEOUT_MS = 30_000;
 const DEFECT_FILE_IN_OWNED_MOUNT = "/app/.owned/defect.json";
 
@@ -70,11 +72,16 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
         recipeStart: { env: { ...(driver.defect ? { ORDERS_TEST_DEFECT_FILE: DEFECT_FILE_IN_OWNED_MOUNT } : {}), ...driver.appEnv }, ...(driver.startArgs ? { args: [...driver.startArgs] } : {}) },
         ...(driver.recipeBuild ? { recipeBuild: driver.recipeBuild.map((command) => ({ ...command, args: [...command.args], env: { ...command.env } })) } : {}) });
       let blockedRequests: Uint8Array | null = null;
+      let chromiumSandbox: Uint8Array | null = null;
+      const retainsSandbox = WEB_API_REQUIRED_PROBES.find((probe) => probe.probeId === probeId)?.chromiumSandbox === true;
       const host = createDockerApplicationHost({ docker: deps.docker, executorImage: deps.executorImage, buildImage: deps.buildImage, runRoot: deps.runRoot, now,
         admission: plan.plan.admission, groupId: plan.plan.groupId, candidateSourceDir: staged,
         ...(driver.defect ? { ownedFiles: { "defect.json": await readFile(join(staged, "defects", driver.defect)) } } : {}),
         // The executor's blocked-requests file leaves the run only here, before the run's directory is removed.
-        async onRunOutput(run) { blockedRequests = await readBlockedRequests(run.outDir); } });
+        async onRunOutput(run) {
+          blockedRequests = await readBlockedRequests(run.outDir);
+          if (retainsSandbox) chromiumSandbox = await readChromiumSandboxAttestation(run.outDir);
+        } });
       const signal = AbortSignal.timeout(deps.probeTimeoutMs ?? 280_000);
       const run = await runIsolatedE2EApplication({ input: webApiProbeRunInput(plan) as never, compiled: plan.compiled, ports: host, signal });
 
@@ -92,7 +99,8 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
         evidence = collected.collection === null || collected.oracle === null ? unavailable(collected.unavailableReason ?? "collector-unavailable")
           : { kind: "collected", runId, scenarioBundle: JSON.parse(JSON.stringify(plan.compiled.bundle)) as Record<string, unknown>,
             collection: JSON.parse(JSON.stringify(collected.collection)) as Record<string, unknown>, oracle: JSON.parse(JSON.stringify(collected.oracle)) as Record<string, unknown>,
-            blockedRequestsBase64: driver.probe.startsWith("web-") && blockedRequests !== null ? Buffer.from(blockedRequests).toString("base64") : null };
+            blockedRequestsBase64: driver.probe.startsWith("web-") && blockedRequests !== null ? Buffer.from(blockedRequests).toString("base64") : null,
+            ...(retainsSandbox ? { chromiumSandboxBase64: chromiumSandbox === null ? null : Buffer.from(chromiumSandbox).toString("base64") } : {}) };
       }
       const derived = deriveWebApiProbeObservation({ challenge: deps.challenge, probeId, evidence });
       if (!derived.ok) throw new Error(derived.reason);
@@ -102,6 +110,11 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
       await rm(staged, { recursive: true, force: true });
     }
   };
+}
+
+/** The executor's Chromium sandbox attestation, or null when it is missing or too large for the evidence schema's base64 bound. */
+export async function readChromiumSandboxAttestation(outDir: string): Promise<Uint8Array | null> {
+  return readFile(join(outDir, E2E_CHROMIUM_SANDBOX_FILE)).then((bytes) => (bytes.byteLength <= MAX_CHROMIUM_SANDBOX_BYTES ? bytes : null), () => null);
 }
 
 /** The executor's blocked-requests file, or null when it is missing or too large for the evidence schema's base64 bound. */

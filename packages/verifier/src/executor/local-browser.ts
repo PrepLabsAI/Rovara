@@ -20,9 +20,11 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
 /**
  * Starts the pinned Playwright Chromium inside the executor container and hands back its DevTools endpoint.
  *
- * `--no-sandbox` is deliberate: the container (internal network, every capability dropped, no-new-privileges, non-root)
- * is the sandbox boundary, and Chromium's own user-namespace sandbox cannot start inside it. The debugging port is bound
- * to loopback, so only processes inside this container can attach.
+ * Chromium's own sandbox stays on: its renderers run behind a seccomp filter in their own user and PID namespaces, so a hostile page has
+ * to escape that before it reaches this process and the run's result files. It needs the executor container's pinned seccomp profile (it
+ * lets an unprivileged process create namespaces; no capability is added) and a kernel that allows unprivileged user namespaces. When the
+ * sandbox cannot start Chromium exits and this launch fails: there is deliberately no flag and no retry that falls back to an unsandboxed
+ * browser. The debugging port is bound to loopback, so only processes inside this container can attach.
  */
 export async function launchLocalChromium(input: { downloadDir: string; signal: AbortSignal;
   /** Test seam for a Chromium binary other than the pinned Playwright one. */
@@ -36,7 +38,7 @@ export async function launchLocalChromium(input: { downloadDir: string; signal: 
   // fetches its own copy through DevTools.
   await writeFile(join(profile, "Default", "Preferences"), JSON.stringify({ download: { default_directory: input.downloadDir,
     prompt_for_download: false, directory_upgrade: true } }));
-  const args = ["--headless=new", "--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
+  const args = ["--headless=new", "--disable-gpu", "--disable-dev-shm-usage", "--no-first-run", "--no-default-browser-check",
     "--disable-background-networking", "--disable-component-update", "--disable-sync", "--disable-extensions", "--metrics-recording-only",
     "--mute-audio", "--password-store=basic", "--use-mock-keychain", `--user-data-dir=${profile}`,
     "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",

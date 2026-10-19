@@ -7,10 +7,13 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import { listChromiumProcesses } from "../../packages/verifier/src/executor/chromium-sandbox.js";
+import { launchLocalChromium } from "../../packages/verifier/src/executor/local-browser.js";
 import { assembleDockerCollectionInputs, assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput } from "../../packages/verifier/src/host/executor-readback.js";
 import { resolveE2EExecutorSuite } from "../../packages/verifier/src/executor/suite.js";
 import { collectHostRun, proveActualRun } from "../support/e2e-actual-run-proof.js";
 import { readShardReport, blockedHosts, caseStatuses, csvRows, failedAssertionKinds, readReport, resultOf } from "../support/e2e-executor-output.js";
+import { standInChromiumSandbox } from "../support/local-executor-docker.js";
 import { ORDERS_FIXTURE_ROOT, createOrdersExecutorPlan, type OrdersProbeName } from "../support/e2e-orders-executor-fixture.js";
 
 // A real Chromium and the real fixture app on loopback, with the app origin mapped to it. It needs the built verifier
@@ -47,7 +50,9 @@ async function runProbe(probe: OrdersProbeName, options: { defect?: string; appE
   let stderr = ""; server.stderr?.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
   await writeFile(join(dir, "plan.json"), JSON.stringify(fixture.plan));
   const outDir = join(dir, "out");
-  const result = await runE2EExecutor({ planPath: join(dir, "plan.json"), outDir, signal: AbortSignal.timeout(240_000), localAppUpstream: `http://127.0.0.1:${port}` });
+  const result = await runE2EExecutor({ planPath: join(dir, "plan.json"), outDir, signal: AbortSignal.timeout(240_000), localAppUpstream: `http://127.0.0.1:${port}`,
+    // macOS has no /proc to read a sandbox from; on Linux the executor reads the real kernel's facts.
+    ...(standInChromiumSandbox ? { inspectChromiumSandbox: standInChromiumSandbox } : {}) });
   server.kill("SIGTERM");
   // On a failure the assertion message carries everything the run left to explain it.
   const files = await readdir(outDir, { withFileTypes: true, recursive: true });
@@ -206,6 +211,19 @@ describe.runIf(enabled)("a failure that is not an assertion is never FAILED (loc
     expect(steps.some((step) => step.status === "failed")).toBe(true);
     expect(steps.some((step) => step.status === "failed" && step.kind === "assertion")).toBe(false);
   }, 300_000);
+});
+
+describe.runIf(enabled)("Chromium's process list over its real DevTools endpoint (local)", () => {
+  it("names the browser and at least one renderer, which is what the sandbox inspection reads /proc for", async () => {
+    const downloads = join(await mkdtemp(join(tmpdir(), "chromium-list-")), "downloads"); dirs.push(downloads);
+    const browser = await launchLocalChromium({ downloadDir: downloads, signal: AbortSignal.timeout(60_000) });
+    try {
+      const listing = await listChromiumProcesses(browser.cdpEndpoint, AbortSignal.timeout(60_000));
+      expect(listing.browserPid).toBe(browser.pid);
+      expect(listing.rendererPids.length).toBeGreaterThan(0);
+      expect(listing.rendererPids).not.toContain(browser.pid);
+    } finally { await browser.close(); }
+  }, 120_000);
 });
 
 describe.skipIf(enabled)("executor against a real Chromium (local)", () => {

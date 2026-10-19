@@ -3,6 +3,7 @@ import { cp } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import type { InspectChromiumSandboxInput } from "../../packages/verifier/src/executor/chromium-sandbox.js";
 import { FakeDockerCli } from "./fake-docker-cli.js";
 
 async function freePort(): Promise<number> {
@@ -12,6 +13,16 @@ async function freePort(): Promise<number> {
     server.listen(0, "127.0.0.1", () => { const { port } = server.address() as { port: number }; server.close(() => resolve(port)); });
   });
 }
+
+/**
+ * Where the executor would read Chromium's renderers from `/proc`, this machine (macOS) has no such thing, and its own Chromium sandbox is a different one.
+ * The double answers with the facts a sandboxed Linux renderer shows, so a probe run here records an attestation of the right shape. It is never evidence that
+ * a sandbox is on: the real attestation is read in the Linux CI job (`tests/linux`), on a real kernel, and a Linux host here reads its own `/proc`.
+ */
+export const standInChromiumSandbox: ((input: InspectChromiumSandboxInput) => Promise<never>) | undefined = process.platform === "linux" ? undefined
+  : async (input) => ({ schemaVersion: "e2e-executor-chromium-sandbox/v1", runId: input.runId, groupId: input.groupId,
+    browser: { pid: input.browserPid, nsPidDepth: 1, seccompFilters: 1, uidMap: "0 0 4294967295" },
+    renderers: [{ pid: input.browserPid + 1, nsPidDepth: 2, seccompFilters: 2, uidMap: "0 1000 1" }] } as never);
 
 /**
  * A Docker double whose "executor container" is the real executor running on this machine: it starts the staged candidate app as a local
@@ -55,7 +66,8 @@ export class LocalExecutorDocker extends FakeDockerCli {
       this.appOutput += `spawn ${command.join(" ")} in ${workDir} on ${port} with ${Object.keys(env).join(",")}\n`;
       this.children.push(server);
       try {
-        const result = await runE2EExecutor({ planPath: join(workspace, "plan.json"), outDir, signal: AbortSignal.timeout(240_000), localAppUpstream: `http://127.0.0.1:${port}` });
+        const result = await runE2EExecutor({ planPath: join(workspace, "plan.json"), outDir, signal: AbortSignal.timeout(240_000), localAppUpstream: `http://127.0.0.1:${port}`,
+          ...(standInChromiumSandbox ? { inspectChromiumSandbox: standInChromiumSandbox } : {}) });
         this.exitCodeOfExecutor(result.exitCode);
       } finally { server.kill("SIGKILL"); }
     };

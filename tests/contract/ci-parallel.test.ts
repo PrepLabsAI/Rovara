@@ -44,8 +44,21 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(firewall).not.toContain("iptables -I");
     expect(run.indexOf("<<'FIREWALL'")).toBeGreaterThanOrEqual(0);
     expect(run.indexOf("<<'FIREWALL'")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci ."));
-    expect(run).toContain("docker run --rm --network none rovara-e2e-executor:ci node /opt/agentx/packages/verifier/dist/executor/smoke.js");
+    // The smoke check runs the executor the way the host does: Chromium's own sandbox on, under the pinned seccomp profile, no capability, no network.
+    const smoke = run.split("\n").find((line) => line.includes("executor/smoke.js"))!;
+    for (const flag of ["--network none", "--cap-drop=ALL", "--security-opt no-new-privileges", "--security-opt seccomp=packages/verifier/assets/executor-seccomp.json", "--read-only"]) expect(smoke).toContain(flag);
+    expect(smoke).toContain("rovara-e2e-executor:ci node /opt/agentx/packages/verifier/dist/executor/smoke.js");
+    expect(run).not.toMatch(/seccomp=unconfined|--privileged|--cap-add|--no-sandbox/);
     expect(run).toContain("npx vitest run tests/linux");
+  });
+
+  it("lets the Ubuntu runner create unprivileged user namespaces for Chromium's sandbox before it builds or runs a container, and says production does not need that", async () => {
+    const job = (await workflow()).jobs["linux-runtime"] as Job;
+    const step = job.steps.find((candidate) => (candidate.run ?? "").includes("apparmor_restrict_unprivileged_userns"))!;
+    expect(step.run).toContain("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0");
+    expect(step.run).toContain("Amazon Linux 2023");
+    const run = job.steps.map((candidate) => candidate.run ?? "").join("\n");
+    expect(run.indexOf("apparmor_restrict_unprivileged_userns")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile"));
   });
 
   it("gives every job but the manual live-AWS one a time limit, so a hung runner fails in minutes and not after six hours", async () => {

@@ -278,6 +278,8 @@ export function webApiProbeDriver(probeId: string): WebApiProbeDriver {
     case "api-egress-denial-v1": return { probe: "api-egress-denial-v1", defect: null, appEnv: { INVENTORY_ORIGIN: `https://${WEB_API_EGRESS_PROBE_HOST}` }, recipeBuild: null, startArgs: null };
     case "build-imds-denial-v1": return { probe: "web-csv-positive-v1", defect: null, appEnv: {}, recipeBuild: [webApiBuildProbeCommand("build-imds-denial-v1")], startArgs: null };
     case "build-lateral-denial-v1": return { probe: "web-csv-positive-v1", defect: null, appEnv: {}, recipeBuild: [webApiBuildProbeCommand("build-lateral-denial-v1")], startArgs: null };
+    // The CSV scenario again: what makes this probe is that its run must also carry the executor's Chromium sandbox attestation (the pin's `chromiumSandbox`).
+    case "chromium-sandbox-v1": return { probe: "web-csv-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null };
     case "app-host-denial-v1": return { probe: "api-state-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: webApiAppStartGuardArgs() };
     default: throw new Error(`no probe plan for ${probeId}`);
   }

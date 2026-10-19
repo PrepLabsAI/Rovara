@@ -16,6 +16,8 @@ const probeOracle = z.discriminatedUnion("kind", [
     candidateUiIsNotEvidence: z.literal(true).optional(), candidateResponseIsNotEvidence: z.literal(true).optional(),
     /** The command the app is started with for this probe (`app-host-denial-v1`), so the asset digest pins it. */
     appStart: z.object({ program: z.literal("node"), args: z.array(z.string().min(1).max(1_024)).min(1).max(8) }).strict().optional() }).strict(),
+  z.object({ kind: z.literal("chromium-sandbox"), requiresRendererSeccompFilter: z.literal(true), requiresRendererPidNamespace: z.literal(true),
+    requiresRendererUserNamespace: z.literal(true) }).strict(),
   z.object({ kind: z.literal("json-state"), path: z.string().startsWith("/"), expected: z.object({ version: z.number().int().positive(), tenantId: z.string().min(1), orderIds: z.array(z.string().min(1)).min(1).max(10) }).strict() }).strict(),
   z.object({ kind: z.literal("build-command-failure"), build: z.object({ program: z.literal("node"), args: z.array(z.string().min(1).max(512)).min(1).max(8),
     cwd: z.literal("."), timeoutMs: z.number().int().min(1_000).max(120_000), env: z.object({}).strict() }).strict(),
@@ -28,7 +30,7 @@ const probeSchema = z.object({ schemaVersion: z.literal("e2e-application-runtime
   requiredCapabilities: z.array(z.string().min(1).max(120)).min(1).max(16), oracle: probeOracle }).strict().superRefine((value, context) => {
     const webTypes = ["csv", "csv-defect"].includes(value.oracle.kind) || value.oracle.kind === "viewer-refusal" && value.oracle.viewerIdentity !== undefined;
     const expectedOracle = value.kind === "build" ? value.oracle.kind === "build-command-failure" && value.polarity === "negative"
-      : value.oracle.kind === "build-command-failure" ? false : value.kind === "web" ? webTypes || value.oracle.kind === "protected-network-denial"
+      : value.oracle.kind === "build-command-failure" ? false : value.kind === "web" ? webTypes || value.oracle.kind === "protected-network-denial" || value.oracle.kind === "chromium-sandbox"
       : ["json-state", "tenant-refusal"].includes(value.oracle.kind) || value.oracle.kind === "viewer-refusal" && value.oracle.path !== undefined
         || value.oracle.kind === "protected-network-denial";
     if (!expectedOracle) context.addIssue({ code: "custom", path: ["oracle"], message: "runtime probe oracle kind is incompatible with its platform profile" });

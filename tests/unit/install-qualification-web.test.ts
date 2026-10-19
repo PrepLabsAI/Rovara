@@ -20,16 +20,16 @@ async function qualify(overrides: Parameters<typeof fakeProbeRunner>[0] = {}, ex
 const rejection = (promise: Promise<unknown>) => promise.then(() => { throw new Error("qualification unexpectedly succeeded"); }, (error: unknown) => error as Error);
 
 describe("web/API runtime qualification", () => {
-  it("runs the eight required probes in order and qualifies a runtime whose outcomes are all as expected", async () => {
+  it("runs the nine required probes in order and qualifies a runtime whose outcomes are all as expected", async () => {
     const { result, runner } = await qualify();
-    expect(runner.calls).toEqual(["web-csv-positive-v1", "web-csv-negative-v1", "web-egress-denial-v1", "api-state-positive-v1", "api-egress-denial-v1", "build-imds-denial-v1", "build-lateral-denial-v1", "app-host-denial-v1"]);
+    expect(runner.calls).toEqual(["web-csv-positive-v1", "web-csv-negative-v1", "web-egress-denial-v1", "api-state-positive-v1", "api-egress-denial-v1", "build-imds-denial-v1", "build-lateral-denial-v1", "app-host-denial-v1", "chromium-sandbox-v1"]);
     expect(result.state).toBe("READY");
     expect(result.profileId).toBe("linux-arm64-web-api-v1");
     expect(result.scope).toBe("application-web-api/v1");
     expect(result.probes.map((probe) => [probe.probeId, probe.observedOutcome])).toEqual([
       ["web-csv-positive-v1", "PASS"], ["web-csv-negative-v1", "EXPECTED_FAILURE"], ["web-egress-denial-v1", "EXPECTED_FAILURE"],
       ["api-state-positive-v1", "PASS"], ["api-egress-denial-v1", "EXPECTED_FAILURE"], ["build-imds-denial-v1", "EXPECTED_FAILURE"],
-      ["build-lateral-denial-v1", "EXPECTED_FAILURE"], ["app-host-denial-v1", "PASS"]]);
+      ["build-lateral-denial-v1", "EXPECTED_FAILURE"], ["app-host-denial-v1", "PASS"], ["chromium-sandbox-v1", "PASS"]]);
     expect(WebApiRuntimeInstallProposalSchema.parse(JSON.parse(canonicalJson(result)))).toEqual(result);
   });
 
@@ -79,7 +79,7 @@ describe("web/API runtime qualification", () => {
     expect(error.message).toContain(`probe-wrong-cause:${probeId}`);
   });
 
-  it.each(["web-csv-positive-v1", "api-state-positive-v1", "app-host-denial-v1"])("rejects a positive probe the collector did not pass: %s", async (probeId) => {
+  it.each(["web-csv-positive-v1", "api-state-positive-v1", "app-host-denial-v1", "chromium-sandbox-v1"])("rejects a positive probe the collector did not pass: %s", async (probeId) => {
     for (const observation of [{ collectorStatus: "FAILED" as const, failedAssertionKinds: ["csv"] }, { collectorStatus: "UNKNOWN" as const },
       { collectorStatus: null, runUnavailableReason: "build-failed" }]) {
       expect((await rejection(qualify({ [probeId]: observation }))).message).toContain(`positive-probe-failed:${probeId}`);
@@ -252,7 +252,7 @@ describe("web/API probe assets", () => {
     expect(script).toContain("s.on('timeout',()=>{s.destroy();import('./server.mjs').then(m=>m.startOrdersServer())}");
   });
 
-  it("loads only the eight M1.1 probes, not the later auth and tenant probes", () => {
+  it("loads only the nine M1.1 probes, not the later auth and tenant probes", () => {
     expect(loadWebApiQualificationProbeAssets().map((asset) => asset.probeId)).toEqual(WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId));
   });
 });

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { E2EScenarioBundleSchema, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, canonicalJson, webApiProbeRunId,
+import { ChromiumSandboxAttestationSchema, E2EScenarioBundleSchema, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, canonicalJson, evaluateChromiumSandbox, webApiProbeRunId,
   type RuntimeInstallChallenge, type WebApiProbeEvidence, type WebApiProbeObservation } from "@agentx/contracts";
 import { parseE2EApplicationReport } from "./application-report-schema.js";
 import { E2EApplicationCollectionOracleSchema, E2EApplicationCollectionSchema, qualifyE2EApplicationCollection } from "./application-result-adapter.js";
@@ -22,6 +22,18 @@ function blockedHostsOf(base64: string | null, expected: { runId: string; groupI
     const hosts = (value.blocked as { host?: unknown }[]).map((item) => item.host);
     return hosts.every((host): host is string => typeof host === "string" && host.length > 0 && host.length <= 253) ? [...new Set(hosts)] : null;
   } catch { return null; }
+}
+
+/**
+ * The executor's Chromium sandbox attestation, accepted only when it names this run and group and its raw facts, judged by the same pure evaluator the
+ * executor used, show every renderer behind its own seccomp filter, PID namespace and user namespace. Null means the bytes cannot stand as that evidence.
+ */
+function sandboxedAttestation(base64: string | null | undefined, expected: { runId: string; groupId: string }): boolean {
+  if (base64 === null || base64 === undefined) return false;
+  try {
+    const parsed = ChromiumSandboxAttestationSchema.safeParse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.from(base64, "base64"))));
+    return parsed.success && parsed.data.runId === expected.runId && parsed.data.groupId === expected.groupId && evaluateChromiumSandbox(parsed.data).sandboxed;
+  } catch { return false; }
 }
 
 /**
@@ -61,6 +73,10 @@ export function deriveWebApiProbeObservation(input: Readonly<{ challenge: Runtim
   if (bundle.data.scenarios.length !== 1 || !scenario || sha(canonicalJson(scenario)) !== required.scenarioDigest
     || bundle.data.bundleDigest !== required.bundleDigest || oracle.data.binding.bundleDigest !== bundle.data.bundleDigest) return mismatch(required.probeId);
   if (oracle.data.binding.runId !== evidence.runId) return { ok: false, reason: `probe-evidence-unbound:${required.probeId}` };
+
+  // The sandbox attestation belongs to exactly the probe that pins it: required there, and never carried by another probe's evidence.
+  if (required.chromiumSandbox === true ? !sandboxedAttestation(evidence.chromiumSandboxBase64, { runId: evidence.runId, groupId: oracle.data.groupId })
+    : evidence.chromiumSandboxBase64 !== undefined) return mismatch(required.probeId);
 
   const qualification = qualifyE2EApplicationCollection(oracle.data, collection.data);
   const hosts = blockedHostsOf(evidence.blockedRequestsBase64, { runId: evidence.runId, groupId: oracle.data.groupId,
