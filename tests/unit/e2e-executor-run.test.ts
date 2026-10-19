@@ -12,7 +12,7 @@ type Registry = { hosts: { profileId: string; entryPointId: string; entryPointMa
 const repoRoot = join(import.meta.dirname, "../..");
 const verifierRoot = join(repoRoot, "packages/verifier");
 const registry = JSON.parse(await readFile(join(verifierRoot, "assets/application-runtime-v1/cli-hosts.json"), "utf8")) as Registry;
-const cliHost = { profileId: E2E_EXECUTOR_HOST_PROFILE_ID, descriptor: { entryPointId: E2E_EXECUTOR_HOST_ENTRY_POINT_ID,
+const cliHost: { profileId: string; descriptor: { entryPointId: string; entryPointManifestDigest: string } } = { profileId: E2E_EXECUTOR_HOST_PROFILE_ID, descriptor: { entryPointId: E2E_EXECUTOR_HOST_ENTRY_POINT_ID,
   entryPointManifestDigest: registry.hosts[0]!.entryPointManifestDigest } };
 const dirs: string[] = [];
 async function temp() { const dir = realpathSync(await mkdtemp(join(tmpdir(), "executor-run-test-"))); dirs.push(dir); return dir; }

@@ -4,7 +4,7 @@ import { appendFile, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, r
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { E2EExecutorPlanSchema, copyBoundedE2EJsonData, canonicalJson, type E2EExecutorPlan } from "@agentx/contracts";
+import { E2E_EXECUTOR_COMPILED_ORIGIN, E2EExecutorPlanSchema, copyBoundedE2EJsonData, canonicalJson, type E2EExecutorPlan } from "@agentx/contracts";
 import { compareE2EApplicationPublicList } from "../application-identity.js";
 import { normalizeE2EApplicationPublicList } from "../application-result-adapter.js";
 import { parseE2EApplicationReport } from "../application-report-schema.js";
@@ -12,6 +12,7 @@ import { createE2EApplicationRuntimeAssets } from "../application-runtime-assets
 import type { E2EApplicationCliLaunchContext } from "../application-runtime-bootstrap.js";
 import { E2E_EXECUTOR_BLOCKED_LOG, E2E_EXECUTOR_CONTEXT_ENV, E2E_EXECUTOR_OUTPUT_DIR, type ExecutorHostContext } from "./host.js";
 import { verifyExecutorHostRegistration } from "./host-registry.js";
+import { startAppForwarder, type AppForwarder } from "./app-forward.js";
 import { launchLocalChromium, type LocalChromium } from "./local-browser.js";
 import { createCredentialRedactor, type CredentialRedactor } from "./redact.js";
 import { createLaunchContexts, resolveE2EExecutorSuite, type ResolvedExecutorSuite } from "./suite.js";
@@ -25,10 +26,7 @@ const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).d
 export type E2EExecutorExitCode = 0 | 1 | 2;
 export type E2EExecutorRunInput = Readonly<{
   planPath: string; outDir: string; signal: AbortSignal;
-  /**
-   * Test seam, never part of a plan: where the plan's app origin really answers (a fixture app on loopback). Chromium maps
-   * `app:4317` there and the executor's own requests go there; the compiled suite and the ledger still see `http://app:4317`.
-   */
+  /** Test seam, never part of a plan: where `http://app:4317` really answers (a fixture app on loopback). */
   localAppUpstream?: string;
   /** Test seam for a Chromium binary other than the pinned Playwright one. */
   chromiumExecutable?: string;
@@ -109,7 +107,7 @@ type ShardOutcome = { shardId: string; launchId: string; targetKind: string; lis
  * registered executor host, which drives the case adapters against the live application.
  */
 async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApplicationCliLaunchContext; workDir: string; planPath: string; outDir: string;
-  browser: LocalChromium | null; appUpstream: string | null; redactor: CredentialRedactor; signal: AbortSignal; log: (line: string) => Promise<void> }): Promise<ShardOutcome> {
+  browser: LocalChromium | null; redactor: CredentialRedactor; signal: AbortSignal; log: (line: string) => Promise<void> }): Promise<ShardOutcome> {
   const { resolved, launch } = input;
   const shard = resolved.suite.shards.find((candidate) => candidate.shardId === launch.shardId)!;
   const shardKey = sha(launch.shardId).slice(0, 16);
@@ -127,7 +125,7 @@ async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApp
   const home = join(project, ".home"); const tmp = join(project, ".tmp");
   await mkdir(home, { mode: 0o700 }); await mkdir(tmp, { mode: 0o700 });
   const context: ExecutorHostContext = { schemaVersion: "e2e-executor-host-context/v1", planPath: input.planPath, outDir: input.outDir, projectDir: project,
-    cdpEndpoint: input.browser?.cdpEndpoint ?? null, browserPid: input.browser?.pid ?? null, appUpstream: input.appUpstream };
+    cdpEndpoint: input.browser?.cdpEndpoint ?? null, browserPid: input.browser?.pid ?? null };
   const contextPath = join(input.workDir, `host-context-${shardKey}.json`);
   await writeExclusive(contextPath, `${JSON.stringify(context)}\n`);
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: home, TMPDIR: tmp, TMP: tmp, TEMP: tmp, CI: "1",
@@ -198,6 +196,7 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
   const logPath = join(outDir, "executor.log");
   const log = async (line: string) => { await appendFile(logPath, `${new Date().toISOString()} ${redactor.text(line)}\n`); };
   let browser: LocalChromium | null = null;
+  let forwarder: AppForwarder | null = null;
   let workDir: string | null = null;
   let resolved: ResolvedExecutorSuite | null = null;
   const shards: ShardOutcome[] = [];
@@ -206,6 +205,7 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
 
   const finish = async (): Promise<void> => {
     await browser?.close().catch(() => undefined);
+    await forwarder?.close().catch(() => undefined);
     if (workDir) await rm(workDir, { recursive: true, force: true }).catch(() => undefined);
     let blocked: unknown[] = [];
     try {
@@ -254,15 +254,23 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
 
     const launches = createLaunchContexts(resolved);
     if (launches.some((launch) => launch.selectedTarget.kind === "web")) {
-      const mapped = input.localAppUpstream === undefined ? undefined : `MAP app:4317 ${new URL(input.localAppUpstream).host}`;
       browser = await launchLocalChromium({ downloadDir: join(outDir, "downloads"), signal: input.signal,
-        ...(mapped === undefined ? {} : { hostResolverRules: mapped }), ...(input.chromiumExecutable === undefined ? {} : { executablePath: input.chromiumExecutable }) });
+        ...(input.chromiumExecutable === undefined ? {} : { executablePath: input.chromiumExecutable }) });
       await log("chromium is listening on loopback");
+    }
+    const target = new URL(upstream);
+    const compiled = new URL(E2E_EXECUTOR_COMPILED_ORIGIN);
+    try {
+      forwarder = await startAppForwarder({ listen: { host: compiled.hostname, port: Number(compiled.port) },
+        upstream: { host: target.hostname, port: Number(target.port || 80) } });
+    } catch (error) {
+      await log(`unavailable: forwarder-unavailable: ${error instanceof Error ? error.message : "cannot listen"}`);
+      reason = "forwarder-unavailable";
+      return;
     }
     workDir = await mkdtemp(join(await realpath(tmpdir()), "rovara-executor-"));
     for (const launch of launches) {
-      shards.push(await runShard({ resolved, launch, workDir, planPath: input.planPath, outDir, browser,
-        appUpstream: input.localAppUpstream ?? null, redactor, signal: input.signal, log }));
+      shards.push(await runShard({ resolved, launch, workDir, planPath: input.planPath, outDir, browser, redactor, signal: input.signal, log }));
     }
     const incomplete = shards.find((shard) => !shard.completed);
     if (incomplete) { reason = incomplete.reason ?? "shard-incomplete"; await log(`unavailable: ${reason}`); return; }

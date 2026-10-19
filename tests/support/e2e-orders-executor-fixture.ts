@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { E2EApplicationExecutionAdmissionSchema, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
+import { E2E_EXECUTOR_APP_ORIGIN, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
   E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, createCandidateManifest, e2eApplicationMetadataSourceRefs,
   e2eAppBuildManifestDigest, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2ERepository, proposeE2ESetup,
   selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EPolicy, type E2ESourceSnapshot } from "@agentx/contracts";
@@ -14,7 +14,8 @@ import { gitBlob, gitTreeSha, hash } from "./e2e-application-fixture.js";
 const repoRoot = join(import.meta.dirname, "../..");
 const fixtureRoot = join(repoRoot, "tests/fixtures/e2e-web-api-app");
 export const ORDERS_FIXTURE_ROOT = fixtureRoot;
-export const ORDERS_APP_ORIGIN = "http://app:4317" as const;
+/** The loopback origin compiled suites name; the plan itself reaches the app at http://app:4317. */
+export const ORDERS_APP_ORIGIN = E2E_EXECUTOR_COMPILED_ORIGIN;
 
 /** The scenarios a probe runs. Each is an ordinary source-style scenario that the real compiler turns into a CLI suite. */
 export type OrdersProbeName = "web-csv-positive-v1" | "web-egress-denial-v1" | "api-state-positive-v1";
@@ -191,7 +192,7 @@ export function createOrdersExecutorPlan(options: { probe: OrdersProbeName; dead
   const email = `rovara-${randomUUID()}@example.invalid`;
   const role = options.role ?? "owner";
   const plan = E2EExecutorPlanSchema.parse({ schemaVersion: "e2e-executor-plan/v1", runId: binding.runId, groupId: group.groupId, admission,
-    admissionDigest: admission.admissionDigest, app: { origin: ORDERS_APP_ORIGIN, health: { path: "/health", expectedStatus: 200, timeoutMs: options.healthTimeoutMs ?? 30_000 } },
+    admissionDigest: admission.admissionDigest, app: { origin: E2E_EXECUTOR_APP_ORIGIN, health: { path: "/health", expectedStatus: 200, timeoutMs: options.healthTimeoutMs ?? 30_000 } },
     deadlineAt: Date.parse(binding.deadlineAt), accounts: [{ profileId: accountProfileId, email, password }] });
   return { plan, compiled, caseId: compiled.expectedCases[0]!.caseId, probe: options.probe,
     seed: { accounts: [{ email, passwordDigest: createHash("sha256").update(password, "utf8").digest("hex"), subjectId: `subject-${randomUUID()}`,

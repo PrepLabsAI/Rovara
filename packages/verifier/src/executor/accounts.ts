@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { E2ERuntimeAccountRefSchema, readE2EApplicationProjectContract, type E2EExecutorPlan, type E2ERuntimeAccountRef } from "@agentx/contracts";
+import { E2E_EXECUTOR_COMPILED_ORIGIN, E2ERuntimeAccountRefSchema, readE2EApplicationProjectContract, type E2EExecutorPlan, type E2ERuntimeAccountRef } from "@agentx/contracts";
 import type { E2EApplicationOwnedSubject } from "../application-result-adapter.js";
 import type { E2EApiRuntimeResponse } from "../api-runtime.js";
 import type { ExecutorSessionFacts } from "./case-ledger.js";
@@ -65,13 +65,12 @@ export type ExecutorSessionStore = ReturnType<typeof createExecutorSessionStore>
  * seeded credentials to `/api/login`, keep the `orders_session` cookie in memory, and send it on API requests or add it to
  * the owned browser context. The cookie value and the credentials never leave this object.
  */
-export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetchImpl?: typeof fetch;
-  /** Test seam: where requests for the plan's app origin really go (a local fixture app). Never read from a plan. */
-  appUpstream?: string | null }) {
+export function createExecutorSessionStore(input: { plan: E2EExecutorPlan; fetchImpl?: typeof fetch }) {
   const resolved = resolveE2EExecutorSuite(input.plan);
   const fetchImpl = input.fetchImpl ?? fetch;
-  const origin = input.plan.app.origin;
-  const upstream = input.appUpstream ?? origin;
+  // Requests go to the compiled loopback origin, where the executor's forwarder serves the candidate.
+  const origin: string = E2E_EXECUTOR_COMPILED_ORIGIN;
+  const upstream = origin;
   const sessions = new Map<string, Session>();
   const sourceSnapshot = resolved.suite.runtimeAdmissionContext.selectionInput.sourceSnapshot;
 

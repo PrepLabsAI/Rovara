@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { E2ETargetSchema, e2eBindingDigest, type E2EExecutorPlan, type E2ERound, type E2ERunBinding, type E2ERuntimeAccountRef,
+import { E2E_EXECUTOR_COMPILED_ORIGIN, E2ETargetSchema, e2eBindingDigest, type E2EExecutorPlan, type E2ERound, type E2ERunBinding, type E2ERuntimeAccountRef,
   type E2ETarget } from "@agentx/contracts";
 import type { E2EApplicationCliLaunchContext } from "../application-runtime-bootstrap.js";
 import type { E2EApplicationCliCasePlan } from "../application-services.js";
@@ -32,8 +32,8 @@ export function resolveE2EExecutorSuite(plan: E2EExecutorPlan): ResolvedExecutor
   const binding = validated.admission.round.groupBindings.find((candidate) => candidate.groupId === plan.groupId && candidate.runId === plan.runId);
   if (!suite || !binding) throw new Error("executor plan group is not a runnable application group of its admission");
   const origins = suite.originByApplicationId;
-  if (origins.length === 0 || origins.some((item) => item.origin !== plan.app.origin)) {
-    throw new Error("compiled application origin differs from the only origin an executor run may reach");
+  if (origins.length === 0 || origins.some((item) => item.origin !== E2E_EXECUTOR_COMPILED_ORIGIN)) {
+    throw new Error("compiled application origin differs from the loopback origin the executor serves");
   }
   const resolved: ResolvedExecutorSuite = Object.freeze({ plan, suite, round: validated.admission.round, binding,
     bindingDigest: e2eBindingDigest(binding),

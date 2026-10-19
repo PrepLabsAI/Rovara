@@ -25,8 +25,8 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
  * to loopback, so only processes inside this container can attach.
  */
 export async function launchLocalChromium(input: { downloadDir: string; signal: AbortSignal;
-  /** Test seam for a Chromium host-resolver rule, e.g. `MAP app:4317 127.0.0.1:5000`; production never sets it. */
-  hostResolverRules?: string; executablePath?: string }): Promise<LocalChromium> {
+  /** Test seam for a Chromium binary other than the pinned Playwright one. */
+  executablePath?: string }): Promise<LocalChromium> {
   const executable = input.executablePath ?? chromium.executablePath();
   try { await access(executable); } catch { throw new Error(`chromium executable is not installed at ${executable}`); }
   await mkdir(input.downloadDir, { recursive: true, mode: 0o755 });
@@ -40,7 +40,7 @@ export async function launchLocalChromium(input: { downloadDir: string; signal: 
     "--disable-background-networking", "--disable-component-update", "--disable-sync", "--disable-extensions", "--metrics-recording-only",
     "--mute-audio", "--password-store=basic", "--use-mock-keychain", `--user-data-dir=${profile}`,
     "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
-    ...(input.hostResolverRules === undefined ? [] : [`--host-resolver-rules=${input.hostResolverRules}`]), "about:blank"];
+    "about:blank"];
   // Chromium sees only what it needs: the host's own environment may hold credentials that no page may ever read.
   const env: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: profile, TMPDIR: tmpdir(), LANG: "C.UTF-8" };
   const child: ChildProcess = spawn(executable, args, { env, stdio: ["ignore", "ignore", "pipe"], shell: false });

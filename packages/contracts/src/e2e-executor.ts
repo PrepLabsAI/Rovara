@@ -3,8 +3,14 @@ import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import { E2EApplicationExecutionAdmissionSchema } from "./e2e-application-execution.js";
 
-/** The only application origin an executor run may reach: the candidate app's alias on the per-run internal network. */
+/** The only application an executor run may reach: the candidate app's alias on the per-run internal network. */
 export const E2E_EXECUTOR_APP_ORIGIN = "http://app:4317" as const;
+/**
+ * The origin every compiled suite names. The pinned runner accepts plain HTTP only for loopback hosts, so the executor
+ * serves the candidate on this loopback address through a forwarder to `E2E_EXECUTOR_APP_ORIGIN`; the browser, the HTTP
+ * client and the assertions all see this one origin.
+ */
+export const E2E_EXECUTOR_COMPILED_ORIGIN = "http://127.0.0.1:4317" as const;
 /** Upper bound for the application health wait, so a hung candidate cannot hold the runner for the whole round. */
 export const E2E_EXECUTOR_HEALTH_TIMEOUT_MAX_MS = 120_000;
 export const E2E_EXECUTOR_MAX_ACCOUNTS = 16;

@@ -3,7 +3,7 @@ import { lstat, open, readdir, realpath } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join, sep } from "node:path";
 import { z } from "zod";
-import { E2EExecutorPlanSchema, canonicalJson } from "@agentx/contracts";
+import { E2E_EXECUTOR_COMPILED_ORIGIN, E2EExecutorPlanSchema, canonicalJson } from "@agentx/contracts";
 import type { BrowserContext } from "playwright-core";
 import { createAPIApplicationCliHost, type E2EApiRuntimePorts } from "../api-runtime.js";
 import { createWebApplicationCliHost, type E2EWebRuntimePorts } from "../web-runtime.js";
@@ -28,7 +28,6 @@ export const ExecutorHostContextSchema = z.object({
   projectDir: z.string().min(1).max(4096),
   cdpEndpoint: z.string().min(1).max(1024).nullable(),
   browserPid: z.number().int().nonnegative().nullable(),
-  appUpstream: z.string().url().max(512).nullable(),
 }).strict();
 export type ExecutorHostContext = z.infer<typeof ExecutorHostContextSchema>;
 
@@ -113,7 +112,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
   if (planBytes.byteLength > MAX_PLAN_BYTES) throw new Error("executor plan exceeds its fixed bound");
   const plan = E2EExecutorPlanSchema.parse(JSON.parse(planBytes.toString("utf8")));
   const resolved = resolveE2EExecutorSuite(plan);
-  const store = createExecutorSessionStore({ plan, appUpstream: context.appUpstream });
+  const store = createExecutorSessionStore({ plan });
   const ledger = createFileCaseLedger(context.outDir, plan, { observations: { sessionFacts: store.sessionFacts,
     upstreamRunId: (launch) => readUpstreamRunId(context.projectDir, launch.launchId) } });
   const { launchContext, declaration } = input;
@@ -155,7 +154,7 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         const request = route.request();
         let url: URL;
         try { url = new URL(request.url()); } catch { await route.abort("blockedbyclient"); return; }
-        if (url.origin === plan.app.origin || url.protocol === "data:" || url.protocol === "blob:" || url.protocol === "about:") {
+        if (url.origin === E2E_EXECUTOR_COMPILED_ORIGIN || url.protocol === "data:" || url.protocol === "blob:" || url.protocol === "about:") {
           await route.continue();
           return;
         }
@@ -193,7 +192,16 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         } finally { await session.detach().catch(() => undefined); }
       },
     });
-    return createWebApplicationCliHost({ launchContext, declaration, ports });
+    const inner = createWebApplicationCliHost({ launchContext, declaration, ports });
+    return Object.freeze({ ...inner,
+      async runCase(caseId: string, fixtures: unknown): Promise<void> {
+        // The engine opens a fresh context per attempt with no page, and the case adapter needs a live page before it can
+        // bind the session. Opening the one non-network page (about:blank) gives it one without touching the application.
+        const browser = (fixtures as { browser?: { goto?: (url: string) => Promise<unknown> } } | null)?.browser;
+        if (!browser || typeof browser.goto !== "function") throw new Error("installed web engine did not provide its browser fixture");
+        await browser.goto("about:blank");
+        await inner.runCase(caseId, fixtures);
+      } });
   }
 
   if (launchContext.selectedTarget.kind === "api") {

@@ -41,9 +41,10 @@ const failure = z.object({ url: z.string().url().max(8192).optional(), viewport:
   nodes: count.optional(), screen: text.optional(), screenshot: text.optional(), candidates: z.array(text).max(128).optional() }).strict();
 const skip = z.object({ cause: z.enum(["explicit", "filtered", "platform-unavailable", "capability-unavailable", "setup-failed", "serial-predecessor-failed", "hook-failed", "infrastructure-unavailable", "failure-limit"]),
   reason: text, relatedId: text.optional() }).strict();
+// The pinned runner omits `appLog` when the attempt logged nothing, so an absent log is a quiet run, not a malformed report.
 const attempt = E2EReportSchema.shape.run.shape.results.element.shape.attempts.element.extend({
   environment: z.record(z.string().max(256), z.string().max(2048)).optional(), artifacts: z.array(artifact).max(200), steps: z.array(step).max(256),
-  appLog: z.array(z.object({ source: z.enum(["console", "error", "network", "system"]), level: z.enum(["debug", "info", "warn", "error"]), text, at: text, step: count.optional() }).strict()).max(1000),
+  appLog: z.array(z.object({ source: z.enum(["console", "error", "network", "system"]), level: z.enum(["debug", "info", "warn", "error"]), text, at: text, step: count.optional() }).strict()).max(1000).optional(),
   failure: failure.optional(), skip: skip.optional(),
 });
 const result = E2EReportSchema.shape.run.shape.results.element.extend({ attempts: z.array(attempt).max(3), skip: skip.optional() });
