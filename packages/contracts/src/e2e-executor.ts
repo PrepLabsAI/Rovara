@@ -1,0 +1,58 @@
+import { createHash } from "node:crypto";
+import { z } from "zod";
+import { canonicalJson } from "./canonical-json.js";
+import { E2EApplicationExecutionAdmissionSchema } from "./e2e-application-execution.js";
+
+/** The only application origin an executor run may reach: the candidate app's alias on the per-run internal network. */
+export const E2E_EXECUTOR_APP_ORIGIN = "http://app:4317" as const;
+/** Upper bound for the application health wait, so a hung candidate cannot hold the runner for the whole round. */
+export const E2E_EXECUTOR_HEALTH_TIMEOUT_MAX_MS = 120_000;
+export const E2E_EXECUTOR_MAX_ACCOUNTS = 16;
+
+/** One synthetic account the host seeded into the candidate. The password exists only in the read-only plan mount. */
+export const E2EExecutorAccountSchema = z.object({
+  profileId: z.string().min(1).max(120),
+  email: z.string().min(3).max(256).regex(/^[^\s@]+@[^\s@]+$/),
+  password: z.string().min(16).max(256),
+}).strict();
+export type E2EExecutorAccount = z.infer<typeof E2EExecutorAccountSchema>;
+
+/** The admission is signed by its own digest over every other field; a plan that disagrees is refused. */
+export function e2eExecutorAdmissionDigest(admission: z.infer<typeof E2EApplicationExecutionAdmissionSchema>): string {
+  const { admissionDigest: _digest, ...body } = admission;
+  void _digest;
+  return createHash("sha256").update(canonicalJson(body)).digest("hex");
+}
+
+/**
+ * What the host mounts read-only into the executor container. The executor decodes the admission, recompiles the
+ * group with the same compiler the broker used, and runs exactly that suite against the candidate at `app.origin`.
+ */
+export const E2EExecutorPlanSchema = z.object({
+  schemaVersion: z.literal("e2e-executor-plan/v1"),
+  runId: z.string().uuid(),
+  groupId: z.string().min(1).max(80),
+  admission: E2EApplicationExecutionAdmissionSchema,
+  admissionDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  app: z.object({
+    origin: z.literal(E2E_EXECUTOR_APP_ORIGIN),
+    health: z.object({
+      path: z.string().min(1).max(512).startsWith("/"),
+      expectedStatus: z.number().int().min(100).max(599),
+      timeoutMs: z.number().int().positive().max(E2E_EXECUTOR_HEALTH_TIMEOUT_MAX_MS),
+    }).strict(),
+  }).strict(),
+  deadlineAt: z.number().int().positive(),
+  accounts: z.array(E2EExecutorAccountSchema).max(E2E_EXECUTOR_MAX_ACCOUNTS),
+}).strict().superRefine((plan, context) => {
+  if (plan.admission.admissionDigest !== plan.admissionDigest || e2eExecutorAdmissionDigest(plan.admission) !== plan.admissionDigest) {
+    context.addIssue({ code: "custom", path: ["admissionDigest"], message: "executor plan admission digest does not bind its admission" });
+  }
+  if (!plan.admission.groups.some((group) => group.outerBinding.groupId === plan.groupId && group.outerBinding.runId === plan.runId)) {
+    context.addIssue({ code: "custom", path: ["groupId"], message: "executor plan group and run are not in its admission" });
+  }
+  if (new Set(plan.accounts.map((account) => account.profileId)).size !== plan.accounts.length) {
+    context.addIssue({ code: "custom", path: ["accounts"], message: "executor plan accounts must have unique profiles" });
+  }
+});
+export type E2EExecutorPlan = z.infer<typeof E2EExecutorPlanSchema>;

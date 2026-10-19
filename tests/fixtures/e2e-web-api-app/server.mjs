@@ -30,6 +30,24 @@ function validDefect(value) {
   return value;
 }
 
+// Optional third-party references for egress tests. They are plain https URLs from the environment, injected as a
+// stylesheet link and as the target of the page's outbound probe; neither is set in normal use.
+function externalUrl(name) {
+  const value = process.env[name];
+  if (!value) return null;
+  const parsed = new URL(value);
+  if (parsed.protocol !== "https:") throw new Error(`${name} must be an https URL`);
+  return parsed.href;
+}
+function withOptionalExternals(html) {
+  const font = externalUrl("FIXTURE_EXTERNAL_FONT");
+  const probe = externalUrl("FIXTURE_EGRESS_PROBE_URL");
+  let result = html;
+  if (font) result = result.replace("</head>", `<link rel="stylesheet" href="${font}"></head>`);
+  if (probe) result = result.replace("</head>", `<meta name="egress-probe" content="${probe}"></head>`);
+  return result;
+}
+
 export function createOrdersApplication({ seed, orders, defect: rawDefect = null, fetchDependency = async () => ({ status: 200, body: { healthy: true } }) }) {
   if (!seed || !Array.isArray(seed.accounts) || seed.accounts.length < 1 || seed.accounts.length > 32
     || !Array.isArray(orders?.orders) || !orders.state) throw new Error("orders application requires the owned seed and fixture records");
@@ -55,7 +73,11 @@ export function createOrdersApplication({ seed, orders, defect: rawDefect = null
     if (!rawUrl.startsWith("/") || rawUrl.startsWith("//")) return json(400, { error: "relative path required" });
     const url = new URL(rawUrl, "http://owned.invalid");
     if (url.origin !== "http://owned.invalid" || url.search || url.hash) return json(400, { error: "canonical path required" });
-    if (method === "GET" && staticFiles.has(url.pathname)) return { status: 200, headers: { "content-type": url.pathname.endsWith(".js") ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" }, body: readFileSync(join(root, staticFiles.get(url.pathname)), "utf8") };
+    if (method === "GET" && staticFiles.has(url.pathname)) {
+      const text = readFileSync(join(root, staticFiles.get(url.pathname)), "utf8");
+      return { status: 200, headers: { "content-type": url.pathname.endsWith(".js") ? "text/javascript; charset=utf-8" : "text/html; charset=utf-8" },
+        body: url.pathname === "/" ? withOptionalExternals(text) : text };
+    }
     if (method === "GET" && url.pathname === "/health") return json(200, { status: "ready" });
     if (method === "POST" && url.pathname === "/api/login") {
       const body = request.body;

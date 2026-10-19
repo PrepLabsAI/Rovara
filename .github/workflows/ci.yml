@@ -141,7 +141,7 @@ jobs:
         env:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
-        run: npx vitest run tests/linux --passWithNoTests
+        run: npx vitest run tests/linux
 
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:

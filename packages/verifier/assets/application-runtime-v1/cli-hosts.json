@@ -1,0 +1,1 @@
+{"hosts":[{"entryPointId":"rovara-e2e-executor-host/v1","entryPointManifestDigest":"8f7b9b3bab4eda5d34a8addb5f422cbb6340b666bd81dc9da6aec3ccf1f2631f","modulePath":"dist/executor/host-entry.js","profileId":"linux-arm64-web-api-v1"}],"schemaVersion":"application-cli-host-registry/v1"}

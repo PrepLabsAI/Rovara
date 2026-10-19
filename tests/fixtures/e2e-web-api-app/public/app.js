@@ -22,3 +22,7 @@ byId("download-orders").addEventListener("click", async () => {
   const anchor = document.createElement("a"); anchor.href = url; anchor.download = "orders.csv"; anchor.click(); URL.revokeObjectURL(url);
   byId("orders-export-status").textContent = "Orders exported";
 });
+const egressProbe = document.querySelector('meta[name="egress-probe"]')?.getAttribute("content");
+if (egressProbe) {
+  fetch(egressProbe, { mode: "no-cors" }).then(() => { byId("network-denial").textContent = "reachable"; }, () => { byId("network-denial").textContent = "blocked"; });
+}

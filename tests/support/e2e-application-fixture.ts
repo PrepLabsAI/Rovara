@@ -10,9 +10,9 @@ import { compileE2EApplicationScenarios, createE2EApplicationPortableChildBindin
   type E2ECompiledApplicationSuite } from "../../packages/verifier/src/application-scenarios.js";
 import { encodeE2EApplicationBuildSourceArchive } from "../../packages/verifier/src/application-build-source.js";
 
-const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
-const gitBlob = (bytes: Uint8Array) => createHash("sha1").update(Buffer.concat([Buffer.from(`blob ${bytes.byteLength}\0`), Buffer.from(bytes)])).digest("hex");
-function gitTreeSha(entries: readonly { path: string; mode: string; objectId: string }[]): string {
+export const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+export const gitBlob = (bytes: Uint8Array) => createHash("sha1").update(Buffer.concat([Buffer.from(`blob ${bytes.byteLength}\0`), Buffer.from(bytes)])).digest("hex");
+export function gitTreeSha(entries: readonly { path: string; mode: string; objectId: string }[]): string {
   type Node = { files: Array<{ name: string; mode: string; objectId: string }>; dirs: Map<string, Node> };
   const root: Node = { files: [], dirs: new Map() };
   for (const entry of entries) {
