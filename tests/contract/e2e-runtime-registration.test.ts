@@ -443,12 +443,31 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
       expect(t.objects.size).toBe(0);
     });
 
-    it("accepts a proposal that is large but inside the bound, and retains exactly its bytes", async () => {
+    it("registers and retains a proposal between the standard 1 MiB bound and the 5 MiB one, exactly as sent", async () => {
       const t = await setup();
-      expect(Buffer.byteLength(canonicalJson(t.proposal))).toBeLessThan(WEB_API_PROBE_PROPOSAL_MAX_BYTES);
-      const result = await registerRuntimeInstallation(t.deps, admin, t.request());
-      expect(t.objects.get(result.evidence.key)!.byteLength).toBe(Buffer.byteLength(canonicalJson(t.proposal)));
-      expect(result.evidence.byteLength).toBeGreaterThan(1_048_576 / 8);
+      // Many repeated blocked-request entries for one host: valid evidence whose observation names that host once, only larger.
+      const padded = structuredClone(t.proposal);
+      for (const id of ["web-csv-positive-v1", "web-csv-negative-v1", "web-egress-denial-v1"]) {
+        const probe = padded.probes[probeIndex(id)]! as unknown as EditableProbe;
+        const file = JSON.parse(Buffer.from(probe.evidence.blockedRequestsBase64!, "base64").toString("utf8")) as { blocked: { host: string }[] };
+        const entry = file.blocked[0] ?? { host: "probe.example.com" };
+        const room = Math.floor(250_000 * 3 / 4) - JSON.stringify(file).length;
+        for (let used = 0; used < room; used += JSON.stringify(entry).length + 1) file.blocked.push(entry);
+        const text = JSON.stringify(file);
+        probe.evidence.blockedRequestsBase64 = Buffer.from(text).toString("base64");
+        probe.observation = { ...probe.observation, blockedHosts: [entry.host], evidenceDigest: sha(canonicalJson(probe.evidence)) };
+      }
+      const size = Buffer.byteLength(canonicalJson(padded));
+      expect(size).toBeGreaterThan(1_048_576);
+      expect(size).toBeLessThan(WEB_API_PROBE_PROPOSAL_MAX_BYTES);
+      const result = await registerRuntimeInstallation(t.deps, admin, { proposal: padded, proposalSha256: webApiRuntimeInstallProposalSha256(padded) });
+      expect(t.objects.get(result.evidence.key)!.byteLength).toBe(size);
+      expect(result.evidence.byteLength).toBe(size);
+    });
+
+    it("keeps the standard proposal's 1 MiB retention bound for the P0 profile", async () => {
+      const p0 = proposalFor(webApiChallenge(at, { profileId: "linux-arm64-docker-v1" }));
+      expect(Buffer.byteLength(canonicalJson(p0))).toBeLessThan(1_048_576);
     });
   });
 });

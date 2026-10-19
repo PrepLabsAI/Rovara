@@ -6,7 +6,7 @@ import {
   canonicalJson, RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema, runtimeInstallChallengeDigest,
   runtimeInstallationProposalSha256, type RuntimeInstallChallenge, type RuntimeInstallationProposal,
   ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
-  WEB_API_RUNTIME_PROFILE_ID, WebApiRuntimeInstallProposalSchema, webApiRuntimeInstallProposalSha256, type WebApiRuntimeInstallProposal,
+  WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_RUNTIME_PROFILE_ID, WebApiRuntimeInstallProposalSchema, webApiRuntimeInstallProposalSha256, type WebApiRuntimeInstallProposal,
   agentXError,
 } from "@agentx/contracts";
 import { parseE2EReport, verifyWebApiProbeRecord } from "@agentx/verifier";
@@ -107,10 +107,10 @@ export function runtimeInstallationRecords(input: {
   return { setup, feature };
 }
 
-async function retainImmutableProposal(deps: RuntimeInstallationDependencies, proposal: object, proposalSha256: string): Promise<{ key: string; sha256: string; byteLength: number }> {
+async function retainImmutableProposal(deps: RuntimeInstallationDependencies, proposal: object, proposalSha256: string, maxBytes: number): Promise<{ key: string; sha256: string; byteLength: number }> {
   const body = canonicalJson(proposal);
   const bytes = Buffer.from(body, "utf8");
-  if (bytes.byteLength > MAX_PROPOSAL_BYTES || sha(bytes) !== proposalSha256) throw agentXError("CONFIG_INVALID", "runtime proposal exceeds its evidence bound or its digest changed");
+  if (bytes.byteLength > maxBytes || sha(bytes) !== proposalSha256) throw agentXError("CONFIG_INVALID", "runtime proposal exceeds its evidence bound or its digest changed");
   const key = runtimeEvidenceObjectKey(proposalSha256);
   try {
     await deps.s3.send(new PutObjectCommand({ Bucket: deps.artifactBucketName, Key: key, Body: bytes, ContentType: "application/json", Metadata: { sha256: proposalSha256 }, IfNoneMatch: "*" }));
@@ -155,9 +155,9 @@ async function loadIssuedChallenge(deps: RuntimeInstallationDependencies, identi
 
 /** Retains the exact proposal bytes and builds the immutable evidence pointer, refusing a pointer that conflicts with an earlier one. */
 async function prepareEvidence(deps: RuntimeInstallationDependencies, proposal: object, proposalSha256: string, issued: IssuedChallenge,
-  identity: AuthenticatedIdentity): Promise<{ evidence: { key: string; sha256: string; byteLength: number }; evidencePointer: Record<string, unknown> }> {
+  identity: AuthenticatedIdentity, maxBytes: number): Promise<{ evidence: { key: string; sha256: string; byteLength: number }; evidencePointer: Record<string, unknown> }> {
   const { challengeRow, nowBeforeRetain } = issued;
-  const evidence = await retainImmutableProposal(deps, proposal, proposalSha256);
+  const evidence = await retainImmutableProposal(deps, proposal, proposalSha256, maxBytes);
   const evidencePointerKey = evidenceKey(proposalSha256);
   const evidencePointerResult = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: evidencePointerKey, ConsistentRead: true }));
   const attribution = { issuedByOwnerKey: challengeRow.issuedByOwnerKey, issuedBySubject: challengeRow.issuedBySubject, issuedAt: challengeRow.issuedAt, approvedByOwnerKey: identity.ownerKey, approvedBySubject: identity.subject, approvedAt: new Date(nowBeforeRetain).toISOString() };
@@ -203,7 +203,7 @@ export async function registerRuntimeInstallation(
   const expectedSetupKey = projectSetupRuntimeKey(deps.setupCatalogId, projectSetupBindingDigest(proposal.challenge.binding));
   const expectedFeatureKey = e2eFeatureVerifierKey(deps.featureCatalogId, PROFILE_ID);
   const [setupRevisionBefore, featureRevisionBefore] = await Promise.all([readCatalogRevision(deps, expectedSetupKey), readCatalogRevision(deps, expectedFeatureKey)]);
-  const { evidence, evidencePointer } = await prepareEvidence(deps, proposal, proposalSha256, issued, identity);
+  const { evidence, evidencePointer } = await prepareEvidence(deps, proposal, proposalSha256, issued, identity, MAX_PROPOSAL_BYTES);
   const setupRevision = (setupRevisionBefore ?? 0) + 1;
   const featureRevision = (featureRevisionBefore ?? 0) + 1;
   const records = runtimeInstallationRecords({ proposal, setupRevision, featureRevision, qualifiedAt: new Date(nowFor(deps)).toISOString() });
@@ -297,7 +297,7 @@ async function registerWebApiRuntimeInstallation(
   const [webBefore, apiBefore] = await Promise.all([readWebApiCatalogRow(deps, keys.web), readWebApiCatalogRow(deps, keys.api)]);
   const generation = proposal.challenge.generation;
   if ([webBefore, apiBefore].some((row) => row !== undefined && row.generation > generation)) throw agentXError("CONFIG_INVALID", "runtime proposal is for an older worker generation than the registered runtime");
-  const { evidence, evidencePointer } = await prepareEvidence(deps, proposal, proposalSha256, issued, identity);
+  const { evidence, evidencePointer } = await prepareEvidence(deps, proposal, proposalSha256, issued, identity, WEB_API_PROBE_PROPOSAL_MAX_BYTES);
   const revisions = { web: (webBefore?.revision ?? 0) + 1, api: (apiBefore?.revision ?? 0) + 1 };
   const rows = e2eWebApiRuntimeRecords({ proposal, revisions, qualifiedAt: new Date(nowFor(deps)).toISOString(), evidence });
   const transactAt = nowFor(deps);
