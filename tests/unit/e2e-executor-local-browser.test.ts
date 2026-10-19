@@ -9,7 +9,7 @@ import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
 import { assembleDockerCollectionInputs, assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput } from "../../packages/verifier/src/host/executor-readback.js";
 import { resolveE2EExecutorSuite } from "../../packages/verifier/src/executor/suite.js";
 import { collectHostRun, proveActualRun } from "../support/e2e-actual-run-proof.js";
-import { blockedHosts, caseStatuses, csvRows, failedAssertionKinds, readReport, resultOf } from "../support/e2e-executor-output.js";
+import { readShardReport, blockedHosts, caseStatuses, csvRows, failedAssertionKinds, readReport, resultOf } from "../support/e2e-executor-output.js";
 import { ORDERS_FIXTURE_ROOT, createOrdersExecutorPlan, type OrdersProbeName } from "../support/e2e-orders-executor-fixture.js";
 
 // A real Chromium and the real fixture app on loopback, with the app origin mapped to it. It needs the built verifier
@@ -27,13 +27,15 @@ async function freePort(): Promise<number> {
   });
 }
 
-async function runProbe(probe: OrdersProbeName, options: { defect?: string; appEnv?: Record<string, string>; role?: "owner" | "viewer" } = {}) {
+async function runProbe(probe: OrdersProbeName, options: { defect?: string; appEnv?: Record<string, string>; role?: "owner" | "viewer";
+  /** Rewrites the copied app server, e.g. to break the page load while leaving the API alone. */ patchServer?: (source: string) => string } = {}) {
   const fixture = createOrdersExecutorPlan({ probe, ...(options.role ? { role: options.role } : {}) });
   const dir = realpathSync(await mkdtemp(join(tmpdir(), "executor-local-")));
   dirs.push(dir);
   const app = join(dir, "app");
   await cp(ORDERS_FIXTURE_ROOT, app, { recursive: true });
   await mkdir(join(app, ".owned"));
+  if (options.patchServer) await writeFile(join(app, "server.mjs"), options.patchServer(await readFile(join(app, "server.mjs"), "utf8")));
   await writeFile(join(app, ".owned", "seed.json"), JSON.stringify(fixture.seed));
   if (options.defect) await cp(join(ORDERS_FIXTURE_ROOT, "defects", options.defect), join(app, ".owned", "defect.json"));
   const port = await freePort();
@@ -132,10 +134,17 @@ describe.runIf(enabled)("host readback of a real executor run (local, no Docker)
       if (probe.startsWith("web-")) {
         const collected = collectHostRun(actual, inputs, run.fixture.plan);
         if (defect) {
-          // Known gap (reported to the controller): the collector wants the upstream report to carry a failed `assertion` step at the assertion's index,
-          // but the web adapter fails the case body with a plain error, so a real assertion mismatch collects as UNKNOWN, never PASS.
-          expect(collected.qualification?.status ?? "UNKNOWN").not.toBe("PASS");
-          expect(collected.unavailableReason ?? "").toMatch(/upstream report verdict disagree/);
+          // An approved assertion that did not hold is FAILED, decided through the report's own failed `assertion` step for that assertion.
+          expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
+          expect(collected.qualification?.status).toBe("FAILED");
+          const [verdict] = collected.qualification!.result!.cases;
+          expect(verdict!.status).toBe("failed");
+          expect(verdict!.assertionReceipts.map((receipt) => [receipt.assertionIndex, receipt.status])).toEqual([[0, "failed"]]);
+          expect(verdict!.assertionReceipts[0]!.assertionDigest).toBe(run.fixture.compiled.expectedCases[0]!.assertionDigests[0]);
+          // The csv assertion is the cause: it is the only assertion, and the report's one failed step is its step.
+          const report = readReport(run.outDir).run.results[0]!.attempts[0]!;
+          const failed = report.steps.filter((step) => step.status === "failed");
+          expect(failed.map((step) => [step.kind, step.index, step.label])).toEqual([["assertion", 0, "approved assertion 0"]]);
         } else {
           expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
           expect(collected.qualification?.status).toBe("PASS");
@@ -147,6 +156,26 @@ describe.runIf(enabled)("host readback of a real executor run (local, no Docker)
       expect(text).not.toContain(run.fixture.account.password);
       expect(text).not.toContain(run.fixture.account.email);
     }, 300_000);
+});
+
+describe.runIf(enabled)("a failure that is not an assertion is never FAILED (local, no Docker)", () => {
+  it("a page that cannot be loaded fails no approved assertion step and leaves the run unavailable", async () => {
+    // The page load is cut off at the socket while login and the API still work, so the case fails before any approved assertion is observed.
+    const run = await runProbe("web-csv-positive-v1", { patchServer: (source) => {
+      const patched = source.replace("const result = await app.handle(", 'if (request.url === "/") { request.socket.destroy(); return; }\n        const result = await app.handle(');
+      if (patched === source) throw new Error("the fixture server changed shape; update this patch");
+      return patched;
+    } });
+    // The runner classes a page that never loaded as an infrastructure failure: the executor reports no trustworthy result (exit 2),
+    // which the host maps to an unavailable run and never reads, so it cannot collect as FAILED.
+    expect(run.result.exitCode, run.stderr).toBe(2);
+    expect(run.result.reason).toMatch(/^cli-run-exit-/);
+    const [shard] = await readdir(join(run.outDir, "shards"));
+    const report = readShardReport(join(run.outDir, "shards", shard!, "report.json"));
+    const steps = report.run.results[0]!.attempts[0]!.steps;
+    expect(steps.some((step) => step.status === "failed")).toBe(true);
+    expect(steps.some((step) => step.status === "failed" && step.kind === "assertion")).toBe(false);
+  }, 300_000);
 });
 
 describe.skipIf(enabled)("executor against a real Chromium (local)", () => {

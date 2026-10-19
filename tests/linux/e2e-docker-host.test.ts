@@ -52,14 +52,15 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(collected.qualification?.status).toBe("PASS");
   }, 300_000);
 
-  it("never collects the extra-order defect as PASS", async () => {
+  it("collects the extra-order defect through the real collector as FAILED, caused by the csv assertion", async () => {
     const r = await runProbe("web-csv-positive-v1", { defect: "extra-order.json" });
     expect(r.exitCode, JSON.stringify(r.host.readDiagnostics(r.fixture.plan.runId))).toBe(1);
     const collected = await collectLikeTheWorker(r);
-    // Known gap: the collector wants a failed `assertion` step in the upstream report, but the web adapter fails the case body with a plain
-    // error, so a real assertion mismatch collects as UNKNOWN instead of FAILED (see the Task 1.4 fix report).
-    expect(collected.qualification?.status ?? "UNKNOWN").not.toBe("PASS");
-    expect(collected.unavailableReason ?? "").toMatch(/upstream report verdict disagree/);
+    expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
+    expect(collected.qualification?.status).toBe("FAILED");
+    const [verdict] = collected.qualification!.result!.cases;
+    expect(verdict!.assertionReceipts.map((receipt) => [receipt.assertionIndex, receipt.status])).toEqual([[0, "failed"]]);
+    expect(verdict!.assertionReceipts[0]!.assertionDigest).toBe(r.fixture.compiled.expectedCases[0]!.assertionDigests[0]);
   }, 300_000);
 
   it("reports build-failed, with the build log, when a build command fails, and removes everything", async () => {

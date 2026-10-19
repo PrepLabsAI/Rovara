@@ -10,6 +10,13 @@ export function readReport(outDir: string) {
   return parsed.report;
 }
 
+/** One shard's own report, which exists even when the executor reports the run unavailable and writes no merged report. */
+export function readShardReport(path: string) {
+  const parsed = parseE2EApplicationReport(readFileSync(path));
+  if (parsed.kind !== "parsed") throw new Error(parsed.reason);
+  return parsed.report;
+}
+
 /** Scenario id to upstream status, joined through the compiled expected cases. */
 export function caseStatuses(outDir: string, fixture: OrdersExecutorFixture): Record<string, string> {
   const report = readReport(outDir);

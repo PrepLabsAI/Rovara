@@ -193,15 +193,8 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       },
     });
     const inner = createWebApplicationCliHost({ launchContext, declaration, ports });
-    return Object.freeze({ ...inner,
-      async runCase(caseId: string, fixtures: unknown): Promise<void> {
-        // The engine opens a fresh context per attempt with no page, and the case adapter needs a live page before it can
-        // bind the session. Opening the one non-network page (about:blank) gives it one without touching the application.
-        const browser = (fixtures as { browser?: { goto?: (url: string) => Promise<unknown> } } | null)?.browser;
-        if (!browser || typeof browser.goto !== "function") throw new Error("installed web engine did not provide its browser fixture");
-        await browser.goto("about:blank");
-        await inner.runCase(caseId, fixtures);
-      } });
+    // The case adapter opens its own first page and its assertion steps; nothing may run before them.
+    return inner;
   }
 
   if (launchContext.selectedTarget.kind === "api") {
