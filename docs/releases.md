@@ -122,6 +122,14 @@ place; this records what it is, so a change to any piece can be made deliberatel
   rejects such a release, so upgrade the CLI before installing or updating from a release newer than
   the one that first publishes the executor. Strictness is deliberate: an image key a CLI does not
   know must not be skipped silently.
+- **The executor image's smoke test needs a Docker VM that lets Chromium's sandbox start.** The release path
+  (`smokeTestExecutor`, also used by `scripts/test-deploy.ts`) and the CI `linux-runtime` job both run
+  `scripts/executor-smoke.ts`'s definition: the image under the pinned seccomp profile
+  (`packages/verifier/assets/executor-seccomp.json`, digest-checked), every capability dropped, no-new-privileges,
+  read-only, no network. Chromium runs with its own sandbox and the check never skips it. On a local Docker VM
+  whose kernel restricts unprivileged user namespaces (colima's Ubuntu 24.04 VM) the smoke test fails with a
+  message that names the fix: `colima ssh -- sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0`
+  (temporary; it resets when the VM restarts). Never work around it with `--no-sandbox`.
 - **The npm package.** `@preplabsai/rovara-code`, owned by the `preplabsai` npm organization
   (publishing needs an owner or developer role there; GitHub access does not grant it). Version
   0.1.0 was published by hand from the tag's commit, because npm trusted publishing can only be

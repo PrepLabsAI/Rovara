@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
@@ -44,12 +45,27 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(firewall).not.toContain("iptables -I");
     expect(run.indexOf("<<'FIREWALL'")).toBeGreaterThanOrEqual(0);
     expect(run.indexOf("<<'FIREWALL'")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci ."));
-    // The smoke check runs the executor the way the host does: Chromium's own sandbox on, under the pinned seccomp profile, no capability, no network.
-    const smoke = run.split("\n").find((line) => line.includes("executor/smoke.js"))!;
-    for (const flag of ["--network none", "--cap-drop=ALL", "--security-opt no-new-privileges", "--security-opt seccomp=packages/verifier/assets/executor-seccomp.json", "--read-only"]) expect(smoke).toContain(flag);
-    expect(smoke).toContain("rovara-e2e-executor:ci node /opt/agentx/packages/verifier/dist/executor/smoke.js");
+    // The smoke check is the shared definition in scripts/executor-smoke.ts (the one the release path and test-deploy use), never a copy of its flags: it runs after
+    // `npm ci` and `npm run build`, which the script needs, and before the Linux tests.
+    const smoke = run.split("\n").find((line) => line.includes("executor-smoke.ts"))!;
+    expect(smoke.trim()).toBe("npx tsx scripts/executor-smoke.ts rovara-e2e-executor:ci");
+    expect(run).not.toMatch(/executor\/smoke\.js|seccomp=|--cap-drop|--read-only/);
+    expect(run.indexOf("npm ci")).toBeLessThan(run.indexOf("executor-smoke.ts"));
+    expect(run.indexOf("npm run build")).toBeLessThan(run.indexOf("executor-smoke.ts"));
+    expect(run.indexOf("executor-smoke.ts")).toBeLessThan(run.indexOf("npx vitest run tests/linux"));
     expect(run).not.toMatch(/seccomp=unconfined|--privileged|--cap-add|--no-sandbox/);
     expect(run).toContain("npx vitest run tests/linux");
+  });
+
+  it("smoke-tests the executor image from CI and from the release path through one definition, with the production sandbox flags", async () => {
+    const shared = readFileSync("scripts/executor-smoke.ts", "utf8");
+    for (const flag of ["--init", "--cap-drop=ALL", "no-new-privileges", "seccomp=${profilePath}", "--read-only", "--network", "--tmpfs"]) expect(shared, flag).toContain(flag);
+    // The release path (and so test-deploy, which takes smokeTestExecutor from it) builds its command from that definition and spells no flags of its own.
+    const release = readFileSync("scripts/release-common.ts", "utf8");
+    const body = release.slice(release.indexOf("export async function smokeTestExecutor"), release.indexOf("export async function smokeTestWorker"));
+    expect(body).toContain("executorSmokeDockerArgs(image)");
+    expect(body).not.toMatch(/--network|--cap-drop|seccomp|smoke\.js/);
+    expect(readFileSync("scripts/test-deploy.ts", "utf8")).toContain("smokeTest: smokeTestExecutor");
   });
 
   it("lets the Ubuntu runner create unprivileged user namespaces for Chromium's sandbox before it builds or runs a container, and says production does not need that", async () => {

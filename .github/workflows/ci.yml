@@ -146,12 +146,13 @@ jobs:
           sysctl user.max_user_namespaces
       - name: Build the executor image
         run: docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci .
-      # The executor as the host runs it: Chromium's sandbox on, the pinned seccomp profile, no capability, read-only, no network. The smoke check fails unless the renderer is sandboxed.
-      - name: Smoke-test the executor image without a network
-        run: docker run --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges --security-opt seccomp=packages/verifier/assets/executor-seccomp.json --read-only --tmpfs /tmp:rw,exec,nosuid,nodev,size=512m --shm-size 1g rovara-e2e-executor:ci node /opt/agentx/packages/verifier/dist/executor/smoke.js
       - run: npm ci
       # The packages import each other through their built output.
       - run: npm run build
+      # The executor as the host runs it (the pinned seccomp profile, every capability dropped, read-only, no network), from the one definition the release path and
+      # test-deploy use too. The smoke check fails unless Chromium's renderer is sandboxed.
+      - name: Smoke-test the executor image without a network
+        run: npx tsx scripts/executor-smoke.ts rovara-e2e-executor:ci
       - name: Linux runtime tests
         env:
           ROVARA_DOCKER: "1"

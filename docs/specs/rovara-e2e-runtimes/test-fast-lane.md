@@ -74,6 +74,18 @@ aws ecr create-repository --repository-name <worker repo with the last "worker" 
 
 For example, `agentx-test/worker` becomes `aws ecr create-repository --repository-name agentx-test/executor ...`. Check the result against `aws ecr describe-repositories --repository-names <worker repo>` and copy any other setting (encryption, lifecycle policy) it has.
 
+#### The local Docker VM must let Chromium's sandbox start (operator step)
+
+Before pushing the executor image, `test-deploy.ts --only executor-image` smoke-tests it locally (`smokeTestExecutor` in `scripts/release-common.ts`, built from `scripts/executor-smoke.ts`, the same definition the CI `linux-runtime` job runs): the image runs as the worker's Docker host runs the executor, under the pinned seccomp profile `packages/verifier/assets/executor-seccomp.json` (checked against its digest in contracts), with every capability dropped, no-new-privileges, a read-only root, a `/tmp` tmpfs and no network. Chromium's own sandbox is on and is never skipped: if it cannot start, the smoke test fails and the push is refused.
+
+A Docker VM on Ubuntu 24.04 (colima's default VM) restricts unprivileged user namespaces for AppArmor-confined containers, which stops the sandbox. The smoke test then says "Chromium's sandbox could not start in this Docker VM". Lift the restriction in the VM and retry:
+
+```sh
+colima ssh -- sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0   # temporary: resets when the VM restarts
+```
+
+On another Linux Docker host run the same `sysctl` there, and check that `user.max_user_namespaces` is above 0. Production runners (Amazon Linux 2023) need no such change. The fix is the VM's setting, never `--no-sandbox` and never a weaker profile.
+
 ## 2. Evidence for and against
 
 For:
