@@ -17,7 +17,7 @@ const FIXED_PACKET_IDENTITIES = [
   { sourceDigest: "d364565e3e56fec557da690e15fbc385fccd215096deff75b92dcfb7229e3a4a", sourceBytes: 2021 },
 ] as const;
 const catalogId = z.string().trim().min(1).max(160);
-const profile = z.enum(["darwin-arm64-colima-v1", "linux-arm64-docker-v1"]);
+const profile = z.enum(["darwin-arm64-colima-v1", "linux-arm64-docker-v1", "linux-arm64-web-api-v1"]);
 const privateIpv4Url = z.string().url().max(512).superRefine((value, context) => {
   let url: URL;
   try { url = new URL(value); } catch { context.addIssue({ code: "custom", message: "endpoint must be a private IPv4 HTTP URL" }); return; }
@@ -152,7 +152,7 @@ function parseCanonicalJsonCapture(base64: string): unknown {
 function isRecord(value: unknown): value is Record<string, unknown> { return Boolean(value) && typeof value === "object" && !Array.isArray(value); }
 
 const RuntimeInstallManifestEntrySchema = z.object({ path: z.string().min(1).max(512), sha256: digest }).strict();
-const RuntimeInstallManifestSchema = z.object({
+export const RuntimeInstallManifestSchema = z.object({
   schemaVersion: z.literal("installed-runtime-manifest/v1"), entries: z.array(RuntimeInstallManifestEntrySchema).min(2).max(4096), sha256: digest,
 }).strict().superRefine((manifest, context) => {
   const paths = manifest.entries.map((entry) => entry.path);

@@ -1,0 +1,1 @@
+{"schemaVersion":"e2e-application-runtime-probe/v1","probeId":"api-egress-denial/v1","kind":"api","polarity":"negative","templateId":"api-egress-denial/v1","requiredCapabilities":["http","network-denial"],"oracle":{"kind":"protected-network-denial","requiresKernelDenialCounter":true,"requiresAbsenceOfEffect":true,"candidateResponseIsNotEvidence":true}}

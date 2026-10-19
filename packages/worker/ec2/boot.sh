@@ -243,6 +243,31 @@ ensure_docker() {
   printf '{"data-root": "%s"}\n' "$DOCKER_DATA_ROOT" >/etc/docker/daemon.json
   systemctl enable docker.service
   systemctl restart docker.service
+  block_container_metadata_access
+}
+
+# Containers must not reach the instance metadata service. Host-network containers (the worker) bypass
+# DOCKER-USER. Docker rebuilds its chains on start, so a oneshot unit re-applies the rule each time.
+readonly IMDS_DROP_UNIT=rovara-imds-drop.service
+block_container_metadata_access() {
+  install -d -o root -g root -m 0755 /usr/local/libexec
+  cat >/usr/local/libexec/rovara-imds-drop <<'DROP'
+iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP
+DROP
+  cat >"/etc/systemd/system/$IMDS_DROP_UNIT" <<EOF
+[Unit]
+Description=Block container access to the instance metadata service
+Requires=docker.service
+After=docker.service
+Before=$WORKER_UNIT
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /usr/local/libexec/rovara-imds-drop
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl enable "$IMDS_DROP_UNIT" && bash /usr/local/libexec/rovara-imds-drop || fail "could not block container access to the instance metadata service"
 }
 
 # The password goes from the AWS CLI to Docker through a pipe, never through the log.
@@ -270,6 +295,18 @@ pull_contained_image() {
   return 1
 }
 
+# Optional until the control plane sets EXECUTOR_IMAGE; without it only end-to-end checks are withheld.
+pull_executor_image() {
+  [[ -n "${EXECUTOR_IMAGE:-}" ]] || return 0
+  local attempt
+  for ((attempt=1; attempt<=RETRY_ATTEMPTS && SECONDS<BOOT_DEADLINE; attempt++)); do
+    timeout "$(try_seconds 300)" docker pull "$EXECUTOR_IMAGE" && return 0
+    ((attempt<RETRY_ATTEMPTS && SECONDS<BOOT_DEADLINE)) && sleep "$((1 << (attempt - 1)))"
+  done
+  log "optional executor image unavailable; worker continues"
+  return 1
+}
+
 # Root-only, because the worker's environment is its configuration; none of it is secret today, but
 # the file should not become world-readable if that changes.
 write_worker_environment() {
@@ -292,6 +329,8 @@ AGENTX_WORKSPACE_ID=$AGENTX_WORKSPACE_ID
 AGENTX_SESSION_GENERATION=$AGENTX_SESSION_GENERATION
 EOF
   printf 'TMPDIR=/tmp\n' >>"$WORKER_ENV_FILE"
+  # The browser executor the web/API runtime runs: docker exec agentx-worker processes read it from this file too.
+  [[ -z "${EXECUTOR_IMAGE:-}" ]] || printf 'EXECUTOR_IMAGE=%s\n' "$EXECUTOR_IMAGE" >>"$WORKER_ENV_FILE"
 }
 
 write_worker_launcher() {
@@ -367,8 +406,8 @@ write_worker_unit() {
   cat >"/etc/systemd/system/$WORKER_UNIT" <<EOF
 [Unit]
 Description=AgentX worker for workspace $AGENTX_WORKSPACE_ID generation $AGENTX_SESSION_GENERATION
-Requires=docker.service
-After=docker.service network-online.target
+Requires=docker.service $IMDS_DROP_UNIT
+After=docker.service $IMDS_DROP_UNIT network-online.target
 Wants=network-online.target
 RequiresMountsFor=$MOUNT_PATH
 
@@ -382,6 +421,97 @@ RestartSec=5
 [Install]
 WantedBy=multi-user.target
 EOF
+}
+
+# Opt-in TEST qualification of the web/API runtime, run only when the user data sets
+# AGENTX_E2E_QUALIFICATION_ROLE_ID, _PROFILE and _BUCKET. Its S3 prefix is e2e-runtime/<role ID>:<instance ID>/,
+# the one the grant e2e-runtime/${aws:userid}/ allows this instance. It runs as its own unit after the worker
+# started, so it cannot fail the boot; it reports through status.json.
+write_e2e_qualification_script() {
+  install -d -o root -g root -m 0755 /usr/local/libexec
+  cat >/usr/local/libexec/agentx-e2e-qualification <<'QUALIFICATION'
+set -uo pipefail
+umask 077
+readonly REGION=${1:-} BUCKET=${2:-} ROLE_ID=${3:-} INSTANCE_ID=${4:-} PROFILE=${5:-} EXECUTOR=${6:-}
+readonly EVIDENCE_HOST=${AGENTX_HOST_ROOT:-}/mnt/workspace/.agentx-runtime/evidence
+readonly EVIDENCE_CONTAINER=/mnt/agentx-runtime/evidence
+readonly CHALLENGE_NAME=runtime-install-challenge.json
+readonly PROPOSAL_NAME=runtime-install-proposal.json
+readonly CHALLENGE_MAX_BYTES=65536
+readonly PROPOSAL_MAX_BYTES=5242880
+readonly POLL=${AGENTX_E2E_QUALIFICATION_POLL_SECONDS:-10}
+readonly HEALTHY_WAIT=${AGENTX_E2E_QUALIFICATION_HEALTHY_WAIT_SECONDS:-900}
+readonly CHALLENGE_WAIT=${AGENTX_E2E_QUALIFICATION_CHALLENGE_WAIT_SECONDS:-1800}
+readonly QUALIFY_SECONDS=${AGENTX_E2E_QUALIFICATION_QUALIFY_SECONDS:-2700}
+readonly PULL_SECONDS=${AGENTX_E2E_QUALIFICATION_PULL_SECONDS:-300}
+log() { printf 'agentx-e2e-qualification: %s\n' "$*" >&2; }
+[[ "$ROLE_ID" =~ ^AROA[A-Z0-9]{12,}$ ]] || { log "refused: the role ID must be the worker role's unique ID (AROA...)"; exit 2; }
+[[ "$INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || { log "refused: the instance ID is not valid"; exit 2; }
+[[ "$EXECUTOR" =~ ^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$ ]] || { log "refused: the executor image must be an ECR image pinned by digest"; exit 2; }
+[[ "$PROFILE" == linux-arm64-web-api-v1 ]] || { log "refused: the profile must be linux-arm64-web-api-v1"; exit 2; }
+[[ "$BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { log "refused: the bucket name is not valid"; exit 2; }
+[[ "$REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { log "refused: the region is not valid"; exit 2; }
+readonly PREFIX="e2e-runtime/$ROLE_ID:$INSTANCE_ID/"
+STAGE=$(mktemp -d) || exit 1
+readonly STAGE
+upload() { aws s3api put-object --bucket "$BUCKET" --key "$PREFIX$1" --body "$2" --server-side-encryption AES256 --region "$REGION" --no-cli-pager >/dev/null; }
+publish_status() {
+  printf '{"state":"%s","reason":"%s","finishedAt":"%s"}\n' "$1" "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STAGE/status.json" && upload status.json "$STAGE/status.json"
+}
+fail_with() {
+  log "failed: $1"
+  publish_status FAILED "$1" || log "could not upload the failure status"
+  exit 1
+}
+deadline=$((SECONDS + HEALTHY_WAIT))
+until curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/ping >/dev/null 2>&1; do
+  ((SECONDS < deadline)) || fail_with worker-not-healthy
+  sleep "$POLL"
+done
+# The boot's preload is optional, the qualification needs the executor image: pull it if missing.
+if ! docker image inspect "$EXECUTOR" >/dev/null 2>&1; then
+  log "the executor image is not on this host; pulling it"
+  { timeout --foreground --kill-after=10s "${PULL_SECONDS}s" aws ecr get-login-password --region "$REGION" \
+      | timeout --foreground --kill-after=10s "${PULL_SECONDS}s" docker login --username AWS --password-stdin "${EXECUTOR%%/*}" >/dev/null 2>&1 \
+      && timeout --foreground --kill-after=10s "${PULL_SECONDS}s" docker pull "$EXECUTOR" >/dev/null 2>&1; } \
+    || log "the executor image could not be pulled"
+  docker image inspect "$EXECUTOR" >/dev/null 2>&1 || fail_with executor-image-unavailable
+fi
+printf '{"state":"READY","reason":"worker-healthy","finishedAt":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STAGE/ready.json" && upload ready.json "$STAGE/ready.json" || fail_with ready-upload-failed
+fetched="$STAGE/challenge.json"
+deadline=$((SECONDS + CHALLENGE_WAIT))
+until aws s3api get-object --bucket "$BUCKET" --key "${PREFIX}challenge.json" --region "$REGION" --no-cli-pager "$fetched" >/dev/null 2>&1; do
+  ((SECONDS < deadline)) || fail_with challenge-unavailable
+  sleep "$POLL"
+done
+size=$(wc -c <"$fetched" | tr -d '[:space:]')
+((size > 0 && size <= CHALLENGE_MAX_BYTES)) || fail_with challenge-size-rejected
+[[ -d "$EVIDENCE_HOST" && ! -L "$EVIDENCE_HOST" ]] || fail_with evidence-directory-unavailable
+chown 1000:1000 "$fetched" && chmod 0600 "$fetched" && mv -fT "$fetched" "$EVIDENCE_HOST/$CHALLENGE_NAME" || fail_with challenge-install-failed
+rm -f "$EVIDENCE_HOST/$PROPOSAL_NAME"
+timeout --foreground --kill-after=10s "${QUALIFY_SECONDS}s" docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/verifier/dist/install-qualification-cli.js --profile "$PROFILE" --challenge-file "$EVIDENCE_CONTAINER/$CHALLENGE_NAME" --evidence-root "$EVIDENCE_CONTAINER" --out "$EVIDENCE_CONTAINER/$PROPOSAL_NAME" >"$STAGE/qualifier.log" 2>&1
+status=$?
+tail -c 2000 "$STAGE/qualifier.log" | while IFS= read -r line; do log "qualifier: $line"; done
+((status == 0)) || fail_with "qualification-failed-exit-$status"
+proposal="$EVIDENCE_HOST/$PROPOSAL_NAME"
+[[ -f "$proposal" && ! -L "$proposal" ]] || fail_with proposal-missing
+size=$(wc -c <"$proposal" | tr -d '[:space:]')
+((size > 0)) || fail_with proposal-missing
+((size <= PROPOSAL_MAX_BYTES)) || fail_with proposal-too-large
+upload proposal.json "$proposal" || fail_with proposal-upload-failed
+publish_status SUCCEEDED qualified || { log "could not upload the success status"; exit 1; }
+log "qualified; the proposal and status are under the prefix"
+QUALIFICATION
+}
+
+# The instance ID is the one boot read from instance metadata.
+start_e2e_qualification() {
+  local region=$1 instance_id=$2
+  [[ -n "${AGENTX_E2E_QUALIFICATION_ROLE_ID:-}" && -n "${AGENTX_E2E_QUALIFICATION_PROFILE:-}" ]] || return 0
+  write_e2e_qualification_script
+  systemd-run --unit=agentx-e2e-qualification --collect --no-block \
+    /bin/bash /usr/local/libexec/agentx-e2e-qualification "$region" "${AGENTX_E2E_QUALIFICATION_BUCKET:-}" "$AGENTX_E2E_QUALIFICATION_ROLE_ID" "$instance_id" "$AGENTX_E2E_QUALIFICATION_PROFILE" "${EXECUTOR_IMAGE:-}" \
+    >/dev/null 2>&1 || log "could not start the E2E qualification"
 }
 
 main() {
@@ -403,12 +533,14 @@ main() {
   BOOT_STEP="download the worker image"
   pull_worker_image "$region"
   if [[ "$CONTAINED_RUNTIME_AVAILABLE_BOOT" == true ]]; then pull_contained_image || true; fi
+  pull_executor_image || true
   BOOT_STEP="start the worker"
   write_worker_environment "$region"
   write_worker_unit "$region" "$instance_id"
   systemctl daemon-reload
   systemctl enable --now "$WORKER_UNIT"
   log "worker started"
+  start_e2e_qualification "$region" "$instance_id" || log "the E2E qualification did not start"
 }
 
 main "$@"

@@ -11,6 +11,9 @@ import { compileE2EScenarios } from "@agentx/verifier";
 import { E2ERunBindingSchema, E2ERoundSchema, type E2ERound } from "@agentx/contracts";
 import { admitE2EFeatureVerifier, E2E_FEATURE_PROCESS_RESPONSE_SCOPE, type E2EFeatureVerifierRecord } from "../aws/e2e-feature-verifier-catalog.js";
 
+export { deriveE2EApplicationFeatureExecutionSelection } from "./application-feature-plan-intent.js";
+export type { E2EApplicationFeatureSelectionInput } from "./application-feature-plan-intent.js";
+
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 
 export type E2EPortablePlanReferenceFailure = "operation-inventory" | "target-ownership" | "module-path" | "callable-export" | "scenario-binding";
@@ -26,7 +29,7 @@ export class E2EPortablePlanReferenceError extends Error {
   }
 }
 
-function deriveApprovedMockSelections(input: { intent: E2EFeaturePlanIntent; snapshot: E2ESourceSnapshot;
+function deriveApprovedMockSelections(input: { intent: Pick<E2EFeaturePlanIntent, "mockFixtureRefs">; snapshot: E2ESourceSnapshot;
   inspection: ReturnType<typeof inspectE2ERepository>["inspection"] }): Array<{ componentId: string; requestedTargetId: string; kind: "api";
   sourceRefs: Array<{ path: string; sha256: string }>; fixture: unknown }> {
   return (input.intent.mockFixtureRefs ?? []).map((reference) => {
@@ -45,6 +48,15 @@ function deriveApprovedMockSelections(input: { intent: E2EFeaturePlanIntent; sna
     return { componentId: reference.componentId, requestedTargetId: reference.requestedTargetId, kind: "api" as const,
       sourceRefs: [{ path: schemaSource.path, sha256: schemaSource.sha256 }], fixture };
   });
+}
+
+/** Re-derives approved API mock selections from a full application intent and protected source. */
+export function deriveE2EFeatureApprovedMockSelections(input: { intent: Pick<E2EFeaturePlanIntent, "mockFixtureRefs">;
+  snapshot: E2ESourceSnapshot }): Array<{ componentId: string; requestedTargetId: string; kind: "api";
+  sourceRefs: Array<{ path: string; sha256: string }>; fixture: unknown }> {
+  verifyE2ESourceSnapshot(input.snapshot, input.snapshot.candidate);
+  const discovered = inspectE2ERepository(input.snapshot, input.snapshot.candidate);
+  return deriveApprovedMockSelections({ ...input, inspection: discovered.inspection });
 }
 
 /** Derives feature invocation registrations only from canonical Owner-approved refs and the protected final source snapshot. */

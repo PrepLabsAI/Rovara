@@ -159,6 +159,17 @@ function resolvedImage(answers: InstallAnswers, which: "worker" | "slack", outpu
   return privateImageUri(requiredImage(answers.release, which), imageTarget(answers, prefix));
 }
 
+/**
+ * The browser executor image the worker pulls at boot, from the release through the image cache like the worker's own. A release that
+ * carries none (every release before the web/API runtime) supplies no value: the runtime stack's `ExecutorImageUri` defaults to "none",
+ * and workers then boot without `EXECUTOR_IMAGE`.
+ */
+function executorImageParameter(answers: InstallAnswers, outputs: Partial<Record<DeployPart, StackOutputs>>): { ExecutorImageUri?: string } {
+  const executor = answers.release.images.executor;
+  if (executor === undefined) return {};
+  return { ExecutorImageUri: privateImageUri(executor, imageTarget(answers, required(outputs, "access", "PullThroughPrefix", answers.env))) };
+}
+
 /** The Slack execution role is granted pull access only to the same-account, same-region ECR repo selected for this image. */
 function ecrRepositoryName(uri: string, answers: Pick<InstallAnswers, "account" | "region" | "partition">): string {
   const suffix = ECR_HOST_SUFFIX[answers.partition ?? "aws"];
@@ -285,6 +296,7 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
       return {
         ...base,
         WorkerImageUri: resolvedImage(answers, "worker", outputs),
+        ...executorImageParameter(answers, outputs),
         ModelProvider: answers.models.providers?.worker ?? "amazon-bedrock",
         ModelId: answers.models.worker,
         ...secret, ...routing,

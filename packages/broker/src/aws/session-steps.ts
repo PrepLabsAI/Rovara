@@ -41,6 +41,8 @@ export type SessionStep = z.infer<typeof SessionStepSchema>;
 /** What a worker runs with besides its own workspace: set by each release in SSM. */
 export interface WorkerSettings {
   workerImage: string;
+  /** The browser executor image, once a release carries one; workers boot without EXECUTOR_IMAGE until then. */
+  executorImage?: string;
   modelProvider: string;
   modelId: string;
   promptCacheRetention: "short" | "long";
@@ -119,6 +121,7 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
           volumeId: step.volumeId,
           expectNewVolume: step.expectNewVolume,
           workerImage: settings.workerImage,
+          ...(settings.executorImage ? { executorImage: settings.executorImage } : {}),
           invokePublicKey,
           controlPlaneUrl: dependencies.controlPlaneUrl,
           modelProvider: settings.modelProvider,
@@ -192,11 +195,11 @@ export const handler = createSessionStepsHandler({
     const promptCacheRetention = setting("promptCacheRetention");
     if (promptCacheRetention !== "short" && promptCacheRetention !== "long") throw new Error("worker prompt cache retention must be short or long");
     // Absent from SSM (a release before the setting existed) or "none" both mean not configured.
-    const optional = (key: "openRouterSecretArn" | "openRouterProviders" | "anthropicSecretArn" | "openaiSecretArn") => {
+    const optional = (key: "openRouterSecretArn" | "openRouterProviders" | "anthropicSecretArn" | "openaiSecretArn" | "executorImage") => {
       const value = values.get(names[key]);
       return value && value !== "none" ? { [key]: value } : {};
     };
-    return { ...optional("openRouterSecretArn"), ...optional("openRouterProviders"), ...optional("anthropicSecretArn"), ...optional("openaiSecretArn"), workerImage: setting("workerImage"), modelProvider: setting("modelProvider"), modelId: setting("modelId"), promptCacheRetention };
+    return { ...optional("openRouterSecretArn"), ...optional("openRouterProviders"), ...optional("anthropicSecretArn"), ...optional("openaiSecretArn"), ...optional("executorImage"), workerImage: setting("workerImage"), modelProvider: setting("modelProvider"), modelId: setting("modelId"), promptCacheRetention };
   },
   invokePublicKey() {
     // The key never changes, so one read per container.

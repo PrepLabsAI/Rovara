@@ -3,11 +3,22 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./executor": {
+      "types": "./dist/executor/index.d.ts",
+      "default": "./dist/executor/index.js"
+    }
+  },
   "types": "./dist/index.d.ts",
   "dependencies": {
     "@agentx/contracts": "0.1.0",
+    "@e2e-dev/web": "0.14.0",
     "e2e": "file:../../upstream/e2e-0.20.0.tgz",
+    "playwright-core": "1.63.0",
     "typescript": "5.9.3"
   }
 }

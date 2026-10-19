@@ -4,6 +4,7 @@ import {
   E2EAppRecipeSchema, E2ERepositoryInspectionSchema, E2ESetupProposalSchema, type E2ERepositoryInspection, type E2ESetupProposal,
 } from "./e2e.js";
 import { canonicalJson } from "./canonical-json.js";
+import { bindE2EApplicationAccountTargets, readE2EApplicationProjectContract, type E2EApplicationProjectContract } from "./e2e-application-accounts.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
 import type { CandidateManifest } from "./task-workflow.js";
 
@@ -348,6 +349,15 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
     const electron = "electron" in deps;
     const api = ["express", "fastify", "@hono/node-server", "koa"].some((name) => name in deps) || /(^|\/)(api|server)(\/|$)/i.test(relDir);
     const kind = api ? "api" : mobile ? "mobile" : electron ? "desktop" : "web";
+    let projectContract: E2EApplicationProjectContract | null = null;
+    let projectContractMalformed = false;
+    // Source project contracts are web/API only and need a valid package name; anything else keeps the mainline discovery path.
+    if (validName !== undefined && (kind === "web" || kind === "api")) try { projectContract = readE2EApplicationProjectContract(snapshot, appId); }
+    catch {
+      projectContractMalformed = true;
+      missingInputs.push({ inputId: "application-project-contract-" + createHash("sha256").update(manifest.path).digest("hex").slice(0, 12),
+        targetIds: [], kind: "runtime", disposition: "blocking", reason: "Source-owned application project contract is malformed, ambiguous, or outside its approved owning package", sourcePaths: [manifest.path] });
+    }
     const packageNativeFiles = [...sources.keys()].filter((path) => (relDir === "." || path.startsWith(relDir + "/")) && deepestPackageDir(path) === relDir).sort();
     const nativeProjectCounts = new Map<string, number>();
     for (const platform of ["android", "ios"] as const) {
@@ -407,20 +417,31 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
     let recipe: E2ERepositoryInspection["applications"][number]["recipe"] = null;
     const hasStart = typeof pkg.scripts?.start === "string" && pkg.scripts.start.trim() !== "";
     const hasDev = typeof pkg.scripts?.dev === "string" && pkg.scripts.dev.trim() !== "";
+    if (projectContract !== null) recipe = projectContract.recipe;
     if (kind === "web" || kind === "api") {
       if (hasStart !== hasDev) {
-        const script = hasStart ? "start" : "dev";
-        const recipeBody = {
-          schemaVersion: 1 as const, build: [],
-          launch: { kind: "service" as const, start: { program: "npm", args: ["run", script], cwd: relDir, timeoutMs: 60_000, env: {} }, health: { path: "/", expectedStatus: 200 } },
-          serviceProfileIds: [], seedProfileId: "synthetic-seed-v1", accountProfileIds: ["synthetic"], allowedOrigins: ["app-origin"],
-        };
-        recipe = E2EAppRecipeSchema.parse({ ...recipeBody, recipeDigest: createHash("sha256").update(canonicalJson(recipeBody)).digest("hex") });
+        if (projectContract === null && !projectContractMalformed) {
+          const script = hasStart ? "start" : "dev";
+          const recipeBody = {
+            schemaVersion: 1 as const, build: [],
+            launch: { kind: "service" as const, start: { program: "npm", args: ["run", script], cwd: relDir, timeoutMs: 60_000, env: {} }, health: { path: "/", expectedStatus: 200 } },
+            serviceProfileIds: [], seedProfileId: "synthetic-seed-v1", accountProfileIds: ["synthetic"], allowedOrigins: ["app-origin"],
+          };
+          recipe = E2EAppRecipeSchema.parse({ ...recipeBody, recipeDigest: createHash("sha256").update(canonicalJson(recipeBody)).digest("hex") });
+        }
       } else if (hasStart && hasDev) {
-        missingInputs.push({ inputId: "recipe-choice-" + (applications.length + 1), targetIds: target ? [target.targetId] : [], kind: "runtime", disposition: "blocking", reason: "The repository declares both start and dev recipes; choose the intended application launch contract", sourcePaths: [manifest.path] });
+        if (projectContract === null && !projectContractMalformed) missingInputs.push({ inputId: "recipe-choice-" + (applications.length + 1), targetIds: target ? [target.targetId] : [], kind: "runtime", disposition: "blocking", reason: "The repository declares both start and dev recipes; choose the intended application launch contract", sourcePaths: [manifest.path] });
       }
     }
-    const appTargets = target ? [target, ...additionalTargets] : [];
+    let appTargets = target ? [target, ...additionalTargets] : [];
+    if (projectContract !== null) {
+      try { appTargets = bindE2EApplicationAccountTargets({ contract: projectContract, applicationId: appId, baseTargets: appTargets }); }
+      catch {
+        missingInputs.push({ inputId: "application-account-targets-" + createHash("sha256").update(manifest.path).digest("hex").slice(0, 12),
+          targetIds: appTargets.map((item) => item.targetId), kind: "target-selection", disposition: "blocking", reason: "Source account variants do not bind exact compatible base targets within the target inventory limit", sourcePaths: [manifest.path] });
+        recipe = null;
+      }
+    }
     if (kind === "mobile" || kind === "desktop") {
       const runtimeSources = sourcePaths.filter((path) => /AndroidManifest\.xml$|Info\.plist$|project\.pbxproj$|\.csproj$|\.sln$|CMakeLists\.txt$|meson\.build$/.test(path));
       if (appTargets.length) missingInputs.push({ inputId: "native-runtime-" + (applications.length + 1), targetIds: appTargets.map((item) => item.targetId), kind: "runtime", disposition: "mock-substitutable", reason: `The ${kind} build and launch runtime profile is unavailable in this phase`, sourcePaths: runtimeSources.length ? runtimeSources : [manifest.path] });

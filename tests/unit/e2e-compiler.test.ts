@@ -3,13 +3,14 @@ import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promis
 import { dirname, join, relative, resolve, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 import { list } from "e2e/runner";
-import { canonicalJson, createCandidateManifest, e2eScenarioBundleDigest, e2EDefaultSyntheticAccountDefinition, E2ERoundSchema, E2ERunBindingSchema, inspectE2EPortableSource, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, e2EPortableApprovalBindingDigest, copyBoundedE2ESourceBytes, copyBoundedE2ETreePaths, e2ePortableRegistrationKey, resolveE2EPortableRegistration, type E2EPolicy, type E2EPortableApprovalBinding, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
+import { canonicalJson, createCandidateManifest, e2eExecutionPlanDigest, e2eScenarioBundleDigest, e2EDefaultSyntheticAccountDefinition, E2ERoundSchema, E2ERunBindingSchema, inspectE2EPortableSource, e2ePortableOperationDescriptorDigest as contractDescriptorDigest, e2EPortableApprovalBindingDigest, copyBoundedE2ESourceBytes, copyBoundedE2ETreePaths, e2ePortableRegistrationKey, resolveE2EPortableRegistration, type E2EPolicy, type E2EPortableApprovalBinding, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
 import { selectE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
 import { compileE2EScenarios, validateE2ECompiledRuntimeAdmission, type E2EImmutableCompilationContext } from "../../packages/verifier/src/scenarios.js";
 import { e2ePortableOperationDescriptorDigest } from "../../packages/verifier/src/templates.js";
-import { compareE2EPublicList, type E2ESelectionPacket } from "../../packages/verifier/src/selection.js";
+import { compareE2EPublicList, createE2ESelectionPacket, type E2ESelectionPacket } from "../../packages/verifier/src/selection.js";
 import { verifyE2ECompiledFileInventory } from "../../packages/verifier/src/identity.js";
+import { e2eApplicationUpstreamTestIdFromIdentity } from "../../packages/contracts/src/e2e-application-execution-plan.js";
 import { createE2ECollectionOracleFromCompiledSuite } from "../../packages/verifier/src/result-adapter.js";
 import { runE2EActualCli } from "../../packages/verifier/src/runtime-cli.js";
 
@@ -48,6 +49,23 @@ const approvedBundle = { ...bundle, bundleDigest: e2eScenarioBundleDigest(bundle
 const immutableCompilationContext: E2EImmutableCompilationContext = { selectionInput: selection, executionPlan: plan, group };
 
 describe("trusted E2E compiler", () => {
+  it("keeps application IDs representable while rejecting them in the portable compiler and packet", () => {
+    const compiled = compileE2EScenarios(approvedBundle, plan.effectiveTargets, group, immutableCompilationContext);
+    const expectedCase = compiled.expectedCases[0]!;
+    const applicationCase = { ...expectedCase, upstreamTestId: e2eApplicationUpstreamTestIdFromIdentity(expectedCase) };
+    const changedGroup = { ...group, expectedCases: [applicationCase] };
+    const changedBody = { ...plan, groups: [changedGroup], digest: "0".repeat(64) };
+    const changedPlan = { ...changedBody, digest: e2eExecutionPlanDigest(changedBody) };
+    expect(() => compileE2EScenarios(approvedBundle, plan.effectiveTargets, changedGroup,
+      { selectionInput: selection, executionPlan: changedPlan, group: changedGroup })).toThrow();
+    const caseBinding = compiled.caseBindings.get(expectedCase.caseId)!;
+    expect(() => createE2ESelectionPacket(changedPlan, changedGroup.groupId,
+      new Map([[applicationCase.caseId, expectedCase.upstreamTestId.split("::").at(-1)!]]), new Map([[applicationCase.caseId, {
+        compilerCaseIdentity: caseBinding.compilerCaseIdentity, registrationKey: caseBinding.registrationKey,
+        candidateResponseScope: "contained-candidate-process-response/v1" as const,
+        requestProtocol: "contained-candidate-host-request/v1" as const,
+      }]]))).toThrow(/pinned public identity/);
+  });
   it("retains complete compiler-origin source admission and rejects foreign or incomplete runtime snapshots", () => {
     const compiled = compileE2EScenarios(approvedBundle, plan.effectiveTargets, group, immutableCompilationContext);
     expect(validateE2ECompiledRuntimeAdmission(compiled, snapshot).commitSha).toBe(snapshot.commitSha);

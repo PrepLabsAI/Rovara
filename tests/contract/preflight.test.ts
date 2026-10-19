@@ -33,6 +33,11 @@ describe("EC2 worker preflight (#87)", () => {
     expect(evaluateEc2Preflight(healthy).filter((check) => check.level !== "pass")).toEqual([]);
   });
 
+  it("does not require the optional browser executor image setting, which a runtime stack from before the web/API runtime lacks", () => {
+    const facts = { ...healthy, workerSettings: { ...healthy.workerSettings, executorImage: undefined } } as Ec2PreflightFacts;
+    expect(levelOf(facts, "worker settings")).toBe("pass");
+  });
+
   it.each([
     ["launch template", { launchTemplate: undefined }],
     ["IMDSv2 at hop limit 1", { launchTemplate: { ...healthy.launchTemplate, hopLimit: 2 } }],

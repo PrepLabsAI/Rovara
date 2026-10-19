@@ -61,7 +61,7 @@ export const ReleaseManifestSchema = z
       .optional()
       .refine((documents) => documents === undefined || new Set(documents.map((document) => document.file)).size === documents.length,
         "legal document files must be unique"),
-    images: z.object({ worker: ImageDigest.optional(), slack: ImageDigest.optional() }).strict(),
+    images: z.object({ worker: ImageDigest.optional(), slack: ImageDigest.optional(), executor: ImageDigest.optional() }).strict(),
   })
   .strict();
 

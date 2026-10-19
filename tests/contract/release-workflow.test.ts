@@ -14,6 +14,7 @@ interface Step {
 interface Job {
   if?: string;
   needs?: string | string[];
+  outputs?: Record<string, string>;
   permissions?: Record<string, string>;
   steps: Step[];
 }
@@ -114,6 +115,18 @@ describe("release workflow", () => {
     expect(release.indexOf("release:verify")).toBeGreaterThan(release.indexOf("release:build"));
     expect(release.indexOf("gh release create")).toBeGreaterThan(release.indexOf("release:verify"));
     expect(release).toContain('--worker-image "$WORKER"');
+    // The browser executor ships with every release, built for linux/arm64 from its own Dockerfile and pinned by the same
+    // registry-confirmed digest as the worker, and recorded in release.json for the runtime stack to take.
+    expect(wf.jobs.images!.outputs?.executor).toBe("${{ steps.push.outputs.executor }}");
+    // Off by default: a tagged release must not fail on a repository the owner has not created yet.
+    expect(push).toContain('if [ "$PUBLISH_EXECUTOR" = "true" ]; then images="$images executor"; fi');
+    expect(push).toContain("for image in $images; do");
+    expect(wf.jobs.images!.steps.find((step) => step.id === "push")?.env?.PUBLISH_EXECUTOR).toBe("${{ vars.AGENTX_PUBLISH_EXECUTOR_IMAGE }}");
+    expect(push).toContain("environments/e2e-executor/Dockerfile");
+    // The flag is passed only when the images job produced an executor digest.
+    expect(release).toContain('if [ -n "$EXECUTOR" ]; then executor_flag=(--executor-image "$EXECUTOR"); fi');
+    expect(release).toContain('"${executor_flag[@]}"');
+    expect(wf.jobs.release!.steps.some((s) => s.env?.EXECUTOR === "${{ needs.images.outputs.executor }}")).toBe(true);
     expect(wf.jobs.release!.steps.some((s) => s.env?.GH_TOKEN === "${{ github.token }}")).toBe(true);
   });
 

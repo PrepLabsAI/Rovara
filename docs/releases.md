@@ -106,6 +106,22 @@ place; this records what it is, so a change to any piece can be made deliberatel
   `272978771` is the PrepLabsAI organization and `1307121896` this repository. GitHub uses
   immutable subjects for this repository (`gh api repos/PrepLabsAI/Rovara/actions/oidc/customization/sub`),
   so a rename does not break the role; a transfer to another organization would.
+- **The browser executor repository (not yet created).** Releases from the web/API runtime on
+  also push `agentx-executor` (the browser executor image, built from
+  `environments/e2e-executor/Dockerfile`; the worker pulls it at boot as `EXECUTOR_IMAGE`) and record
+  its digest in release.json. Before the first such release, an owner creates the ECR Public
+  repository `agentx-executor` beside the other two and adds it to the publish role's push
+  permissions; until then the `images` job fails at that image. `release-test.yml` does not push it
+  yet: the release test installs without an executor image, which the runtime stack allows.
+  The release workflow builds and publishes the executor only when the repository variable
+  `AGENTX_PUBLISH_EXECUTOR_IMAGE` is `true` (default off), so tagged releases keep working until
+  the owner has created the repository and extended the role; release.json then has no executor
+  image, which the runtime stack allows. Set the variable once both exist.
+  Once the variable is `true`, release.json has an `images.executor` entry, and `ReleaseManifestSchema`
+  validates `images` strictly (unknown keys are refused). A CLI built before the executor existed
+  rejects such a release, so upgrade the CLI before installing or updating from a release newer than
+  the one that first publishes the executor. Strictness is deliberate: an image key a CLI does not
+  know must not be skipped silently.
 - **The npm package.** `@preplabsai/rovara-code`, owned by the `preplabsai` npm organization
   (publishing needs an owner or developer role there; GitHub access does not grant it). Version
   0.1.0 was published by hand from the tag's commit, because npm trusted publishing can only be

@@ -76,7 +76,7 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
       "agentx-production-dispatcher", "agentx-production-ec2-workers", "agentx-production-session-manager",
     ]);
     expect(all("AWS::SSM::Parameter").map((r) => r.Properties.Name).sort()).toEqual([
-      "/agentx/production/worker-anthropic-secret-arn",
+      "/agentx/production/worker-anthropic-secret-arn", "/agentx/production/worker-executor-image",
       "/agentx/production/worker-image", "/agentx/production/worker-model-id", "/agentx/production/worker-model-provider",
       "/agentx/production/worker-openai-secret-arn", "/agentx/production/worker-openrouter-providers", "/agentx/production/worker-openrouter-secret-arn",
       "/agentx/production/worker-prompt-cache-retention",
@@ -202,5 +202,82 @@ describe("EC2 worker infrastructure (issue #82), shown for a named environment",
       Type: "String",
       Value: { Ref: "WorkerImageUri" },
     });
+  });
+});
+
+describe("standing E2E qualification transport (agentx:e2eQualificationTransport)", () => {
+  type Statement = { Sid?: string; Effect: string; Action: string | string[]; Resource: unknown };
+  const synth = (context: Record<string, unknown> = {}) => {
+    const stacks = stacksOf(buildAgentXApp({ agentxEnv: "staging", ...context }));
+    const byName = (name: string) => Template.fromStack(stacks.find((s) => s.stackName === name)!);
+    return { foundation: byName("agentx-staging-foundation"), controlPlane: byName("agentx-staging-control-plane") };
+  };
+  const statementsOf = (template: Template): Statement[] => ofType(template, "AWS::IAM::Policy")
+    .concat(ofType(template, "AWS::IAM::ManagedPolicy"))
+    .flatMap(([, r]) => (r.Properties.PolicyDocument as { Statement: Statement[] }).Statement);
+  const withAction = (template: Template, action: string) => statementsOf(template).filter((s) => [s.Action].flat().includes(action));
+  // A resource is a Fn::Join ending in the object key pattern; render its literal tail.
+  const tail = (resource: unknown): string => {
+    const parts = (resource as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1];
+    return parts.filter((p): p is string => typeof p === "string").join("");
+  };
+  const qualification = (template: Template) => statementsOf(template).filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"));
+  let off: ReturnType<typeof synth>;
+  let on: ReturnType<typeof synth>;
+  let booleanTrue: ReturnType<typeof synth>;
+  let stringTrue: ReturnType<typeof synth>;
+
+  beforeAll(() => {
+    off = synth();
+    on = synth({ "agentx:e2eQualificationTransport": "enabled" });
+    booleanTrue = synth({ "agentx:e2eQualificationTransport": true });
+    stringTrue = synth({ "agentx:e2eQualificationTransport": "true" });
+  }, 240_000);
+
+  it("adds no qualification transport by default", () => {
+    expect(qualification(off.controlPlane)).toHaveLength(0);
+    expect(qualification(off.foundation)).toHaveLength(0);
+  });
+
+  it("fails closed unless the context is exactly the string enabled", () => {
+    for (const t of [booleanTrue, stringTrue]) {
+      expect(qualification(t.controlPlane)).toHaveLength(0);
+      expect(qualification(t.foundation)).toHaveLength(0);
+      expect(ofType(t.controlPlane, "AWS::IAM::Policy").filter(([, r]) => r.Properties.PolicyName === "E2eQualificationTransport")).toHaveLength(0);
+    }
+  });
+
+  it("adds challenge/proposal/ready/status object access scoped to the caller's own role session (${aws:userid}) when enabled", () => {
+    const get = withAction(on.controlPlane, "s3:GetObject").filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"));
+    const put = withAction(on.controlPlane, "s3:PutObject").filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"));
+    expect(get).toHaveLength(1);
+    expect(put).toHaveLength(1);
+    // The IAM policy variable stays literal in the synthesized template (an EC2 role session's aws:userid is <role unique ID>:<instance ID>),
+    // so one instance of the shared worker role reaches only its own prefix.
+    expect([get[0]!.Resource].flat().map(tail)).toEqual(["/e2e-runtime/${aws:userid}/challenge.json"]);
+    expect([put[0]!.Resource].flat().map(tail).sort()).toEqual(["/e2e-runtime/${aws:userid}/proposal.json", "/e2e-runtime/${aws:userid}/ready.json", "/e2e-runtime/${aws:userid}/status.json"]);
+    expect(JSON.stringify(on.controlPlane.toJSON())).not.toContain("e2e-runtime/*");
+    // The bucket is the control plane's own artifact bucket.
+    expect(JSON.stringify([get[0]!.Resource, put[0]!.Resource])).toMatch(/Artifacts/);
+    // No List, Delete or wildcard access in the policy that carries it.
+    const policy = ofType(on.controlPlane, "AWS::IAM::Policy").find(([, r]) => r.Properties.PolicyName === "E2eQualificationTransport")!;
+    expect(policy).toBeDefined();
+    const statements = (policy[1].Properties.PolicyDocument as { Statement: Statement[] }).Statement;
+    expect(actionsOf(statements).sort()).toEqual(["s3:GetObject", "s3:PutObject"]);
+    expect(JSON.stringify(statements.map((s) => s.Resource))).not.toMatch(/\/\*"|\/\*\\"/);
+    // It attaches to the EC2 workers' instance role, the same way the provider secret policies do.
+    expect(policy[1].Properties.Roles).toEqual([{ "Fn::Select": [3, { "Fn::Split": ["/", { Ref: "Ec2WorkerInstanceRoleArn" }] }] }]);
+  });
+
+  it("leaves the protected foundation template and its instance role unchanged", () => {
+    expect(on.foundation.toJSON()).toEqual(off.foundation.toJSON());
+  });
+
+  it("keeps the IMDS hop limit at 1", () => {
+    for (const { foundation } of [off, on]) {
+      const launch = ofType(foundation, "AWS::EC2::LaunchTemplate")[0]![1];
+      const data = launch.Properties.LaunchTemplateData as { MetadataOptions: { HttpPutResponseHopLimit: number } };
+      expect(data.MetadataOptions.HttpPutResponseHopLimit).toBe(1);
+    }
   });
 });

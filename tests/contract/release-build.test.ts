@@ -6,17 +6,18 @@ import { fileURLToPath } from "node:url";
 import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import type { ContainerImageAssetMetadataEntry } from "@aws-cdk/cloud-assembly-schema";
 import { describe, expect, it } from "vitest";
-import { accumulateAsset, assetSignatureMismatch, buildRelease, type PackageAccumulator } from "../../scripts/release/build.js";
+import { accumulateAsset, assetSignatureMismatch, buildRelease, parseBuildArgs, type PackageAccumulator } from "../../scripts/release/build.js";
 import { ReleaseManifestSchema } from "../../scripts/release/manifest.js";
 import { readZipEntries } from "../support/zip-entries.js";
 
 const sha = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 const worker = `public.ecr.aws/agentx/agentx-worker@sha256:${"a".repeat(64)}`;
+const executor = `public.ecr.aws/agentx/agentx-executor@sha256:${"c".repeat(64)}`;
 
 describe("release builder", () => {
   it("writes templates, packages and a manifest whose checksums match the files", async () => {
     const out = join(await mkdtemp(join(tmpdir(), "agentx-release-")), "r");
-    const manifest = await buildRelease({ version: "1.2.3", out, gitCommit: "b".repeat(40), images: { worker } });
+    const manifest = await buildRelease({ version: "1.2.3", out, gitCommit: "b".repeat(40), images: { worker, executor } });
     expect(ReleaseManifestSchema.parse(JSON.parse(await readFile(join(out, "release.json"), "utf8")))).toEqual(manifest);
     expect(manifest.legalDocuments?.map((document) => document.file)).toEqual([
       "legal/LICENSE",
@@ -37,7 +38,8 @@ describe("release builder", () => {
     for (const document of manifest.legalDocuments ?? []) {
       expect(sha(await readFile(join(out, document.file)))).toBe(document.sha256);
     }
-    expect(manifest.images).toEqual({ worker });
+    // The release carries both digests: the worker and the browser executor the worker pulls at boot.
+    expect(manifest.images).toEqual({ worker, executor });
   }, 600_000);
 
   it("covers every asset parameter in every template with exactly one package, and ships no unused package", async () => {
@@ -62,6 +64,16 @@ describe("release builder", () => {
     await expect(buildRelease({ version: "1.2.3", out: join(dir, "r"), gitCommit: "b".repeat(40) })).rejects.toThrow(/not empty/);
     await expect(buildRelease({ version: "1.2.3", out: join(dir, "s"), gitCommit: "b".repeat(40), images: { worker: "public.ecr.aws/x/y:latest" } })).rejects.toThrow(/digest/);
   }, 600_000);
+
+  it("takes the executor image from --executor-image and refuses one that is not pinned by digest", async () => {
+    expect(parseBuildArgs(["--version", "1.2.3", "--out", "o", "--worker-image", worker, "--executor-image", executor]).images).toEqual({ worker, executor });
+    expect(parseBuildArgs(["--version", "1.2.3", "--out", "o", "--executor-image", executor]).images).toEqual({ executor });
+    expect(() => parseBuildArgs(["--version", "1.2.3", "--out", "o", "--executor-image"])).toThrow("--executor-image requires a value");
+    const dir = await mkdtemp(join(tmpdir(), "agentx-release-"));
+    const out = join(dir, "r");
+    await expect(buildRelease({ version: "1.2.3", out, gitCommit: "b".repeat(40), images: { executor: "public.ecr.aws/x/executor:latest" } })).rejects.toThrow(/executor image must be referenced by digest/);
+    await expect(readdir(out)).rejects.toThrow();
+  });
 
   it("validates images before checking whether the output directory is empty", async () => {
     const dir = await mkdtemp(join(tmpdir(), "agentx-release-"));

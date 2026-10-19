@@ -27,9 +27,20 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(test.steps.some((step) => step.run === "npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}")).toBe(true);
   });
 
-  it("keeps checks, tests and the release check in jobs of their own, none waiting on another", async () => {
+  it("keeps checks, tests, the release check and the Linux runtime check in jobs of their own, none waiting on another", async () => {
     const { jobs } = await workflow();
-    for (const name of ["checks", "test", "release"]) expect(jobs[name]!.needs, name).toBe("scope");
+    for (const name of ["checks", "test", "release", "linux-runtime"]) expect(jobs[name]!.needs, name).toBe("scope");
+  });
+
+  it("runs the Linux runtime check on an ARM64 runner, behind the same Markdown-only skip as the other heavy jobs", async () => {
+    const job = (await workflow()).jobs["linux-runtime"] as Job & { "runs-on"?: string };
+    expect(job["runs-on"]).toBe("ubuntu-24.04-arm");
+    expect(job.if).toBe("needs.scope.outputs.docs_only != 'true'");
+    const run = job.steps.map((step) => step.run ?? "").join("\n");
+    expect(run.indexOf("iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP")).toBeGreaterThanOrEqual(0);
+    expect(run.indexOf("iptables")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci ."));
+    expect(run).toContain("docker run --rm --network none rovara-e2e-executor:ci node /opt/agentx/packages/verifier/dist/executor/smoke.js");
+    expect(run).toContain("npx vitest run tests/linux");
   });
 
   it("gives every job but the manual live-AWS one a time limit, so a hung runner fails in minutes and not after six hours", async () => {

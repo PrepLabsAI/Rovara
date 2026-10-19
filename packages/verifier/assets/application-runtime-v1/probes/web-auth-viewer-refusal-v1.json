@@ -1,0 +1,1 @@
+{"schemaVersion":"e2e-application-runtime-probe/v1","probeId":"web-auth-viewer-refusal/v1","kind":"web","polarity":"positive","templateId":"web-auth-viewer-refusal/v1","requiredCapabilities":["web","auth-refusal"],"oracle":{"kind":"viewer-refusal","viewerIdentity":"Viewer (viewer)","expectedStatus":403,"visibleTestId":"orders-access-error","visibleText":"Access refused (403)"}}

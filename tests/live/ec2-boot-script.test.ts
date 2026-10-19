@@ -103,6 +103,8 @@ fi
 exec /usr/bin/mount "$@"
 EOF
 printf '#!/bin/bash\necho "udevadm $*" >> /tmp/calls.log\n' > /shims/udevadm
+# The metadata drop rule is absent on a fresh boot: the -C check fails, so -I inserts it.
+printf '#!/bin/bash\necho "iptables $*" >> /tmp/calls.log\n[[ "$1" != -C ]]\n' > /shims/iptables
 # Records the wait instead of waiting, so the retry backoff costs the test nothing.
 printf '#!/bin/bash\necho "sleep $*" >> /tmp/calls.log\n' > /shims/sleep
 # Records the transient unit's options and runs its command in the background, as systemd would.
@@ -288,6 +290,8 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.calls).toContain("docker login --username AWS --password-stdin 111122223333.dkr.ecr.us-east-1.amazonaws.com");
     expect(result.calls).toContain(`docker pull ${WORKER_IMAGE}`);
     expect(result.calls).toContain("systemctl enable --now agentx-worker.service");
+    expect(result.calls).toContain("iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP");
+    expect(result.calls).toContain("systemctl enable rovara-imds-drop.service");
     // A healthy boot neither waits nor reports a failure: /ping is left to the worker.
     expect(result.sleeps).toEqual([]);
     expect(result.calls).not.toContain("systemd-run");

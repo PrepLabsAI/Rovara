@@ -3,7 +3,7 @@ import { z } from "zod";
 import { canonicalJson } from "./canonical-json.js";
 import type { WorkflowVerificationResults } from "./task-workflow.js";
 import { redactText } from "./redaction.js";
-import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "./e2e-case-identity.js";
+import { e2eApplicationUpstreamTestIdFromIdentity, e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "./e2e-case-identity.js";
 import { copyBoundedE2EJsonArrayItems } from "./e2e-safe-data.js";
 import { E2ECallableSelectorSchema } from "./e2e-portable.js";
 
@@ -314,7 +314,8 @@ export const E2ECaseCoverageSchema = z.object({ observedScope: E2EEvidenceScopeS
 export type E2ECaseCoverage = z.infer<typeof E2ECaseCoverageSchema>;
 export const E2EExpectedCaseSchema = z.object({ caseId: id(160), criterionId: id(120), scenarioId: id(120), upstreamTestId: id(512), targetId: id(80), requestedTargetId: id(80), agentId: id(120), repeat: z.literal(0), executionDescriptorDigest: digest, accountContextId: id(120), accountContextDigest: digest, accountProfileId: id(120), assertionDigest: digest, assertionDigests: z.array(digest).min(1).max(20), required: z.boolean(), minimumEvidence: E2EEvidenceScopeSchema, requiredRealComponentIds: z.array(id(120)).max(32) }).strict().superRefine((item, context) => {
   if (createHash("sha256").update(canonicalJson(item.assertionDigests)).digest("hex") !== item.assertionDigest) context.addIssue({ code: "custom", path: ["assertionDigest"], message: "aggregate assertion digest must bind the ordered assertion identities" });
-  if (item.caseId !== e2eCaseIdFromIdentity(item) || item.upstreamTestId !== e2eUpstreamTestIdFromIdentity(item)) context.addIssue({ code: "custom", path: ["caseId"], message: "case and pinned upstream test IDs must bind the full execution and account identity" });
+  if (item.caseId !== e2eCaseIdFromIdentity(item) || (item.upstreamTestId !== e2eUpstreamTestIdFromIdentity(item)
+    && item.upstreamTestId !== e2eApplicationUpstreamTestIdFromIdentity(item))) context.addIssue({ code: "custom", path: ["caseId"], message: "case and pinned upstream test IDs must bind the full execution and account identity" });
 });
 export type E2EExpectedCase = z.infer<typeof E2EExpectedCaseSchema>;
 export const E2EExecutionGroupSchema = z.object({ groupId: id(80), targetIds: ids(3), runtimeProfileId: id(120), mode: E2EExecutionModeSchema, mockManifestDigest: digest, expectedCases: z.array(E2EExpectedCaseSchema).max(64) }).strict();

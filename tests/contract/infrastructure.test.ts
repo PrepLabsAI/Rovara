@@ -354,6 +354,7 @@ describe("production foundation and worker settings", () => {
     // would try to create a second parameter with the same name and fail the release (#117).
     expect(Object.entries(resources).filter(([, resource]) => resource.Type !== "AWS::CDK::Metadata").map(([id, resource]) => [id, resource.Type]).sort()).toEqual([
       [expect.stringMatching(/^WorkerAnthropicSecretParameter/), "AWS::SSM::Parameter"],
+      [expect.stringMatching(/^WorkerExecutorImageParameter/), "AWS::SSM::Parameter"],
       ["WorkerImageParameter7CA9ADBB", "AWS::SSM::Parameter"],
       ["WorkerModelIdParameter02DE997A", "AWS::SSM::Parameter"],
       ["WorkerModelProviderParameterFBA25A19", "AWS::SSM::Parameter"],
@@ -368,6 +369,16 @@ describe("production foundation and worker settings", () => {
     template.hasResourceProperties("AWS::SSM::Parameter", {
       Name: "/agentx/production/worker-image",
       Value: { Ref: "WorkerImageUri" },
+    });
+    // The browser executor image: optional, so a release without one deploys unchanged, and published for the worker's boot config.
+    template.hasParameter("ExecutorImageUri", {
+      Type: "String",
+      Default: "none",
+      AllowedPattern: "^(none|.+@sha256:[a-f0-9]{64})$",
+    });
+    template.hasResourceProperties("AWS::SSM::Parameter", {
+      Name: "/agentx/production/worker-executor-image",
+      Value: { Ref: "ExecutorImageUri" },
     });
     template.hasParameter("PromptCacheRetention", {
       Type: "String",

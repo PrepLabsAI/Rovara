@@ -315,7 +315,16 @@ export async function buildAndPushImage(
   return pushed;
 }
 
-async function smokeTestWorker(runner: Runner, image: string): Promise<void> {
+/** The executor image's own smoke check (the one CI runs): its entrypoint's smoke module, with no network. */
+export async function smokeTestExecutor(runner: Runner, image: string): Promise<void> {
+  const result = runner.capture("docker", ["run", "--rm", "--network", "none", image, "node", "/opt/agentx/packages/verifier/dist/executor/smoke.js"], true);
+  if (result.status !== 0) {
+    process.stderr.write(result.stderr);
+    throw new Error("executor image smoke test failed");
+  }
+}
+
+export async function smokeTestWorker(runner: Runner, image: string): Promise<void> {
   // The tools that run a project's devcontainer through the EC2 host's Docker (#121).
   const tools = runner.capture("docker", [
     "run", "--rm", "--entrypoint", "sh", image, "-c",
@@ -372,7 +381,7 @@ export function stackExists(runner: Runner, region: string, stack: string): bool
   throw new Error(`unable to inspect CloudFormation stack ${stack}`);
 }
 
-export function describeStack(runner: Runner, region: string, stack: string): StackDescription {
+export function describeStack(runner: Pick<Runner, "aws">, region: string, stack: string): StackDescription {
   const result = runner.aws([
     "cloudformation",
     "describe-stacks",
