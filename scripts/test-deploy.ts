@@ -394,6 +394,24 @@ export async function waitForChangeSetExecution(
   }
 }
 
+/** After a change set completes the stack may still be cleaning up (`UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`): wait for a settled status, which must be UPDATE_COMPLETE. */
+export async function waitForSettledStack(
+  readStatus: () => Promise<string>,
+  options: { timeoutMs?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
+): Promise<void> {
+  const { timeoutMs = 10 * 60_000, intervalMs = 5_000, sleep: wait = sleep, now = Date.now } = options;
+  const deadline = now() + timeoutMs;
+  for (;;) {
+    const status = await readStatus();
+    if (!status.endsWith("_IN_PROGRESS")) {
+      if (status !== "UPDATE_COMPLETE") throw new Error(`the stack is ${status} after its change set completed; read its events in CloudFormation`);
+      return;
+    }
+    if (now() > deadline) throw new Error(`the stack is still ${status} after ${Math.round(timeoutMs / 60_000)} minutes; check CloudFormation`);
+    await wait(intervalMs);
+  }
+}
+
 /** Reads each named resource back with DescribeStackResource and requires its status; returns the IDs checked. */
 export async function verifyStackResources(
   describe: (logicalId: string) => Promise<{ ResourceStatus?: string | undefined; PhysicalResourceId?: string | undefined } | undefined>,
@@ -679,8 +697,7 @@ async function executeChangeSet(context: ApplyContext, step: Extract<DeployStep,
   await context.cloudFormation.send(new ExecuteChangeSetCommand(identity));
   // The change set's own ExecutionStatus, never the stack's: a stack still saying UPDATE_COMPLETE from before is not this deploy's success.
   await waitForChangeSetExecution(() => context.cloudFormation.send(new DescribeChangeSetCommand(identity)));
-  const status = (await describeStackSdk(context, step.stack)).StackStatus ?? "";
-  if (status !== "UPDATE_COMPLETE") throw new Error(`${step.stack} is ${status} after its change set completed; read its events in CloudFormation`);
+  await waitForSettledStack(async () => (await describeStackSdk(context, step.stack)).StackStatus ?? "");
 }
 
 /** Pushes to a repository that must already exist: describing it is the check, and nothing here creates one. */

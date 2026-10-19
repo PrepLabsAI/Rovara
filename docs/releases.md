@@ -113,6 +113,10 @@ place; this records what it is, so a change to any piece can be made deliberatel
   repository `agentx-executor` beside the other two and adds it to the publish role's push
   permissions; until then the `images` job fails at that image. `release-test.yml` does not push it
   yet: the release test installs without an executor image, which the runtime stack allows.
+  The release workflow builds and publishes the executor only when the repository variable
+  `AGENTX_PUBLISH_EXECUTOR_IMAGE` is `true` (default off), so tagged releases keep working until
+  the owner has created the repository and extended the role; release.json then has no executor
+  image, which the runtime stack allows. Set the variable once both exist.
 - **The npm package.** `@preplabsai/rovara-code`, owned by the `preplabsai` npm organization
   (publishing needs an owner or developer role there; GitHub access does not grant it). Version
   0.1.0 was published by hand from the tag's commit, because npm trusted publishing can only be

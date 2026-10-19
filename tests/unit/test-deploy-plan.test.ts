@@ -11,6 +11,7 @@ import {
   resolveTestStacks,
   verifyStackResources,
   waitForChangeSetExecution,
+  waitForSettledStack,
   type BuiltArtifacts,
   type DeployStep,
   type StackParameters,
@@ -417,6 +418,26 @@ describe("waitForChangeSetExecution", () => {
     // The describe function is the only thing it reads: a status that is not an execution status is not success.
     const fake = sequence([{ ExecutionStatus: "UPDATE_COMPLETE" }]);
     await expect(waitForChangeSetExecution(fake.describe, { ...fast, timeoutMs: 5 })).rejects.toThrow();
+  });
+});
+
+describe("waitForSettledStack", () => {
+  const statuses = (list: string[]) => { let calls = 0; return { read: async () => list[Math.min(calls++, list.length - 1)]!, calls: () => calls }; };
+  const clock = () => { let t = 0; return () => (t += 1); };
+  const fast = { sleep: async () => undefined, intervalMs: 1, timeoutMs: 1_000 };
+
+  it("waits out the cleanup after a change set completes, then accepts UPDATE_COMPLETE", async () => {
+    const fake = statuses(["UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", "UPDATE_IN_PROGRESS", "UPDATE_COMPLETE"]);
+    await waitForSettledStack(fake.read, { ...fast, now: clock() });
+    expect(fake.calls()).toBe(3);
+  });
+
+  it("fails on any other settled status, naming it", async () => {
+    await expect(waitForSettledStack(statuses(["UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE"]).read, { ...fast, now: clock() })).rejects.toThrow(/UPDATE_ROLLBACK_COMPLETE/);
+  });
+
+  it("fails when the stack never settles in the time allowed", async () => {
+    await expect(waitForSettledStack(statuses(["UPDATE_COMPLETE_CLEANUP_IN_PROGRESS"]).read, { ...fast, timeoutMs: 5, now: clock() })).rejects.toThrow(/still UPDATE_COMPLETE_CLEANUP_IN_PROGRESS/);
   });
 });
 

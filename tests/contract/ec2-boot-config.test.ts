@@ -313,6 +313,8 @@ describe("the opt-in TEST qualification hook", () => {
     expect(unquoted).not.toMatch(/\$\{?(BUCKET|PREFIX|PROFILE|REGION|EVIDENCE_HOST|EVIDENCE_CONTAINER|STAGE|fetched|proposal)\b/);
     expect(qualificationScript).not.toMatch(/AWS_SECRET|AWS_SESSION_TOKEN|X-aws-ec2-metadata-token|get-secret-value/);
     expect(qualificationScript).toContain("--server-side-encryption AES256");
+    // A temporary directory that cannot be made stops the script before it reads or writes anything.
+    expect(qualificationScript).toContain("STAGE=$(mktemp -d) || exit 1\nreadonly STAGE");
     expect(qualificationScript).toContain("--user node agentx-worker /usr/local/bin/node /opt/agentx/packages/verifier/dist/install-qualification-cli.js");
   });
 
@@ -342,6 +344,8 @@ out=; while (($#)); do [[ "$1" == --out ]] && out=$2; shift; done
 head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename "$out")"`);
     fake("curl", `[[ "$FAKE_PING" == down ]] && exit 22; echo '{"status":"Healthy"}'`);
     fake("chown", `printf 'chown %s\\n' "$*" >>"${calls}"`);
+    // macOS mv has no -T: the shim keeps the test honest about the flag being passed and runs the plain move.
+    fake("mv", `printf 'mv %s\\n' "$*" >>"${calls}"; a=(); for x in "$@"; do [[ "$x" == -fT ]] && x=-f; a+=("$x"); done; exec /bin/mv "\${a[@]}"`);
     fake("timeout", `while [[ "$1" == -* ]]; do shift; done; shift; exec "$@"`);
     const result = spawnSync("bash", ["-c", qualificationScript, "bash", ...(options.args ?? ["us-east-1", qualification.bucket, qualification.prefix, qualification.profile])], {
       encoding: "utf8",
@@ -359,8 +363,12 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
   it("fetches the challenge, then runs the qualifier on it, then uploads the proposal and a SUCCEEDED status, in that order", () => {
     const { result, called, object } = runHook();
     expect(result.status, result.stderr).toBe(0);
-    const step = (call: string) => (call.startsWith("aws s3api get-object") ? "fetch" : call.startsWith("docker exec") ? "exec" : call.startsWith("aws s3api put-object") ? (call.includes("proposal.json") ? "upload-proposal" : "upload-status") : call.split(" ")[0]);
-    expect(called.map(step).filter((name) => name !== "chown")).toEqual(["fetch", "exec", "upload-proposal", "upload-status"]);
+    const step = (call: string) => (call.startsWith("aws s3api get-object") ? "fetch" : call.startsWith("docker exec") ? "exec" : call.startsWith("aws s3api put-object") ? (call.includes("proposal.json") ? "upload-proposal" : call.includes("ready.json") ? "upload-ready" : "upload-status") : call.split(" ")[0]);
+    expect(called.map(step).filter((name) => name !== "chown" && name !== "mv")).toEqual(["upload-ready", "fetch", "exec", "upload-proposal", "upload-status"]);
+    // The ready marker comes once the worker answers, before the challenge is looked for, so boot time never eats the challenge's lifetime.
+    expect(object("ready.json")).toContain('"state":"READY"');
+    // Moves into the uid-1000 evidence directory are of a file onto that exact name, never into a directory of that name.
+    expect(called.find((call) => call.startsWith("mv"))).toContain("mv -fT ");
     expect(called.find((call) => call.includes("get-object"))).toContain(`--bucket ${qualification.bucket} --key ${qualification.prefix}challenge.json`);
     expect(called.find((call) => call.startsWith("chown"))).toContain("1000:1000");
     const exec = called.find((call) => call.startsWith("docker exec")) ?? "";
@@ -395,8 +403,8 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
   it.each([
     ["the worker never becomes healthy", { ping: "down" as const }, "worker-not-healthy", ["aws"]],
     ["the challenge never appears", { challenge: "missing" as const }, "challenge-unavailable", ["aws"]],
-    ["the qualifier fails", { qualifier: 3 }, "qualification-failed-exit-3", ["aws", "docker", "chown"]],
-    ["the proposal is larger than the registrar accepts", { proposalBytes: 5 * 1024 * 1024 + 1 }, "proposal-too-large", ["aws", "docker", "chown"]],
+    ["the qualifier fails", { qualifier: 3 }, "qualification-failed-exit-3", ["aws", "docker", "chown", "mv"]],
+    ["the proposal is larger than the registrar accepts", { proposalBytes: 5 * 1024 * 1024 + 1 }, "proposal-too-large", ["aws", "docker", "chown", "mv"]],
   ])("uploads a FAILED status with the reason and no proposal when %s", (_name, options, reason, tools) => {
     const { result, called, object } = runHook(options);
     expect(result.status).toBe(1);

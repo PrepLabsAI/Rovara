@@ -1,14 +1,19 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
-import { ec2WorkerBootScript } from "../../packages/contracts/src/session.js";
+import { ec2WorkerBootScript, Ec2RuntimeBindingSchema } from "../../packages/contracts/src/session.js";
+import { canonicalJson } from "../../packages/contracts/src/index.js";
+import { ec2Binding } from "../../packages/cli/src/setup/project-add.js";
 import {
   QUALIFICATION_POLL_TIMEOUT_MS,
   buildRunInstancesInput,
+  classifyGetObjectFailure,
   describeRegisteredRows,
   formatQualificationPlan,
   parseQualifyArgs,
   planTestQualification,
+  qualificationBinding,
   renderQualificationUserData,
   runTestQualification,
   type QualificationEffects,
@@ -27,6 +32,13 @@ const plan = (overrides: Partial<typeof input> = {}, allowlist?: readonly string
 const kinds = (steps: QualificationStep[]) => steps.map((step) => step.kind);
 const find = <K extends QualificationStep["kind"]>(steps: QualificationStep[], kind: K) => steps.find((step): step is Extract<QualificationStep, { kind: K }> => step.kind === kind);
 
+const foundationOutputs = {
+  Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0",
+  // The foundation lists every worker subnet, in no particular zone order.
+  Ec2WorkerSubnets: "us-east-1b=subnet-0bbbbbbbbbbbbbbbb,us-east-1a=subnet-0aaaaaaaaaaaaaaaa,us-east-1c=subnet-0cccccccccccccccc",
+};
+const { binding: projectBinding, launchSubnet } = qualificationBinding(foundationOutputs, "agentx-agentxlivetest123-foundation");
+
 const facts: QualificationFacts = {
   region: "us-east-1",
   artifactBucket: "agentx-agentxlivetest123-control-artifacts82dd59a1-syx0unxsewcf",
@@ -34,7 +46,8 @@ const facts: QualificationFacts = {
   invokePublicKey: `MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE${"A".repeat(88)}`,
   logGroupName: "/agentx/agentxlivetest123/worker",
   launchTemplateId: "lt-0123456789abcdef0",
-  subnet: { availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef0" },
+  binding: projectBinding,
+  subnet: launchSubnet,
   volumeSizeGiB: 20,
   settings: {
     workerImage: `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-test/worker@sha256:${"a".repeat(64)}`,
@@ -55,11 +68,13 @@ describe("planTestQualification", () => {
       "run-instance",
       "attach-volume",
       "read-private-ip",
+      "wait-ready",
       "issue-challenge",
       "upload-challenge",
       "poll-status",
       "download-proposal",
       "register",
+      "delete-challenge",
       "print-registered-rows",
     ]);
   });
@@ -74,6 +89,9 @@ describe("planTestQualification", () => {
     });
     expect(find(steps, "upload-challenge")).toMatchObject({ key: `${PREFIX}challenge.json` });
     expect(find(steps, "poll-status")).toMatchObject({ key: `${PREFIX}status.json`, timeoutMs: 60 * 60_000 });
+    // The challenge is issued only once the worker says it is ready, so boot time does not use up its 60 minutes.
+    expect(find(steps, "wait-ready")).toMatchObject({ key: `${PREFIX}ready.json`, statusKey: `${PREFIX}status.json` });
+    expect(find(steps, "delete-challenge")).toMatchObject({ key: `${PREFIX}challenge.json` });
     expect(find(steps, "download-proposal")).toMatchObject({ key: `${PREFIX}proposal.json` });
     expect(QUALIFICATION_POLL_TIMEOUT_MS).toBe(60 * 60_000);
   });
@@ -140,6 +158,48 @@ describe("the qualification instance's user data", () => {
   });
 });
 
+describe("qualificationBinding", () => {
+  it("binds the challenge to every worker subnet the foundation lists, in its order, exactly as project registration does", () => {
+    expect(projectBinding.subnets).toEqual([
+      { availabilityZone: "us-east-1b", subnetId: "subnet-0bbbbbbbbbbbbbbbb" },
+      { availabilityZone: "us-east-1a", subnetId: "subnet-0aaaaaaaaaaaaaaaa" },
+      { availabilityZone: "us-east-1c", subnetId: "subnet-0cccccccccccccccc" },
+    ]);
+    const digest = (binding: unknown) => createHash("sha256").update(canonicalJson(Ec2RuntimeBindingSchema.parse(binding))).digest("hex");
+    // What `agentx project add` registers for the same outputs ...
+    expect(digest(projectBinding)).toBe(digest(ec2Binding(foundationOutputs, "stack")));
+    // ... and the literal binding the registered runtime row must equal.
+    expect(digest(projectBinding)).toBe(digest({
+      deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef0", volumeSizeGiB: 20, volumeType: "gp3",
+      subnets: [
+        { availabilityZone: "us-east-1b", subnetId: "subnet-0bbbbbbbbbbbbbbbb" },
+        { availabilityZone: "us-east-1a", subnetId: "subnet-0aaaaaaaaaaaaaaaa" },
+        { availabilityZone: "us-east-1c", subnetId: "subnet-0cccccccccccccccc" },
+      ],
+    }));
+  });
+
+  it("launches into one of those subnets, the first by zone", () => {
+    expect(launchSubnet).toEqual({ availabilityZone: "us-east-1a", subnetId: "subnet-0aaaaaaaaaaaaaaaa" });
+    expect(projectBinding.subnets).toContainEqual(launchSubnet);
+  });
+
+  it("refuses outputs without the launch template or the subnets", () => {
+    expect(() => qualificationBinding({ Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0" }, "stack")).toThrow(/Ec2WorkerSubnets/);
+  });
+});
+
+describe("classifyGetObjectFailure", () => {
+  it("treats a missing object and a denied read as not there yet (the principal may lack ListBucket), and anything else as an error", () => {
+    for (const stderr of ["An error occurred (NoSuchKey) when calling the GetObject operation", "Not Found", "An error occurred (404)", "An error occurred (AccessDenied) when calling the GetObject operation: Access Denied", "Forbidden"]) {
+      expect(classifyGetObjectFailure(stderr), stderr).toBe("absent");
+    }
+    for (const stderr of ["Unable to locate credentials", "The security token included in the request is expired", "Could not connect to the endpoint URL"]) {
+      expect(classifyGetObjectFailure(stderr), stderr).toBe("error");
+    }
+  });
+});
+
 describe("buildRunInstancesInput", () => {
   it("is one instance from the environment's own launch template in its subnet, with the run ID as token and no instance type or profile of its own", () => {
     const request = buildRunInstancesInput(facts, { env: ENV, runId: RUN_ID, revision: "0123456789ab", userData: "dXNlcmRhdGE=" });
@@ -151,7 +211,7 @@ describe("buildRunInstancesInput", () => {
     expect(request).not.toHaveProperty("InstanceType");
     expect(request).not.toHaveProperty("IamInstanceProfile");
     const tags = Object.fromEntries((request.TagSpecifications?.[0]?.Tags ?? []).map((tag) => [tag.Key ?? "", tag.Value ?? ""] as const));
-    expect(tags).toMatchObject({ "agentx:env": ENV, "agentx:run": RUN_ID, "agentx:runtime-purpose": "web-api-qualification", "agentx:revision": "0123456789ab" });
+    expect(tags).toMatchObject({ "agentx:env": ENV, "agentx:run": RUN_ID, "agentx:runtime-purpose": "web-api-qualification", "agentx:revision": "0123456789ab", "agentx:qualification-run": RUN_ID });
     expect(request.TagSpecifications?.[0]?.ResourceType).toBe("instance");
   });
 });
@@ -184,8 +244,10 @@ describe("describeRegisteredRows", () => {
 });
 
 /** Effects that record every call and fail where a test says, so the run is driven with no AWS and no clock. */
-function harness(options: { statuses?: Array<Buffer | undefined>; failAt?: string; adminFails?: boolean } = {}) {
+function harness(options: { statuses?: Array<Buffer | undefined>; readies?: Array<Buffer | undefined>; failAt?: string; adminFails?: boolean } = {}) {
   const calls: string[] = [];
+  const bindings: unknown[] = [];
+  const ready = [...(options.readies ?? [Buffer.from(JSON.stringify({ state: "READY", reason: "worker-healthy", finishedAt: "2026-10-19T11:50:00Z" }))])];
   const printed: string[] = [];
   let clock = 0;
   const statuses = [...(options.statuses ?? [Buffer.from(JSON.stringify({ state: "SUCCEEDED", reason: "qualified", finishedAt: "2026-10-19T12:00:00Z" }))])];
@@ -201,16 +263,22 @@ function harness(options: { statuses?: Array<Buffer | undefined>; failAt?: strin
     },
     async attachVolume(request) { calls.push(`attachVolume ${request.volumeId} ${request.instanceId}`); maybeFail("attachVolume"); },
     async privateIpOf(instanceId) { calls.push(`privateIpOf ${instanceId}`); maybeFail("privateIpOf"); return "10.42.128.17"; },
-    async issueChallenge(request) { calls.push(`issueChallenge ${request.endpoint} ${request.generation} ${request.transportCorrelationId} ${request.profile}`); maybeFail("issueChallenge"); return { challengeId: "c-1", file: "/tmp/challenge.json", expiresAt: "2026-10-19T13:00:00Z" }; },
+    async issueChallenge(request) { bindings.push(request.binding); calls.push(`issueChallenge ${request.endpoint} ${request.generation} ${request.transportCorrelationId} ${request.profile}`); maybeFail("issueChallenge"); return { challengeId: "c-1", file: "/tmp/challenge.json", expiresAt: "2026-10-19T13:00:00Z" }; },
     async putObject(key, file) { calls.push(`putObject ${key} ${file}`); maybeFail("putObject"); },
-    async getObject(key) { calls.push(`getObject ${key}`); maybeFail("getObject"); return key.endsWith("status.json") ? statuses.shift() : Buffer.from("proposal-bytes"); },
+    async getObject(key) {
+      calls.push(`getObject ${key}`);
+      maybeFail("getObject");
+      if (key.endsWith("ready.json")) return ready.shift();
+      return key.endsWith("status.json") ? statuses.shift() : Buffer.from("proposal-bytes");
+    },
+    async deleteObject(key) { calls.push(`deleteObject ${key}`); maybeFail("deleteObject"); },
     saveProposal(bytes) { calls.push(`saveProposal ${bytes.toString()}`); return "/tmp/proposal.json"; },
     async register(file) { calls.push(`register ${file}`); maybeFail("register"); return JSON.stringify({ profileId: "linux-arm64-web-api-v1", featureCatalogId: "catalog-1", featureRevisions: { web: 1, api: 1 } }); },
     now: () => clock,
     async sleep(ms) { clock += ms; },
     print: (line) => printed.push(line),
   };
-  return { effects, calls, printed, clockNow: () => clock };
+  return { effects, calls, printed, bindings, clockNow: () => clock };
 }
 const succeeded = Buffer.from(JSON.stringify({ state: "SUCCEEDED", reason: "qualified", finishedAt: "2026-10-19T12:00:00Z" }));
 const failed = (reason: string) => Buffer.from(JSON.stringify({ state: "FAILED", reason, finishedAt: "2026-10-19T12:00:00Z" }));
@@ -221,9 +289,13 @@ describe("runTestQualification", () => {
     await runTestQualification(plan(), effects, { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" });
     const names = calls.map((call) => call.split(" ")[0]);
     expect(names).toEqual([
-      "checkAdminSession", "resolveFacts", "createVolume", "runInstance", "attachVolume", "privateIpOf", "issueChallenge", "putObject",
-      "getObject", "getObject", "getObject", "getObject", "saveProposal", "register",
+      "checkAdminSession", "resolveFacts", "createVolume", "runInstance", "attachVolume", "privateIpOf", "getObject", "issueChallenge", "putObject",
+      "getObject", "getObject", "getObject", "getObject", "saveProposal", "register", "deleteObject",
     ]);
+    // The ready marker is read before the challenge is issued, never after.
+    expect(calls.indexOf(`getObject ${PREFIX}ready.json`)).toBeLessThan(calls.findIndex((call) => call.startsWith("issueChallenge")));
+    // The one-use challenge is deleted once registration has succeeded.
+    expect(calls[calls.length - 1]).toBe(`deleteObject ${PREFIX}challenge.json`);
     expect(calls).toContain("runInstance min=1 max=1 token=" + RUN_ID);
     expect(calls).toContain("issueChallenge http://10.42.128.17:8080 1 " + WORKSPACE_ID + " linux-arm64-web-api-v1");
     expect(calls).toContain(`putObject ${PREFIX}challenge.json /tmp/challenge.json`);
@@ -285,5 +357,64 @@ describe("runTestQualification", () => {
     expect(text).toContain("vol-0123456789abcdef0");
     expect(text).toContain("aws ec2 delete-volume --volume-id vol-0123456789abcdef0");
     expect(text).not.toContain("terminate-instances");
+  });
+});
+
+describe("runTestQualification: readiness, binding and cleanup", () => {
+  const options = { revision: "0123456789ab", profile: "agentx-test", region: "us-east-1" };
+
+  it("issues the challenge for every worker subnet the foundation lists, not only the one launched into", async () => {
+    const { effects, bindings } = harness();
+    await runTestQualification(plan(), effects, options);
+    expect(bindings).toEqual([projectBinding]);
+    expect((bindings[0] as { subnets: unknown[] }).subnets).toHaveLength(3);
+  });
+
+  it("waits for the worker's ready marker before it issues the challenge, so boot time never uses the challenge's lifetime", async () => {
+    const { effects, calls, clockNow } = harness({ readies: [undefined, undefined, Buffer.from(JSON.stringify({ state: "READY" }))], statuses: [undefined, undefined, succeeded] });
+    await runTestQualification(plan(), effects, options);
+    const ready = calls.filter((call) => call.endsWith("ready.json"));
+    expect(ready).toHaveLength(3);
+    expect(clockNow()).toBe(2 * 30_000);
+  });
+
+  it("stops before issuing a challenge when the worker never becomes ready, keeping the instance", async () => {
+    const { effects, calls, printed } = harness({ readies: [], statuses: [] });
+    await expect(runTestQualification(plan(), effects, options)).rejects.toThrow(/not ready after/);
+    expect(calls.some((call) => call.startsWith("issueChallenge") || call.startsWith("putObject"))).toBe(false);
+    expect(printed.join("\n")).toContain("aws ec2 terminate-instances --instance-ids i-0123456789abcdef0");
+  });
+
+  it("stops at once, with the reason, when the worker reports FAILED before it is ready", async () => {
+    const { effects, calls, clockNow } = harness({ readies: [], statuses: [failed("worker-not-healthy")] });
+    await expect(runTestQualification(plan(), effects, options)).rejects.toThrow(/worker-not-healthy/);
+    expect(calls.some((call) => call.startsWith("issueChallenge"))).toBe(false);
+    expect(clockNow()).toBe(0);
+  });
+
+  it("deletes the one-use challenge after registration, and only after it", async () => {
+    const { effects, calls } = harness();
+    await runTestQualification(plan(), effects, options);
+    expect(calls.indexOf(`deleteObject ${PREFIX}challenge.json`)).toBeGreaterThan(calls.findIndex((call) => call.startsWith("register")));
+    const failedRun = harness({ statuses: [failed("qualification-failed-exit-3")] });
+    await expect(runTestQualification(plan(), failedRun.effects, options)).rejects.toThrow();
+    expect(failedRun.calls.some((call) => call.startsWith("deleteObject"))).toBe(false);
+  });
+
+  it("warns, naming the key, when the challenge cannot be deleted, and still succeeds", async () => {
+    const { effects, printed } = harness({ failAt: "deleteObject" });
+    await expect(runTestQualification(plan(), effects, options)).resolves.toBeUndefined();
+    const text = printed.join("\n");
+    expect(text).toMatch(/warning/i);
+    expect(text).toContain(`${PREFIX}challenge.json`);
+    expect(text).toContain("PROFILE#linux-arm64-web-api-v1#web revision 1");
+  });
+
+  it("prints the client token and the run tag, so an instance RunInstances created before it threw can be found", async () => {
+    const { effects, printed } = harness({ failAt: "runInstance" });
+    await expect(runTestQualification(plan(), effects, options)).rejects.toThrow("runInstance failed");
+    const text = printed.join("\n");
+    expect(text).toContain(`client token ${RUN_ID}`);
+    expect(text).toContain(`aws ec2 describe-instances --filters Name=tag:agentx:qualification-run,Values=${RUN_ID} --profile agentx-test --region us-east-1`);
   });
 });

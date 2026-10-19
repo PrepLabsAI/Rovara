@@ -23,6 +23,7 @@ import { CloudFormationClient, DescribeStackResourcesCommand, DescribeStacksComm
 import { AttachVolumeCommand, CreateVolumeCommand, DescribeInstancesCommand, DescribeLaunchTemplateVersionsCommand, DescribeVolumesCommand, EC2Client, RunInstancesCommand, type RunInstancesCommandInput } from "@aws-sdk/client-ec2";
 import { GetPublicKeyCommand, KMSClient } from "@aws-sdk/client-kms";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { ec2Binding } from "../packages/cli/src/setup/project-add.js";
 import { environmentSettingsPrefix, environmentStackName } from "../packages/contracts/src/environments.js";
 import {
   E2E_QUALIFICATION_PROFILE_ID,
@@ -45,6 +46,8 @@ const INSTANCE_TYPE = "m6g.large";
 /** The web/API challenge lives 60 minutes (docs/runtime-installation.md): registration is refused after that. */
 export const QUALIFICATION_POLL_TIMEOUT_MS = 60 * 60_000;
 const POLL_INTERVAL_MS = 30_000;
+/** The worker uploads ready.json once it answers /ping: boot, volume attach and image pulls take a few minutes. */
+const READY_TIMEOUT_MS = 20 * 60_000;
 
 export interface QualificationSettings {
   workerImage: string;
@@ -67,9 +70,25 @@ export interface QualificationFacts {
   invokePublicKey: string;
   logGroupName: string;
   launchTemplateId: string;
+  /** The binding `agentx project add` registers for this foundation: every worker subnet. The challenge, and so the registered rows, carry it. */
+  binding: Ec2RuntimeBinding;
+  /** The one subnet of the binding the worker is launched into. */
   subnet: { availabilityZone: string; subnetId: string };
   volumeSizeGiB: number;
   settings: QualificationSettings;
+}
+
+/** The runtime binding project registration builds from the foundation's outputs (its own function), and the subnet to launch into: the first by zone. */
+export function qualificationBinding(outputs: Record<string, string>, stackName: string): { binding: Ec2RuntimeBinding; launchSubnet: { availabilityZone: string; subnetId: string } } {
+  const binding = ec2Binding(outputs, stackName);
+  const [launchSubnet] = [...binding.subnets].sort((a, b) => a.availabilityZone.localeCompare(b.availabilityZone));
+  if (launchSubnet === undefined) throw new Error(`stack ${stackName} lists no worker subnet`);
+  return { binding, launchSubnet };
+}
+
+/** A failed get-object is "not there yet" when the object is missing or the principal may not list the bucket (so a missing key reads as AccessDenied); anything else is an error. */
+export function classifyGetObjectFailure(stderr: string): "absent" | "error" {
+  return /NoSuchKey|Not Found|\b404\b|AccessDenied|Forbidden/.test(stderr) ? "absent" : "error";
 }
 
 export type QualificationStep =
@@ -79,11 +98,13 @@ export type QualificationStep =
   | { id: string; kind: "run-instance"; minCount: 1; maxCount: 1; clientToken: string; workspaceId: string; qualification: { prefix: string; profile: typeof E2E_QUALIFICATION_PROFILE_ID } }
   | { id: string; kind: "attach-volume"; device: string }
   | { id: string; kind: "read-private-ip" }
+  | { id: string; kind: "wait-ready"; key: string; statusKey: string; timeoutMs: number; intervalMs: number }
   | { id: string; kind: "issue-challenge"; profile: typeof E2E_QUALIFICATION_PROFILE_ID; generation: 1; transportCorrelationId: string; port: number }
   | { id: string; kind: "upload-challenge"; key: string }
   | { id: string; kind: "poll-status"; key: string; timeoutMs: number; intervalMs: number }
   | { id: string; kind: "download-proposal"; key: string }
   | { id: string; kind: "register" }
+  | { id: string; kind: "delete-challenge"; key: string }
   | { id: string; kind: "print-registered-rows" };
 
 export interface QualificationInput {
@@ -108,11 +129,13 @@ export function planTestQualification(input: QualificationInput, allowlist: read
     { id: "run-instance", kind: "run-instance", minCount: 1, maxCount: 1, clientToken: input.runId, workspaceId: input.workspaceId, qualification: { prefix, profile: E2E_QUALIFICATION_PROFILE_ID } },
     { id: "attach-volume", kind: "attach-volume", device: VOLUME_DEVICE },
     { id: "read-private-ip", kind: "read-private-ip" },
+    { id: "wait-ready", kind: "wait-ready", key: `${prefix}ready.json`, statusKey: `${prefix}status.json`, timeoutMs: READY_TIMEOUT_MS, intervalMs: POLL_INTERVAL_MS },
     { id: "issue-challenge", kind: "issue-challenge", profile: E2E_QUALIFICATION_PROFILE_ID, generation: 1, transportCorrelationId: input.workspaceId, port: WORKER_PORT },
     { id: "upload-challenge", kind: "upload-challenge", key: `${prefix}challenge.json` },
     { id: "poll-status", kind: "poll-status", key: `${prefix}status.json`, timeoutMs: QUALIFICATION_POLL_TIMEOUT_MS, intervalMs: POLL_INTERVAL_MS },
     { id: "download-proposal", kind: "download-proposal", key: `${prefix}proposal.json` },
     { id: "register", kind: "register" },
+    { id: "delete-challenge", kind: "delete-challenge", key: `${prefix}challenge.json` },
     { id: "print-registered-rows", kind: "print-registered-rows" },
   ];
 }
@@ -127,11 +150,13 @@ export function formatQualificationPlan(steps: readonly QualificationStep[], inp
       case "run-instance": return `launch ONE ${INSTANCE_TYPE} instance (MinCount=MaxCount=1, client token ${step.clientToken}) from the environment's launch template, with the worker's normal boot plus the qualification hook for ${step.qualification.prefix}`;
       case "attach-volume": return `attach the volume to that instance at ${step.device}`;
       case "read-private-ip": return "read the instance's private IP address";
+      case "wait-ready": return `wait up to ${step.timeoutMs / 60_000} minutes for the worker to upload ${step.key} (it is healthy), so boot time does not use the challenge's lifetime`;
       case "issue-challenge": return `issue a ${step.profile} challenge (agentx admin runtime-installation challenge) for http://<private ip>:${step.port}, generation ${step.generation}, correlation ${step.transportCorrelationId}`;
       case "upload-challenge": return `upload challenge.json to s3://<control artifacts bucket>/${step.key}`;
       case "poll-status": return `poll ${step.key} every ${step.intervalMs / 1000}s for up to ${step.timeoutMs / 60_000} minutes (the challenge's lifetime)`;
       case "download-proposal": return `only if the status is SUCCEEDED: download ${step.key}`;
       case "register": return "register the proposal (agentx admin runtime-installation register --proposal-file)";
+      case "delete-challenge": return `after a successful registration, delete the one-use ${step.key} from the bucket (a failure only warns)`;
       case "print-registered-rows": return "print the registered catalog rows";
     }
   };
@@ -195,6 +220,7 @@ export function buildRunInstancesInput(
         { Key: "Name", Value: `agentx-${run.env}-web-api-qualification-${run.runId.slice(0, 8)}` },
         { Key: "agentx:env", Value: run.env },
         { Key: "agentx:run", Value: run.runId },
+        { Key: "agentx:qualification-run", Value: run.runId },
         { Key: "agentx:revision", Value: run.revision },
         { Key: "agentx:runtime-purpose", Value: "web-api-qualification" },
       ],
@@ -213,6 +239,7 @@ export interface QualificationEffects {
   putObject(key: string, file: string): Promise<void>;
   /** The object's bytes, or undefined when it does not exist (yet). */
   getObject(key: string): Promise<Buffer | undefined>;
+  deleteObject(key: string): Promise<void>;
   saveProposal(bytes: Buffer): string;
   register(proposalFile: string): Promise<string>;
   now(): number;
@@ -266,6 +293,8 @@ export interface RunOptions {
 }
 
 interface RunState {
+  /** The client token and tag of the launch, once it has been attempted (RunInstances may throw after creating the instance). */
+  launchRun?: string;
   facts?: QualificationFacts;
   volumeId?: string;
   instanceId?: string;
@@ -296,6 +325,7 @@ export async function runTestQualification(steps: readonly QualificationStep[], 
         }
         case "run-instance": {
           const facts = need(state.facts, "the stack facts");
+          state.launchRun = step.clientToken;
           const userData = renderQualificationUserData(facts, { workspaceId: step.workspaceId, volumeId: need(state.volumeId, "the volume"), qualification: step.qualification }, options.bootScript ?? readBootScript());
           state.instanceId = await effects.runInstance(buildRunInstancesInput(facts, { env: options.env ?? "", runId: step.clientToken, revision: options.revision, userData }));
           effects.print(`instance ${state.instanceId}`);
@@ -303,9 +333,10 @@ export async function runTestQualification(steps: readonly QualificationStep[], 
         }
         case "attach-volume": await effects.attachVolume({ volumeId: need(state.volumeId, "the volume"), instanceId: need(state.instanceId, "the instance"), device: step.device }); break;
         case "read-private-ip": state.privateIp = await effects.privateIpOf(need(state.instanceId, "the instance")); break;
+        case "wait-ready": await waitReady(step, effects); break;
         case "issue-challenge": {
           const facts = need(state.facts, "the stack facts");
-          const binding = Ec2RuntimeBindingSchema.parse({ deploymentMode: "ec2-ebs", launchTemplateId: facts.launchTemplateId, subnets: [facts.subnet], volumeSizeGiB: facts.volumeSizeGiB, volumeType: "gp3" });
+          const binding = Ec2RuntimeBindingSchema.parse(facts.binding);
           const issued = await effects.issueChallenge({ binding, endpoint: `http://${need(state.privateIp, "the private IP")}:${step.port}`, generation: step.generation, transportCorrelationId: step.transportCorrelationId, profile: step.profile });
           state.challengeFile = issued.file;
           effects.print(`challenge ${issued.challengeId}, expires ${issued.expiresAt}`);
@@ -320,6 +351,13 @@ export async function runTestQualification(steps: readonly QualificationStep[], 
           break;
         }
         case "register": state.registered = await effects.register(need(state.proposalFile, "the proposal file")); break;
+        case "delete-challenge":
+          try {
+            await effects.deleteObject(step.key);
+          } catch (error) {
+            effects.print(`Warning: could not delete the one-use challenge ${step.key} (${error instanceof Error ? error.message : String(error)}); delete it by hand.`);
+          }
+          break;
         case "print-registered-rows": {
           const rows = describeRegisteredRows(need(state.registered, "the registration answer"));
           for (const row of rows.length > 0 ? rows : [`registered; the answer was not in the expected form: ${state.registered}`]) effects.print(row);
@@ -338,6 +376,21 @@ function need<T>(value: T | undefined, what: string): T {
   return value;
 }
 
+async function waitReady(step: Extract<QualificationStep, { kind: "wait-ready" }>, effects: QualificationEffects): Promise<void> {
+  const deadline = effects.now() + step.timeoutMs;
+  for (;;) {
+    if ((await effects.getObject(step.key)) !== undefined) return;
+    // A worker that failed before it was ready says so in status.json: stop at once instead of waiting out the clock.
+    const status = await effects.getObject(step.statusKey);
+    if (status !== undefined) {
+      const parsed = parseStatus(status);
+      if (parsed.state === "FAILED") throw new Error(`the worker reported FAILED before it was ready: ${parsed.reason}`);
+    }
+    if (effects.now() >= deadline) throw new Error(`the worker was not ready after ${step.timeoutMs / 60_000} minutes; no challenge was issued`);
+    await effects.sleep(step.intervalMs);
+  }
+}
+
 async function pollStatus(step: Extract<QualificationStep, { kind: "poll-status" }>, effects: QualificationEffects): Promise<void> {
   const deadline = effects.now() + step.timeoutMs;
   for (;;) {
@@ -353,6 +406,10 @@ async function pollStatus(step: Extract<QualificationStep, { kind: "poll-status"
 }
 
 function reportLeftovers(state: RunState, options: RunOptions, print: (line: string) => void): void {
+  if (state.launchRun !== undefined) {
+    print(`\nThe launch used client token ${state.launchRun}. If RunInstances failed after it created an instance, find it by its tag:`);
+    print(`  aws ec2 describe-instances --filters Name=tag:agentx:qualification-run,Values=${state.launchRun} --profile ${options.profile} --region ${options.region}`);
+  }
   if (state.instanceId !== undefined) {
     print(`\nThe qualification instance ${state.instanceId} is still running (${INSTANCE_TYPE}, billed until it is ended), left for diagnosis. End it with:`);
     print(`  aws ec2 terminate-instances --instance-ids ${state.instanceId} --profile ${options.profile} --region ${options.region}`);
@@ -459,11 +516,9 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
       const publicKey = await kms.send(new GetPublicKeyCommand({ KeyId: signingKeyArn }));
       if (publicKey.KeySpec !== "ECC_NIST_P256" || publicKey.KeyUsage !== "SIGN_VERIFY" || !publicKey.PublicKey) throw new Error("the worker invoke signing key is not the expected P-256 signing key");
 
-      // The first subnet by zone, as read from the foundation's own output: no ID is written into this script.
-      const subnets = requireOutput(foundation, "Ec2WorkerSubnets", foundationName).split(",").filter(Boolean).map((pair) => pair.split("=") as [string, string]).sort(([a], [b]) => a.localeCompare(b));
-      const [zone, subnetId] = subnets[0] ?? [];
-      if (zone === undefined || subnetId === undefined) throw new Error(`stack ${foundationName} lists no worker subnet`);
-      const launchTemplateId = requireOutput(foundation, "Ec2WorkerLaunchTemplateId", foundationName);
+      // The binding is what project registration builds from the same outputs (every worker subnet); the worker launches into the first by zone.
+      const { binding, launchSubnet } = qualificationBinding(foundation, foundationName);
+      const launchTemplateId = binding.launchTemplateId;
 
       // The template is launched as it is: refuse one that is not the reviewed shape instead of overriding it.
       const template = (await ec2.send(new DescribeLaunchTemplateVersionsCommand({ LaunchTemplateId: launchTemplateId, Versions: ["$Default"] }))).LaunchTemplateVersions?.[0]?.LaunchTemplateData;
@@ -479,8 +534,9 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
         invokePublicKey: Buffer.from(publicKey.PublicKey).toString("base64"),
         logGroupName: requireOutput(foundation, "Ec2WorkerLogGroupName", foundationName),
         launchTemplateId,
-        subnet: { availabilityZone: zone, subnetId },
-        volumeSizeGiB: VOLUME_SIZE_GIB,
+        binding,
+        subnet: launchSubnet,
+        volumeSizeGiB: binding.volumeSizeGiB,
         settings: {
           workerImage: required("workerImage"),
           executorImage,
@@ -561,8 +617,12 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
       const file = join(scratch, `get-${Date.now()}`);
       const result = runner.aws(["s3api", "get-object", "--bucket", bucket, "--key", key, "--region", args.region, file], true);
       if (result.status === 0) return readFileSync(file);
-      if (/NoSuchKey|Not Found|404/.test(result.stderr)) return undefined;
+      if (classifyGetObjectFailure(result.stderr) === "absent") return undefined;
       throw new Error(`reading s3://${bucket}/${key} failed: ${result.stderr.trim().slice(0, 300)}`);
+    },
+
+    async deleteObject(key) {
+      runner.aws(["s3api", "delete-object", "--bucket", bucket, "--key", key, "--region", args.region, "--output", "json"]);
     },
 
     saveProposal(bytes) {

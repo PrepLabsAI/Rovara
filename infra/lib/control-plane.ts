@@ -975,8 +975,8 @@ export class ControlPlaneStack extends Stack {
           Statement: [
             { Sid: "ReadQualificationChallenge", Effect: "Allow", Action: "s3:GetObject", Resource: artifacts.arnForObjects("e2e-runtime/*/challenge.json") },
             {
-              Sid: "WriteQualificationProposalAndStatus", Effect: "Allow", Action: "s3:PutObject",
-              Resource: [artifacts.arnForObjects("e2e-runtime/*/proposal.json"), artifacts.arnForObjects("e2e-runtime/*/status.json")],
+              Sid: "WriteQualificationProposalReadyAndStatus", Effect: "Allow", Action: "s3:PutObject",
+              Resource: [artifacts.arnForObjects("e2e-runtime/*/proposal.json"), artifacts.arnForObjects("e2e-runtime/*/ready.json"), artifacts.arnForObjects("e2e-runtime/*/status.json")],
             },
           ],
         },

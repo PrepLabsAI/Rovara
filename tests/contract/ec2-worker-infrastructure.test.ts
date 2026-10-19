@@ -253,7 +253,7 @@ describe("standing E2E qualification transport (agentx:e2eQualificationTransport
     expect(get).toHaveLength(1);
     expect(put).toHaveLength(1);
     expect([get[0]!.Resource].flat().map(tail)).toEqual(["/e2e-runtime/*/challenge.json"]);
-    expect([put[0]!.Resource].flat().map(tail).sort()).toEqual(["/e2e-runtime/*/proposal.json", "/e2e-runtime/*/status.json"]);
+    expect([put[0]!.Resource].flat().map(tail).sort()).toEqual(["/e2e-runtime/*/proposal.json", "/e2e-runtime/*/ready.json", "/e2e-runtime/*/status.json"]);
     // The bucket is the control plane's own artifact bucket.
     expect(JSON.stringify([get[0]!.Resource, put[0]!.Resource])).toMatch(/Artifacts/);
     // No List, Delete or wildcard access in the policy that carries it.

@@ -448,7 +448,8 @@ log() { printf 'agentx-e2e-qualification: %s\n' "$*" >&2; }
 [[ "$PROFILE" == linux-arm64-web-api-v1 ]] || { log "refused: the profile must be linux-arm64-web-api-v1"; exit 2; }
 [[ "$BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { log "refused: the bucket name is not valid"; exit 2; }
 [[ "$REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { log "refused: the region is not valid"; exit 2; }
-readonly STAGE=$(mktemp -d)
+STAGE=$(mktemp -d) || exit 1
+readonly STAGE
 upload() { aws s3api put-object --bucket "$BUCKET" --key "$PREFIX$1" --body "$2" --server-side-encryption AES256 --region "$REGION" --no-cli-pager >/dev/null; }
 publish_status() {
   printf '{"state":"%s","reason":"%s","finishedAt":"%s"}\n' "$1" "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STAGE/status.json" && upload status.json "$STAGE/status.json"
@@ -463,6 +464,7 @@ until curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/ping >/de
   ((SECONDS < deadline)) || fail_with worker-not-healthy
   sleep "$POLL"
 done
+printf '{"state":"READY","reason":"worker-healthy","finishedAt":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STAGE/ready.json" && upload ready.json "$STAGE/ready.json" || fail_with ready-upload-failed
 fetched="$STAGE/challenge.json"
 deadline=$((SECONDS + CHALLENGE_WAIT))
 until aws s3api get-object --bucket "$BUCKET" --key "${PREFIX}challenge.json" --region "$REGION" --no-cli-pager "$fetched" >/dev/null 2>&1; do
@@ -472,7 +474,7 @@ done
 size=$(wc -c <"$fetched" | tr -d '[:space:]')
 ((size > 0 && size <= CHALLENGE_MAX_BYTES)) || fail_with challenge-size-rejected
 [[ -d "$EVIDENCE_HOST" && ! -L "$EVIDENCE_HOST" ]] || fail_with evidence-directory-unavailable
-chown 1000:1000 "$fetched" && chmod 0600 "$fetched" && mv -f "$fetched" "$EVIDENCE_HOST/$CHALLENGE_NAME" || fail_with challenge-install-failed
+chown 1000:1000 "$fetched" && chmod 0600 "$fetched" && mv -fT "$fetched" "$EVIDENCE_HOST/$CHALLENGE_NAME" || fail_with challenge-install-failed
 rm -f "$EVIDENCE_HOST/$PROPOSAL_NAME"
 timeout --foreground --kill-after=10s "${QUALIFY_SECONDS}s" docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/verifier/dist/install-qualification-cli.js --profile "$PROFILE" --challenge-file "$EVIDENCE_CONTAINER/$CHALLENGE_NAME" --evidence-root "$EVIDENCE_CONTAINER" --out "$EVIDENCE_CONTAINER/$PROPOSAL_NAME" >"$STAGE/qualifier.log" 2>&1
 status=$?
