@@ -2,8 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromium } from "playwright-core";
-import { evaluateChromiumSandbox } from "@agentx/contracts";
-import { inspectChromiumSandbox } from "./chromium-sandbox.js";
+import { attestWhenSettled } from "./chromium-sandbox.js";
 import { launchLocalChromium } from "./local-browser.js";
 
 // Proves the image's Chromium starts as the unprivileged user without any network, with its own sandbox on (the container must run under the pinned
@@ -14,8 +13,8 @@ const timer = setTimeout(() => controller.abort(new Error("chromium smoke check 
 let browser: Awaited<ReturnType<typeof launchLocalChromium>> | null = null;
 try {
   browser = await launchLocalChromium({ downloadDir: downloads, signal: controller.signal });
-  const verdict = evaluateChromiumSandbox(await inspectChromiumSandbox({ cdpEndpoint: browser.cdpEndpoint, browserPid: browser.pid, runId: "00000000-0000-4000-8000-000000000000",
-    groupId: "smoke", signal: controller.signal }));
+  const { verdict } = await attestWhenSettled({ cdpEndpoint: browser.cdpEndpoint, browserPid: browser.pid, runId: "00000000-0000-4000-8000-000000000000",
+    groupId: "smoke", signal: controller.signal }, { settleMs: 5_000 });
   if (!verdict.sandboxed) throw new Error(`chromium is not sandboxed: ${verdict.reason}`);
   const connected = await chromium.connectOverCDP(browser.cdpEndpoint);
   const context = await connected.newContext();

@@ -1230,11 +1230,11 @@
 			"args": [
 				{
 					"index": 0,
-					"value": 33554560,
+					"value": 1845624960,
 					"op": "SCMP_CMP_MASKED_EQ"
 				}
 			],
-			"comment": "rovara: Chromium sandbox - unshare with any namespace flag except CLONE_NEWCGROUP and CLONE_NEWTIME (the flags mask is 0x02000080), no capability needed"
+			"comment": "rovara: Chromium sandbox - unshare(CLONE_NEWUSER) and nothing that creates another namespace: the flags mask 0x6E020080 (NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWPID, NEWNET, NEWTIME) must be absent; no capability needed"
 		},
 		{
 			"names": [
@@ -1244,11 +1244,11 @@
 			"args": [
 				{
 					"index": 0,
-					"value": 33554432,
+					"value": 235012096,
 					"op": "SCMP_CMP_MASKED_EQ"
 				}
 			],
-			"comment": "rovara: Chromium sandbox - clone with any namespace flag except CLONE_NEWCGROUP (the flags mask is 0x02000000), no capability needed",
+			"comment": "rovara: Chromium sandbox - clone with CLONE_NEWUSER, CLONE_NEWPID and CLONE_NEWNET (what the namespace sandbox uses) but not NEWNS, NEWCGROUP, NEWUTS or NEWIPC: the flags mask 0x0E020000 must be absent; no capability needed",
 			"excludes": {
 				"arches": [
 					"s390",
@@ -1264,7 +1264,7 @@
 			"args": [
 				{
 					"index": 1,
-					"value": 33554432,
+					"value": 235012096,
 					"op": "SCMP_CMP_MASKED_EQ"
 				}
 			],

@@ -41,13 +41,19 @@ describe("the executor container's seccomp profile", () => {
     }
   });
 
-  it("allows namespace flags except CLONE_NEWCGROUP (and CLONE_NEWTIME for unshare), and no syscall that is dangerous without CAP_SYS_ADMIN", async () => {
+  it("allows exactly the namespace flags Chromium's namespace sandbox uses (clone: USER, PID, NET; unshare: USER), and no syscall that is dangerous without CAP_SYS_ADMIN", async () => {
     const profile = await readProfile();
     const [unshare, clone, cloneS390, chroot] = ours(profile) as [Rule, Rule, Rule, Rule];
     // The mask is the set of flags that must NOT be present: SCMP_CMP_MASKED_EQ with datum 0.
-    expect(unshare.args).toEqual([{ index: 0, value: 0x02000080, op: "SCMP_CMP_MASKED_EQ" }]);
-    expect(clone.args).toEqual([{ index: 0, value: 0x02000000, op: "SCMP_CMP_MASKED_EQ" }]);
-    expect(cloneS390.args).toEqual([{ index: 1, value: 0x02000000, op: "SCMP_CMP_MASKED_EQ" }]);
+    const NEWNS = 0x00020000, NEWCGROUP = 0x02000000, NEWUTS = 0x04000000, NEWIPC = 0x08000000, NEWUSER = 0x10000000, NEWPID = 0x20000000, NEWNET = 0x40000000, NEWTIME = 0x00000080;
+    // sandbox/linux/services/namespace_sandbox.cc and credentials.cc in Chromium: clone(CLONE_NEWUSER | CLONE_NEWPID | CLONE_NEWNET), clone(CLONE_NEWUSER), clone(CLONE_NEWPID), unshare(CLONE_NEWUSER).
+    const cloneForbidden = NEWNS | NEWCGROUP | NEWUTS | NEWIPC;
+    const unshareForbidden = NEWNS | NEWCGROUP | NEWUTS | NEWIPC | NEWPID | NEWNET | NEWTIME;
+    expect(cloneForbidden & (NEWUSER | NEWPID | NEWNET)).toBe(0);
+    expect(unshareForbidden & NEWUSER).toBe(0);
+    expect(unshare.args).toEqual([{ index: 0, value: unshareForbidden, op: "SCMP_CMP_MASKED_EQ" }]);
+    expect(clone.args).toEqual([{ index: 0, value: cloneForbidden, op: "SCMP_CMP_MASKED_EQ" }]);
+    expect(cloneS390.args).toEqual([{ index: 1, value: cloneForbidden, op: "SCMP_CMP_MASKED_EQ" }]);
     expect(chroot.args).toBeUndefined();
     const added = ours(profile).flatMap((rule) => rule.names);
     for (const forbidden of ["setns", "mount", "umount2", "pivot_root", "bpf", "perf_event_open", "clone3", "ptrace", "reboot", "sethostname"]) expect(added).not.toContain(forbidden);

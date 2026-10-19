@@ -138,7 +138,7 @@ describe.runIf(built)("executor Chromium sandbox gate", () => {
     runId: request.runId, groupId: request.groupId, browser: { pid: 40, ...processFacts },
     renderers: [kind === "plain" ? { pid: 41, ...processFacts } : { pid: 41, nsPidDepth: 2, seccompFilters: 2, uidMap: "0 1000 1" }] });
 
-  async function runWebExecutor(inspectChromiumSandbox: (request: { runId: string; groupId: string; cdpEndpoint?: string }) => Promise<unknown>) {
+  async function runWebExecutor(inspectChromiumSandbox: (request: { runId: string; groupId: string; cdpEndpoint?: string }) => Promise<unknown>, settleMs = 0) {
     const fixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", healthTimeoutMs: 5_000 });
     const dir = await temp(); const out = join(dir, "out");
     await writeFile(join(dir, "plan.json"), JSON.stringify(fixture.plan));
@@ -147,7 +147,7 @@ describe.runIf(built)("executor Chromium sandbox gate", () => {
     const chromium = await fakeChromium("listen"); dirs.push(chromium.directory);
     try {
       const result = await runE2EExecutor({ planPath: join(dir, "plan.json"), outDir: out, signal, localAppUpstream: `http://127.0.0.1:${(app.address() as { port: number }).port}`,
-        chromiumExecutable: chromium.executable, inspectChromiumSandbox: inspectChromiumSandbox as never });
+        chromiumExecutable: chromium.executable, inspectChromiumSandbox: inspectChromiumSandbox as never, chromiumSandboxSettleMs: settleMs });
       return { fixture, out, result, launches: await chromium.launches() };
     } finally { await new Promise<void>((resolve) => app.close(() => resolve())); }
   }
@@ -162,6 +162,14 @@ describe.runIf(built)("executor Chromium sandbox gate", () => {
     expect(JSON.parse(await readFile(join(out, "chromium-sandbox.json"), "utf8"))).toMatchObject({ schemaVersion: "e2e-executor-chromium-sandbox/v1", runId: fixture.plan.runId, groupId: fixture.plan.groupId });
     expect(await readFile(join(out, "executor.log"), "utf8")).toContain("chromium-unsandboxed: renderer-has-no-extra-seccomp-filter");
     expect(JSON.parse(await readFile(join(out, "executor-result.json"), "utf8"))).toMatchObject({ exitCode: 2, reason: "chromium-unsandboxed", shards: [] });
+  });
+
+  it("waits for a renderer that has not yet installed its seccomp filter instead of judging the first look", async () => {
+    let looks = 0;
+    const { result, out } = await runWebExecutor(async (request) => { looks += 1; return attestationFor(looks < 3 ? "plain" : "sandboxed")(request); }, 5_000);
+    expect(looks).toBe(3);
+    expect(result.reason).not.toMatch(/^chromium-/);
+    expect(JSON.parse(await readFile(join(out, "chromium-sandbox.json"), "utf8"))).toMatchObject({ renderers: [{ nsPidDepth: 2, seccompFilters: 2 }] });
   });
 
   it("exits 2 with chromium-sandbox-unverifiable when the kernel cannot show it (no procfs, an old kernel), never assuming a sandbox", async () => {

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { E2EExecutorPlanSchema } from "@agentx/contracts";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
@@ -87,6 +87,47 @@ describe("docker application host", () => {
     expect(others.length).toBeGreaterThan(2);
     for (const args of others) expect(args.join(" ")).not.toMatch(/seccomp/);
     for (const args of fake.calls) expect(args.join(" ")).not.toMatch(/--privileged|--cap-add|seccomp=unconfined|apparmor=unconfined|--userns|--pid=host|--ipc=host/);
+  });
+
+  it("says why an executor that exited 2 did, from its own log and its exit code, since docker run prints nothing of it", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    fake.exitCodeOfExecutor(2);
+    fake.onExecutor = (outDir) => {
+      writeExecutorOutput(outDir, { exitCode: 2, reason: "chromium-unsandboxed", runId: s.runId, groupId: s.groupId });
+      writeFileSync(join(outDir, "executor.log"), "2026-10-19T00:00:00.000Z unavailable: chromium-unsandboxed: renderer-has-no-extra-seccomp-filter\n");
+    };
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBe("executor-failed");
+    const tail = s.host.readDiagnostics(s.runId).executorLogTail;
+    expect(tail).toContain("chromium-unsandboxed: renderer-has-no-extra-seccomp-filter");
+    expect(tail).toContain("docker run exited with code 2");
+  });
+
+  it("says why docker run itself failed to start the executor: its stderr and exit code", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    fake.exitCodeOfExecutor(126); fake.executorStdout = "docker: Error response from daemon: invalid seccomp profile";
+    await runWith(s);
+    const tail = s.host.readDiagnostics(s.runId).executorLogTail;
+    expect(tail).toContain("invalid seccomp profile");
+    expect(tail).toContain("docker run exited with code 126");
+  });
+
+  it("keeps a finished run's executor diagnostics free of credentials and bounded", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    fake.exitCodeOfExecutor(2);
+    let password = "";
+    fake.onExecutor = (outDir) => {
+      // The run's own synthetic credential, which only the plan mount holds.
+      password = (JSON.parse(readFileSync(join(dirname(outDir), "plan.json"), "utf8")) as { accounts: { password: string }[] }).accounts[0]!.password;
+      writeExecutorOutput(outDir, { exitCode: 2, reason: "internal-error", runId: s.runId, groupId: s.groupId });
+      writeFileSync(join(outDir, "executor.log"), `${"x".repeat(200_000)}\npassword ${password}\n`);
+    };
+    await runWith(s);
+    const tail = s.host.readDiagnostics(s.runId).executorLogTail;
+    expect(password.length).toBeGreaterThan(16);
+    expect(tail).not.toContain(password);
+    expect(Buffer.byteLength(tail)).toBeLessThanOrEqual(64 * 1024);
+    expect(tail).toContain("<account:");
   });
 
   it("refuses to be built over a seccomp profile whose digest differs from the pin", async () => {
@@ -347,7 +388,8 @@ describe("docker application host", () => {
     const fake = new FakeDockerCli(); const s = await setup({ fake });
     const signal = new AbortController().signal;
     const lease = await s.host.allocate(s.input as never, signal);
-    expect(fake.networks().sort()).toEqual([`rovara-e2e-${s.runId}`, `rovara-e2e-build-${s.runId}`]);
+    // Both names, in sorted order whichever way the run id's first character sorts against "build-".
+    expect(fake.networks().sort()).toEqual([`rovara-e2e-${s.runId}`, `rovara-e2e-build-${s.runId}`].sort());
     await expect(lease.close(signal)).resolves.toEqual({ confirmed: true });
     const removals = () => fake.calls.filter((args) => args[0] === "rm" || (args[0] === "network" && args[1] === "rm")).length;
     const before = removals();

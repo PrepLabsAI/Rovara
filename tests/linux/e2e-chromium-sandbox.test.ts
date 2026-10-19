@@ -16,9 +16,8 @@ import { EXECUTOR_IMAGE, removeProbeDirs, runProbe } from "../support/linux-runt
 const INSIDE_THE_CONTAINER = `
 import { chmodSync, readFileSync, writeFileSync } from "node:fs";
 import { chromium } from "playwright-core";
-import { evaluateChromiumSandbox } from "@agentx/contracts";
 import { launchLocalChromium } from "/opt/agentx/packages/verifier/dist/executor/local-browser.js";
-import { inspectChromiumSandbox } from "/opt/agentx/packages/verifier/dist/executor/chromium-sandbox.js";
+import { attestWhenSettled } from "/opt/agentx/packages/verifier/dist/executor/chromium-sandbox.js";
 const controller = new AbortController();
 let executablePath;
 if (process.env.SANDBOX_MODE === "no-sandbox") {
@@ -30,9 +29,10 @@ if (process.env.SANDBOX_MODE === "no-sandbox") {
 let result;
 try {
   const browser = await launchLocalChromium({ downloadDir: "/tmp/downloads", signal: controller.signal, ...(executablePath ? { executablePath } : {}) });
-  const attestation = await inspectChromiumSandbox({ cdpEndpoint: browser.cdpEndpoint, browserPid: browser.pid, runId: "7f1d1c6e-4f43-4d5c-9b8f-2a6f3c0a9d11", groupId: "linux-ci", signal: controller.signal });
+  // The same settling look the executor takes, so a renderer still starting is waited for; a renderer that never shows a sandbox is reported as it is.
+  const { attestation, verdict } = await attestWhenSettled({ cdpEndpoint: browser.cdpEndpoint, browserPid: browser.pid, runId: "7f1d1c6e-4f43-4d5c-9b8f-2a6f3c0a9d11", groupId: "linux-ci", signal: controller.signal }, { settleMs: 5000 });
   const status = readFileSync("/proc/self/status", "utf8");
-  result = { launched: true, attestation, verdict: evaluateChromiumSandbox(attestation), capEff: /CapEff:\\s*(\\w+)/.exec(status)?.[1], noNewPrivs: /NoNewPrivs:\\s*(\\d)/.exec(status)?.[1] };
+  result = { launched: true, attestation, verdict, capEff: /CapEff:\\s*(\\w+)/.exec(status)?.[1], noNewPrivs: /NoNewPrivs:\\s*(\\d)/.exec(status)?.[1] };
   await browser.close();
 } catch (error) {
   result = { launched: false, error: String(error instanceof Error ? error.message : error).slice(-800) };

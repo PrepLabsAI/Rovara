@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { chmod, cp, lstat, mkdir, rm, writeFile } from "node:fs/promises";
+import { chmod, cp, lstat, mkdir, open, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { E2E_EXECUTOR_APP_ORIGIN, E2EExecutorPlanSchema, readE2EApplicationProjectContract, redactText, type E2EApplicationExecutionAdmission,
   type E2ECollection, type E2EExecutorAccount, type E2EExecutorPlan, type E2ELease, type E2ERunInput } from "@agentx/contracts";
@@ -22,6 +22,8 @@ export type { DockerCollectionInputs } from "./executor-readback.js";
 export type DockerCli = { run(args: string[], opts: { signal: AbortSignal; timeoutMs: number }): Promise<{ code: number; stdout: string; stderr: string }> };
 
 const OUTPUT_CAP_BYTES = 1024 * 1024;
+/** How much of the executor's own `executor.log` is kept in the diagnostics of a run that ended without a trustworthy result. */
+const EXECUTOR_OWN_LOG_BYTES = 32 * 1024;
 const tailOf = (value: string, maxBytes: number): string => {
   const bytes = Buffer.from(value, "utf8");
   return bytes.byteLength <= maxBytes ? value : bytes.subarray(bytes.byteLength - maxBytes).toString("utf8");
@@ -315,6 +317,22 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     return { running: status === "running" || status === "created", exitCode: code === undefined ? null : Number(code) };
   }
 
+  /** The end of the executor's own log, or "" when it left none; the file is a plain regular file or it is not read. */
+  async function readExecutorOwnLog(): Promise<string> {
+    try {
+      const path = join(dirs.out, "executor.log");
+      const info = await lstat(path);
+      if (!info.isFile()) return "";
+      const handle = await open(path, "r");
+      try {
+        const length = Math.min(info.size, EXECUTOR_OWN_LOG_BYTES);
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, info.size - length);
+        return buffer.toString("utf8");
+      } finally { await handle.close(); }
+    } catch { return ""; }
+  }
+
   async function execute(signal: AbortSignal): Promise<Outcome> {
     // Environment names that look like credentials are refused outright, whatever the recipe schema let through.
     const envNames = [...recipe.build.flatMap((command) => Object.keys(command.env)), ...Object.keys(launch.start.env)];
@@ -373,7 +391,11 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const executor = await executorRun;
     watching.abort();
     await watch.catch(() => undefined);
-    state.executorLogTail = redact(`${executor.stdout}${executor.stderr}`);
+    // `docker run` prints nothing of why the executor exited 2: that is in the executor's own log in the out directory. A code other than 0 or 1 is a run
+    // without a trustworthy result, so its log tail and the code itself are kept to explain it (a refused or failed `docker run` shows in stderr and the code).
+    const ownLog = executor.code === 0 || executor.code === 1 ? "" : await readExecutorOwnLog();
+    state.executorLogTail = redact(`${executor.stdout}${executor.stderr}${ownLog === "" ? "" : `\n--- executor.log (end)\n${ownLog}`}${
+      executor.code === 0 || executor.code === 1 ? "" : `\n[docker run exited with code ${executor.code}]`}`);
     const logs = await admin(["logs", "--tail", "400", appName]);
     state.appLogTail = redact(`${logs.stdout}${logs.stderr}`);
 

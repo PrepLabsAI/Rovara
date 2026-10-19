@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ChromiumSandboxAttestationSchema, type ChromiumSandboxAttestation, type ChromiumSandboxProcess } from "@agentx/contracts";
+import { ChromiumSandboxAttestationSchema, evaluateChromiumSandbox, type ChromiumSandboxAttestation, type ChromiumSandboxProcess, type ChromiumSandboxVerdict } from "@agentx/contracts";
 
 const LIST_TIMEOUT_MS = 15_000;
 const POLL_MS = 100;
@@ -32,7 +32,12 @@ export async function listChromiumProcesses(cdpEndpoint: string, signal: AbortSi
   socket.addEventListener("close", () => failAll(new Error("DevTools connection closed")));
   socket.addEventListener("error", () => failAll(new Error("DevTools connection failed")));
   const deadline = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+  const expired = () => (deadline.reason instanceof Error ? deadline.reason : new Error("listing Chromium's processes was cancelled or timed out"));
+  // A cancelled or timed-out listing rejects every call still waiting for a reply, so none can hang past the deadline.
+  const onDeadline = () => failAll(expired());
+  deadline.addEventListener("abort", onDeadline, { once: true });
   const call = <T>(method: string, params: Record<string, unknown> = {}): Promise<T> => new Promise<T>((resolve, reject) => {
+    if (deadline.aborted) { reject(expired()); return; }
     const id = ++nextId;
     pending.set(id, { resolve, reject });
     socket.send(JSON.stringify({ id, method, params }));
@@ -40,10 +45,11 @@ export async function listChromiumProcesses(cdpEndpoint: string, signal: AbortSi
   let targetId: string | undefined;
   try {
     await new Promise<void>((resolve, reject) => {
+      if (deadline.aborted) { reject(expired()); return; }
       if (socket.readyState === WebSocket.OPEN) { resolve(); return; }
       socket.addEventListener("open", () => resolve(), { once: true });
       socket.addEventListener("error", () => reject(new Error("DevTools connection failed")), { once: true });
-      deadline.addEventListener("abort", () => reject(new Error("timed out connecting to DevTools")), { once: true });
+      deadline.addEventListener("abort", () => reject(expired()), { once: true });
     });
     const created = await call<{ targetId?: string }>("Target.createTarget", { url: "about:blank" });
     targetId = created.targetId;
@@ -56,9 +62,10 @@ export async function listChromiumProcesses(cdpEndpoint: string, signal: AbortSi
         return { browserPid: browser && Number.isInteger(browser.id) && browser.id! > 0 ? browser.id! : null, rendererPids };
       }
       if (deadline.aborted) throw new Error("no renderer process showed up in Chromium's process list");
-      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      await new Promise<void>((resolve) => { const timer = setTimeout(resolve, POLL_MS); deadline.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true }); });
     }
   } finally {
+    deadline.removeEventListener("abort", onDeadline);
     // The blank tab only made a renderer exist; the browser is left as it was found.
     if (targetId !== undefined && socket.readyState === WebSocket.OPEN) await call("Target.closeTarget", { targetId }).catch(() => undefined);
     socket.close();
@@ -104,4 +111,31 @@ export async function inspectChromiumSandbox(input: InspectChromiumSandboxInput)
     catch (error) { if ((error as { code?: string }).code !== "ENOENT") throw error; }
   }
   return ChromiumSandboxAttestationSchema.parse({ schemaVersion: "e2e-executor-chromium-sandbox/v1", runId: input.runId, groupId: input.groupId, browser, renderers });
+}
+
+export type SettledChromiumSandbox = Readonly<{ attestation: ChromiumSandboxAttestation; verdict: ChromiumSandboxVerdict }>;
+
+/**
+ * A renderer is listed by the browser as soon as it exists, which can be before it has installed its own seccomp filter, so one look can catch a sandboxed
+ * renderer half-started. This looks again, every `pollMs` for up to `settleMs`, until the evaluator accepts what it sees; a renderer that never shows a
+ * sandbox is still refused, with the last facts seen. A read that fails is retried the same way and its last error thrown if nothing was ever read.
+ */
+export async function attestWhenSettled(input: InspectChromiumSandboxInput, options: Readonly<{ settleMs: number; pollMs?: number;
+  /** Test seam: one look at the browser. The default is `inspectChromiumSandbox`. */ inspect?: (input: InspectChromiumSandboxInput) => Promise<ChromiumSandboxAttestation> }>): Promise<SettledChromiumSandbox> {
+  const inspect = options.inspect ?? inspectChromiumSandbox;
+  const end = Date.now() + options.settleMs;
+  let last: SettledChromiumSandbox | null = null;
+  let lastError: unknown = null;
+  for (;;) {
+    try {
+      const attestation = await inspect(input);
+      const verdict = evaluateChromiumSandbox(attestation);
+      last = { attestation, verdict };
+      if (verdict.sandboxed) return last;
+    } catch (error) { lastError = error; }
+    if (Date.now() >= end || input.signal.aborted) break;
+    await new Promise((resolve) => setTimeout(resolve, options.pollMs ?? 200));
+  }
+  if (last !== null) return last;
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
