@@ -261,13 +261,14 @@ for r in $(awk '$1=="nameserver"&&$2~/^[0-9.]+$/{print $2}' /etc/resolv.conf /ru
   for p in udp tcp; do f iptables DOCKER-USER -i rvb+ -d $r -p $p --dport 53 -j RETURN; done
 done
 f iptables DOCKER-USER -d 169.254.169.254/32 -j DROP
-for i in rvb+ rvi+; do f iptables INPUT -i $i -j DROP; ! command -v ip6tables >/dev/null || f ip6tables INPUT -i $i -j DROP || true; done
+for i in rvb+ rvi+; do f iptables INPUT -i $i -j DROP; ! command -v ip6tables >/dev/null || f ip6tables INPUT -i $i -j DROP || echo "ip6tables $i rule failed" >&2; done
 FIREWALL
   cat >"/etc/systemd/system/$FIREWALL_UNIT" <<EOF
 [Unit]
 Description=Wall untrusted containers off from the host and private networks
 Requires=docker.service
-After=docker.service
+After=docker.service network-online.target systemd-resolved.service
+Wants=network-online.target
 Before=$WORKER_UNIT
 [Service]
 Type=oneshot

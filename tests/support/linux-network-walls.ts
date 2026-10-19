@@ -11,13 +11,23 @@ const run = (file: string, args: string[]): Promise<Result> => execFileAsync(fil
 export const docker = (...args: string[]) => run("docker", args);
 export const sudo = (...args: string[]) => run("sudo", ["-n", ...args]);
 
-/** The rules the CI job installs from boot.sh before any test runs; a test that finds them missing says so instead of passing vacuously. */
+/**
+ * The rules the CI job installs from boot.sh before any test runs; a test that finds them missing says so instead of passing vacuously. Each rule is asked
+ * for with `iptables -C` (exit 0 = present), never matched against `iptables -S` text, whose option order is the backend's own.
+ */
 export async function assertFirewallInstalled(): Promise<void> {
-  const rules = (await sudo("iptables", "-S")).stdout;
-  for (const rule of ["-A INPUT -i rvb+ -j DROP", "-A INPUT -i rvi+ -j DROP", "-A DOCKER-USER -i rvi+ ! -o rvi+ -j DROP", "-A DOCKER-USER -i rvb+ -d 10.0.0.0/8 -j DROP",
-    "-A DOCKER-USER -d 169.254.169.254/32 -j DROP"]) {
-    if (!rules.split("\n").includes(rule)) throw new Error(`the container firewall is not installed (missing "${rule}"): run the "Wall containers off" step of the linux-runtime job first`);
+  const rules: string[][] = [["INPUT", "-i", "rvb+", "-j", "DROP"], ["INPUT", "-i", "rvi+", "-j", "DROP"], ["DOCKER-USER", "-i", "rvi+", "!", "-o", "rvi+", "-j", "DROP"],
+    ...["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10", "169.254.0.0/16", "127.0.0.0/8"].map((range) => ["DOCKER-USER", "-i", "rvb+", "-d", range, "-j", "DROP"]),
+    ["DOCKER-USER", "-d", "169.254.169.254/32", "-j", "DROP"]];
+  const missing: string[] = [];
+  for (const rule of rules) if ((await sudo("iptables", "-C", ...rule)).code !== 0) missing.push(rule.join(" "));
+  // Where ip6tables exists the same INPUT drops are required (they are best effort in boot.sh, but CI's runner has the tool).
+  if ((await run("which", ["ip6tables"])).code === 0) {
+    for (const bridge of ["rvb+", "rvi+"]) if ((await sudo("ip6tables", "-C", "INPUT", "-i", bridge, "-j", "DROP")).code !== 0) missing.push(`ip6tables INPUT -i ${bridge} -j DROP`);
   }
+  if (missing.length === 0) return;
+  const listing = `${(await sudo("iptables", "-S", "DOCKER-USER")).stdout}${(await sudo("iptables", "-S", "INPUT")).stdout}`;
+  throw new Error(`the container firewall is not installed (iptables -C finds no "${missing.join('", "')}"): run the "Wall containers off" step of the linux-runtime job first\n${listing}`);
 }
 
 /** A TCP server on every address of this host, standing in for the Rovara worker's port. */

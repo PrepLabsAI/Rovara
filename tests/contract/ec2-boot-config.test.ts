@@ -171,7 +171,7 @@ describe("EC2 worker user data", () => {
     expect(bootScript).toContain("readonly FIREWALL_UNIT=rovara-container-firewall.service");
     expect(bootScript).toContain("Type=oneshot");
     expect(bootScript).toContain("RemainAfterExit=yes");
-    expect(bootScript).toMatch(/\[Unit\][^]*?After=docker\.service\nBefore=\$WORKER_UNIT/);
+    expect(bootScript).toMatch(/\[Unit\][^]*?After=docker\.service network-online\.target systemd-resolved\.service\nWants=network-online\.target\nBefore=\$WORKER_UNIT/);
     expect(bootScript).toContain("ExecStart=/bin/bash /usr/local/libexec/rovara-container-firewall");
     // A worker must not start unless the rules are in place: it requires and follows the firewall unit.
     expect(bootScript).toContain("Requires=docker.service $FIREWALL_UNIT\nAfter=docker.service $FIREWALL_UNIT network-online.target");
