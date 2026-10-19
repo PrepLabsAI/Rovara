@@ -9,6 +9,7 @@ export default tseslint.config(
       "cdk.out/**",
       ".release-synth/**",
       "coverage/**",
+      "tests/fixtures/e2e-web-api-app/**",
       "eslint.config.js",
     ],
   },

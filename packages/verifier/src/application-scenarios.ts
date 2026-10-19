@@ -163,8 +163,10 @@ function selectedContextCopy(input: unknown): E2EApplicationCompilationContext {
   const selectionInput = { ...selectionRaw, expectedCandidate: bounded(selectionRaw.expectedCandidate, 262_144), sourceSnapshot: snapshotCopy(selectionRaw.sourceSnapshot),
     policy: bounded(selectionRaw.policy), scenarios: bounded(selectionRaw.scenarios), selectedTargetIds: bounded(selectionRaw.selectedTargetIds),
     sandboxAvailability: bounded(selectionRaw.sandboxAvailability), runtimeAvailability: bounded(selectionRaw.runtimeAvailability),
-    portableApprovalBinding: bounded(selectionRaw.portableApprovalBinding), approvedSemanticApproval: bounded(selectionRaw.approvedSemanticApproval),
-    mockableComponents: bounded(selectionRaw.mockableComponents), intent: E2EApplicationPlanIntentSchema.parse(bounded(selectionRaw.intent)),
+    ...(selectionRaw.portableApprovalBinding === undefined ? {} : { portableApprovalBinding: bounded(selectionRaw.portableApprovalBinding) }),
+    approvedSemanticApproval: bounded(selectionRaw.approvedSemanticApproval),
+    ...(selectionRaw.mockableComponents === undefined ? {} : { mockableComponents: bounded(selectionRaw.mockableComponents) }),
+    intent: E2EApplicationPlanIntentSchema.parse(bounded(selectionRaw.intent)),
     intentDigest: bounded(selectionRaw.intentDigest), setupProposal: bounded(selectionRaw.setupProposal), setupApproval: bounded(selectionRaw.setupApproval),
     applicationApprovalBinding: bounded(selectionRaw.applicationApprovalBinding), registeredRuntimes: bounded(selectionRaw.registeredRuntimes),
     runtimeAccountRefs: bounded(selectionRaw.runtimeAccountRefs), now: selectionRaw.now } as E2EApplicationPlanSelectionInput;

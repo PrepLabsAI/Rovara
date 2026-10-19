@@ -59,7 +59,7 @@ describe("exact candidate application build source", () => {
       operationId: "44444444-4444-4444-8444-444444444444", operationFence: 1, workflowRevision: 1,
       candidateDigest: candidate.digest, planDigest: "b".repeat(64), intentDigest: "c".repeat(64), applicationApprovalDigest: "d".repeat(64),
       applicationId: "app", recipeDigest: "e".repeat(64), buildSourceManifestDigest: sourceManifest.manifestDigest,
-      buildSourceSha256: reference.sha256, runtimeProfileId: "profile", runtimeManifestDigest: "f".repeat(64), deadlineAt: "2026-10-17T23:00:00.000Z" } as const;
+      buildSourceSha256: reference.sha256, runtimeProfileId: "profile", runtimeManifestDigest: "f".repeat(64), deadlineAt: "2099-01-01T00:00:00.000Z" } as const;
     const readChunk = vi.fn(async () => { throw new Error("oversized source payload must not be requested"); });
     await expect(materializeE2EApplicationBuildSource({ manifest: sourceManifest, reference, expectedCandidate: candidate,
       inspectionSnapshot: { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha: candidate.repositories[0]!.treeSha,
@@ -92,7 +92,7 @@ describe("exact candidate application build source", () => {
       candidateDigest: candidate.digest, planDigest: "b".repeat(64), intentDigest: "c".repeat(64),
       applicationApprovalDigest: "d".repeat(64), applicationId: "app", recipeDigest: "e".repeat(64),
       buildSourceManifestDigest: manifest.manifestDigest, buildSourceSha256: reference.sha256,
-      runtimeProfileId: "web-profile", runtimeManifestDigest: "f".repeat(64), deadlineAt: "2026-10-17T22:00:00.000Z" } as const;
+      runtimeProfileId: "web-profile", runtimeManifestDigest: "f".repeat(64), deadlineAt: "2099-01-01T00:00:00.000Z" } as const;
     const encoded = encodeE2EApplicationBuildSourceArchive([{ path, mode: "100644", bytes }]);
     expect(Buffer.from(encoded.bytes).toString("utf8")).toBe(archiveText);
     expect(validateE2EApplicationBuildSourceManifest({ manifest, reference, expectedCandidate: candidate, inspectionSnapshot: snapshot }).files).toHaveLength(1);

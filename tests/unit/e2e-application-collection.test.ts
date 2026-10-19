@@ -481,7 +481,7 @@ describe("application collection contracts", () => {
       selectedArtifact, connection: null });
     const result = collectE2EApplicationRun({ actual, compiled, binding, round,
       environment: { ci: true, trustNoticeShown: false, os: "linux 6.8.0", arch: "x64", runtime: "node v22.23.2" },
-      usage: report.run.usage, limits: report.run.limits, expectedSupervisorReceiptRefs: expectedSupervisorRefs, ownedResourceInventoryDigest: sha,
+      usage: report.run.usage as Record<string, number>, limits: report.run.limits, expectedSupervisorReceiptRefs: expectedSupervisorRefs, ownedResourceInventoryDigest: sha,
       observationBindings: [observationBinding], assertionAssets: [], governedModelReceipts: null, ownedClosedAt: processFinished });
     expect(result.unavailableReason).toBeNull();
     expect(result.qualification).toMatchObject({ status: "PASS", runId: binding.runId, result: { qualification: "exploratory", status: "passed" } });
@@ -556,7 +556,7 @@ describe("application collection contracts", () => {
           runProcess: processRecord(options.processStatus ?? 0, shifted(processStarted), shifted(processFinished), reportBytes) }] };
       return collectE2EApplicationRun({ actual: variantActual, compiled, binding, round,
         environment: { ci: true, trustNoticeShown: false, os: "linux 6.8.0", arch: "x64", runtime: "node v22.23.2" },
-        usage: options.usage ?? report.run.usage, limits: report.run.limits, expectedSupervisorReceiptRefs: expectedSupervisorRefs, ownedResourceInventoryDigest: sha,
+        usage: (options.usage ?? report.run.usage) as Record<string, number>, limits: report.run.limits, expectedSupervisorReceiptRefs: expectedSupervisorRefs, ownedResourceInventoryDigest: sha,
         observationBindings: [observationBinding], assertionAssets: [], governedModelReceipts: null, ownedClosedAt: processFinished });
     };
 
@@ -636,7 +636,7 @@ describe("application collection contracts", () => {
       nullRouteUsage.run.usage.modelTokens = 9_999;
       nullRouteUsage.run.usage.maxModelCallsInStep = 8;
       expect(recollect({ reportValue: nullRouteUsage }).qualification?.status).toBe("UNKNOWN");
-      expect(recollect({ reportValue: nullRouteUsage, usage: nullRouteUsage.run.usage }).qualification?.status).toBe("UNKNOWN");
+      expect(recollect({ reportValue: nullRouteUsage, usage: nullRouteUsage.run.usage as Record<string, number> }).qualification?.status).toBe("UNKNOWN");
       const infrastructureError = structuredClone(report);
       infrastructureError.run.status = "error";
       infrastructureError.run.exitCode = 1;
@@ -693,7 +693,7 @@ describe("application collection contracts", () => {
       runProcess: processRecord(0, processStarted, processFinished, foreignOriginBytes) }] };
     const foreignOriginResult = collectE2EApplicationRun({ actual: foreignOriginActual, compiled, binding, round,
       environment: { ci: true, trustNoticeShown: false, os: "linux 6.8.0", arch: "x64", runtime: "node v22.23.2" },
-      usage: report.run.usage, limits: report.run.limits, expectedSupervisorReceiptRefs: expectedSupervisorRefs, ownedResourceInventoryDigest: sha,
+      usage: report.run.usage as Record<string, number>, limits: report.run.limits, expectedSupervisorReceiptRefs: expectedSupervisorRefs, ownedResourceInventoryDigest: sha,
       observationBindings: [observationBinding], assertionAssets: [], governedModelReceipts: null, ownedClosedAt: processFinished });
     expect(foreignOriginResult.qualification?.status).toBe("UNKNOWN");
     expect(foreignOriginResult.unavailableReason).toMatch(/origin differs/u);
@@ -808,7 +808,7 @@ describe("application collection contracts", () => {
     const options = { actual, compiled, binding, round, environment: failedReport.run.environment, usage: failedReport.run.usage, limits: failedReport.run.limits,
       expectedSupervisorReceiptRefs: expectedSupervisorRefs, ownedResourceInventoryDigest: sha, observationBindings: [observationBinding],
       assertionAssets: [], governedModelReceipts: [] as const, ownedClosedAt: processFinished };
-    const result = collectE2EApplicationRun(options);
+    const result = collectE2EApplicationRun(options as never);
     expect(result.qualification?.status).toBe("FAILED");
     expect(result.unavailableReason).toBeNull();
 
@@ -823,7 +823,7 @@ describe("application collection contracts", () => {
     const alteredBytes = Buffer.from(JSON.stringify(futureSdkUse));
     const alteredActual = { ...actual, shards: [{ ...actual.shards[0]!, rawReportBytes: alteredBytes,
       runProcess: proc(1, processStarted, processFinished, alteredBytes) }] };
-    const futureUseResult = collectE2EApplicationRun({ ...options, actual: alteredActual });
+    const futureUseResult = collectE2EApplicationRun({ ...options, actual: alteredActual } as never);
     expect(futureUseResult.qualification?.status).toBe("UNKNOWN");
     expect(futureUseResult.unavailableReason).toMatch(/model counters differ|model receipt rows differ/u);
   });
@@ -1003,7 +1003,7 @@ describe("application collection contracts", () => {
     const options = { actual, compiled, binding, round, environment: reportEnvironment, usage: aggregateUsage,
       limits: reportLimits, expectedSupervisorReceiptRefs: positive.expectedRefs, ownedResourceInventoryDigest: sha,
       observationBindings: positive.bindings, assertionAssets: [], governedModelReceipts: positive.protectedModelRows, ownedClosedAt: timeAt(900) };
-    const qualified = collectE2EApplicationRun(options);
+    const qualified = collectE2EApplicationRun(options as never);
     expect(qualified.collection).not.toBeNull();
     expect(qualified.oracle?.usage).toEqual(aggregateUsage);
     expect(qualified.qualification?.status).toBe("UNKNOWN");
@@ -1016,7 +1016,7 @@ describe("application collection contracts", () => {
       supervisorReadback: overspent.supervisorReadback };
     const overspentResult = collectE2EApplicationRun({ ...options, actual: overspentActual, usage: overspentUsage,
       expectedSupervisorReceiptRefs: overspent.expectedRefs, observationBindings: overspent.bindings,
-      governedModelReceipts: overspent.protectedModelRows });
+      governedModelReceipts: overspent.protectedModelRows } as never);
     expect(overspentResult.qualification?.status).toBe("UNKNOWN");
     expect(overspentResult.unavailableReason).toMatch(/protected model receipt projection inventory .* exceeds its original budget/u);
   });

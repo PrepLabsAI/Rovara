@@ -1,0 +1,1 @@
+{"schemaVersion":"e2e-application-runtime-probe/v1","probeId":"web-csv-negative/v1","kind":"web","polarity":"negative","templateId":"web-csv-negative/v1","requiredCapabilities":["web","download"],"oracle":{"kind":"csv-defect","downloadName":"orders.csv","forbiddenRow":["a3","Katherine","31","ready"],"expectedOutcome":"assertion-failed"}}

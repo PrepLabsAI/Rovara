@@ -3,7 +3,8 @@ import { constants as fsConstants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { E2EApplicationCliHostDescriptorSchema, E2EApplicationLaunchTargetSchema, E2EExpectedCaseSchema, E2ETargetSchema, APPLICATION_E2E_TEST_PATH, canonicalJson, copyBoundedE2EJsonData } from "@agentx/contracts";
+import { E2EApplicationCliHostDescriptorSchema, E2EApplicationCliLaunchContextSchema, E2EApplicationLaunchTargetSchema, E2EExpectedCaseSchema, APPLICATION_E2E_TEST_PATH, canonicalJson, copyBoundedE2EJsonData } from "@agentx/contracts";
+import type { E2EApplicationCliLaunchContext as SharedE2EApplicationCliLaunchContext } from "@agentx/contracts";
 import type { E2EConfig, ModelInstance, Reporter } from "e2e";
 import { isEngineHandle, type EngineHandle } from "e2e/engine";
 import { z } from "zod";
@@ -20,26 +21,14 @@ const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).d
 const HOSTS_REGISTRY = "assets/application-runtime-v1/cli-hosts.json";
 const MAX_FILE = 1_048_576;
 
-export type E2EApplicationCliLaunchContext = Readonly<{
-  schemaVersion: "e2e-application-cli-launch/v1"; launchId: string; shardId: string; compiledInventoryDigest: string; groupCompiledInventoryDigest: string;
-  bindingDigest: string; roundId: string; runId: string; cliHost: { profileId: string; descriptor: { entryPointId: string; entryPointManifestDigest: string } };
-  selectedTarget: z.infer<typeof E2ETargetSchema>; transportId: string; transportCorrelationId: string; deadlineAt: string;
-}>;
+export type E2EApplicationCliLaunchContext = SharedE2EApplicationCliLaunchContext;
 export type E2EApplicationCliHost = Readonly<{ profileId: string; descriptor: { entryPointId: string; entryPointManifestDigest: string };
   launchContext: E2EApplicationCliLaunchContext; installedModule: string; engine?: EngineHandle; modelFactory?: () => ModelInstance;
   runCase(caseId: string, fixtures: unknown): Promise<void> }>;
 type E2EApplicationCliHostFactoryResult = Readonly<{ profileId: string; descriptor: { entryPointId: string; entryPointManifestDigest: string };
   engine?: EngineHandle; modelFactory?: () => ModelInstance; runCase(caseId: string, fixtures: unknown): Promise<void> }>;
 
-const launchSchema = z.object({ schemaVersion: z.literal("e2e-application-cli-launch/v1"),
-  launchId: z.string().uuid(), shardId: z.string().min(1).max(120),
-  compiledInventoryDigest: z.string().regex(/^[a-f0-9]{64}$/), groupCompiledInventoryDigest: z.string().regex(/^[a-f0-9]{64}$/),
-  bindingDigest: z.string().regex(/^[a-f0-9]{64}$/),
-  roundId: z.string().uuid(), runId: z.string().uuid(),
-  cliHost: z.object({ profileId: z.string().min(1).max(120), descriptor: E2EApplicationCliHostDescriptorSchema }).strict(),
-  selectedTarget: E2ETargetSchema,
-  transportId: z.string().min(1).max(256), transportCorrelationId: z.string().uuid(),
-  deadlineAt: z.string().datetime({ offset: true }) }).strict();
+const launchSchema = E2EApplicationCliLaunchContextSchema;
 
 type Registration = { launch: E2EApplicationCliLaunchContext; host: E2EApplicationCliHost; installedModule: string };
 const registrationKey = Symbol.for("agentx.e2e.application.cli-host.v1");
