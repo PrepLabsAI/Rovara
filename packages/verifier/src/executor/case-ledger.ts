@@ -41,7 +41,7 @@ export type FileCaseLedger = Pick<E2EWebRuntimePorts, "casePlans" | "caseObserva
   recordApprovedAsset(input: { caseId: string; assetId: string; bytes: Uint8Array }): Promise<E2EApplicationEvidenceRef>;
 }>;
 
-function uuidFor(value: string): string {
+export function uuidFor(value: string): string {
   if (/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) return value;
   const hex = sha(`rovara-executor-operation:${value}`).slice(0, 32).split("");
   hex[12] = "4"; hex[16] = ((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);

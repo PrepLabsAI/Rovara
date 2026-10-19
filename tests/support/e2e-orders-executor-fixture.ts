@@ -83,9 +83,21 @@ export type OrdersExecutorFixture = Readonly<{
  * selection and compiler, so the executor runs a genuinely compiled suite. Only the admission inputs that the broker owns
  * (approvals, build manifest, runtime registration) are synthesized, with the same shapes the broker produces.
  */
-export function createOrdersExecutorPlan(options: { probe: OrdersProbeName; deadlineMs?: number; healthTimeoutMs?: number; role?: "owner" | "viewer" }): OrdersExecutorFixture {
+export function createOrdersExecutorPlan(options: { probe: OrdersProbeName; deadlineMs?: number; healthTimeoutMs?: number; role?: "owner" | "viewer";
+  /** Build commands for the recipe (the fixture itself builds nothing); the recipe digest is recomputed to match. */
+  recipeBuild?: { program: string; args: string[]; cwd: string; timeoutMs: number; env: Record<string, string> }[];
+  /** Overrides of the recipe's start command (arguments, timeout, env); the recipe digest is recomputed to match. */
+  recipeStart?: { args?: string[]; timeoutMs?: number; env?: Record<string, string> } }): OrdersExecutorFixture {
   const kind = options.probe.startsWith("web-") ? "web" as const : "api" as const;
-  const rawPackage = JSON.parse(readFileSync(join(fixtureRoot, "package.json"), "utf8")) as { agentx: { e2e: { targetAccounts: { baseTargetId: string; profileId: string }[] } } };
+  const rawPackage = JSON.parse(readFileSync(join(fixtureRoot, "package.json"), "utf8")) as { agentx: { e2e: { targetAccounts: { baseTargetId: string; profileId: string }[];
+    recipe: { recipeDigest: string; build: unknown[]; launch: { start: Record<string, unknown> } } } } };
+  if (options.recipeBuild || options.recipeStart) {
+    const recipe = rawPackage.agentx.e2e.recipe;
+    const launch = options.recipeStart ? { ...recipe.launch, start: { ...recipe.launch.start, ...options.recipeStart } } : recipe.launch;
+    const { recipeDigest: _digest, ...body } = { ...recipe, launch, build: options.recipeBuild ?? recipe.build };
+    void _digest;
+    rawPackage.agentx.e2e.recipe = { ...body, recipeDigest: hash(canonicalJson(body)) };
+  }
   if (kind === "api") rawPackage.agentx.e2e.targetAccounts = rawPackage.agentx.e2e.targetAccounts.map((item) => ({ ...item, baseTargetId: "api-1" }));
   const packageBytes = Buffer.from(JSON.stringify(rawPackage));
   const packagePath = kind === "web" ? "apps/orders/package.json" : "server/package.json";

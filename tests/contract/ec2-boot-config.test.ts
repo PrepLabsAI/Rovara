@@ -151,6 +151,21 @@ describe("EC2 worker user data", () => {
     expect(bootScript.indexOf('pull_contained_image')).toBeLessThan(bootScript.indexOf('write_worker_unit "$region"'));
   });
 
+  it("keeps containers off the instance metadata service and pulls the executor image after the worker image", () => {
+    expect(bootScript).toContain("iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP");
+    // The rule is idempotent: a -C check comes first, and a failure to install it stops the boot.
+    expect(bootScript).toContain("iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER");
+    expect(bootScript).toContain('fail "could not block container access to the instance metadata service"');
+    // DOCKER-USER exists only once the daemon is running.
+    expect(bootScript.indexOf("systemctl restart docker.service")).toBeLessThan(bootScript.indexOf("  block_container_metadata_access\n}"));
+    expect(bootScript).toContain('docker pull "$EXECUTOR_IMAGE"');
+    // Unset until the control plane sets it: the pull is skipped, never a boot failure.
+    expect(bootScript).toContain('[[ -n "${EXECUTOR_IMAGE:-}" ]] || return 0');
+    expect(bootScript).toContain("pull_executor_image || true");
+    expect(bootScript.indexOf('pull_worker_image "$region"')).toBeLessThan(bootScript.indexOf("pull_executor_image || true"));
+    expect(bootScript.indexOf("pull_executor_image || true")).toBeLessThan(bootScript.indexOf('write_worker_unit "$region"'));
+  });
+
   it("renders a script bash accepts", () => {
     const checked = spawnSync("bash", ["-n"], { input: ec2WorkerBootScript(config, bootScript), encoding: "utf8" });
     expect(checked.status, checked.stderr).toBe(0);

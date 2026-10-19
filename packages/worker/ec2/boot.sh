@@ -243,6 +243,16 @@ ensure_docker() {
   printf '{"data-root": "%s"}\n' "$DOCKER_DATA_ROOT" >/etc/docker/daemon.json
   systemctl enable docker.service
   systemctl restart docker.service
+  block_container_metadata_access
+}
+
+# No container may reach the instance metadata service (instance-role credentials). Docker sends
+# bridge traffic through DOCKER-USER, which exists once the daemon is up and is never flushed by
+# it. The check keeps the rule single when this runs again. Host-network containers (the worker)
+# bypass the chain, so the worker keeps its role.
+block_container_metadata_access() {
+  iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP \
+    || fail "could not block container access to the instance metadata service"
 }
 
 # The password goes from the AWS CLI to Docker through a pipe, never through the log.
@@ -267,6 +277,19 @@ pull_contained_image() {
     ((attempt<RETRY_ATTEMPTS && SECONDS<BOOT_DEADLINE)) && sleep "$((1 << (attempt - 1)))"
   done
   log "optional verifier image unavailable; worker continues"
+  return 1
+}
+
+# The browser executor image runs the candidate's end-to-end checks. It is optional while the control
+# plane does not set EXECUTOR_IMAGE, and an unavailable image only withholds those checks.
+pull_executor_image() {
+  [[ -n "${EXECUTOR_IMAGE:-}" ]] || return 0
+  local attempt
+  for ((attempt=1; attempt<=RETRY_ATTEMPTS && SECONDS<BOOT_DEADLINE; attempt++)); do
+    timeout "$(try_seconds 300)" docker pull "$EXECUTOR_IMAGE" && return 0
+    ((attempt<RETRY_ATTEMPTS && SECONDS<BOOT_DEADLINE)) && sleep "$((1 << (attempt - 1)))"
+  done
+  log "optional executor image unavailable; worker continues"
   return 1
 }
 
@@ -403,6 +426,7 @@ main() {
   BOOT_STEP="download the worker image"
   pull_worker_image "$region"
   if [[ "$CONTAINED_RUNTIME_AVAILABLE_BOOT" == true ]]; then pull_contained_image || true; fi
+  pull_executor_image || true
   BOOT_STEP="start the worker"
   write_worker_environment "$region"
   write_worker_unit "$region" "$instance_id"

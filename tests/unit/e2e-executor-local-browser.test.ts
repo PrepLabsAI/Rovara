@@ -6,6 +6,9 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import { assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput } from "../../packages/verifier/src/host/executor-readback.js";
+import { resolveE2EExecutorSuite } from "../../packages/verifier/src/executor/suite.js";
+import { proveActualRun } from "../support/e2e-actual-run-proof.js";
 import { blockedHosts, caseStatuses, csvRows, failedAssertionKinds, readReport, resultOf } from "../support/e2e-executor-output.js";
 import { ORDERS_FIXTURE_ROOT, createOrdersExecutorPlan, type OrdersProbeName } from "../support/e2e-orders-executor-fixture.js";
 
@@ -103,6 +106,31 @@ describe.runIf(enabled)("executor against a real Chromium and the fixture app (l
     expect(resultOf(run.outDir).exitCode).toBe(0);
     expect(await everything(run.outDir)).not.toContain(run.fixture.account.password);
   }, 300_000);
+});
+
+/** What the Docker host does after a real run: read the out directory, then assemble the readback a collector validates. */
+async function assembleFrom(run: Awaited<ReturnType<typeof runProbe>>) {
+  const snapshot = await snapshotExecutorOutput(run.outDir, await readExecutorResultFile(run.outDir));
+  const resolved = resolveE2EExecutorSuite(run.fixture.plan);
+  return assembleExecutorActualRun({ snapshot, compiled: resolved.suite, binding: resolved.binding,
+    cleanup: { removedAt: new Date().toISOString(), containers: ["rovara-app"], network: "rovara-e2e" }, evidenceDirectory: "/out" });
+}
+
+describe.runIf(enabled)("host readback of a real executor run (local, no Docker)", () => {
+  it.each([["web-csv-positive-v1" as const, undefined], ["api-state-positive-v1" as const, undefined], ["web-csv-positive-v1" as const, "extra-order.json"]])(
+    "%s (%s) assembles into a readback the supervisor proof accepts", async (probe, defect) => {
+      const run = await runProbe(probe, defect ? { defect } : {});
+      const actual = await assembleFrom(run);
+      const proof = proveActualRun(actual, run.fixture.plan);
+      expect(proof.captures.map((capture) => capture.caseId)).toEqual(run.fixture.compiled.expectedCases.map((item) => item.caseId));
+      expect(proof.captures.map((capture) => capture.terminal.kind)).toEqual([defect ? "assertion-failed" : "completed"]);
+      expect(proof.captures.map((capture) => capture.assertions.map((assertion) => assertion.outcome))).toEqual([[defect ? "failed" : "passed"]]);
+      expect(actual.selected).toBe(1);
+      expect(actual.filtered).toBe(0);
+      const text = JSON.stringify([...actual.supervisorReadback!.evidence.map((item) => Buffer.from(item.bytes).toString("latin1")), actual.shards.map((shard) => Buffer.from(shard.rawReportBytes).toString("latin1"))]);
+      expect(text).not.toContain(run.fixture.account.password);
+      expect(text).not.toContain(run.fixture.account.email);
+    }, 300_000);
 });
 
 describe.skipIf(enabled)("executor against a real Chromium (local)", () => {
