@@ -42,9 +42,9 @@ function scenarioFor(probe: OrdersProbeName, targetId: string, accountProfileId:
 function registeredRuntime(kind: "web" | "api", profileId: string, now: number) {
   const web = kind === "web";
   const capabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ schemaVersion: "e2e-runtime-capabilities/v1", profileId, kind,
-    host: { os: "linux", arch: "arm64" }, engine: { name: web ? "playwright" : "api-supervisor", version: "1.0.0", spiVersion: 1 },
+    host: { os: "linux", arch: "arm64" }, engine: { name: web ? "web" : "api-supervisor", version: web ? "0.14.0" : "1.0.0", spiVersion: 1 },
     runtimeManifestDigest: (web ? "a" : "f").repeat(64), supportedSteps: web ? ["navigate", "click", "fill"] : ["request"],
-    supportedAssertions: web ? ["text", "visible", "csv"] : ["http-status", "state"], evidenceScopes: ["runtime"],
+    supportedAssertions: web ? ["text", "visible", "csv", "state"] : ["http-status", "state"], evidenceScopes: ["runtime"],
     networkPolicyDigest: "1".repeat(64), ...(web ? { browsers: ["chromium"] } : { protocols: ["http"] }) });
   const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
     subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef" }], volumeSizeGiB: 32, volumeType: "gp3" as const };
@@ -130,7 +130,8 @@ export function createOrdersExecutorPlan(options: { probe: OrdersProbeName; dead
     artifactSha256: semanticApproval.digest, planDigest, setupProposal, setupApproval });
   const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [scenario.scenarioId],
     targets: discovery.inspection.proposedTargets, defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
-    capture: { screenshots: false, traces: false, video: false, downloads: false },
+    // The real web engine reports screenshot and video capability, and the compiler binds the launch descriptor to the capture policy.
+    capture: { screenshots: kind === "web", traces: false, video: kind === "web", downloads: false },
     limits: { runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 60_000, caseTimeoutMs: 120_000,
       maxActionsPerCase: 10, maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } };
   const selectionInput = { candidateDigest: candidate.digest, expectedCandidate: candidate, sourceSnapshot: snapshot, planDigest, policy, scenarios: [scenario],
@@ -165,8 +166,10 @@ export function createOrdersExecutorPlan(options: { probe: OrdersProbeName; dead
   const runtimeBindings = new Map([[runtimeProfileId, runtime]]);
   const cliHostsByProfile = new Map([[runtimeProfileId, registeredHost()]]);
   const launchTargets = [{ targetId: target.targetId, profileId: runtimeProfileId, factoryId: "executor-host", factoryManifestDigest: runtime.manifestDigest,
-    engine: kind === "web" ? { name: "playwright", version: "1.0.0", spiVersion: 1 as const, platform: "web", capabilities: ["actions", "observation"] } : null,
-    artifactCapabilities: [] as Array<"screenshot" | "video">, stateCapability: kind === "api",
+    // The real @e2e-dev/web 0.14.0 engine descriptor, as the pinned runner's own report states it for a web target.
+    engine: kind === "web" ? { name: "web", version: "0.14.0", spiVersion: 1 as const, platform: "web",
+      capabilities: ["actions", "artifacts", "browser", "keyboard", "location", "observation", "pointer", "state"] } : null,
+    artifactCapabilities: kind === "web" ? ["screenshot" as const, "video" as const] : [], stateCapability: kind === "api" || kind === "web",
     app: kind === "web" ? { url: ORDERS_APP_ORIGIN, identity: application.applicationId, environment: "test" as const } : null }];
   const bundleBody = { schemaVersion: 1 as const, planDigest, templateVersion: "trusted-e2e-application/v1" as const, scenarios: [scenario], bundleDigest: "0".repeat(64) };
   const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };

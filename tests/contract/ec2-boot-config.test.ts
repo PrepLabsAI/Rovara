@@ -155,9 +155,16 @@ describe("EC2 worker user data", () => {
     expect(bootScript).toContain("iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP");
     // The rule is idempotent: a -C check comes first, and a failure to install it stops the boot.
     expect(bootScript).toContain("iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER");
-    expect(bootScript).toContain('fail "could not block container access to the instance metadata service"');
+    expect(bootScript).toContain('|| fail "could not block container access to the instance metadata service"');
     // DOCKER-USER exists only once the daemon is running.
-    expect(bootScript.indexOf("systemctl restart docker.service")).toBeLessThan(bootScript.indexOf("  block_container_metadata_access\n}"));
+    expect(bootScript.indexOf("systemctl restart docker.service")).toBeLessThan(bootScript.indexOf("  block_container_metadata_access\n}\n"));
+    // The rule is also a oneshot unit, so it returns after a reboot (Docker rebuilds its chains) and lands before the worker starts.
+    expect(bootScript).toContain("readonly IMDS_DROP_UNIT=rovara-imds-drop.service");
+    expect(bootScript).toContain("Type=oneshot");
+    expect(bootScript).toContain("RemainAfterExit=yes");
+    expect(bootScript).toMatch(/\[Unit\][^]*?After=docker\.service\nBefore=\$WORKER_UNIT/);
+    expect(bootScript).toContain("ExecStart=/bin/bash /usr/local/libexec/rovara-imds-drop");
+    expect(bootScript).toContain('systemctl enable "$IMDS_DROP_UNIT" && bash /usr/local/libexec/rovara-imds-drop || fail');
     expect(bootScript).toContain('docker pull "$EXECUTOR_IMAGE"');
     // Unset until the control plane sets it: the pull is skipped, never a boot failure.
     expect(bootScript).toContain('[[ -n "${EXECUTOR_IMAGE:-}" ]] || return 0');

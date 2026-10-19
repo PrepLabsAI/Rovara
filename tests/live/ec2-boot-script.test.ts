@@ -291,6 +291,7 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.calls).toContain(`docker pull ${WORKER_IMAGE}`);
     expect(result.calls).toContain("systemctl enable --now agentx-worker.service");
     expect(result.calls).toContain("iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP");
+    expect(result.calls).toContain("systemctl enable rovara-imds-drop.service");
     // A healthy boot neither waits nor reports a failure: /ping is left to the worker.
     expect(result.sleeps).toEqual([]);
     expect(result.calls).not.toContain("systemd-run");

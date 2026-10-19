@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFileCaseLedger } from "../../packages/verifier/src/executor/case-ledger.js";
+import { snapshotExecutorOutput, type ExecutorResultFile } from "../../packages/verifier/src/host/executor-readback.js";
 import { createCredentialRedactor } from "../../packages/verifier/src/executor/redact.js";
 import { createLaunchContexts, resolveE2EExecutorSuite } from "../../packages/verifier/src/executor/suite.js";
 import { readValidatedE2EApplicationCaseObservation, readValidatedE2EApplicationCliCasePlan } from "../../packages/verifier/src/application-services.js";
@@ -104,7 +105,32 @@ describe("file case ledger", () => {
     expect(observation.identityEvidence).toHaveLength(4);
     expect(observation.binding.sessionRef).toBe("rovara-session-1");
     expect(observation.binding.assertionProducers).toHaveLength(casePlan.scenario.assertions.length);
-    expect((await readdir(join(dir, "observations"))).length).toBe(4);
+    // Four evidence items, plus the binding itself, persisted for the host and bound to its own digest.
+    const files = await readdir(join(dir, "observations"));
+    expect(files.filter((name) => name.startsWith("ev-"))).toHaveLength(4);
+    const persisted = JSON.parse(await readFile(join(dir, "observations", `binding-${caseId.replaceAll(":", "_")}.json`), "utf8")) as { sha256: string; binding: unknown };
+    expect(persisted.binding).toEqual(observation.binding);
+    expect(persisted.sha256).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("persists observation and asset bindings that the host snapshot reads back, and refuses a binding that changed", async () => {
+    const dir = await root();
+    const ledger = createFileCaseLedger(dir, plan, { observations: { sessionFacts: () => sessionFacts, upstreamRunId: () => "0190a000-0000-7000-8000-000000000001" } });
+    const casePlan = await ledger.casePlans.readCasePlan({ launchContext: launch, caseId, upstreamTestId: resolved.suite.expectedCases[0]!.upstreamTestId,
+      targetId: resolved.suite.expectedCases[0]!.targetId }, signal);
+    const observation = await readValidatedE2EApplicationCaseObservation({ reader: ledger.caseObservations, launchContext: launch, plan: casePlan,
+      ownedClientRef: "rovara-session-1", expectedSubjectKind: "service", signal });
+    const ref = await ledger.recordApprovedAsset({ caseId, assetId: "api-state-positive/v1", bytes });
+    const asset = { caseId, assertionIndex: 0, kind: "state-probe" as const, id: "api-state-positive/v1", manifestDigest: digest, ref };
+    await ledger.recordAssetBinding(asset);
+    const result: ExecutorResultFile = { schemaVersion: "e2e-executor-result/v1", exitCode: 0, reason: null, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+      node: { version: "v22.23.2", execPath: "/usr/local/bin/node", platform: "linux", arch: "arm64" }, runId: resolved.binding.runId, groupId: resolved.binding.groupId, shards: [] };
+    const snapshot = await snapshotExecutorOutput(dir, result);
+    expect(snapshot.observationBindings).toEqual([observation.binding]);
+    expect(snapshot.assertionAssets).toEqual([asset]);
+    const file = join(dir, "observations", `binding-${caseId.replaceAll(":", "_")}.json`);
+    await writeFile(file, (await readFile(file, "utf8")).replace("rovara-session-1", "rovara-session-2"));
+    await expect(snapshotExecutorOutput(dir, result)).rejects.toThrow(/digest the executor recorded/);
   });
 
   it("closes after the run deadline", async () => {

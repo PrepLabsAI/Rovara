@@ -246,13 +246,28 @@ ensure_docker() {
   block_container_metadata_access
 }
 
-# No container may reach the instance metadata service (instance-role credentials). Docker sends
-# bridge traffic through DOCKER-USER, which exists once the daemon is up and is never flushed by
-# it. The check keeps the rule single when this runs again. Host-network containers (the worker)
-# bypass the chain, so the worker keeps its role.
+# Containers must not reach the instance metadata service. Host-network containers (the worker) bypass
+# DOCKER-USER. Docker rebuilds its chains on start, so a oneshot unit re-applies the rule each time.
+readonly IMDS_DROP_UNIT=rovara-imds-drop.service
 block_container_metadata_access() {
-  iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP \
-    || fail "could not block container access to the instance metadata service"
+  install -d -o root -g root -m 0755 /usr/local/libexec
+  cat >/usr/local/libexec/rovara-imds-drop <<'DROP'
+iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP
+DROP
+  cat >"/etc/systemd/system/$IMDS_DROP_UNIT" <<EOF
+[Unit]
+Description=Block container access to the instance metadata service
+Requires=docker.service
+After=docker.service
+Before=$WORKER_UNIT
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash /usr/local/libexec/rovara-imds-drop
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl enable "$IMDS_DROP_UNIT" && bash /usr/local/libexec/rovara-imds-drop || fail "could not block container access to the instance metadata service"
 }
 
 # The password goes from the AWS CLI to Docker through a pipe, never through the log.
@@ -280,8 +295,7 @@ pull_contained_image() {
   return 1
 }
 
-# The browser executor image runs the candidate's end-to-end checks. It is optional while the control
-# plane does not set EXECUTOR_IMAGE, and an unavailable image only withholds those checks.
+# Optional until the control plane sets EXECUTOR_IMAGE; without it only end-to-end checks are withheld.
 pull_executor_image() {
   [[ -n "${EXECUTOR_IMAGE:-}" ]] || return 0
   local attempt

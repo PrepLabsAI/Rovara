@@ -1,8 +1,7 @@
-import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { E2EExecutorPlanSchema, type E2EExecutorAccount } from "@agentx/contracts";
 import { runIsolatedE2EApplication, type E2EIsolatedApplicationRun } from "../../packages/verifier/src/application-runtime.js";
 import { createDockerApplicationHost, createProcessDockerCli, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { ORDERS_FIXTURE_ROOT, createOrdersExecutorPlan, type OrdersExecutorFixture, type OrdersProbeName } from "./e2e-orders-executor-fixture.js";
@@ -53,8 +52,8 @@ export type ProbeRun = Readonly<{
   exitCode: number | null;
   /** A kept copy of the out directory of a completed run; null when the run was unavailable. */
   outDir: string | null;
-  /** The synthetic account the host generated for the run; null when the run was unavailable. */
-  account: E2EExecutorAccount | null;
+  /** Whether any byte of the kept out directory carries the run's account credentials (the host's own predicate); null when the run was unavailable. */
+  credentialsLeaked: boolean | null;
   host: DockerApplicationHost;
 }>;
 
@@ -74,15 +73,16 @@ export async function runProbe(probe: OrdersProbeName, options: ProbeOptions): P
     ...(options.appArgs ? { args: options.appArgs } : {}), ...(options.healthTimeoutMs ? { timeoutMs: options.healthTimeoutMs } : {}) } });
   const keep = realpathSync(await mkdtemp(join(tmpdir(), "rovara-linux-kept-")));
   linuxDirs.push(keep);
-  let account: E2EExecutorAccount | null = null; let outDir: string | null = null;
+  let credentialsLeaked: boolean | null = null; let outDir: string | null = null;
   const { host } = await createLinuxHost(fixture, {
     ...(options.defect ? { ownedFiles: { "defect.json": await readFile(join(ORDERS_FIXTURE_ROOT, "defects", options.defect)) } } : {}),
-    async onRunOutput(paths) {
-      await cp(paths.outDir, join(keep, "out"), { recursive: true });
+    async onRunOutput(run) {
+      await cp(run.outDir, join(keep, "out"), { recursive: true });
       outDir = join(keep, "out");
-      account = E2EExecutorPlanSchema.parse(JSON.parse(await readFile(paths.planPath, "utf8"))).accounts[0] ?? null;
+      const files = (await readdir(outDir, { withFileTypes: true, recursive: true })).filter((entry) => entry.isFile());
+      credentialsLeaked = (await Promise.all(files.map(async (entry) => run.containsCredential(await readFile(join(entry.parentPath, entry.name)))))).some(Boolean);
     },
   });
   const run = await runIsolatedE2EApplication({ input: linuxRunInput(fixture) as never, compiled: fixture.compiled, ports: host, signal: AbortSignal.timeout(280_000) });
-  return { fixture, run, exitCode: run.lifecycle.process.exitCode, outDir, account, host };
+  return { fixture, run, exitCode: run.lifecycle.process.exitCode, outDir, credentialsLeaked, host };
 }

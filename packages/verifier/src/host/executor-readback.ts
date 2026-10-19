@@ -5,7 +5,9 @@ import { z } from "zod";
 import { E2EApplicationEvidenceRefSchema, ProjectSetupRunnerToolchainSchema, canonicalJson, type E2EApplicationEvidenceRef, type E2ERunBinding } from "@agentx/contracts";
 import type { E2EActualApplicationRun, E2EActualApplicationShard } from "../application-collection.js";
 import { compareE2EApplicationPublicList } from "../application-identity.js";
-import { E2EApplicationCaseCaptureSchema, normalizeE2EApplicationPublicList, type E2EApplicationProofBytes } from "../application-result-adapter.js";
+import { parseE2EApplicationReport } from "../application-report-schema.js";
+import { E2EApplicationAssertionAssetBindingSchema, E2EApplicationCaseCaptureSchema, E2EApplicationObservationBindingSchema, e2eApplicationAggregateRunUsage,
+  normalizeE2EApplicationPublicList, type E2EApplicationAssertionAssetBinding, type E2EApplicationObservationBinding, type E2EApplicationProofBytes } from "../application-result-adapter.js";
 import { expectedE2EApplicationReporterDigest } from "../application-runtime-assets.js";
 import type { E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import { uuidFor } from "../executor/case-ledger.js";
@@ -34,6 +36,8 @@ type OutputEvidence = Readonly<{ ref: E2EApplicationEvidenceRef; bytes: Uint8Arr
 type ShardFiles = Readonly<{ list: Uint8Array; listStderr: Uint8Array; report: Uint8Array; runStderr: Uint8Array; runStart: Uint8Array }>;
 /** Everything the host takes out of the executor's out directory, read once, before the directory is removed. */
 export type ExecutorOutputSnapshot = Readonly<{ result: ExecutorResultFile; shardFiles: ReadonlyMap<string, ShardFiles>; evidence: readonly OutputEvidence[];
+  /** The protected facts the ledger persisted for the collector's oracle: one observation binding per case, one binding per approved assertion asset. */
+  observationBindings: readonly E2EApplicationObservationBinding[]; assertionAssets: readonly E2EApplicationAssertionAssetBinding[];
   /** The merged report for a single-shard run, kept so the host can hand it to the lifecycle as the raw report. */
   reportBytes: Uint8Array | null }>;
 
@@ -50,6 +54,15 @@ async function readRegular(root: string, relativePath: string, budget: { total: 
     if (bytes.byteLength !== before.size) throw new Error(`executor output ${relativePath} changed while being read`);
     return Uint8Array.from(bytes);
   } finally { await handle.close(); }
+}
+
+const MAX_BINDING_FILES = 64;
+const MAX_ASSET_FILES = 128;
+const bindingFileSchema = z.object({ schemaVersion: z.string(), caseId: z.string().min(1).max(160), sha256: z.string().regex(/^[a-f0-9]{64}$/), binding: z.unknown() }).strict();
+
+/** The executor's result must describe a finished run of exactly this group before anything else in its out directory is trusted. */
+export function validateExecutorResult(result: ExecutorResultFile, binding: Pick<E2ERunBinding, "runId" | "groupId">): void {
+  if (result.exitCode === 2 || result.runId !== binding.runId || result.groupId !== binding.groupId) throw new Error("executor result is not a completed run of this group");
 }
 
 const observationSchema = z.object({ schemaVersion: z.literal("e2e-executor-observation/v1"), artifactId: z.string().min(1).max(200), kind: z.string(),
@@ -95,7 +108,21 @@ export async function snapshotExecutorOutput(outDir: string, result: ExecutorRes
   }
   let reportBytes: Uint8Array | null = null;
   try { reportBytes = await readRegular(outDir, "report.json", budget); } catch { /* a run without a merged report has none */ }
-  return Object.freeze({ result, shardFiles, evidence: Object.freeze(evidence), reportBytes });
+  const readBindings = async <T>(pattern: RegExp, max: number, schemaVersion: string, parse: (value: unknown) => T): Promise<T[]> => {
+    const files = (await readdir(join(outDir, "observations"))).filter((name) => pattern.test(name)).sort();
+    if (files.length > max) throw new Error("executor output holds more protected bindings than the host reads");
+    return Promise.all(files.map(async (name) => {
+      const row = bindingFileSchema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await readRegular(outDir, `observations/${name}`, budget))));
+      if (row.schemaVersion !== schemaVersion || row.sha256 !== sha(canonicalJson(row.binding))) throw new Error("executor binding differs from the digest the executor recorded");
+      return parse(row.binding);
+    }));
+  };
+  const observationBindings = await readBindings(/^binding-[A-Za-z0-9._-]+\.json$/, MAX_BINDING_FILES, "e2e-executor-observation-binding/v1",
+    (value) => E2EApplicationObservationBindingSchema.parse(value));
+  const assertionAssets = await readBindings(/^asset-[A-Za-z0-9._-]+\.json$/, MAX_ASSET_FILES, "e2e-executor-asset-binding/v1",
+    (value) => E2EApplicationAssertionAssetBindingSchema.parse(value));
+  return Object.freeze({ result, shardFiles, evidence: Object.freeze(evidence), observationBindings: Object.freeze(observationBindings),
+    assertionAssets: Object.freeze(assertionAssets), reportBytes });
 }
 
 /** The identity of what the host owns for one run, so a collector can recompute it without asking the host. */
@@ -112,13 +139,48 @@ function proof(value: unknown, mediaType: string, artifactId: string): { ref: E2
 }
 const decode = (bytes: Uint8Array) => new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 
+type OwnedCleanup = { removedAt: string; containers: readonly string[]; network: string };
+const ownedCleanupReceipt = (binding: Pick<E2ERunBinding, "runId">, cleanup: OwnedCleanup) => proof({ schemaVersion: "rovara-docker-owned-cleanup/v1",
+  runId: binding.runId, removedAt: cleanup.removedAt, network: cleanup.network, containers: [...cleanup.containers].sort(compare),
+  inventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId) }, "application/json", `rovara-owned-cleanup-${binding.runId}`);
+
+/** What `collectE2EApplicationRun` takes besides the actual run, the compiled suite, the binding and the round. */
+export type DockerCollectionInputs = Readonly<{ environment: { ci: boolean; trustNoticeShown: boolean; os: string; arch: string; runtime: string };
+  usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>;
+  expectedSupervisorReceiptRefs: readonly E2EApplicationEvidenceRef[]; ownedResourceInventoryDigest: string;
+  observationBindings: readonly E2EApplicationObservationBinding[]; assertionAssets: readonly E2EApplicationAssertionAssetBinding[];
+  governedModelReceipts: readonly never[]; ownedClosedAt: string }>;
+
+/**
+ * The collector's protected inputs for a finished run: the bindings the ledger persisted, the cleanup receipt the host will
+ * attest, the inventory digest recomputed from the run id, and the close time. Environment, limits and usage come from the
+ * runner's own reports, reconciled with the runner's sum and max rules.
+ */
+export function assembleDockerCollectionInputs(input: { snapshot: ExecutorOutputSnapshot; binding: E2ERunBinding; cleanup: OwnedCleanup }): DockerCollectionInputs {
+  validateExecutorResult(input.snapshot.result, input.binding);
+  const reports = input.snapshot.result.shards.map((row) => {
+    const files = input.snapshot.shardFiles.get(row.shardId);
+    const parsed = files ? parseE2EApplicationReport(files.report) : null;
+    if (!parsed || parsed.kind !== "parsed") throw new Error("a shard report is unreadable");
+    return parsed.report.run;
+  });
+  const first = reports[0];
+  const usage = e2eApplicationAggregateRunUsage(reports.map((run) => run.usage as Readonly<Record<string, number>>));
+  if (!first || !usage) throw new Error("shard reports do not reconcile to one group usage");
+  return Object.freeze({ environment: first.environment, usage, limits: first.limits,
+    expectedSupervisorReceiptRefs: Object.freeze([ownedCleanupReceipt(input.binding, input.cleanup).ref]),
+    ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(input.binding.runId),
+    observationBindings: input.snapshot.observationBindings, assertionAssets: input.snapshot.assertionAssets, governedModelReceipts: Object.freeze([]),
+    ownedClosedAt: input.cleanup.removedAt });
+}
+
 /**
  * Assembles the post-close private readback the lifecycle asks for. The executor's evidence is the case proof; the host adds
  * the two frames only it can attest (the owned-cleanup receipt and the supervisor receipt) once the run's resources are
  * confirmed gone. Nothing here decides pass or fail: the collector validates every byte again and the oracle judges the cases.
  */
 export function assembleExecutorActualRun(input: { snapshot: ExecutorOutputSnapshot; compiled: E2ECompiledApplicationSuite; binding: E2ERunBinding;
-  cleanup: { removedAt: string; containers: readonly string[]; network: string }; evidenceDirectory: string }): E2EActualApplicationRun {
+  cleanup: OwnedCleanup; evidenceDirectory: string }): E2EActualApplicationRun {
   const { snapshot, compiled, binding } = input;
   const result = snapshot.result;
   if (result.exitCode === 2 || result.runId !== binding.runId || result.groupId !== binding.groupId) throw new Error("executor result is not a completed run of this group");
@@ -152,13 +214,23 @@ export function assembleExecutorActualRun(input: { snapshot: ExecutorOutputSnaps
     preparedEnvironmentDigest: compiled.preparedEnvironmentDigest, candidateDigest: binding.candidateDigest, roundId: binding.roundId, runId: binding.runId,
     groupId: binding.groupId, lifecycleId, observedAt, producer };
 
+  // The runtime writes each case capture with cleanup "pending": only the host can say the run's resources are gone. Once cleanup is
+  // confirmed it re-seals each capture under the same artifact id, so the closure binds the new bytes.
+  const sealedCaptures = new Map<string, OutputEvidence>();
   const captures = snapshot.evidence.filter((item) => item.kind === "case-capture").map((item) => {
-    const capture = E2EApplicationCaseCaptureSchema.parse(JSON.parse(decode(item.bytes)));
-    return { capture, item };
+    const original = E2EApplicationCaseCaptureSchema.parse(JSON.parse(decode(item.bytes)));
+    // The in-run frame names the compiled test and the scenario's component list as coverage; the collector derives coverage from the
+    // observations themselves and rejects anything else, so the sealed frame states it that way: the application ran, and the
+    // behaviors not exercised are the assertions that did not pass.
+    const coverage = { ...original.coverage, executedCandidateParts: original.coverage.observedScope === "source" ? [] : [original.applicationId],
+      unexercisedBehaviors: original.assertions.filter((assertion) => assertion.outcome !== "passed").map((assertion) => assertion.digest) };
+    const capture = E2EApplicationCaseCaptureSchema.parse({ ...original, coverage, cleanup: "confirmed" });
+    const sealed = proof(capture, item.ref.mediaType, item.ref.artifactId);
+    const resealed: OutputEvidence = Object.freeze({ ref: sealed.ref, bytes: sealed.bytes, kind: item.kind });
+    sealedCaptures.set(item.ref.artifactId, resealed);
+    return { capture, item: resealed };
   });
-  const cleanupReceipt = proof({ schemaVersion: "rovara-docker-owned-cleanup/v1", runId: binding.runId, removedAt: input.cleanup.removedAt,
-    network: input.cleanup.network, containers: [...input.cleanup.containers].sort(compare), inventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId) },
-  "application/json", `rovara-owned-cleanup-${binding.runId}`);
+  const cleanupReceipt = ownedCleanupReceipt(binding, input.cleanup);
   const cleanupFrame = proof({ schemaVersion: "e2e-application-owned-cleanup/v1", context, phase: "after-owned-close", cleanup: "confirmed", confirmed: true,
     serverListening: false, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId), ownedCleanupReceiptRefs: [cleanupReceipt.ref] },
   "application/json", `rovara-cleanup-frame-${binding.runId}`);
@@ -169,7 +241,7 @@ export function assembleExecutorActualRun(input: { snapshot: ExecutorOutputSnaps
     mockConsumptions: [], cleanupRef: cleanupFrame.ref, additionalSupervisorReceiptRefs: [cleanupReceipt.ref] },
   "application/json", `rovara-supervisor-receipt-${binding.runId}`);
 
-  const evidence: E2EApplicationProofBytes[] = [...snapshot.evidence.map(({ ref, bytes }) => ({ ref, bytes })), cleanupReceipt, cleanupFrame]
+  const evidence: E2EApplicationProofBytes[] = [...snapshot.evidence.map((item) => sealedCaptures.get(item.ref.artifactId) ?? item).map(({ ref, bytes }) => ({ ref, bytes })), cleanupReceipt, cleanupFrame]
     .sort((a, b) => compare(a.ref.artifactId, b.ref.artifactId));
   const supervisorReceiptRefs = [receiptFrame.ref, cleanupReceipt.ref].sort((a, b) => compare(a.artifactId, b.artifactId));
   return Object.freeze({ protocol: "e2e-actual-application-run/v1" as const, runnerToolchain: toolchain, shards: Object.freeze(shards),

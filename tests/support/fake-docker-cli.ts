@@ -21,6 +21,12 @@ export class FakeDockerCli implements DockerCli {
   /** Writes the files a finished executor would leave in its out directory. */
   onExecutor: (outDir: string, args: string[]) => void = () => undefined;
   logs = new Map<string, string>();
+  /** The order of the moments a test may need to compare: an executor finishing, and containers being force-removed. */
+  readonly events: string[] = [];
+  networkCreateFails = false;
+  appStartFails = false;
+  /** When set, the executor "container" ignores the abort signal and finishes (with its normal output) after this many milliseconds. */
+  executorIgnoresAbortForMs: number | null = null;
   buildOutput = "";
   executorStdout = "executor said hello\n";
 
@@ -28,6 +34,11 @@ export class FakeDockerCli implements DockerCli {
   hangOn(what: "executor"): void { this.hanging = what; }
   exitCodeOfExecutor(code: number): void { this.executorExit = code; }
   exitDuringExecutor(what: "app", code: number, logs: string): void { void what; this.appExit = { code, logs }; this.hanging = "executor"; }
+  /** A labeled resource whose creation time is missing or unreadable: the sweep must leave it alone. */
+  seedUnlabeled(runId: string, created: string): void {
+    const labels: Record<string, string> = { "rovara.run": runId, ...(created === "" ? {} : { "rovara.created": created }) };
+    this.resources.set(`rovara-app-${runId}`, { kind: "container", name: `rovara-app-${runId}`, labels, state: "running", exitCode: 0, logs: "" });
+  }
   seedStale(input: { runId: string; ageMs: number; now: number }): void {
     const labels = { "rovara.run": input.runId, "rovara.created": String(input.now - input.ageMs) };
     this.resources.set(`rovara-app-${input.runId}`, { kind: "container", name: `rovara-app-${input.runId}`, labels, state: "running", exitCode: 0, logs: "" });
@@ -81,6 +92,7 @@ export class FakeDockerCli implements DockerCli {
     this.timeouts.push(opts.timeoutMs);
     const [command, sub] = args;
     if (command === "network" && sub === "create") {
+      if (this.networkCreateFails) return { code: 1, stdout: "", stderr: "network create refused" };
       const name = args[args.length - 1]!;
       this.resources.set(name, { kind: "network", name, labels: this.mark(args), state: "running", exitCode: 0, logs: "" });
       return { code: 0, stdout: name, stderr: "" };
@@ -91,6 +103,7 @@ export class FakeDockerCli implements DockerCli {
     if (command === "rm") {
       for (const name of args.slice(2)) {
         this.resources.delete(name);
+        this.events.push(`rm ${name}`);
         if (name.startsWith("rovara-executor-")) this.releaseExecutor?.(137);
       }
       return { code: 0, stdout: "", stderr: "" };
@@ -107,6 +120,7 @@ export class FakeDockerCli implements DockerCli {
   private async runContainer(args: string[], opts: { signal: AbortSignal; timeoutMs: number }): Promise<Result> {
     const name = args.includes("--name") ? args[args.indexOf("--name") + 1]! : "";
     if (name.startsWith("rovara-app-")) {
+      if (this.appStartFails) return { code: 125, stdout: "", stderr: "docker: Error response from daemon: cannot start the app container" };
       this.resources.set(name, { kind: "container", name, labels: this.mark(args), state: "running", exitCode: 0, logs: "" });
       return { code: 0, stdout: "container-id", stderr: "" };
     }
@@ -130,7 +144,9 @@ export class FakeDockerCli implements DockerCli {
         });
         return { code, stdout: "", stderr: "" };
       }
+      if (this.executorIgnoresAbortForMs !== null) await new Promise((done) => setTimeout(done, this.executorIgnoresAbortForMs!));
       this.onExecutor(outMount, args);
+      this.events.push("executor finished");
       return { code: this.executorExit, stdout: this.executorStdout, stderr: "" };
     }
     // Anything else (the throwaway root cleanup container) just succeeds.

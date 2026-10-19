@@ -3,8 +3,8 @@ import { promisify } from "node:util";
 import { afterAll, describe, expect, it } from "vitest";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
-import { proveActualRun } from "../support/e2e-actual-run-proof.js";
-import { createLinuxHost, linuxRunInput, removeProbeDirs } from "../support/linux-runtime.js";
+import { collectHostRun, proveActualRun } from "../support/e2e-actual-run-proof.js";
+import { createLinuxHost, linuxRunInput, removeProbeDirs, runProbe, type ProbeRun } from "../support/linux-runtime.js";
 
 const execFileAsync = promisify(execFile);
 const docker = async (...args: string[]) => (await execFileAsync("docker", args)).stdout.trim();
@@ -33,6 +33,33 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(proof.captures.map((capture) => capture.terminal.kind)).toEqual(["completed"]);
     expect(proof.captures.map((capture) => capture.assertions.map((assertion) => assertion.outcome))).toEqual([["passed"]]);
     expect(r.leftovers).toEqual({ containers: "", networks: "" });
+  }, 300_000);
+
+  /** The worker's own join after close. The executor reports its image's node path, which the worker image shares; here the test process borrows it. */
+  async function collectLikeTheWorker(r: ProbeRun) {
+    const actual = r.run.actualRun!;
+    const inputs = await r.host.readCollectionInputs(new AbortController().signal);
+    const original = process.execPath;
+    process.execPath = actual.runnerToolchain.execPath;
+    try { return collectHostRun(actual, inputs, r.fixture.plan); } finally { process.execPath = original; }
+  }
+
+  it("collects the CSV positive through the real collector as PASS", async () => {
+    const r = await runProbe("web-csv-positive-v1", { defect: null });
+    expect(r.run.unavailableReason, JSON.stringify(r.host.readDiagnostics(r.fixture.plan.runId))).toBeNull();
+    const collected = await collectLikeTheWorker(r);
+    expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
+    expect(collected.qualification?.status).toBe("PASS");
+  }, 300_000);
+
+  it("never collects the extra-order defect as PASS", async () => {
+    const r = await runProbe("web-csv-positive-v1", { defect: "extra-order.json" });
+    expect(r.exitCode, JSON.stringify(r.host.readDiagnostics(r.fixture.plan.runId))).toBe(1);
+    const collected = await collectLikeTheWorker(r);
+    // Known gap: the collector wants a failed `assertion` step in the upstream report, but the web adapter fails the case body with a plain
+    // error, so a real assertion mismatch collects as UNKNOWN instead of FAILED (see the Task 1.4 fix report).
+    expect(collected.qualification?.status ?? "UNKNOWN").not.toBe("PASS");
+    expect(collected.unavailableReason ?? "").toMatch(/upstream report verdict disagree/);
   }, 300_000);
 
   it("reports build-failed, with the build log, when a build command fails, and removes everything", async () => {

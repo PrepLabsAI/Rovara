@@ -8,9 +8,11 @@ import type { E2EActualApplicationRun } from "../application-collection.js";
 import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
 import { validateE2EApplicationExecutionAdmission } from "../application-scenarios.js";
 import { createCredentialRedactor } from "../executor/redact.js";
-import { assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput, type ExecutorOutputSnapshot, type ExecutorResultFile } from "./executor-readback.js";
+import { assembleDockerCollectionInputs, assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput, validateExecutorResult,
+  type DockerCollectionInputs, type ExecutorOutputSnapshot, type ExecutorResultFile } from "./executor-readback.js";
 
 export { dockerOwnedResourceInventory, dockerOwnedResourceInventoryDigest } from "./executor-readback.js";
+export type { DockerCollectionInputs } from "./executor-readback.js";
 
 /**
  * The one way the host talks to Docker. `code` is the process exit code, 124 when `timeoutMs` elapsed first and 130 when
@@ -54,6 +56,11 @@ const APP_PORT = 4317;
 const BUILD_COPY_TIMEOUT_MS = 120_000;
 const SUPPORTED_SEED_PROFILE = "orders-seed/v1";
 const SUPPORTED_AUTH_PROFILE = "orders-auth/v1";
+const FORBIDDEN_ENV_NAME = /token|secret/i;
+/** Blank on every container, so an ambient proxy or Node option can never reach the candidate, the build or the executor. */
+const BLANKED_ENV = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "NODE_OPTIONS"].flatMap((name) => ["-e", `${name}=`]);
+const limits = (memory: string, pids: string, cpus: string) => ["--memory", memory, "--memory-swap", memory, "--pids-limit", pids, "--cpus", cpus];
+const IMAGE_PULL_TIMEOUT_MS = 300_000;
 const OWNED_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const sha = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 
@@ -84,17 +91,25 @@ export type DockerApplicationHostDeps = Readonly<{
    */
   ownedFiles?: Readonly<Record<string, string | Uint8Array>>;
   /**
-   * Called once with the out directory and plan of a run the executor completed (exit 0 or 1, result file agreeing), before the
-   * run's resources are removed. It is never called for a run without a trustworthy result.
+   * Called once with the out directory of a run the executor completed (exit 0 or 1, a result file that agrees and names this run and
+   * group), before the run's resources are removed. It is never called for a run without a trustworthy result, and never with a
+   * credential: `containsCredential` answers whether bytes carry one of the run's account credentials.
    */
-  onRunOutput?(paths: { outDir: string; planPath: string }): Promise<void>;
-  /** Test seam: builds the lifecycle's readback from the snapshot once cleanup is confirmed. */
+  onRunOutput?(run: { outDir: string; accountProfileIds: readonly string[]; containsCredential(bytes: Uint8Array): boolean }): Promise<void>;
+  /** Test seams: build the lifecycle's readback and the collector's protected inputs once cleanup is confirmed. */
   assemble?: typeof assembleExecutorActualRun;
+  assembleCollectionInputs?: typeof assembleDockerCollectionInputs;
 }>;
 
 export type DockerApplicationHost = E2EApplicationRuntimePorts & Readonly<{
   /** Redacted log tails of the run (64 KiB at most each); empty for a run this host did not allocate. */
   readDiagnostics(runId: string): { appLogTail: string; buildLogTail: string; executorLogTail: string };
+  /**
+   * The inputs `collectE2EApplicationRun` needs besides the actual run, the compiled suite, the binding and the round: the
+   * observation bindings and assertion assets the executor persisted, the cleanup receipt and inventory digest, the close time
+   * (`ownedClosedAt`), and the runner's own environment, limits and usage. Available only after confirmed cleanup of a completed run.
+   */
+  readCollectionInputs(signal: AbortSignal): Promise<DockerCollectionInputs>;
 }>;
 
 type Outcome =
@@ -175,7 +190,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const assemble = deps.assemble ?? assembleExecutorActualRun;
   const deadlineAt = Date.parse(binding.deadlineAt);
 
-  const state = { allocated: false, closed: false, cleanupConfirmed: false, outcome: null as Outcome | null, startedAt: "", cleanup: null as null | { removedAt: string; containers: string[] },
+  const state = { allocated: false, closed: false, cleanupConfirmed: false, outcome: null as Outcome | null, executing: null as Promise<unknown> | null, startedAt: "", cleanup: null as null | { removedAt: string; containers: string[] },
     appLogTail: "", buildLogTail: "", executorLogTail: "", redactor: createCredentialRedactor([]), createdAt: 0 };
   const redact = (text: string) => tailOf(state.redactor.text(redactText(text)), MAX_TAIL_BYTES);
   const admin = (args: string[], signal: AbortSignal = new AbortController().signal) => docker.run(args, { signal, timeoutMs: ADMIN_TIMEOUT_MS });
@@ -183,13 +198,15 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const stopReason = (): DockerApplicationUnavailableReason => (deps.now() >= deadlineAt ? "deadline-exceeded" : "cancelled");
   const appendBuildLog = (text: string) => { state.buildLogTail = redact(`${state.buildLogTail}${text}`); };
 
+  const left = () => Math.max(1, deadlineAt - deps.now());
   const hardening = (extra: string[] = []) => ["--cap-drop=ALL", "--security-opt", "no-new-privileges", "--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`, ...extra];
 
   async function removeWorkspace(): Promise<void> {
     try { await rm(workspace, { recursive: true, force: true }); return; } catch { /* files written by the container user may not be removable by this user */ }
     // A throwaway root container with no network and only this directory mounted removes what this user cannot. The executor image
     // is the one image certain to be on the host already.
-    await docker.run(["run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "rm", "-v", `${workspace}:/d`, deps.executorImage, "-rf", "/d/app", "/d/out", "/d/owned"],
+    await docker.run(["run", "--rm", "--pull=never", "--label", label, "--network", "none", "--user", "0:0", "--entrypoint", "rm", "-v", `${workspace}:/d`, ...BLANKED_ENV,
+      deps.executorImage, "-rf", "/d/app", "/d/out", "/d/owned"],
       { signal: new AbortController().signal, timeoutMs: ADMIN_TIMEOUT_MS }).catch(() => undefined);
     await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -208,27 +225,38 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     return { confirmed: !left && workspaceGone, containers };
   }
 
-  async function build(signal: AbortSignal): Promise<boolean> {
+  /** "deadline" means the plan deadline, not the command, ended the build. */
+  async function build(signal: AbortSignal): Promise<"ok" | "failed" | "deadline"> {
     const mounts = ["-v", `${deps.candidateSourceDir}:/src:ro`, "-v", `${dirs.app}:/out`];
-    const common = (name: string) => ["run", "--rm", "--name", name, ...hardening(), "--memory", "2g", "--pids-limit", "1024", "--user", "1000:1000", ...mounts];
-    const copy = await docker.run([...common(`rovara-build-${runId}-0`), "--entrypoint", "cp", deps.buildImage, "-R", "--no-preserve=all", "/src/.", "/out/"], { signal, timeoutMs: BUILD_COPY_TIMEOUT_MS });
+    const common = (name: string) => ["run", "--rm", "--name", name, ...hardening(), ...limits("2g", "1024", "2"), "--user", "1000:1000", ...mounts];
+    const copyTimeout = Math.min(BUILD_COPY_TIMEOUT_MS, left());
+    const copy = await docker.run([...common(`rovara-build-${runId}-0`), ...BLANKED_ENV, "--entrypoint", "cp", deps.buildImage, "-R", "--no-preserve=all", "/src/.", "/out/"],
+      { signal, timeoutMs: copyTimeout });
     appendBuildLog(`${copy.stdout}${copy.stderr}`);
-    if (copy.code !== 0) return false;
+    if (copy.code !== 0) return copy.code === 124 && copyTimeout < BUILD_COPY_TIMEOUT_MS ? "deadline" : "failed";
     let index = 0;
     for (const command of recipe.build) {
       index += 1;
       // The build runs with registry egress only through the default bridge and holds no credential: HOME and the package cache sit in a tmpfs.
-      const env = ["-e", "HOME=/tmp/home", "-e", "npm_config_cache=/tmp/home/.npm", "-e", "CI=1", ...Object.entries(command.env).flatMap(([name, value]) => ["-e", `${name}=${value}`])];
-      const result = await docker.run([...common(`rovara-build-${runId}-${index}`), "--tmpfs", "/tmp:rw,exec,size=1g", "-w", containerCwd("/out", command.cwd), ...env,
-        deps.buildImage, command.program, ...command.args], { signal, timeoutMs: command.timeoutMs });
+      const env = ["-e", "HOME=/tmp/home", "-e", "npm_config_cache=/tmp/home/.npm", "-e", "CI=1", ...Object.entries(command.env).flatMap(([name, value]) => ["-e", `${name}=${value}`]), ...BLANKED_ENV];
+      const timeoutMs = Math.min(command.timeoutMs, left());
+      const result = await docker.run([...common(`rovara-build-${runId}-${index}`), "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=1g", "-w", containerCwd("/out", command.cwd), ...env,
+        deps.buildImage, command.program, ...command.args], { signal, timeoutMs });
       appendBuildLog(`${result.stdout}${result.stderr}`);
       if (result.code !== 0) {
         if (result.code === 124) await admin(["rm", "-f", `rovara-build-${runId}-${index}`]);
-        appendBuildLog(`\nbuild command ${index} (${command.program}) ended with ${result.code === 124 ? "a timeout" : `exit code ${result.code}`}\n`);
-        return false;
+        const clamped = result.code === 124 && timeoutMs < command.timeoutMs;
+        appendBuildLog(`\nbuild command ${index} (${command.program}) ended with ${result.code === 124 ? (clamped ? "the run deadline" : "a timeout") : `exit code ${result.code}`}\n`);
+        return clamped ? "deadline" : "failed";
       }
     }
-    return true;
+    return "ok";
+  }
+
+  /** The images are pulled here, never by `docker run`, so a run can only start what the host already holds. */
+  async function ensureImage(image: string, signal: AbortSignal): Promise<boolean> {
+    if ((await admin(["image", "inspect", image], signal)).code === 0) return true;
+    return (await docker.run(["pull", image], { signal, timeoutMs: IMAGE_PULL_TIMEOUT_MS })).code === 0;
   }
 
   async function appStatus(): Promise<{ running: boolean; exitCode: number | null }> {
@@ -239,11 +267,22 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   }
 
   async function execute(signal: AbortSignal): Promise<Outcome> {
+    // Environment names that look like credentials are refused outright, whatever the recipe schema let through.
+    const envNames = [...recipe.build.flatMap((command) => Object.keys(command.env)), ...Object.keys(launch.start.env)];
+    const refused = envNames.find((name) => FORBIDDEN_ENV_NAME.test(name));
+    if (refused !== undefined) {
+      appendBuildLog(`the recipe sets ${refused}, whose name looks like a credential; recipes may not carry credentials\n`);
+      return { kind: "unavailable", reason: "build-failed" };
+    }
+    for (const image of [deps.buildImage, deps.executorImage]) {
+      if (!(await ensureImage(image, signal))) { appendBuildLog(`image ${image} is not available on the host\n`); return { kind: "unavailable", reason: signal.aborted ? stopReason() : "executor-failed" }; }
+    }
     // Build, or take the source as it is when the recipe builds nothing; either way the app sees /app read-only.
     if (recipe.build.length > 0) {
       await mkdir(dirs.app, { recursive: true, mode: 0o777 });
       await chmod(dirs.app, 0o777);
-      if (!(await build(signal))) return { kind: "unavailable", reason: signal.aborted ? stopReason() : "build-failed" };
+      const built = await build(signal);
+      if (built !== "ok") return { kind: "unavailable", reason: built === "deadline" ? "deadline-exceeded" : signal.aborted ? stopReason() : "build-failed" };
     } else {
       await cp(deps.candidateSourceDir, dirs.app, { recursive: true, verbatimSymlinks: true });
     }
@@ -253,13 +292,13 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     if (existing && !existing.isDirectory()) await rm(ownedMount, { force: true });
     await mkdir(ownedMount, { recursive: true });
 
-    const appCreate = await docker.run(["run", "-d", "--name", appName, ...hardening(["--network", network, "--network-alias", "app"]), "--read-only", "--tmpfs", "/tmp:rw,size=256m",
-      "--memory", "1g", "--pids-limit", "512", "--user", "1000:1000", "-v", `${dirs.app}:/app:ro`, "-v", `${dirs.owned}:/app/.owned:ro`, "-w", containerCwd("/app", launch.start.cwd),
+    const appCreate = await docker.run(["run", "-d", "--name", appName, "--pull=never", ...hardening(["--network", network, "--network-alias", "app"]), "--read-only",
+      "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", ...limits("1g", "512", "1"), "--user", "1000:1000", "-v", `${dirs.app}:/app:ro`, "-v", `${dirs.owned}:/app/.owned:ro`, "-w", containerCwd("/app", launch.start.cwd),
       // The recipe's literals come first, so the host's own port and seed variables always win.
       ...Object.entries(launch.start.env).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
-      "-e", `${portEnv}=${APP_PORT}`, "-e", "ORDERS_TEST_SEED_FILE=/app/.owned/seed.json", deps.buildImage, launch.start.program, ...launch.start.args],
+      "-e", `${portEnv}=${APP_PORT}`, "-e", "ORDERS_TEST_SEED_FILE=/app/.owned/seed.json", ...BLANKED_ENV, deps.buildImage, launch.start.program, ...launch.start.args],
     { signal, timeoutMs: ADMIN_TIMEOUT_MS });
-    if (appCreate.code !== 0) { state.appLogTail = redact(`${appCreate.stdout}${appCreate.stderr}`); return { kind: "unavailable", reason: signal.aborted ? stopReason() : "executor-failed" }; }
+    if (appCreate.code !== 0) { state.appLogTail = redact(`${appCreate.stdout}${appCreate.stderr}`); return { kind: "unavailable", reason: signal.aborted ? stopReason() : "app-exited" }; }
     if (!(await appStatus()).running) return { kind: "unavailable", reason: "app-exited" };
 
     const executorStop = new AbortController();
@@ -267,8 +306,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const remaining = Math.max(1, deadlineAt - deps.now()) + graceMs;
     let appGone = false;
     const watching = new AbortController();
-    const executorRun = docker.run(["run", "--name", executorName, ...hardening(["--network", network]), "--init", "--read-only", "--shm-size", "1g", "--tmpfs", "/tmp:rw,exec,size=512m",
-      "-v", `${dirs.plan}:/run/rovara/plan.json:ro`, "-v", `${dirs.out}:/out`, deps.executorImage], { signal: executorSignal, timeoutMs: remaining });
+    const executorRun = docker.run(["run", "--name", executorName, "--pull=never", ...hardening(["--network", network]), "--init", "--read-only", "--shm-size", "1g",
+      "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=512m", ...limits("2g", "1024", "2"), "-v", `${dirs.plan}:/run/rovara/plan.json:ro`, "-v", `${dirs.out}:/out`, ...BLANKED_ENV,
+      deps.executorImage], { signal: executorSignal, timeoutMs: remaining });
     const watch = (async () => {
       while (!watching.signal.aborted && !executorSignal.aborted) {
         await new Promise<void>((done) => {
@@ -296,9 +336,12 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     if (executor.code === 0 || executor.code === 1) {
       // Exit 0 or 1 is only believed together with a result file that says the same.
       if (result === null) return { kind: "unavailable", reason: "executor-result-mismatch" };
+      try { validateExecutorResult(result, binding); } catch { return { kind: "unavailable", reason: "executor-result-mismatch" }; }
       try {
         const snapshot = await snapshotExecutorOutput(dirs.out, result);
-        await deps.onRunOutput?.({ outDir: dirs.out, planPath: dirs.plan });
+        // A run that was stopped (the deadline or the caller) while the output was being read has no result, and nothing is handed out.
+        if (signal.aborted) return { kind: "unavailable", reason: stopReason() };
+        await deps.onRunOutput?.({ outDir: dirs.out, accountProfileIds: profileIds, containsCredential: (bytes) => state.redactor.contains(bytes) });
         return { kind: "completed", exitCode: executor.code, snapshot };
       } catch { return { kind: "unavailable", reason: "executor-failed" }; }
     }
@@ -342,10 +385,16 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     return Object.freeze({
       leaseId: `rovara-docker-${runId}`,
       async execute(executeSignal: AbortSignal): Promise<E2ECollection> {
+        if (state.closed || state.executing !== null) throw new Error("docker application host runs once and only before it is closed");
         state.startedAt = new Date(deps.now()).toISOString();
-        let outcome: Outcome;
-        try { outcome = await execute(executeSignal); }
-        catch { outcome = { kind: "unavailable", reason: executeSignal.aborted ? stopReason() : "executor-failed" }; }
+        const running = (async (): Promise<Outcome> => {
+          try { return await execute(executeSignal); }
+          catch { return { kind: "unavailable", reason: executeSignal.aborted ? stopReason() : "executor-failed" }; }
+        })();
+        state.executing = running;
+        let outcome = await running;
+        // Whatever finished after the deadline or a cancellation is not a result, however complete it looks.
+        if (executeSignal.aborted && outcome.kind === "completed") outcome = { kind: "unavailable", reason: stopReason() };
         state.outcome = outcome;
         const reason = outcome.kind === "unavailable" ? outcome.reason : null;
         return { process: { exitCode: outcome.kind === "completed" ? outcome.exitCode : null, timedOut: reason === "deadline-exceeded", aborted: reason === "cancelled" },
@@ -355,6 +404,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       },
       async close(): Promise<{ confirmed: boolean }> {
         if (state.closed) return { confirmed: state.cleanupConfirmed };
+        // An execution still in flight (stopped by the deadline or a cancellation) settles first: it is bounded by its own kills, and
+        // nothing may snapshot the out directory or record an outcome while the run's resources are being removed.
+        await state.executing?.catch(() => undefined);
         const removed = await removeOwned();
         state.closed = true;
         state.cleanupConfirmed = removed.confirmed;
@@ -364,18 +416,28 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     });
   }
 
-  async function readActualRun(signal: AbortSignal): Promise<E2EActualApplicationRun> {
-    if (signal.aborted) throw new Error("application proof readback was cancelled");
+  /** The completed outcome and cleanup facts of a run whose resources are confirmed gone; every other state is the unavailable reason. */
+  function settledRun(signal: AbortSignal, what: string) {
+    if (signal.aborted) throw new Error(`${what} was cancelled`);
     if (!state.closed || !state.cleanupConfirmed || state.cleanup === null) throw new Error("owned cleanup is not confirmed");
     const outcome = state.outcome;
     if (outcome === null) throw new Error("the run was never executed");
     if (outcome.kind === "unavailable") throw new Error(outcome.reason);
-    return assemble({ snapshot: outcome.snapshot, compiled, binding, cleanup: { removedAt: state.cleanup.removedAt, containers: state.cleanup.containers, network },
-      evidenceDirectory: dirs.out });
+    return { snapshot: outcome.snapshot, cleanup: { removedAt: state.cleanup.removedAt, containers: state.cleanup.containers, network } };
+  }
+
+  async function readActualRun(signal: AbortSignal): Promise<E2EActualApplicationRun> {
+    const { snapshot, cleanup } = settledRun(signal, "application proof readback");
+    return assemble({ snapshot, compiled, binding, cleanup, evidenceDirectory: dirs.out });
+  }
+
+  async function readCollectionInputs(signal: AbortSignal): Promise<DockerCollectionInputs> {
+    const { snapshot, cleanup } = settledRun(signal, "collection input readback");
+    return (deps.assembleCollectionInputs ?? assembleDockerCollectionInputs)({ snapshot, binding, cleanup });
   }
 
   return Object.freeze({
-    allocate, readActualRun,
+    allocate, readActualRun, readCollectionInputs,
     readDiagnostics: (requestedRunId: string) => requestedRunId === runId
       ? { appLogTail: state.appLogTail, buildLogTail: state.buildLogTail, executorLogTail: state.executorLogTail }
       : { appLogTail: "", buildLogTail: "", executorLogTail: "" },
@@ -392,7 +454,7 @@ export async function sweepStaleRovaraRuns(docker: DockerCli, olderThanMs: numbe
   const signal = new AbortController().signal;
   const format = `{{.Names}}\t{{.Label "${ROVARA_RUN_LABEL}"}}\t{{.Label "${ROVARA_CREATED_LABEL}"}}`;
   const rows = (stdout: string) => stdout.split("\n").map((line) => line.split("\t")).filter((parts) => parts.length === 3)
-    .map(([name, run, created]) => ({ name: name!.trim(), runId: run!.trim(), created: Number(created!.trim()) }))
+    .map(([name, run, created]) => ({ name: name!.trim(), runId: run!.trim(), created: /^\d{1,16}$/.test(created!.trim()) ? Number(created!.trim()) : Number.NaN }))
     .filter((row) => row.name !== "" && SAFE_RUN_ID.test(row.runId) && Number.isFinite(row.created));
   const containers = rows((await docker.run(["ps", "-a", "--filter", `label=${ROVARA_RUN_LABEL}`, "--format", format], { signal, timeoutMs: ADMIN_TIMEOUT_MS })).stdout);
   const networks = rows((await docker.run(["network", "ls", "--filter", `label=${ROVARA_RUN_LABEL}`, "--format", format.replace("{{.Names}}", "{{.Name}}")], { signal, timeoutMs: ADMIN_TIMEOUT_MS })).stdout);

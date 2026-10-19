@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, it } from "vitest";
-import { allOutputText, blockedHosts, caseStatuses, csvRows, failedAssertionKinds } from "../support/e2e-executor-output.js";
+import { blockedHosts, caseStatuses, csvRows, failedAssertionKinds } from "../support/e2e-executor-output.js";
 import { removeProbeDirs, runProbe, type ProbeRun } from "../support/linux-runtime.js";
 
 /** Everything a failing run left to explain it: why it was unavailable, and the redacted log tails. */
@@ -18,9 +18,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(caseStatuses(outOf(r), r.fixture)).toEqual({ "web-csv-positive-v1": "passed" });
     // The rows are the fixture's own: tests/fixtures/e2e-web-api-app/fixtures/orders.json for tenant-a, as the CSV probe oracle lists them.
     expect(csvRows(outOf(r))).toEqual([["id", "customer", "total", "state"], ["a1", "Ada", "12.5", "ready"], ["a2", "Grace", "23", "ready"]]);
-    const everything = allOutputText(outOf(r));
-    expect(everything).not.toContain(r.account!.password);
-    expect(everything).not.toContain(r.account!.email);
+    // Judged by the host's own credential predicate over every byte of the run's out directory.
+    expect(r.credentialsLeaked).toBe(false);
   }, 300_000);
 
   it("web-csv-negative: the extra-order defect fails the csv assertion", async () => {

@@ -213,8 +213,10 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         if (!schema) throw new Error("state probe is not in the installed fixed probe inventory");
         const bytes = Buffer.from(canonicalJson(schema), "utf8");
         const ref = await ledger.recordApprovedAsset({ caseId: request.caseId, assetId: request.probeId, bytes });
-        return { proof: { ref, bytes: Uint8Array.from(bytes) }, assetBinding: { caseId: request.caseId, assertionIndex: request.assertionIndex,
-          kind: "state-probe", id: request.probeId, manifestDigest: sha(canonicalJson({ probeId: request.probeId, assetSha256: ref.sha256 })), ref } };
+        const assetBinding = { caseId: request.caseId, assertionIndex: request.assertionIndex, kind: "state-probe" as const, id: request.probeId,
+          manifestDigest: sha(canonicalJson({ probeId: request.probeId, assetSha256: ref.sha256 })), ref };
+        await ledger.recordAssetBinding(assetBinding);
+        return { proof: { ref, bytes: Uint8Array.from(bytes) }, assetBinding };
       },
     });
     return createAPIApplicationCliHost({ launchContext, declaration: { ...declaration, target: { targetId: declaration.target.targetId, app: null } }, ports });

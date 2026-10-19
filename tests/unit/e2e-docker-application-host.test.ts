@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
-import { readFileSync, realpathSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,17 +14,22 @@ const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 async function temp(prefix: string) { const dir = realpathSync(await mkdtemp(join(tmpdir(), prefix))); roots.push(dir); return dir; }
 
+const collectionSentinel = { marker: "collection-inputs" };
 const sentinel = { protocol: "e2e-actual-application-run/v1", cleanupConfirmed: true, cleanupServerListening: false, supervisorReadback: { marker: "assembled" } };
 type Setup = Awaited<ReturnType<typeof setup>>;
 
-async function setup(options: { fake: FakeDockerCli; deadlineMs?: number; recipeBuild?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeBuild"]; runRoot?: string; role?: "owner" | "viewer" }) {
+async function setup(options: { fake: FakeDockerCli; deadlineMs?: number; recipeBuild?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeBuild"];
+  recipeStart?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeStart"]; runRoot?: string; role?: "owner" | "viewer";
+  onRunOutput?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["onRunOutput"]> }) {
   const fixture: OrdersExecutorFixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}),
-    ...(options.recipeBuild ? { recipeBuild: options.recipeBuild } : {}), ...(options.role ? { role: options.role } : {}) });
+    ...(options.recipeBuild ? { recipeBuild: options.recipeBuild } : {}), ...(options.recipeStart ? { recipeStart: options.recipeStart } : {}), ...(options.role ? { role: options.role } : {}) });
   const source = await temp("candidate-source-"); await writeFile(join(source, "package.json"), "{}");
   const runRoot = options.runRoot ?? await temp("run-root-");
   const assemble = vi.fn<(input: unknown) => never>(() => sentinel as never);
+  const assembleCollectionInputs = vi.fn<(input: unknown) => never>(() => collectionSentinel as never);
   const host = createDockerApplicationHost({ docker: options.fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, now: () => Date.now(),
-    admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir: source, appPollMs: 10, deadlineGraceMs: 60, assemble });
+    admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir: source, appPollMs: 10, deadlineGraceMs: 60, assemble, assembleCollectionInputs,
+    ...(options.onRunOutput ? { onRunOutput: options.onRunOutput } : {}) });
   const { compiled, plan } = fixture;
   const binding = plan.admission.round.groupBindings[0]!;
   const ref = compiled.runtimeAdmissionContext.selectionInput.intent.applicationRuntimeRefs[0]!;
@@ -35,7 +40,7 @@ async function setup(options: { fake: FakeDockerCli; deadlineMs?: number; recipe
         appRecipe: app.approval.applications.find((item) => item.applicationId === ref.applicationId)!.recipe }],
       networkPolicyDigest: runtime.capabilities.networkPolicyDigest, seedDigest: "a".repeat(64), limits: runtime.binding,
       capture: compiled.runtimeAdmissionContext.selectionInput.policy.capture }, modelPermit: null };
-  return { fixture, host, assemble, input, runId: plan.runId, groupId: plan.groupId, runRoot, fake: options.fake };
+  return { fixture, host, assemble, assembleCollectionInputs, input, runId: plan.runId, groupId: plan.groupId, runRoot, fake: options.fake };
 }
 const runWith = (s: Setup, signal: AbortSignal = new AbortController().signal) =>
   runIsolatedE2EApplication({ input: s.input as never, compiled: s.fixture.compiled, ports: s.host, signal });
@@ -51,8 +56,16 @@ describe("docker application host", () => {
       expect(args).toEqual(expect.arrayContaining(["--network", `rovara-e2e-${s.runId}`, "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--label", `rovara.run=${s.runId}`]));
       expect(args.join(" ")).not.toMatch(/docker\.sock|AWS_|AGENTX_|PI_|GIT_|TOKEN|SECRET|(^| )-p /);
     }
-    expect(fake.argsFor("app")).toEqual(expect.arrayContaining(["--read-only", "--tmpfs", "/tmp:rw,size=256m", "--network-alias", "app", "APP_PORT=4317", "--memory", "1g", "--pids-limit", "512"]));
-    expect(fake.argsFor("executor")).toEqual(expect.arrayContaining(["--init", "--read-only", "--shm-size", "1g"]));
+    expect(fake.argsFor("app")).toEqual(expect.arrayContaining(["--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", "--network-alias", "app", "APP_PORT=4317",
+      "--memory", "1g", "--memory-swap", "1g", "--pids-limit", "512", "--cpus", "1", "--pull=never"]));
+    expect(fake.argsFor("executor")).toEqual(expect.arrayContaining(["--init", "--read-only", "--shm-size", "1g", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=512m",
+      "--memory", "2g", "--memory-swap", "2g", "--pids-limit", "1024", "--cpus", "2", "--pull=never"]));
+    // Ambient proxy and Node settings are blanked on every container, after anything the recipe could set.
+    for (const args of [fake.argsFor("app"), fake.argsFor("executor")]) {
+      for (const name of ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy", "NODE_OPTIONS"]) {
+        expect(args.some((value, index) => args[index - 1] === "-e" && value === `${name}=`), name).toBe(true);
+      }
+    }
     expect(fake.call("network create")).toContain("--internal");
     expect(fake.mountsFor("executor").find((mount) => mount.endsWith(":/run/rovara/plan.json:ro"))).toBeDefined();
     expect(fake.mountsFor("executor").find((mount) => mount.endsWith(":/out"))).toBeDefined();
@@ -67,7 +80,8 @@ describe("docker application host", () => {
     const builds = fake.calls.filter((args) => args[0] === "run" && args[args.indexOf("--name") + 1]!.startsWith("rovara-build-"));
     expect(builds).toHaveLength(3);
     for (const args of builds) {
-      expect(args).toEqual(expect.arrayContaining(["--cap-drop=ALL", "--security-opt", "no-new-privileges", "--memory", "2g", "--pids-limit", "1024"]));
+      expect(args).toEqual(expect.arrayContaining(["--cap-drop=ALL", "--security-opt", "no-new-privileges", "--memory", "2g", "--memory-swap", "2g", "--pids-limit", "1024", "--cpus", "2"]));
+      expect(args).toContain("NODE_OPTIONS=");
       expect(args).not.toContain("--network");
       expect(args.join(" ")).not.toMatch(/docker\.sock|AWS_|AGENTX_|PI_|GIT_|TOKEN|SECRET|(^| )-p /);
       expect(args.some((value) => value.endsWith(":/src:ro"))).toBe(true);
@@ -139,8 +153,27 @@ describe("docker application host", () => {
     setTimeout(() => controller.abort(new Error("operator cancelled")), 100);
     const result = await runWith(s, controller.signal);
     expect(result.actualRun).toBeNull();
+    // The lifecycle refuses to read back after a cancellation; the host's own reason is the cancellation, never a result.
+    expect(result.unavailableReason).toBe("application proof readback was cancelled before dispatch");
+    await expect(s.host.readActualRun(new AbortController().signal)).rejects.toThrow("cancelled");
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
   });
+
+  it("waits for an execution still in flight at the deadline before removing anything, and never returns its late result", async () => {
+    const fake = new FakeDockerCli(); const hook = vi.fn(async () => undefined);
+    const s = await setup({ fake, deadlineMs: 300, onRunOutput: hook });
+    // The executor does not stop when the signal fires: it finishes, cleanly and in full, well after the deadline.
+    fake.executorIgnoresAbortForMs = 900;
+    fake.onExecutor = okOutput(s);
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBe("deadline-exceeded");
+    expect(result.actualRun).toBeNull();
+    expect(hook).not.toHaveBeenCalled();
+    expect(s.assemble).not.toHaveBeenCalled();
+    expect(fake.events.indexOf("executor finished")).toBeGreaterThanOrEqual(0);
+    expect(fake.events.indexOf("executor finished")).toBeLessThan(fake.events.findIndex((event) => event.startsWith("rm ")));
+    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  }, 20_000);
 
   it("isolates concurrent runs", async () => {
     const fake = new FakeDockerCli();
@@ -165,6 +198,80 @@ describe("docker application host", () => {
     expect(fake.liveResources(`rovara.run=${a.runId}`).concat(fake.liveResources(`rovara.run=${b.runId}`))).toEqual([]);
   });
 
+  it("refuses recipe env names that look like credentials, for the build and the app alike", async () => {
+    for (const options of [{ recipeBuild: [{ program: "npm", args: ["run", "build"], cwd: ".", timeoutMs: 45_000, env: { MY_Token_NAME: "x" } }] }, { recipeStart: { env: { app_SECRET_name: "x" } } }]) {
+      const fake = new FakeDockerCli(); const s = await setup({ fake, ...options });
+      const result = await runWith(s);
+      expect(result.unavailableReason).toBe("build-failed");
+      expect(s.host.readDiagnostics(s.runId).buildLogTail).toMatch(/looks like a credential/);
+      expect(fake.calls.filter((args) => args[0] === "run")).toEqual([]);
+      expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+    }
+  });
+
+  it("never lets a build command run past the plan deadline, and reports that as the deadline", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake, deadlineMs: 5_000, recipeBuild: [{ program: "npm", args: ["run", "build"], cwd: ".", timeoutMs: 300_000, env: {} }] });
+    fake.failOn("build", 124);
+    const result = await runWith(s);
+    expect(fake.buildTimeouts().slice(1).every((timeout) => timeout <= 5_000)).toBe(true);
+    expect(fake.buildTimeouts()).toHaveLength(2);
+    expect(result.unavailableReason).toBe("deadline-exceeded");
+    expect(result.actualRun).toBeNull();
+    // A command that merely times out inside the deadline is still a failed build.
+    const inside = new FakeDockerCli(); const t = await setup({ fake: inside, deadlineMs: 600_000, recipeBuild: [{ program: "npm", args: ["run", "build"], cwd: ".", timeoutMs: 45_000, env: {} }] });
+    inside.failOn("build", 124);
+    expect((await runWith(t)).unavailableReason).toBe("build-failed");
+  });
+
+  it("reports an app container that cannot start as app-exited", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake }); fake.appStartFails = true;
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBe("app-exited");
+    expect(s.host.readDiagnostics(s.runId).appLogTail).toContain("cannot start the app container");
+    expect(() => fake.argsFor("executor")).toThrow();
+    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  });
+
+  it("cleans up an allocation that fails after it created its workspace", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake }); fake.networkCreateFails = true;
+    const result = await runWith(s);
+    expect(result.actualRun).toBeNull();
+    expect(fake.calls.some((args) => args[0] === "run")).toBe(false);
+    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+    expect(await readdir(s.runRoot)).toEqual([]);
+  });
+
+  it("closes once and says the same thing again", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    const signal = new AbortController().signal;
+    const lease = await s.host.allocate(s.input as never, signal);
+    expect(fake.networks()).toEqual([`rovara-e2e-${s.runId}`]);
+    await expect(lease.close(signal)).resolves.toEqual({ confirmed: true });
+    const removals = () => fake.calls.filter((args) => args[0] === "rm" || (args[0] === "network" && args[1] === "rm")).length;
+    const before = removals();
+    await expect(lease.close(signal)).resolves.toEqual({ confirmed: true });
+    expect(removals()).toBe(before);
+    await expect(lease.execute(signal)).rejects.toThrow(/only before it is closed/);
+    await expect(s.host.allocate(s.input as never, signal)).rejects.toThrow(/already allocated/);
+  });
+
+  it("does not confirm cleanup it could not finish, and removes the workspace's stubborn files through a labeled root container", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    const locked = join(s.runRoot, s.runId, "out", "locked");
+    // A directory this user cannot empty, like the files a container user leaves behind; the fake root container does not actually clear it.
+    fake.onExecutor = (outDir) => { writeExecutorOutput(outDir, { exitCode: 0, reason: null, runId: s.runId, groupId: s.groupId });
+      mkdirSync(join(outDir, "locked")); writeFileSync(join(outDir, "locked", "file"), "x"); chmodSync(join(outDir, "locked"), 0o555); };
+    try {
+      const result = await runWith(s);
+      expect(result.lifecycle.cleanup).not.toBe("confirmed");
+      expect(result.actualRun).toBeNull();
+      expect(result.unavailableReason).toMatch(/cleanup/);
+      const root = fake.calls.find((args) => args[0] === "run" && args.includes("--entrypoint") && args[args.indexOf("--entrypoint") + 1] === "rm")!;
+      expect(root).toEqual(expect.arrayContaining(["--label", `rovara.run=${s.runId}`, "--pull=never", "--network", "none", "--user", "0:0"]));
+      await expect(s.host.readActualRun(new AbortController().signal)).rejects.toThrow("owned cleanup is not confirmed");
+    } finally { await chmod(locked, 0o755).catch(() => undefined); }
+  });
+
   it("sweeps stale runs older than one hour", async () => {
     const fake = new FakeDockerCli(); const now = Date.now();
     fake.seedStale({ runId: "old", ageMs: 3_700_000, now }); fake.seedStale({ runId: "fresh", ageMs: 60_000, now });
@@ -173,6 +280,15 @@ describe("docker application host", () => {
     expect(fake.liveResources("rovara.run=old")).toEqual([]);
     expect(fake.liveResources("rovara.run=fresh")).toHaveLength(2);
     expect(await readdir(runRoot)).toEqual(["fresh"]);
+  });
+
+  it("leaves alone a labeled resource whose creation time is missing or unreadable", async () => {
+    const fake = new FakeDockerCli(); const now = Date.now();
+    fake.seedUnlabeled("no-time", ""); fake.seedUnlabeled("bad-time", "yesterday"); fake.seedStale({ runId: "old", ageMs: 3_700_000, now });
+    expect(await sweepStaleRovaraRuns(fake, 3_600_000, { now: () => now })).toBe(1);
+    expect(fake.liveResources("rovara.run=no-time")).toHaveLength(1);
+    expect(fake.liveResources("rovara.run=bad-time")).toHaveLength(1);
+    expect(fake.liveResources("rovara.run=old")).toEqual([]);
   });
 
   it("sweeps stale runs at the start of an allocation", async () => {
@@ -248,16 +364,51 @@ describe("docker application host", () => {
       for (const s of [a, b, c]) expect(s.assemble).not.toHaveBeenCalled();
     });
 
-    it("refuses a result file written for another run", async () => {
-      const fake = new FakeDockerCli(); const s = await setup({ fake });
+    it("refuses a result file written for another run, before the output hook or any readback", async () => {
+      const fake = new FakeDockerCli(); const hook = vi.fn(async () => undefined);
+      const s = await setup({ fake, onRunOutput: hook });
       fake.onExecutor = (outDir) => writeExecutorOutput(outDir, { exitCode: 0, reason: null, runId: "00000000-0000-4000-8000-000000000000", groupId: s.groupId });
-      const real = await import("../../packages/verifier/src/host/executor-readback.js");
-      // The default readback rejects a foreign run; the host surfaces that as an unavailable readback, never a result.
-      const host = createDockerApplicationHost({ docker: fake, executorImage: "e", buildImage: "b", runRoot: s.runRoot, now: () => Date.now(),
-        admission: s.fixture.plan.admission, groupId: s.groupId, candidateSourceDir: await temp("src-"), appPollMs: 10, deadlineGraceMs: 60, assemble: real.assembleExecutorActualRun });
-      const result = await runIsolatedE2EApplication({ input: s.input as never, compiled: s.fixture.compiled, ports: host, signal: new AbortController().signal });
+      const result = await runWith(s);
       expect(result.actualRun).toBeNull();
-      expect(result.unavailableReason).toMatch(/not a completed run of this group/);
+      expect(result.unavailableReason).toBe("executor-result-mismatch");
+      expect(hook).not.toHaveBeenCalled();
+      expect(s.assemble).not.toHaveBeenCalled();
+    });
+
+    it("hands the output hook only the out directory, the profile ids and a credential predicate", async () => {
+      const fake = new FakeDockerCli(); let seen: { keys: string[]; leaks: boolean; clean: boolean; profiles: readonly string[] } | null = null;
+      const holder: { password: string } = { password: "" };
+      const s = await setup({ fake, onRunOutput: async (run) => {
+        seen = { keys: Object.keys(run).sort(), leaks: run.containsCredential(Buffer.from(`x ${holder.password} y`)), clean: run.containsCredential(Buffer.from("nothing here")), profiles: run.accountProfileIds };
+      } });
+      fake.onExecutor = (outDir, args) => {
+        okOutput(s)(outDir);
+        const mount = args.find((value, index) => args[index - 1] === "-v" && value.endsWith(":/run/rovara/plan.json:ro"))!.slice(0, -":/run/rovara/plan.json:ro".length);
+        holder.password = (JSON.parse(readFileSync(mount, "utf8")) as { accounts: { password: string }[] }).accounts[0]!.password;
+      };
+      await runWith(s);
+      expect(seen).toEqual({ keys: ["accountProfileIds", "containsCredential", "outDir"], leaks: true, clean: false, profiles: ["orders-owner"] });
+    });
+
+    it("exposes the collector inputs only after confirmed cleanup, built from the same cleanup the readback saw", async () => {
+      const fake = new FakeDockerCli(); const s = await setup({ fake });
+      fake.onExecutor = okOutput(s);
+      await expect(s.host.readCollectionInputs(new AbortController().signal)).rejects.toThrow("owned cleanup is not confirmed");
+      const result = await runWith(s);
+      expect(result.actualRun).toBe(sentinel);
+      await expect(s.host.readCollectionInputs(new AbortController().signal)).resolves.toBe(collectionSentinel);
+      const call = s.assembleCollectionInputs.mock.calls[0]![0] as { cleanup: { removedAt: string; network: string } };
+      const readbackCall = s.assemble.mock.calls[0]![0] as { cleanup: { removedAt: string; network: string } };
+      expect(call.cleanup).toEqual(readbackCall.cleanup);
+      expect(call.cleanup.network).toBe(`rovara-e2e-${s.runId}`);
+    });
+
+    it("exposes no collector inputs for a run that was unavailable", async () => {
+      const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep });
+      fake.failOn("build", 1);
+      await runWith(s);
+      await expect(s.host.readCollectionInputs(new AbortController().signal)).rejects.toThrow("build-failed");
+      expect(s.assembleCollectionInputs).not.toHaveBeenCalled();
     });
   });
 });

@@ -5,7 +5,7 @@ import { E2EApplicationEvidenceRefSchema, canonicalJson, type E2EApplicationEvid
 import type { E2EApplicationCliLaunchContext } from "../application-runtime-bootstrap.js";
 import type { E2EApplicationCliCasePlan } from "../application-services.js";
 import type { E2EApplicationObservationBinding, E2EApplicationOwnedSubject, E2EApplicationProofBytes } from "../application-result-adapter.js";
-import { E2EApplicationObservationBindingSchema } from "../application-result-adapter.js";
+import { E2EApplicationObservationBindingSchema, type E2EApplicationAssertionAssetBinding } from "../application-result-adapter.js";
 import type { E2EWebRuntimePorts } from "../web-runtime.js";
 import { createCredentialRedactor } from "./redact.js";
 import { casePlanFor, resolveE2EExecutorSuite, shardOf } from "./suite.js";
@@ -39,6 +39,8 @@ export type FileCaseLedgerOptions = Readonly<{ observations?: ExecutorObservatio
 export type FileCaseLedger = Pick<E2EWebRuntimePorts, "casePlans" | "caseObservations" | "evidence" | "actionWindows"> & Readonly<{
   /** Records bytes the executor itself produced (installed assertion assets); same custody as case evidence. */
   recordApprovedAsset(input: { caseId: string; assetId: string; bytes: Uint8Array }): Promise<E2EApplicationEvidenceRef>;
+  /** Persists the protected binding of an approved assertion asset, so the host can hand it to the collector. */
+  recordAssetBinding(binding: E2EApplicationAssertionAssetBinding): Promise<void>;
 }>;
 
 export function uuidFor(value: string): string {
@@ -82,6 +84,12 @@ export function createFileCaseLedger(root: string, plan: E2EExecutorPlan, option
   async function exclusiveWrite(path: string, data: Uint8Array | string): Promise<void> {
     const handle = await open(inside(path), "wx", 0o644);
     try { await handle.writeFile(data); } finally { await handle.close(); }
+  }
+
+  /** The host-readable binding facts: `binding-<case>.json` and `asset-<case>-<index>.json`, each bound to its own digest. */
+  async function persistBinding(file: string, schemaVersion: string, caseId: string, binding: unknown): Promise<void> {
+    await mkdir(join(root, "observations"), { recursive: true, mode: 0o755 });
+    await writeFile(inside(join(root, "observations", file)), `${JSON.stringify({ schemaVersion, caseId, sha256: sha(canonicalJson(binding)), binding }, null, 2)}\n`);
   }
 
   async function record(input: { caseId: string; kind: string; bytes: Uint8Array; mediaType?: string; name?: string }): Promise<E2EApplicationEvidenceRef> {
@@ -217,11 +225,14 @@ export function createFileCaseLedger(root: string, plan: E2EExecutorPlan, option
           producer: producer(`${caseId}:assertion:${index}`) })),
         accountRef: casePlan.runtimeAccountRef, sessionRef: facts.sessionRef, accountIdDigest: facts.accountIdDigest,
         identityReceiptRef: accountProjection.ref, subjectIdentityReceiptRef: subjectProjection.ref, selectedArtifact: artifact, connection: null });
+      await persistBinding(`binding-${caseId.replaceAll(":", "_")}.json`, "e2e-executor-observation-binding/v1", caseId, observationBinding);
       return { observationBinding, upstreamRunId, identityEvidence: [accountProjection, subjectProjection, accountSource, subjectSource] };
     },
   });
 
   return Object.freeze({ casePlans, caseObservations, evidence, actionWindows,
+    recordAssetBinding: (binding: E2EApplicationAssertionAssetBinding) => persistBinding(
+      `asset-${requireCase(binding.caseId).replaceAll(":", "_")}-${binding.assertionIndex}.json`, "e2e-executor-asset-binding/v1", binding.caseId, binding),
     recordApprovedAsset: (input: { caseId: string; assetId: string; bytes: Uint8Array }) => {
       if (!SAFE_NAME.test(input.assetId.replaceAll("/", "-"))) throw new Error("approved asset id is not a plain identifier");
       return record({ caseId: input.caseId, kind: "approved-asset", bytes: input.bytes, mediaType: "application/json" });

@@ -6,9 +6,9 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
-import { assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput } from "../../packages/verifier/src/host/executor-readback.js";
+import { assembleDockerCollectionInputs, assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput } from "../../packages/verifier/src/host/executor-readback.js";
 import { resolveE2EExecutorSuite } from "../../packages/verifier/src/executor/suite.js";
-import { proveActualRun } from "../support/e2e-actual-run-proof.js";
+import { collectHostRun, proveActualRun } from "../support/e2e-actual-run-proof.js";
 import { blockedHosts, caseStatuses, csvRows, failedAssertionKinds, readReport, resultOf } from "../support/e2e-executor-output.js";
 import { ORDERS_FIXTURE_ROOT, createOrdersExecutorPlan, type OrdersProbeName } from "../support/e2e-orders-executor-fixture.js";
 
@@ -108,23 +108,39 @@ describe.runIf(enabled)("executor against a real Chromium and the fixture app (l
   }, 300_000);
 });
 
-/** What the Docker host does after a real run: read the out directory, then assemble the readback a collector validates. */
+/** What the Docker host does after a real run: read the out directory, then assemble the readback and collector inputs. */
 async function assembleFrom(run: Awaited<ReturnType<typeof runProbe>>) {
   const snapshot = await snapshotExecutorOutput(run.outDir, await readExecutorResultFile(run.outDir));
   const resolved = resolveE2EExecutorSuite(run.fixture.plan);
-  return assembleExecutorActualRun({ snapshot, compiled: resolved.suite, binding: resolved.binding,
-    cleanup: { removedAt: new Date().toISOString(), containers: ["rovara-app"], network: "rovara-e2e" }, evidenceDirectory: "/out" });
+  const cleanup = { removedAt: new Date().toISOString(), containers: ["rovara-app"], network: "rovara-e2e" };
+  return { actual: assembleExecutorActualRun({ snapshot, compiled: resolved.suite, binding: resolved.binding, cleanup, evidenceDirectory: "/out" }),
+    inputs: assembleDockerCollectionInputs({ snapshot, binding: resolved.binding, cleanup }) };
 }
 
 describe.runIf(enabled)("host readback of a real executor run (local, no Docker)", () => {
   it.each([["web-csv-positive-v1" as const, undefined], ["api-state-positive-v1" as const, undefined], ["web-csv-positive-v1" as const, "extra-order.json"]])(
     "%s (%s) assembles into a readback the supervisor proof accepts", async (probe, defect) => {
       const run = await runProbe(probe, defect ? { defect } : {});
-      const actual = await assembleFrom(run);
+      const { actual, inputs } = await assembleFrom(run);
       const proof = proveActualRun(actual, run.fixture.plan);
       expect(proof.captures.map((capture) => capture.caseId)).toEqual(run.fixture.compiled.expectedCases.map((item) => item.caseId));
       expect(proof.captures.map((capture) => capture.terminal.kind)).toEqual([defect ? "assertion-failed" : "completed"]);
       expect(proof.captures.map((capture) => capture.assertions.map((assertion) => assertion.outcome))).toEqual([[defect ? "failed" : "passed"]]);
+      // The real collector, with the protected inputs the host exposes, judges the run: no result is ever PASS without them.
+      // The engine-less API target is excluded: the collector requires its report to claim no state capability while the compiler binds the
+      // launch descriptor to the runtime's `state` assertion support, so a state probe cannot reach PASS yet (Task 1.5 owns that).
+      if (probe.startsWith("web-")) {
+        const collected = collectHostRun(actual, inputs, run.fixture.plan);
+        if (defect) {
+          // Known gap (reported to the controller): the collector wants the upstream report to carry a failed `assertion` step at the assertion's index,
+          // but the web adapter fails the case body with a plain error, so a real assertion mismatch collects as UNKNOWN, never PASS.
+          expect(collected.qualification?.status ?? "UNKNOWN").not.toBe("PASS");
+          expect(collected.unavailableReason ?? "").toMatch(/upstream report verdict disagree/);
+        } else {
+          expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
+          expect(collected.qualification?.status).toBe("PASS");
+        }
+      }
       expect(actual.selected).toBe(1);
       expect(actual.filtered).toBe(0);
       const text = JSON.stringify([...actual.supervisorReadback!.evidence.map((item) => Buffer.from(item.bytes).toString("latin1")), actual.shards.map((shard) => Buffer.from(shard.rawReportBytes).toString("latin1"))]);
