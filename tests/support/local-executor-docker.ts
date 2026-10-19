@@ -29,8 +29,10 @@ export class LocalExecutorDocker extends FakeDockerCli {
     super();
     this.onExecutor = async (outDir) => {
       const workspace = dirname(outDir);
-      const app = this.argsFor("app");
-      const image = app.indexOf("node:build-test");
+      // The most recent app container: one double serves every probe of a qualification in turn.
+      const app = [...this.calls].reverse().find((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith("rovara-app-"))!;
+      // The host ends the app container's arguments with the blanked environment, the image, then the recipe's program and arguments.
+      const image = app.lastIndexOf("NODE_OPTIONS=") + 1;
       const command = app.slice(image + 1);
       const workDir = app.at(app.indexOf("-w") + 1)!.replace(/^\/app/, join(workspace, "app"));
       // The read-only owned mount is a directory inside the app, where the app expects it.

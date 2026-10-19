@@ -31,7 +31,8 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     await writeFile(challengeFile, canonicalJson(challenge));
     await qualificationCli(["--profile", "linux-arm64-web-api-v1", "--challenge-file", challengeFile, "--evidence-root", evidenceRoot, "--out", proposalFile], {
       environment: { EXECUTOR_IMAGE }, host: { platform: "linux", arch: "arm64" }, config: { runRoot },
-      qualificationEnvironment: { assertHostIdentity: fake.assertHostIdentity!, observeManifest: shippedAssetManifest, now: () => Date.now() },
+      // The worker supervisor's Node is at the image's fixed path, which the registrar requires; the CI runner's own Node is elsewhere.
+      qualificationEnvironment: { assertHostIdentity: fake.assertHostIdentity!, observeManifest: shippedAssetManifest, now: () => Date.now(), nodeExecPath: fake.nodeExecPath! },
       createProbeRunner: (input) => createLinuxProbeRunner(input) });
 
     const bytes = await readFile(proposalFile);
