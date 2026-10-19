@@ -32,6 +32,11 @@
 - 2026-10-19: Task H1: network walls for untrusted containers (see "Before M1.2 runs untrusted candidates"). Verified locally (unit and contract tests, fake Docker); the Linux behaviour is verified by the `linux-runtime` CI job.
 - 2026-10-19: Task H2: Chromium runs with its own sandbox inside the executor (see "Before M1.2 runs untrusted candidates"). Verified locally (unit and contract tests, real Chromium on macOS for launch arguments and the DevTools process list); the Linux behaviour (namespaces, seccomp) is verified by the `linux-runtime` CI job.
 - 2026-10-19: TEST cleanup with owner approval: terminated five unregistered P0 qualification instances and deleted their five detached 20 GiB data volumes.
+- 2026-10-19: **hardening (PR #403) live in TEST and requalified**, from branch head `f4d57e64`:
+  - hardened Broker and Dispatcher, worker image `worker@sha256:eb5630c4…` and sandboxed executor `executor@sha256:f40e9e7e…` deployed and verified;
+  - `scripts/test-qualify-runtime.ts --apply` qualified a new runner `i-064d6c00c2d299684` (10.42.133.107) with all **9 probes**, including network walls and the Chromium sandbox, on the first attempt;
+  - rows `#web`/`#api` are READY (revision 2), expiring 2026-10-26T23:54Z;
+  - the previous runner `i-0cfe8d699d3b4b7af` and its data volume were removed.
 
 ## Before M1.2 runs untrusted candidates
 
