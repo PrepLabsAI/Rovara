@@ -143,4 +143,36 @@ describe("source-owned application account contracts", () => {
     expect(legacy.applications[0]?.recipe).toBeNull();
     expect(legacy.proposedTargets[0]?.accountProfileId).toBe("synthetic");
   });
+
+  describe("mainline discovery for packages outside the source project contract", () => {
+    const snapshotOf = (pkg: unknown) => {
+      const bytes = Buffer.from(JSON.stringify(pkg));
+      const commitSha = "c".repeat(40); const treeSha = "d".repeat(40);
+      const candidate = createCandidateManifest([{ repositoryId: "repo", commitSha, treeSha }]);
+      return { candidate, snapshot: { candidate, commitSha, treeSha, treeComplete: true, treePaths: ["package.json"],
+        sources: [{ path: "package.json", sha256: sha(bytes.toString("utf8")), bytes, kind: "blob" }] } as E2ESourceSnapshot };
+    };
+    const unnamedApi = { scripts: { start: "node s.js" }, dependencies: { express: "1" } };
+    const expectMainlineRecipe = (pkg: unknown) => {
+      const { snapshot, candidate } = snapshotOf(pkg);
+      const inspection = inspectE2ERepository(snapshot, candidate).inspection;
+      expect(inspection.applications).toHaveLength(1);
+      expect(inspection.applications[0]?.recipe).not.toBeNull();
+      expect(inspection.missingInputs.some((input) => input.inputId.startsWith("application-project-contract-"))).toBe(false);
+    };
+
+    it("keeps an unnamed web/API package on the synthesized start recipe", () => expectMainlineRecipe(unnamedApi));
+    it("keeps a package with an invalid name on the synthesized start recipe", () => expectMainlineRecipe({ ...unnamedApi, name: "bad name!" }));
+
+    it("applies no project contract recipe to a mobile package", () => {
+      const contractProject = { schemaVersion: "e2e-application-project/v1", recipe: recipe(), service: null,
+        accountProfiles: [{ profileId: "synthetic", scope: "synthetic-test", authProfileId: "a/v1", seedProfileId: "orders-seed/v1", tenantRef: "t", roleRef: "viewer", identityProbeId: "i/v1" }],
+        targetAccounts: [] };
+      const { snapshot, candidate } = snapshotOf({ name: "mobile-app", dependencies: { "react-native": "1" }, agentx: { e2e: contractProject } });
+      const inspection = inspectE2ERepository(snapshot, candidate).inspection;
+      expect(inspection.applications).toHaveLength(1);
+      expect(inspection.applications[0]?.recipe).toBeNull();
+      expect(inspection.missingInputs.some((input) => input.inputId.startsWith("application-project-contract-"))).toBe(false);
+    });
+  });
 });

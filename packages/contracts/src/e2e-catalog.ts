@@ -351,7 +351,8 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
     const kind = api ? "api" : mobile ? "mobile" : electron ? "desktop" : "web";
     let projectContract: E2EApplicationProjectContract | null = null;
     let projectContractMalformed = false;
-    try { projectContract = readE2EApplicationProjectContract(snapshot, appId); }
+    // Source project contracts are web/API only and need a valid package name; anything else keeps the mainline discovery path.
+    if (validName !== undefined && (kind === "web" || kind === "api")) try { projectContract = readE2EApplicationProjectContract(snapshot, appId); }
     catch {
       projectContractMalformed = true;
       missingInputs.push({ inputId: "application-project-contract-" + createHash("sha256").update(manifest.path).digest("hex").slice(0, 12),
@@ -416,16 +417,7 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
     let recipe: E2ERepositoryInspection["applications"][number]["recipe"] = null;
     const hasStart = typeof pkg.scripts?.start === "string" && pkg.scripts.start.trim() !== "";
     const hasDev = typeof pkg.scripts?.dev === "string" && pkg.scripts.dev.trim() !== "";
-    if (projectContract !== null) {
-      if (projectContract.service !== null && kind !== "web" && kind !== "api") {
-        missingInputs.push({ inputId: "application-service-kind-" + createHash("sha256").update(manifest.path).digest("hex").slice(0, 12),
-          targetIds: target ? [target.targetId] : [], kind: "runtime", disposition: "blocking", reason: "Source service contract is incompatible with the discovered application platform", sourcePaths: [manifest.path] });
-        projectContract = null;
-        projectContractMalformed = true;
-      } else {
-        recipe = projectContract.recipe;
-      }
-    }
+    if (projectContract !== null) recipe = projectContract.recipe;
     if (kind === "web" || kind === "api") {
       if (hasStart !== hasDev) {
         if (projectContract === null && !projectContractMalformed) {
