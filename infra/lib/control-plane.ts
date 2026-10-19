@@ -959,12 +959,14 @@ export class ControlPlaneStack extends Stack {
     // protected foundation template or require a separate foundation change set.
     grantProviderKeySecrets(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);
     // Optional standing transport for the EC2 E2E qualification runner (CDK context
-    // agentx:e2eQualificationTransport, off by default): it reads its challenge and writes its
+    // agentx:e2eQualificationTransport=enabled, off by default; `-c key=value` always delivers a
+    // string, so only the exact string "enabled" turns it on, like agentxInstaller and agentxEval,
+    // and boolean true or "true" stay off): it reads its challenge and writes its
     // proposal and status files under e2e-runtime/<installationId>/ in the artifact bucket, so no
     // run needs temporary grants. Exact object keys only: no List, Delete or wildcard object access.
     // Attached from this stack, like the provider secrets above, because the bucket lives here and
     // the foundation template stays untouched.
-    if (this.node.tryGetContext("agentx:e2eQualificationTransport") === true) {
+    if (this.node.tryGetContext("agentx:e2eQualificationTransport") === "enabled") {
       new iam.CfnPolicy(this, "E2eQualificationTransport", {
         policyName: "E2eQualificationTransport",
         roles: [sessions.instanceRoleName],

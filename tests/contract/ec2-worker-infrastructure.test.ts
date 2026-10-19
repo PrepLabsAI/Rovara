@@ -221,19 +221,30 @@ describe("standing E2E qualification transport (agentx:e2eQualificationTransport
     const parts = (resource as { "Fn::Join": [string, unknown[]] })["Fn::Join"][1];
     return parts.filter((p): p is string => typeof p === "string").join("");
   };
-  const qualification = (template: Template) => withAction(template, "s3:GetObject").concat(withAction(template, "s3:PutObject"))
-    .filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"));
+  const qualification = (template: Template) => statementsOf(template).filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"));
   let off: ReturnType<typeof synth>;
   let on: ReturnType<typeof synth>;
+  let booleanTrue: ReturnType<typeof synth>;
+  let stringTrue: ReturnType<typeof synth>;
 
   beforeAll(() => {
     off = synth();
-    on = synth({ "agentx:e2eQualificationTransport": true });
+    on = synth({ "agentx:e2eQualificationTransport": "enabled" });
+    booleanTrue = synth({ "agentx:e2eQualificationTransport": true });
+    stringTrue = synth({ "agentx:e2eQualificationTransport": "true" });
   }, 240_000);
 
   it("adds no qualification transport by default", () => {
     expect(qualification(off.controlPlane)).toHaveLength(0);
     expect(qualification(off.foundation)).toHaveLength(0);
+  });
+
+  it("fails closed unless the context is exactly the string enabled", () => {
+    for (const t of [booleanTrue, stringTrue]) {
+      expect(qualification(t.controlPlane)).toHaveLength(0);
+      expect(qualification(t.foundation)).toHaveLength(0);
+      expect(ofType(t.controlPlane, "AWS::IAM::Policy").filter(([, r]) => r.Properties.PolicyName === "E2eQualificationTransport")).toHaveLength(0);
+    }
   });
 
   it("adds exact challenge/proposal/status object access when enabled", () => {
