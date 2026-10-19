@@ -22,16 +22,29 @@ A small Node HTTP application used by Rovara to exercise browser and API checks.
 ## Running
 
 ```sh
-APP_PORT=4317 node server.mjs
 node --test
+ORDERS_TEST_SEED_FILE=.owned/seed.json APP_PORT=4317 node server.mjs
 ```
 
 ## Seed
 
-The repository contains no accounts or passwords. Rovara supplies the account seed at runtime through the `ORDERS_TEST_SEED_FILE` environment variable, which must point to a JSON file under `.owned/` in the application directory:
+The repository contains no accounts or passwords. Rovara supplies the account seed at runtime through the `ORDERS_TEST_SEED_FILE` environment variable, which must point to a JSON file under `.owned/` in the application directory. Never commit `.owned/` (it is in `.gitignore`).
+
+Minimal seed shape (placeholder values, `passwordDigest` is the sha256 hex of the password):
 
 ```json
-{ "accounts": [{ "email": "...", "passwordDigest": "<sha256 hex of the password>", "subjectId": "...", "tenantId": "tenant-a", "role": "owner", "displayName": "..." }] }
+{
+  "accounts": [
+    {
+      "email": "owner@example.test",
+      "passwordDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+      "subjectId": "owner-a",
+      "tenantId": "tenant-a",
+      "role": "owner",
+      "displayName": "Owner A"
+    }
+  ]
+}
 ```
 
 The tests in `test/` build the application with their own in-test seed.

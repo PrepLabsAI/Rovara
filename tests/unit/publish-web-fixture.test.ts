@@ -1,8 +1,10 @@
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  assertStarterClean,
   buildPublishPlan,
   FIXTURE_COMMIT_MESSAGE,
   listStarterFiles,
@@ -14,32 +16,66 @@ import {
 const temporary: string[] = [];
 afterEach(() => { for (const path of temporary.splice(0)) rmSync(path, { recursive: true, force: true }); });
 
-function tree(files: readonly string[]): string {
-  const root = mkdtempSync(join(tmpdir(), "starter-tree-"));
+const git = (cwd: string, ...args: string[]): void => {
+  execFileSync("git", ["-c", "user.name=test", "-c", "user.email=test@example.test", "-c", "commit.gpgsign=false", ...args], { cwd, stdio: "pipe" });
+};
+
+function write(root: string, file: string): void {
+  mkdirSync(dirname(join(root, file)), { recursive: true });
+  writeFileSync(join(root, file), "x");
+}
+
+/** A temp git repository whose starter directory holds the given committed files. */
+function repository(committed: readonly string[], outside: readonly string[] = []): string {
+  const root = mkdtempSync(join(tmpdir(), "starter-repo-"));
   temporary.push(root);
-  for (const file of files) {
-    mkdirSync(join(root, file, ".."), { recursive: true });
-    writeFileSync(join(root, file), "x");
-  }
+  git(root, "init", "--quiet", "-b", "main");
+  for (const file of committed) write(root, `${STARTER_DIRECTORY}/${file}`);
+  for (const file of outside) write(root, file);
+  git(root, "add", "-A");
+  git(root, "commit", "--quiet", "-m", "seed");
   return root;
 }
 
 describe("listStarterFiles", () => {
-  it("excludes defects, node_modules, .git and .DS_Store at any depth, and keeps dot directories", () => {
-    const root = tree([
+  it("lists committed files only, excluding defects, node_modules, .git and .DS_Store at any depth", () => {
+    const root = repository([
       "server.mjs", ".DS_Store", "public/.DS_Store", "public/index.html", "defects/a.json", "defects/nested/b.json",
-      "node_modules/pkg/index.js", "sub/node_modules/pkg/index.js", ".git/config", ".github/workflows/ci.yml",
-    ]);
+      "node_modules/pkg/index.js", "sub/node_modules/pkg/index.js", ".github/workflows/ci.yml",
+    ], ["other/file.txt"]);
     expect(listStarterFiles(root)).toEqual([".github/workflows/ci.yml", "public/index.html", "server.mjs"]);
   });
 
-  it("lists the committed starter with the files the fixture repository needs", () => {
-    const files = listStarterFiles(join(import.meta.dirname, "../..", STARTER_DIRECTORY));
-    expect(files).toEqual(expect.arrayContaining([
-      ".github/workflows/ci.yml", "server.mjs", "public/index.html", "public/app.js", "fixtures/orders.json",
-      "test/orders.test.mjs", "README.md", "package.json",
-    ]));
-    expect(files.some((file) => file.startsWith("defects/") || file.includes("node_modules") || file.endsWith(".DS_Store"))).toBe(false);
+  it("never lists untracked or gitignored local files such as a seed or .env", () => {
+    const root = repository(["server.mjs", ".gitignore"]);
+    write(root, `${STARTER_DIRECTORY}/.owned/seed.json`);
+    write(root, `${STARTER_DIRECTORY}/.env`);
+    expect(listStarterFiles(root)).toEqual([".gitignore", "server.mjs"]);
+  });
+
+  it("lists exactly the committed starter files", () => {
+    expect(listStarterFiles(join(import.meta.dirname, "../.."))).toEqual([
+      ".github/workflows/ci.yml", ".gitignore", "README.md", "fixtures/orders.json", "package.json", "public/app.js",
+      "public/index.html", "server.mjs", "test/orders.test.mjs",
+    ]);
+  });
+});
+
+describe("assertStarterClean", () => {
+  it("accepts a clean starter directory and ignores changes elsewhere", () => {
+    const root = repository(["server.mjs"]);
+    write(root, "elsewhere.txt");
+    expect(() => assertStarterClean(root)).not.toThrow();
+  });
+  it("refuses untracked, modified and staged changes under the starter directory", () => {
+    const root = repository(["server.mjs"]);
+    write(root, `${STARTER_DIRECTORY}/.owned/seed.json`);
+    expect(() => assertStarterClean(root)).toThrow(/uncommitted or untracked/);
+    rmSync(join(root, STARTER_DIRECTORY, ".owned"), { recursive: true });
+    writeFileSync(join(root, STARTER_DIRECTORY, "server.mjs"), "changed");
+    expect(() => assertStarterClean(root)).toThrow(/uncommitted or untracked/);
+    git(root, "add", "-A");
+    expect(() => assertStarterClean(root)).toThrow(/uncommitted or untracked/);
   });
 });
 
@@ -75,11 +111,16 @@ describe("parsePublishArguments and dry run", () => {
     expect(parsePublishArguments(["--repo", "o/n", "--dry-run", "--force-reseed"])).toEqual({ repo: "o/n", dryRun: true, forceReseed: true });
   });
   it("prints the file list and target on --dry-run and exits 0 without touching the network", () => {
+    const root = repository(["server.mjs", ".github/workflows/ci.yml", "defects/a.json"]);
     const lines: string[] = [];
-    expect(run(["--repo", "owner/name", "--dry-run"], (line) => lines.push(line))).toBe(0);
+    expect(run(["--repo", "owner/name", "--dry-run"], (line) => lines.push(line), root)).toBe(0);
     expect(lines[0]).toContain("https://github.com/owner/name");
-    expect(lines).toContain("  .github/workflows/ci.yml");
-    expect(lines).toContain("  server.mjs");
-    expect(lines.some((line) => line.includes("defects"))).toBe(false);
+    expect(lines.slice(1)).toEqual(["  .github/workflows/ci.yml", "  server.mjs"]);
+  });
+  it("refuses to run, dry run or not, when the starter has untracked files", () => {
+    const root = repository(["server.mjs"]);
+    write(root, `${STARTER_DIRECTORY}/.owned/seed.json`);
+    expect(() => run(["--repo", "owner/name", "--dry-run"], () => undefined, root)).toThrow(/uncommitted or untracked/);
+    expect(() => run(["--repo", "owner/name"], () => undefined, root)).toThrow(/uncommitted or untracked/);
   });
 });

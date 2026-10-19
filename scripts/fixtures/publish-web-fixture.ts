@@ -1,12 +1,12 @@
-// Publishes the committed orders web starter (tests/fixtures/orders-web-starter) to a GitHub repository
+// Publishes the committed (HEAD) orders web starter (tests/fixtures/orders-web-starter) to a GitHub repository
 // as a single seed commit on main. Owner-run. It uses the owner's existing gh authentication through git's
 // credential helper, so no token ever appears in an argument, environment variable or log line.
 //
 // Usage: npx tsx scripts/fixtures/publish-web-fixture.ts --repo <owner/name> [--dry-run] [--force-reseed]
 import { execFileSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, posix, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const STARTER_DIRECTORY = "tests/fixtures/orders-web-starter";
@@ -36,21 +36,37 @@ export interface PublishPlan {
   mode: "seed" | "reseed" | "unchecked";
 }
 
-/** Relative POSIX paths of every regular file the starter publishes, sorted. */
-export function listStarterFiles(root: string): string[] {
-  const found: string[] = [];
-  const walk = (relativeDirectory: string): void => {
-    for (const entry of readdirSync(join(root, relativeDirectory), { withFileTypes: true })) {
-      const relativePath = relativeDirectory === "" ? entry.name : `${relativeDirectory}/${entry.name}`;
-      if (entry.isDirectory()) {
-        if (!EXCLUDED_DIRECTORY_NAMES.has(entry.name)) walk(relativePath);
-      } else if (entry.isFile() && !EXCLUDED_FILE_NAMES.has(entry.name)) {
-        found.push(relativePath);
-      }
-    }
-  };
-  walk("");
-  return found.sort();
+const GIT_SAFETY = ["-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false"];
+
+/** git in the source repository, returning raw bytes. */
+function sourceGit(repositoryRoot: string, args: readonly string[]): Buffer {
+  return execFileSync("git", [...GIT_SAFETY, ...args], { cwd: repositoryRoot, maxBuffer: 64 * 1024 * 1024 });
+}
+
+function isPublishable(relativePath: string): boolean {
+  const segments = relativePath.split("/");
+  return !segments.slice(0, -1).some((segment) => EXCLUDED_DIRECTORY_NAMES.has(segment))
+    && !EXCLUDED_FILE_NAMES.has(segments[segments.length - 1] ?? "");
+}
+
+/**
+ * Relative POSIX paths (inside the starter directory) of the files committed at HEAD under it, sorted. Only committed
+ * files are listed, so untracked or gitignored local files (a seed, an .env) can never be published.
+ */
+export function listStarterFiles(repositoryRoot: string, starterDirectory: string = STARTER_DIRECTORY): string[] {
+  const listed = sourceGit(repositoryRoot, ["ls-tree", "-r", "-z", "--name-only", "HEAD", "--", starterDirectory]).toString("utf8");
+  return listed.split("\0").filter((path) => path !== "")
+    .map((path) => posix.relative(starterDirectory, path))
+    .filter(isPublishable)
+    .sort();
+}
+
+/** Refuses a starter directory with uncommitted, staged or untracked changes, so what is published is what is committed. */
+export function assertStarterClean(repositoryRoot: string, starterDirectory: string = STARTER_DIRECTORY): void {
+  const status = sourceGit(repositoryRoot, ["status", "--porcelain", "--", starterDirectory]).toString("utf8").trim();
+  if (status !== "") {
+    throw new Error(`${starterDirectory} has uncommitted or untracked changes; commit or remove them before publishing:\n${status}`);
+  }
 }
 
 export function buildPublishPlan(input: PublishPlanInput): PublishPlan {
@@ -90,12 +106,12 @@ export function parsePublishArguments(argv: readonly string[]): PublishArguments
 
 /** git with gh as the credential helper, so the owner's gh login authorizes the push. */
 function git(cwd: string, args: readonly string[]): string {
-  return execFileSync("git", ["-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential", ...args], {
+  return execFileSync("git", [...GIT_SAFETY, "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential", ...args], {
     cwd, encoding: "utf8", env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   });
 }
 
-function publish(args: PublishArguments, starterRoot: string, files: readonly string[]): PublishPlan {
+function publish(args: PublishArguments, repositoryRoot: string, files: readonly string[]): PublishPlan {
   const work = mkdtempSync(join(tmpdir(), "rovara-web-fixture-"));
   try {
     git(work, ["init", "--quiet", "-b", FIXTURE_BRANCH]);
@@ -113,7 +129,7 @@ function publish(args: PublishArguments, starterRoot: string, files: readonly st
     }
     for (const file of files) {
       mkdirSync(dirname(join(work, file)), { recursive: true });
-      cpSync(join(starterRoot, file), join(work, file));
+      writeFileSync(join(work, file), sourceGit(repositoryRoot, ["show", `HEAD:${posix.join(STARTER_DIRECTORY, file)}`]));
     }
     git(work, ["add", "-A"]);
     git(work, ["commit", "--quiet", "--allow-empty", "-m", FIXTURE_COMMIT_MESSAGE]);
@@ -124,18 +140,19 @@ function publish(args: PublishArguments, starterRoot: string, files: readonly st
   }
 }
 
-export function run(argv: readonly string[], log: (line: string) => void = console.log): number {
+const DEFAULT_REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+
+export function run(argv: readonly string[], log: (line: string) => void = console.log, repositoryRoot: string = DEFAULT_REPOSITORY_ROOT): number {
   const args = parsePublishArguments(argv);
-  const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-  const starterRoot = join(repositoryRoot, STARTER_DIRECTORY);
-  const files = listStarterFiles(starterRoot);
+  assertStarterClean(repositoryRoot);
+  const files = listStarterFiles(repositoryRoot);
   if (args.dryRun) {
     const plan = buildPublishPlan({ repo: args.repo, files, remoteHasCommits: null, forceReseed: args.forceReseed, dryRun: true });
     log(`dry run: would push ${plan.files.length} files from ${STARTER_DIRECTORY} to https://github.com/${plan.repo} (${plan.branch}), commit "${plan.commitMessage}"`);
     for (const file of plan.files) log(`  ${file}`);
     return 0;
   }
-  const plan = publish(args, starterRoot, files);
+  const plan = publish(args, repositoryRoot, files);
   log(`published ${plan.files.length} files to https://github.com/${plan.repo} (${plan.branch}, ${plan.mode})`);
   return 0;
 }
