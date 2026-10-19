@@ -10,6 +10,7 @@ export default tseslint.config(
       ".release-synth/**",
       "coverage/**",
       "tests/fixtures/e2e-web-api-app/**",
+      "tests/fixtures/orders-web-starter/**",
       "eslint.config.js",
     ],
   },
