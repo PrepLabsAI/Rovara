@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, open, readdir } from "node:fs/promises";
+import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { E2EApplicationEvidenceRefSchema, ProjectSetupRunnerToolchainSchema, canonicalJson, type E2EApplicationEvidenceRef, type E2ERunBinding } from "@agentx/contracts";
@@ -11,6 +11,7 @@ import { E2EApplicationAssertionAssetBindingSchema, E2EApplicationCaseCaptureSch
 import { expectedE2EApplicationReporterDigest } from "../application-runtime-assets.js";
 import type { E2ECompiledApplicationSuite } from "../application-scenarios.js";
 import { uuidFor } from "../executor/case-ledger.js";
+import { openRegularFile } from "./regular-file.js";
 
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const MAX_FILE_BYTES = 8 * 1024 * 1024;
@@ -44,14 +45,16 @@ export type ExecutorOutputSnapshot = Readonly<{ result: ExecutorResultFile; shar
 /** A regular, non-link file below `root`, read in full and never past the bound. */
 async function readRegular(root: string, relativePath: string, budget: { total: number }): Promise<Uint8Array> {
   const path = join(root, ...relativePath.split("/"));
-  const before = await lstat(path);
-  if (!before.isFile() || before.isSymbolicLink() || before.size > MAX_FILE_BYTES) throw new Error(`executor output ${relativePath} is not a bounded regular file`);
-  budget.total += before.size;
-  if (budget.total > MAX_TOTAL_BYTES) throw new Error("executor output exceeds the host's total read bound");
-  const handle = await open(path, "r");
+  // Decided on the open handle, not on the path: a link or FIFO swapped in by a container that still runs is refused, never followed or waited on.
+  let opened: Awaited<ReturnType<typeof openRegularFile>>;
+  try { opened = await openRegularFile(path); } catch { throw new Error(`executor output ${relativePath} is not a bounded regular file`); }
+  const { handle, size } = opened;
   try {
+    if (size > MAX_FILE_BYTES) throw new Error(`executor output ${relativePath} is not a bounded regular file`);
+    budget.total += size;
+    if (budget.total > MAX_TOTAL_BYTES) throw new Error("executor output exceeds the host's total read bound");
     const bytes = await handle.readFile();
-    if (bytes.byteLength !== before.size) throw new Error(`executor output ${relativePath} changed while being read`);
+    if (bytes.byteLength !== size) throw new Error(`executor output ${relativePath} changed while being read`);
     return Uint8Array.from(bytes);
   } finally { await handle.close(); }
 }

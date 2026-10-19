@@ -138,8 +138,8 @@ describe.runIf(built)("executor Chromium sandbox gate", () => {
     runId: request.runId, groupId: request.groupId, browser: { pid: 40, ...processFacts },
     renderers: [kind === "plain" ? { pid: 41, ...processFacts } : { pid: 41, nsPidDepth: 2, seccompFilters: 2, uidMap: "0 1000 1" }] });
 
-  async function runWebExecutor(inspectChromiumSandbox: (request: { runId: string; groupId: string; cdpEndpoint?: string }) => Promise<unknown>, settleMs = 0) {
-    const fixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", healthTimeoutMs: 5_000 });
+  async function runWebExecutor(inspectChromiumSandbox: (request: { runId: string; groupId: string; cdpEndpoint?: string }) => Promise<unknown>, settleMs = 0, deadlineMs?: number) {
+    const fixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", healthTimeoutMs: 5_000, ...(deadlineMs === undefined ? {} : { deadlineMs }) });
     const dir = await temp(); const out = join(dir, "out");
     await writeFile(join(dir, "plan.json"), JSON.stringify(fixture.plan));
     const app = createServer((_request, response) => { response.writeHead(200, { "content-type": "application/json" }); response.end("{}"); });
@@ -170,6 +170,13 @@ describe.runIf(built)("executor Chromium sandbox gate", () => {
     expect(looks).toBe(3);
     expect(result.reason).not.toMatch(/^chromium-/);
     expect(JSON.parse(await readFile(join(out, "chromium-sandbox.json"), "utf8"))).toMatchObject({ renderers: [{ nsPidDepth: 2, seccompFilters: 2 }] });
+  });
+
+  it("never settles past the run deadline: a long settle time is cut to what the run has left", async () => {
+    const started = Date.now();
+    const { result } = await runWebExecutor(async (request) => attestationFor("plain")(request), 600_000, 4_000);
+    expect(result.exitCode).toBe(2);
+    expect(Date.now() - started).toBeLessThan(30_000);
   });
 
   it("exits 2 with chromium-sandbox-unverifiable when the kernel cannot show it (no procfs, an old kernel), never assuming a sandbox", async () => {

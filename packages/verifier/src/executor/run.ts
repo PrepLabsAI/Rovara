@@ -298,7 +298,7 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
         // A renderer is listed before it has installed its own seccomp filter, so the check settles on a verdict instead of judging the first look.
         ({ attestation, verdict: sandbox } = await attestWhenSettled({ cdpEndpoint: browser.cdpEndpoint, browserPid: browser.pid,
           runId: resolved.binding.runId, groupId: resolved.suite.group.groupId, signal: input.signal },
-        { settleMs: input.chromiumSandboxSettleMs ?? 5_000, ...(input.inspectChromiumSandbox ? { inspect: input.inspectChromiumSandbox } : {}) }));
+        { settleMs: Math.max(0, Math.min(input.chromiumSandboxSettleMs ?? 5_000, resolved.deadlineAtMs - Date.now())), ...(input.inspectChromiumSandbox ? { inspect: input.inspectChromiumSandbox } : {}) }));
       } catch (error) {
         await log(`unavailable: chromium-sandbox-unverifiable: ${error instanceof Error ? error.message : "unreadable"}`);
         reason = "chromium-sandbox-unverifiable";

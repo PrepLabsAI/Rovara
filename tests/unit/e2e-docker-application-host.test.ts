@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
-import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -128,6 +129,51 @@ describe("docker application host", () => {
     expect(tail).not.toContain(password);
     expect(Buffer.byteLength(tail)).toBeLessThanOrEqual(64 * 1024);
     expect(tail).toContain("<account:");
+  });
+
+  it.each([124, 130])("reads nothing from the out directory when docker run was killed (exit %i): the container may still be running", async (code) => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    fake.exitCodeOfExecutor(code);
+    fake.onExecutor = (outDir) => { writeExecutorOutput(outDir, { exitCode: 2, reason: "internal-error", runId: s.runId, groupId: s.groupId }); writeFileSync(join(outDir, "executor.log"), "LOG-THAT-MUST-NOT-BE-READ\n"); };
+    await runWith(s);
+    expect(s.host.readDiagnostics(s.runId).executorLogTail).not.toContain("LOG-THAT-MUST-NOT-BE-READ");
+  });
+
+  it("never follows a symbolic link, and never waits on a FIFO, left in place of executor.log", async () => {
+    for (const kind of ["symlink", "fifo"] as const) {
+      const fake = new FakeDockerCli(); const s = await setup({ fake });
+      const secret = join(await temp("worker-file-"), "worker-secret.txt"); writeFileSync(secret, "WORKER-FILE-CONTENT\n");
+      fake.exitCodeOfExecutor(2);
+      fake.onExecutor = (outDir) => {
+        writeExecutorOutput(outDir, { exitCode: 2, reason: "internal-error", runId: s.runId, groupId: s.groupId });
+        if (kind === "symlink") symlinkSync(secret, join(outDir, "executor.log")); else execFileSync("mkfifo", [join(outDir, "executor.log")]);
+      };
+      const started = Date.now();
+      await runWith(s);
+      const tail = s.host.readDiagnostics(s.runId).executorLogTail;
+      expect(Date.now() - started, kind).toBeLessThan(10_000);
+      expect(tail, kind).not.toContain("WORKER-FILE-CONTENT");
+      expect(tail, kind).toContain("docker run exited with code 2");
+    }
+  });
+
+  it("redacts a credential that straddles the start of the kept window, before cutting", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    fake.exitCodeOfExecutor(2);
+    let password = "";
+    fake.onExecutor = (outDir) => {
+      password = (JSON.parse(readFileSync(join(dirname(outDir), "plan.json"), "utf8")) as { accounts: { password: string }[] }).accounts[0]!.password;
+      writeExecutorOutput(outDir, { exitCode: 2, reason: "internal-error", runId: s.runId, groupId: s.groupId });
+      // The kept window is the last 32 KiB: put the credential so that its second half is the first thing inside it.
+      const tail = `${"y".repeat(32 * 1024 - Math.floor(password.length / 2))}`;
+      writeFileSync(join(outDir, "executor.log"), `${"x".repeat(5_000)}${password}${tail}`);
+    };
+    await runWith(s);
+    const text = s.host.readDiagnostics(s.runId).executorLogTail;
+    expect(text).toContain("yyyy");
+    expect(text).not.toContain(password);
+    expect(text).not.toContain(password.slice(-10));
+    expect(text).not.toContain(password.slice(0, 10));
   });
 
   it("refuses to be built over a seccomp profile whose digest differs from the pin", async () => {
