@@ -1,8 +1,9 @@
+import { createHash } from "node:crypto";
 import { readFile, readdir, stat, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { WEB_API_REQUIRED_PROBES, WebApiRuntimeInstallProposalSchema, canonicalJson, evaluateWebApiProbeObservation } from "../../packages/contracts/src/index.js";
+import { WEB_API_REQUIRED_PROBES, WebApiRuntimeInstallProposalSchema, canonicalJson, evaluateWebApiProbeObservation, webApiProbeAssetManifestPath } from "../../packages/contracts/src/index.js";
 import { WebApiQualificationRejected, qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
 import { main as qualificationCli } from "../../packages/verifier/src/install-qualification-cli.js";
 import { loadWebApiQualificationProbeAssets } from "../../packages/verifier/src/application-runtime-probes.js";
@@ -137,6 +138,43 @@ describe("web/API qualification oracle and proposal", () => {
     expect(WebApiRuntimeInstallProposalSchema.safeParse({ ...result, probes: result.probes.slice(0, 5) }).success).toBe(false);
     expect(WebApiRuntimeInstallProposalSchema.safeParse({ ...result, probes: [...result.probes].reverse() }).success).toBe(false);
     expect(WebApiRuntimeInstallProposalSchema.safeParse({ ...result, runnerToolchain: { ...result.runnerToolchain, arch: "x64" } }).success).toBe(false);
+  });
+});
+
+describe("pinned web/API probe assets", () => {
+  it("keeps the pinned digests equal to the shipped asset bytes", () => {
+    expect(loadWebApiQualificationProbeAssets().map((asset) => [asset.probeId, asset.assetDigest]))
+      .toEqual(WEB_API_REQUIRED_PROBES.map((probe) => [probe.probeId, probe.assetDigest]));
+  });
+
+  it("does not qualify when an installed probe asset is not the pinned one, and never runs that probe", async () => {
+    const runner = fakeProbeRunner();
+    const base = fakeLinuxEnvironment(now);
+    const tampered = async () => {
+      const manifest = await base.observeManifest!();
+      const entries = manifest.entries.map((entry) => entry.path === webApiProbeAssetManifestPath("build-imds-denial-v1")
+        ? { ...entry, sha256: createHash("sha256").update("process.exit(7)").digest("hex") } : entry);
+      return { ...manifest, entries };
+    };
+    const error = await rejection(qualifyInstalledWebApiRuntime({ challenge: webApiChallenge(now), evidenceRoot: await privateEvidenceRoot(),
+      runProbe: runner.runProbe, environment: { ...base, observeManifest: tampered } }));
+    expect((error as WebApiQualificationRejected).reasons).toEqual(["probe-asset-not-installed-as-pinned:build-imds-denial-v1"]);
+    expect(runner.calls).not.toContain("build-imds-denial-v1");
+  });
+
+  it("does not parse a proposal whose probe digest or installed manifest names another asset, however it is re-sealed", async () => {
+    const { result } = await qualify();
+    const other = "e".repeat(64);
+    const digestChanged = structuredClone(result);
+    digestChanged.probes[5]!.assetDigest = other;
+    expect(JSON.stringify(WebApiRuntimeInstallProposalSchema.safeParse(digestChanged).error?.issues)).toContain("probe-asset-digest-mismatch:build-imds-denial-v1");
+    const entries = result.manifest.entries.map((entry) => entry.path === webApiProbeAssetManifestPath("build-imds-denial-v1") ? { ...entry, sha256: other } : entry);
+    const body = { schemaVersion: result.manifest.schemaVersion, entries };
+    const resealed = { ...result, manifest: { ...body, sha256: createHash("sha256").update(canonicalJson(body)).digest("hex") } };
+    expect(JSON.stringify(WebApiRuntimeInstallProposalSchema.safeParse(resealed).error?.issues)).toContain("probe-asset-not-installed-as-pinned:build-imds-denial-v1");
+    const missing = result.manifest.entries.filter((entry) => entry.path !== webApiProbeAssetManifestPath("web-csv-positive-v1"));
+    const dropped = { schemaVersion: result.manifest.schemaVersion, entries: missing };
+    expect(WebApiRuntimeInstallProposalSchema.safeParse({ ...result, manifest: { ...dropped, sha256: createHash("sha256").update(canonicalJson(dropped)).digest("hex") } }).success).toBe(false);
   });
 });
 

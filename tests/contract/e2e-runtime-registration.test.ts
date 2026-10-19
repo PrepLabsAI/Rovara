@@ -19,7 +19,8 @@ import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type Runtime
 import type { AuthenticatedIdentity } from "../../packages/broker/src/auth.js";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "../../packages/verifier/src/rovara-http-engine-descriptor.js";
 import { qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
-import { runtimeInstallChallengeDigest, webApiRuntimeInstallProposalSha256, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";
+import { runtimeInstallChallengeDigest, runtimeInstallationProposalSha256, webApiRuntimeInstallProposalSha256, type RuntimeInstallChallenge } from "../../packages/contracts/src/index.js";
+import { proposalFor } from "../support/p0-runtime-proposal.js";
 import { fakeLinuxEnvironment, fakeProbeRunner, privateEvidenceRoot, webApiChallenge } from "../support/web-api-qualification.js";
 
 const digest = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
@@ -273,18 +274,59 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
   it("bumps each row's own catalog revision on re-registration", async () => {
     const t = await setup();
     const webKey = e2eRegisteredRuntimeKey("configured-feature", "linux-arm64-web-api-v1", "web");
-    t.items.set(`${webKey.pk}|${webKey.sk}`, { ...webKey, catalogRevision: 4 });
+    t.items.set(`${webKey.pk}|${webKey.sk}`, { ...webKey, catalogRevision: 4, generation: 3 });
     const result = await registerRuntimeInstallation(t.deps, admin, t.request());
     expect(result).toMatchObject({ featureRevisions: { web: 5, api: 1 } });
     const condition = t.transactions[0]!.map((write) => (write.Put as { ConditionExpression?: string } | undefined)?.ConditionExpression);
-    expect(condition[0]).toBe("catalogRevision = :expectedRevision");
+    expect(condition[0]).toBe("catalogRevision = :expectedRevision AND generation <= :generation");
+    expect((t.transactions[0]![0]!.Put as { ExpressionAttributeValues: unknown }).ExpressionAttributeValues).toEqual({ ":expectedRevision": 4, ":generation": 3 });
     expect(condition[1]).toBe("attribute_not_exists(pk) AND attribute_not_exists(sk)");
+  });
+
+  it("refuses to move a row to an older worker generation, and conditions each write on it", async () => {
+    const t = await setup();
+    const webKey = e2eRegisteredRuntimeKey("configured-feature", "linux-arm64-web-api-v1", "web");
+    const apiKey = e2eRegisteredRuntimeKey("configured-feature", "linux-arm64-web-api-v1", "api");
+    t.items.set(`${apiKey.pk}|${apiKey.sk}`, { ...apiKey, catalogRevision: 2, generation: t.challenge.generation + 1 });
+    await expect(registerRuntimeInstallation(t.deps, admin, t.request())).rejects.toThrow(/older worker generation/);
+    expect(t.transactions).toHaveLength(0);
+    expect(t.objects.size).toBe(0);
+    expect(t.items.get(`RUNTIME_INSTALL_CHALLENGE#${t.challenge.challengeId}|CHALLENGE`)!.state).toBe("ISSUED");
+    // An equal generation re-registers (a renewal); a row with no valid generation is refused rather than guessed at.
+    t.items.set(`${apiKey.pk}|${apiKey.sk}`, { ...apiKey, catalogRevision: 2, generation: t.challenge.generation });
+    t.items.set(`${webKey.pk}|${webKey.sk}`, { ...webKey, catalogRevision: 1 });
+    await expect(registerRuntimeInstallation(t.deps, admin, t.request())).rejects.toThrow(/invalid revision or generation/);
+    t.items.set(`${webKey.pk}|${webKey.sk}`, { ...webKey, catalogRevision: 1, generation: 1 });
+    await expect(registerRuntimeInstallation(t.deps, admin, t.request())).resolves.toMatchObject({ featureRevisions: { web: 2, api: 3 } });
+    for (const write of t.transactions[0]!.slice(0, 2)) expect((write.Put as { ConditionExpression: string }).ConditionExpression).toContain("generation <= :generation");
+  });
+
+  it("registers nothing for a tampered probe asset digest", async () => {
+    const t = await setup();
+    const tampered = structuredClone(t.proposal);
+    tampered.probes[5]!.assetDigest = "f".repeat(64);
+    await expect(registerRuntimeInstallation(t.deps, admin, { proposal: tampered, proposalSha256: "a".repeat(64) })).rejects.toThrow(/probe-asset-digest-mismatch:build-imds-denial-v1/);
+    expect(t.transactions).toHaveLength(0);
   });
 
   it("keeps the standard P0 registrar closed to a web/API proposal and the web/API one closed to P0", async () => {
     const t = await setup();
+    // A v1 label on web/API content is an ordinary P0 proposal, which its own schema rejects before anything is written.
     const asP0 = { ...t.proposal, schemaVersion: "runtime-installation-proposal/v1" };
-    await expect(registerRuntimeInstallation(t.deps, admin, { proposal: asP0, proposalSha256: "c".repeat(64) })).rejects.toThrow();
+    await expect(registerRuntimeInstallation(t.deps, admin, { proposal: asP0, proposalSha256: "c".repeat(64) })).rejects.toThrow(/Required|Invalid|expected/i);
+    // A v2 label on anything that is not a READY web/API qualification names the reason.
+    await expect(registerRuntimeInstallation(t.deps, admin, { proposal: { ...t.proposal, state: "PARKED" }, proposalSha256: "c".repeat(64) })).rejects.toThrow(/not a READY web\/API qualification/);
+    expect(t.transactions).toHaveLength(0);
+  });
+
+  it("sends a v1 proposal to the standard P0 registrar, which still refuses a web/API challenge", async () => {
+    const t = await setup();
+    const p0 = proposalFor(webApiChallenge(at, { profileId: "linux-arm64-docker-v1" }));
+    // The unmodified v1 proposal is handled by the P0 path (it gets as far as its challenge lookup)...
+    await expect(registerRuntimeInstallation(t.deps, admin, { proposal: p0, proposalSha256: runtimeInstallationProposalSha256(p0) })).rejects.toThrow(/challenge is missing, stale, mismatched, or already consumed/);
+    // ...and the same proposal re-labelled for the web/API profile fails the P0 schema's own profile binding, before any write.
+    const relabelled = { ...p0, challenge: { ...p0.challenge, profileId: "linux-arm64-web-api-v1" } };
+    await expect(registerRuntimeInstallation(t.deps, admin, { proposal: relabelled, proposalSha256: "c".repeat(64) })).rejects.toThrow(/challenge-bound runtime profile and socket/);
     expect(t.transactions).toHaveLength(0);
   });
 });

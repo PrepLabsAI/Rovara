@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { mkdtemp, chmod, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { canonicalJson, type RuntimeInstallChallenge, type WebApiProbeObservation } from "../../packages/contracts/src/index.js";
+import { WEB_API_REQUIRED_PROBES, canonicalJson, webApiProbeAssetManifestPath, type RuntimeInstallChallenge, type WebApiProbeObservation } from "../../packages/contracts/src/index.js";
 import type { WebApiQualificationEnvironment } from "../../packages/verifier/src/install-qualification.js";
 
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -44,8 +45,8 @@ export function fakeProbeRunner(overrides: Record<string, Partial<WebApiProbeObs
 
 /** A Linux ARM64 host description with an installed-manifest fixture; nothing here reads the real machine. */
 export function fakeLinuxEnvironment(now: number, overrides: Partial<WebApiQualificationEnvironment> = {}): Partial<WebApiQualificationEnvironment> {
-  const entries = [{ path: "packages/verifier/assets/application-runtime-v1/probes/web-csv-positive-v1.json", sha256: sha("probe") },
-    { path: "packages/verifier/dist/install-qualification.js", sha256: sha("code") }];
+  const entries = [...WEB_API_REQUIRED_PROBES.map((probe) => ({ path: webApiProbeAssetManifestPath(probe.probeId), sha256: probe.assetDigest })),
+    { path: "packages/verifier/dist/install-qualification.js", sha256: sha("code") }].sort((left, right) => left.path.localeCompare(right.path));
   const body = { schemaVersion: "installed-runtime-manifest/v1" as const, entries };
   return { platform: "linux", arch: "arm64", nodeVersion: "v22.23.2", nodeExecPath: "/usr/local/bin/node", osRelease: "6.8.0-aws", now: () => now,
     assertHostIdentity: () => undefined, observeManifest: async () => ({ ...body, sha256: sha(canonicalJson(body)) }), ...overrides };
@@ -56,4 +57,13 @@ export async function privateEvidenceRoot(): Promise<string> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "web-api-qualification-")));
   await chmod(root, 0o700);
   return root;
+}
+
+/** A manifest that hashes the probe asset files actually shipped in the repo, so a changed asset fails qualification as it would on a host. */
+export async function shippedAssetManifest() {
+  const root = join(import.meta.dirname, "../..");
+  const entries = [...WEB_API_REQUIRED_PROBES.map((probe) => ({ path: webApiProbeAssetManifestPath(probe.probeId), sha256: sha(readFileSync(join(root, webApiProbeAssetManifestPath(probe.probeId)))) })),
+    { path: "packages/verifier/dist/install-qualification.js", sha256: sha("code") }].sort((left, right) => left.path.localeCompare(right.path));
+  const body = { schemaVersion: "installed-runtime-manifest/v1" as const, entries };
+  return { ...body, sha256: sha(canonicalJson(body)) };
 }

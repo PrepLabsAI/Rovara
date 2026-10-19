@@ -7,7 +7,7 @@ import {
   e2eScenarioBundleDigest, e2ePortableOperationDescriptorDigest, inspectE2ERepository, selectE2EExecutionPlan,
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot, type RuntimeInstallChallenge,
   RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema,
-  WEB_API_REQUIRED_PROBES, WEB_API_RUNTIME_PROFILE_ID, WEB_API_RUNTIME_SCOPE, WebApiProbeObservationSchema, WebApiRuntimeInstallProposalSchema,
+  WEB_API_REQUIRED_PROBES, WEB_API_RUNTIME_PROFILE_ID, webApiProbeAssetManifestPath, WEB_API_RUNTIME_SCOPE, WebApiProbeObservationSchema, WebApiRuntimeInstallProposalSchema,
   evaluateWebApiProbeObservation, type WebApiProbeObservation, type WebApiRuntimeInstallProposal,
 } from "@agentx/contracts";
 import { compileE2EScenarios, type E2EImmutableCompilationContext } from "./scenarios.js";
@@ -15,7 +15,6 @@ import { runE2EActualCli } from "./runtime-cli.js";
 import { parseE2EReport } from "./result-adapter.js";
 import { CONTAINED_IMAGE, CONTAINED_RUNTIME_PROFILE, inspectContainedRuntimeReadinessForHost } from "./contained-candidate.js";
 import { observeInstalledRuntimeManifestForHost, type InstalledRuntimeManifest } from "./installed-runtime-manifest.js";
-import { loadWebApiQualificationProbeAssets } from "./application-runtime-probes.js";
 import type { E2ESelectionPacket } from "./selection.js";
 
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
@@ -241,10 +240,12 @@ export async function qualifyInstalledWebApiRuntime(input: Readonly<{
   const evidenceDirectory = await mkdtemp(join(evidenceRoot, "web-api-qualification-"));
   await chmod(evidenceDirectory, 0o700);
   const manifest = await environment.observeManifest();
-  const assets = new Map(loadWebApiQualificationProbeAssets().map((asset) => [asset.probeId, asset]));
+  // The installed manifest hashes the real asset files, so it proves the installed probes are the pinned ones.
+  const installedAssets = new Map(manifest.entries.map((entry) => [entry.path, entry.sha256]));
   const probes: WebApiRuntimeInstallProposal["probes"] = [];
   const reasons: string[] = [];
   for (const required of WEB_API_REQUIRED_PROBES) {
+    if (installedAssets.get(webApiProbeAssetManifestPath(required.probeId)) !== required.assetDigest) { reasons.push(`probe-asset-not-installed-as-pinned:${required.probeId}`); continue; }
     let observation: WebApiProbeObservation;
     try { observation = WebApiProbeObservationSchema.parse(await input.runProbe(required.probeId)); }
     catch { reasons.push(`probe-run-failed:${required.probeId}`); continue; }
@@ -252,7 +253,7 @@ export async function qualifyInstalledWebApiRuntime(input: Readonly<{
     const verdict = evaluateWebApiProbeObservation(required.probeId, observation);
     if (!verdict.ok) { reasons.push(verdict.reason); continue; }
     probes.push({ probeId: required.probeId, kind: required.kind, expectedOutcome: required.expectedOutcome, observedOutcome: required.expectedOutcome,
-      assetDigest: assets.get(required.probeId)!.assetDigest, observation });
+      assetDigest: required.assetDigest, observation });
   }
   if (reasons.length > 0) throw new WebApiQualificationRejected(reasons);
   const toolchain = { execPath: environment.nodeExecPath, version: environment.nodeVersion as "v22.23.2", platform: environment.platform, arch: environment.arch };

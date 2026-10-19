@@ -6,7 +6,7 @@ import {
   canonicalJson, RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema, runtimeInstallChallengeDigest,
   runtimeInstallationProposalSha256, type RuntimeInstallChallenge, type RuntimeInstallationProposal,
   ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
-  WEB_API_RUNTIME_PROFILE_ID, WebApiRuntimeInstallProposalSchema, webApiRuntimeInstallProposalSha256,
+  WEB_API_RUNTIME_PROFILE_ID, WebApiRuntimeInstallProposalSchema, webApiRuntimeInstallProposalSha256, type WebApiRuntimeInstallProposal,
   agentXError,
 } from "@agentx/contracts";
 import { parseE2EReport } from "@agentx/verifier";
@@ -132,6 +132,54 @@ async function readCatalogRevision(deps: RuntimeInstallationDependencies, key: {
   return item.catalogRevision as number;
 }
 
+/** What one issued challenge row proved, shared by both registration paths. */
+type IssuedChallenge = { key: { pk: string; sk: string }; challengeRow: Record<string, unknown>; challengeDigest: string; challengeSecretDigest: string; nowBeforeRetain: number };
+
+/** Loads the challenge row and refuses an expired, future, missing, mismatched, consumed or foreign-issuer challenge. */
+async function loadIssuedChallenge(deps: RuntimeInstallationDependencies, identity: AuthenticatedIdentity,
+  proposal: { challenge: RuntimeInstallChallenge; createdAt: string }): Promise<IssuedChallenge> {
+  const nowBeforeRetain = nowFor(deps);
+  if (Date.parse(proposal.challenge.expiresAt) <= nowBeforeRetain || Date.parse(proposal.challenge.issuedAt) > nowBeforeRetain || Date.parse(proposal.createdAt) > nowBeforeRetain) throw agentXError("CONFIG_INVALID", "runtime challenge is expired or from the future");
+  const key = challengeKey(proposal.challenge.challengeId);
+  const challengeResult = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }));
+  const challengeRow = challengeResult.Item as Record<string, unknown> | undefined;
+  const challengeDigest = runtimeInstallChallengeDigest(proposal.challenge);
+  const challengeSecretDigest = sha(Buffer.from(proposal.challenge.challengeSecret, "base64"));
+  if (!challengeRow || challengeRow.entityType !== "RUNTIME_INSTALL_CHALLENGE" || challengeRow.state !== "ISSUED"
+    || challengeRow.challengeDigest !== challengeDigest || challengeRow.secretSha256 !== challengeSecretDigest
+    || challengeRow.issuedByOwnerKey !== proposal.challenge.issuedByOwnerKey || challengeRow.issuedBySubject !== proposal.challenge.issuedBySubject
+    || typeof challengeRow.expiresAt !== "string" || Date.parse(challengeRow.expiresAt) <= nowBeforeRetain) throw agentXError("CONFIG_INVALID", "runtime challenge is missing, stale, mismatched, or already consumed");
+  if (identity.ownerKey !== challengeRow.issuedByOwnerKey || identity.subject !== challengeRow.issuedBySubject) throw agentXError("FORBIDDEN", "runtime installation must be approved by the administrator who issued its challenge");
+  return { key, challengeRow, challengeDigest, challengeSecretDigest, nowBeforeRetain };
+}
+
+/** Retains the exact proposal bytes and builds the immutable evidence pointer, refusing a pointer that conflicts with an earlier one. */
+async function prepareEvidence(deps: RuntimeInstallationDependencies, proposal: object, proposalSha256: string, issued: IssuedChallenge,
+  identity: AuthenticatedIdentity): Promise<{ evidence: { key: string; sha256: string; byteLength: number }; evidencePointer: Record<string, unknown> }> {
+  const { challengeRow, nowBeforeRetain } = issued;
+  const evidence = await retainImmutableProposal(deps, proposal, proposalSha256);
+  const evidencePointerKey = evidenceKey(proposalSha256);
+  const evidencePointerResult = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: evidencePointerKey, ConsistentRead: true }));
+  const attribution = { issuedByOwnerKey: challengeRow.issuedByOwnerKey, issuedBySubject: challengeRow.issuedBySubject, issuedAt: challengeRow.issuedAt, approvedByOwnerKey: identity.ownerKey, approvedBySubject: identity.subject, approvedAt: new Date(nowBeforeRetain).toISOString() };
+  const evidencePointer = { ...evidencePointerKey, entityType: "RUNTIME_INSTALLATION_EVIDENCE", proposalSha256, evidence, ...attribution };
+  if (evidencePointerResult.Item && canonicalJson(evidencePointerResult.Item) !== canonicalJson(evidencePointer)) throw agentXError("RUNTIME_UNAVAILABLE", "immutable runtime evidence pointer conflicts with its digest or attribution");
+  return { evidence, evidencePointer };
+}
+
+const revisionCondition = (old: number | undefined) => old === undefined
+  ? { ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }
+  : { ConditionExpression: "catalogRevision = :expectedRevision", ExpressionAttributeValues: { ":expectedRevision": old } };
+
+/** The evidence pointer write and the one-use challenge consumption that close every registration transaction. */
+function challengeAndEvidenceWrites(deps: RuntimeInstallationDependencies, issued: IssuedChallenge, identity: AuthenticatedIdentity,
+  proposalSha256: string, evidencePointer: Record<string, unknown>, transactAt: number) {
+  const { key, challengeDigest, challengeSecretDigest } = issued;
+  return [
+    { Put: { TableName: deps.tableName, Item: evidencePointer, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } },
+    { Update: { TableName: deps.tableName, Key: key, UpdateExpression: "SET #state = :consumed, consumedAt = :consumedAt, proposalSha256 = :proposalSha256, approvedByOwnerKey = :ownerKey, approvedBySubject = :subject, approvedAt = :approvedAt", ConditionExpression: "entityType = :entity AND #state = :issued AND challengeDigest = :challengeDigest AND secretSha256 = :secretSha256 AND issuedByOwnerKey = :ownerKey AND issuedBySubject = :subject AND expiresAt > :now", ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":entity": "RUNTIME_INSTALL_CHALLENGE", ":issued": "ISSUED", ":consumed": "CONSUMED", ":challengeDigest": challengeDigest, ":secretSha256": challengeSecretDigest, ":ownerKey": identity.ownerKey, ":subject": identity.subject, ":now": new Date(transactAt).toISOString(), ":consumedAt": new Date(transactAt).toISOString(), ":approvedAt": new Date(transactAt).toISOString(), ":proposalSha256": proposalSha256 } } },
+  ];
+}
+
 export async function registerRuntimeInstallation(
   deps: RuntimeInstallationDependencies,
   identity: AuthenticatedIdentity,
@@ -150,28 +198,12 @@ export async function registerRuntimeInstallation(
   const proposalSha256 = runtimeInstallationProposalSha256(proposal);
   if (proposalSha256 !== request.proposalSha256) throw agentXError("CONFIG_INVALID", "runtime proposal approval digest does not match the exact proposal bytes");
   if (proposal.challenge.setupCatalogId !== deps.setupCatalogId || proposal.challenge.featureCatalogId !== deps.featureCatalogId) throw agentXError("FORBIDDEN", "runtime challenge catalogs do not match this deployment");
-  const nowBeforeRetain = nowFor(deps);
-  if (Date.parse(proposal.challenge.expiresAt) <= nowBeforeRetain || Date.parse(proposal.challenge.issuedAt) > nowBeforeRetain || Date.parse(proposal.createdAt) > nowBeforeRetain) throw agentXError("CONFIG_INVALID", "runtime challenge is expired or from the future");
-  const key = challengeKey(proposal.challenge.challengeId);
-  const challengeResult = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }));
-  const challengeRow = challengeResult.Item as Record<string, unknown> | undefined;
-  const challengeDigest = runtimeInstallChallengeDigest(proposal.challenge);
-  const challengeSecretDigest = sha(Buffer.from(proposal.challenge.challengeSecret, "base64"));
-  if (!challengeRow || challengeRow.entityType !== "RUNTIME_INSTALL_CHALLENGE" || challengeRow.state !== "ISSUED"
-    || challengeRow.challengeDigest !== challengeDigest || challengeRow.secretSha256 !== challengeSecretDigest
-    || challengeRow.issuedByOwnerKey !== proposal.challenge.issuedByOwnerKey || challengeRow.issuedBySubject !== proposal.challenge.issuedBySubject
-    || typeof challengeRow.expiresAt !== "string" || Date.parse(challengeRow.expiresAt) <= nowBeforeRetain) throw agentXError("CONFIG_INVALID", "runtime challenge is missing, stale, mismatched, or already consumed");
-  if (identity.ownerKey !== challengeRow.issuedByOwnerKey || identity.subject !== challengeRow.issuedBySubject) throw agentXError("FORBIDDEN", "runtime installation must be approved by the administrator who issued its challenge");
+  const issued = await loadIssuedChallenge(deps, identity, proposal);
   if (proposal.challenge.profileId !== "linux-arm64-docker-v1" || proposal.runnerToolchain.platform !== "linux" || proposal.runnerToolchain.arch !== "arm64" || proposal.runnerToolchain.execPath !== "/usr/local/bin/node") throw agentXError("CONFIG_INVALID", "standard runtime registration requires qualification on the fixed Linux ARM64 worker supervisor");
   const expectedSetupKey = projectSetupRuntimeKey(deps.setupCatalogId, projectSetupBindingDigest(proposal.challenge.binding));
   const expectedFeatureKey = e2eFeatureVerifierKey(deps.featureCatalogId, PROFILE_ID);
   const [setupRevisionBefore, featureRevisionBefore] = await Promise.all([readCatalogRevision(deps, expectedSetupKey), readCatalogRevision(deps, expectedFeatureKey)]);
-  const evidence = await retainImmutableProposal(deps, proposal, proposalSha256);
-  const evidencePointerKey = evidenceKey(proposalSha256);
-  const evidencePointerResult = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: evidencePointerKey, ConsistentRead: true }));
-  const attribution = { issuedByOwnerKey: challengeRow.issuedByOwnerKey, issuedBySubject: challengeRow.issuedBySubject, issuedAt: challengeRow.issuedAt, approvedByOwnerKey: identity.ownerKey, approvedBySubject: identity.subject, approvedAt: new Date(nowBeforeRetain).toISOString() };
-  const evidencePointer = { ...evidencePointerKey, entityType: "RUNTIME_INSTALLATION_EVIDENCE", proposalSha256, evidence, ...attribution };
-  if (evidencePointerResult.Item && canonicalJson(evidencePointerResult.Item) !== canonicalJson(evidencePointer)) throw agentXError("RUNTIME_UNAVAILABLE", "immutable runtime evidence pointer conflicts with its digest or attribution");
+  const { evidence, evidencePointer } = await prepareEvidence(deps, proposal, proposalSha256, issued, identity);
   const setupRevision = (setupRevisionBefore ?? 0) + 1;
   const featureRevision = (featureRevisionBefore ?? 0) + 1;
   const records = runtimeInstallationRecords({ proposal, setupRevision, featureRevision, qualifiedAt: new Date(nowFor(deps)).toISOString() });
@@ -180,16 +212,12 @@ export async function registerRuntimeInstallation(
   const feature = E2EFeatureVerifierRecordSchema.parse(records.feature);
   const transactAt = nowFor(deps);
   if (Date.parse(proposal.challenge.expiresAt) <= transactAt) throw agentXError("CONFIG_INVALID", "runtime challenge expired before its registration transaction");
-  const revisionCondition = (old: number | undefined) => old === undefined
-    ? { ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }
-    : { ConditionExpression: "catalogRevision = :expectedRevision", ExpressionAttributeValues: { ":expectedRevision": old } };
   const setupItem = { ...expectedSetupKey, ...setup };
   const featureItem = { ...expectedFeatureKey, ...feature };
   const writes = [
     { Put: { TableName: deps.tableName, Item: setupItem, ...revisionCondition(setupRevisionBefore) } },
     { Put: { TableName: deps.tableName, Item: featureItem, ...revisionCondition(featureRevisionBefore) } },
-    { Put: { TableName: deps.tableName, Item: evidencePointer, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } },
-    { Update: { TableName: deps.tableName, Key: key, UpdateExpression: "SET #state = :consumed, consumedAt = :consumedAt, proposalSha256 = :proposalSha256, approvedByOwnerKey = :ownerKey, approvedBySubject = :subject, approvedAt = :approvedAt", ConditionExpression: "entityType = :entity AND #state = :issued AND challengeDigest = :challengeDigest AND secretSha256 = :secretSha256 AND issuedByOwnerKey = :ownerKey AND issuedBySubject = :subject AND expiresAt > :now", ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":entity": "RUNTIME_INSTALL_CHALLENGE", ":issued": "ISSUED", ":consumed": "CONSUMED", ":challengeDigest": challengeDigest, ":secretSha256": challengeSecretDigest, ":ownerKey": identity.ownerKey, ":subject": identity.subject, ":now": new Date(transactAt).toISOString(), ":consumedAt": new Date(transactAt).toISOString(), ":approvedAt": new Date(transactAt).toISOString(), ":proposalSha256": proposalSha256 } } },
+    ...challengeAndEvidenceWrites(deps, issued, identity, proposalSha256, evidencePointer, transactAt),
   ];
   try { await deps.documentClient.send(new TransactWriteCommand({ TransactItems: writes })); }
   catch { throw agentXError("PROJECT_REVISION_MISMATCH", "runtime challenge, catalog revision, or evidence pointer changed before paired registration"); }
@@ -209,9 +237,27 @@ function isWebApiProposal(proposal: unknown): boolean {
   return proposal !== null && typeof proposal === "object" && (proposal as { schemaVersion?: unknown }).schemaVersion === "runtime-installation-proposal/v2";
 }
 
+/** Reads an existing per-kind row's revision and the worker generation it was qualified on. */
+async function readWebApiCatalogRow(deps: RuntimeInstallationDependencies, key: { pk: string; sk: string }): Promise<{ revision: number; generation: number } | undefined> {
+  const result = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }));
+  const item = result.Item as Record<string, unknown> | undefined;
+  if (item === undefined) return undefined;
+  if (!Number.isSafeInteger(item.catalogRevision) || (item.catalogRevision as number) < 1
+    || !Number.isSafeInteger(item.generation) || (item.generation as number) < 1) throw agentXError("RUNTIME_UNAVAILABLE", "existing runtime catalog row has an invalid revision or generation");
+  return { revision: item.catalogRevision as number, generation: item.generation as number };
+}
+
+/**
+ * TODO(task-1.5b, Ruling Z): the retained-evidence check goes here. Registration must not rely on the operator-supplied probe
+ * observations alone; it has to verify that each probe's `evidenceDigest` binds retained, run-bound evidence (the executor report and
+ * collector result of the actual run, tied to this challenge). Until that exists, linux-arm64-web-api-v1 registration is not for live use.
+ */
+function assertRunBoundProbeEvidence(proposal: WebApiRuntimeInstallProposal): void { void proposal; /* intentionally empty until Task 1.5b */ }
+
 /**
  * Registers the web/API runtime qualification. The proposal's own schema re-judges every recorded probe observation, so a READY label
- * alone registers nothing. The two per-kind v2 rows, the evidence pointer and the one-use challenge are one conditional transaction.
+ * alone registers nothing. The two per-kind v2 rows, the evidence pointer and the one-use challenge are one conditional transaction,
+ * and neither row may move to an older worker generation than the one already registered.
  */
 async function registerWebApiRuntimeInstallation(
   deps: RuntimeInstallationDependencies,
@@ -221,42 +267,28 @@ async function registerWebApiRuntimeInstallation(
   const parsed = WebApiRuntimeInstallProposalSchema.safeParse(request.proposal);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", `runtime proposal is not a READY web/API qualification: ${parsed.error.issues[0]?.message ?? "invalid proposal"}`);
   const proposal = parsed.data;
+  assertRunBoundProbeEvidence(proposal);
   const proposalSha256 = webApiRuntimeInstallProposalSha256(proposal);
   if (proposalSha256 !== request.proposalSha256) throw agentXError("CONFIG_INVALID", "runtime proposal approval digest does not match the exact proposal bytes");
   if (proposal.challenge.setupCatalogId !== deps.setupCatalogId || proposal.challenge.featureCatalogId !== deps.featureCatalogId) throw agentXError("FORBIDDEN", "runtime challenge catalogs do not match this deployment");
-  const nowBeforeRetain = nowFor(deps);
-  if (Date.parse(proposal.challenge.expiresAt) <= nowBeforeRetain || Date.parse(proposal.challenge.issuedAt) > nowBeforeRetain || Date.parse(proposal.createdAt) > nowBeforeRetain) throw agentXError("CONFIG_INVALID", "runtime challenge is expired or from the future");
-  const key = challengeKey(proposal.challenge.challengeId);
-  const challengeResult = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }));
-  const challengeRow = challengeResult.Item as Record<string, unknown> | undefined;
-  const challengeDigest = runtimeInstallChallengeDigest(proposal.challenge);
-  const challengeSecretDigest = sha(Buffer.from(proposal.challenge.challengeSecret, "base64"));
-  if (!challengeRow || challengeRow.entityType !== "RUNTIME_INSTALL_CHALLENGE" || challengeRow.state !== "ISSUED"
-    || challengeRow.challengeDigest !== challengeDigest || challengeRow.secretSha256 !== challengeSecretDigest
-    || challengeRow.issuedByOwnerKey !== proposal.challenge.issuedByOwnerKey || challengeRow.issuedBySubject !== proposal.challenge.issuedBySubject
-    || typeof challengeRow.expiresAt !== "string" || Date.parse(challengeRow.expiresAt) <= nowBeforeRetain) throw agentXError("CONFIG_INVALID", "runtime challenge is missing, stale, mismatched, or already consumed");
-  if (identity.ownerKey !== challengeRow.issuedByOwnerKey || identity.subject !== challengeRow.issuedBySubject) throw agentXError("FORBIDDEN", "runtime installation must be approved by the administrator who issued its challenge");
+  const issued = await loadIssuedChallenge(deps, identity, proposal);
   if (proposal.challenge.profileId !== WEB_API_RUNTIME_PROFILE_ID || proposal.runnerToolchain.platform !== "linux" || proposal.runnerToolchain.arch !== "arm64" || proposal.runnerToolchain.execPath !== "/usr/local/bin/node") throw agentXError("CONFIG_INVALID", "web/API runtime registration requires qualification on the fixed Linux ARM64 worker supervisor");
   const keys = { web: e2eRegisteredRuntimeKey(deps.featureCatalogId, WEB_API_RUNTIME_PROFILE_ID, "web"), api: e2eRegisteredRuntimeKey(deps.featureCatalogId, WEB_API_RUNTIME_PROFILE_ID, "api") };
-  const [webBefore, apiBefore] = await Promise.all([readCatalogRevision(deps, keys.web), readCatalogRevision(deps, keys.api)]);
-  const evidence = await retainImmutableProposal(deps, proposal, proposalSha256);
-  const evidencePointerKey = evidenceKey(proposalSha256);
-  const evidencePointerResult = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: evidencePointerKey, ConsistentRead: true }));
-  const attribution = { issuedByOwnerKey: challengeRow.issuedByOwnerKey, issuedBySubject: challengeRow.issuedBySubject, issuedAt: challengeRow.issuedAt, approvedByOwnerKey: identity.ownerKey, approvedBySubject: identity.subject, approvedAt: new Date(nowBeforeRetain).toISOString() };
-  const evidencePointer = { ...evidencePointerKey, entityType: "RUNTIME_INSTALLATION_EVIDENCE", proposalSha256, evidence, ...attribution };
-  if (evidencePointerResult.Item && canonicalJson(evidencePointerResult.Item) !== canonicalJson(evidencePointer)) throw agentXError("RUNTIME_UNAVAILABLE", "immutable runtime evidence pointer conflicts with its digest or attribution");
-  const revisions = { web: (webBefore ?? 0) + 1, api: (apiBefore ?? 0) + 1 };
+  const [webBefore, apiBefore] = await Promise.all([readWebApiCatalogRow(deps, keys.web), readWebApiCatalogRow(deps, keys.api)]);
+  const generation = proposal.challenge.generation;
+  if ([webBefore, apiBefore].some((row) => row !== undefined && row.generation > generation)) throw agentXError("CONFIG_INVALID", "runtime proposal is for an older worker generation than the registered runtime");
+  const { evidence, evidencePointer } = await prepareEvidence(deps, proposal, proposalSha256, issued, identity);
+  const revisions = { web: (webBefore?.revision ?? 0) + 1, api: (apiBefore?.revision ?? 0) + 1 };
   const rows = e2eWebApiRuntimeRecords({ proposal, revisions, qualifiedAt: new Date(nowFor(deps)).toISOString(), evidence });
   const transactAt = nowFor(deps);
   if (Date.parse(proposal.challenge.expiresAt) <= transactAt) throw agentXError("CONFIG_INVALID", "runtime challenge expired before its registration transaction");
-  const revisionCondition = (old: number | undefined) => old === undefined
-    ? { ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }
-    : { ConditionExpression: "catalogRevision = :expectedRevision", ExpressionAttributeValues: { ":expectedRevision": old } };
+  // A row that is replaced must still be at the revision read and no newer a generation than this proposal's.
+  const rowCondition = (before: { revision: number } | undefined) => before === undefined ? revisionCondition(undefined)
+    : { ConditionExpression: "catalogRevision = :expectedRevision AND generation <= :generation", ExpressionAttributeValues: { ":expectedRevision": before.revision, ":generation": generation } };
   const writes = [
-    { Put: { TableName: deps.tableName, Item: { ...keys.web, ...rows.web }, ...revisionCondition(webBefore) } },
-    { Put: { TableName: deps.tableName, Item: { ...keys.api, ...rows.api }, ...revisionCondition(apiBefore) } },
-    { Put: { TableName: deps.tableName, Item: evidencePointer, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } },
-    { Update: { TableName: deps.tableName, Key: key, UpdateExpression: "SET #state = :consumed, consumedAt = :consumedAt, proposalSha256 = :proposalSha256, approvedByOwnerKey = :ownerKey, approvedBySubject = :subject, approvedAt = :approvedAt", ConditionExpression: "entityType = :entity AND #state = :issued AND challengeDigest = :challengeDigest AND secretSha256 = :secretSha256 AND issuedByOwnerKey = :ownerKey AND issuedBySubject = :subject AND expiresAt > :now", ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":entity": "RUNTIME_INSTALL_CHALLENGE", ":issued": "ISSUED", ":consumed": "CONSUMED", ":challengeDigest": challengeDigest, ":secretSha256": challengeSecretDigest, ":ownerKey": identity.ownerKey, ":subject": identity.subject, ":now": new Date(transactAt).toISOString(), ":consumedAt": new Date(transactAt).toISOString(), ":approvedAt": new Date(transactAt).toISOString(), ":proposalSha256": proposalSha256 } } },
+    { Put: { TableName: deps.tableName, Item: { ...keys.web, ...rows.web }, ...rowCondition(webBefore) } },
+    { Put: { TableName: deps.tableName, Item: { ...keys.api, ...rows.api }, ...rowCondition(apiBefore) } },
+    ...challengeAndEvidenceWrites(deps, issued, identity, proposalSha256, evidencePointer, transactAt),
   ];
   try { await deps.documentClient.send(new TransactWriteCommand({ TransactItems: writes })); }
   catch { throw agentXError("PROJECT_REVISION_MISMATCH", "runtime challenge, catalog revision, or evidence pointer changed before registration"); }

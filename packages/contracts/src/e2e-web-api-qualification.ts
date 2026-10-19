@@ -15,17 +15,20 @@ type ExpectedFailureCause =
   | Readonly<{ kind: "assertion"; assertionKind: "csv" | "http-status" }>
   | Readonly<{ kind: "blocked-host"; host: string }>
   | Readonly<{ kind: "build-failed" }>;
-type RequiredProbe = Readonly<{ probeId: string; kind: "web" | "api" | "build"; expectedOutcome: "PASS" | "EXPECTED_FAILURE"; cause: ExpectedFailureCause | null }>;
+type RequiredProbe = Readonly<{ probeId: string; /** sha256 of the installed probe asset file; a test keeps it equal to the shipped bytes. */ assetDigest: string; kind: "web" | "api" | "build"; expectedOutcome: "PASS" | "EXPECTED_FAILURE"; cause: ExpectedFailureCause | null }>;
+
+/** Where each probe's asset sits in the installed-runtime manifest, which therefore proves the installed bytes. */
+export const webApiProbeAssetManifestPath = (probeId: string) => `packages/verifier/assets/application-runtime-v1/probes/${probeId}.json`;
 
 /** The exact probe set M1.1 requires, in the order a proposal carries it. The auth and tenant probes belong to M1.3. */
 const requiredProbes: RequiredProbe[] = [
-  { probeId: "web-csv-positive-v1", kind: "web", expectedOutcome: "PASS", cause: null },
-  { probeId: "web-csv-negative-v1", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "csv" } },
-  { probeId: "web-egress-denial-v1", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "blocked-host", host: "probe.example.com" } },
-  { probeId: "api-state-positive-v1", kind: "api", expectedOutcome: "PASS", cause: null },
+  { probeId: "web-csv-positive-v1", assetDigest: "3fd4928bf1fd9db70994ea733caede591f5fdab1574e340b89f397d9000985e4", kind: "web", expectedOutcome: "PASS", cause: null },
+  { probeId: "web-csv-negative-v1", assetDigest: "91b591d3551262a6f8800e530ae502b9ed02e7066411194b0d9bfdc8aa079d14", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "csv" } },
+  { probeId: "web-egress-denial-v1", assetDigest: "a7e28d356365d736b8b1251344df6ca89194ea78ebd2ea977790bc03d9cf9e19", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "blocked-host", host: "probe.example.com" } },
+  { probeId: "api-state-positive-v1", assetDigest: "5fa681bbcf60bdcbee9804d8bfe9bbd56c60d6a35925b5f9e929c42d9773cbc7", kind: "api", expectedOutcome: "PASS", cause: null },
   // The app, not the browser, makes this request, so the executor cannot record the blocked host; the dependency check fails instead.
-  { probeId: "api-egress-denial-v1", kind: "api", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "http-status" } },
-  { probeId: "build-imds-denial-v1", kind: "build", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "build-failed" } },
+  { probeId: "api-egress-denial-v1", assetDigest: "ccfebb5c1e33d3f5a5d80d99cb51d42b29f2c6bd02ad76f81a746684276ade47", kind: "api", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "http-status" } },
+  { probeId: "build-imds-denial-v1", assetDigest: "c6494ae44cf33f9824944dfe6606d82ac6c3a0240e355508d03785361adc23ac", kind: "build", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "build-failed" } },
 ];
 export const WEB_API_REQUIRED_PROBES: readonly RequiredProbe[] = Object.freeze(requiredProbes.map((probe) => Object.freeze(probe)));
 export const WEB_API_REQUIRED_PROBE_IDS = WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId) as [string, ...string[]];
@@ -88,6 +91,10 @@ const ProbeRecordSchema = z.object({
 }).strict();
 
 /**
+ * TODO(task-1.5b, Ruling Z): each probe's `evidenceDigest` must come to bind retained, run-bound evidence (the executor report and collector
+ * result of the actual run, tied to this challenge), checked by the registrar (`assertRunBoundProbeEvidence`). Until then the observations are
+ * operator-supplied facts and this profile's registration is not for live use.
+ *
  * The web/API qualification proposal. Its `state` is a label, not an authority: the schema re-judges every recorded observation
  * with the same pure oracle the qualifier used, so a proposal can only parse as READY when its evidence shows the required outcomes.
  */
@@ -112,6 +119,10 @@ export const WebApiRuntimeInstallProposalSchema = z.object({
       context.addIssue({ code: "custom", path: ["probes", index], message: `probe ${index} must be ${required.probeId} with its fixed expected outcome` });
       return;
     }
+    // A tampered or substituted probe asset must never qualify: the recorded digest is the pinned one, and so is the installed file's.
+    if (probe.assetDigest !== required.assetDigest) context.addIssue({ code: "custom", path: ["probes", index, "assetDigest"], message: `probe-asset-digest-mismatch:${required.probeId}` });
+    const installed = proposal.manifest.entries.find((entry) => entry.path === webApiProbeAssetManifestPath(required.probeId));
+    if (installed?.sha256 !== required.assetDigest) context.addIssue({ code: "custom", path: ["manifest", "entries"], message: `probe-asset-not-installed-as-pinned:${required.probeId}` });
     const verdict = evaluateWebApiProbeObservation(probe.probeId, probe.observation);
     if (!verdict.ok) context.addIssue({ code: "custom", path: ["probes", index, "observation"], message: verdict.reason });
   });

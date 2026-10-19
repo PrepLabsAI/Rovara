@@ -3,7 +3,7 @@ import { WEB_API_REQUIRED_PROBES, WebApiRuntimeInstallProposalSchema } from "../
 import { qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
 import { observeWebApiProbe } from "../support/linux-web-api-probes.js";
 import { removeProbeDirs } from "../support/linux-runtime.js";
-import { fakeLinuxEnvironment, privateEvidenceRoot, webApiChallenge } from "../support/web-api-qualification.js";
+import { fakeLinuxEnvironment, privateEvidenceRoot, shippedAssetManifest, webApiChallenge } from "../support/web-api-qualification.js";
 
 // The whole qualification suite through the production Docker host and the real collector. It runs only in the CI `linux-runtime`
 // job (ubuntu-24.04-arm, ROVARA_DOCKER=1, ROVARA_EXECUTOR_IMAGE, with the DOCKER-USER metadata drop rule applied); elsewhere it skips.
@@ -14,12 +14,13 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     const now = Date.now();
     const observed: string[] = [];
     // Only the worker identity and the installed-manifest read are replaced: this CI host is not the EC2 worker and has no installed root.
+    // The manifest still hashes the probe asset files in this checkout, so a changed asset fails against its pinned digest.
     const fake = fakeLinuxEnvironment(now);
     // Six container runs outlast the usual five-minute challenge window.
     const challenge = webApiChallenge(now, { expiresAt: new Date(now + 2 * 3_600_000).toISOString() });
     const proposal = await qualifyInstalledWebApiRuntime({ challenge, evidenceRoot: await privateEvidenceRoot(),
       runProbe: async (probeId) => { observed.push(probeId); return observeWebApiProbe(probeId); },
-      environment: { assertHostIdentity: fake.assertHostIdentity!, observeManifest: fake.observeManifest!, now: () => Date.now() } });
+      environment: { assertHostIdentity: fake.assertHostIdentity!, observeManifest: shippedAssetManifest, now: () => Date.now() } });
     expect(observed).toEqual(WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId));
     expect(proposal.state).toBe("READY");
     expect(proposal.probes.map((probe) => [probe.probeId, probe.observedOutcome])).toEqual(WEB_API_REQUIRED_PROBES.map((probe) => [probe.probeId, probe.expectedOutcome]));
