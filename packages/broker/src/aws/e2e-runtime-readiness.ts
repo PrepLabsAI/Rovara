@@ -14,8 +14,9 @@ import {
 } from "@agentx/contracts";
 import type { z } from "zod";
 
-export function e2eRegisteredRuntimeKey(runtimeCatalogId: string, profileId: string): { pk: string; sk: string } {
-  return { pk: `E2E_FEATURE_VERIFIER#${runtimeCatalogId}`, sk: `PROFILE#${profileId}` };
+/** A profile that serves more than one target kind (web and API) keeps one row per kind; without a kind the key is the profile's alone. */
+export function e2eRegisteredRuntimeKey(runtimeCatalogId: string, profileId: string, kind?: "web" | "api"): { pk: string; sk: string } {
+  return { pk: `E2E_FEATURE_VERIFIER#${runtimeCatalogId}`, sk: kind === undefined ? `PROFILE#${profileId}` : `PROFILE#${profileId}#${kind}` };
 }
 
 type ExpectedRuntime = {
@@ -24,6 +25,8 @@ type ExpectedRuntime = {
   binding: Ec2RuntimeBinding;
   capabilityDigest: string;
   now: number;
+  /** Selects the per-kind row of a profile that registers both web and API runtimes. */
+  kind?: "web" | "api";
 };
 
 type E2ERegisteredRuntime = z.infer<typeof E2ERegisteredRuntimeSchema>;
@@ -37,7 +40,7 @@ const runtimeKeys = new Set([
 function parseRegisteredRow(recordInput: unknown, expected: ExpectedRuntime): E2ERegisteredRuntime | undefined {
   if (recordInput === null || typeof recordInput !== "object" || Array.isArray(recordInput)) return undefined;
   const row = recordInput as Record<string, unknown>;
-  const key = e2eRegisteredRuntimeKey(expected.runtimeCatalogId, expected.profileId);
+  const key = e2eRegisteredRuntimeKey(expected.runtimeCatalogId, expected.profileId, expected.kind);
   if (Object.keys(row).some((name) => !runtimeKeys.has(name)) || row.pk !== key.pk || row.sk !== key.sk) return undefined;
   const { pk: _pk, sk: _sk, ...domainRecord } = row;
   void _pk;
@@ -45,6 +48,7 @@ function parseRegisteredRow(recordInput: unknown, expected: ExpectedRuntime): E2
   const parsed = E2ERegisteredRuntimeSchema.safeParse(domainRecord);
   if (!parsed.success) return undefined;
   const runtime = parsed.data;
+  if (expected.kind !== undefined && runtime.capabilities.kind !== expected.kind) return undefined;
   let expectedBinding: Ec2RuntimeBinding;
   try { expectedBinding = Ec2RuntimeBindingSchema.parse(expected.binding); }
   catch { return undefined; }

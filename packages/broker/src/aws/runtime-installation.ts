@@ -6,12 +6,14 @@ import {
   canonicalJson, RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema, runtimeInstallChallengeDigest,
   runtimeInstallationProposalSha256, type RuntimeInstallChallenge, type RuntimeInstallationProposal,
   ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
+  WEB_API_RUNTIME_PROFILE_ID, WebApiRuntimeInstallProposalSchema, webApiRuntimeInstallProposalSha256,
   agentXError,
 } from "@agentx/contracts";
 import { parseE2EReport } from "@agentx/verifier";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { projectSetupBindingDigest, projectSetupRuntimeKey, ProjectSetupRuntimeRecordSchema } from "./project-setup-runtime-catalog.js";
-import { e2eFeatureVerifierKey, E2E_FEATURE_PROCESS_RESPONSE_SCOPE, E2EFeatureVerifierRecordSchema } from "./e2e-feature-verifier-catalog.js";
+import { e2eFeatureVerifierKey, e2eWebApiRuntimeRecords, E2E_FEATURE_PROCESS_RESPONSE_SCOPE, E2EFeatureVerifierRecordSchema } from "./e2e-feature-verifier-catalog.js";
+import { e2eRegisteredRuntimeKey } from "./e2e-runtime-readiness.js";
 
 const MAX_PROPOSAL_BYTES = 1_048_576;
 const PROFILE_ID = "default-sandbox";
@@ -39,7 +41,7 @@ export interface RuntimeInstallationDependencies {
 }
 
 function nowFor(deps: RuntimeInstallationDependencies): number { return deps.now?.() ?? Date.now(); }
-function knownProfile(profileId: RuntimeInstallChallenge["profileId"]): boolean { return profileId === "linux-arm64-docker-v1" || profileId === "darwin-arm64-colima-v1"; }
+function knownProfile(profileId: RuntimeInstallChallenge["profileId"]): boolean { return profileId === "linux-arm64-docker-v1" || profileId === "darwin-arm64-colima-v1" || profileId === WEB_API_RUNTIME_PROFILE_ID; }
 function assertAdmin(identity: AuthenticatedIdentity): void {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
 }
@@ -105,7 +107,7 @@ export function runtimeInstallationRecords(input: {
   return { setup, feature };
 }
 
-async function retainImmutableProposal(deps: RuntimeInstallationDependencies, proposal: RuntimeInstallationProposal, proposalSha256: string): Promise<{ key: string; sha256: string; byteLength: number }> {
+async function retainImmutableProposal(deps: RuntimeInstallationDependencies, proposal: object, proposalSha256: string): Promise<{ key: string; sha256: string; byteLength: number }> {
   const body = canonicalJson(proposal);
   const bytes = Buffer.from(body, "utf8");
   if (bytes.byteLength > MAX_PROPOSAL_BYTES || sha(bytes) !== proposalSha256) throw agentXError("CONFIG_INVALID", "runtime proposal exceeds its evidence bound or its digest changed");
@@ -134,9 +136,11 @@ export async function registerRuntimeInstallation(
   deps: RuntimeInstallationDependencies,
   identity: AuthenticatedIdentity,
   requestInput: unknown,
-): Promise<{ setupCatalogId: string; featureCatalogId: string; setupRevision: number; featureRevision: number; proposalSha256: string; evidence: { key: string; sha256: string; byteLength: number } }> {
+): Promise<{ setupCatalogId: string; featureCatalogId: string; setupRevision: number; featureRevision: number; proposalSha256: string; evidence: { key: string; sha256: string; byteLength: number } }
+  | WebApiRuntimeRegistrationResult> {
   assertAdmin(identity);
   const request = zRegistrationRequest(requestInput);
+  if (isWebApiProposal(request.proposal)) return registerWebApiRuntimeInstallation(deps, identity, request);
   const proposal = RuntimeInstallationProposalSchema.parse(request.proposal);
   const report = parseE2EReport(Buffer.from(proposal.execution.run.stdout.bytesBase64, "base64"));
   if (report.kind !== "parsed") throw agentXError("CONFIG_INVALID", "runtime proposal does not contain a complete pinned upstream report");
@@ -196,4 +200,65 @@ function zRegistrationRequest(value: unknown): { proposal: unknown; proposalSha2
   const parsed = z.object({ proposal: z.unknown(), proposalSha256: z.string().regex(/^[a-f0-9]{64}$/) }).strict().safeParse(value);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", `invalid runtime registration request: ${parsed.error.issues[0]?.message ?? "invalid body"}`);
   return parsed.data;
+}
+
+export type WebApiRuntimeRegistrationResult = { profileId: typeof WEB_API_RUNTIME_PROFILE_ID; featureCatalogId: string; featureRevisions: { web: number; api: number };
+  proposalSha256: string; evidence: { key: string; sha256: string; byteLength: number } };
+
+function isWebApiProposal(proposal: unknown): boolean {
+  return proposal !== null && typeof proposal === "object" && (proposal as { schemaVersion?: unknown }).schemaVersion === "runtime-installation-proposal/v2";
+}
+
+/**
+ * Registers the web/API runtime qualification. The proposal's own schema re-judges every recorded probe observation, so a READY label
+ * alone registers nothing. The two per-kind v2 rows, the evidence pointer and the one-use challenge are one conditional transaction.
+ */
+async function registerWebApiRuntimeInstallation(
+  deps: RuntimeInstallationDependencies,
+  identity: AuthenticatedIdentity,
+  request: { proposal: unknown; proposalSha256: string },
+): Promise<WebApiRuntimeRegistrationResult> {
+  const parsed = WebApiRuntimeInstallProposalSchema.safeParse(request.proposal);
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", `runtime proposal is not a READY web/API qualification: ${parsed.error.issues[0]?.message ?? "invalid proposal"}`);
+  const proposal = parsed.data;
+  const proposalSha256 = webApiRuntimeInstallProposalSha256(proposal);
+  if (proposalSha256 !== request.proposalSha256) throw agentXError("CONFIG_INVALID", "runtime proposal approval digest does not match the exact proposal bytes");
+  if (proposal.challenge.setupCatalogId !== deps.setupCatalogId || proposal.challenge.featureCatalogId !== deps.featureCatalogId) throw agentXError("FORBIDDEN", "runtime challenge catalogs do not match this deployment");
+  const nowBeforeRetain = nowFor(deps);
+  if (Date.parse(proposal.challenge.expiresAt) <= nowBeforeRetain || Date.parse(proposal.challenge.issuedAt) > nowBeforeRetain || Date.parse(proposal.createdAt) > nowBeforeRetain) throw agentXError("CONFIG_INVALID", "runtime challenge is expired or from the future");
+  const key = challengeKey(proposal.challenge.challengeId);
+  const challengeResult = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }));
+  const challengeRow = challengeResult.Item as Record<string, unknown> | undefined;
+  const challengeDigest = runtimeInstallChallengeDigest(proposal.challenge);
+  const challengeSecretDigest = sha(Buffer.from(proposal.challenge.challengeSecret, "base64"));
+  if (!challengeRow || challengeRow.entityType !== "RUNTIME_INSTALL_CHALLENGE" || challengeRow.state !== "ISSUED"
+    || challengeRow.challengeDigest !== challengeDigest || challengeRow.secretSha256 !== challengeSecretDigest
+    || challengeRow.issuedByOwnerKey !== proposal.challenge.issuedByOwnerKey || challengeRow.issuedBySubject !== proposal.challenge.issuedBySubject
+    || typeof challengeRow.expiresAt !== "string" || Date.parse(challengeRow.expiresAt) <= nowBeforeRetain) throw agentXError("CONFIG_INVALID", "runtime challenge is missing, stale, mismatched, or already consumed");
+  if (identity.ownerKey !== challengeRow.issuedByOwnerKey || identity.subject !== challengeRow.issuedBySubject) throw agentXError("FORBIDDEN", "runtime installation must be approved by the administrator who issued its challenge");
+  if (proposal.challenge.profileId !== WEB_API_RUNTIME_PROFILE_ID || proposal.runnerToolchain.platform !== "linux" || proposal.runnerToolchain.arch !== "arm64" || proposal.runnerToolchain.execPath !== "/usr/local/bin/node") throw agentXError("CONFIG_INVALID", "web/API runtime registration requires qualification on the fixed Linux ARM64 worker supervisor");
+  const keys = { web: e2eRegisteredRuntimeKey(deps.featureCatalogId, WEB_API_RUNTIME_PROFILE_ID, "web"), api: e2eRegisteredRuntimeKey(deps.featureCatalogId, WEB_API_RUNTIME_PROFILE_ID, "api") };
+  const [webBefore, apiBefore] = await Promise.all([readCatalogRevision(deps, keys.web), readCatalogRevision(deps, keys.api)]);
+  const evidence = await retainImmutableProposal(deps, proposal, proposalSha256);
+  const evidencePointerKey = evidenceKey(proposalSha256);
+  const evidencePointerResult = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: evidencePointerKey, ConsistentRead: true }));
+  const attribution = { issuedByOwnerKey: challengeRow.issuedByOwnerKey, issuedBySubject: challengeRow.issuedBySubject, issuedAt: challengeRow.issuedAt, approvedByOwnerKey: identity.ownerKey, approvedBySubject: identity.subject, approvedAt: new Date(nowBeforeRetain).toISOString() };
+  const evidencePointer = { ...evidencePointerKey, entityType: "RUNTIME_INSTALLATION_EVIDENCE", proposalSha256, evidence, ...attribution };
+  if (evidencePointerResult.Item && canonicalJson(evidencePointerResult.Item) !== canonicalJson(evidencePointer)) throw agentXError("RUNTIME_UNAVAILABLE", "immutable runtime evidence pointer conflicts with its digest or attribution");
+  const revisions = { web: (webBefore ?? 0) + 1, api: (apiBefore ?? 0) + 1 };
+  const rows = e2eWebApiRuntimeRecords({ proposal, revisions, qualifiedAt: new Date(nowFor(deps)).toISOString(), evidence });
+  const transactAt = nowFor(deps);
+  if (Date.parse(proposal.challenge.expiresAt) <= transactAt) throw agentXError("CONFIG_INVALID", "runtime challenge expired before its registration transaction");
+  const revisionCondition = (old: number | undefined) => old === undefined
+    ? { ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }
+    : { ConditionExpression: "catalogRevision = :expectedRevision", ExpressionAttributeValues: { ":expectedRevision": old } };
+  const writes = [
+    { Put: { TableName: deps.tableName, Item: { ...keys.web, ...rows.web }, ...revisionCondition(webBefore) } },
+    { Put: { TableName: deps.tableName, Item: { ...keys.api, ...rows.api }, ...revisionCondition(apiBefore) } },
+    { Put: { TableName: deps.tableName, Item: evidencePointer, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" } },
+    { Update: { TableName: deps.tableName, Key: key, UpdateExpression: "SET #state = :consumed, consumedAt = :consumedAt, proposalSha256 = :proposalSha256, approvedByOwnerKey = :ownerKey, approvedBySubject = :subject, approvedAt = :approvedAt", ConditionExpression: "entityType = :entity AND #state = :issued AND challengeDigest = :challengeDigest AND secretSha256 = :secretSha256 AND issuedByOwnerKey = :ownerKey AND issuedBySubject = :subject AND expiresAt > :now", ExpressionAttributeNames: { "#state": "state" }, ExpressionAttributeValues: { ":entity": "RUNTIME_INSTALL_CHALLENGE", ":issued": "ISSUED", ":consumed": "CONSUMED", ":challengeDigest": challengeDigest, ":secretSha256": challengeSecretDigest, ":ownerKey": identity.ownerKey, ":subject": identity.subject, ":now": new Date(transactAt).toISOString(), ":consumedAt": new Date(transactAt).toISOString(), ":approvedAt": new Date(transactAt).toISOString(), ":proposalSha256": proposalSha256 } } },
+  ];
+  try { await deps.documentClient.send(new TransactWriteCommand({ TransactItems: writes })); }
+  catch { throw agentXError("PROJECT_REVISION_MISMATCH", "runtime challenge, catalog revision, or evidence pointer changed before registration"); }
+  return { profileId: WEB_API_RUNTIME_PROFILE_ID, featureCatalogId: deps.featureCatalogId, featureRevisions: revisions, proposalSha256, evidence };
 }

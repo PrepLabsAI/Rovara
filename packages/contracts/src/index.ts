@@ -28,6 +28,7 @@ export * from "./review-output.js";
 export * from "./release.js";
 export * from "./session.js";
 export * from "./runtime-installation.js";
+export * from "./e2e-web-api-qualification.js";
 export * from "./slack.js";
 export * from "./slack-details.js";
 export * from "./slack-confirmation.js";

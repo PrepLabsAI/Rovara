@@ -1,18 +1,21 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdtemp, readFile, realpath } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { networkInterfaces, release as osRelease } from "node:os";
 import { join, resolve } from "node:path";
 import {
-  createCandidateManifest, e2EDefaultSyntheticAccountDefinition, e2EPortableApprovalBindingDigest, runtimeInstallChallengeDigest,
+  canonicalJson, createCandidateManifest, e2EDefaultSyntheticAccountDefinition, e2EPortableApprovalBindingDigest, runtimeInstallChallengeDigest,
   e2eScenarioBundleDigest, e2ePortableOperationDescriptorDigest, inspectE2ERepository, selectE2EExecutionPlan,
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot, type RuntimeInstallChallenge,
   RuntimeInstallChallengeSchema, RuntimeInstallationProposalSchema,
+  WEB_API_REQUIRED_PROBES, WEB_API_RUNTIME_PROFILE_ID, WEB_API_RUNTIME_SCOPE, WebApiProbeObservationSchema, WebApiRuntimeInstallProposalSchema,
+  evaluateWebApiProbeObservation, type WebApiProbeObservation, type WebApiRuntimeInstallProposal,
 } from "@agentx/contracts";
 import { compileE2EScenarios, type E2EImmutableCompilationContext } from "./scenarios.js";
 import { runE2EActualCli } from "./runtime-cli.js";
 import { parseE2EReport } from "./result-adapter.js";
 import { CONTAINED_IMAGE, CONTAINED_RUNTIME_PROFILE, inspectContainedRuntimeReadinessForHost } from "./contained-candidate.js";
-import { observeInstalledRuntimeManifestForHost } from "./installed-runtime-manifest.js";
+import { observeInstalledRuntimeManifestForHost, type InstalledRuntimeManifest } from "./installed-runtime-manifest.js";
+import { loadWebApiQualificationProbeAssets } from "./application-runtime-probes.js";
 import type { E2ESelectionPacket } from "./selection.js";
 
 const sha = (bytes: Uint8Array | string) => createHash("sha256").update(bytes).digest("hex");
@@ -182,7 +185,7 @@ export async function qualifyInstalledP0Runtime(input: Readonly<{ challenge: Run
 
 /** Linux qualification is bound to the actual EC2 worker's boot-injected workspace and generation. */
 export function assertRuntimeInstallationHostIdentity(profileId: string, challenge: RuntimeInstallChallenge, environment: NodeJS.ProcessEnv): void {
-  if (profileId !== "linux-arm64-docker-v1") return;
+  if (profileId !== "linux-arm64-docker-v1" && profileId !== WEB_API_RUNTIME_PROFILE_ID) return;
   if (environment.AGENTX_WORKSPACE_ID !== challenge.transportCorrelationId
     || !/^[1-9][0-9]*$/.test(environment.AGENTX_SESSION_GENERATION ?? "")
     || Number(environment.AGENTX_SESSION_GENERATION) !== challenge.generation) throw new Error("runtime qualification challenge does not match the actual boot-injected workspace identity and generation");
@@ -197,4 +200,63 @@ export function assertRuntimeInstallationEndpointIdentity(endpoint: string, work
   const url = new URL(endpoint);
   const endpointPort = url.port ? Number(url.port) : url.protocol === "https:" ? 443 : 80;
   if (url.protocol !== "http:" || endpointPort !== workerPort || !hostIpv4Addresses.includes(url.hostname)) throw new Error("runtime qualification endpoint does not match a non-loopback address and listener port on this host");
+}
+
+/** Where the qualifier reads the facts of the host it runs on; tests substitute these, the installed CLI uses the real ones. */
+export type WebApiQualificationEnvironment = Readonly<{
+  platform: string; arch: string; nodeVersion: string; nodeExecPath: string; osRelease: string; now(): number;
+  assertHostIdentity(challenge: RuntimeInstallChallenge): void;
+  observeManifest(): Promise<InstalledRuntimeManifest>;
+}>;
+const realWebApiEnvironment = (): WebApiQualificationEnvironment => ({
+  platform: process.platform, arch: process.arch, nodeVersion: process.version, nodeExecPath: process.execPath, osRelease: osRelease(), now: () => Date.now(),
+  assertHostIdentity: (challenge) => assertRuntimeInstallationHostIdentity(challenge.profileId, challenge, process.env),
+  observeManifest: () => observeInstalledRuntimeManifestForHost(process.platform, process.arch),
+});
+
+/** Qualification failed closed; `reasons` are the stable per-probe codes, for example `negative-probe-passed:web-csv-negative-v1`. */
+export class WebApiQualificationRejected extends Error {
+  constructor(readonly reasons: readonly string[]) { super(`web/API runtime qualification rejected: ${reasons.join(", ")}`); this.name = "WebApiQualificationRejected"; }
+}
+
+/**
+ * Qualifies the web/API application runtime. Each required probe runs through the supplied runner (the real Docker host and the
+ * real collector in production), and its observed facts are judged by the same pure oracle the registrar re-runs. Any probe that is
+ * wrong, missing, skipped, flaky or retried rejects the whole qualification; nothing here returns a partial proposal.
+ */
+export async function qualifyInstalledWebApiRuntime(input: Readonly<{
+  challenge: RuntimeInstallChallenge; evidenceRoot: string;
+  runProbe: (probeId: string) => Promise<WebApiProbeObservation>;
+  environment?: Partial<WebApiQualificationEnvironment>;
+}>): Promise<WebApiRuntimeInstallProposal> {
+  const challenge = RuntimeInstallChallengeSchema.parse(input.challenge);
+  const environment = { ...realWebApiEnvironment(), ...input.environment };
+  if (challenge.profileId !== WEB_API_RUNTIME_PROFILE_ID) throw new Error("runtime installation challenge profile is not the web/API runtime profile");
+  if (environment.platform !== "linux" || environment.arch !== "arm64") throw new Error("runtime installation challenge profile does not match this actual host");
+  if (environment.nodeVersion !== "v22.23.2") throw new Error("runtime qualification requires the exact installed Node v22.23.2 toolchain");
+  environment.assertHostIdentity(challenge);
+  const evidenceRoot = await realpath(resolve(input.evidenceRoot));
+  const rootStat = await lstat(evidenceRoot);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink() || rootStat.uid !== process.getuid?.() || (rootStat.mode & 0o077) !== 0) throw new Error("qualification evidence root must be a pre-created private owned directory");
+  const evidenceDirectory = await mkdtemp(join(evidenceRoot, "web-api-qualification-"));
+  await chmod(evidenceDirectory, 0o700);
+  const manifest = await environment.observeManifest();
+  const assets = new Map(loadWebApiQualificationProbeAssets().map((asset) => [asset.probeId, asset]));
+  const probes: WebApiRuntimeInstallProposal["probes"] = [];
+  const reasons: string[] = [];
+  for (const required of WEB_API_REQUIRED_PROBES) {
+    let observation: WebApiProbeObservation;
+    try { observation = WebApiProbeObservationSchema.parse(await input.runProbe(required.probeId)); }
+    catch { reasons.push(`probe-run-failed:${required.probeId}`); continue; }
+    await writeFile(join(evidenceDirectory, `${required.probeId}.json`), `${canonicalJson(observation)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    const verdict = evaluateWebApiProbeObservation(required.probeId, observation);
+    if (!verdict.ok) { reasons.push(verdict.reason); continue; }
+    probes.push({ probeId: required.probeId, kind: required.kind, expectedOutcome: required.expectedOutcome, observedOutcome: required.expectedOutcome,
+      assetDigest: assets.get(required.probeId)!.assetDigest, observation });
+  }
+  if (reasons.length > 0) throw new WebApiQualificationRejected(reasons);
+  const toolchain = { execPath: environment.nodeExecPath, version: environment.nodeVersion as "v22.23.2", platform: environment.platform, arch: environment.arch };
+  const runnerEnvironment = { ci: true as const, trustNoticeShown: false as const, os: `${environment.platform} ${environment.osRelease}`, arch: environment.arch, runtime: `node ${environment.nodeVersion}` };
+  return WebApiRuntimeInstallProposalSchema.parse({ schemaVersion: "runtime-installation-proposal/v2", state: "READY", profileId: WEB_API_RUNTIME_PROFILE_ID,
+    scope: WEB_API_RUNTIME_SCOPE, challenge, createdAt: new Date(environment.now()).toISOString(), manifest, runnerEnvironment, runnerToolchain: toolchain, probes });
 }

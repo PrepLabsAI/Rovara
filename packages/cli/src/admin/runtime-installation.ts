@@ -19,7 +19,7 @@ async function post(auth: Auth, path: string, body: unknown, fetchImplementation
 /** Requests a short-lived one-use challenge through the current administrator session. */
 export async function requestRuntimeInstallChallenge(input: Auth & {
   bindingFile: string; endpoint: string; generation: number; transportCorrelationId: string;
-  profileId: "linux-arm64-docker-v1" | "darwin-arm64-colima-v1"; outputFile: string;
+  profileId: "linux-arm64-docker-v1" | "darwin-arm64-colima-v1" | "linux-arm64-web-api-v1"; outputFile: string;
 }, fetchImplementation: Fetcher = fetch): Promise<{ challengeId: string; outputFile: string; expiresAt: string }> {
   const bindingInput: unknown = JSON.parse(await readFile(resolve(input.bindingFile), "utf8"));
   const binding = Ec2RuntimeBindingSchema.parse(bindingInput);

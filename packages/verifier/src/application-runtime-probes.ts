@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
-import { canonicalJson } from "@agentx/contracts";
+import { WEB_API_REQUIRED_PROBES, canonicalJson } from "@agentx/contracts";
 
 const probeOracle = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("csv"), downloadName: z.literal("orders.csv"), columns: z.array(z.string().min(1).max(64)).length(4),
@@ -15,14 +15,18 @@ const probeOracle = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("protected-network-denial"), requiresKernelDenialCounter: z.literal(true), requiresAbsenceOfEffect: z.literal(true),
     candidateUiIsNotEvidence: z.literal(true).optional(), candidateResponseIsNotEvidence: z.literal(true).optional() }).strict(),
   z.object({ kind: z.literal("json-state"), path: z.string().startsWith("/"), expected: z.object({ version: z.number().int().positive(), tenantId: z.string().min(1), orderIds: z.array(z.string().min(1)).min(1).max(10) }).strict() }).strict(),
+  z.object({ kind: z.literal("build-command-failure"), build: z.object({ program: z.literal("node"), args: z.array(z.string().min(1).max(512)).min(1).max(8),
+    cwd: z.literal("."), timeoutMs: z.number().int().min(1_000).max(120_000), env: z.object({}).strict() }).strict(),
+    expectedExitCode: z.literal(7), expectedUnavailableReason: z.literal("build-failed") }).strict(),
   z.object({ kind: z.literal("tenant-refusal"), path: z.string().startsWith("/"), expectedStatus: z.literal(403), expectedOwnerTenant: z.string().min(1),
     forbiddenTenant: z.string().min(1), expectedOutcome: z.literal("assertion-failed") }).strict(),
 ]);
 const probeSchema = z.object({ schemaVersion: z.literal("e2e-application-runtime-probe/v1"), probeId: z.string().min(1).max(120),
-  kind: z.enum(["web", "api"]), polarity: z.enum(["positive", "negative"]), templateId: z.string().min(1).max(120),
+  kind: z.enum(["web", "api", "build"]), polarity: z.enum(["positive", "negative"]), templateId: z.string().min(1).max(120),
   requiredCapabilities: z.array(z.string().min(1).max(120)).min(1).max(16), oracle: probeOracle }).strict().superRefine((value, context) => {
     const webTypes = ["csv", "csv-defect"].includes(value.oracle.kind) || value.oracle.kind === "viewer-refusal" && value.oracle.viewerIdentity !== undefined;
-    const expectedOracle = value.kind === "web" ? webTypes || value.oracle.kind === "protected-network-denial"
+    const expectedOracle = value.kind === "build" ? value.oracle.kind === "build-command-failure" && value.polarity === "negative"
+      : value.oracle.kind === "build-command-failure" ? false : value.kind === "web" ? webTypes || value.oracle.kind === "protected-network-denial"
       : ["json-state", "tenant-refusal"].includes(value.oracle.kind) || value.oracle.kind === "viewer-refusal" && value.oracle.path !== undefined
         || value.oracle.kind === "protected-network-denial";
     if (!expectedOracle) context.addIssue({ code: "custom", path: ["oracle"], message: "runtime probe oracle kind is incompatible with its platform profile" });
@@ -54,4 +58,25 @@ export function createE2EApplicationRuntimeProbeManifest(input: { kind: "web" | 
   const negativeProbes = probes.filter((probe) => probe.polarity === "negative").sort((a, b) => a.probeId.localeCompare(b.probeId));
   const body = { schemaVersion: "e2e-application-runtime-probe-manifest/v1" as const, kind: input.kind, installedManifestDigest: input.installedManifestDigest, positiveProbes, negativeProbes };
   return { ...body, manifestDigest: createHash("sha256").update(canonicalJson(body)).digest("hex") };
+}
+
+/** One installed probe asset of the web/API profile, with the digest of its exact bytes. */
+export type E2EWebApiQualificationProbeAsset = Readonly<{ probeId: string; kind: "web" | "api" | "build"; polarity: "positive" | "negative"; assetDigest: string;
+  probe: z.infer<typeof probeSchema> }>;
+
+/**
+ * Loads exactly the probe assets `linux-arm64-web-api-v1` requires (the auth and tenant probes belong to a later milestone), each bound
+ * to its fixed identity. The qualification ids are the asset file names, `web-csv-positive-v1` for `web-csv-positive/v1`.
+ */
+export function loadWebApiQualificationProbeAssets(): readonly E2EWebApiQualificationProbeAsset[] {
+  return WEB_API_REQUIRED_PROBES.map((required) => {
+    const path = join(dirname(fileURLToPath(import.meta.url)), "../assets/application-runtime-v1/probes", `${required.probeId}.json`);
+    const bytes = readFileSync(path);
+    if (bytes.byteLength > 16_384) throw new Error("installed runtime probe asset exceeds its bound");
+    const probe = probeSchema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)));
+    const assetId = required.probeId.replace(/-v1$/, "/v1");
+    if (probe.probeId !== assetId || probe.templateId !== assetId || probe.kind !== required.kind
+      || probe.polarity !== (required.expectedOutcome === "PASS" ? "positive" : "negative")) throw new Error("installed probe asset does not match its fixed qualification identity");
+    return { probeId: required.probeId, kind: probe.kind, polarity: probe.polarity, assetDigest: sha(bytes), probe };
+  });
 }

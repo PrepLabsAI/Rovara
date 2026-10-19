@@ -19,7 +19,7 @@ export const ORDERS_FIXTURE_ROOT = fixtureRoot;
 export const ORDERS_APP_ORIGIN = E2E_EXECUTOR_COMPILED_ORIGIN;
 
 /** The scenarios a probe runs. Each is an ordinary source-style scenario that the real compiler turns into a CLI suite. */
-export type OrdersProbeName = "web-csv-positive-v1" | "web-egress-denial-v1" | "api-state-positive-v1" | "api-status-mismatch-v1";
+export type OrdersProbeName = "web-csv-positive-v1" | "web-egress-denial-v1" | "api-state-positive-v1" | "api-status-mismatch-v1" | "api-egress-denial-v1";
 const probeOracle = (name: string) => (JSON.parse(readFileSync(join(repoRoot, "packages/verifier/assets/application-runtime-v1/probes", `${name}.json`), "utf8")) as {
   oracle: { columns: string[]; rows: string[][] } }).oracle;
 
@@ -40,6 +40,11 @@ function scenarioFor(probe: OrdersProbeName, targetId: string, accountProfileId:
     // A healthy app answers 200; the scenario claims 503, so this assertion definitively does not hold.
     return { ...common, scenarioId: probe, steps: [{ kind: "request" as const, requestId: "health", path: "/health", method: "GET" as const, body: {} }],
       assertions: [{ kind: "http-status" as const, path: "/health", method: "GET" as const, equals: 503 }] };
+  }
+  if (probe === "api-egress-denial-v1") {
+    // The app's dependency check must reach an outside host to answer 200, which an egress-denied run can never do.
+    return { ...common, scenarioId: probe, steps: [{ kind: "request" as const, requestId: "inventory", path: "/api/inventory/status", method: "GET" as const, body: {} }],
+      assertions: [{ kind: "http-status" as const, path: "/api/inventory/status", method: "GET" as const, equals: 200 }] };
   }
   return { ...common, scenarioId: probe, steps: [{ kind: "request" as const, requestId: "health", path: "/health", method: "GET" as const, body: {} }],
     assertions: [{ kind: "state" as const, probeId: "api-state-positive/v1", equals: { orders: "ready", version: 1 }, pollTimeoutMs: 5_000 }] };
