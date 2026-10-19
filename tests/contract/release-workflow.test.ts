@@ -14,6 +14,7 @@ interface Step {
 interface Job {
   if?: string;
   needs?: string | string[];
+  outputs?: Record<string, string>;
   permissions?: Record<string, string>;
   steps: Step[];
 }
@@ -114,6 +115,13 @@ describe("release workflow", () => {
     expect(release.indexOf("release:verify")).toBeGreaterThan(release.indexOf("release:build"));
     expect(release.indexOf("gh release create")).toBeGreaterThan(release.indexOf("release:verify"));
     expect(release).toContain('--worker-image "$WORKER"');
+    // The browser executor ships with every release, built for linux/arm64 from its own Dockerfile and pinned by the same
+    // registry-confirmed digest as the worker, and recorded in release.json for the runtime stack to take.
+    expect(wf.jobs.images!.outputs?.executor).toBe("${{ steps.push.outputs.executor }}");
+    expect(push).toContain("for image in worker slack executor; do");
+    expect(push).toContain("environments/e2e-executor/Dockerfile");
+    expect(release).toContain('--executor-image "$EXECUTOR"');
+    expect(wf.jobs.release!.steps.some((s) => s.env?.EXECUTOR === "${{ needs.images.outputs.executor }}")).toBe(true);
     expect(wf.jobs.release!.steps.some((s) => s.env?.GH_TOKEN === "${{ github.token }}")).toBe(true);
   });
 

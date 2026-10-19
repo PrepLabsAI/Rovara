@@ -257,6 +257,17 @@ describe("deploy parameters", () => {
     expect(() => stackParameters("control-plane", { ...answers(), callbackSigningKey: "k".repeat(32) }, outputs, { packages: true })).not.toThrow();
   });
 
+  it("passes the release's browser executor image to the runtime stack through the image cache, and omits the parameter for a release without one", () => {
+    const executor = `public.ecr.aws/agentx/agentx-executor@sha256:${d("d")}`;
+    const withExecutor = { ...answers(), release: { ...release, images: { ...release.images, executor } } };
+    const params = stackParameters("runtime", withExecutor, outputs, { packages: true });
+    expect(params.ExecutorImageUri).toBe(`123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/agentx/agentx-executor@sha256:${d("d")}`);
+    // Only the runtime stack takes it, and it is declared there with a default, so a release without an executor needs no value.
+    for (const part of ["control-plane", "slack"] as const) expect(stackParameters(part, withExecutor, outputs, { packages: true })).not.toHaveProperty("ExecutorImageUri");
+    expect(stackParameters("runtime", answers(), outputs, { packages: true })).not.toHaveProperty("ExecutorImageUri");
+    expect(templates.get("runtime")?.Parameters).toHaveProperty("ExecutorImageUri");
+  });
+
   it("uses image overrides as-is, and only by digest", () => {
     const withOverrides = { ...answers(), images: { worker: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${d("e")}` } };
     expect(stackParameters("runtime", withOverrides, outputs, { packages: true }).WorkerImageUri).toBe(withOverrides.images.worker);

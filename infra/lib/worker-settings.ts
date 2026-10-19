@@ -25,6 +25,13 @@ export class WorkerSettingsStack extends Stack {
       allowedPattern: "^.+@sha256:[a-f0-9]{64}$",
       description: "Immutable private ECR linux/arm64 worker image URI",
     });
+    // Optional: a release before the web/API runtime has no executor, and an environment that never deploys one keeps "none".
+    const executorImageUri = new CfnParameter(this, "ExecutorImageUri", {
+      type: "String",
+      default: "none",
+      allowedPattern: "^(none|.+@sha256:[a-f0-9]{64})$",
+      description: "Immutable private ECR linux/arm64 browser executor image URI, or none",
+    });
     const modelProvider = new CfnParameter(this, "ModelProvider", {
       type: "String",
       default: "amazon-bedrock",
@@ -57,6 +64,7 @@ export class WorkerSettingsStack extends Stack {
       ["WorkerAnthropicSecretParameter", "anthropicSecretArn", Fn.conditionIf(hasAnthropicSecret.logicalId, keys.anthropic.valueAsString, "none").toString()],
       ["WorkerOpenAISecretParameter", "openaiSecretArn", Fn.conditionIf(hasOpenAISecret.logicalId, keys.openai.valueAsString, "none").toString()],
       ["WorkerOpenRouterProvidersParameter", "openRouterProviders", Fn.conditionIf(hasProviders.logicalId, providers.valueAsString, "none").toString()],
+      ["WorkerExecutorImageParameter", "executorImage", executorImageUri.valueAsString],
       ["WorkerModelProviderParameter", "modelProvider", modelProvider.valueAsString],
       ["WorkerModelIdParameter", "modelId", modelId.valueAsString],
       ["WorkerPromptCacheRetentionParameter", "promptCacheRetention", promptCacheRetention.valueAsString],

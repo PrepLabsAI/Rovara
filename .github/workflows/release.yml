@@ -33,6 +33,7 @@ jobs:
     outputs:
       worker: ${{ steps.push.outputs.worker }}
       slack: ${{ steps.push.outputs.slack }}
+      executor: ${{ steps.push.outputs.executor }}
     steps:
       # AGENTX_PUBLISH_ROLE_ARN's trust policy only allows this repository's v* tags (by immutable ID),
       # so a workflow_dispatch run must be re-run from the tag ref itself; fail clearly here instead
@@ -88,8 +89,10 @@ jobs:
           VERSION: ${{ github.ref_name }}
         run: |
           VERSION="${VERSION#v}"
-          for image in worker slack; do
-            dockerfile=environments/base/Dockerfile; [ "$image" = slack ] && dockerfile=environments/slack/Dockerfile
+          for image in worker slack executor; do
+            dockerfile=environments/base/Dockerfile
+            [ "$image" = slack ] && dockerfile=environments/slack/Dockerfile
+            [ "$image" = executor ] && dockerfile=environments/e2e-executor/Dockerfile
             repo="public.ecr.aws/$ALIAS/agentx-$image"
             # --provenance=false --sbom=false: without them, buildx pushes an OCI image *index*
             # (the tagged manifest plus attached provenance/SBOM attestations) instead of a single
@@ -131,10 +134,11 @@ jobs:
           VERSION: ${{ github.ref_name }}
           WORKER: ${{ needs.images.outputs.worker }}
           SLACK: ${{ needs.images.outputs.slack }}
+          EXECUTOR: ${{ needs.images.outputs.executor }}
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="${VERSION#v}"
-          npm run release:build -- --version "$VERSION" --out "$RUNNER_TEMP/release" --worker-image "$WORKER" --slack-image "$SLACK"
+          npm run release:build -- --version "$VERSION" --out "$RUNNER_TEMP/release" --worker-image "$WORKER" --slack-image "$SLACK" --executor-image "$EXECUTOR"
           npm run release:verify -- "$RUNNER_TEMP/release"
           (cd "$RUNNER_TEMP/release" && tar -czf "$RUNNER_TEMP/agentx-$VERSION.tar.gz" .)
           gh release create "v$VERSION" --verify-tag --title "Rovara $VERSION" --notes-from-tag "$RUNNER_TEMP/agentx-$VERSION.tar.gz" "$RUNNER_TEMP/release/release.json"

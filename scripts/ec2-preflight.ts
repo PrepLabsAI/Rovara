@@ -69,7 +69,8 @@ export function evaluateEc2Preflight(facts: Ec2PreflightFacts): PreflightCheck[]
       facts.signingKey === undefined ? "not found" : `${facts.signingKey.enabled ? "enabled" : "disabled"}, ${facts.signingKey.keySpec}, ${facts.signingKey.keyUsage}`),
     check("workspace volume key", facts.workspaceKey?.enabled === true, facts.workspaceKey === undefined ? "not found" : facts.workspaceKey.enabled ? "enabled" : "disabled"),
   ];
-  const missingSettings = Object.entries(facts.workerSettings).filter(([, value]) => !value).map(([key]) => key);
+  // The executor image is optional: "none" or absent until a release carries one.
+  const missingSettings = Object.entries(facts.workerSettings).filter(([key, value]) => key !== "executorImage" && !value).map(([key]) => key);
   const image = facts.workerSettings.workerImage;
   checks.push(check("worker settings", missingSettings.length === 0 && image !== undefined && /@sha256:[0-9a-f]{64}$/.test(image),
     missingSettings.length > 0 ? `missing ${missingSettings.join(", ")}` : `worker image ${image}`));

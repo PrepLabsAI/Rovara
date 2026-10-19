@@ -10,7 +10,7 @@ import { ec2WorkerBootScript } from "../../packages/contracts/src/session.js";
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
 const workspaceId = randomUUID();
 
-function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "Healthy" })) {
+function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "Healthy" }), extraSettings: Partial<Awaited<ReturnType<SessionStepsDependencies["workerSettings"]>>> = {}) {
   const sessions = {
     markVolume: vi.fn(async () => undefined),
     markInstance: vi.fn(async () => undefined),
@@ -30,6 +30,7 @@ function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "
       openRouterProviders: "anthropic,amazon-bedrock",
       anthropicSecretArn: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/anthropic-AbCdEf",
       openaiSecretArn: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/openai-AbCdEf",
+      ...extraSettings,
     }),
     // Full length, as KMS returns a P-256 public key, so the user data size check is realistic.
     invokePublicKey: async () => `MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE${"A".repeat(88)}`,
@@ -76,6 +77,17 @@ describe("session steps", () => {
     }, bootScript));
     expect(userData).toContain("export AGENTX_ANTHROPIC_SECRET_ARN='arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/anthropic-AbCdEf'");
     expect(userData).toContain("export AGENTX_OPENAI_SECRET_ARN='arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/openai-AbCdEf'");
+  });
+
+  it("boots the worker with EXECUTOR_IMAGE when the release has set an executor image, and without it otherwise", async () => {
+    const executorImage = `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production-executor@sha256:${"e".repeat(64)}`;
+    const launch = async (extra: Parameters<typeof setup>[1]) => {
+      const { handler } = setup(undefined, extra);
+      const result = await handler({ action: "launchConfiguration", workspaceId, generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false }) as { userData: string };
+      return gunzipSync(Buffer.from(result.userData, "base64")).toString("utf8");
+    };
+    expect(await launch({ executorImage })).toContain(`export EXECUTOR_IMAGE='${executorImage}'`);
+    expect(await launch({})).not.toContain("export EXECUTOR_IMAGE=");
   });
 
   it("records the volume and instance, and marks the session ready, failed or deleted", async () => {

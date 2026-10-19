@@ -329,6 +329,8 @@ AGENTX_WORKSPACE_ID=$AGENTX_WORKSPACE_ID
 AGENTX_SESSION_GENERATION=$AGENTX_SESSION_GENERATION
 EOF
   printf 'TMPDIR=/tmp\n' >>"$WORKER_ENV_FILE"
+  # The browser executor the web/API runtime runs: docker exec agentx-worker processes read it from this file too.
+  [[ -z "${EXECUTOR_IMAGE:-}" ]] || printf 'EXECUTOR_IMAGE=%s\n' "$EXECUTOR_IMAGE" >>"$WORKER_ENV_FILE"
 }
 
 write_worker_launcher() {
@@ -421,6 +423,81 @@ WantedBy=multi-user.target
 EOF
 }
 
+# Opt-in TEST qualification of the web/API runtime on this host, run only when the user data sets
+# AGENTX_E2E_QUALIFICATION_PREFIX (e2e-runtime/<uuid>/) and AGENTX_E2E_QUALIFICATION_PROFILE, with the
+# bucket in AGENTX_E2E_QUALIFICATION_BUCKET. It runs as its own unit, after the worker started, so nothing
+# it does can fail the boot or the worker; it reports through status.json under its prefix instead.
+write_e2e_qualification_script() {
+  install -d -o root -g root -m 0755 /usr/local/libexec
+  cat >/usr/local/libexec/agentx-e2e-qualification <<'QUALIFICATION'
+set -uo pipefail
+umask 077
+readonly REGION=${1:-} BUCKET=${2:-} PREFIX=${3:-} PROFILE=${4:-}
+readonly EVIDENCE_HOST=${AGENTX_HOST_ROOT:-}/mnt/workspace/.agentx-runtime/evidence
+readonly EVIDENCE_CONTAINER=/mnt/agentx-runtime/evidence
+readonly CHALLENGE_NAME=runtime-install-challenge.json
+readonly PROPOSAL_NAME=runtime-install-proposal.json
+readonly CHALLENGE_MAX_BYTES=65536
+readonly PROPOSAL_MAX_BYTES=5242880
+readonly POLL=${AGENTX_E2E_QUALIFICATION_POLL_SECONDS:-10}
+readonly HEALTHY_WAIT=${AGENTX_E2E_QUALIFICATION_HEALTHY_WAIT_SECONDS:-900}
+readonly CHALLENGE_WAIT=${AGENTX_E2E_QUALIFICATION_CHALLENGE_WAIT_SECONDS:-1800}
+readonly QUALIFY_SECONDS=${AGENTX_E2E_QUALIFICATION_QUALIFY_SECONDS:-2700}
+log() { printf 'agentx-e2e-qualification: %s\n' "$*" >&2; }
+[[ "$PREFIX" =~ ^e2e-runtime/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/$ ]] || { log "refused: the prefix must be e2e-runtime/<uuid>/"; exit 2; }
+[[ "$PROFILE" == linux-arm64-web-api-v1 ]] || { log "refused: the profile must be linux-arm64-web-api-v1"; exit 2; }
+[[ "$BUCKET" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]] || { log "refused: the bucket name is not valid"; exit 2; }
+[[ "$REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { log "refused: the region is not valid"; exit 2; }
+readonly STAGE=$(mktemp -d)
+upload() { aws s3api put-object --bucket "$BUCKET" --key "$PREFIX$1" --body "$2" --server-side-encryption AES256 --region "$REGION" --no-cli-pager >/dev/null; }
+publish_status() {
+  printf '{"state":"%s","reason":"%s","finishedAt":"%s"}\n' "$1" "$2" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STAGE/status.json" && upload status.json "$STAGE/status.json"
+}
+fail_with() {
+  log "failed: $1"
+  publish_status FAILED "$1" || log "could not upload the failure status"
+  exit 1
+}
+deadline=$((SECONDS + HEALTHY_WAIT))
+until curl -fsS --connect-timeout 2 --max-time 3 http://127.0.0.1:8080/ping >/dev/null 2>&1; do
+  ((SECONDS < deadline)) || fail_with worker-not-healthy
+  sleep "$POLL"
+done
+fetched="$STAGE/challenge.json"
+deadline=$((SECONDS + CHALLENGE_WAIT))
+until aws s3api get-object --bucket "$BUCKET" --key "${PREFIX}challenge.json" --region "$REGION" --no-cli-pager "$fetched" >/dev/null 2>&1; do
+  ((SECONDS < deadline)) || fail_with challenge-unavailable
+  sleep "$POLL"
+done
+size=$(wc -c <"$fetched" | tr -d '[:space:]')
+((size > 0 && size <= CHALLENGE_MAX_BYTES)) || fail_with challenge-size-rejected
+[[ -d "$EVIDENCE_HOST" && ! -L "$EVIDENCE_HOST" ]] || fail_with evidence-directory-unavailable
+chown 1000:1000 "$fetched" && chmod 0600 "$fetched" && mv -f "$fetched" "$EVIDENCE_HOST/$CHALLENGE_NAME" || fail_with challenge-install-failed
+rm -f "$EVIDENCE_HOST/$PROPOSAL_NAME"
+timeout --foreground --kill-after=10s "${QUALIFY_SECONDS}s" docker exec --user node agentx-worker /usr/local/bin/node /opt/agentx/packages/verifier/dist/install-qualification-cli.js --profile "$PROFILE" --challenge-file "$EVIDENCE_CONTAINER/$CHALLENGE_NAME" --evidence-root "$EVIDENCE_CONTAINER" --out "$EVIDENCE_CONTAINER/$PROPOSAL_NAME" >"$STAGE/qualifier.log" 2>&1
+status=$?
+tail -c 2000 "$STAGE/qualifier.log" | while IFS= read -r line; do log "qualifier: $line"; done
+((status == 0)) || fail_with "qualification-failed-exit-$status"
+proposal="$EVIDENCE_HOST/$PROPOSAL_NAME"
+[[ -f "$proposal" && ! -L "$proposal" ]] || fail_with proposal-missing
+size=$(wc -c <"$proposal" | tr -d '[:space:]')
+((size > 0)) || fail_with proposal-missing
+((size <= PROPOSAL_MAX_BYTES)) || fail_with proposal-too-large
+upload proposal.json "$proposal" || fail_with proposal-upload-failed
+publish_status SUCCEEDED qualified || { log "could not upload the success status"; exit 1; }
+log "qualified; the proposal and status are under the prefix"
+QUALIFICATION
+}
+
+start_e2e_qualification() {
+  local region=$1
+  [[ -n "${AGENTX_E2E_QUALIFICATION_PREFIX:-}" && -n "${AGENTX_E2E_QUALIFICATION_PROFILE:-}" ]] || return 0
+  write_e2e_qualification_script
+  systemd-run --unit=agentx-e2e-qualification --collect --no-block \
+    /bin/bash /usr/local/libexec/agentx-e2e-qualification "$region" "${AGENTX_E2E_QUALIFICATION_BUCKET:-}" "$AGENTX_E2E_QUALIFICATION_PREFIX" "$AGENTX_E2E_QUALIFICATION_PROFILE" \
+    >/dev/null 2>&1 || log "could not start the E2E qualification"
+}
+
 main() {
   BOOT_STEP="read the boot configuration"
   require_configuration
@@ -447,6 +524,7 @@ main() {
   systemctl daemon-reload
   systemctl enable --now "$WORKER_UNIT"
   log "worker started"
+  start_e2e_qualification "$region" || log "the E2E qualification did not start"
 }
 
 main "$@"

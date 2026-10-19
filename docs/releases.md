@@ -106,6 +106,13 @@ place; this records what it is, so a change to any piece can be made deliberatel
   `272978771` is the PrepLabsAI organization and `1307121896` this repository. GitHub uses
   immutable subjects for this repository (`gh api repos/PrepLabsAI/Rovara/actions/oidc/customization/sub`),
   so a rename does not break the role; a transfer to another organization would.
+- **The browser executor repository (not yet created).** Releases from the web/API runtime on
+  also push `agentx-executor` (the browser executor image, built from
+  `environments/e2e-executor/Dockerfile`; the worker pulls it at boot as `EXECUTOR_IMAGE`) and record
+  its digest in release.json. Before the first such release, an owner creates the ECR Public
+  repository `agentx-executor` beside the other two and adds it to the publish role's push
+  permissions; until then the `images` job fails at that image. `release-test.yml` does not push it
+  yet: the release test installs without an executor image, which the runtime stack allows.
 - **The npm package.** `@preplabsai/rovara-code`, owned by the `preplabsai` npm organization
   (publishing needs an owner or developer role there; GitHub access does not grant it). Version
   0.1.0 was published by hand from the tag's commit, because npm trusted publishing can only be

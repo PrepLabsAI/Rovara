@@ -231,6 +231,8 @@ export function sessionProvisioningName(workspaceId: string, generation: number)
  */
 export const WORKER_SETTING_PARAMETERS = {
   workerImage: "worker-image",
+  /** The browser executor image workers pull at boot; "none" or absent until a release carries one. */
+  executorImage: "worker-executor-image",
   modelProvider: "worker-model-provider",
   modelId: "worker-model-id",
   promptCacheRetention: "worker-prompt-cache-retention",
@@ -308,6 +310,16 @@ export function workerInvokeToken(payload: string, signature: Uint8Array): strin
 // whitespace or other shell metacharacter.
 const SHELL_SAFE = /^[A-Za-z0-9._:/@+=-]+$/;
 
+/** The one profile the worker's opt-in boot qualification runs: the web/API runtime. */
+export const E2E_QUALIFICATION_PROFILE_ID = "linux-arm64-web-api-v1";
+/** The S3 key prefix of one TEST qualification run under the control artifacts bucket: exactly `e2e-runtime/<uuid>/`. */
+export const E2E_QUALIFICATION_PREFIX_PATTERN = /^e2e-runtime\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/$/;
+export function e2eQualificationPrefix(runId: string): string {
+  const prefix = `e2e-runtime/${runId}/`;
+  if (!E2E_QUALIFICATION_PREFIX_PATTERN.test(prefix)) throw new Error("the qualification run ID must be a lowercase UUID");
+  return prefix;
+}
+
 /**
  * What an EC2 worker boots with. The provisioner renders it into user data with `ec2WorkerUserData`
  * (uncompressed, `ec2WorkerBootScript`); `packages/worker/ec2/boot.sh` reads each field from the
@@ -327,6 +339,23 @@ export const Ec2WorkerBootConfigSchema = z
     workerImage: z
       .string()
       .regex(/^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/, "worker image must be an ECR image pinned by digest"),
+    /** EXECUTOR_IMAGE: the browser executor image, an ECR image pinned by digest; set only once a release carries one. */
+    executorImage: z
+      .string()
+      .regex(/^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/, "executor image must be an ECR image pinned by digest")
+      .optional(),
+    /**
+     * The opt-in TEST qualification (AGENTX_E2E_QUALIFICATION_*): after the worker is healthy, the boot script fetches `<prefix>challenge.json`
+     * from the bucket, qualifies the web/API runtime with it and uploads the proposal and a status under the same prefix.
+     */
+    e2eQualification: z
+      .object({
+        bucket: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, "invalid bucket name"),
+        prefix: z.string().regex(E2E_QUALIFICATION_PREFIX_PATTERN, "the prefix must be e2e-runtime/<uuid>/"),
+        profile: z.literal(E2E_QUALIFICATION_PROFILE_ID),
+      })
+      .strict()
+      .optional(),
     /** AGENTX_INVOKE_PUBLIC_KEY: base64 DER SPKI, as KMS GetPublicKey returns it. */
     invokePublicKey: z.string().regex(/^[A-Za-z0-9+/]+={0,2}$/, "invoke public key must be base64").max(1_024),
     /** AGENTX_CONTROL_PLANE_URL */
@@ -369,6 +398,14 @@ export function ec2WorkerBootScript(config: Ec2WorkerBootConfig, bootScript: str
   if (parsed.openRouterProviders) variables.push(["AGENTX_OPENROUTER_PROVIDERS", parsed.openRouterProviders]);
   if (parsed.anthropicSecretArn) variables.push([KEYED_MODEL_PROVIDERS.anthropic.secretArnVariable, parsed.anthropicSecretArn]);
   if (parsed.openaiSecretArn) variables.push([KEYED_MODEL_PROVIDERS.openai.secretArnVariable, parsed.openaiSecretArn]);
+  if (parsed.executorImage) variables.push(["EXECUTOR_IMAGE", parsed.executorImage]);
+  if (parsed.e2eQualification) {
+    variables.push(
+      ["AGENTX_E2E_QUALIFICATION_BUCKET", parsed.e2eQualification.bucket],
+      ["AGENTX_E2E_QUALIFICATION_PREFIX", parsed.e2eQualification.prefix],
+      ["AGENTX_E2E_QUALIFICATION_PROFILE", parsed.e2eQualification.profile],
+    );
+  }
   const body = bootScript.replace(/^#!.*\n/, "");
   return [
     "#!/bin/bash",

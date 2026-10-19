@@ -2,6 +2,7 @@
 // release workflow): what a repository's setup and test commands can count on.
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { webApiProbeRunnerConfig } from "../../packages/verifier/src/install-qualification-cli.js";
 
 const dockerfile = readFileSync("environments/base/Dockerfile", "utf8");
 /** The final stage: everything after the last FROM line. */
@@ -75,5 +76,18 @@ describe("the worker image", () => {
     expect(finalStage).toContain("COPY --from=build /opt/agentx/packages/verifier ./packages/verifier");
     expect(dockerfile).toContain("COPY upstream/e2e-0.20.0.tgz upstream/e2e-0.20.0.tgz");
     expect(dockerfile).toContain("WORKDIR /opt/agentx");
+  });
+
+  it("hands the browser executor image to the processes that qualify the web/API runtime, and fails closed without it", () => {
+    const boot = readFileSync("packages/worker/ec2/boot.sh", "utf8");
+    // worker.env feeds the container, so docker exec --user node agentx-worker (the qualifier) sees EXECUTOR_IMAGE.
+    expect(boot).toContain(`[[ -z "\${EXECUTOR_IMAGE:-}" ]] || printf 'EXECUTOR_IMAGE=%s\\n' "$EXECUTOR_IMAGE" >>"$WORKER_ENV_FILE"`);
+    expect(boot).toContain('--env-file "$WORKER_ENV_FILE"');
+    // The qualifier ships in the worker image, where the boot hook runs it.
+    expect(finalStage).toContain("COPY --from=build /opt/agentx/packages/verifier ./packages/verifier");
+    expect(boot).toContain("/opt/agentx/packages/verifier/dist/install-qualification-cli.js");
+    // No executor image, no qualification: the runner configuration refuses rather than choosing an image itself.
+    expect(() => webApiProbeRunnerConfig({}, "linux", "arm64")).toThrow(/EXECUTOR_IMAGE/);
+    expect(() => webApiProbeRunnerConfig({ EXECUTOR_IMAGE: "" }, "linux", "arm64")).toThrow(/EXECUTOR_IMAGE/);
   });
 });
