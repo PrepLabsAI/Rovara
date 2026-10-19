@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   assertOnlyExpectedChanges,
+  executeChangeSetAndWait,
+  firstFailureReason,
   executorRepositoryUri,
   formatPlan,
   liftResources,
@@ -12,8 +14,7 @@ import {
   resolveCodeArtifactBucket,
   resolveTestStacks,
   verifyStackResources,
-  waitForChangeSetExecution,
-  waitForSettledStack,
+  waitForStackUpdate,
   type BuiltArtifacts,
   type DeployStep,
   type StackParameters,
@@ -467,53 +468,129 @@ describe("parseTestDeployArgs", () => {
   });
 });
 
-describe("waitForChangeSetExecution", () => {
-  const sequence = (statuses: Array<{ ExecutionStatus?: string; StatusReason?: string }>) => {
-    let calls = 0;
-    return { describe: async () => statuses[Math.min(calls++, statuses.length - 1)]!, calls: () => calls };
-  };
-  const fast = { sleep: async () => undefined, intervalMs: 1, timeoutMs: 1_000, now: (() => { let t = 0; return () => (t += 1); })() };
-
-  it("waits for the change set's own EXECUTE_COMPLETE, however many times it still reads as not started or running", async () => {
-    const fake = sequence([{ ExecutionStatus: "AVAILABLE" }, { ExecutionStatus: "AVAILABLE" }, { ExecutionStatus: "EXECUTE_IN_PROGRESS" }, { ExecutionStatus: "EXECUTE_COMPLETE" }]);
-    await waitForChangeSetExecution(fake.describe, fast);
-    expect(fake.calls()).toBe(4);
-  });
-
-  it.each([["EXECUTE_FAILED"], ["UNAVAILABLE"], ["OBSOLETE"]])("fails on %s, with the reason CloudFormation gave", async (status) => {
-    const fake = sequence([{ ExecutionStatus: "EXECUTE_IN_PROGRESS" }, { ExecutionStatus: status, StatusReason: "Resource handler returned: boom" }]);
-    await expect(waitForChangeSetExecution(fake.describe, fast)).rejects.toThrow(new RegExp(`${status}.*boom`));
-  });
-
-  it("fails when the change set never completes within the time allowed", async () => {
-    const fake = sequence([{ ExecutionStatus: "EXECUTE_IN_PROGRESS" }]);
-    await expect(waitForChangeSetExecution(fake.describe, { ...fast, timeoutMs: 5 })).rejects.toThrow(/still EXECUTE_IN_PROGRESS/);
-  });
-
-  it("never reads the stack's own status, so a stale UPDATE_COMPLETE cannot count as success", async () => {
-    // The describe function is the only thing it reads: a status that is not an execution status is not success.
-    const fake = sequence([{ ExecutionStatus: "UPDATE_COMPLETE" }]);
-    await expect(waitForChangeSetExecution(fake.describe, { ...fast, timeoutMs: 5 })).rejects.toThrow();
-  });
-});
-
-describe("waitForSettledStack", () => {
-  const statuses = (list: string[]) => { let calls = 0; return { read: async () => list[Math.min(calls++, list.length - 1)]!, calls: () => calls }; };
+describe("waitForStackUpdate", () => {
+  const SINCE = new Date("2026-10-19T10:00:00Z");
+  const before = new Date("2026-10-19T09:00:00Z");
+  const after = new Date("2026-10-19T10:05:00Z");
+  const states = (list: Array<{ status: string; lastUpdatedTime?: Date }>) => { let calls = 0; return { read: async () => list[Math.min(calls++, list.length - 1)]!, calls: () => calls }; };
   const clock = () => { let t = 0; return () => (t += 1); };
   const fast = { sleep: async () => undefined, intervalMs: 1, timeoutMs: 1_000 };
 
-  it("waits out the cleanup after a change set completes, then accepts UPDATE_COMPLETE", async () => {
-    const fake = statuses(["UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", "UPDATE_IN_PROGRESS", "UPDATE_COMPLETE"]);
-    await waitForSettledStack(fake.read, { ...fast, now: clock() });
+  it("waits through the update and its cleanup, then accepts UPDATE_COMPLETE", async () => {
+    const fake = states([
+      { status: "UPDATE_IN_PROGRESS", lastUpdatedTime: after },
+      { status: "UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", lastUpdatedTime: after },
+      { status: "UPDATE_COMPLETE", lastUpdatedTime: after },
+    ]);
+    await waitForStackUpdate(fake.read, SINCE, { ...fast, now: clock() });
     expect(fake.calls()).toBe(3);
   });
 
-  it("fails on any other settled status, naming it", async () => {
-    await expect(waitForSettledStack(statuses(["UPDATE_COMPLETE_CLEANUP_IN_PROGRESS", "UPDATE_ROLLBACK_COMPLETE"]).read, { ...fast, now: clock() })).rejects.toThrow(/UPDATE_ROLLBACK_COMPLETE/);
+  it("keeps waiting while a settled status is stale: LastUpdatedTime has not moved past the one recorded before execute", async () => {
+    const fake = states([
+      { status: "UPDATE_COMPLETE", lastUpdatedTime: before },
+      { status: "UPDATE_COMPLETE", lastUpdatedTime: SINCE },
+      { status: "UPDATE_IN_PROGRESS", lastUpdatedTime: after },
+      { status: "UPDATE_COMPLETE", lastUpdatedTime: after },
+    ]);
+    await waitForStackUpdate(fake.read, SINCE, { ...fast, now: clock() });
+    expect(fake.calls()).toBe(4);
   });
 
-  it("fails when the stack never settles in the time allowed", async () => {
-    await expect(waitForSettledStack(statuses(["UPDATE_COMPLETE_CLEANUP_IN_PROGRESS"]).read, { ...fast, timeoutMs: 5, now: clock() })).rejects.toThrow(/still UPDATE_COMPLETE_CLEANUP_IN_PROGRESS/);
+  it("accepts a stack that has never been updated before (nothing recorded)", async () => {
+    await expect(waitForStackUpdate(states([{ status: "UPDATE_COMPLETE", lastUpdatedTime: after }]).read, undefined, { ...fast, now: clock() })).resolves.toBeUndefined();
+  });
+
+  it("fails on a rollback, naming the status and the first failure reason", async () => {
+    const fake = states([{ status: "UPDATE_ROLLBACK_IN_PROGRESS", lastUpdatedTime: after }, { status: "UPDATE_ROLLBACK_COMPLETE", lastUpdatedTime: after }]);
+    await expect(waitForStackUpdate(fake.read, SINCE, { ...fast, now: clock(), describeFailure: async () => "E2eQualificationTransport: boom" }))
+      .rejects.toThrow(/UPDATE_ROLLBACK_COMPLETE.*E2eQualificationTransport: boom/);
+  });
+
+  it("still names the status when no failure reason can be found", async () => {
+    const fake = states([{ status: "UPDATE_ROLLBACK_COMPLETE", lastUpdatedTime: after }]);
+    await expect(waitForStackUpdate(fake.read, SINCE, { ...fast, now: clock(), describeFailure: async () => undefined })).rejects.toThrow(/UPDATE_ROLLBACK_COMPLETE/);
+  });
+
+  it("fails when the stack is still updating after the time allowed", async () => {
+    const fake = states([{ status: "UPDATE_IN_PROGRESS", lastUpdatedTime: after }]);
+    await expect(waitForStackUpdate(fake.read, SINCE, { ...fast, timeoutMs: 5, now: clock() })).rejects.toThrow(/still UPDATE_IN_PROGRESS/);
+  });
+
+  it("fails when the update never starts in the time allowed, saying so", async () => {
+    const fake = states([{ status: "UPDATE_COMPLETE", lastUpdatedTime: before }]);
+    await expect(waitForStackUpdate(fake.read, SINCE, { ...fast, timeoutMs: 5, now: clock() })).rejects.toThrow(/did not start/);
+  });
+});
+
+describe("firstFailureReason", () => {
+  const SINCE = new Date("2026-10-19T10:00:00Z");
+  const event = (offsetMinutes: number, logicalId: string, status: string, reason?: string) =>
+    ({ Timestamp: new Date(SINCE.getTime() + offsetMinutes * 60_000), LogicalResourceId: logicalId, ResourceStatus: status, ResourceStatusReason: reason });
+
+  it("returns the earliest failed event of this update, ignoring older failures and the rollback it caused", () => {
+    // DescribeStackEvents lists newest first.
+    const events = [
+      event(4, "Stack", "UPDATE_ROLLBACK_COMPLETE"),
+      event(3, "E2eOther", "UPDATE_FAILED", "Resource update cancelled"),
+      event(2, "E2eQualificationTransport", "CREATE_FAILED", "boom"),
+      event(1, "Stack", "UPDATE_IN_PROGRESS"),
+      event(-60, "Old", "CREATE_FAILED", "ancient"),
+    ];
+    expect(firstFailureReason(events, SINCE)).toBe("E2eQualificationTransport CREATE_FAILED: boom");
+  });
+
+  it("is undefined when the update has no failed event", () => {
+    expect(firstFailureReason([event(1, "Stack", "UPDATE_IN_PROGRESS"), event(-60, "Old", "CREATE_FAILED", "ancient")], SINCE)).toBeUndefined();
+  });
+});
+
+describe("executeChangeSetAndWait", () => {
+  const identity = { StackName: "agentx-x-runtime", ChangeSetName: "test-deploy-qualification-1" };
+  const t = (minute: number) => new Date(Date.UTC(2026, 9, 19, 10, minute));
+  const fast = { sleep: async () => undefined, intervalMs: 1, timeoutMs: 1_000 };
+
+  /** A CloudFormation that serves stack states in order, and refuses the change set once it has been executed, as the real one does. */
+  const fakeCloudFormation = (stackStates: Array<{ StackStatus: string; LastUpdatedTime?: Date }>, events: unknown[] = []) => {
+    const sent: string[] = [];
+    let stackReads = 0;
+    let executed = false;
+    const client = {
+      send: async (command: { constructor: { name: string } }) => {
+        const name = command.constructor.name;
+        sent.push(name);
+        if (name === "DescribeStacksCommand") return { Stacks: [{ StackName: identity.StackName, CreationTime: t(-600), ...stackStates[Math.min(stackReads++, stackStates.length - 1)]! }] };
+        if (name === "ExecuteChangeSetCommand") { executed = true; return {}; }
+        if (name === "DescribeChangeSetCommand") {
+          if (executed) throw Object.assign(new Error(`ChangeSet [${identity.ChangeSetName}] does not exist`), { name: "ChangeSetNotFoundException" });
+          return { ExecutionStatus: "AVAILABLE" };
+        }
+        if (name === "DescribeStackEventsCommand") return { StackEvents: events };
+        throw new Error(`unexpected ${name}`);
+      },
+    };
+    return { client: client as unknown as Parameters<typeof executeChangeSetAndWait>[0], sent };
+  };
+
+  it("succeeds although the executed change set no longer exists, by watching the stack", async () => {
+    const fake = fakeCloudFormation([
+      { StackStatus: "UPDATE_COMPLETE", LastUpdatedTime: t(0) },
+      { StackStatus: "UPDATE_COMPLETE", LastUpdatedTime: t(0) },
+      { StackStatus: "UPDATE_IN_PROGRESS", LastUpdatedTime: t(5) },
+      { StackStatus: "UPDATE_COMPLETE", LastUpdatedTime: t(5) },
+    ]);
+    await executeChangeSetAndWait(fake.client, identity, fast);
+    expect(fake.sent).not.toContain("DescribeChangeSetCommand");
+    // The stack is read before the change set is executed, never after it.
+    expect(fake.sent.indexOf("DescribeStacksCommand")).toBeLessThan(fake.sent.indexOf("ExecuteChangeSetCommand"));
+  });
+
+  it("fails on a rollback, naming the reason from the stack's events", async () => {
+    const fake = fakeCloudFormation(
+      [{ StackStatus: "UPDATE_COMPLETE", LastUpdatedTime: t(0) }, { StackStatus: "UPDATE_ROLLBACK_COMPLETE", LastUpdatedTime: t(5) }],
+      [{ Timestamp: t(6), LogicalResourceId: "E2eQualificationTransport", ResourceStatus: "CREATE_FAILED", ResourceStatusReason: "boom" }],
+    );
+    await expect(executeChangeSetAndWait(fake.client, identity, fast)).rejects.toThrow(/UPDATE_ROLLBACK_COMPLETE.*E2eQualificationTransport CREATE_FAILED: boom/);
   });
 });
 

@@ -19,6 +19,7 @@ import {
   CreateChangeSetCommand,
   DeleteChangeSetCommand,
   DescribeChangeSetCommand,
+  DescribeStackEventsCommand,
   DescribeStackResourceCommand,
   DescribeStackResourcesCommand,
   DescribeStacksCommand,
@@ -402,50 +403,79 @@ export function liftSynthArguments(
   ];
 }
 
-export interface ChangeSetExecutionState {
-  ExecutionStatus?: string | undefined;
-  StatusReason?: string | undefined;
+export interface StackUpdateState {
+  status: string;
+  /** When the stack was last updated (or created, if never updated). */
+  lastUpdatedTime?: Date | undefined;
+}
+
+export interface StackWaitOptions {
+  timeoutMs?: number;
+  intervalMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
 }
 
 /**
- * Waits for one change set's own execution to complete. It reads the change set's ExecutionStatus and nothing else: a stack that
- * already says UPDATE_COMPLETE from an earlier deploy is never taken as this change set's success. AVAILABLE and EXECUTE_IN_PROGRESS
- * keep waiting (right after ExecuteChangeSet the status may still read AVAILABLE); every other status but EXECUTE_COMPLETE is an error.
+ * Waits for the stack's own update to finish after ExecuteChangeSet. CloudFormation removes an executed change set, so the change set
+ * cannot be polled; the stack is watched instead. A settled status only counts once `lastUpdatedTime` is newer than `since` (recorded before
+ * executing), so UPDATE_COMPLETE left by an earlier deploy is never taken as this one's success. The settled status must be UPDATE_COMPLETE;
+ * anything else (UPDATE_ROLLBACK_*, ...) is an error naming the status and, when `describeFailure` finds one, the reason.
  */
-export async function waitForChangeSetExecution(
-  describe: () => Promise<ChangeSetExecutionState>,
-  options: { timeoutMs?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
+export async function waitForStackUpdate(
+  read: () => Promise<StackUpdateState>,
+  since: Date | undefined,
+  options: StackWaitOptions & { describeFailure?: () => Promise<string | undefined> } = {},
 ): Promise<void> {
-  const { timeoutMs = 30 * 60_000, intervalMs = 5_000, sleep: wait = sleep, now = Date.now } = options;
+  const { timeoutMs = 30 * 60_000, intervalMs = 5_000, sleep: wait = sleep, now = Date.now, describeFailure } = options;
   const deadline = now() + timeoutMs;
+  const minutes = Math.round(timeoutMs / 60_000);
   for (;;) {
-    const { ExecutionStatus: status, StatusReason: reason } = await describe();
-    if (status === "EXECUTE_COMPLETE") return;
-    if (status === "EXECUTE_FAILED" || status === "UNAVAILABLE" || status === "OBSOLETE") {
-      throw new Error(`the change set ended ${status}${reason ? `: ${reason}` : ""}; read the stack's events in CloudFormation`);
+    const { status, lastUpdatedTime } = await read();
+    const started = since === undefined || (lastUpdatedTime !== undefined && lastUpdatedTime.getTime() > since.getTime());
+    if (started && !status.endsWith("_IN_PROGRESS")) {
+      if (status === "UPDATE_COMPLETE") return;
+      const reason = await describeFailure?.();
+      throw new Error(`the stack is ${status} after the change set was executed${reason ? `: ${reason}` : ""}; read its events in CloudFormation`);
     }
-    if (status !== "AVAILABLE" && status !== "EXECUTE_IN_PROGRESS") throw new Error(`the change set reports ${status ?? "no execution status"}, which is not one this deploy knows`);
-    if (now() > deadline) throw new Error(`the change set is still ${status} after ${Math.round(timeoutMs / 60_000)} minutes; check CloudFormation`);
+    if (now() > deadline) {
+      throw new Error(started
+        ? `the stack is still ${status} after ${minutes} minutes; check CloudFormation`
+        : `the stack update did not start within ${minutes} minutes (the stack is ${status}, last updated ${lastUpdatedTime?.toISOString() ?? "never"}); check CloudFormation`);
+    }
     await wait(intervalMs);
   }
 }
 
-/** After a change set completes the stack may still be cleaning up (`UPDATE_COMPLETE_CLEANUP_IN_PROGRESS`): wait for a settled status, which must be UPDATE_COMPLETE. */
-export async function waitForSettledStack(
-  readStatus: () => Promise<string>,
-  options: { timeoutMs?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
+/** The earliest failed stack event of the update that began after `since`: the root cause, before the cancellations and the rollback it triggered. */
+export function firstFailureReason(
+  events: ReadonlyArray<{ Timestamp?: Date | undefined; LogicalResourceId?: string | undefined; ResourceStatus?: string | undefined; ResourceStatusReason?: string | undefined }>,
+  since: Date | undefined,
+): string | undefined {
+  const failed = events
+    .filter((event) => event.ResourceStatus?.endsWith("_FAILED") && event.Timestamp !== undefined && (since === undefined || event.Timestamp.getTime() > since.getTime()))
+    .sort((left, right) => left.Timestamp!.getTime() - right.Timestamp!.getTime())[0];
+  if (failed === undefined) return undefined;
+  return `${failed.LogicalResourceId ?? "the stack"} ${failed.ResourceStatus}${failed.ResourceStatusReason ? `: ${failed.ResourceStatusReason}` : ""}`;
+}
+
+/** Records the stack's last update time, executes the change set, and waits on the stack (see waitForStackUpdate). Never reads the change set again. */
+export async function executeChangeSetAndWait(
+  cloudFormation: Pick<CloudFormationClient, "send">,
+  identity: { StackName: string; ChangeSetName: string },
+  options: StackWaitOptions = {},
 ): Promise<void> {
-  const { timeoutMs = 10 * 60_000, intervalMs = 5_000, sleep: wait = sleep, now = Date.now } = options;
-  const deadline = now() + timeoutMs;
-  for (;;) {
-    const status = await readStatus();
-    if (!status.endsWith("_IN_PROGRESS")) {
-      if (status !== "UPDATE_COMPLETE") throw new Error(`the stack is ${status} after its change set completed; read its events in CloudFormation`);
-      return;
-    }
-    if (now() > deadline) throw new Error(`the stack is still ${status} after ${Math.round(timeoutMs / 60_000)} minutes; check CloudFormation`);
-    await wait(intervalMs);
-  }
+  const readStack = async (): Promise<StackUpdateState> => {
+    const stack = (await cloudFormation.send(new DescribeStacksCommand({ StackName: identity.StackName }))).Stacks?.[0];
+    if (stack === undefined) throw new Error(`stack ${identity.StackName} does not exist`);
+    return { status: stack.StackStatus ?? "", lastUpdatedTime: stack.LastUpdatedTime ?? stack.CreationTime };
+  };
+  const since = (await readStack()).lastUpdatedTime;
+  await cloudFormation.send(new ExecuteChangeSetCommand(identity));
+  await waitForStackUpdate(readStack, since, {
+    ...options,
+    describeFailure: async () => firstFailureReason((await cloudFormation.send(new DescribeStackEventsCommand({ StackName: identity.StackName }))).StackEvents ?? [], since),
+  });
 }
 
 /** Reads each named resource back with DescribeStackResource and requires its status; returns the IDs checked. */
@@ -730,10 +760,7 @@ async function executeChangeSet(context: ApplyContext, step: Extract<DeployStep,
   if (created?.status === "no-changes") return;
   if (created?.changeSetName === undefined) throw new Error(`step ${step.createdBy} created no change set`);
   const identity = { StackName: step.stack, ChangeSetName: created.changeSetName };
-  await context.cloudFormation.send(new ExecuteChangeSetCommand(identity));
-  // The change set's own ExecutionStatus, never the stack's: a stack still saying UPDATE_COMPLETE from before is not this deploy's success.
-  await waitForChangeSetExecution(() => context.cloudFormation.send(new DescribeChangeSetCommand(identity)));
-  await waitForSettledStack(async () => (await describeStackSdk(context, step.stack)).StackStatus ?? "");
+  await executeChangeSetAndWait(context.cloudFormation, identity);
 }
 
 /** Pushes to a repository that must already exist: describing it is the check, and nothing here creates one. */
