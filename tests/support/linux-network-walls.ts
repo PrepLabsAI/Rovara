@@ -32,8 +32,10 @@ export async function assertFirewallInstalled(): Promise<void> {
 
 /** A TCP server on every address of this host, standing in for the Rovara worker's port. */
 export async function listenOnAllAddresses(port = 0): Promise<{ port: number; server: Server }> {
-  const server = createServer((socket) => socket.end("host\n"));
+  // A probing container that is killed, or a connection a firewall drops, resets the peer; that is expected here and must never surface as an unhandled error.
+  const server = createServer((socket) => { socket.on("error", () => undefined); socket.end("host\n"); });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(port, "0.0.0.0", resolve); });
+  server.on("error", () => undefined);
   return { port: (server.address() as { port: number }).port, server };
 }
 
@@ -80,7 +82,7 @@ export async function startRoutedPrivateServer(port: number): Promise<{ address:
     await stop();
     for (const step of steps) { const done = await sudo(...step); if (done.code !== 0) throw new Error(`${step.join(" ")} failed: ${done.stderr}`); }
     // The server also ends itself after three minutes, so a test that dies early leaves nothing running.
-    const source = `require('net').createServer(s=>s.end('private\\n')).listen(${port},'10.77.1.2');setTimeout(()=>process.exit(0),180000)`;
+    const source = `require('net').createServer(s=>{s.on('error',()=>{});s.end('private\\n')}).listen(${port},'10.77.1.2');setTimeout(()=>process.exit(0),180000)`;
     server = spawn("sudo", ["-n", "ip", "netns", "exec", "rovara-wall", process.execPath, "-e", source], { stdio: "ignore" });
     await new Promise((resolve) => setTimeout(resolve, 1_000));
     return { address: "10.77.1.2", stop };

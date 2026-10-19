@@ -92,7 +92,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
       expect(created.code, created.stderr).toBe(0);
     }
     const [first, second] = ids as [typeof ids[number], typeof ids[number]];
-    const serve = "require('net').createServer(s=>s.end('app\\n')).listen(4317,'0.0.0.0')";
+    const serve = "require('net').createServer(s=>{s.on('error',()=>{});s.end('app\\n')}).listen(4317,'0.0.0.0')";
     const started = await docker("run", "-d", "--rm", "--pull=never", "--name", `rovara-wall-server-${first.value}`, "--network", first.internal, "--cap-drop=ALL", "--user", "1000:1000", APP_NODE_IMAGE, "node", "-e", serve);
     expect(started.code, started.stderr).toBe(0);
     try {
