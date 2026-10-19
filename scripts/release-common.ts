@@ -315,7 +315,7 @@ export async function buildAndPushImage(
   return pushed;
 }
 
-async function smokeTestWorker(runner: Runner, image: string): Promise<void> {
+export async function smokeTestWorker(runner: Runner, image: string): Promise<void> {
   // The tools that run a project's devcontainer through the EC2 host's Docker (#121).
   const tools = runner.capture("docker", [
     "run", "--rm", "--entrypoint", "sh", image, "-c",
