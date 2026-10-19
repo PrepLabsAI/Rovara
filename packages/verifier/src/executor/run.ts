@@ -85,18 +85,22 @@ async function waitForHealthy(plan: E2EExecutorPlan, upstream: string, deadlineA
   }
 }
 
-async function listFiles(root: string): Promise<string[]> {
-  const found: string[] = [];
+const MAX_SCAN_DEPTH = 12;
+const MAX_SCAN_FILES = 50_000;
+/** Every file under root; `complete` is false when the walk hit a bound, and the caller must then treat the tree as unscanned. */
+export async function listOutputFiles(root: string): Promise<{ files: string[]; complete: boolean }> {
+  const files: string[] = []; let complete = true;
   const walk = async (dir: string, depth: number): Promise<void> => {
-    if (depth > 6 || found.length > 20_000) return;
-    for (const entry of await readdir(dir, { withFileTypes: true }).catch(() => [])) {
+    if (depth > MAX_SCAN_DEPTH) { complete = false; return; }
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
       const full = join(dir, entry.name);
       if (entry.isDirectory()) await walk(full, depth + 1);
-      else if (entry.isFile()) found.push(full);
+      else if (entry.isFile()) { if (files.length >= MAX_SCAN_FILES) { complete = false; return; } files.push(full); }
+      else complete = false;
     }
   };
   await walk(root, 0);
-  return found;
+  return { files, complete };
 }
 
 type ShardOutcome = { shardId: string; launchId: string; targetKind: string; list: ReturnType<typeof processRecord>; run: ReturnType<typeof processRecord> | null;
@@ -173,9 +177,16 @@ async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApp
   const parsed = parseE2EApplicationReport(run.stdout);
   if (parsed.kind !== "parsed") return { ...base, list: processRecord(list), run: record, upstreamRunId, reportBytes: null, failed: false, completed: false, reason: "report-unreadable" };
   const summary = parsed.report.run.summary;
-  // Skipped, flaky, filtered or missing results never count as a clean run.
-  const clean = run.status === 0 && summary.failed === 0 && summary.skipped === 0 && summary.flaky === 0 && summary.interrupted === 0
-    && summary.executed === summary.selected && summary.selected === shard.selection.tuples.length;
+  const statuses = parsed.report.run.results.map((result) => result.status);
+  // A timed-out or interrupted case leaves no verdict, so the run is unavailable rather than failed.
+  if (statuses.includes("timed-out") || statuses.includes("interrupted")) {
+    return { ...base, list: processRecord(list), run: record, upstreamRunId, reportBytes: run.stdout, failed: false, completed: false, reason: "case-timed-out" };
+  }
+  // Only a positive account counts as clean: skipped, flaky, filtered or missing results never do.
+  const expectedCount = shard.selection.tuples.length;
+  const clean = run.status === 0 && parsed.report.run.status === "passed" && summary.passed === expectedCount && summary.selected === expectedCount
+    && summary.executed === expectedCount && summary.failed === 0 && summary.skipped === 0 && summary.flaky === 0 && summary.interrupted === 0
+    && statuses.length === expectedCount && statuses.every((status) => status === "passed");
   if (!clean && run.status !== 0 && run.status !== 1) {
     return { ...base, list: processRecord(list), run: record, upstreamRunId, reportBytes: run.stdout, failed: false, completed: false, reason: `cli-run-exit-${run.status}` };
   }
@@ -197,6 +208,9 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
   const log = async (line: string) => { await appendFile(logPath, `${new Date().toISOString()} ${redactor.text(line)}\n`); };
   let browser: LocalChromium | null = null;
   let forwarder: AppForwarder | null = null;
+  const state: { forwarderFailure: Error | null } = { forwarderFailure: null };
+  const failure = new AbortController();
+  const runSignal = AbortSignal.any([input.signal, failure.signal]);
   let workDir: string | null = null;
   let resolved: ResolvedExecutorSuite | null = null;
   const shards: ShardOutcome[] = [];
@@ -214,15 +228,24 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     } catch { /* no request was blocked */ }
     await writeFile(join(outDir, "blocked-requests.json"), `${JSON.stringify({ schemaVersion: "e2e-executor-blocked-requests/v1", blocked }, null, 2)}\n`);
     // Last line of defense: nothing under the out directory may carry an account credential.
-    for (const file of await listFiles(outDir)) {
-      const info = await lstat(file);
-      if (info.size > MAX_SCAN_BYTES) continue;
-      if (redactor.contains(await readFile(file))) {
-        await rm(file, { force: true });
-        await appendFile(logPath, `${new Date().toISOString()} removed an output file that carried an account credential\n`);
-        if (exitCode !== 2) { exitCode = 2; reason = "credential-leak"; }
+    // The scan fails closed: a file it cannot read in full, or a tree it cannot walk in full, leaves no trustworthy result.
+    const failScan = async (why: string) => {
+      await appendFile(logPath, `${new Date().toISOString()} ${why}\n`);
+      if (exitCode !== 2 || reason === null) { exitCode = 2; reason = "output-scan-failed"; }
+    };
+    try {
+      const listing = await listOutputFiles(outDir);
+      if (!listing.complete) await failScan("the output scan reached its depth or file bound");
+      for (const file of listing.files) {
+        const info = await lstat(file);
+        if (info.size > MAX_SCAN_BYTES) { await rm(file, { force: true }); await failScan("removed an output file too large to scan for credentials"); continue; }
+        if (redactor.contains(await readFile(file))) {
+          await rm(file, { force: true });
+          await appendFile(logPath, `${new Date().toISOString()} removed an output file that carried an account credential\n`);
+          if (exitCode !== 2 || reason === null) { exitCode = 2; reason = "credential-leak"; }
+        }
       }
-    }
+    } catch (error) { await failScan(`the output scan failed: ${error instanceof Error ? error.message : "unreadable"}`); }
     await writeFile(join(outDir, "executor-result.json"), `${JSON.stringify({ schemaVersion: "e2e-executor-result/v1", exitCode, reason,
       startedAt, finishedAt: new Date().toISOString(), node: { version: process.version, execPath: process.execPath, platform: process.platform, arch: process.arch },
       runId: resolved?.binding.runId ?? null, groupId: resolved?.suite.group.groupId ?? null,
@@ -253,6 +276,7 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     if (health !== "healthy") { await log(`unavailable: ${health}`); reason = health; return; }
 
     const launches = createLaunchContexts(resolved);
+    if (launches.length === 0) { await log("unavailable: no-shards"); reason = "no-shards"; return; }
     if (launches.some((launch) => launch.selectedTarget.kind === "web")) {
       browser = await launchLocalChromium({ downloadDir: join(outDir, "downloads"), signal: input.signal,
         ...(input.chromiumExecutable === undefined ? {} : { executablePath: input.chromiumExecutable }) });
@@ -262,7 +286,8 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     const compiled = new URL(E2E_EXECUTOR_COMPILED_ORIGIN);
     try {
       forwarder = await startAppForwarder({ listen: { host: compiled.hostname, port: Number(compiled.port) },
-        upstream: { host: target.hostname, port: Number(target.port || 80) } });
+        upstream: { host: target.hostname, port: Number(target.port || 80) },
+        onError: (error) => { state.forwarderFailure = error; failure.abort(error); } });
     } catch (error) {
       await log(`unavailable: forwarder-unavailable: ${error instanceof Error ? error.message : "cannot listen"}`);
       reason = "forwarder-unavailable";
@@ -270,8 +295,11 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     }
     workDir = await mkdtemp(join(await realpath(tmpdir()), "rovara-executor-"));
     for (const launch of launches) {
-      shards.push(await runShard({ resolved, launch, workDir, planPath: input.planPath, outDir, browser, redactor, signal: input.signal, log }));
+      if (state.forwarderFailure) break;
+      shards.push(await runShard({ resolved, launch, workDir, planPath: input.planPath, outDir, browser, redactor, signal: runSignal, log }));
     }
+    if (state.forwarderFailure) { reason = "forwarder-failed"; await log(`unavailable: forwarder-failed: ${state.forwarderFailure.message}`); return; }
+    if (shards.length === 0) { reason = "no-shards"; await log("unavailable: no-shards"); return; }
     const incomplete = shards.find((shard) => !shard.completed);
     if (incomplete) { reason = incomplete.reason ?? "shard-incomplete"; await log(`unavailable: ${reason}`); return; }
     if (shards.length === 1) await writeFile(join(outDir, "report.json"), redactor.text(shards[0]!.reportBytes!.toString("utf8")));
@@ -285,7 +313,7 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
   try {
     await main();
   } catch (error) {
-    reason = input.signal.aborted ? "cancelled" : typeof (error as { reason?: unknown })?.reason === "string" ? (error as { reason: string }).reason : "internal-error";
+    reason = state.forwarderFailure ? "forwarder-failed" : input.signal.aborted ? "cancelled" : typeof (error as { reason?: unknown })?.reason === "string" ? (error as { reason: string }).reason : "internal-error";
     exitCode = 2;
     await log(`unavailable: ${reason}: ${error instanceof Error ? error.stack ?? error.message : String(error)}`).catch(() => undefined);
   }

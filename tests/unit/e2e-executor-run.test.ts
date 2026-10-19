@@ -5,7 +5,9 @@ import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promis
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_MODULE_PATH, E2E_EXECUTOR_HOST_PROFILE_ID, verifyExecutorHostRegistration } from "../../packages/verifier/src/executor/host-registry.js";
-import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import { spawn } from "node:child_process";
+import { startAppForwarder } from "../../packages/verifier/src/executor/app-forward.js";
+import { listOutputFiles, runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 
 type Registry = { hosts: { profileId: string; entryPointId: string; entryPointManifestDigest: string; modulePath: string }[] };
@@ -84,4 +86,42 @@ describe("runE2EExecutor unavailable outcomes", () => {
     expect(everything).not.toContain(fixture.account.password);
     expect(everything).not.toContain(fixture.account.email);
   });
+});
+
+describe("executor failure handling", () => {
+  it("reports an incomplete output scan when the tree is deeper than the scan bound", async () => {
+    const dir = await temp();
+    let deep = dir;
+    for (let level = 0; level < 14; level += 1) { deep = join(deep, `d${level}`); await mkdir(deep); }
+    await writeFile(join(deep, "file.txt"), "x");
+    await writeFile(join(dir, "top.txt"), "x");
+    const listing = await listOutputFiles(dir);
+    expect(listing.complete).toBe(false);
+    expect(listing.files).toContain(join(dir, "top.txt"));
+    const shallow = await temp();
+    await writeFile(join(shallow, "a.txt"), "x");
+    expect((await listOutputFiles(shallow)).complete).toBe(true);
+  });
+
+  it("turns a listener failure after startup into a callback instead of an unhandled error event", async () => {
+    const errors: Error[] = [];
+    const forwarder = await startAppForwarder({ listen: { host: "127.0.0.1", port: 0 }, upstream: { host: "127.0.0.1", port: 9 }, onError: (error) => errors.push(error) });
+    forwarder.server.emit("error", new Error("listener died"));
+    expect(errors.map((error) => error.message)).toEqual(["listener died"]);
+    await forwarder.close();
+  });
+
+  it.runIf(built)("exits 2, never 1, when the process crashes outside the run", async () => {
+    const fixture = createOrdersExecutorPlan({ probe: "api-state-positive-v1", healthTimeoutMs: 5_000 });
+    const dir = await temp();
+    await writeFile(join(dir, "plan.json"), JSON.stringify(fixture.plan));
+    const entry = join(verifierRoot, "dist/executor/entry.js");
+    const child = spawn(process.execPath, ["--import", "data:text/javascript,setTimeout(() => Promise.reject(new Error('preload boom')), 400)",
+      entry, join(dir, "plan.json"), join(dir, "out")], { stdio: ["ignore", "ignore", "pipe"], env: { PATH: process.env.PATH ?? "" } });
+    let stderr = "";
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    const code = await new Promise<number | null>((resolve) => child.once("close", resolve));
+    expect(code).toBe(2);
+    expect(stderr).toContain("executor crashed");
+  }, 60_000);
 });

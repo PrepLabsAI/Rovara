@@ -44,6 +44,18 @@ export type ProbeOptions = Readonly<{
 }>;
 export type ProbeRun = Readonly<{ exitCode: number; outDir: string; fixture: OrdersExecutorFixture; executorLogTail: string; appLogTail: string }>;
 
+const probeDirs: string[] = [];
+/**
+ * The executor writes the out directory as its own unprivileged user, so the runner user cannot unlink those files. A
+ * throwaway root container removes them (no network, nothing else mounted), then the leftover empty directory goes.
+ */
+export async function removeProbeDirs(): Promise<void> {
+  for (const dir of probeDirs.splice(0)) {
+    await docker(["run", "--rm", "--network", "none", "--user", "0:0", "--entrypoint", "rm", "-v", `${dir}:/d`, EXECUTOR_IMAGE, "-rf", "/d/out"], { allowFailure: true });
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 /**
  * Runs one compiled probe the way the worker will: a per-run `--internal` network, the fixture app on it with the alias
  * `app`, and the executor image with the plan mounted read-only and an empty writable out directory. Everything carries the
@@ -55,6 +67,7 @@ export async function runProbe(probe: OrdersProbeName, options: ProbeOptions): P
   const label = `rovara.run=${runId}`;
   const network = `rovara-e2e-${runId}`;
   const dir = realpathSync(await mkdtemp(join(tmpdir(), "rovara-linux-probe-")));
+  probeDirs.push(dir);
   const app = join(dir, "app"); const owned = join(dir, "owned"); const outDir = join(dir, "out");
   // A copy keeps the repository clean and gives the nested read-only mounts a mount point that already exists.
   await cp(ORDERS_FIXTURE_ROOT, app, { recursive: true });
@@ -74,7 +87,7 @@ export async function runProbe(probe: OrdersProbeName, options: ProbeOptions): P
       ...(options.defect ? ["-e", "ORDERS_TEST_DEFECT_FILE=/app/.owned/defect.json"] : []),
       ...Object.entries(options.appEnv ?? {}).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
       APP_NODE_IMAGE, ...(options.appCommand ?? ["node", "server.mjs"])]);
-    const executor = await runForeground(["run", "--name", executorName, ...hardening, "--init", "--shm-size", "1g", "--tmpfs", "/tmp:rw,exec,size=512m",
+    const executor = await runForeground(["run", "--name", executorName, ...hardening, "--init", "--read-only", "--shm-size", "1g", "--tmpfs", "/tmp:rw,exec,size=512m",
       "-v", `${join(dir, "plan.json")}:/run/rovara/plan.json:ro`, "-v", `${outDir}:/out`, EXECUTOR_IMAGE], 280_000);
     const appLogTail = (await docker(["logs", "--tail", "100", appName], { allowFailure: true })).stderr.slice(-8192);
     const executorLogTail = `${executor.stdout}${executor.stderr}`.slice(-8192);

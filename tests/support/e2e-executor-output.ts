@@ -47,3 +47,9 @@ export function blockedHosts(outDir: string): string[] {
 export function resultOf(outDir: string): { exitCode: number; reason: string | null } {
   return JSON.parse(readFileSync(join(outDir, "executor-result.json"), "utf8")) as { exitCode: number; reason: string | null };
 }
+
+/** Every output file as text, for "nothing leaked" checks. */
+export function allOutputText(outDir: string): string {
+  return readdirSync(outDir, { withFileTypes: true, recursive: true }).filter((entry) => entry.isFile())
+    .map((entry) => readFileSync(join(entry.parentPath, entry.name)).toString("latin1")).join("\n");
+}

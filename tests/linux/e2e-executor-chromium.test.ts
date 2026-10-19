@@ -1,16 +1,21 @@
-import { describe, expect, it } from "vitest";
-import { blockedHosts, caseStatuses, csvRows, failedAssertionKinds } from "../support/e2e-executor-output.js";
-import { runProbe } from "../support/linux-runtime.js";
+import { afterAll, describe, expect, it } from "vitest";
+import { allOutputText, blockedHosts, caseStatuses, csvRows, failedAssertionKinds } from "../support/e2e-executor-output.js";
+import { removeProbeDirs, runProbe } from "../support/linux-runtime.js";
 
 // Real Docker, the real executor image and a real Chromium on a per-run internal network. It runs only in the CI
 // `linux-runtime` job (ubuntu-24.04-arm, ROVARA_DOCKER=1, ROVARA_EXECUTOR_IMAGE); everywhere else it skips.
 describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1")("executor image on an internal network", () => {
+  afterAll(removeProbeDirs, 120_000);
+
   it("web-csv-positive: real Chromium downloads the exact CSV", async () => {
     const r = await runProbe("web-csv-positive-v1", { defect: null });
     expect(r.exitCode, `${r.executorLogTail}\n${r.appLogTail}`).toBe(0);
     expect(caseStatuses(r.outDir, r.fixture)).toEqual({ "web-csv-positive-v1": "passed" });
     // The rows are the fixture's own: tests/fixtures/e2e-web-api-app/fixtures/orders.json for tenant-a, as the CSV probe oracle lists them.
     expect(csvRows(r.outDir)).toEqual([["id", "customer", "total", "state"], ["a1", "Ada", "12.5", "ready"], ["a2", "Grace", "23", "ready"]]);
+    const everything = allOutputText(r.outDir);
+    expect(everything).not.toContain(r.fixture.account.password);
+    expect(everything).not.toContain(r.fixture.account.email);
   }, 300_000);
 
   it("web-csv-negative: the extra-order defect fails the csv assertion", async () => {
