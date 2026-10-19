@@ -210,7 +210,11 @@ describe("EC2 worker user data", () => {
 
 const executorImage = `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx/executor@sha256:${"e".repeat(64)}`;
 const runId = "0b6e6f0e-5d3b-4f0e-9d3a-2f1c4b7a8e90";
-const qualification = { bucket: "agentx-agentxlivetest123-control-artifacts82dd59a1-syx0unxsewcf", prefix: `e2e-runtime/${runId}/`, profile: "linux-arm64-web-api-v1" } as const;
+const roleId = "AROAEXAMPLEROLEID123";
+const instanceId = "i-0123456789abcdef0";
+const qualification = { bucket: "agentx-agentxlivetest123-control-artifacts82dd59a1-syx0unxsewcf", roleId, profile: "linux-arm64-web-api-v1" } as const;
+/** The key prefix the instance role's `${aws:userid}` grant allows: <role unique id>:<instance id>. */
+const qualificationPrefix = `e2e-runtime/${roleId}:${instanceId}/`;
 
 /** Runs one shell function of the boot script on its own, with the script's own fixed paths replaced by the test's. */
 function runBootFunction(name: string, args: string[], environment: Record<string, string>, replace: Array<[string, string]> = []): { status: number | null; stdout: string; stderr: string } {
@@ -256,26 +260,32 @@ describe("the executor image on the worker", () => {
 });
 
 describe("the opt-in TEST qualification hook", () => {
-  it("renders the validated qualification settings into the boot config, only when asked for, and refuses a malformed prefix, profile or bucket", () => {
+  it("renders the validated qualification settings into the boot config, only when asked for, and refuses a malformed role ID, profile or bucket", () => {
     const rendered = ec2WorkerBootScript({ ...config, e2eQualification: qualification }, bootScript);
-    expect(rendered).toContain(`export AGENTX_E2E_QUALIFICATION_PREFIX='e2e-runtime/${runId}/'`);
+    expect(rendered).toContain(`export AGENTX_E2E_QUALIFICATION_ROLE_ID='${roleId}'`);
+    // The prefix is no longer a user-data value: the instance builds it from its own ID.
+    expect(rendered).not.toContain("AGENTX_E2E_QUALIFICATION_PREFIX");
     expect(rendered).toContain("export AGENTX_E2E_QUALIFICATION_PROFILE='linux-arm64-web-api-v1'");
     expect(rendered).toContain(`export AGENTX_E2E_QUALIFICATION_BUCKET='${qualification.bucket}'`);
     // The boot script itself carries no bucket name: it comes from this configuration.
     expect(bootScript).not.toMatch(/control-artifacts|agentxlivetest/);
     expect(ec2WorkerBootScript(config, bootScript)).not.toContain("export AGENTX_E2E_QUALIFICATION");
     for (const bad of [
-      { ...qualification, prefix: `e2e-runtime/${runId}` },
-      { ...qualification, prefix: `e2e-runtime/${runId.toUpperCase()}/` },
-      { ...qualification, prefix: "e2e-runtime/../x/" },
-      { ...qualification, prefix: `e2e-runtime/${runId}/x/` },
-      { ...qualification, prefix: `other/${runId}/` },
+      { ...qualification, roleId: "" },
+      { ...qualification, roleId: "AIDAEXAMPLEUSERID1234" },
+      { ...qualification, roleId: "AROAshort" },
+      { ...qualification, roleId: "AROAEXAMPLEROLEID123/../x" },
+      { ...qualification, roleId: "AROAEXAMPLEROLEID123:i-0123456789abcdef0" },
+      { ...qualification, roleId: "AROAEXAMPLEROLEID123*" },
+      { ...qualification, roleId: "aroaexampleroleid123" },
+      { ...qualification, roleId: "AROAEXAMPLEROLEID123'; touch /tmp/bad" },
+      { ...qualification, prefix: `e2e-runtime/${runId}/` },
       { ...qualification, profile: "linux-arm64-docker-v1" },
       { ...qualification, bucket: "Bucket'; touch /tmp/bad" },
     ]) expect(() => ec2WorkerBootScript({ ...config, e2eQualification: bad } as Ec2WorkerBootConfig, bootScript), JSON.stringify(bad)).toThrow();
   });
 
-  it("starts the hook only when both the prefix and the profile are set, as its own unit, and never lets it fail the boot", () => {
+  it("starts the hook only when both the role ID and the profile are set, as its own unit, passing it the instance ID and the executor image, and never lets it fail the boot", () => {
     const dir = mkdtempSync(join(tmpdir(), "boot-hook-"));
     const bin = join(dir, "bin");
     mkdirSync(bin);
@@ -283,26 +293,26 @@ describe("the opt-in TEST qualification hook", () => {
     writeFileSync(join(bin, "systemd-run"), `#!/bin/bash\nprintf '%s\\n' "$*" >>"${log}"\n`);
     chmodSync(join(bin, "systemd-run"), 0o755);
     const replace: Array<[string, string]> = [["write_e2e_qualification_script", ":"]];
-    const run = (environment: Record<string, string>) => runBootFunction("start_e2e_qualification", ["us-east-1"], { ...environment, PATH: `${bin}:${process.env.PATH ?? ""}` }, replace);
-    for (const environment of [{}, { AGENTX_E2E_QUALIFICATION_PREFIX: qualification.prefix }, { AGENTX_E2E_QUALIFICATION_PROFILE: qualification.profile }, { AGENTX_E2E_QUALIFICATION_PREFIX: "", AGENTX_E2E_QUALIFICATION_PROFILE: qualification.profile }]) {
+    const run = (environment: Record<string, string>) => runBootFunction("start_e2e_qualification", ["us-east-1", instanceId], { ...environment, PATH: `${bin}:${process.env.PATH ?? ""}` }, replace);
+    for (const environment of [{}, { AGENTX_E2E_QUALIFICATION_ROLE_ID: qualification.roleId }, { AGENTX_E2E_QUALIFICATION_PROFILE: qualification.profile }, { AGENTX_E2E_QUALIFICATION_ROLE_ID: "", AGENTX_E2E_QUALIFICATION_PROFILE: qualification.profile }]) {
       expect(run(environment).status).toBe(0);
     }
     expect(existsSync(log)).toBe(false);
-    const enabled = { AGENTX_E2E_QUALIFICATION_PREFIX: qualification.prefix, AGENTX_E2E_QUALIFICATION_PROFILE: qualification.profile, AGENTX_E2E_QUALIFICATION_BUCKET: qualification.bucket };
+    const enabled = { AGENTX_E2E_QUALIFICATION_ROLE_ID: qualification.roleId, AGENTX_E2E_QUALIFICATION_PROFILE: qualification.profile, AGENTX_E2E_QUALIFICATION_BUCKET: qualification.bucket, EXECUTOR_IMAGE: executorImage };
     const started = run(enabled);
     expect(started.status, started.stderr).toBe(0);
     const call = readFileSync(log, "utf8");
     expect(call).toContain("--unit=agentx-e2e-qualification");
     expect(call).toContain("--no-block");
-    expect(call).toContain(`/bin/bash /usr/local/libexec/agentx-e2e-qualification us-east-1 ${qualification.bucket} ${qualification.prefix} ${qualification.profile}`);
+    expect(call).toContain(`/bin/bash /usr/local/libexec/agentx-e2e-qualification us-east-1 ${qualification.bucket} ${qualification.roleId} ${instanceId} ${qualification.profile} ${executorImage}`);
     // systemd-run failing is logged, never returned as a failure of the boot.
     writeFileSync(join(bin, "systemd-run"), "#!/bin/bash\nexit 1\n");
     const failed = run(enabled);
     expect(failed.status).toBe(0);
     expect(failed.stderr).toContain("could not start the E2E qualification");
     // It starts after the worker unit does, and a failure to start it is only logged.
-    expect(bootScript).toContain('start_e2e_qualification "$region" || log "the E2E qualification did not start"');
-    expect(bootScript.indexOf('systemctl enable --now "$WORKER_UNIT"')).toBeLessThan(bootScript.indexOf('start_e2e_qualification "$region" ||'));
+    expect(bootScript).toContain('start_e2e_qualification "$region" "$instance_id" || log "the E2E qualification did not start"');
+    expect(bootScript.indexOf('systemctl enable --now "$WORKER_UNIT"')).toBeLessThan(bootScript.indexOf('start_e2e_qualification "$region" "$instance_id" ||'));
   });
 
   it("carries a hook script bash accepts, with every path quoted, that logs and uploads no secret", () => {
@@ -310,7 +320,7 @@ describe("the opt-in TEST qualification hook", () => {
     expect(spawnSync("bash", ["-n"], { input: qualificationScript, encoding: "utf8" }).status).toBe(0);
     // No unquoted expansion of a path or key: once the double-quoted strings are taken out, none of them is left.
     const unquoted = qualificationScript.replace(/"(?:[^"\\]|\\.)*"/g, '""');
-    expect(unquoted).not.toMatch(/\$\{?(BUCKET|PREFIX|PROFILE|REGION|EVIDENCE_HOST|EVIDENCE_CONTAINER|STAGE|fetched|proposal)\b/);
+    expect(unquoted).not.toMatch(/\$\{?(BUCKET|PREFIX|ROLE_ID|INSTANCE_ID|PROFILE|REGION|EXECUTOR|EVIDENCE_HOST|EVIDENCE_CONTAINER|STAGE|fetched|proposal)\b/);
     expect(qualificationScript).not.toMatch(/AWS_SECRET|AWS_SESSION_TOKEN|X-aws-ec2-metadata-token|get-secret-value/);
     expect(qualificationScript).toContain("--server-side-encryption AES256");
     // A temporary directory that cannot be made stops the script before it reads or writes anything.
@@ -319,7 +329,9 @@ describe("the opt-in TEST qualification hook", () => {
   });
 
   /** Runs the hook script against fake aws, docker, curl, chown and timeout commands that record every call. */
-  function runHook(options: { args?: string[]; challenge?: "present" | "missing"; qualifier?: number; proposalBytes?: number; ping?: "up" | "down"; wait?: number } = {}) {
+  const hookArgs = ["us-east-1", qualification.bucket, qualification.roleId, instanceId, qualification.profile, executorImage];
+  type HookOptions = { args?: string[]; challenge?: "present" | "missing"; qualifier?: number; proposalBytes?: number; ping?: "up" | "down"; wait?: number; executor?: "present" | "missing" | "pullable" };
+  function runHook(options: HookOptions = {}) {
     const dir = mkdtempSync(join(tmpdir(), "boot-hook-run-"));
     const bin = join(dir, "bin");
     const hostRoot = join(dir, "host");
@@ -330,6 +342,7 @@ describe("the opt-in TEST qualification hook", () => {
     const fake = (name: string, body: string) => { writeFileSync(join(bin, name), `#!/bin/bash\n${body}\n`); chmodSync(join(bin, name), 0o755); };
     fake("aws", `printf 'aws %s\\n' "$*" >>"${calls}"
 case "$2" in
+  get-login-password) printf 'registry-password' ;;
   get-object)
     last=; while (($#)); do last=$1; shift; done
     [[ "$FAKE_CHALLENGE" == missing ]] && { echo "NoSuchKey" >&2; exit 254; }
@@ -339,6 +352,13 @@ case "$2" in
     mkdir -p "${objects}/$(dirname "$key")"; cp "$body" "${objects}/$key" ;;
 esac`);
     fake("docker", `printf 'docker %s\\n' "$*" >>"${calls}"
+case "$1 $2" in
+  "image inspect") [[ "$FAKE_EXECUTOR" == present ]] && exit 0; [[ "$FAKE_EXECUTOR" == pullable && -e "${dir}/pulled" ]] && exit 0; exit 1 ;;
+esac
+case "$1" in
+  login) cat >/dev/null; exit 0 ;;
+  pull) [[ "$FAKE_EXECUTOR" == pullable ]] && touch "${dir}/pulled"; exit 0 ;;
+esac
 out=; while (($#)); do [[ "$1" == --out ]] && out=$2; shift; done
 [[ "$FAKE_QUALIFIER" != 0 ]] && exit "$FAKE_QUALIFIER"
 head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename "$out")"`);
@@ -347,29 +367,30 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
     // macOS mv has no -T: the shim keeps the test honest about the flag being passed and runs the plain move.
     fake("mv", `printf 'mv %s\\n' "$*" >>"${calls}"; a=(); for x in "$@"; do [[ "$x" == -fT ]] && x=-f; a+=("$x"); done; exec /bin/mv "\${a[@]}"`);
     fake("timeout", `while [[ "$1" == -* ]]; do shift; done; shift; exec "$@"`);
-    const result = spawnSync("bash", ["-c", qualificationScript, "bash", ...(options.args ?? ["us-east-1", qualification.bucket, qualification.prefix, qualification.profile])], {
+    const result = spawnSync("bash", ["-c", qualificationScript, "bash", ...(options.args ?? hookArgs)], {
       encoding: "utf8",
       env: {
         PATH: `${bin}:${process.env.PATH ?? ""}`, AGENTX_HOST_ROOT: hostRoot, TMPDIR: dir,
         AGENTX_E2E_QUALIFICATION_POLL_SECONDS: "0", AGENTX_E2E_QUALIFICATION_HEALTHY_WAIT_SECONDS: String(options.wait ?? 1), AGENTX_E2E_QUALIFICATION_CHALLENGE_WAIT_SECONDS: String(options.wait ?? 1),
         FAKE_CHALLENGE: options.challenge ?? "present", FAKE_QUALIFIER: String(options.qualifier ?? 0), FAKE_PROPOSAL_BYTES: String(options.proposalBytes ?? 64), FAKE_PING: options.ping ?? "up",
+        FAKE_EXECUTOR: options.executor ?? "present", AGENTX_E2E_QUALIFICATION_PULL_SECONDS: "5",
       },
     });
     const called = existsSync(calls) ? readFileSync(calls, "utf8").split("\n").filter(Boolean) : [];
-    const object = (name: string) => { const path = join(objects, qualification.prefix, name); return existsSync(path) ? readFileSync(path, "utf8") : undefined; };
+    const object = (name: string) => { const path = join(objects, qualificationPrefix, name); return existsSync(path) ? readFileSync(path, "utf8") : undefined; };
     return { result, called, object, evidence };
   }
 
   it("fetches the challenge, then runs the qualifier on it, then uploads the proposal and a SUCCEEDED status, in that order", () => {
     const { result, called, object } = runHook();
     expect(result.status, result.stderr).toBe(0);
-    const step = (call: string) => (call.startsWith("aws s3api get-object") ? "fetch" : call.startsWith("docker exec") ? "exec" : call.startsWith("aws s3api put-object") ? (call.includes("proposal.json") ? "upload-proposal" : call.includes("ready.json") ? "upload-ready" : "upload-status") : call.split(" ")[0]);
-    expect(called.map(step).filter((name) => name !== "chown" && name !== "mv")).toEqual(["upload-ready", "fetch", "exec", "upload-proposal", "upload-status"]);
+    const step = (call: string) => (call.startsWith("aws s3api get-object") ? "fetch" : call.startsWith("docker exec") ? "exec" : call.startsWith("docker image inspect") ? "inspect" : call.startsWith("aws s3api put-object") ? (call.includes("proposal.json") ? "upload-proposal" : call.includes("ready.json") ? "upload-ready" : "upload-status") : call.split(" ")[0]);
+    expect(called.map(step).filter((name) => name !== "chown" && name !== "mv")).toEqual(["inspect", "upload-ready", "fetch", "exec", "upload-proposal", "upload-status"]);
     // The ready marker comes once the worker answers, before the challenge is looked for, so boot time never eats the challenge's lifetime.
     expect(object("ready.json")).toContain('"state":"READY"');
     // Moves into the uid-1000 evidence directory are of a file onto that exact name, never into a directory of that name.
     expect(called.find((call) => call.startsWith("mv"))).toContain("mv -fT ");
-    expect(called.find((call) => call.includes("get-object"))).toContain(`--bucket ${qualification.bucket} --key ${qualification.prefix}challenge.json`);
+    expect(called.find((call) => call.includes("get-object"))).toContain(`--bucket ${qualification.bucket} --key ${qualificationPrefix}challenge.json`);
     expect(called.find((call) => call.startsWith("chown"))).toContain("1000:1000");
     const exec = called.find((call) => call.startsWith("docker exec")) ?? "";
     expect(exec).toContain("--user node agentx-worker /usr/local/bin/node /opt/agentx/packages/verifier/dist/install-qualification-cli.js");
@@ -384,15 +405,31 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
     expect(called.join("\n")).not.toMatch(/secret|token/i);
   });
 
-  it("is refused, touching nothing, for a malformed prefix, profile, bucket or region", () => {
+  it("is refused, touching nothing, for a malformed role ID, instance ID, profile, bucket, region or executor image", () => {
+    const withArg = (index: number, value: string) => hookArgs.map((arg, at) => (at === index ? value : arg));
     for (const args of [
-      ["us-east-1", qualification.bucket, `e2e-runtime/${runId}`, qualification.profile],
-      ["us-east-1", qualification.bucket, `e2e-runtime/${runId}/../`, qualification.profile],
-      ["us-east-1", qualification.bucket, `e2e-runtime/${runId}/ x`, qualification.profile],
-      ["us-east-1", qualification.bucket, qualification.prefix, "linux-arm64-docker-v1"],
-      ["us-east-1", "Bad Bucket", qualification.prefix, qualification.profile],
-      ["us-east-1", "", qualification.prefix, qualification.profile],
-      ["us east", qualification.bucket, qualification.prefix, qualification.profile],
+      withArg(2, `e2e-runtime/${runId}/`),
+      withArg(2, ""),
+      withArg(2, "AIDAEXAMPLEUSERID1234"),
+      withArg(2, "AROAshort"),
+      withArg(2, `${roleId}/../`),
+      withArg(2, `${roleId}:${instanceId}`),
+      withArg(2, `${roleId}*`),
+      withArg(2, `${roleId.toLowerCase()}`),
+      withArg(3, ""),
+      withArg(3, "i-xyz"),
+      withArg(3, "i-0123456789ABCDEF0"),
+      withArg(3, `${instanceId}/../`),
+      withArg(3, `${instanceId} x`),
+      withArg(3, `${instanceId}*`),
+      withArg(4, "linux-arm64-docker-v1"),
+      withArg(1, "Bad Bucket"),
+      withArg(1, ""),
+      withArg(0, "us east"),
+      withArg(5, ""),
+      withArg(5, "111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx/executor:latest"),
+      withArg(5, `docker.io/library/node@sha256:${"c".repeat(64)}`),
+      withArg(5, `${executorImage};touch /tmp/bad`),
     ]) {
       const { result, called } = runHook({ args });
       expect(result.status, JSON.stringify(args)).toBe(2);
@@ -400,9 +437,61 @@ head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename
     }
   });
 
+  it("reads and writes only under the prefix built from its own role ID and instance ID", () => {
+    const { called } = runHook();
+    const keys = called.flatMap((call) => [...call.matchAll(/--key (\S+)/g)].map((match) => match[1]));
+    expect(keys.length).toBeGreaterThan(0);
+    for (const key of keys) expect(key?.startsWith(qualificationPrefix), key).toBe(true);
+  });
+
+  describe("the executor image", () => {
+    it("is left alone when the host already has it", () => {
+      const { result, called } = runHook({ executor: "present" });
+      expect(result.status, result.stderr).toBe(0);
+      expect(called.filter((call) => call.startsWith("docker image inspect"))).toEqual([`docker image inspect ${executorImage}`]);
+      expect(called.some((call) => call.startsWith("docker pull") || call.startsWith("docker login") || call.startsWith("aws ecr"))).toBe(false);
+    });
+
+    it("is logged in to its registry and pulled when missing, then checked again, before the host is called ready", () => {
+      const { result, called, object } = runHook({ executor: "pullable" });
+      expect(result.status, result.stderr).toBe(0);
+      const executorCalls = called.filter((call) => /^(docker (image|login|pull)|aws ecr)/.test(call));
+      // The password pipe's two ends are started together, so their log lines come in either order.
+      expect([executorCalls[0], ...executorCalls.slice(1, 3).sort(), ...executorCalls.slice(3)]).toEqual([
+        `docker image inspect ${executorImage}`,
+        "aws ecr get-login-password --region us-east-1",
+        "docker login --username AWS --password-stdin 111122223333.dkr.ecr.us-east-1.amazonaws.com",
+        `docker pull ${executorImage}`,
+        `docker image inspect ${executorImage}`,
+      ]);
+      // The registry password goes through a pipe: it is never an argument of any call.
+      expect(called.join("\n")).not.toContain("registry-password");
+      expect(called.findIndex((call) => call.startsWith("docker pull"))).toBeLessThan(called.findIndex((call) => call.includes("ready.json")));
+      expect(object("ready.json")).toContain('"state":"READY"');
+    });
+
+    it("is bounded: the pull and the registry login run under timeout", () => {
+      expect(qualificationScript).toMatch(/timeout[^\n]*docker pull/);
+      expect(qualificationScript).toMatch(/timeout[^\n]*aws ecr get-login-password/);
+      expect(qualificationScript).toMatch(/timeout[^\n]*docker login/);
+    });
+
+    it("fails with executor-image-unavailable, before the host is called ready or the challenge is fetched, when it is still missing after the pull", () => {
+      const { result, called, object } = runHook({ executor: "missing" });
+      expect(result.status).toBe(1);
+      const status = JSON.parse(object("status.json") ?? "{}") as { state?: string; reason?: string };
+      expect(status).toMatchObject({ state: "FAILED", reason: "executor-image-unavailable" });
+      expect(object("ready.json")).toBeUndefined();
+      expect(object("proposal.json")).toBeUndefined();
+      expect(called.some((call) => call.includes("get-object") || call.startsWith("docker exec"))).toBe(false);
+      expect(called.filter((call) => call.startsWith("docker pull"))).toHaveLength(1);
+      expect(called.join("\n")).not.toMatch(/docker (stop|rm|kill|restart)|systemctl/);
+    });
+  });
+
   it.each([
     ["the worker never becomes healthy", { ping: "down" as const }, "worker-not-healthy", ["aws"]],
-    ["the challenge never appears", { challenge: "missing" as const }, "challenge-unavailable", ["aws"]],
+    ["the challenge never appears", { challenge: "missing" as const }, "challenge-unavailable", ["aws", "docker"]],
     ["the qualifier fails", { qualifier: 3 }, "qualification-failed-exit-3", ["aws", "docker", "chown", "mv"]],
     ["the proposal is larger than the registrar accepts", { proposalBytes: 5 * 1024 * 1024 + 1 }, "proposal-too-large", ["aws", "docker", "chown", "mv"]],
   ])("uploads a FAILED status with the reason and no proposal when %s", (_name, options, reason, tools) => {

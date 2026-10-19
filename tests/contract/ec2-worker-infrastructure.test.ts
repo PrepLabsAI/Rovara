@@ -247,13 +247,16 @@ describe("standing E2E qualification transport (agentx:e2eQualificationTransport
     }
   });
 
-  it("adds exact challenge/proposal/status object access when enabled", () => {
+  it("adds challenge/proposal/ready/status object access scoped to the caller's own role session (${aws:userid}) when enabled", () => {
     const get = withAction(on.controlPlane, "s3:GetObject").filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"));
     const put = withAction(on.controlPlane, "s3:PutObject").filter((s) => JSON.stringify(s.Resource).includes("e2e-runtime/"));
     expect(get).toHaveLength(1);
     expect(put).toHaveLength(1);
-    expect([get[0]!.Resource].flat().map(tail)).toEqual(["/e2e-runtime/*/challenge.json"]);
-    expect([put[0]!.Resource].flat().map(tail).sort()).toEqual(["/e2e-runtime/*/proposal.json", "/e2e-runtime/*/ready.json", "/e2e-runtime/*/status.json"]);
+    // The IAM policy variable stays literal in the synthesized template (an EC2 role session's aws:userid is <role unique ID>:<instance ID>),
+    // so one instance of the shared worker role reaches only its own prefix.
+    expect([get[0]!.Resource].flat().map(tail)).toEqual(["/e2e-runtime/${aws:userid}/challenge.json"]);
+    expect([put[0]!.Resource].flat().map(tail).sort()).toEqual(["/e2e-runtime/${aws:userid}/proposal.json", "/e2e-runtime/${aws:userid}/ready.json", "/e2e-runtime/${aws:userid}/status.json"]);
+    expect(JSON.stringify(on.controlPlane.toJSON())).not.toContain("e2e-runtime/*");
     // The bucket is the control plane's own artifact bucket.
     expect(JSON.stringify([get[0]!.Resource, put[0]!.Resource])).toMatch(/Artifacts/);
     // No List, Delete or wildcard access in the policy that carries it.

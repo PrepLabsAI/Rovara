@@ -2,9 +2,9 @@ import { createHash } from "node:crypto";
 import { readFile, readdir, stat, writeFile, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WEB_API_REQUIRED_PROBES, WebApiRuntimeInstallProposalSchema, canonicalJson, evaluateWebApiProbeObservation, webApiProbeAssetManifestPath } from "../../packages/contracts/src/index.js";
-import { WebApiQualificationRejected, qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
+import { WebApiQualificationRejected, assertRuntimeInstallationHostIdentity, qualifyInstalledWebApiRuntime } from "../../packages/verifier/src/install-qualification.js";
 import { main as qualificationCli, webApiProbeRunnerConfig } from "../../packages/verifier/src/install-qualification-cli.js";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { loadWebApiQualificationProbeAssets } from "../../packages/verifier/src/application-runtime-probes.js";
@@ -109,6 +109,35 @@ describe("web/API runtime qualification", () => {
     await expect(qualifyInstalledWebApiRuntime({ ...base, challenge: webApiChallenge(now), environment: fakeLinuxEnvironment(now, { nodeVersion: "v22.23.1" }) })).rejects.toThrow(/Node v22.23.2/);
     await expect(qualifyInstalledWebApiRuntime({ ...base, challenge: webApiChallenge(now), environment: fakeLinuxEnvironment(now, { assertHostIdentity: () => { throw new Error("wrong worker identity"); } }) })).rejects.toThrow(/wrong worker identity/);
     expect(runner.calls).toEqual([]);
+  });
+
+  describe("the real host check, which the installed qualifier uses unless a test replaces it", () => {
+    afterEach(() => { vi.unstubAllEnvs(); });
+    // A private address the challenge schema accepts and no test host has.
+    const foreignEndpoint = webApiChallenge(now, { endpoint: "http://10.255.255.254:8080" });
+    const bootEnvironment = (challenge: ReturnType<typeof webApiChallenge>) => ({ AGENTX_WORKSPACE_ID: challenge.transportCorrelationId, AGENTX_SESSION_GENERATION: String(challenge.generation) });
+    const realHostCheck = () => { const { assertHostIdentity: _replaced, ...real } = fakeLinuxEnvironment(now); void _replaced; return real; };
+
+    it("refuses a web/API challenge whose endpoint is not an address of this host, on the worker port, before any probe runs", async () => {
+      expect(() => assertRuntimeInstallationHostIdentity(foreignEndpoint.profileId, foreignEndpoint, bootEnvironment(foreignEndpoint))).toThrow(/endpoint does not match a non-loopback address and listener port on this host/);
+      for (const [name, value] of Object.entries(bootEnvironment(foreignEndpoint))) vi.stubEnv(name, value);
+      const runner = fakeProbeRunner();
+      await expect(qualifyInstalledWebApiRuntime({ challenge: foreignEndpoint, evidenceRoot: await privateEvidenceRoot(), runProbe: runner.runProbe, environment: realHostCheck() }))
+        .rejects.toThrow(/endpoint does not match a non-loopback address and listener port on this host/);
+      expect(runner.calls).toEqual([]);
+    });
+
+    it("refuses a web/API challenge whose endpoint port is not the worker port", async () => {
+      const challenge = webApiChallenge(now);
+      for (const [name, value] of Object.entries(bootEnvironment(challenge))) vi.stubEnv(name, value);
+      vi.stubEnv("PORT", "9090");
+      await expect(qualifyInstalledWebApiRuntime({ challenge, evidenceRoot: await privateEvidenceRoot(), runProbe: fakeProbeRunner().runProbe, environment: realHostCheck() }))
+        .rejects.toThrow(/endpoint does not match|worker port/);
+    });
+
+    it("refuses another worker's workspace identity before it looks at the endpoint", () => {
+      expect(() => assertRuntimeInstallationHostIdentity(foreignEndpoint.profileId, foreignEndpoint, { AGENTX_WORKSPACE_ID: "other", AGENTX_SESSION_GENERATION: "3" })).toThrow(/boot-injected workspace identity/);
+    });
   });
 
   it("requires a private evidence root", async () => {

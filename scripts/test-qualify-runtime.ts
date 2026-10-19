@@ -2,17 +2,23 @@
 //
 //   npx tsx scripts/test-qualify-runtime.ts --env agentxlivetest123 --profile agentx-test [--apply]
 //
-// Without --apply it prints the plan and exits 0, with no AWS call. With --apply it launches ONE worker
-// from the environment's own launch template with the opt-in qualification hook of boot.sh (the same boot
-// the provisioner renders, plus the hook's three settings), issues a linux-arm64-web-api-v1 challenge for
-// that worker's private endpoint, hands the challenge over through the standing transport under
-// e2e-runtime/<uuid>/ in the control artifacts bucket, waits for the worker's status.json, and only when
-// it says SUCCEEDED downloads proposal.json and registers it. Nothing is ever terminated or deleted here:
-// when anything fails the worker is left running for diagnosis, and its ID and the command that ends it
-// are printed. Run `scripts/test-deploy.ts --only qualification-transport,executor-image,...` first.
+// Without --apply it prints the plan and exits 0, with no AWS call. With --apply it first proves the
+// operator can use the transport (puts, reads back and deletes e2e-runtime/<run id>/preflight.json) and
+// launches nothing otherwise, then launches ONE worker from the environment's own launch template with the
+// opt-in qualification hook of boot.sh (the same boot the provisioner renders, plus the hook's three
+// settings, one of them the worker role's unique ID), issues a linux-arm64-web-api-v1 challenge for that
+// worker's private endpoint, hands the challenge over through the standing transport under
+// e2e-runtime/<role unique ID>:<instance ID>/ in the control artifacts bucket (the one prefix the
+// grant e2e-runtime/${aws:userid}/ allows that instance), waits for the worker's status.json, and only when
+// it says SUCCEEDED downloads proposal.json and registers it. Nothing is ever terminated here, and the
+// only objects it deletes are its own preflight object and the one-use challenge: when anything fails
+// the worker is left running for diagnosis, and its ID and the command that ends it are printed.
+// Run `scripts/test-deploy.ts --only qualification-transport,executor-image,...` first.
 //
 // Order differs from the plan's "issue the challenge, then launch": the challenge names the worker's
-// private endpoint, which exists only once the worker does, so the hook waits for challenge.json.
+// private endpoint, which exists only once the worker does, so the hook waits for challenge.json. The
+// instance is tagged DeploymentMode=e2e-qualification, not the launch template's ec2-ebs: the session
+// reconciler ends any ec2-ebs instance of the environment that no session owns, 15 minutes after launch.
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
@@ -29,6 +35,7 @@ import {
   E2E_QUALIFICATION_PROFILE_ID,
   Ec2RuntimeBindingSchema,
   WORKER_SETTING_PARAMETERS,
+  E2E_QUALIFICATION_ROLE_ID_PATTERN,
   e2eQualificationPrefix,
   ec2WorkerUserData,
   type Ec2RuntimeBinding,
@@ -70,6 +77,8 @@ export interface QualificationFacts {
   invokePublicKey: string;
   logGroupName: string;
   launchTemplateId: string;
+  /** The unique ID (AROA...) of the worker instance role: the first half of the instance's `${aws:userid}`, which scopes its grant. */
+  workerRoleId: string;
   /** The binding `agentx project add` registers for this foundation: every worker subnet. The challenge, and so the registered rows, carry it. */
   binding: Ec2RuntimeBinding;
   /** The one subnet of the binding the worker is launched into. */
@@ -94,17 +103,18 @@ export function classifyGetObjectFailure(stderr: string): "absent" | "error" {
 export type QualificationStep =
   | { id: string; kind: "check-admin-session" }
   | { id: string; kind: "resolve-facts" }
+  | { id: string; kind: "preflight"; key: string }
   | { id: string; kind: "create-volume"; clientToken: string }
-  | { id: string; kind: "run-instance"; minCount: 1; maxCount: 1; clientToken: string; workspaceId: string; qualification: { prefix: string; profile: typeof E2E_QUALIFICATION_PROFILE_ID } }
+  | { id: string; kind: "run-instance"; minCount: 1; maxCount: 1; clientToken: string; workspaceId: string; qualification: { profile: typeof E2E_QUALIFICATION_PROFILE_ID } }
   | { id: string; kind: "attach-volume"; device: string }
   | { id: string; kind: "read-private-ip" }
-  | { id: string; kind: "wait-ready"; key: string; statusKey: string; timeoutMs: number; intervalMs: number }
+  | { id: string; kind: "wait-ready"; object: string; statusObject: string; timeoutMs: number; intervalMs: number }
   | { id: string; kind: "issue-challenge"; profile: typeof E2E_QUALIFICATION_PROFILE_ID; generation: 1; transportCorrelationId: string; port: number }
-  | { id: string; kind: "upload-challenge"; key: string }
-  | { id: string; kind: "poll-status"; key: string; timeoutMs: number; intervalMs: number }
-  | { id: string; kind: "download-proposal"; key: string }
+  | { id: string; kind: "upload-challenge"; object: string }
+  | { id: string; kind: "poll-status"; object: string; timeoutMs: number; intervalMs: number }
+  | { id: string; kind: "download-proposal"; object: string }
   | { id: string; kind: "register" }
-  | { id: string; kind: "delete-challenge"; key: string }
+  | { id: string; kind: "delete-challenge"; object: string }
   | { id: string; kind: "print-registered-rows" };
 
 export interface QualificationInput {
@@ -121,58 +131,74 @@ export function planTestQualification(input: QualificationInput, allowlist: read
   if (!allowlist.includes(input.env)) throw new Error(ALLOWLIST_ERROR);
   if (!UUID.test(input.runId)) throw new Error("the run ID must be a lowercase UUID");
   if (!UUID.test(input.workspaceId)) throw new Error("the workspace ID must be a lowercase UUID");
-  const prefix = e2eQualificationPrefix(input.runId);
+  // The objects of the run live under a prefix holding the launched instance's ID, known only after the launch: the plan names them.
   return [
     { id: "check-admin-session", kind: "check-admin-session" },
     { id: "resolve-facts", kind: "resolve-facts" },
+    { id: "preflight", kind: "preflight", key: preflightKey(input.runId) },
     { id: "create-volume", kind: "create-volume", clientToken: input.runId },
-    { id: "run-instance", kind: "run-instance", minCount: 1, maxCount: 1, clientToken: input.runId, workspaceId: input.workspaceId, qualification: { prefix, profile: E2E_QUALIFICATION_PROFILE_ID } },
+    { id: "run-instance", kind: "run-instance", minCount: 1, maxCount: 1, clientToken: input.runId, workspaceId: input.workspaceId, qualification: { profile: E2E_QUALIFICATION_PROFILE_ID } },
     { id: "attach-volume", kind: "attach-volume", device: VOLUME_DEVICE },
     { id: "read-private-ip", kind: "read-private-ip" },
-    { id: "wait-ready", kind: "wait-ready", key: `${prefix}ready.json`, statusKey: `${prefix}status.json`, timeoutMs: READY_TIMEOUT_MS, intervalMs: POLL_INTERVAL_MS },
+    { id: "wait-ready", kind: "wait-ready", object: "ready.json", statusObject: "status.json", timeoutMs: READY_TIMEOUT_MS, intervalMs: POLL_INTERVAL_MS },
     { id: "issue-challenge", kind: "issue-challenge", profile: E2E_QUALIFICATION_PROFILE_ID, generation: 1, transportCorrelationId: input.workspaceId, port: WORKER_PORT },
-    { id: "upload-challenge", kind: "upload-challenge", key: `${prefix}challenge.json` },
-    { id: "poll-status", kind: "poll-status", key: `${prefix}status.json`, timeoutMs: QUALIFICATION_POLL_TIMEOUT_MS, intervalMs: POLL_INTERVAL_MS },
-    { id: "download-proposal", kind: "download-proposal", key: `${prefix}proposal.json` },
+    { id: "upload-challenge", kind: "upload-challenge", object: "challenge.json" },
+    { id: "poll-status", kind: "poll-status", object: "status.json", timeoutMs: QUALIFICATION_POLL_TIMEOUT_MS, intervalMs: POLL_INTERVAL_MS },
+    { id: "download-proposal", kind: "download-proposal", object: "proposal.json" },
     { id: "register", kind: "register" },
-    { id: "delete-challenge", kind: "delete-challenge", key: `${prefix}challenge.json` },
+    { id: "delete-challenge", kind: "delete-challenge", object: "challenge.json" },
     { id: "print-registered-rows", kind: "print-registered-rows" },
   ];
 }
 
+/** The key of the preflight object: under the run's own ID, apart from every instance's prefix. */
+export function preflightKey(runId: string): string {
+  return `e2e-runtime/${runId}/preflight.json`;
+}
+
+/** What stands for the instance's prefix in the printed plan, before there is an instance. */
+const PLAN_PREFIX = "e2e-runtime/<worker role unique ID>:<instance ID>/";
+
+/** The role name of a role ARN (`arn:aws:iam::<account>:role[/path]/<name>`): what `iam get-role` takes. */
+export function roleNameFromArn(arn: string): string {
+  const name = /^arn:aws[a-z-]*:iam::\d{12}:role\/(?:[^/\s]+\/)*([A-Za-z0-9+=,.@_-]{1,64})$/.exec(arn)?.[1];
+  if (name === undefined) throw new Error(`not an IAM role ARN: ${arn === "" ? "(empty)" : arn}`);
+  return name;
+}
+
 export function formatQualificationPlan(steps: readonly QualificationStep[], input: QualificationInput): string {
-  const prefix = e2eQualificationPrefix(input.runId);
   const describe = (step: QualificationStep): string => {
     switch (step.kind) {
       case "check-admin-session": return "check the Rovara admin sign-in (agentx admin workspace list) before anything is created";
-      case "resolve-facts": return "read the live stacks (control plane, foundation, runtime), the worker settings, the signing key and the launch template; refuse unless the executor image and the qualification transport are deployed";
+      case "resolve-facts": return "read the live stacks (control plane, foundation, runtime), the worker settings, the signing key, the launch template and the worker role's unique ID (iam get-role); refuse unless the executor image and the qualification transport are deployed";
+      case "preflight": return `put, read back and delete s3://<control artifacts bucket>/${step.key}; refuse to launch anything, naming the permission, if any of the three fails`;
       case "create-volume": return `create one new encrypted ${VOLUME_SIZE_GIB} GiB gp3 workspace volume (client token ${step.clientToken})`;
-      case "run-instance": return `launch ONE ${INSTANCE_TYPE} instance (MinCount=MaxCount=1, client token ${step.clientToken}) from the environment's launch template, with the worker's normal boot plus the qualification hook for ${step.qualification.prefix}`;
+      case "run-instance": return `launch ONE ${INSTANCE_TYPE} instance (MinCount=MaxCount=1, client token ${step.clientToken}) from the environment's launch template, with the worker's normal boot plus the qualification hook (prefix ${PLAN_PREFIX}), tagged DeploymentMode=e2e-qualification so the session reconciler leaves it alone`;
       case "attach-volume": return `attach the volume to that instance at ${step.device}`;
       case "read-private-ip": return "read the instance's private IP address";
-      case "wait-ready": return `wait up to ${step.timeoutMs / 60_000} minutes for the worker to upload ${step.key} (it is healthy), so boot time does not use the challenge's lifetime`;
+      case "wait-ready": return `wait up to ${step.timeoutMs / 60_000} minutes for the worker to upload ${PLAN_PREFIX}${step.object} (it is healthy), so boot time does not use the challenge's lifetime`;
       case "issue-challenge": return `issue a ${step.profile} challenge (agentx admin runtime-installation challenge) for http://<private ip>:${step.port}, generation ${step.generation}, correlation ${step.transportCorrelationId}`;
-      case "upload-challenge": return `upload challenge.json to s3://<control artifacts bucket>/${step.key}`;
-      case "poll-status": return `poll ${step.key} every ${step.intervalMs / 1000}s for up to ${step.timeoutMs / 60_000} minutes (the challenge's lifetime)`;
-      case "download-proposal": return `only if the status is SUCCEEDED: download ${step.key}`;
+      case "upload-challenge": return `upload challenge.json to s3://<control artifacts bucket>/${PLAN_PREFIX}${step.object}`;
+      case "poll-status": return `poll ${PLAN_PREFIX}${step.object} every ${step.intervalMs / 1000}s for up to ${step.timeoutMs / 60_000} minutes (the challenge's lifetime)`;
+      case "download-proposal": return `only if the status is SUCCEEDED: download ${PLAN_PREFIX}${step.object}`;
       case "register": return "register the proposal (agentx admin runtime-installation register --proposal-file)";
-      case "delete-challenge": return `after a successful registration, delete the one-use ${step.key} from the bucket (a failure only warns)`;
+      case "delete-challenge": return `after a successful registration, delete the one-use ${PLAN_PREFIX}${step.object} from the bucket (a failure only warns and prints the command)`;
       case "print-registered-rows": return "print the registered catalog rows";
     }
   };
   return [
-    `TEST qualification plan for ${input.env} (${input.region}), profile ${E2E_QUALIFICATION_PROFILE_ID}, run ${input.runId}, prefix ${prefix}`,
+    `TEST qualification plan for ${input.env} (${input.region}), profile ${E2E_QUALIFICATION_PROFILE_ID}, run ${input.runId}`,
     ...steps.map((step, index) => `${index + 1}. [${step.id}] ${describe(step)}`),
     "",
     `Spend: one instance (${INSTANCE_TYPE}) and one ${VOLUME_SIZE_GIB} GiB gp3 volume, billed until you end them. Launching it needs the owner's explicit OK at run time.`,
-    "On any failure the instance is left running for diagnosis: this script never terminates or deletes anything, and prints how.",
+    "On any failure the instance is left running for diagnosis: this script never terminates an instance or deletes a volume (it deletes only its own preflight and challenge objects), and prints how.",
   ].join("\n");
 }
 
 /** The worker's boot configuration for the qualification instance, rendered by the product's own user data helper. */
 export function renderQualificationUserData(
   facts: QualificationFacts,
-  run: { workspaceId: string; volumeId: string; qualification: { prefix: string; profile: typeof E2E_QUALIFICATION_PROFILE_ID } },
+  run: { workspaceId: string; volumeId: string; qualification: { profile: typeof E2E_QUALIFICATION_PROFILE_ID } },
   bootScript: string,
 ): string {
   const { settings } = facts;
@@ -196,7 +222,7 @@ export function renderQualificationUserData(
     ...(settings.anthropicSecretArn ? { anthropicSecretArn: settings.anthropicSecretArn } : {}),
     ...(settings.openaiSecretArn ? { openaiSecretArn: settings.openaiSecretArn } : {}),
     logGroupName: facts.logGroupName,
-    e2eQualification: { bucket: facts.artifactBucket, prefix: run.qualification.prefix, profile: run.qualification.profile },
+    e2eQualification: { bucket: facts.artifactBucket, roleId: facts.workerRoleId, profile: run.qualification.profile },
   }, bootScript);
 }
 
@@ -216,6 +242,9 @@ export function buildRunInstancesInput(
       ResourceType: "instance",
       Tags: [
         { Key: "Application", Value: "AgentX" },
+        // Not the launch template's ec2-ebs: the session reconciler ends an ec2-ebs instance of this environment that no session owns once it is
+        // 15 minutes old, which would end this one mid-qualification. The request's tags override the template's for the same key.
+        { Key: "DeploymentMode", Value: "e2e-qualification" },
         { Key: "Environment", Value: run.env },
         { Key: "Name", Value: `agentx-${run.env}-web-api-qualification-${run.runId.slice(0, 8)}` },
         { Key: "agentx:env", Value: run.env },
@@ -237,8 +266,11 @@ export interface QualificationEffects {
   privateIpOf(instanceId: string): Promise<string>;
   issueChallenge(request: { binding: Ec2RuntimeBinding; endpoint: string; generation: number; transportCorrelationId: string; profile: string }): Promise<{ challengeId: string; file: string; expiresAt: string }>;
   putObject(key: string, file: string): Promise<void>;
+  putBytes(key: string, bytes: Buffer): Promise<void>;
   /** The object's bytes, or undefined when it does not exist (yet). */
   getObject(key: string): Promise<Buffer | undefined>;
+  /** The object's bytes; any failure, a denied or missing object included, throws. */
+  getObjectStrict(key: string): Promise<Buffer>;
   deleteObject(key: string): Promise<void>;
   saveProposal(bytes: Buffer): string;
   register(proposalFile: string): Promise<string>;
@@ -296,10 +328,16 @@ interface RunState {
   /** The client token and tag of the launch, once it has been attempted (RunInstances may throw after creating the instance). */
   launchRun?: string;
   facts?: QualificationFacts;
+  /** The preflight object, from the moment it is put until it is deleted. */
+  preflightKey?: string | undefined;
   volumeId?: string;
   instanceId?: string;
+  /** e2e-runtime/<role unique ID>:<instance ID>/, once the instance is launched. */
+  prefix?: string;
   privateIp?: string;
   challengeFile?: string;
+  /** The challenge object, from the moment it is uploaded until it is deleted. */
+  challengeKey?: string | undefined;
   proposalFile?: string;
   registered?: string;
 }
@@ -313,7 +351,14 @@ export async function runTestQualification(steps: readonly QualificationStep[], 
       effects.print(`== ${step.id}`);
       switch (step.kind) {
         case "check-admin-session": await effects.checkAdminSession(); break;
-        case "resolve-facts": state.facts = await effects.resolveFacts(); break;
+        case "resolve-facts": {
+          const facts = await effects.resolveFacts();
+          // The role's unique ID is half of the key prefix and of the user data: refuse a malformed one before anything is created.
+          if (!E2E_QUALIFICATION_ROLE_ID_PATTERN.test(facts.workerRoleId)) throw new Error("the worker role's unique ID must look like AROA followed by at least 12 capital letters or digits");
+          state.facts = facts;
+          break;
+        }
+        case "preflight": await preflight(step.key, need(state.facts, "the stack facts").artifactBucket, effects, state); break;
         case "create-volume": {
           const facts = need(state.facts, "the stack facts");
           state.volumeId = await effects.createVolume({
@@ -329,11 +374,13 @@ export async function runTestQualification(steps: readonly QualificationStep[], 
           const userData = renderQualificationUserData(facts, { workspaceId: step.workspaceId, volumeId: need(state.volumeId, "the volume"), qualification: step.qualification }, options.bootScript ?? readBootScript());
           state.instanceId = await effects.runInstance(buildRunInstancesInput(facts, { env: options.env ?? "", runId: step.clientToken, revision: options.revision, userData }));
           effects.print(`instance ${state.instanceId}`);
+          // The grant allows only this exact prefix; the instance builds the same one from its own ID. Both validate the two IDs strictly.
+          state.prefix = e2eQualificationPrefix(facts.workerRoleId, state.instanceId);
           break;
         }
         case "attach-volume": await effects.attachVolume({ volumeId: need(state.volumeId, "the volume"), instanceId: need(state.instanceId, "the instance"), device: step.device }); break;
         case "read-private-ip": state.privateIp = await effects.privateIpOf(need(state.instanceId, "the instance")); break;
-        case "wait-ready": await waitReady(step, effects); break;
+        case "wait-ready": await waitReady(step, need(state.prefix, "the instance's key prefix"), effects); break;
         case "issue-challenge": {
           const facts = need(state.facts, "the stack facts");
           const binding = Ec2RuntimeBindingSchema.parse(facts.binding);
@@ -342,22 +389,33 @@ export async function runTestQualification(steps: readonly QualificationStep[], 
           effects.print(`challenge ${issued.challengeId}, expires ${issued.expiresAt}`);
           break;
         }
-        case "upload-challenge": await effects.putObject(step.key, need(state.challengeFile, "the challenge file")); break;
-        case "poll-status": await pollStatus(step, effects); break;
+        case "upload-challenge": {
+          const key = `${need(state.prefix, "the instance's key prefix")}${step.object}`;
+          state.challengeKey = key;
+          await effects.putObject(key, need(state.challengeFile, "the challenge file"));
+          break;
+        }
+        case "poll-status": await pollStatus(step, need(state.prefix, "the instance's key prefix"), effects); break;
         case "download-proposal": {
-          const bytes = await effects.getObject(step.key);
-          if (bytes === undefined) throw new Error(`the status said SUCCEEDED but ${step.key} does not exist; refusing to register`);
+          const key = `${need(state.prefix, "the instance's key prefix")}${step.object}`;
+          const bytes = await effects.getObject(key);
+          if (bytes === undefined) throw new Error(`the status said SUCCEEDED but ${key} does not exist; refusing to register`);
           state.proposalFile = effects.saveProposal(bytes);
           break;
         }
         case "register": state.registered = await effects.register(need(state.proposalFile, "the proposal file")); break;
-        case "delete-challenge":
+        case "delete-challenge": {
+          const key = `${need(state.prefix, "the instance's key prefix")}${step.object}`;
           try {
-            await effects.deleteObject(step.key);
+            await effects.deleteObject(key);
+            state.challengeKey = undefined;
           } catch (error) {
-            effects.print(`Warning: could not delete the one-use challenge ${step.key} (${error instanceof Error ? error.message : String(error)}); delete it by hand.`);
+            // challengeKey stays set: the leftovers say how to delete it.
+            effects.print(`Warning: could not delete the one-use challenge ${key} (${error instanceof Error ? error.message : String(error)}); delete it by hand.`);
+            reportObjectLeftovers(state, options, (line) => effects.print(line));
           }
           break;
+        }
         case "print-registered-rows": {
           const rows = describeRegisteredRows(need(state.registered, "the registration answer"));
           for (const row of rows.length > 0 ? rows : [`registered; the answer was not in the expected form: ${state.registered}`]) effects.print(row);
@@ -376,12 +434,26 @@ function need<T>(value: T | undefined, what: string): T {
   return value;
 }
 
-async function waitReady(step: Extract<QualificationStep, { kind: "wait-ready" }>, effects: QualificationEffects): Promise<void> {
+/** Writes a small object, reads it back and deletes it: the same three permissions the run needs, proven before anything costs money. */
+async function preflight(key: string, bucket: string, effects: QualificationEffects, state: RunState): Promise<void> {
+  const where = `s3://${bucket}/${key}`;
+  const refuse = (permission: string, cause: unknown) => new Error(`preflight failed: ${permission} on ${where} is not usable (${cause instanceof Error ? cause.message : String(cause)}); nothing was launched`);
+  const body = Buffer.from(`${JSON.stringify({ preflight: "test-qualify-runtime" })}\n`);
+  try { await effects.putBytes(key, body); } catch (error) { throw refuse("s3:PutObject", error); }
+  state.preflightKey = key;
+  let read: Buffer;
+  try { read = await effects.getObjectStrict(key); } catch (error) { throw refuse("s3:GetObject", error); }
+  if (!read.equals(body)) throw refuse("s3:GetObject", "the object read back is not the object that was put");
+  try { await effects.deleteObject(key); } catch (error) { throw refuse("s3:DeleteObject", error); }
+  state.preflightKey = undefined;
+}
+
+async function waitReady(step: Extract<QualificationStep, { kind: "wait-ready" }>, prefix: string, effects: QualificationEffects): Promise<void> {
   const deadline = effects.now() + step.timeoutMs;
   for (;;) {
-    if ((await effects.getObject(step.key)) !== undefined) return;
+    if ((await effects.getObject(`${prefix}${step.object}`)) !== undefined) return;
     // A worker that failed before it was ready says so in status.json: stop at once instead of waiting out the clock.
-    const status = await effects.getObject(step.statusKey);
+    const status = await effects.getObject(`${prefix}${step.statusObject}`);
     if (status !== undefined) {
       const parsed = parseStatus(status);
       if (parsed.state === "FAILED") throw new Error(`the worker reported FAILED before it was ready: ${parsed.reason}`);
@@ -391,10 +463,10 @@ async function waitReady(step: Extract<QualificationStep, { kind: "wait-ready" }
   }
 }
 
-async function pollStatus(step: Extract<QualificationStep, { kind: "poll-status" }>, effects: QualificationEffects): Promise<void> {
+async function pollStatus(step: Extract<QualificationStep, { kind: "poll-status" }>, prefix: string, effects: QualificationEffects): Promise<void> {
   const deadline = effects.now() + step.timeoutMs;
   for (;;) {
-    const bytes = await effects.getObject(step.key);
+    const bytes = await effects.getObject(`${prefix}${step.object}`);
     if (bytes !== undefined) {
       const status = parseStatus(bytes);
       if (status.state === "SUCCEEDED") return;
@@ -405,7 +477,18 @@ async function pollStatus(step: Extract<QualificationStep, { kind: "poll-status"
   }
 }
 
+/** The delete commands of objects this run put in the bucket and has not deleted. */
+function reportObjectLeftovers(state: RunState, options: RunOptions, print: (line: string) => void): void {
+  const bucket = state.facts?.artifactBucket;
+  for (const [what, key] of [["preflight object", state.preflightKey], ["one-use challenge, which holds a secret,", state.challengeKey]] as const) {
+    if (key === undefined || bucket === undefined) continue;
+    print(`\nThe ${what} s3://${bucket}/${key} is still in the bucket. Delete it with:`);
+    print(`  aws s3api delete-object --bucket ${bucket} --key ${key} --profile ${options.profile} --region ${options.region}`);
+  }
+}
+
 function reportLeftovers(state: RunState, options: RunOptions, print: (line: string) => void): void {
+  reportObjectLeftovers(state, options, print);
   if (state.launchRun !== undefined) {
     print(`\nThe launch used client token ${state.launchRun}. If RunInstances failed after it created an instance, find it by its tag:`);
     print(`  aws ec2 describe-instances --filters Name=tag:agentx:qualification-run,Values=${state.launchRun} --profile ${options.profile} --region ${options.region}`);
@@ -512,6 +595,13 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
       const executorImage = optional("executorImage");
       if (executorImage === undefined) throw new Error("the executor image is not set in this environment (SSM worker-executor-image is missing or none); run test-deploy --only executor-image first");
 
+      // The worker role's unique ID (AROA...) scopes the standing grant: an instance's aws:userid is <that ID>:<instance ID>.
+      const roleArn = requireOutput(foundation, "Ec2WorkerInstanceRoleArn", foundationName);
+      const role = runner.aws(["iam", "get-role", "--role-name", roleNameFromArn(roleArn), "--query", "Role.[RoleId,Arn]", "--output", "json"], true);
+      if (role.status !== 0) throw new Error(`reading the worker role failed (iam:GetRole on ${roleArn}): ${role.stderr.trim().slice(0, 300)}`);
+      const [workerRoleId, foundRoleArn] = JSON.parse(role.stdout) as [string, string];
+      if (foundRoleArn !== roleArn) throw new Error(`iam get-role returned ${foundRoleArn}, not the foundation's worker role ${roleArn}`);
+
       const signingKeyArn = requireOutput(controlPlane, "InvokeSigningKeyArn", controlPlaneName);
       const publicKey = await kms.send(new GetPublicKeyCommand({ KeyId: signingKeyArn }));
       if (publicKey.KeySpec !== "ECC_NIST_P256" || publicKey.KeyUsage !== "SIGN_VERIFY" || !publicKey.PublicKey) throw new Error("the worker invoke signing key is not the expected P-256 signing key");
@@ -534,6 +624,7 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
         invokePublicKey: Buffer.from(publicKey.PublicKey).toString("base64"),
         logGroupName: requireOutput(foundation, "Ec2WorkerLogGroupName", foundationName),
         launchTemplateId,
+        workerRoleId,
         binding,
         subnet: launchSubnet,
         volumeSizeGiB: binding.volumeSizeGiB,
@@ -611,6 +702,19 @@ function createAwsEffects(args: QualifyArgs, runner: Runner): QualificationEffec
 
     async putObject(key, file) {
       runner.aws(["s3api", "put-object", "--bucket", bucket, "--key", key, "--body", file, "--server-side-encryption", "AES256", "--region", args.region, "--output", "json"]);
+    },
+
+    async putBytes(key, bytes) {
+      const file = join(mkdtempSync(join(scratch, "put-")), "body");
+      writeFileSync(file, bytes, { mode: 0o600 });
+      runner.aws(["s3api", "put-object", "--bucket", bucket, "--key", key, "--body", file, "--server-side-encryption", "AES256", "--region", args.region, "--output", "json"]);
+    },
+
+    async getObjectStrict(key) {
+      const file = join(mkdtempSync(join(scratch, "read-")), "body");
+      const result = runner.aws(["s3api", "get-object", "--bucket", bucket, "--key", key, "--region", args.region, file], true);
+      if (result.status !== 0) throw new Error(result.stderr.trim().slice(0, 300));
+      return readFileSync(file);
     },
 
     async getObject(key) {

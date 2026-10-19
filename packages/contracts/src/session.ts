@@ -312,12 +312,17 @@ const SHELL_SAFE = /^[A-Za-z0-9._:/@+=-]+$/;
 
 /** The one profile the worker's opt-in boot qualification runs: the web/API runtime. */
 export const E2E_QUALIFICATION_PROFILE_ID = "linux-arm64-web-api-v1";
-/** The S3 key prefix of one TEST qualification run under the control artifacts bucket: exactly `e2e-runtime/<uuid>/`. */
-export const E2E_QUALIFICATION_PREFIX_PATTERN = /^e2e-runtime\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/$/;
-export function e2eQualificationPrefix(runId: string): string {
-  const prefix = `e2e-runtime/${runId}/`;
-  if (!E2E_QUALIFICATION_PREFIX_PATTERN.test(prefix)) throw new Error("the qualification run ID must be a lowercase UUID");
-  return prefix;
+/** The unique ID of the worker instance role (`iam:GetRole` RoleId), the first half of that role's `${aws:userid}` on an instance. */
+export const E2E_QUALIFICATION_ROLE_ID_PATTERN = /^AROA[A-Z0-9]{12,}$/;
+export const E2E_QUALIFICATION_INSTANCE_ID_PATTERN = /^i-[0-9a-f]{8,17}$/;
+/**
+ * The S3 key prefix of one TEST qualification run under the control artifacts bucket: `e2e-runtime/<role unique ID>:<instance ID>/`,
+ * which is `e2e-runtime/${aws:userid}/` for that instance's role session, the only prefix the standing grant allows it.
+ */
+export function e2eQualificationPrefix(roleId: string, instanceId: string): string {
+  if (!E2E_QUALIFICATION_ROLE_ID_PATTERN.test(roleId)) throw new Error("the worker role's unique ID must look like AROA followed by at least 12 capital letters or digits");
+  if (!E2E_QUALIFICATION_INSTANCE_ID_PATTERN.test(instanceId)) throw new Error("the instance ID must look like i-0123456789abcdef0");
+  return `e2e-runtime/${roleId}:${instanceId}/`;
 }
 
 /**
@@ -346,12 +351,13 @@ export const Ec2WorkerBootConfigSchema = z
       .optional(),
     /**
      * The opt-in TEST qualification (AGENTX_E2E_QUALIFICATION_*): after the worker is healthy, the boot script fetches `<prefix>challenge.json`
-     * from the bucket, qualifies the web/API runtime with it and uploads the proposal and a status under the same prefix.
+     * from the bucket, qualifies the web/API runtime with it and uploads the proposal and a status under the same prefix. The prefix is
+     * `e2e-runtime/<roleId>:<this instance's ID>/`, built on the host from its own instance ID (see `e2eQualificationPrefix`).
      */
     e2eQualification: z
       .object({
         bucket: z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/, "invalid bucket name"),
-        prefix: z.string().regex(E2E_QUALIFICATION_PREFIX_PATTERN, "the prefix must be e2e-runtime/<uuid>/"),
+        roleId: z.string().regex(E2E_QUALIFICATION_ROLE_ID_PATTERN, "the role ID must be the worker instance role's unique ID (AROA...)"),
         profile: z.literal(E2E_QUALIFICATION_PROFILE_ID),
       })
       .strict()
@@ -402,7 +408,7 @@ export function ec2WorkerBootScript(config: Ec2WorkerBootConfig, bootScript: str
   if (parsed.e2eQualification) {
     variables.push(
       ["AGENTX_E2E_QUALIFICATION_BUCKET", parsed.e2eQualification.bucket],
-      ["AGENTX_E2E_QUALIFICATION_PREFIX", parsed.e2eQualification.prefix],
+      ["AGENTX_E2E_QUALIFICATION_ROLE_ID", parsed.e2eQualification.roleId],
       ["AGENTX_E2E_QUALIFICATION_PROFILE", parsed.e2eQualification.profile],
     );
   }

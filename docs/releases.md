@@ -117,6 +117,11 @@ place; this records what it is, so a change to any piece can be made deliberatel
   `AGENTX_PUBLISH_EXECUTOR_IMAGE` is `true` (default off), so tagged releases keep working until
   the owner has created the repository and extended the role; release.json then has no executor
   image, which the runtime stack allows. Set the variable once both exist.
+  Once the variable is `true`, release.json has an `images.executor` entry, and `ReleaseManifestSchema`
+  validates `images` strictly (unknown keys are refused). A CLI built before the executor existed
+  rejects such a release, so upgrade the CLI before installing or updating from a release newer than
+  the one that first publishes the executor. Strictness is deliberate: an image key a CLI does not
+  know must not be skipped silently.
 - **The npm package.** `@preplabsai/rovara-code`, owned by the `preplabsai` npm organization
   (publishing needs an owner or developer role there; GitHub access does not grant it). Version
   0.1.0 was published by hand from the tag's commit, because npm trusted publishing can only be

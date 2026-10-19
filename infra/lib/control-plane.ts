@@ -962,21 +962,26 @@ export class ControlPlaneStack extends Stack {
     // agentx:e2eQualificationTransport=enabled, off by default; `-c key=value` always delivers a
     // string, so only the exact string "enabled" turns it on, like agentxInstaller and agentxEval,
     // and boolean true or "true" stay off): it reads its challenge and writes its
-    // proposal and status files under e2e-runtime/<installationId>/ in the artifact bucket, so no
-    // run needs temporary grants. Exact object keys only: no List, Delete or wildcard object access.
-    // Attached from this stack, like the provider secrets above, because the bucket lives here and
-    // the foundation template stays untouched.
+    // proposal, ready and status files in the artifact bucket, so no run needs temporary grants.
+    // The keys are scoped by the IAM policy variable ${aws:userid}, which for an EC2 instance role
+    // session is <role unique ID>:<instance ID>: of the instances sharing the worker role, each can
+    // reach only e2e-runtime/<its own ID>/, so a worker running other code cannot read or plant
+    // another instance's files. The variable is plain text in the resource ARN (CDK treats only
+    // its own ${Token[...]} markers as tokens; the test pins the synthesized text). Exact object keys
+    // only: no List, Delete or wildcard object access. Attached from this stack, like the provider
+    // secrets above, because the bucket lives here and the foundation template stays untouched.
     if (this.node.tryGetContext("agentx:e2eQualificationTransport") === "enabled") {
+      const ownPrefix = "e2e-runtime/${aws:userid}";
       new iam.CfnPolicy(this, "E2eQualificationTransport", {
         policyName: "E2eQualificationTransport",
         roles: [sessions.instanceRoleName],
         policyDocument: {
           Version: "2012-10-17",
           Statement: [
-            { Sid: "ReadQualificationChallenge", Effect: "Allow", Action: "s3:GetObject", Resource: artifacts.arnForObjects("e2e-runtime/*/challenge.json") },
+            { Sid: "ReadQualificationChallenge", Effect: "Allow", Action: "s3:GetObject", Resource: artifacts.arnForObjects(`${ownPrefix}/challenge.json`) },
             {
               Sid: "WriteQualificationProposalReadyAndStatus", Effect: "Allow", Action: "s3:PutObject",
-              Resource: [artifacts.arnForObjects("e2e-runtime/*/proposal.json"), artifacts.arnForObjects("e2e-runtime/*/ready.json"), artifacts.arnForObjects("e2e-runtime/*/status.json")],
+              Resource: [artifacts.arnForObjects(`${ownPrefix}/proposal.json`), artifacts.arnForObjects(`${ownPrefix}/ready.json`), artifacts.arnForObjects(`${ownPrefix}/status.json`)],
             },
           ],
         },
