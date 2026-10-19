@@ -69,7 +69,7 @@ Per-run grants made every M1 live demo wait for a human review of the same chang
 
 - Task 0.1: the policy this packet approves.
 - Task 0.3: registers `rovara-web-fixture`, then the membership in item b follows.
-- Task 1.6 (and every later M1 task): deploys through this path. `executor-image` is in the script's vocabulary but the plan refuses it until Task 1.6 adds `ExecutorImageUri`.
+- Task 1.6 (and every later M1 task): deploys through this path. The `executor-image` unit pushes the executor image to the repository beside the worker's and changes only `ExecutorImageUri` (the first run also adds that parameter and its SSM setting to the runtime stack). It never creates the repository: a missing one stops the run and comes back as a Tier 3 item.
 
 ## 5. Runbook
 
@@ -79,10 +79,10 @@ Each run, from a clean checkout of the commit to deploy (the script refuses a di
 aws login --profile agentx-test
 npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test            # prints the plan, changes nothing
 npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test --apply    # runs it
-# one unit: --only broker | dispatcher | worker-image | qualification-transport  (comma separated)
+# one unit: --only broker | dispatcher | worker-image | executor-image | qualification-transport  (comma separated)
 ```
 
-- Default units: `broker,dispatcher,worker-image`. `qualification-transport` runs on its own.
+- Default units: `broker,dispatcher,worker-image`. `executor-image` is opt-in (it needs the executor repository). `qualification-transport` runs on its own.
 - The dry run reads the stacks' current parameters (read-only) so it can show the exact parameter set; run it first and read it.
 - Order inside one run: the worker image is pushed and its runtime change set executes first, then the control-plane change set, as the release pipeline does.
 - Each step is checked: the zip is hashed and uploaded to a checksummed object version; the change set must hold only the expected changes; the stack must end in `UPDATE_COMPLETE`; Lambda `CodeSha256` must equal the zip's sha256 (base64); `WorkerImageUri` must equal the pushed digest.

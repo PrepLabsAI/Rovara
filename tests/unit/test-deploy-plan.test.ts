@@ -1,14 +1,20 @@
 import { describe, expect, it } from "vitest";
 import {
   assertOnlyExpectedChanges,
+  executorRepositoryUri,
+  formatPlan,
   liftResources,
+  liftSynthArguments,
   parseTestDeployArgs,
   patchLambdaCode,
   planTestDeploy,
   resolveTestStacks,
+  verifyStackResources,
+  waitForChangeSetExecution,
   type BuiltArtifacts,
   type DeployStep,
   type StackParameters,
+  type TemplatePlan,
 } from "../../scripts/test-deploy.js";
 
 const ENV = "agentxlivetest123";
@@ -132,13 +138,80 @@ describe("planTestDeploy", () => {
     expect(() => plan(["broker"])).not.toThrow();
   });
 
-  it("keeps executor-image in the vocabulary but refuses it until it has its parameter", () => {
-    expect(() => plan(["executor-image"])).toThrow("executor-image requires ExecutorImageUri (Task 1.6)");
+  const OLD_EXECUTOR = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-test/executor@sha256:${"d".repeat(64)}`;
+
+  it("plans an executor-image deploy as ECR push then a runtime change set that changes only ExecutorImageUri", () => {
+    const withParameter: StackParameters = { ...previous, runtime: { ...previous.runtime, ExecutorImageUri: OLD_EXECUTOR } };
+    const steps = planTestDeploy({ env: ENV, only: ["executor-image"], artifacts, previous: withParameter });
+    expect(kinds(steps)).toEqual(["ecr-push", "create-change-set", "execute-change-set", "verify-stack-parameter"]);
+    const push = steps[0] as Extract<DeployStep, { kind: "ecr-push" }>;
+    // Next to the worker's repository, which the stack's current WorkerImageUri names: nothing new is created.
+    expect(push).toMatchObject({ image: "executor", repositoryUri: "123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-test/executor", revision: artifacts.revision });
+    const changeSet = steps[1] as Extract<DeployStep, { kind: "create-change-set" }>;
+    expect(changeSet.stack).toBe(RUNTIME);
+    expect(changeSet.template).toEqual({ source: "previous" });
+    expect(changeSet.parameters).toEqual([
+      { key: "ExecutorImageUri", value: { fromStep: push.id, output: "imageUri" } },
+      { key: "ModelId", usePreviousValue: true },
+      { key: "ModelProvider", usePreviousValue: true },
+      { key: "WorkerImageUri", usePreviousValue: true },
+    ]);
+    expect(changeSet.expect).toEqual({ action: "Modify", logicalIdPrefixes: ["WorkerExecutorImageParameter"], allowedAttributes: ["Properties.Value"] });
+    expect(steps[3]).toMatchObject({ stack: RUNTIME, key: "ExecutorImageUri", expected: { fromStep: push.id, output: "imageUri" } });
+  });
+
+  it("adds the ExecutorImageUri parameter and its SSM setting the first time, as the only change, lifted from a synth of the runtime stack", () => {
+    // The deployed runtime stack predates ExecutorImageUri, so it has neither the parameter nor the setting yet.
+    const steps = plan(["executor-image"]);
+    const changeSet = steps.find((step) => step.kind === "create-change-set") as Extract<DeployStep, { kind: "create-change-set" }>;
+    expect(changeSet.template).toEqual({
+      source: "lift-resources",
+      logicalIdPrefix: "WorkerExecutorImageParameter",
+      parameterNames: ["ExecutorImageUri"],
+      construct: "AgentXProductionRuntime",
+      cdkContext: {},
+      identityMode: "cognito",
+    });
+    expect(changeSet.expect).toEqual({ action: "Add", logicalIdPrefixes: ["WorkerExecutorImageParameter"] });
+    expect(changeSet.parameters).toContainEqual({ key: "ExecutorImageUri", value: { fromStep: "push-executor-image", output: "imageUri" } });
+    expect(changeSet.parameters.filter((parameter) => "usePreviousValue" in parameter).map((parameter) => parameter.key)).toEqual(["ModelId", "ModelProvider", "WorkerImageUri"]);
+  });
+
+  it("passes the environment's identity mode to the synth the lifted template comes from", () => {
+    const steps = planTestDeploy({ env: ENV, only: ["executor-image"], artifacts, previous, identityMode: "oidc" });
+    const changeSet = steps.find((step) => step.kind === "create-change-set");
+    expect(changeSet?.kind === "create-change-set" && changeSet.template).toMatchObject({ source: "lift-resources", identityMode: "oidc" });
+  });
+
+  it("pushes both images and changes the runtime stack once for each when asked for both, worker first", () => {
+    const steps = plan(["executor-image", "worker-image"]);
+    expect(kinds(steps)).toEqual(["ecr-push", "create-change-set", "execute-change-set", "verify-stack-parameter", "ecr-push", "create-change-set", "execute-change-set", "verify-stack-parameter"]);
+    expect(steps.filter((step) => step.kind === "ecr-push").map((step) => step.kind === "ecr-push" && step.image)).toEqual(["worker", "executor"]);
+    const prefixes = steps.filter((step) => step.kind === "create-change-set").map((step) => step.kind === "create-change-set" && step.changeSetPrefix);
+    expect(new Set(prefixes).size).toBe(2);
+    expect(new Set(steps.flatMap((step) => ("stack" in step ? [step.stack] : [])))).toEqual(new Set([RUNTIME]));
+  });
+
+  it("derives the executor repository from the worker's, and refuses a worker repository it cannot map", () => {
+    const registry = "123456789012.dkr.ecr.us-east-1.amazonaws.com";
+    expect(executorRepositoryUri(`${registry}/agentx-test/worker`)).toBe(`${registry}/agentx-test/executor`);
+    expect(executorRepositoryUri(`${registry}/agentx-staging/agentx/agentx-worker`)).toBe(`${registry}/agentx-staging/agentx/agentx-executor`);
+    expect(() => executorRepositoryUri(`${registry}/agentx-test/images`)).toThrow(/executor repository/);
+    // A worker word elsewhere in the path is not the repository's own name.
+    expect(() => executorRepositoryUri(`${registry}/worker-team/images`)).toThrow(/executor repository/);
+  });
+
+  it("states in the printed plan which image is pushed and that no repository is created", () => {
+    const text = formatPlan(plan(["executor-image"]));
+    expect(text).toContain("executor image");
+    expect(text).toContain("agentx-test/executor");
+    expect(text).toMatch(/never creates a repository/);
   });
 
   it("plans qualification-transport as a guarded add-only change set on the control-plane stack", () => {
     const steps = plan(["qualification-transport"]);
-    expect(kinds(steps)).toEqual(["create-change-set", "execute-change-set"]);
+    expect(kinds(steps)).toEqual(["create-change-set", "execute-change-set", "verify-stack-resources"]);
+    expect(steps[2]).toMatchObject({ stack: CONTROL_PLANE, createdBy: steps[0]?.id, logicalIdPrefix: "E2eQualificationTransport", expectedStatus: "CREATE_COMPLETE" });
     expect(steps[0]).toMatchObject({
       stack: CONTROL_PLANE,
       template: {
@@ -305,5 +378,75 @@ describe("parseTestDeployArgs", () => {
     expect(parsed).toMatchObject({ apply: true, only: ["broker", "qualification-transport"] });
     expect(() => parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "foundation"])).toThrow(/unknown deploy unit foundation/);
     expect(() => parseTestDeployArgs(["--env", ENV, "--profile", "p", "--force"])).toThrow("unknown option --force");
+  });
+
+  it("rejects positional arguments instead of ignoring them", () => {
+    expect(() => parseTestDeployArgs(["--env", ENV, "--profile", "p", "broker"])).toThrow("unexpected argument broker");
+    expect(() => parseTestDeployArgs(["apply", "--env", ENV, "--profile", "p"])).toThrow("unexpected argument apply");
+    expect(() => parseTestDeployArgs(["--env", ENV, "--profile", "p", "--apply", "now"])).toThrow("unexpected argument now");
+    // A value that belongs to an option is not positional.
+    expect(() => parseTestDeployArgs(["--env", ENV, "--profile", "p", "--only", "broker"])).not.toThrow();
+    expect(() => parseTestDeployArgs(["--env", ENV, "--env", ENV, "--profile", "p"])).toThrow("--env was given twice");
+  });
+});
+
+describe("waitForChangeSetExecution", () => {
+  const sequence = (statuses: Array<{ ExecutionStatus?: string; StatusReason?: string }>) => {
+    let calls = 0;
+    return { describe: async () => statuses[Math.min(calls++, statuses.length - 1)]!, calls: () => calls };
+  };
+  const fast = { sleep: async () => undefined, intervalMs: 1, timeoutMs: 1_000, now: (() => { let t = 0; return () => (t += 1); })() };
+
+  it("waits for the change set's own EXECUTE_COMPLETE, however many times it still reads as not started or running", async () => {
+    const fake = sequence([{ ExecutionStatus: "AVAILABLE" }, { ExecutionStatus: "AVAILABLE" }, { ExecutionStatus: "EXECUTE_IN_PROGRESS" }, { ExecutionStatus: "EXECUTE_COMPLETE" }]);
+    await waitForChangeSetExecution(fake.describe, fast);
+    expect(fake.calls()).toBe(4);
+  });
+
+  it.each([["EXECUTE_FAILED"], ["UNAVAILABLE"], ["OBSOLETE"]])("fails on %s, with the reason CloudFormation gave", async (status) => {
+    const fake = sequence([{ ExecutionStatus: "EXECUTE_IN_PROGRESS" }, { ExecutionStatus: status, StatusReason: "Resource handler returned: boom" }]);
+    await expect(waitForChangeSetExecution(fake.describe, fast)).rejects.toThrow(new RegExp(`${status}.*boom`));
+  });
+
+  it("fails when the change set never completes within the time allowed", async () => {
+    const fake = sequence([{ ExecutionStatus: "EXECUTE_IN_PROGRESS" }]);
+    await expect(waitForChangeSetExecution(fake.describe, { ...fast, timeoutMs: 5 })).rejects.toThrow(/still EXECUTE_IN_PROGRESS/);
+  });
+
+  it("never reads the stack's own status, so a stale UPDATE_COMPLETE cannot count as success", async () => {
+    // The describe function is the only thing it reads: a status that is not an execution status is not success.
+    const fake = sequence([{ ExecutionStatus: "UPDATE_COMPLETE" }]);
+    await expect(waitForChangeSetExecution(fake.describe, { ...fast, timeoutMs: 5 })).rejects.toThrow();
+  });
+});
+
+describe("verifyStackResources", () => {
+  it("reads each named resource back with DescribeStackResource and requires its status", async () => {
+    const asked: string[] = [];
+    const describe = async (logicalId: string) => { asked.push(logicalId); return { ResourceStatus: "CREATE_COMPLETE", PhysicalResourceId: `phys-${logicalId}` }; };
+    await expect(verifyStackResources(describe, ["E2eQualificationTransport"], "CREATE_COMPLETE")).resolves.toEqual(["E2eQualificationTransport"]);
+    expect(asked).toEqual(["E2eQualificationTransport"]);
+  });
+
+  it("fails on another status, a missing resource, or nothing to verify", async () => {
+    await expect(verifyStackResources(async () => ({ ResourceStatus: "CREATE_FAILED" }), ["E2eQualificationTransport"], "CREATE_COMPLETE")).rejects.toThrow(/E2eQualificationTransport.*CREATE_FAILED/);
+    await expect(verifyStackResources(async () => undefined, ["E2eQualificationTransport"], "CREATE_COMPLETE")).rejects.toThrow(/E2eQualificationTransport/);
+    await expect(verifyStackResources(async () => ({ ResourceStatus: "CREATE_COMPLETE" }), [], "CREATE_COMPLETE")).rejects.toThrow(/no resource to verify/);
+  });
+});
+
+describe("liftSynthArguments", () => {
+  const lift = { source: "lift-resources", logicalIdPrefix: "E2eQualificationTransport", construct: "AgentXControlPlane", cdkContext: { "agentx:e2eQualificationTransport": "enabled" }, identityMode: "cognito" } as Extract<TemplatePlan, { source: "lift-resources" }>;
+  const args = (overrides: Partial<typeof lift> = {}, profile = "agentx-test") =>
+    liftSynthArguments({ ...lift, ...overrides }, { env: ENV, region: "us-east-1", profile, outDir: "/tmp/out" });
+
+  it("gives cdk synth the profile and the same app and context the repo's deploy engine passes", () => {
+    const list = args();
+    expect(list.slice(0, 4)).toEqual(["--no-install", "cdk", "synth", "AgentXControlPlane"]);
+    expect(list).toEqual(expect.arrayContaining(["--exclusively", "--app", "node infra/dist/bin/agentx.js", "-c", `agentxEnv=${ENV}`, "-c", "agentxRegion=us-east-1", "-c", "agentx:e2eQualificationTransport=enabled", "--output", "/tmp/out"]));
+    expect(list.slice(list.indexOf("--profile"), list.indexOf("--profile") + 2)).toEqual(["--profile", "agentx-test"]);
+    // Cognito is the engine's default and adds no identity context; an own-OIDC environment adds it.
+    expect(list.join(" ")).not.toContain("agentxIdentity");
+    expect(args({ identityMode: "oidc" }).join(" ")).toContain("-c agentxIdentity=oidc");
   });
 });

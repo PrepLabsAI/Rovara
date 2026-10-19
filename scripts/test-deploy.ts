@@ -20,6 +20,7 @@ import {
   DeleteChangeSetCommand,
   DescribeChangeSetCommand,
   DescribeStackResourceCommand,
+  DescribeStackResourcesCommand,
   DescribeStacksCommand,
   ExecuteChangeSetCommand,
   GetTemplateCommand,
@@ -28,13 +29,17 @@ import {
 } from "@aws-sdk/client-cloudformation";
 import { GetFunctionConfigurationCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { build as bundle } from "esbuild";
+import { CDK_CONSTRUCT_IDS, cdkAppArguments } from "../packages/cli/src/deploy/cdk-engine.js";
 import { environmentStackName } from "../packages/contracts/src/environments.js";
 import {
   Runner,
   assertDigestImage,
   buildAndPushImage,
   describeStack,
+  profileArgs,
+  smokeTestExecutor,
   smokeTestWorker,
+  stackExists,
   stackOutput,
   verifyRepositoryImage,
   type ReleaseOptions,
@@ -79,15 +84,25 @@ export interface ObservedChange {
   attributes?: readonly string[];
 }
 
+export type IdentityMode = "cognito" | "oidc";
 export type TemplatePlan =
   | { source: "previous" }
   | { source: "lambda-code"; patches: ReadonlyArray<{ logicalId: string; zip: string }> }
-  | { source: "lift-resources"; logicalIdPrefix: string; construct: string; cdkContext: Readonly<Record<string, string>> };
+  | {
+      source: "lift-resources";
+      logicalIdPrefix: string;
+      /** Synthesized parameters to add to the deployed template with the lifted resources. */
+      parameterNames?: readonly string[];
+      construct: string;
+      cdkContext: Readonly<Record<string, string>>;
+      /** The synth runs with the app and context the deploy engine passes, which depend on this. */
+      identityMode: IdentityMode;
+    };
 
 export type DeployStep =
   | { id: string; kind: "build-lambda-zip"; unit: "broker" | "dispatcher"; logicalId: string; entry: string; zipPath: string }
   | { id: string; kind: "upload-artifact"; bucketFromStack: StackKind; from: string; keyPrefix: string }
-  | { id: string; kind: "ecr-push"; repositoryUri: string; revision: string }
+  | { id: string; kind: "ecr-push"; image: "worker" | "executor"; repositoryUri: string; revision: string }
   | {
       id: string;
       kind: "create-change-set";
@@ -100,14 +115,30 @@ export type DeployStep =
     }
   | { id: string; kind: "execute-change-set"; stack: string; createdBy: string }
   | { id: string; kind: "verify-lambda-code"; stack: string; logicalId: string; expectedSha256Base64: StepRef }
+  | { id: string; kind: "verify-stack-resources"; stack: string; createdBy: string; logicalIdPrefix: string; expectedStatus: string }
   | { id: string; kind: "verify-stack-parameter"; stack: string; key: string; expected: StepRef };
 
 const LAMBDAS = {
   broker: { logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker.ts" },
   dispatcher: { logicalId: "DispatcherD4A12972", entry: "packages/broker/src/aws/dispatcher.ts" },
 } as const;
-const QUALIFICATION = { logicalIdPrefix: "E2eQualificationTransport", construct: "AgentXControlPlane", context: { "agentx:e2eQualificationTransport": "enabled" } } as const;
+const QUALIFICATION = { logicalIdPrefix: "E2eQualificationTransport", construct: CDK_CONSTRUCT_IDS["control-plane"], context: { "agentx:e2eQualificationTransport": "enabled" } } as const;
 const WORKER_IMAGE_PARAMETER = "WorkerImageUri";
+const EXECUTOR_IMAGE_PARAMETER = "ExecutorImageUri";
+const EXECUTOR_SETTING = { logicalIdPrefix: "WorkerExecutorImageParameter", construct: CDK_CONSTRUCT_IDS.runtime } as const;
+
+/**
+ * The executor image's repository: the worker's, with its own name changed (`.../worker` to `.../executor`, `.../agentx-worker` to
+ * `.../agentx-executor`). Only the repository's last path segment is renamed, so the worker's registry and path stay what they are.
+ */
+export function executorRepositoryUri(workerRepositoryUri: string): string {
+  const slash = workerRepositoryUri.lastIndexOf("/");
+  const name = workerRepositoryUri.slice(slash + 1);
+  if (slash < 0 || !name.includes("worker")) {
+    throw new Error(`cannot derive the executor repository from ${workerRepositoryUri}: its name has no "worker" to replace; create the executor repository beside it and push the image by hand`);
+  }
+  return `${workerRepositoryUri.slice(0, slash + 1)}${name.slice(0, name.lastIndexOf("worker"))}executor${name.slice(name.lastIndexOf("worker") + "worker".length)}`;
+}
 
 export function loadAllowlist(): string[] {
   const parsed: unknown = JSON.parse(readFileSync(new URL("./test-deploy.allowlist.json", import.meta.url), "utf8"));
@@ -121,13 +152,13 @@ export function resolveTestStacks(env: string): Record<StackKind, string> {
 }
 
 export function planTestDeploy(
-  input: { env: string; only: DeployUnit[]; artifacts: BuiltArtifacts; previous: StackParameters },
+  input: { env: string; only: DeployUnit[]; artifacts: BuiltArtifacts; previous: StackParameters; identityMode?: IdentityMode },
   allowlist: readonly string[] = loadAllowlist(),
 ): DeployStep[] {
   if (!allowlist.includes(input.env)) throw new Error(ALLOWLIST_ERROR);
   const units = DEPLOY_UNITS.filter((unit) => input.only.includes(unit));
   if (units.length === 0) throw new Error("nothing to deploy: --only names no deploy unit");
-  if (units.includes("executor-image")) throw new Error("executor-image requires ExecutorImageUri (Task 1.6)");
+  const identityMode = input.identityMode ?? "cognito";
   if (units.includes("qualification-transport") && units.some((unit) => unit === "broker" || unit === "dispatcher")) {
     throw new Error("qualification-transport changes the control-plane template; run it on its own, apart from broker and dispatcher");
   }
@@ -144,7 +175,7 @@ export function planTestDeploy(
     if (current === undefined) throw new Error(`the runtime stack has no ${WORKER_IMAGE_PARAMETER} parameter to take the ECR repository from`);
     assertDigestImage(current);
     const repositoryUri = current.slice(0, current.indexOf("@"));
-    steps.push({ id: "push-worker-image", kind: "ecr-push", repositoryUri, revision });
+    steps.push({ id: "push-worker-image", kind: "ecr-push", image: "worker", repositoryUri, revision });
     const image: StepRef = { fromStep: "push-worker-image", output: "imageUri" };
     steps.push(
       {
@@ -159,6 +190,40 @@ export function planTestDeploy(
       },
       { id: "execute-runtime", kind: "execute-change-set", stack: stacks.runtime, createdBy: "change-set-runtime" },
       { id: "verify-runtime-image", kind: "verify-stack-parameter", stack: stacks.runtime, key: WORKER_IMAGE_PARAMETER, expected: image },
+    );
+  }
+
+  if (units.includes("executor-image")) {
+    const current = input.previous.runtime[WORKER_IMAGE_PARAMETER];
+    if (current === undefined) throw new Error(`the runtime stack has no ${WORKER_IMAGE_PARAMETER} parameter to take the ECR repository from`);
+    assertDigestImage(current);
+    const repositoryUri = executorRepositoryUri(current.slice(0, current.indexOf("@")));
+    steps.push({ id: "push-executor-image", kind: "ecr-push", image: "executor", repositoryUri, revision });
+    const image: StepRef = { fromStep: "push-executor-image", output: "imageUri" };
+    // A runtime stack deployed before the web/API runtime has neither the parameter nor its SSM setting: the first change set adds
+    // both, lifted from a synth of the runtime stack, and changes nothing else. Afterwards it changes only the parameter's value.
+    const exists = input.previous.runtime[EXECUTOR_IMAGE_PARAMETER] !== undefined;
+    const previousKeys = Object.keys(input.previous.runtime).filter((key) => key !== EXECUTOR_IMAGE_PARAMETER);
+    steps.push(
+      {
+        id: "change-set-executor",
+        kind: "create-change-set",
+        stack: stacks.runtime,
+        stackKind: "runtime",
+        changeSetPrefix: `test-deploy-executor-${revision.slice(0, 12)}`,
+        template: exists
+          ? { source: "previous" }
+          : { source: "lift-resources", logicalIdPrefix: EXECUTOR_SETTING.logicalIdPrefix, parameterNames: [EXECUTOR_IMAGE_PARAMETER], construct: EXECUTOR_SETTING.construct, cdkContext: {}, identityMode },
+        parameters: [
+          { key: EXECUTOR_IMAGE_PARAMETER, value: image },
+          ...previousKeys.sort().map((key): ParameterSpec => ({ key, usePreviousValue: true })),
+        ],
+        expect: exists
+          ? { action: "Modify", logicalIdPrefixes: [EXECUTOR_SETTING.logicalIdPrefix], allowedAttributes: ["Properties.Value"] }
+          : { action: "Add", logicalIdPrefixes: [EXECUTOR_SETTING.logicalIdPrefix] },
+      },
+      { id: "execute-executor", kind: "execute-change-set", stack: stacks.runtime, createdBy: "change-set-executor" },
+      { id: "verify-executor-image", kind: "verify-stack-parameter", stack: stacks.runtime, key: EXECUTOR_IMAGE_PARAMETER, expected: image },
     );
   }
 
@@ -202,11 +267,13 @@ export function planTestDeploy(
         stack: stacks["control-plane"],
         stackKind: "control-plane",
         changeSetPrefix: `test-deploy-qualification-${revision.slice(0, 12)}`,
-        template: { source: "lift-resources", logicalIdPrefix: QUALIFICATION.logicalIdPrefix, construct: QUALIFICATION.construct, cdkContext: QUALIFICATION.context },
+        template: { source: "lift-resources", logicalIdPrefix: QUALIFICATION.logicalIdPrefix, construct: QUALIFICATION.construct, cdkContext: QUALIFICATION.context, identityMode },
         parameters: usePrevious("control-plane"),
         expect: { action: "Add", logicalIdPrefixes: [QUALIFICATION.logicalIdPrefix] },
       },
       { id: "execute-qualification-transport", kind: "execute-change-set", stack: stacks["control-plane"], createdBy: "change-set-qualification-transport" },
+      // Read back what the change set added: the standing grant exists and is complete, not merely "UPDATE_COMPLETE".
+      { id: "verify-qualification-transport", kind: "verify-stack-resources", stack: stacks["control-plane"], createdBy: "change-set-qualification-transport", logicalIdPrefix: QUALIFICATION.logicalIdPrefix, expectedStatus: "CREATE_COMPLETE" },
     );
   }
   return steps;
@@ -263,17 +330,83 @@ function references(node: unknown, found: Set<string> = new Set()): Set<string> 
 
 /** The deployed template plus only the synthesized resources whose logical ID starts with `prefix`.
  * Taking the rest from the deployed template keeps unrelated code and configuration byte for byte. */
-export function liftResources(deployed: CfnTemplate, synthesized: CfnTemplate, prefix: string): CfnTemplate {
+export function liftResources(deployed: CfnTemplate, synthesized: CfnTemplate, prefix: string, parameterNames: readonly string[] = []): CfnTemplate {
   const lifted = Object.entries(synthesized.Resources ?? {}).filter(([logicalId]) => logicalId.startsWith(prefix));
   if (lifted.length === 0) throw new Error(`the synthesized template has no resource starting with ${prefix}; the CDK context flag was not honoured`);
-  const liftedIds = new Set(lifted.map(([logicalId]) => logicalId));
+  const liftedParameters = parameterNames.map((name): [string, unknown] => {
+    const parameter = synthesized.Parameters?.[name];
+    if (parameter === undefined) throw new Error(`the synthesized template has no parameter ${name}`);
+    return [name, parameter];
+  });
+  const liftedIds = new Set([...lifted.map(([logicalId]) => logicalId), ...liftedParameters.map(([name]) => name)]);
   for (const [logicalId, resource] of lifted) {
     for (const name of references(resource)) {
       if (name.startsWith("AWS::") || liftedIds.has(name) || name in (deployed.Resources ?? {}) || name in (deployed.Parameters ?? {})) continue;
       throw new Error(`${logicalId} refers to ${name}, which the deployed stack does not have; deploy it with CDK instead`);
     }
   }
-  return { ...deployed, Resources: { ...deployed.Resources, ...Object.fromEntries(lifted) } };
+  return {
+    ...deployed,
+    ...(liftedParameters.length === 0 ? {} : { Parameters: { ...deployed.Parameters, ...Object.fromEntries(liftedParameters) } }),
+    Resources: { ...deployed.Resources, ...Object.fromEntries(lifted) },
+  };
+}
+
+/** The arguments of `npx cdk synth <construct>` for a lifted template: the profile, and the app and context the repo's deploy engine passes. */
+export function liftSynthArguments(
+  plan: Extract<TemplatePlan, { source: "lift-resources" }>,
+  input: { env: string; region: string; profile: string; outDir: string },
+): string[] {
+  return [
+    "--no-install", "cdk", "synth", plan.construct, "--exclusively", "--quiet", "--no-notices", "--no-version-reporting",
+    ...cdkAppArguments({ env: input.env, region: input.region, identityMode: plan.identityMode }),
+    ...Object.entries(plan.cdkContext).flatMap(([key, value]) => ["-c", `${key}=${value}`]),
+    "--output", input.outDir,
+    ...profileArgs(input.profile),
+  ];
+}
+
+export interface ChangeSetExecutionState {
+  ExecutionStatus?: string | undefined;
+  StatusReason?: string | undefined;
+}
+
+/**
+ * Waits for one change set's own execution to complete. It reads the change set's ExecutionStatus and nothing else: a stack that
+ * already says UPDATE_COMPLETE from an earlier deploy is never taken as this change set's success. AVAILABLE and EXECUTE_IN_PROGRESS
+ * keep waiting (right after ExecuteChangeSet the status may still read AVAILABLE); every other status but EXECUTE_COMPLETE is an error.
+ */
+export async function waitForChangeSetExecution(
+  describe: () => Promise<ChangeSetExecutionState>,
+  options: { timeoutMs?: number; intervalMs?: number; sleep?: (ms: number) => Promise<void>; now?: () => number } = {},
+): Promise<void> {
+  const { timeoutMs = 30 * 60_000, intervalMs = 5_000, sleep: wait = sleep, now = Date.now } = options;
+  const deadline = now() + timeoutMs;
+  for (;;) {
+    const { ExecutionStatus: status, StatusReason: reason } = await describe();
+    if (status === "EXECUTE_COMPLETE") return;
+    if (status === "EXECUTE_FAILED" || status === "UNAVAILABLE" || status === "OBSOLETE") {
+      throw new Error(`the change set ended ${status}${reason ? `: ${reason}` : ""}; read the stack's events in CloudFormation`);
+    }
+    if (status !== "AVAILABLE" && status !== "EXECUTE_IN_PROGRESS") throw new Error(`the change set reports ${status ?? "no execution status"}, which is not one this deploy knows`);
+    if (now() > deadline) throw new Error(`the change set is still ${status} after ${Math.round(timeoutMs / 60_000)} minutes; check CloudFormation`);
+    await wait(intervalMs);
+  }
+}
+
+/** Reads each named resource back with DescribeStackResource and requires its status; returns the IDs checked. */
+export async function verifyStackResources(
+  describe: (logicalId: string) => Promise<{ ResourceStatus?: string | undefined; PhysicalResourceId?: string | undefined } | undefined>,
+  logicalIds: readonly string[],
+  expectedStatus: string,
+): Promise<string[]> {
+  if (logicalIds.length === 0) throw new Error("there is no resource to verify: the change set added none");
+  for (const logicalId of logicalIds) {
+    const resource = await describe(logicalId);
+    if (resource === undefined) throw new Error(`${logicalId} is not in the stack`);
+    if (resource.ResourceStatus !== expectedStatus) throw new Error(`${logicalId} is ${resource.ResourceStatus ?? "in no known status"}, not ${expectedStatus}`);
+  }
+  return [...logicalIds];
 }
 
 /** A copy of `template` whose named Lambda functions run the given S3 code; everything else is untouched. */
@@ -301,27 +434,45 @@ export interface TestDeployArgs {
   only: DeployUnit[];
 }
 
+/**
+ * Splits argv into the options a script knows. Every option is `--name` (a flag) or `--name value`; a bare word, a repeated option
+ * and an unknown option are errors, so a mistyped command never runs as a different one.
+ */
+export function parseOptions(argv: readonly string[], spec: { values: readonly string[]; flags: readonly string[] }): { values: Map<string, string>; flags: Set<string> } {
+  const values = new Map<string, string>();
+  const flags = new Set<string>();
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index] ?? "";
+    if (!argument.startsWith("--")) throw new Error(`unexpected argument ${argument}; every input is an option (--name value)`);
+    if (spec.flags.includes(argument)) {
+      if (flags.has(argument)) throw new Error(`${argument} was given twice`);
+      flags.add(argument);
+    } else if (spec.values.includes(argument)) {
+      const value = argv[index + 1];
+      if (value === undefined || value.startsWith("--")) throw new Error(`${argument} requires a value`);
+      if (values.has(argument)) throw new Error(`${argument} was given twice`);
+      values.set(argument, value);
+      index += 1;
+    } else {
+      throw new Error(`unknown option ${argument}`);
+    }
+  }
+  return { values, flags };
+}
+
 export function parseTestDeployArgs(argv: readonly string[]): TestDeployArgs {
-  const valueOf = (flag: string): string | undefined => {
-    const index = argv.indexOf(flag);
-    if (index < 0) return undefined;
-    const value = argv[index + 1];
-    if (value === undefined || value.startsWith("--")) throw new Error(`${flag} requires a value`);
-    return value;
-  };
-  const known = new Set(["--env", "--profile", "--region", "--only", "--apply"]);
-  for (const argument of argv) if (argument.startsWith("--") && !known.has(argument)) throw new Error(`unknown option ${argument}`);
-  const env = valueOf("--env");
+  const { values, flags } = parseOptions(argv, { values: ["--env", "--profile", "--region", "--only"], flags: ["--apply"] });
+  const env = values.get("--env");
   if (env === undefined) throw new Error("--env is required");
-  const profile = valueOf("--profile");
+  const profile = values.get("--profile");
   if (profile === undefined) throw new Error("--profile is required");
-  const onlyValue = valueOf("--only");
+  const onlyValue = values.get("--only");
   const only = onlyValue === undefined ? [...DEFAULT_UNITS] : onlyValue.split(",").map((name) => {
     const unit = DEPLOY_UNITS.find((candidate) => candidate === name.trim());
     if (unit === undefined) throw new Error(`unknown deploy unit ${name}; expected one of ${DEPLOY_UNITS.join(", ")}`);
     return unit;
   });
-  return { env, profile, region: valueOf("--region") ?? DEFAULT_REGION, apply: argv.includes("--apply"), only };
+  return { env, profile, region: values.get("--region") ?? DEFAULT_REGION, apply: flags.has("--apply"), only };
 }
 
 function describeRef(ref: StepRef): string {
@@ -334,16 +485,17 @@ export function formatPlan(steps: readonly DeployStep[]): string {
     switch (step.kind) {
       case "build-lambda-zip": return `${head} build ${step.logicalId} zip from ${step.entry} -> ${step.zipPath}`;
       case "upload-artifact": return `${head} upload ${step.from} zip to the control-plane artifact bucket under ${step.keyPrefix}<sha256>.zip`;
-      case "ecr-push": return `${head} build the worker image and push it to the existing repository ${step.repositoryUri} (tag test-*), then pin its digest`;
+      case "ecr-push": return `${head} build the ${step.image} image and push it to the existing repository ${step.repositoryUri} (tag test-*), then pin its digest; test-deploy never creates a repository, and stops if this one is missing`;
       case "create-change-set": {
         const changed = step.parameters.flatMap((parameter) => ("value" in parameter ? [`${parameter.key}=${describeRef(parameter.value)}`] : []));
         const template = step.template.source === "previous" ? "previous template"
           : step.template.source === "lambda-code" ? `deployed template with Code replaced for ${step.template.patches.map((patch) => patch.logicalId).join(", ")}`
-          : `deployed template plus ${step.template.logicalIdPrefix}* from a CDK synth (${Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`).join(", ")})`;
+          : `deployed template plus ${step.template.logicalIdPrefix}*${(step.template.parameterNames ?? []).length === 0 ? "" : ` and parameter ${(step.template.parameterNames ?? []).join(", ")}`} from a CDK synth of ${step.template.construct} (${[`identity=${step.template.identityMode}`, ...Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`)].join(", ")})`;
         const allowed = [...(step.expect.logicalIds ?? []), ...(step.expect.logicalIdPrefixes ?? []).map((prefix) => `${prefix}*`)].join(", ");
         return `${head} create change set on ${step.stack}: ${template}; ${step.parameters.length} parameters, ${changed.length === 0 ? "all UsePreviousValue" : `changing only ${changed.join(", ")}`}; abort unless the only changes are ${step.expect.action} ${allowed}`;
       }
       case "execute-change-set": return `${head} execute the change set from ${step.createdBy} on ${step.stack} and wait for UPDATE_COMPLETE`;
+      case "verify-stack-resources": return `${head} verify with DescribeStackResource that every ${step.logicalIdPrefix}* resource ${step.createdBy} added in ${step.stack} is ${step.expectedStatus}`;
       case "verify-lambda-code": return `${head} verify ${step.logicalId} CodeSha256 equals ${describeRef(step.expectedSha256Base64)}`;
       case "verify-stack-parameter": return `${head} verify ${step.stack} parameter ${step.key} equals ${describeRef(step.expected)}`;
     }
@@ -435,11 +587,7 @@ function observedChanges(changes: readonly Change[]): ObservedChange[] {
 function synthesizeLiftSource(context: ApplyContext, plan: Extract<TemplatePlan, { source: "lift-resources" }>): CfnTemplate {
   runNpmBuild(context);
   const outDir = mkdtempSync(join(tmpdir(), "test-deploy-synth-"));
-  context.runner.run("npx", [
-    "--no-install", "cdk", "synth", plan.construct, "--exclusively", "--quiet", "--no-notices", "--no-version-reporting",
-    "--app", "node infra/dist/bin/agentx.js", "-c", `agentxEnv=${context.env}`, "-c", `agentxRegion=${context.region}`,
-    ...Object.entries(plan.cdkContext).flatMap(([key, value]) => ["-c", `${key}=${value}`]), "--output", outDir,
-  ]);
+  context.runner.run("npx", liftSynthArguments(plan, { env: context.env, region: context.region, profile: context.options.profile ?? "", outDir }));
   return JSON.parse(readFileSync(join(outDir, `${plan.construct}.template.json`), "utf8")) as CfnTemplate;
 }
 
@@ -450,7 +598,9 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
     throw new Error(`stack ${step.stack} is ${status}; it must be in a settled state first`);
   }
   const have = new Set((stack.Parameters ?? []).map((parameter) => parameter.ParameterKey));
-  const unknown = step.parameters.filter((parameter) => !have.has(parameter.key));
+  // A parameter the lifted template itself adds is new; every other one must already be on the stack.
+  const added = new Set(step.template.source === "lift-resources" ? step.template.parameterNames ?? [] : []);
+  const unknown = step.parameters.filter((parameter) => !have.has(parameter.key) && !added.has(parameter.key));
   if (unknown.length > 0) throw new Error(`${step.stack} has no parameter ${unknown.map((parameter) => parameter.key).join(", ")}`);
 
   let templateUrl: string | undefined;
@@ -464,7 +614,7 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
         if (upload?.bucket === undefined || upload.s3Key === undefined || upload.s3ObjectVersion === undefined) throw new Error(`step ${patch.zip} did not upload`);
         return { logicalId: patch.logicalId, code: { S3Bucket: upload.bucket, S3Key: upload.s3Key, S3ObjectVersion: upload.s3ObjectVersion } };
       }))
-      : liftResources(deployed, synthesizeLiftSource(context, step.template), step.template.logicalIdPrefix);
+      : liftResources(deployed, synthesizeLiftSource(context, step.template), step.template.logicalIdPrefix, step.template.parameterNames);
     const body = Buffer.from(`${JSON.stringify(prepared, null, 2)}\n`);
     const bucket = stackOutput(describeStack(context.runner, context.region, step.stack), "ArtifactBucketName");
     const key = `test-deploy/${context.revision}/${step.stackKind}-template-${sha256(body).digest("hex")}.json`;
@@ -518,24 +668,26 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
     await dropChangeSet();
     throw new Error(`${error instanceof Error ? error.message : String(error)}. The change set was deleted and nothing was applied.`, { cause: error });
   }
-  recordOutput(context, step.id, { status: "created", changeSetName });
+  recordOutput(context, step.id, { status: "created", changeSetName, addedLogicalIds: JSON.stringify(observed.filter((change) => change.action === "Add").map((change) => change.logicalId)) });
 }
 
 async function executeChangeSet(context: ApplyContext, step: Extract<DeployStep, { kind: "execute-change-set" }>): Promise<void> {
   const created = context.outputs.get(step.createdBy);
   if (created?.status === "no-changes") return;
   if (created?.changeSetName === undefined) throw new Error(`step ${step.createdBy} created no change set`);
-  await context.cloudFormation.send(new ExecuteChangeSetCommand({ StackName: step.stack, ChangeSetName: created.changeSetName }));
-  const deadline = Date.now() + 30 * 60_000;
-  for (;;) {
-    await sleep(5_000);
-    const status = (await describeStackSdk(context, step.stack)).StackStatus ?? "";
-    if (status.endsWith("_IN_PROGRESS")) {
-      if (Date.now() > deadline) throw new Error(`${step.stack} is still ${status} after 30 minutes; check CloudFormation`);
-      continue;
-    }
-    if (status !== "UPDATE_COMPLETE") throw new Error(`${step.stack} ended in ${status}; read its events in CloudFormation`);
-    return;
+  const identity = { StackName: step.stack, ChangeSetName: created.changeSetName };
+  await context.cloudFormation.send(new ExecuteChangeSetCommand(identity));
+  // The change set's own ExecutionStatus, never the stack's: a stack still saying UPDATE_COMPLETE from before is not this deploy's success.
+  await waitForChangeSetExecution(() => context.cloudFormation.send(new DescribeChangeSetCommand(identity)));
+  const status = (await describeStackSdk(context, step.stack)).StackStatus ?? "";
+  if (status !== "UPDATE_COMPLETE") throw new Error(`${step.stack} is ${status} after its change set completed; read its events in CloudFormation`);
+}
+
+/** Pushes to a repository that must already exist: describing it is the check, and nothing here creates one. */
+function assertRepositoryExists(context: ApplyContext, repository: string): void {
+  const found = context.runner.aws(["ecr", "describe-repositories", "--repository-names", repository, "--region", context.region, "--output", "json"], true);
+  if (found.status !== 0) {
+    throw new Error(`the ECR repository ${repository} does not exist (or cannot be read) and test-deploy never creates one; create it with the worker repository's settings, then run this again`);
   }
 }
 
@@ -572,9 +724,11 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
       // Only the repository the runtime stack already uses: ensureRepository would create or change one.
       const repository = step.repositoryUri.slice(step.repositoryUri.indexOf("/") + 1);
       const options = { ...context.options, repository };
-      const imageUri = await buildAndPushImage(context.runner, options, {
-        repository, repositoryUri: step.repositoryUri, dockerfile: "environments/base/Dockerfile", localName: "agentx-worker", smokeTest: smokeTestWorker, tagPrefix: "test-",
-      }, step.revision);
+      if (step.image === "executor") assertRepositoryExists(context, repository);
+      const imageUri = await buildAndPushImage(context.runner, options, step.image === "worker"
+        ? { repository, repositoryUri: step.repositoryUri, dockerfile: "environments/base/Dockerfile", localName: "agentx-worker", smokeTest: smokeTestWorker, tagPrefix: "test-" }
+        : { repository, repositoryUri: step.repositoryUri, dockerfile: "environments/e2e-executor/Dockerfile", localName: "agentx-executor", smokeTest: smokeTestExecutor, tagPrefix: "test-" },
+      step.revision);
       verifyRepositoryImage(context.runner, options, imageUri);
       recordOutput(context, step.id, { imageUri });
       console.log(imageUri);
@@ -588,6 +742,19 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
       const expected = outputOf(context, step.expectedSha256Base64);
       if (configuration.CodeSha256 !== expected) throw new Error(`${step.logicalId} CodeSha256 ${configuration.CodeSha256} does not equal the zip's ${expected}`);
       console.log(`${step.logicalId} runs ${expected}`);
+      return;
+    }
+    case "verify-stack-resources": {
+      const created = context.outputs.get(step.createdBy);
+      let logicalIds: string[] = (JSON.parse(created?.addedLogicalIds ?? "[]") as string[]).filter((logicalId) => logicalId.startsWith(step.logicalIdPrefix));
+      if (logicalIds.length === 0 && created?.status === "no-changes") {
+        // Already applied by an earlier run: find the resources it left by their prefix.
+        const resources = await context.cloudFormation.send(new DescribeStackResourcesCommand({ StackName: step.stack }));
+        logicalIds = (resources.StackResources ?? []).map((resource) => resource.LogicalResourceId ?? "").filter((logicalId) => logicalId.startsWith(step.logicalIdPrefix));
+      }
+      const described = async (logicalId: string) => (await context.cloudFormation.send(new DescribeStackResourceCommand({ StackName: step.stack, LogicalResourceId: logicalId }))).StackResourceDetail;
+      const checked = await verifyStackResources(described, logicalIds, step.expectedStatus);
+      console.log(`${checked.join(", ")} ${step.expectedStatus}`);
       return;
     }
     case "verify-stack-parameter": {
@@ -613,12 +780,14 @@ export async function main(argv: readonly string[]): Promise<void> {
   const runner = new Runner(options);
   const revision = runner.capture("git", ["rev-parse", "HEAD"]).stdout.trim();
   const stacks = resolveTestStacks(args.env);
-  const needsRuntime = args.only.includes("worker-image");
+  const needsRuntime = args.only.includes("worker-image") || args.only.includes("executor-image");
   const previous: StackParameters = {
     "control-plane": currentParameters(runner, args.region, stacks["control-plane"]),
     runtime: needsRuntime ? currentParameters(runner, args.region, stacks.runtime) : {},
   };
-  const steps = planTestDeploy({ env: args.env, only: args.only, artifacts: { revision, outputDir: join(tmpdir(), `test-deploy-${revision.slice(0, 12)}`) }, previous });
+  // The identity stack exists only for a Cognito environment; the engine's synth context differs for an own-OIDC one.
+  const identityMode = stackExists(runner, args.region, environmentStackName(args.env, "identity")) ? "cognito" : "oidc";
+  const steps = planTestDeploy({ env: args.env, only: args.only, artifacts: { revision, outputDir: join(tmpdir(), `test-deploy-${revision.slice(0, 12)}`) }, previous, identityMode });
   console.log(`TEST deploy plan for ${args.env} (${args.region}), revision ${revision}\n${formatPlan(steps)}`);
   if (!args.apply) {
     console.log("\nDry run: nothing was changed. Add --apply to run this plan.");
