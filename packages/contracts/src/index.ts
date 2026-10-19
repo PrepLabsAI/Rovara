@@ -54,6 +54,7 @@ export * from "./e2e-application-execution-plan.js";
 export * from "./e2e-application-execution.js";
 export * from "./e2e-application-cli-launch.js";
 export * from "./e2e-application-build-binding.js";
+export * from "./e2e-application-approval-binding.js";
 export * from "./e2e-view.js";
 export * from "./e2e-catalog.js";
 export * from "./e2e-execution-plan.js";
