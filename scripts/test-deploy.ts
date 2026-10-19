@@ -76,6 +76,17 @@ export interface ChangeExpectation {
   logicalIdPrefixes?: readonly string[];
   /** Modify only: the only attributes (as `Properties.<Name>`) the change may touch. */
   allowedAttributes?: readonly string[];
+  /**
+   * Modify only, for Lambda code units (`logicalIds`): also accept a Modify of any other resource when every one of its
+   * Details is a Dynamic ResourceAttribute re-evaluation caused by `<code unit>.Arn`. A code-only update cannot change a
+   * function's Arn, so these are CloudFormation's conservative no-ops; anything else is still refused.
+   */
+  allowArnReevaluations?: boolean;
+}
+export interface ObservedDetail {
+  evaluation?: string;
+  changeSource?: string;
+  causingEntity?: string;
 }
 export interface ObservedChange {
   action: string;
@@ -83,6 +94,8 @@ export interface ObservedChange {
   type?: string;
   replacement?: string;
   attributes?: readonly string[];
+  /** One entry per change-set Detail, in the same order as `attributes`. */
+  details?: readonly ObservedDetail[];
 }
 
 export type IdentityMode = "cognito" | "oidc";
@@ -283,7 +296,7 @@ export function planTestDeploy(
         changeSetPrefix: `test-deploy-control-plane-${revision.slice(0, 12)}`,
         template: { source: "lambda-code", patches: lambdas.map((unit) => ({ logicalId: LAMBDAS[unit].logicalId, zip: `upload-${unit}` })) },
         parameters: usePrevious("control-plane"),
-        expect: { action: "Modify", logicalIds, allowedAttributes: ["Properties.Code"] },
+        expect: { action: "Modify", logicalIds, allowedAttributes: ["Properties.Code"], allowArnReevaluations: true },
       },
       { id: "execute-control-plane", kind: "execute-change-set", stack: stacks["control-plane"], createdBy: "change-set-control-plane" },
       ...lambdas.map((unit): DeployStep => ({
@@ -316,18 +329,30 @@ export function planTestDeploy(
   return steps;
 }
 
-/** Throws, listing every change that is not an expected one, when a change set holds more than it should. */
-export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], expected: ChangeExpectation): void {
+/** The one CausingEntity a code unit's Arn re-evaluation may name. */
+const arnOf = (logicalId: string) => `${logicalId}.Arn`;
+
+/**
+ * Throws, listing every change that is not an expected one, when a change set holds more than it should. Returns the logical ids
+ * accepted only as no-op `<code unit>.Arn` re-evaluations (empty unless the expectation allows them).
+ */
+export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], expected: ChangeExpectation): { noOpReevaluations: string[] } {
   if (changes.length === 0) throw new Error("the change set has no changes; nothing to apply");
   const matchesId = (logicalId: string) =>
     (expected.logicalIds ?? []).includes(logicalId) || (expected.logicalIdPrefixes ?? []).some((prefix) => logicalId.startsWith(prefix));
+  const labelOf = (change: ObservedChange) => `${change.action} ${change.logicalId}${change.type ? ` (${change.type})` : ""}`;
   const problems: string[] = [];
+  // The code units whose own change is exactly the expected one: only their Arn re-evaluations may be accepted.
+  const exactUnits = new Set<string>();
+  const reevaluations: ObservedChange[] = [];
   for (const change of changes) {
-    const label = `${change.action} ${change.logicalId}${change.type ? ` (${change.type})` : ""}`;
+    const label = labelOf(change);
     if (change.action !== expected.action || !matchesId(change.logicalId)) {
-      problems.push(label);
+      if (expected.allowArnReevaluations === true && expected.action === "Modify" && change.action === "Modify") reevaluations.push(change);
+      else problems.push(label);
       continue;
     }
+    const before = problems.length;
     if (change.replacement !== undefined && change.replacement !== "" && change.replacement !== "False") problems.push(`${label}: would replace the resource (Replacement ${change.replacement})`);
     if (expected.allowedAttributes !== undefined) {
       const attributes = change.attributes ?? [];
@@ -335,11 +360,35 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
       if (attributes.length === 0) problems.push(`${label}: changed attributes are not reported, so they cannot be checked`);
       else if (extra.length > 0) problems.push(`${label}: also changes ${extra.join(", ")}`);
     }
+    if (expected.allowArnReevaluations === true) {
+      const details = change.details ?? [];
+      if (details.length === 0) problems.push(`${label}: its change details are not reported, so they cannot be checked`);
+      else if (details.some((detail) => detail.evaluation !== "Static" || detail.changeSource !== "DirectModification")) problems.push(`${label}: has a change that is not a Static DirectModification`);
+    }
+    if (problems.length === before) exactUnits.add(change.logicalId);
+  }
+  const noOpReevaluations: string[] = [];
+  for (const change of reevaluations) {
+    const label = labelOf(change);
+    const details = change.details ?? [];
+    const causedByExactUnit = (detail: ObservedDetail) =>
+      detail.evaluation === "Dynamic" && detail.changeSource === "ResourceAttribute"
+      && (expected.logicalIds ?? []).some((unit) => exactUnits.has(unit) && detail.causingEntity === arnOf(unit));
+    let unsafe: string | undefined;
+    if (details.length === 0) unsafe = "its change details are not reported, so they cannot be checked";
+    else if (change.replacement === "True") unsafe = `would replace the resource (Replacement ${change.replacement})`;
+    else if (!details.every(causedByExactUnit)) unsafe = "has a change that is not a Dynamic re-evaluation of the Arn of a code unit changed only in Code";
+    if (unsafe === undefined) noOpReevaluations.push(change.logicalId);
+    else problems.push(`${label}: ${unsafe}`);
   }
   for (const logicalId of expected.logicalIds ?? []) {
     if (!changes.some((change) => change.logicalId === logicalId && change.action === expected.action)) problems.push(`missing the expected ${expected.action} ${logicalId}`);
   }
-  if (problems.length > 0) throw new Error(`the change set holds unexpected changes: ${problems.join("; ")}`);
+  if (problems.length > 0) {
+    const accepted = noOpReevaluations.length === 0 ? "" : `; accepted separately as no-op re-evaluations caused by ${(expected.logicalIds ?? []).map(arnOf).join(", ")}: ${noOpReevaluations.join(", ")}`;
+    throw new Error(`the change set holds unexpected changes: ${problems.join("; ")}${accepted}`);
+  }
+  return { noOpReevaluations };
 }
 
 export interface CfnResource {
@@ -576,7 +625,10 @@ export function formatPlan(steps: readonly DeployStep[]): string {
           : step.template.source === "lambda-code" ? `deployed template with Code replaced for ${step.template.patches.map((patch) => patch.logicalId).join(", ")}`
           : `deployed template plus ${step.template.logicalIdPrefix}*${(step.template.parameterNames ?? []).length === 0 ? "" : ` and parameter ${(step.template.parameterNames ?? []).join(", ")}`} from a CDK synth of ${step.template.construct} (${[`identity=${step.template.identityMode}`, ...Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`)].join(", ")})`;
         const allowed = [...(step.expect.logicalIds ?? []), ...(step.expect.logicalIdPrefixes ?? []).map((prefix) => `${prefix}*`)].join(", ");
-        return `${head} create change set on ${step.stack}: ${template}; ${step.parameters.length} parameters, ${changed.length === 0 ? "all UsePreviousValue" : `changing only ${changed.join(", ")}`}; abort unless the only changes are ${step.expect.action} ${allowed}`;
+        const reevaluations = step.expect.allowArnReevaluations === true
+          ? `, plus Modify entries accepted only as no-op re-evaluations caused by ${(step.expect.logicalIds ?? []).map(arnOf).join(", ")} (every detail Dynamic ResourceAttribute, never a replacement)`
+          : "";
+        return `${head} create change set on ${step.stack}: ${template}; ${step.parameters.length} parameters, ${changed.length === 0 ? "all UsePreviousValue" : `changing only ${changed.join(", ")}`}; abort unless the only changes are ${step.expect.action} ${allowed}${reevaluations}`;
       }
       case "execute-change-set": return `${head} execute the change set from ${step.createdBy} on ${step.stack} and wait for UPDATE_COMPLETE`;
       case "verify-stack-resources": return `${head} verify with DescribeStackResource that every ${step.logicalIdPrefix}* resource ${step.createdBy} added in ${step.stack} is ${step.expectedStatus}`;
@@ -651,19 +703,25 @@ async function describeStackSdk(context: ApplyContext, stackName: string): Promi
   return stack;
 }
 
-function observedChanges(changes: readonly Change[]): ObservedChange[] {
+export function observedChanges(changes: readonly Change[]): ObservedChange[] {
   return changes.map((change) => {
     const resource = change.ResourceChange;
     const attributes = (resource?.Details ?? []).map((detail) => {
       const attribute = detail.Target?.Attribute ?? "";
       return attribute === "Properties" ? `Properties.${detail.Target?.Name ?? ""}` : attribute;
     });
+    const details = (resource?.Details ?? []).map((detail): ObservedDetail => ({
+      ...(detail.Evaluation === undefined ? {} : { evaluation: detail.Evaluation }),
+      ...(detail.ChangeSource === undefined ? {} : { changeSource: detail.ChangeSource }),
+      ...(detail.CausingEntity === undefined ? {} : { causingEntity: detail.CausingEntity }),
+    }));
     return {
       action: resource?.Action ?? "",
       logicalId: resource?.LogicalResourceId ?? "",
       ...(resource?.ResourceType === undefined ? {} : { type: resource.ResourceType }),
       ...(resource?.Replacement === undefined ? {} : { replacement: resource.Replacement }),
       attributes,
+      details,
     };
   });
 }
@@ -747,7 +805,8 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
   const observed = observedChanges(changes);
   console.log(`change set ${changeSetName}:\n${observed.map((change) => `  ${change.action} ${change.logicalId} ${change.type ?? ""} ${(change.attributes ?? []).join(",")}`).join("\n")}`);
   try {
-    assertOnlyExpectedChanges(observed, step.expect);
+    const { noOpReevaluations } = assertOnlyExpectedChanges(observed, step.expect);
+    if (noOpReevaluations.length > 0) console.log(`accepted as no-op re-evaluations caused by ${(step.expect.logicalIds ?? []).map(arnOf).join(", ")}: ${noOpReevaluations.join(", ")}`);
   } catch (error) {
     await dropChangeSet();
     throw new Error(`${error instanceof Error ? error.message : String(error)}. The change set was deleted and nothing was applied.`, { cause: error });

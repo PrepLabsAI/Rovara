@@ -1,0 +1,580 @@
+{
+    "Changes": [
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "BrokerApiInvokeC6C766F0",
+                "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-BrokerApiInvokeC6C766F0-rwTIDA7Dn11s",
+                "ResourceType": "AWS::Lambda::Permission",
+                "Replacement": "Conditional",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "FunctionName",
+                            "RequiresRecreation": "Always"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "BrokerE1355FD6",
+                "PhysicalResourceId": "agentx-agentxlivetest123-control-pl-BrokerE1355FD6-8biQFqdYC9Bk",
+                "ResourceType": "AWS::Lambda::Function",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "Code",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Static",
+                        "ChangeSource": "DirectModification"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "BrokerIntegration",
+                "PhysicalResourceId": "v1dblx5",
+                "ResourceType": "AWS::ApiGatewayV2::Integration",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "IntegrationUri",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "DispatcherD4A12972",
+                "PhysicalResourceId": "agentx-agentxlivetest123-contro-DispatcherD4A12972-QYaODyknA2Zx",
+                "ResourceType": "AWS::Lambda::Function",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "Code",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Static",
+                        "ChangeSource": "DirectModification"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "GithubWebhookRecoveryRoleDefaultPolicyDC13C89E",
+                "PhysicalResourceId": "agent-Githu-ysgIM4TB7Vwv",
+                "ResourceType": "AWS::IAM::Policy",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "PolicyDocument",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "GithubWebhookRecoverySchedule",
+                "PhysicalResourceId": "agentx-agentxlivetest123-GithubWebhookRecoverySch-1UT8E40VTUX8H",
+                "ResourceType": "AWS::Scheduler::Schedule",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "Target",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "SlackIngressServiceRoleDefaultPolicy6F2F26FC",
+                "PhysicalResourceId": "agent-Slack-WOBs6TjhuSDd",
+                "ResourceType": "AWS::IAM::Policy",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "PolicyDocument",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "WorkflowDispatchRecoveryRoleDefaultPolicy083213B6",
+                "PhysicalResourceId": "agent-Workf-VxOg2i8Z7cil",
+                "ResourceType": "AWS::IAM::Policy",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "PolicyDocument",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "WorkflowDispatchRecoverySchedule",
+                "PhysicalResourceId": "agentx-agentxlivetest123-WorkflowDispatchRecovery-TD3ZHR4KVNID",
+                "ResourceType": "AWS::Scheduler::Schedule",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "Target",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        },
+        {
+            "Type": "Resource",
+            "ResourceChange": {
+                "Action": "Modify",
+                "LogicalResourceId": "WorkflowMergeRecoverySchedule",
+                "PhysicalResourceId": "agentx-agentxlivetest123-WorkflowMergeRecoverySch-937OL25UEDBR",
+                "ResourceType": "AWS::Scheduler::Schedule",
+                "Replacement": "False",
+                "Scope": [
+                    "Properties"
+                ],
+                "Details": [
+                    {
+                        "Target": {
+                            "Attribute": "Properties",
+                            "Name": "Target",
+                            "RequiresRecreation": "Never"
+                        },
+                        "Evaluation": "Dynamic",
+                        "ChangeSource": "ResourceAttribute",
+                        "CausingEntity": "BrokerE1355FD6.Arn"
+                    }
+                ]
+            }
+        }
+    ],
+    "ChangeSetName": "claude-inspect-cp-1792440295",
+    "ChangeSetId": "arn:aws:cloudformation:us-east-1:944937319445:changeSet/claude-inspect-cp-1792440295/35c7f40c-32c3-4388-a749-6c166657a47c",
+    "StackId": "arn:aws:cloudformation:us-east-1:944937319445:stack/agentx-agentxlivetest123-control-plane/b83be8d0-c350-11f1-bfc9-0e0bb0e82511",
+    "StackName": "agentx-agentxlivetest123-control-plane",
+    "Description": null,
+    "Parameters": [
+        {
+            "ParameterKey": "AssetParameters67ed427d35b283ffc40b8d3d7b2ff3cb6df3b526da523226f2f126bb830abeb6S3BucketBDA222E4",
+            "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
+        },
+        {
+            "ParameterKey": "AnthropicSecretArn",
+            "ParameterValue": ""
+        },
+        {
+            "ParameterKey": "AssetParameters6e115b4a869db92abc49eece5374ff536103930e3bbfbda22911080e06f6aa49ArtifactHash4834E80B",
+            "ParameterValue": "6e115b4a869db92abc49eece5374ff536103930e3bbfbda22911080e06f6aa49"
+        },
+        {
+            "ParameterKey": "SlackMemberWorkspaceLimit",
+            "ParameterValue": "3"
+        },
+        {
+            "ParameterKey": "AssetParameters3c075eb3689fc1f1c1e94008a86701547f550557658e7d83275f66278ef90d4eS3VersionKey9BB153D8",
+            "ParameterValue": "agentxlivetest123/private-candidates/0.3.6-p0test.cd1130da-20261014-1932z/lambda-assets/||3c075eb3689fc1f1c1e94008a86701547f550557658e7d83275f66278ef90d4e.zip"
+        },
+        {
+            "ParameterKey": "AssetParameters67ed427d35b283ffc40b8d3d7b2ff3cb6df3b526da523226f2f126bb830abeb6S3VersionKey34E28E31",
+            "ParameterValue": "agentxlivetest123/private-candidates/0.3.6-p0test.cd1130da-20261014-1932z/lambda-assets/||67ed427d35b283ffc40b8d3d7b2ff3cb6df3b526da523226f2f126bb830abeb6.zip"
+        },
+        {
+            "ParameterKey": "SessionManagerSecurityGroupId",
+            "ParameterValue": "sg-0f814f76d1ccaaf26"
+        },
+        {
+            "ParameterKey": "GitHubAppPrivateKeySecretArn",
+            "ParameterValue": "arn:aws:secretsmanager:us-east-1:944937319445:secret:agentx/agentxlivetest123/github-app-mr5iUo"
+        },
+        {
+            "ParameterKey": "AssetParametersa97c1627d3ec2b9a15d756a8395a3a118a588a69a021331cab8b822add26f53fS3Bucket9A3452F9",
+            "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
+        },
+        {
+            "ParameterKey": "AssetParameters774440e653d441dd8b43b14a1a0c7d9618531783bd94753284f42f28a325b0d0S3Bucket57A8C087",
+            "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
+        },
+        {
+            "ParameterKey": "SlackAppPostedMessages",
+            "ParameterValue": "accept"
+        },
+        {
+            "ParameterKey": "AdminClaim",
+            "ParameterValue": "cognito:groups"
+        },
+        {
+            "ParameterKey": "WorkspaceKmsKeyArn",
+            "ParameterValue": "arn:aws:kms:us-east-1:944937319445:key/aaa95a89-d32d-428b-ac0d-a259859d9f6f"
+        },
+        {
+            "ParameterKey": "AssetParameters774440e653d441dd8b43b14a1a0c7d9618531783bd94753284f42f28a325b0d0S3VersionKey6F3E4B1A",
+            "ParameterValue": "agentxlivetest123/private-candidates/0.3.6-p0test.cd1130da-20261014-1932z/lambda-assets/||774440e653d441dd8b43b14a1a0c7d9618531783bd94753284f42f28a325b0d0.zip"
+        },
+        {
+            "ParameterKey": "BudgetScope",
+            "ParameterValue": "account"
+        },
+        {
+            "ParameterKey": "AssetParameters8833f3d2b41934a89127f46ebb31fc44c9f81cb3e7dbd9195321af04aa561246S3Bucket55FE1DA3",
+            "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
+        },
+        {
+            "ParameterKey": "CallbackSigningKey",
+            "ParameterValue": "****"
+        },
+        {
+            "ParameterKey": "DeveloperOidcClientId",
+            "ParameterValue": ""
+        },
+        {
+            "ParameterKey": "DeveloperSignInSlackSince",
+            "ParameterValue": "1791489613"
+        },
+        {
+            "ParameterKey": "BudgetMonthlyUsd",
+            "ParameterValue": "260"
+        },
+        {
+            "ParameterKey": "AssetParameters6e115b4a869db92abc49eece5374ff536103930e3bbfbda22911080e06f6aa49S3VersionKey5BDAA2FC",
+            "ParameterValue": "agentxlivetest123/private-candidates/0.3.6-p0test.cd1130da-20261014-1932z/lambda-assets/||6e115b4a869db92abc49eece5374ff536103930e3bbfbda22911080e06f6aa49.zip"
+        },
+        {
+            "ParameterKey": "DispatcherSecurityGroupId",
+            "ParameterValue": "sg-0e0371a0763c07556"
+        },
+        {
+            "ParameterKey": "SlackTeamId",
+            "ParameterValue": "T0BSHLLUGBD"
+        },
+        {
+            "ParameterKey": "AssetParameters3c075eb3689fc1f1c1e94008a86701547f550557658e7d83275f66278ef90d4eS3Bucket68C47FC7",
+            "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
+        },
+        {
+            "ParameterKey": "SlackOrganizationWorkspaceLimit",
+            "ParameterValue": "20"
+        },
+        {
+            "ParameterKey": "DeveloperOidcRequiredValues",
+            "ParameterValue": "[]"
+        },
+        {
+            "ParameterKey": "AssetParameters7e82f5e80a19ed31eb71a9be376b1cd60e59d3ddca5f7db2951adca54c2d2750ArtifactHash72764A66",
+            "ParameterValue": "7e82f5e80a19ed31eb71a9be376b1cd60e59d3ddca5f7db2951adca54c2d2750"
+        },
+        {
+            "ParameterKey": "TaskPeopleChangesEnabled",
+            "ParameterValue": "true"
+        },
+        {
+            "ParameterKey": "AssetParametersef04d165cd2649aa7d6527f7e384d1ed1fa527d444a43f94832e02175daddf5bS3VersionKey4041BA42",
+            "ParameterValue": "agentxlivetest123/private-candidates/0.3.6-p0test.cd1130da-20261014-1932z/lambda-assets/||ef04d165cd2649aa7d6527f7e384d1ed1fa527d444a43f94832e02175daddf5b.zip"
+        },
+        {
+            "ParameterKey": "PrivateSubnetIds",
+            "ParameterValue": "subnet-0c1e579281da8c6e5,subnet-019469176b177d3a8"
+        },
+        {
+            "ParameterKey": "AssetParametersbc56acd0a6f18ce927772c1b52e22727dd12fd1c1995ca9b67a622df802012dbS3Bucket024A8275",
+            "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
+        },
+        {
+            "ParameterKey": "WorkflowDependenciesEnabled",
+            "ParameterValue": "false"
+        },
+        {
+            "ParameterKey": "DeveloperOidcRequiredClaim",
+            "ParameterValue": ""
+        },
+        {
+            "ParameterKey": "AssetParameters4cc08d20a47075d98e1d1c0c3ec8a5c2fde4f48a7ec4017107965683d0be0353ArtifactHash301F1B5F",
+            "ParameterValue": "4cc08d20a47075d98e1d1c0c3ec8a5c2fde4f48a7ec4017107965683d0be0353"
+        },
+        {
+            "ParameterKey": "PermissionsBoundaryArn",
+            "ParameterValue": ""
+        },
+        {
+            "ParameterKey": "Ec2WorkerInstanceRoleArn",
+            "ParameterValue": "arn:aws:iam::944937319445:role/agentx/agentxlivetest123/agentx-agentxlivetest123--Ec2WorkersInstanceRoleAB9-zb0OAjhEXiCo"
+        },
+        {
+            "ParameterKey": "AssetParameters67ed427d35b283ffc40b8d3d7b2ff3cb6df3b526da523226f2f126bb830abeb6ArtifactHashD301FEAC",
+            "ParameterValue": "67ed427d35b283ffc40b8d3d7b2ff3cb6df3b526da523226f2f126bb830abeb6"
+        },
+        {
+            "ParameterKey": "AssetParameters6e115b4a869db92abc49eece5374ff536103930e3bbfbda22911080e06f6aa49S3Bucket4E35639C",
+            "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
+        },
+        {
+            "ParameterKey": "OpenAISecretArn",
+            "ParameterValue": ""
+        },
+        {
+            "ParameterKey": "AssetParameters3c075eb3689fc1f1c1e94008a86701547f550557658e7d83275f66278ef90d4eArtifactHash944AF92C",
+            "ParameterValue": "3c075eb3689fc1f1c1e94008a86701547f550557658e7d83275f66278ef90d4e"
+        },
+        {
+            "ParameterKey": "OpenRouterSecretArn",
+            "ParameterValue": ""
+        },
+        {
+            "ParameterKey": "AssetParameters774440e653d441dd8b43b14a1a0c7d9618531783bd94753284f42f28a325b0d0ArtifactHash29C6BFB1",
+            "ParameterValue": "774440e653d441dd8b43b14a1a0c7d9618531783bd94753284f42f28a325b0d0"
+        },
+        {
+            "ParameterKey": "OidcIssuer",
+            "ParameterValue": "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_3v5LWW2F6"
+        },
+        {
+            "ParameterKey": "DeveloperOidcDisplayName",
+            "ParameterValue": "Company sign-in"
+        },
+        {
+            "ParameterKey": "DeveloperOidcIssuer",
+            "ParameterValue": ""
+        },
+        {
+            "ParameterKey": "AdminValues",
+            "ParameterValue": "[\"agentx-admin\"]"
+        },
+        {
+            "ParameterKey": "AssetParametersce8facb7272aaee8f89a13b296fb976827963491b22e9552d4ffe6ac9ec3226dArtifactHash48C7FDC3",
+            "ParameterValue": "ce8facb7272aaee8f89a13b296fb976827963491b22e9552d4ffe6ac9ec3226d"
+        },
+        {
+            "ParameterKey": "TaskPeoplePrivateInvitationsEnabled",
+            "ParameterValue": "false"
+        },
+        {
+            "ParameterKey": "DeveloperSignInSlack",
+            "ParameterValue": "enabled"
+        },
+        {
+            "ParameterKey": "AssetParametersef04d165cd2649aa7d6527f7e384d1ed1fa527d444a43f94832e02175daddf5bS3Bucket4A0EBC19",
+            "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
+        },
+        {
+            "ParameterKey": "AssetParameters4cc08d20a47075d98e1d1c0c3ec8a5c2fde4f48a7ec4017107965683d0be0353S3VersionKey86490AC2",
+            "ParameterValue": "agentxlivetest123/private-candidates/0.3.6-p0test.cd1130da-20261014-1932z/lambda-assets/||4cc08d20a47075d98e1d1c0c3ec8a5c2fde4f48a7ec4017107965683d0be0353.zip"
+        },
+        {
+            "ParameterKey": "GitHubAppId",
+            "ParameterValue": ""
+        },
+        {
+            "ParameterKey": "OidcAudience",
+            "ParameterValue": "5vjjlhouoosqnce7akpmkvhmbn"
+        },
+        {
+            "ParameterKey": "AssetParameters7e82f5e80a19ed31eb71a9be376b1cd60e59d3ddca5f7db2951adca54c2d2750S3VersionKey4DD17802",
+            "ParameterValue": "agentxlivetest123/private-candidates/0.3.6-p0test.cd1130da-20261014-1932z/lambda-assets/||7e82f5e80a19ed31eb71a9be376b1cd60e59d3ddca5f7db2951adca54c2d2750.zip"
+        },
+        {
+            "ParameterKey": "AssetParameters340e468afe33ef0d14f1e2bc7f906cb616c44d2a852ffc4bfd17595eece4527dS3BucketEC50DD53",
+            "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
+        },
+        {
+            "ParameterKey": "TaskPersonProofEnabled",
+            "ParameterValue": "true"
+        },
+        {
+            "ParameterKey": "DeveloperOidcSince",
+            "ParameterValue": "0"
+        },
+        {
+            "ParameterKey": "SlackThreadTurnsPerMinute",
+            "ParameterValue": "6"
+        },
+        {
+            "ParameterKey": "AssetParametersef04d165cd2649aa7d6527f7e384d1ed1fa527d444a43f94832e02175daddf5bArtifactHashFFD134F1",
+            "ParameterValue": "ef04d165cd2649aa7d6527f7e384d1ed1fa527d444a43f94832e02175daddf5b"
+        },
+        {
+            "ParameterKey": "TaskPeoplePublicInvitationsEnabled",
+            "ParameterValue": "false"
+        },
+        {
+            "ParameterKey": "AssetParameters7e82f5e80a19ed31eb71a9be376b1cd60e59d3ddca5f7db2951adca54c2d2750S3BucketC7195DED",
+            "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
+        },
+        {
+            "ParameterKey": "Ec2WorkerLaunchTemplateId",
+            "ParameterValue": "lt-0c0f5c645d932372c"
+        },
+        {
+            "ParameterKey": "GitHubAppCredentialRef",
+            "ParameterValue": "github-agentx-sdlc"
+        },
+        {
+            "ParameterKey": "AssetParametersbc56acd0a6f18ce927772c1b52e22727dd12fd1c1995ca9b67a622df802012dbS3VersionKey58C2736B",
+            "ParameterValue": "agentxlivetest123/private-candidates/0.3.6-p0test.cd1130da-20261014-1932z/lambda-assets/||bc56acd0a6f18ce927772c1b52e22727dd12fd1c1995ca9b67a622df802012db.zip"
+        },
+        {
+            "ParameterKey": "AssetParametersbc56acd0a6f18ce927772c1b52e22727dd12fd1c1995ca9b67a622df802012dbArtifactHash1873ED54",
+            "ParameterValue": "bc56acd0a6f18ce927772c1b52e22727dd12fd1c1995ca9b67a622df802012db"
+        },
+        {
+            "ParameterKey": "AssetParameters8833f3d2b41934a89127f46ebb31fc44c9f81cb3e7dbd9195321af04aa561246S3VersionKey12451DB2",
+            "ParameterValue": "agentxlivetest123/private-candidates/0.3.6-p0test.cd1130da-20261014-1932z/lambda-assets/||8833f3d2b41934a89127f46ebb31fc44c9f81cb3e7dbd9195321af04aa561246.zip"
+        },
+        {
+            "ParameterKey": "AssetParametersce8facb7272aaee8f89a13b296fb976827963491b22e9552d4ffe6ac9ec3226dS3VersionKeyCAF841FE",
+            "ParameterValue": "agentxlivetest123/private-candidates/0.3.6-p0test.cd1130da-20261014-1932z/lambda-assets/||ce8facb7272aaee8f89a13b296fb976827963491b22e9552d4ffe6ac9ec3226d.zip"
+        },
+        {
+            "ParameterKey": "AssetParameters8833f3d2b41934a89127f46ebb31fc44c9f81cb3e7dbd9195321af04aa561246ArtifactHash4375717E",
+            "ParameterValue": "8833f3d2b41934a89127f46ebb31fc44c9f81cb3e7dbd9195321af04aa561246"
+        },
+        {
+            "ParameterKey": "AssetParameters340e468afe33ef0d14f1e2bc7f906cb616c44d2a852ffc4bfd17595eece4527dArtifactHashDE40A0F4",
+            "ParameterValue": "340e468afe33ef0d14f1e2bc7f906cb616c44d2a852ffc4bfd17595eece4527d"
+        },
+        {
+            "ParameterKey": "AssetParametersa97c1627d3ec2b9a15d756a8395a3a118a588a69a021331cab8b822add26f53fS3VersionKeyA7A7F3A7",
+            "ParameterValue": "agentxlivetest123/private-candidates/0.3.6-p0test.cd1130da-20261014-1932z/lambda-assets/||a97c1627d3ec2b9a15d756a8395a3a118a588a69a021331cab8b822add26f53f.zip"
+        },
+        {
+            "ParameterKey": "McpConfirmElicitation",
+            "ParameterValue": "enabled"
+        },
+        {
+            "ParameterKey": "AssetParametersa97c1627d3ec2b9a15d756a8395a3a118a588a69a021331cab8b822add26f53fArtifactHashE56E0497",
+            "ParameterValue": "a97c1627d3ec2b9a15d756a8395a3a118a588a69a021331cab8b822add26f53f"
+        },
+        {
+            "ParameterKey": "AssetParameters340e468afe33ef0d14f1e2bc7f906cb616c44d2a852ffc4bfd17595eece4527dS3VersionKeyBDA20588",
+            "ParameterValue": "agentxlivetest123/private-candidates/0.3.6-p0test.cd1130da-20261014-1932z/lambda-assets/||340e468afe33ef0d14f1e2bc7f906cb616c44d2a852ffc4bfd17595eece4527d.zip"
+        },
+        {
+            "ParameterKey": "AssetParameters4cc08d20a47075d98e1d1c0c3ec8a5c2fde4f48a7ec4017107965683d0be0353S3BucketBC7C2282",
+            "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
+        },
+        {
+            "ParameterKey": "AssetParametersce8facb7272aaee8f89a13b296fb976827963491b22e9552d4ffe6ac9ec3226dS3Bucket3A84A73A",
+            "ParameterValue": "agentx-agentxlivetest123-ac-artifactbucket7410c9ef-tdepjp3jep13"
+        }
+    ],
+    "CreationTime": "2026-10-19T20:04:58.950000+00:00",
+    "ExecutionStatus": "AVAILABLE",
+    "Status": "CREATE_COMPLETE",
+    "StatusReason": null,
+    "NotificationARNs": [],
+    "RollbackConfiguration": {},
+    "Capabilities": [
+        "CAPABILITY_NAMED_IAM"
+    ],
+    "Tags": null,
+    "ParentChangeSetId": null,
+    "IncludeNestedStacks": false,
+    "RootChangeSetId": null,
+    "OnStackFailure": null,
+    "ImportExistingResources": null,
+    "StackDriftStatus": null,
+    "DeploymentMode": null,
+    "DeploymentConfig": {
+        "Mode": "STANDARD",
+        "DisableRollback": false
+    }
+}

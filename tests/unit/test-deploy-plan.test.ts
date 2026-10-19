@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import type { Change } from "@aws-sdk/client-cloudformation";
 import { describe, expect, it } from "vitest";
 import {
   assertOnlyExpectedChanges,
@@ -7,6 +9,7 @@ import {
   formatPlan,
   liftResources,
   liftSynthArguments,
+  observedChanges,
   parseTestDeployArgs,
   patchLambdaCode,
   planTestDeploy,
@@ -16,6 +19,7 @@ import {
   verifyStackResources,
   waitForStackUpdate,
   type BuiltArtifacts,
+  type ChangeExpectation,
   type DeployStep,
   type StackParameters,
   type TemplatePlan,
@@ -59,7 +63,7 @@ describe("planTestDeploy", () => {
     expect(changeSet).toMatchObject({
       stack: CONTROL_PLANE,
       template: { source: "lambda-code", patches: [{ logicalId: "BrokerE1355FD6", zip: upload.id }] },
-      expect: { action: "Modify", logicalIds: ["BrokerE1355FD6"], allowedAttributes: ["Properties.Code"] },
+      expect: { action: "Modify", logicalIds: ["BrokerE1355FD6"], allowedAttributes: ["Properties.Code"], allowArnReevaluations: true },
     });
     expect(execute).toMatchObject({ stack: CONTROL_PLANE, createdBy: changeSet.id });
     // The Lambda CodeSha256 is the base64 of the zip's sha256: the plan binds it to the build step.
@@ -220,6 +224,12 @@ describe("planTestDeploy", () => {
     expect(text).not.toContain("control-plane artifact bucket");
   });
 
+  it("states in the printed plan that only no-op Arn re-evaluations are accepted beside the code units", () => {
+    const text = formatPlan(plan(["broker", "dispatcher"]));
+    expect(text).toContain("no-op re-evaluations caused by BrokerE1355FD6.Arn, DispatcherD4A12972.Arn");
+    expect(formatPlan(plan(["worker-image"]))).not.toContain("no-op re-evaluations");
+  });
+
   it("plans qualification-transport as a guarded add-only change set on the control-plane stack", () => {
     const steps = plan(["qualification-transport"]);
     expect(kinds(steps)).toEqual(["create-change-set", "execute-change-set", "verify-stack-resources"]);
@@ -373,6 +383,131 @@ describe("assertOnlyExpectedChanges", () => {
 
   it("aborts when an expected change is missing", () => {
     expect(() => assertOnlyExpectedChanges([policyAdd], codeOnly)).toThrow(/BrokerE1355FD6/);
+  });
+});
+
+describe("assertOnlyExpectedChanges with a code-only Lambda update (real TEST change set)", () => {
+  const live = JSON.parse(readFileSync(new URL("../fixtures/test-deploy/control-plane-code-change-set.json", import.meta.url), "utf8")) as { Changes: Change[] };
+  const expectation = (logicalIds: readonly string[]) =>
+    ({ action: "Modify", logicalIds, allowedAttributes: ["Properties.Code"], allowArnReevaluations: true }) as const;
+  const both = expectation(["BrokerE1355FD6", "DispatcherD4A12972"]);
+  const fresh = (): Change[] => structuredClone(live.Changes);
+  const resource = (changes: Change[], logicalId: string) => {
+    const found = changes.find((change) => change.ResourceChange?.LogicalResourceId === logicalId)?.ResourceChange;
+    if (found === undefined) throw new Error(`fixture has no ${logicalId}`);
+    return found;
+  };
+  const check = (changes: Change[], expected: ChangeExpectation = both) => assertOnlyExpectedChanges(observedChanges(changes), expected);
+
+  it("accepts the saved change set for broker and dispatcher, reporting the dynamic entries separately", () => {
+    const result = check(fresh());
+    expect(result.noOpReevaluations).toHaveLength(8);
+    expect(result.noOpReevaluations).toContain("BrokerApiInvokeC6C766F0");
+    expect(result.noOpReevaluations).not.toContain("BrokerE1355FD6");
+  });
+
+  it("refuses the same change set when only the dispatcher is deployed, because the broker is not a code unit of that run", () => {
+    expect(() => check(fresh(), expectation(["DispatcherD4A12972"]))).toThrow(/Modify BrokerE1355FD6/);
+  });
+
+  it("refuses a dependent whose detail is Static", () => {
+    const changes = fresh();
+    const detail = resource(changes, "BrokerIntegration").Details?.[0];
+    if (detail === undefined) throw new Error("fixture detail");
+    detail.Evaluation = "Static";
+    expect(() => check(changes)).toThrow(/BrokerIntegration/);
+  });
+
+  it("refuses a dependent caused by another attribute of the code unit", () => {
+    const changes = fresh();
+    const detail = resource(changes, "BrokerIntegration").Details?.[0];
+    if (detail === undefined) throw new Error("fixture detail");
+    detail.CausingEntity = "BrokerE1355FD6.Version";
+    expect(() => check(changes)).toThrow(/BrokerIntegration/);
+  });
+
+  it("refuses a dependent caused by a resource that is not a code unit of this run", () => {
+    const changes = fresh();
+    const detail = resource(changes, "BrokerIntegration").Details?.[0];
+    if (detail === undefined) throw new Error("fixture detail");
+    detail.CausingEntity = "SomethingElse.Arn";
+    expect(() => check(changes)).toThrow(/BrokerIntegration/);
+  });
+
+  it("refuses a dependent that has one dynamic detail and one other detail", () => {
+    const changes = fresh();
+    const target = resource(changes, "BrokerIntegration");
+    target.Details = [...(target.Details ?? []), { Target: { Attribute: "Properties", Name: "Other", RequiresRecreation: "Never" }, Evaluation: "Static", ChangeSource: "DirectModification" }];
+    expect(() => check(changes)).toThrow(/BrokerIntegration/);
+  });
+
+  it("refuses a dependent with no details", () => {
+    const changes = fresh();
+    resource(changes, "BrokerIntegration").Details = [];
+    expect(() => check(changes)).toThrow(/BrokerIntegration/);
+  });
+
+  it("refuses a dependent whose change source is a parameter reference", () => {
+    const changes = fresh();
+    const detail = resource(changes, "BrokerIntegration").Details?.[0];
+    if (detail === undefined) throw new Error("fixture detail");
+    detail.ChangeSource = "ParameterReference";
+    expect(() => check(changes)).toThrow(/BrokerIntegration/);
+  });
+
+  it("refuses a dependent that would be replaced, even conditionally-looking ones that are not Conditional", () => {
+    const changes = fresh();
+    resource(changes, "BrokerApiInvokeC6C766F0").Replacement = "True";
+    expect(() => check(changes)).toThrow(/BrokerApiInvokeC6C766F0.*replace/);
+  });
+
+  it("accepts Replacement Conditional only because the causing Arn cannot change", () => {
+    const changes = fresh();
+    expect(resource(changes, "BrokerApiInvokeC6C766F0").Replacement).toBe("Conditional");
+    expect(() => check(changes)).not.toThrow();
+  });
+
+  it("refuses a dependent that is added or removed", () => {
+    const added = fresh();
+    resource(added, "BrokerIntegration").Action = "Add";
+    expect(() => check(added)).toThrow(/Add BrokerIntegration/);
+    const removed = fresh();
+    resource(removed, "BrokerIntegration").Action = "Remove";
+    expect(() => check(removed)).toThrow(/Remove BrokerIntegration/);
+  });
+
+  it("refuses an extra Add beside the otherwise accepted change set", () => {
+    const changes = fresh();
+    changes.push({ Type: "Resource", ResourceChange: { Action: "Add", LogicalResourceId: "Extra", ResourceType: "AWS::SQS::Queue", Details: [] } });
+    expect(() => check(changes)).toThrow(/Add Extra/);
+  });
+
+  it("refuses dependents when the code unit's own change touches more than Code", () => {
+    const changes = fresh();
+    const broker = resource(changes, "BrokerE1355FD6");
+    broker.Details = [...(broker.Details ?? []), { Target: { Attribute: "Properties", Name: "Environment", RequiresRecreation: "Never" }, Evaluation: "Static", ChangeSource: "DirectModification" }];
+    expect(() => check(changes)).toThrow(/BrokerE1355FD6.*Properties.Environment/);
+    expect(() => check(changes)).toThrow(/BrokerApiInvokeC6C766F0/);
+  });
+
+  it("refuses dependents when the code unit's own change replaces it", () => {
+    const changes = fresh();
+    resource(changes, "BrokerE1355FD6").Replacement = "True";
+    expect(() => check(changes)).toThrow(/BrokerIntegration/);
+  });
+
+  it("refuses a code unit whose own detail is not a static direct modification", () => {
+    const changes = fresh();
+    const detail = resource(changes, "BrokerE1355FD6").Details?.[0];
+    if (detail === undefined) throw new Error("fixture detail");
+    detail.Evaluation = "Dynamic";
+    detail.ChangeSource = "ResourceAttribute";
+    detail.CausingEntity = "DispatcherD4A12972.Arn";
+    expect(() => check(changes)).toThrow(/BrokerE1355FD6/);
+  });
+
+  it("does not accept dynamic dependents unless the expectation allows Arn re-evaluations", () => {
+    expect(() => check(fresh(), { action: "Modify", logicalIds: ["BrokerE1355FD6", "DispatcherD4A12972"], allowedAttributes: ["Properties.Code"] })).toThrow(/Modify BrokerIntegration/);
   });
 });
 
