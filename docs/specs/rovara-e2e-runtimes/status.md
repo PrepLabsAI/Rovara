@@ -37,6 +37,7 @@
   - `scripts/test-qualify-runtime.ts --apply` qualified a new runner `i-064d6c00c2d299684` (10.42.133.107) with all **9 probes**, including network walls and the Chromium sandbox, on the first attempt;
   - rows `#web`/`#api` are READY (revision 2), expiring 2026-10-26T23:54Z;
   - the previous runner `i-0cfe8d699d3b4b7af` and its data volume were removed.
+- 2026-10-19: M1.2 Task 2.1 (discovery proposes qualified web/API targets): a root web/API package with `scripts.start` and an npm lockfile now gets an inferred launch recipe (`npm ci`, optional `npm run build`, `npm start`), not the old `npm run start` one, so its `recipeDigest` changes. Setup proposals stored before this re-verify differently (their recipe no longer matches discovery's); planning falls back to capturing the prepared commit, which is safe. Web/API targets in new proposals carry the READY runtime profile `linux-arm64-web-api-v1` instead of the `*-phase-unavailable` placeholders.
 
 ## Before M1.2 runs untrusted candidates
 

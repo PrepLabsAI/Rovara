@@ -147,4 +147,58 @@ describe("qualified web/API targets and Node launch recipes", () => {
     expect(inferNodeWebRecipe(source)).toEqual(explicit);
     expect(inferNodeWebRecipe(source)?.recipeDigest).toBe(explicit.recipeDigest);
   });
+
+  describe("inferNodeWebRecipe agrees with discovery", () => {
+    const rootRecipe = (source: VerifiedE2ESourceSnapshot) => inspectE2ERepository(source, source.candidate).inspection.applications
+      .find((item) => (item.kind === "web" || item.kind === "api") && item.sourcePaths[0] === "package.json")?.recipe ?? null;
+    const fixtureText = readFileSync(new URL("../fixtures/e2e-web-api-app/package.json", import.meta.url), "utf8");
+    const lock = { "package-lock.json": "{}" };
+    const cases: Array<[string, VerifiedE2ESourceSnapshot, boolean]> = [
+      ["start and dev scripts", web({ start: "node s.js", dev: "vite" }, lock), false],
+      ["an Electron root package", snapshotOf({ "package.json": JSON.stringify({ name: "desk", dependencies: { electron: "1" }, scripts: { start: "electron ." } }), ...lock }), false],
+      ["an Expo root package", snapshotOf({ "package.json": JSON.stringify({ name: "mob", dependencies: { expo: "1" }, scripts: { start: "expo start" } }), ...lock }), false],
+      ["a malformed project contract", snapshotOf({ "package.json": JSON.stringify({ name: "shop-web", scripts: { start: "x" }, agentx: { e2e: { schemaVersion: "bad" } } }), ...lock }), false],
+      ["a native sidecar beside the package", snapshotOf({ "package.json": JSON.stringify({ name: "shop-web", scripts: { start: "x" } }), ".agentx/e2e-application.json": "{}", ...lock }), false],
+      ["an explicit project contract", snapshotOf({ "package.json": fixtureText, ...lock }), true],
+      ["an inferred recipe", web({ start: "node s.js", build: "tsc" }, lock), true],
+    ];
+    it.each(cases)("returns the discovered recipe for %s", (_name, source, expectRecipe) => {
+      const discovered = rootRecipe(source);
+      expect(inferNodeWebRecipe(source)).toEqual(discovered);
+      expect(discovered !== null).toBe(expectRecipe);
+    });
+  });
+
+  describe("verification of a stored READY profile", () => {
+    const monorepo = () => {
+      const pkg = (name: string) => JSON.stringify({ name, scripts: { start: "node s.js" } });
+      const contents = { "apps/a/package.json": pkg("shop-a"), "apps/b/package.json": pkg("shop-b") };
+      const sources = Object.entries(contents).map(([path, text]) => ({ path, sha256: hash(text), bytes: Buffer.from(text), kind: "blob" as const }));
+      return { candidate: snapshot.candidate, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha, treeComplete: true as const, treePaths: sources.map((item) => item.path), sources } as VerifiedE2ESourceSnapshot;
+    };
+    const proposed = () => {
+      const source = monorepo();
+      return { source, proposal: proposeE2ESetup({ inspection: inspectE2ERepository(source, source.candidate).inspection, snapshot: source, expectedCandidate: source.candidate,
+        readyProfiles: [{ kind: "web", profileId: "linux-arm64-web-api-v1" }] }) };
+    };
+    const withProfiles = (proposal: ReturnType<typeof proposed>["proposal"], profiles: string[]) =>
+      ({ ...proposal, targets: proposal.targets.map((item, index) => ({ ...item, runtimeProfileId: profiles[index]! })) });
+
+    it("accepts every web target on the qualified profile", () => {
+      const { source, proposal } = proposed();
+      expect(proposal.targets.map((item) => item.runtimeProfileId)).toEqual(["linux-arm64-web-api-v1", "linux-arm64-web-api-v1"]);
+      expect(verifyE2ESetupProposal(proposal, source, source.candidate)).toEqual(proposal);
+    });
+
+    it("rejects a profile that is not the qualified web/API profile", () => {
+      const { source, proposal } = proposed();
+      expect(() => verifyE2ESetupProposal(withProfiles(proposal, ["rogue-profile-v1", "rogue-profile-v1"]), source, source.candidate)).toThrow();
+    });
+
+    it("rejects mixed profiles across web targets", () => {
+      const { source, proposal } = proposed();
+      expect(() => verifyE2ESetupProposal(withProfiles(proposal, ["linux-arm64-web-api-v1", "rogue-profile-v1"]), source, source.candidate)).toThrow();
+      expect(() => verifyE2ESetupProposal(withProfiles(proposal, ["linux-arm64-web-api-v1", "web-phase-unavailable"]), source, source.candidate)).toThrow();
+    });
+  });
 });

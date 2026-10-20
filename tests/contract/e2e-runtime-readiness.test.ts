@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { canonicalJson, E2ETargetSchema, type E2ERuntimeCapabilityDescriptor, type E2ERuntimeReadinessInput } from "@agentx/contracts";
 import { E2ERuntimeCapabilityDescriptorSchema, e2eRuntimeCapabilityDigest } from "../../packages/contracts/src/index.js";
 import { e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness, readReadyE2ERuntimeProfiles } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
@@ -74,7 +74,7 @@ describe("registered E2E runtime readiness", () => {
 });
 
 describe("READY profiles for setup proposals", () => {
-  const apiCapabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ ...(({ browsers: _browsers, ...rest }) => rest)(capabilities), kind: "api", supportedSteps: ["request"], supportedAssertions: ["http-status"], protocols: ["http"] });
+  const apiCapabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ ...Object.fromEntries(Object.entries(capabilities).filter(([name]) => name !== "browsers")), kind: "api", supportedSteps: ["request"], supportedAssertions: ["http-status"], protocols: ["http"] });
   const rowFor = (kind: "web" | "api", overrides: Record<string, unknown> = {}) => {
     const body = kind === "web" ? capabilities : apiCapabilities;
     const apiProbeBase = { ...probeBase, capabilityDigest: e2eRuntimeCapabilityDigest(apiCapabilities) };
@@ -97,7 +97,16 @@ describe("READY profiles for setup proposals", () => {
     expect(await ask({ [`PROFILE#web-profile#api`]: rowFor("api", { capabilities, capabilityDigest: e2eRuntimeCapabilityDigest(capabilities) }) })).toEqual([]);
   });
 
-  it("treats an unreadable catalog as no READY profile", async () => {
-    expect(await readReadyE2ERuntimeProfiles({ runtimeCatalogId: "c", profileId: "web-profile", now: 1, read: async () => { throw new Error("throttled"); } })).toEqual([]);
+  it("treats an unreadable catalog as no READY profile and says so, distinct from an unqualified runtime", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      expect(await readReadyE2ERuntimeProfiles({ runtimeCatalogId: "c", profileId: "web-profile", now: 1, read: async () => { throw new Error("throttled"); } })).toEqual([]);
+      const logged = warn.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+      expect(logged).toHaveLength(2);
+      expect(logged[0]).toMatchObject({ component: "broker", level: "warn", event: "e2e-runtime-catalog-read-failed", kind: "web", profileId: "web-profile", error: "throttled" });
+      warn.mockClear();
+      expect(await ask({})).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally { warn.mockRestore(); }
   });
 });

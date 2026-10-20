@@ -82,7 +82,12 @@ export async function readReadyE2ERuntimeProfiles(input: { runtimeCatalogId: str
   for (const kind of ["web", "api"] as const) {
     let row: unknown;
     try { row = await input.read(e2eRegisteredRuntimeKey(input.runtimeCatalogId, input.profileId, kind)); }
-    catch { continue; }
+    catch (error) {
+      // Fail closed to "not READY", but say why: a throttled or failed read is not the same as an unqualified runtime.
+      console.warn(JSON.stringify({ component: "broker", level: "warn", event: "e2e-runtime-catalog-read-failed", kind, profileId: input.profileId,
+        runtimeCatalogId: input.runtimeCatalogId, error: error instanceof Error ? error.message : String(error) }));
+      continue;
+    }
     if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
     const { binding, capabilityDigest } = row as { binding?: unknown; capabilityDigest?: unknown };
     if (typeof capabilityDigest !== "string") continue;
