@@ -360,7 +360,11 @@ function planReview(context: WorkflowMessageContext, exits: ReturnType<typeof ex
       tail.push(context.taskPageUrl === undefined || commentId === undefined ? line : link(`${context.taskPageUrl}?doc=${approved.replace(" ", "-")}#comment-${commentId}`, line));
     }
   } else if (answered !== undefined && answered.total > 0) tail.push(`AgentX answered ${answered.answered} of ${plural(answered.total, "comment")} from v${answered.fromVersion}.`);
-  const unlinked = `I couldn't link the full ${name}; ask an AgentX admin to check the task page.`;
+  // The owner can always reach the plan: when the document could not be shown or linked, the task page is, and an
+  // administrator is named only when no task page exists at all.
+  const unlinked = context.taskPageUrl === undefined
+    ? `I couldn't link the full ${name}; ask an AgentX admin to check the task page.`
+    : `I couldn't show the plan summary here. ${link(context.taskPageUrl, "Open the task page to read the plan")}`;
   if (structured === undefined) {
     // A Markdown document: its first lines, and where the whole text reads.
     const lines = [header];

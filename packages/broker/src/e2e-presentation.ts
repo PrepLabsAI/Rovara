@@ -31,10 +31,17 @@ export function renderE2ESlackBlocks(view: E2ESharedView): Array<E2ESlackBlock |
   ];
 }
 
-/** A fail-closed notifier fallback when its bounded display projection is missing or stale. */
-export function renderE2EUnavailableSlackBlock(taskPageUrl?: string): E2ESlackBlock {
-  const taskLink = taskPageUrl === undefined ? "Open the task for details." : `<${slackBounded(taskPageUrl, 1800)}|Open the task for details.>`;
-  return { type: "section", text: { type: "mrkdwn", text: `*Required E2E status: UNKNOWN*\nManifest/results unavailable. ${taskLink}` } };
+/**
+ * A fail-closed notifier fallback when its bounded display projection is missing or stale. It states no status, so it
+ * cannot be read as a verdict: before any round has started it says the tests have not run, afterwards that the results
+ * could not be shown here. An unstated round is treated as started, the wording that claims nothing about the tests.
+ */
+export function renderE2EUnavailableSlackBlock(taskPageUrl?: string, roundStarted = true): E2ESlackBlock {
+  const [words, linkText] = roundStarted
+    ? ["I couldn't show the test results here.", "Open the task page for the latest status."]
+    : ["Browser and API tests haven't run yet.", "Open the task page for status."];
+  const taskLink = taskPageUrl === undefined ? linkText : `<${slackBounded(taskPageUrl, 1800)}|${linkText}>`;
+  return { type: "section", text: { type: "mrkdwn", text: `${words} ${taskLink}` } };
 }
 
 /** Renders a hashed notification snapshot without implying that it is current readiness. */

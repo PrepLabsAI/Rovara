@@ -433,6 +433,19 @@ describe("workflow Slack messages", () => {
     expect(workflowMessage({ taskId, workflow: snapshot("PLAN_REVIEW", "WAITING") })!.text).toContain("I couldn't link the full coding plan; ask an AgentX admin to check the task page.");
   });
 
+  it("links the task page when the document could not be shown, never telling the owner to ask an admin", () => {
+    const pageUrl = "https://agentx.example.test/review/task-1/task";
+    const message = workflowMessage({ taskId, workflow: snapshot("PLAN_REVIEW", "WAITING"), taskPageUrl: pageUrl })!;
+    expect(message.text).toContain(`I couldn't show the plan summary here. <${pageUrl}|Open the task page to read the plan>`);
+    expect(message.text).not.toContain("ask an AgentX admin");
+    // The decision buttons are exactly what they are with a linked document.
+    expect(buttonsOf(message.blocks).map((button) => [button.action_id, button.text.text])).toEqual([
+      ["agentx_workflow_approve", "Approve coding plan"], ["agentx_workflow_changes", "Request changes"], ["agentx_workflow_close", "Close task"]]);
+    const structured = workflowMessage({ taskId, workflow: snapshot("PLAN_REVIEW", "WAITING"), taskPageUrl: pageUrl, structured: { claims: ["a", "b", "c"], claimCount: 3, decisionCount: 0, tiny: true } })!;
+    expect(structured.text).toContain(`<${pageUrl}|Open the task page to read the plan>`);
+    expect(structured.text).not.toContain("ask an AgentX admin");
+  });
+
   describe("the card for a structured document", () => {
     const page = "https://agentx.example.test/review/x/task";
     const url = planReviewLink(page, snapshot("PLAN_REVIEW", "WAITING"), 1);
