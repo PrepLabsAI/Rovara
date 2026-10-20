@@ -4,7 +4,7 @@ import { z } from "zod";
 import { canonicalJson, copyBoundedE2EJsonData, E2EApplicationEvidenceRefSchema, E2ECaseCoverageSchema,
   E2EExpectedCaseSchema, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema, E2EAssertionSchema,
   E2EScenarioSchema, E2ERuntimeAccountRefSchema, E2EAppArtifactRefSchema, E2EMockSpecSchema, type E2EApplicationEvidenceRef, type E2ECaseCoverage, type E2EQualifiedResult,
-  type E2ERound, type E2ERunBinding } from "@agentx/contracts";
+  type E2ERound, type E2ERunBinding, type E2ERuntimeAccountRef } from "@agentx/contracts";
 import { E2E_REPORT_MAX_BYTES, E2E_APP_RPC_FRAME_MAX_BYTES, e2ePrivateTransferMaxBytes, type E2EStructuralQualification } from "./result-adapter.js";
 import { parseE2EApplicationReport, type E2EApplicationReport } from "./application-report-schema.js";
 import type { E2ECompiledApplicationSuite } from "./application-scenarios.js";
@@ -864,6 +864,24 @@ export function e2eApplicationReportTargetMatches(reportTarget: ReportTarget, ex
     && reportTarget.platform === engine.platform && canonicalJson([...reportTarget.capabilities].sort()) === canonicalJson([...engine.capabilities].sort());
 }
 
+/**
+ * The runtime account reference of one case: the single reference of the case's application and account profile (one application can carry several accounts, an owner and a
+ * viewer, so never the application's first), and only when the case's own runtime reference is for that same account. The oracle is the second line after admission
+ * validation, so it holds the reference and the case to each other itself.
+ */
+export function admittedRuntimeAccountRef(input: { runtimeRef: Readonly<{ targetId: string; applicationId: string; accountProfileId: string }>; accountProfileId: string;
+  runtimeAccountRefs: readonly E2ERuntimeAccountRef[] }): E2ERuntimeAccountRef {
+  const { runtimeRef, accountProfileId } = input;
+  if (runtimeRef.accountProfileId !== accountProfileId) {
+    throw new Error(`the admitted runtime reference of target ${runtimeRef.targetId} is for account profile ${runtimeRef.accountProfileId}, not the case's account profile ${accountProfileId}`);
+  }
+  const matches = input.runtimeAccountRefs.filter((item) => item.applicationId === runtimeRef.applicationId && item.profileId === accountProfileId);
+  if (matches.length !== 1) {
+    throw new Error(`the admitted selection has ${matches.length === 0 ? "no" : "more than one"} runtime account reference for account profile ${accountProfileId} of application ${runtimeRef.applicationId}`);
+  }
+  return matches[0]!;
+}
+
 type Environment = Readonly<{ ci: boolean; trustNoticeShown: boolean; os: string; arch: string; runtime: string }>;
 export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { compiled: E2ECompiledApplicationSuite; binding: E2ERunBinding; round: E2ERound;
   environment: Environment; usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>;
@@ -891,12 +909,8 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
     const runtime = runtimeRef ? input.compiled.runtimeBindings.get(runtimeRef.runtimeProfileId) : undefined;
     // The case's own account: one application can carry several (an owner and a viewer), so the reference is the one of this case's application and account profile, and
     // exactly one (as approval and the executor's `accountRefFor` resolve it). Never the application's first.
-    const accountRefs = runtimeRef ? input.compiled.runtimeAdmissionContext.selectionInput.runtimeAccountRefs
-      .filter((item) => item.applicationId === runtimeRef.applicationId && item.profileId === expected.accountProfileId) : [];
-    if (runtimeRef && accountRefs.length !== 1) {
-      throw new Error(`the admitted selection has ${accountRefs.length === 0 ? "no" : "more than one"} runtime account reference for account profile ${expected.accountProfileId} of application ${runtimeRef.applicationId}`);
-    }
-    const accountRef = accountRefs[0];
+    const accountRef = runtimeRef ? admittedRuntimeAccountRef({ runtimeRef, accountProfileId: expected.accountProfileId,
+      runtimeAccountRefs: input.compiled.runtimeAdmissionContext.selectionInput.runtimeAccountRefs }) : undefined;
     const target = input.compiled.runtimeAdmissionContext.launchTargets.find((item) => item.targetId === expected.targetId);
     if (!scenario || !runtimeRef || !application || !runtime || !accountRef || !target) throw new Error("compiled case lacks exact scenario, application, runtime, account, or target binding");
     const originEntry = input.compiled.originByApplicationId.find((item) => item.applicationId === runtimeRef.applicationId);
