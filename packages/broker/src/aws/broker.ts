@@ -267,7 +267,7 @@ import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePlanReferenceError } from "../e2e/feature-plan-intent.js";
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
-import { e2eRegisteredRuntimeKey, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
+import { applicationRuntimeRowFences, e2eRegisteredRuntimeKey, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
 import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
 import {
@@ -4197,19 +4197,7 @@ async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBroke
     runtimeBinding: parseRuntimeBinding(project.runtimeBinding), now });
   if (!evaluation.ok) return { ok: false, kind: "refused", reason: evaluation.reason, ...(evaluation.scope === undefined ? {} : { scope: evaluation.scope }) };
   // The rows this derivation was made from must still be exactly those when the transaction commits.
-  const conditions: TransactItems = evaluation.selection.runtimeRows.flatMap((selected) => {
-    const row = rows.find((item) => item.capabilities.kind === selected.kind && item.profileId === selected.profileId);
-    if (row === undefined) return [];
-    return [{ ConditionCheck: { TableName: dependencies.tableName,
-      Key: e2eRegisteredRuntimeKey(row.runtimeCatalogId, row.profileId, selected.kind),
-      // The whole record the derivation read: nothing about the row may move between that read and the commit, whether or not a requalification would bump its generation.
-      ConditionExpression: "entityType = :entity AND #state = :ready AND runtimeCatalogId = :catalog AND catalogRevision = :revision AND generation = :generation AND bindingDigest = :binding AND capabilityDigest = :capability AND expiresAt = :expires AND qualifiedAt = :qualifiedAt AND manifestDigest = :manifest AND endpoint = :endpoint AND runnerEnvironmentDigest = :environmentDigest AND runnerEnvironment = :environment AND runnerToolchainDigest = :toolchainDigest AND runnerToolchain = :toolchain AND transportCorrelationId = :correlation",
-      ExpressionAttributeNames: { "#state": "state" },
-      ExpressionAttributeValues: { ":entity": "E2E_FEATURE_VERIFIER", ":ready": "READY", ":catalog": row.runtimeCatalogId, ":revision": row.catalogRevision,
-        ":generation": row.generation, ":binding": row.bindingDigest, ":capability": row.capabilityDigest, ":expires": row.expiresAt, ":qualifiedAt": row.qualifiedAt,
-        ":manifest": row.manifestDigest, ":endpoint": row.endpoint, ":environmentDigest": row.runnerEnvironmentDigest, ":environment": row.runnerEnvironment,
-        ":toolchainDigest": row.runnerToolchainDigest, ":toolchain": row.runnerToolchain, ":correlation": row.transportCorrelationId } } }];
-  });
+  const conditions: TransactItems = applicationRuntimeRowFences({ tableName: dependencies.tableName, rows, selected: evaluation.selection.runtimeRows });
   return { ok: true, selection: evaluation.selection, conditions, inputs: { policy: policy.data,
     setup: { snapshot: setup.snapshot, setupProposal: setup.setupProposal, setupApproval: setup.setupApproval }, rows, runtimeCatalogId: catalogId, runtimeBinding: parseRuntimeBinding(project.runtimeBinding) } };
 }

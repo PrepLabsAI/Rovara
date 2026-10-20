@@ -14,10 +14,32 @@ import {
   type Ec2RuntimeBinding,
 } from "@agentx/contracts";
 import type { z } from "zod";
+import type { TransactItems } from "./developer-task-actions.js";
 
 /** A profile that serves more than one target kind (web and API) keeps one row per kind; without a kind the key is the profile's alone. */
 export function e2eRegisteredRuntimeKey(runtimeCatalogId: string, profileId: string, kind?: "web" | "api"): { pk: string; sk: string } {
   return { pk: `E2E_FEATURE_VERIFIER#${runtimeCatalogId}`, sk: kind === undefined ? `PROFILE#${profileId}` : `PROFILE#${profileId}#${kind}` };
+}
+
+/**
+ * The conditions that keep each runtime row an application approval selected exactly as it was read, until the transaction that records the approval (or a verdict
+ * that rests on it) commits. The whole record is held: nothing about a row may move between the read and the commit, whether or not a requalification would bump its
+ * generation. A selected row that is not among those read cannot be fenced, and the approval must not be recorded without its fence: that is a throw, never a skip.
+ */
+export function applicationRuntimeRowFences(input: { tableName: string; rows: readonly z.infer<typeof E2ERegisteredRuntimeSchema>[];
+  selected: readonly { kind: "web" | "api"; profileId: string }[] }): TransactItems {
+  return input.selected.map((selected) => {
+    const row = input.rows.find((item) => item.capabilities.kind === selected.kind && item.profileId === selected.profileId);
+    if (row === undefined) throw new Error(`the selected ${selected.kind} runtime ${selected.profileId} is not among the runtime rows this approval was derived from`);
+    return { ConditionCheck: { TableName: input.tableName,
+      Key: e2eRegisteredRuntimeKey(row.runtimeCatalogId, row.profileId, selected.kind),
+      ConditionExpression: "entityType = :entity AND #state = :ready AND runtimeCatalogId = :catalog AND catalogRevision = :revision AND generation = :generation AND bindingDigest = :binding AND capabilityDigest = :capability AND expiresAt = :expires AND qualifiedAt = :qualifiedAt AND manifestDigest = :manifest AND endpoint = :endpoint AND runnerEnvironmentDigest = :environmentDigest AND runnerEnvironment = :environment AND runnerToolchainDigest = :toolchainDigest AND runnerToolchain = :toolchain AND transportCorrelationId = :correlation",
+      ExpressionAttributeNames: { "#state": "state" },
+      ExpressionAttributeValues: { ":entity": "E2E_FEATURE_VERIFIER", ":ready": "READY", ":catalog": row.runtimeCatalogId, ":revision": row.catalogRevision,
+        ":generation": row.generation, ":binding": row.bindingDigest, ":capability": row.capabilityDigest, ":expires": row.expiresAt, ":qualifiedAt": row.qualifiedAt,
+        ":manifest": row.manifestDigest, ":endpoint": row.endpoint, ":environmentDigest": row.runnerEnvironmentDigest, ":environment": row.runnerEnvironment,
+        ":toolchainDigest": row.runnerToolchainDigest, ":toolchain": row.runnerToolchain, ":correlation": row.transportCorrelationId } } };
+  });
 }
 
 type ExpectedRuntime = {

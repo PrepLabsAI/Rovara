@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalJson, E2ETargetSchema, type E2ERuntimeCapabilityDescriptor, type E2ERuntimeReadinessInput } from "@agentx/contracts";
 import { E2ERuntimeCapabilityDescriptorSchema, e2eRuntimeCapabilityDigest } from "../../packages/contracts/src/index.js";
-import { e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
+import { applicationRuntimeRowFences, e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 
 const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
@@ -138,5 +138,29 @@ describe("READY runtimes for a project's runtime binding at planning", () => {
     expect(await ask({ ...rows, "PROFILE#web-profile#web": rowFor("web", { expiresAt: "2026-10-13T12:20:00.000Z" }) })).toMatchObject([{ kind: "api" }]);
     expect(await ask({ "PROFILE#web-profile#web": rowFor("web", { capabilities: apiCapabilities, capabilityDigest: e2eRuntimeCapabilityDigest(apiCapabilities) }) })).toEqual([]);
     expect(await ask({})).toEqual([]);
+  });
+});
+
+describe("the fences on the runtime rows an application approval was derived from", () => {
+  const row = { ...key, ...registration } as unknown as Parameters<typeof applicationRuntimeRowFences>[0]["rows"][number];
+  const selected = { kind: "web" as const, profileId: registration.profileId };
+
+  it("holds each selected row exactly as it was read, under the table it is stored in", () => {
+    const fences = applicationRuntimeRowFences({ tableName: "state", rows: [{ ...row, capabilities: { ...row.capabilities, kind: "web" } }], selected: [selected] });
+    expect(fences).toHaveLength(1);
+    const check = (fences[0] as { ConditionCheck: { TableName: string; Key: unknown; ExpressionAttributeValues: Record<string, unknown> } }).ConditionCheck;
+    expect(check.TableName).toBe("state");
+    expect(check.Key).toEqual(e2eRegisteredRuntimeKey(registration.runtimeCatalogId, registration.profileId, "web"));
+    expect(check.ExpressionAttributeValues).toMatchObject({ ":generation": registration.generation, ":manifest": registration.manifestDigest, ":ready": "READY" });
+  });
+
+  it("throws, instead of leaving a selected row unfenced, when the row it selected is not among those read", () => {
+    expect(() => applicationRuntimeRowFences({ tableName: "state", rows: [], selected: [selected] }))
+      .toThrow(`the selected web runtime ${registration.profileId} is not among the runtime rows this approval was derived from`);
+    expect(() => applicationRuntimeRowFences({ tableName: "state", rows: [{ ...row, capabilities: { ...row.capabilities, kind: "api" } }], selected: [selected] })).toThrow(/not among the runtime rows/);
+  });
+
+  it("fences nothing when nothing was selected", () => {
+    expect(applicationRuntimeRowFences({ tableName: "state", rows: [], selected: [] })).toEqual([]);
   });
 });

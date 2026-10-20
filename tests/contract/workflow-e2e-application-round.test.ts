@@ -627,6 +627,20 @@ describe("current authority at verification (the runtime row, the creator, the s
     blockedWith(round, /creator-membership-proof-changed-or-unavailable/);
   });
 
+  it("refuses an admission that carries no creator authority at all: omitting the proof cannot skip the check", async () => {
+    const round = await startApplicationRound();
+    const { creatorAuthority, ...withoutProof } = round.admission as typeof round.admission & { creatorAuthority?: unknown };
+    expect(creatorAuthority, "the admission the dispatch built carries it").toBeDefined();
+    const broker = await brokerModule();
+    const judged = async (admission: unknown) => {
+      const diagnostic: { reason?: string } = {};
+      return { valid: await broker.workflowE2EApplicationAuthorityIsValid(round.harness.brokerInput as never, round.taskNow() as never, round.candidate, admission as never, diagnostic), reason: diagnostic.reason };
+    };
+    expect(await judged(round.admission)).toEqual({ valid: true, reason: undefined });
+    expect(await judged(withoutProof)).toEqual({ valid: false, reason: "creator-membership-proof-changed-or-unavailable" });
+    expect(await judged({ ...withoutProof, creatorAuthority: undefined })).toEqual({ valid: false, reason: "creator-membership-proof-changed-or-unavailable" });
+  });
+
   it("is UNKNOWN when the creator lost access to the project before the verdict", async () => {
     const round = await startApplicationRound();
     const groups = await collectAll(round, [PASS]);
