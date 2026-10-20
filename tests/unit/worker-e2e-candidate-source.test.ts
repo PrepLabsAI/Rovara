@@ -51,6 +51,18 @@ describe("candidate git", () => {
     expect((await lstat(join(destination, "bin/run.sh"))).mode & 0o111).not.toBe(0);
   });
 
+  it("makes every directory it creates readable to the build container's user, whatever the process umask", async () => {
+    const files = { "package.json": "{}", "src/deep/nested/server.js": "x", "bin/run.sh": "#!/bin/sh\n" };
+    const repo = await repository(files, ["bin/run.sh"]);
+    const candidate = await processGit();
+    const destination = await temp("candidate-stage-");
+    const previous = process.umask(0o077);
+    try { await candidate.materializeInto(repo.root, repo.commit, destination, new AbortController().signal); } finally { process.umask(previous); }
+    for (const dir of ["src", "src/deep", "src/deep/nested", "bin"]) expect((await lstat(join(destination, dir))).mode & 0o777, dir).toBe(0o755);
+    expect((await lstat(join(destination, "src/deep/nested/server.js"))).mode & 0o777).toBe(0o644);
+    expect((await lstat(join(destination, "bin/run.sh"))).mode & 0o777).toBe(0o755);
+  });
+
   it("rejects a commit the repository does not have and a non-hex answer", async () => {
     const repo = await repository({ "package.json": "{}" });
     const candidate = (await processGit());

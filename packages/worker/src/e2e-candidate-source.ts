@@ -162,8 +162,11 @@ async function writeFileConfined(root: string, relativePath: string, bytes: Buff
   for (const part of parts.slice(0, -1)) {
     current = join(current, part);
     const stat = await lstat(current).catch(() => undefined);
-    if (stat === undefined) await mkdir(current, { mode: 0o755 });
-    else if (!stat.isDirectory()) throw new Error(`${MISMATCH}: ${relativePath} passes through a symlink or file`);
+    if (stat === undefined) {
+      await mkdir(current, { mode: 0o755 });
+      // The mode is set outright here too: a process umask must not make a staged folder unreadable to the build container's user.
+      await chmod(current, 0o755);
+    } else if (!stat.isDirectory()) throw new Error(`${MISMATCH}: ${relativePath} passes through a symlink or file`);
   }
   const target = join(current, parts.at(-1)!);
   await writeFile(target, bytes, { flag: "wx", mode: executable ? 0o755 : 0o644 });
