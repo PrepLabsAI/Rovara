@@ -1,0 +1,244 @@
+import { execFile as execFileCallback } from "node:child_process";
+import { constants } from "node:fs";
+import { lstat, mkdir, mkdtemp, open, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { promisify } from "node:util";
+import { agentXError } from "@agentx/contracts";
+import { assertNoEmbeddedRepositories, assertNoLfsFiles, isolatedGitEnvironment } from "./git.js";
+
+const execFile = promisify(execFileCallback);
+
+// The coding agent owns the candidate repository and keeps running while the worker reads it. Git cannot be told to ignore a repository's own config, and
+// a `filter.<name>` the worker has not heard of cannot be switched off from outside, so the only safe way to run Git on the agent's files is to never
+// let Git see the agent's repository: every call here names a throwaway git directory the worker created seconds ago (empty template, no hooks, no
+// refs, a config of git's own defaults), and the candidate appears only as `--work-tree` (files, which carry no config) and as an object directory
+// (objects, which carry none either). Nothing in this module starts Git with the candidate's `.git` as its git directory, and nothing reads the candidate's
+// `.git/config` except `candidateConfigValues`, which copies a handful of plain-value keys under a strict grammar and never an executable setting.
+
+const NOT_PLAIN = "candidate repository is not a plain git directory";
+const HEX40 = /^[0-9a-f]{40}$/;
+const SMALL_FILE_BYTES = 1024 * 1024;
+const PACKED_REFS_CAP_BYTES = 256 * 1024 * 1024;
+
+/** Settings of the candidate's own config the worker keeps because they change which bytes `git add` stages. Plain values only, never a command. */
+const KEPT_CONFIG_KEYS = new Set(["core.filemode", "core.symlinks", "core.autocrlf", "core.eol", "core.safecrlf"]);
+const KEPT_CONFIG_VALUE = /^[A-Za-z0-9]{1,16}$/;
+
+/** Where the candidate repository's pieces are, checked to be real directories that are not reached through a symlink. */
+export type CandidateLayout = { workTree: string; gitDirectory: string; objects: string };
+
+async function plainDirectory(path: string): Promise<void> {
+  const stat = await lstat(path).catch(() => undefined);
+  if (stat === undefined || !stat.isDirectory() || stat.isSymbolicLink() || (await realpath(path)) !== path) throw new Error(NOT_PLAIN);
+}
+
+export async function candidateLayout(directory: string): Promise<CandidateLayout> {
+  const workTree = await realpath(directory).catch(() => { throw new Error(NOT_PLAIN); });
+  const gitDirectory = join(workTree, ".git");
+  const objects = join(gitDirectory, "objects");
+  await plainDirectory(gitDirectory);
+  await plainDirectory(objects);
+  if (objects.includes("\n")) throw new Error(NOT_PLAIN);
+  return { workTree, gitDirectory, objects };
+}
+
+/** Reads a small regular file without following a symlink at its path; `undefined` when it is absent. */
+async function readSmallFile(path: string, limit: number): Promise<Buffer | undefined> {
+  let handle;
+  try {
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return undefined;
+    if (code === "ELOOP") throw new Error(NOT_PLAIN, { cause: error });
+    throw error;
+  }
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > limit) throw new Error(NOT_PLAIN);
+    return await handle.readFile();
+  } finally {
+    await handle.close();
+  }
+}
+
+/** The plain-value settings (see KEPT_CONFIG_KEYS) of the candidate's config, read from a private copy of the file. Any other key, and `include`, is never looked at. */
+async function candidateConfigValues(layout: CandidateLayout, scratch: string, gitDir: string): Promise<Array<readonly [string, string]>> {
+  const bytes = await readSmallFile(join(layout.gitDirectory, "config"), SMALL_FILE_BYTES);
+  if (bytes === undefined) return [];
+  const copy = join(scratch, "candidate-config");
+  await writeFile(copy, bytes, { mode: 0o600 });
+  // `--file` reads that one file and, without `--includes`, follows no include.path.
+  const listing = (await execFile("git", [`--git-dir=${gitDir}`, "config", "--file", copy, "--list", "-z"], { cwd: scratch, env: isolatedGitEnvironment(layout.workTree), encoding: "utf8", maxBuffer: 4 * SMALL_FILE_BYTES })).stdout;
+  const kept = new Map<string, string>();
+  for (const record of listing.split("\0")) {
+    if (record === "") continue;
+    const newline = record.indexOf("\n");
+    const key = newline < 0 ? record : record.slice(0, newline);
+    if (!KEPT_CONFIG_KEYS.has(key)) continue;
+    // A key with no value is a boolean true.
+    const value = newline < 0 ? "true" : record.slice(newline + 1);
+    if (!KEPT_CONFIG_VALUE.test(value)) throw new Error(`candidate repository sets ${key} to a value the worker does not accept`);
+    kept.set(key, value);
+  }
+  return [...kept];
+}
+
+export type IsolatedRunOptions = {
+  /** Which index file Git works on: the worker's temporary one (the default), the candidate's real `.git/index`, or none. */
+  index?: "temporary" | "real" | "none";
+  maxBuffer?: number;
+};
+
+export interface IsolatedGit {
+  readonly layout: CandidateLayout;
+  /** A private directory, removed with the throwaway repository. */
+  readonly scratch: string;
+  /** The worker's temporary index file (it does not exist until Git writes it). */
+  readonly temporaryIndex: string;
+  /** The Git arguments that name the throwaway repository and the candidate's work tree, for helpers that spawn Git themselves. */
+  readonly location: readonly string[];
+  env(index?: "temporary" | "real" | "none"): NodeJS.ProcessEnv;
+  text(args: readonly string[], options?: IsolatedRunOptions): Promise<string>;
+  bytes(args: readonly string[], options?: IsolatedRunOptions): Promise<Buffer>;
+  /** The commit HEAD names, read from the candidate's HEAD and refs files. */
+  headCommit(): Promise<string>;
+  /** Moves what HEAD names (the branch it points at, or HEAD itself when detached) from `expected` to `next`, under Git's own lock file protocol. */
+  advanceHead(expected: string, next: string): Promise<void>;
+}
+
+/**
+ * Runs `use` against a throwaway bare repository this worker created under the temporary directory, then removes it on every path. `"read"` lets Git read the
+ * candidate's objects through `objects/info/alternates`, so nothing is written to the candidate. `"write"` makes the candidate's object directory Git's own, so blobs
+ * and trees Git writes (the tree of a snapshot, a commit) land where the candidate repository and later reviews can read them.
+ */
+export async function withIsolatedGit<T>(directory: string, mode: "read" | "write", use: (git: IsolatedGit) => Promise<T>): Promise<T> {
+  const layout = await candidateLayout(directory);
+  const scratch = await mkdtemp(join(tmpdir(), "agentx-candidate-git-"));
+  try {
+    const gitDir = join(scratch, "worker.git");
+    const initEnv = isolatedGitEnvironment(layout.workTree);
+    await execFile("git", ["init", "--bare", "--quiet", "--template=", gitDir], { cwd: scratch, env: initEnv });
+    await mkdir(join(gitDir, "info"), { recursive: true });
+    if (mode === "read") {
+      await mkdir(join(gitDir, "objects", "info"), { recursive: true });
+      await writeFile(join(gitDir, "objects", "info", "alternates"), `${layout.objects}\n`, { mode: 0o600 });
+    }
+    // Ignore patterns and attributes are plain text: the files carry no command, and the agent's own exclusions and attributes keep deciding what `add` stages.
+    for (const name of ["exclude", "attributes"]) {
+      const bytes = await readSmallFile(join(layout.gitDirectory, "info", name), SMALL_FILE_BYTES).catch(() => undefined);
+      if (bytes !== undefined) await writeFile(join(gitDir, "info", name), bytes, { mode: 0o600 });
+    }
+    const config = await candidateConfigValues(layout, scratch, gitDir);
+    const temporaryIndex = join(scratch, "index");
+    const realIndex = join(layout.gitDirectory, "index");
+    const location = [`--git-dir=${gitDir}`, `--work-tree=${layout.workTree}`] as const;
+    const env = (index: "temporary" | "real" | "none" = "temporary"): NodeJS.ProcessEnv => isolatedGitEnvironment(layout.workTree, {
+      ...(mode === "write" ? { GIT_OBJECT_DIRECTORY: layout.objects } : {}),
+      ...(index === "none" ? {} : { GIT_INDEX_FILE: index === "real" ? realIndex : temporaryIndex }),
+    }, config);
+    const run = async (args: readonly string[], options: IsolatedRunOptions, encoding: "utf8" | "buffer") => (await execFile("git", [...location, ...args],
+      { cwd: scratch, env: env(options.index), encoding, maxBuffer: options.maxBuffer ?? SMALL_FILE_BYTES })).stdout;
+    return await use({
+      layout, scratch, temporaryIndex, location, env,
+      text: async (args, options = {}) => (await run(args, options, "utf8")) as string,
+      bytes: async (args, options = {}) => (await run(args, options, "buffer")) as unknown as Buffer,
+      headCommit: () => readHead(layout).then((head) => head.commit),
+      advanceHead: (expected, next) => advanceHead(layout, expected, next),
+    });
+  } finally {
+    await rm(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The tree of `commit` plus the work tree as it is now, computed in `git`'s temporary index (never the candidate's real one): `read-tree`, then `add --all`, then
+ * `write-tree`, with the nested-repository and Git LFS refusals in between. Git runs in the throwaway repository, so no filter, driver or hook of the candidate's
+ * config exists for it to run. A nested repository's own config is out of that protection, so Git is kept away from every tracked gitlink: a gitlink path is
+ * excluded from `add` (its entry stays as `commit` has it), because Git asks a checked-out submodule for its status by running Git inside it, under its config,
+ * and a nested repository can appear at that path between the check for one and `add`. Needs Git 2.25 or later (`--pathspec-from-file`).
+ */
+export async function snapshotTree(git: IsolatedGit, commit: string): Promise<string> {
+  await git.text(["read-tree", commit]);
+  const gitlinks = await assertNoEmbeddedRepositories(git.layout.workTree, git.env(), git.location);
+  await assertNoLfsFiles(git.layout.workTree, git.env(), git.location);
+  for (const path of gitlinks) {
+    const stat = await lstat(join(git.layout.workTree, path)).catch(() => undefined);
+    if (stat === undefined || !stat.isDirectory()) {
+      throw agentXError("CONFIG_INVALID", `the repository has a submodule at ${path} that is no longer a directory. AgentX tasks do not yet support changes to a project's submodules.`);
+    }
+  }
+  if (gitlinks.length === 0) await git.text(["add", "--all", "--", "."], { maxBuffer: 1024 * 1024 });
+  else {
+    const pathspecs = join(git.scratch, "pathspecs");
+    await writeFile(pathspecs, [".", ...gitlinks.map((path) => `:(exclude,literal)${path}`)].map((entry) => `${entry}\0`).join(""), { mode: 0o600 });
+    await git.text(["add", "--all", `--pathspec-from-file=${pathspecs}`, "--pathspec-file-nul"], { maxBuffer: 1024 * 1024 });
+  }
+  return (await git.text(["write-tree"])).trim();
+}
+
+/** Git's own rules for a ref name, applied strictly: anything unusual is refused rather than guessed at. */
+function isSafeRefName(name: string): boolean {
+  if (!name.startsWith("refs/") || name.length > 255 || name.endsWith("/") || name.endsWith(".") || name.includes("//") || name.includes("..") || name.includes("@{")) return false;
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000- \u007f~^:?*[\\]/u.test(name)) return false;
+  return name.split("/").every((part) => part !== "" && !part.startsWith(".") && !part.endsWith(".lock"));
+}
+
+type Head = { kind: "detached" } | { kind: "branch"; ref: string };
+
+/** The one place HEAD's commit is resolved without Git: the branch HEAD names, as a loose ref file or a line of packed-refs. A symbolic ref chain or an odd name is refused. */
+async function readHead(layout: CandidateLayout): Promise<Head & { commit: string }> {
+  const headBytes = await readSmallFile(join(layout.gitDirectory, "HEAD"), 4096);
+  if (headBytes === undefined) throw new Error("candidate repository has no HEAD");
+  const headText = headBytes.toString("utf8").replace(/\n$/u, "");
+  if (HEX40.test(headText)) return { kind: "detached", commit: headText };
+  const symbolic = /^ref: (\S+)$/u.exec(headText);
+  if (symbolic?.[1] === undefined || !isSafeRefName(symbolic[1])) throw new Error("candidate HEAD is not a commit or a plain branch reference");
+  const ref = symbolic[1];
+  const loosePath = join(layout.gitDirectory, ref);
+  const stat = await lstat(loosePath).catch(() => undefined);
+  if (stat !== undefined && !stat.isDirectory()) {
+    if (!stat.isFile()) throw new Error("candidate branch reference is not a plain file");
+    const text = (await readSmallFile(loosePath, 4096))?.toString("utf8").replace(/\n$/u, "") ?? "";
+    if (!HEX40.test(text)) throw new Error("candidate branch reference does not name a commit");
+    return { kind: "branch", ref, commit: text };
+  }
+  const packed = await readSmallFile(join(layout.gitDirectory, "packed-refs"), PACKED_REFS_CAP_BYTES);
+  for (const line of packed?.toString("utf8").split("\n") ?? []) {
+    if (line.length === 41 + ref.length && line[40] === " " && line.endsWith(ref) && HEX40.test(line.slice(0, 40))) return { kind: "branch", ref, commit: line.slice(0, 40) };
+  }
+  throw new Error("candidate branch has no commit");
+}
+
+/**
+ * Moves HEAD's commit from `expected` to `next` the way `git update-ref HEAD <next> <expected>` does, minus the reflog: the ref file is created exclusively as
+ * `<name>.lock` (another Git holding that lock refuses us, as it would refuse itself), the commit it holds is checked to still be `expected`, and the lock is
+ * renamed over the ref. No Git process runs in the candidate's repository, so no config or hook of it can.
+ */
+async function advanceHead(layout: CandidateLayout, expected: string, next: string): Promise<void> {
+  if (!HEX40.test(expected) || !HEX40.test(next)) throw new Error("candidate commit is invalid");
+  const head = await readHead(layout);
+  const target = head.kind === "detached" ? join(layout.gitDirectory, "HEAD") : join(layout.gitDirectory, head.ref);
+  if (head.kind === "branch") await mkdir(dirname(target), { recursive: true });
+  const lock = `${target}.lock`;
+  const handle = await open(lock, "wx", 0o666);
+  let renamed = false;
+  try {
+    const locked = await readHead(layout);
+    if (locked.commit !== expected || locked.kind !== head.kind || (locked.kind === "branch" && head.kind === "branch" && locked.ref !== head.ref)) {
+      throw new Error("candidate HEAD moved while it was being updated");
+    }
+    await handle.writeFile(`${next}\n`);
+    await handle.sync();
+    await handle.close();
+    await rename(lock, target);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      await handle.close().catch(() => undefined);
+      await unlink(lock).catch(() => undefined);
+    }
+  }
+}

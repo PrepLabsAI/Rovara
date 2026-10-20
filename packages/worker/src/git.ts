@@ -17,6 +17,12 @@ const execFile = promisify(execFileCallback);
  *
  * Project-owned commands (setup and readiness) are the project's own code and get
  * {@link projectCommandEnvironment} instead, which keeps the worker's Git settings as they were.
+ *
+ * {@link gitHardenedEnvironment} reads the repository's config once, when the environment is built, and cannot name a
+ * driver the agent writes afterwards. So a call that reads or stages the agent's files while the agent may still be
+ * running (candidate capture, commit, export and the base comparison in verification/candidate.ts) does not use it: it
+ * runs Git in a throwaway repository that never sees the candidate's config (isolated-git.ts, with
+ * {@link isolatedGitEnvironment}). Every environment built here sets GIT_NO_REPLACE_OBJECTS.
  */
 
 /** Settings that no repository or user config may override for AgentX's own git calls. */
@@ -90,6 +96,8 @@ function staticGitEnvironment(
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
+    // A refs/replace entry in the agent's repository must not change which bytes a commit, tree or blob stands for.
+    GIT_NO_REPLACE_OBJECTS: "1",
   });
   const settings: ReadonlyArray<readonly [string, string]> = [
     ["safe.directory", directory],
@@ -103,6 +111,19 @@ function staticGitEnvironment(
     environment[`GIT_CONFIG_VALUE_${index}`] = value;
   });
   return environment;
+}
+
+/**
+ * The environment for Git run against a worker-owned throwaway git directory (see isolated-git.ts): the static
+ * hardening, `extra` (such as GIT_OBJECT_DIRECTORY and GIT_INDEX_FILE) and `config`. No repository's config is
+ * probed because no repository's config is read. `workTree` only names Git's safe directory.
+ */
+export function isolatedGitEnvironment(
+  workTree: string,
+  extra: Readonly<Record<string, string>> = {},
+  config: ReadonlyArray<readonly [string, string]> = [],
+): NodeJS.ProcessEnv {
+  return staticGitEnvironment(workTree, { GIT_ATTR_NOSYSTEM: "1", ...extra }, [["core.attributesFile", "/dev/null"], ...config]);
 }
 
 /**
@@ -216,11 +237,17 @@ export async function gitHardenedEnvironment(
  * holds a `.git`, such as a submodule a project's setup initialised. `git add`, `diff-files` and
  * `diff-index` check such a nested repository by running Git inside it under its own config, whose
  * filters this module has not neutralised. Run it, with the same environment (and index), before
- * `git add`.
+ * `git add`. `location` is the Git arguments that name the repository (`-C <directory>` by default).
+ * Returns every gitlink path the index records (none has a `.git`, or this refuses). That check is a
+ * point in time: a caller that stages the work tree must also keep Git away from those paths.
  */
-export async function assertNoEmbeddedRepositories(directory: string, env: NodeJS.ProcessEnv): Promise<void> {
+export async function assertNoEmbeddedRepositories(
+  directory: string,
+  env: NodeJS.ProcessEnv,
+  location: readonly string[] = ["-C", directory],
+): Promise<readonly string[]> {
   const gitlinks = await new Promise<string[]>((resolvePaths, reject) => {
-    const child = spawn("git", ["-C", directory, "ls-files", "--stage", "-z"], { env, stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn("git", [...location, "ls-files", "--stage", "-z"], { env, stdio: ["ignore", "pipe", "ignore"] });
     const found: string[] = [];
     let rest = "";
     child.stdout.setEncoding("utf8");
@@ -244,6 +271,7 @@ export async function assertNoEmbeddedRepositories(directory: string, env: NodeJ
       );
     }
   }
+  return gitlinks;
 }
 
 /**
@@ -251,12 +279,12 @@ export async function assertNoEmbeddedRepositories(directory: string, env: NodeJ
  * `filter=lfs`. AgentX's Git runs no hooks, so Git LFS's pre-push hook would never upload the
  * objects and a pull request would hold only pointers. Run it before staging for a push.
  */
-export async function assertNoLfsFiles(directory: string, env: NodeJS.ProcessEnv): Promise<void> {
+export async function assertNoLfsFiles(directory: string, env: NodeJS.ProcessEnv, location: readonly string[] = ["-C", directory]): Promise<void> {
   let found: boolean;
   try {
     const { stdout } = await execFile(
       "git",
-      ["-C", directory, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ":(attr:filter=lfs)"],
+      [...location, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ":(attr:filter=lfs)"],
       { env, encoding: "utf8", maxBuffer: 1024 * 1024 },
     );
     found = stdout !== "";
