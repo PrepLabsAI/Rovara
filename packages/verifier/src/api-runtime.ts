@@ -207,15 +207,18 @@ export async function executeE2EAPIApplicationScenario(input: { caseId: string; 
         || canonicalJson(parsedAsset.ref) !== canonicalJson(protectedProof.ref)) {
         throw new Error("protected state-probe schema asset is not bound to this exact assertion and proof bytes");
       }
-      const samples: Array<{ observedAt: string; valueRef: Awaited<ReturnType<typeof recordE2EApplicationCliEvidence>>; disposition: "pending" | "ready" | "failed" }> = [];
+      const samples: Array<{ observedAt: string; valueRef: Awaited<ReturnType<typeof recordE2EApplicationCliEvidence>>; disposition: "pending" | "ready" | "failed" | "timed-out"; httpStatus?: number }> = [];
+      /** Whether the poll ended because its time budget ran out (not an attempt cap, a final answer, or a failure). */
+      let budgetExhausted = false;
       const now = (): number => (input.clock ? input.clock.now() : Date.now());
       const sleep = (milliseconds: number, signal: AbortSignal): Promise<void> => (input.clock ? input.clock.sleep(milliseconds, signal) : waitForNextStatePoll(signal, milliseconds));
       const pollStartedAt = now();
       const pollDeadline = pollStartedAt + assertion.pollTimeoutMs;
-      for (let attempt = 0; attempt < 100 && now() <= pollDeadline; attempt += 1) {
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        if (now() > pollDeadline) { budgetExhausted = true; break; }
         if (input.signal.aborted) throw input.signal.reason ?? new Error("API state polling was cancelled");
         const remainingMs = pollDeadline - now();
-        if (remainingMs <= 0) break;
+        if (remainingMs <= 0) { budgetExhausted = true; break; }
         const requestDeadline = new AbortController();
         const requestTimer = setTimeout(() => requestDeadline.abort(new Error("API state request exceeded its remaining poll budget")), remainingMs);
         let response: Awaited<ReturnType<E2EApiRuntimePorts["request"]>>;
@@ -224,7 +227,7 @@ export async function executeE2EAPIApplicationScenario(input: { caseId: string; 
             AbortSignal.any([input.signal, requestDeadline.signal]));
         } catch (error) {
           if (input.signal.aborted) throw input.signal.reason ?? error;
-          if (now() >= pollDeadline) break;
+          if (now() >= pollDeadline) { budgetExhausted = true; break; }
           throw error;
         } finally { clearTimeout(requestTimer); }
         const arrivedWithinBudget = now() <= pollDeadline;
@@ -239,16 +242,23 @@ export async function executeE2EAPIApplicationScenario(input: { caseId: string; 
         const observedAt = response.observedAt;
         let parsed: unknown;
         try { parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(response.body)) as unknown; }
-        catch { samples.push({ observedAt, valueRef: bodyRef, disposition: "failed" }); break; }
+        catch { samples.push({ observedAt, valueRef: bodyRef, disposition: "failed", httpStatus: response.status }); break; }
         const disposition = !arrivedWithinBudget ? "failed" : response.status >= 200 && response.status < 300
           ? canonicalJson(parsed) === canonicalJson(assertion.equals) ? "ready" : "pending"
           : response.status === 429 || response.status === 503 ? "pending" : "failed";
-        samples.push({ observedAt, valueRef: bodyRef, disposition });
+        samples.push({ observedAt, valueRef: bodyRef, disposition, httpStatus: response.status });
         if (disposition === "ready" || disposition === "failed") break;
-        if (now() >= pollDeadline || attempt === 99) break;
+        if (now() >= pollDeadline) { budgetExhausted = true; break; }
+        if (attempt === 99) break;
         await sleep(Math.min(100, Math.max(1, pollDeadline - now())), input.signal);
       }
       if (samples.length === 0) throw new Error("API state probe deadline expired before an actual sample was read");
+      // Ruling W: when the budget ran out while a well-formed 2xx answer still held another value, that answer is the poll's last word, a definite mismatch.
+      // A 429 or 503 that kept the probe pending, or a poll that only ran out of attempts, is not.
+      const lastSample = samples[samples.length - 1]!;
+      if (budgetExhausted && lastSample.disposition === "pending" && lastSample.httpStatus !== undefined && lastSample.httpStatus >= 200 && lastSample.httpStatus < 300) {
+        samples[samples.length - 1] = { ...lastSample, disposition: "timed-out" };
+      }
       proofBytes.set(protectedProof.ref.artifactId, protectedProof);
       assetBinding = parsedAsset;
       artifacts.push(protectedProof.ref, ...samples.map((sample) => sample.valueRef));

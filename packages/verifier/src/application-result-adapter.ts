@@ -103,7 +103,8 @@ export const E2EApplicationAssertionObservationSchema = z.discriminatedUnion("ki
   z.object({ ...observationHeader, kind: z.literal("csv"), downloadId: id(256), downloadName: id(512), contentRef: observationRef }).strict(),
   z.object({ ...observationHeader, kind: z.literal("json"), responseId: id(256), schemaRef: id(256), schemaAssetRef: observationRef, bodyRef: observationRef }).strict(),
   z.object({ ...observationHeader, kind: z.literal("state"), probeId: id(256), probeAssetRef: observationRef, samples: z.array(z.object({ observedAt: utc,
-    valueRef: observationRef, disposition: z.enum(["pending", "ready", "failed"]) }).strict()).min(1).max(100) }).strict(),
+    // "timed-out" is only ever the last sample: a 2xx answer (see httpStatus) that still held another value when the poll budget ran out.
+    valueRef: observationRef, disposition: z.enum(["pending", "ready", "failed", "timed-out"]), httpStatus: z.number().int().min(100).max(599).optional() }).strict()).min(1).max(100) }).strict(),
   z.object({ ...observationHeader, kind: z.literal("file"), fixtureRootId: id(256), relativePath: id(1024), rootAssetRef: observationRef, contentRef: observationRef }).strict(),
 ]);
 export type E2EApplicationAssertionObservation = z.infer<typeof E2EApplicationAssertionObservationSchema>;
@@ -298,16 +299,23 @@ export function evaluateE2EApplicationAssertionObservation(input: { assertion: z
       if (canonicalJson(probeSchema) !== probeText || !isSupportedJsonSchema(probeSchema)) return { supported: false, passed: false, value: null };
     } catch { return { supported: false, passed: false, value: null }; }
     const sampleTimes = observation.samples.map((item) => Date.parse(item.observedAt));
+    const lastSample = observation.samples.at(-1);
+    // A poll ends ready, or (Ruling W) timed out on a 2xx answer: a definite mismatch. Anything else (a 429 or 503 that kept it pending, a failed or
+    // unreadable answer, a timeout with no recorded 2xx status) is not an answer about the feature, so the observation is unsupported.
+    const timedOut = lastSample?.disposition === "timed-out";
     if (!sampleTimes.every(Number.isFinite) || sampleTimes.some((time, index) => index > 0 && time < sampleTimes[index - 1]!)
       || sampleTimes.at(-1)! - sampleTimes[0]! > assertion.pollTimeoutMs
-      || observation.samples.at(-1)?.disposition !== "ready"
+      || (lastSample?.disposition !== "ready" && !(timedOut && lastSample.httpStatus !== undefined && lastSample.httpStatus >= 200 && lastSample.httpStatus < 300))
       || observation.samples.slice(0, -1).some((sample) => sample.disposition !== "pending")) return { supported: false, passed: false, value: null };
     const sampleValues = observation.samples.map((sample) => JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(proofBytesFor(input.proofBytes, sample.valueRef))) as unknown);
     const value = sampleValues.at(-1);
     if (sampleValues.some((sample) => !schemaMatches(sample, probeSchema))) {
       return { supported: false, passed: false, value };
     }
-    return { supported: true, passed: canonicalJson(value) === canonicalJson(assertion.equals), value };
+    const matches = canonicalJson(value) === canonicalJson(assertion.equals);
+    // A sample that holds the approved value was never a timeout.
+    if (timedOut && matches) return { supported: false, passed: false, value };
+    return { supported: true, passed: matches, value };
   }
   if (observation.kind === "file" && assertion.kind === "file") {
     if (!input.assetBinding || input.assetBinding.kind !== "fixture-root" || input.assetBinding.id !== assertion.fixtureRootId
