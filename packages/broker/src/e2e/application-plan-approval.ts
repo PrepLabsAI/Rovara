@@ -45,6 +45,35 @@ export type ApplicationPlanApprovalInput = {
   planDigest?: string;
 };
 
+/** As operationStep does: a portable scenario is exactly one portable step. One that goes on to application steps is refused as a mix. */
+const isPortableScenario = (scenario: E2EApplicationPlanIntent["scenarios"][number]) => scenario.steps.length === 1
+  && (scenario.steps[0]?.kind === "invoke-contract" || scenario.steps[0]?.kind === "inspect-contract");
+
+/**
+ * The identity of an approved application intent: the digest of the plan's intent as the schema reads it (`fullIntent`), with its optional members as the plan
+ * holds them. Approval records it, dispatch derives it again, and verification binds the stored plan to the record with it. The input is the stored intent or its
+ * parse, never the round's derived intent (`applicationRoundIntent`), which writes the members the planner leaves out as empty lists.
+ */
+export function applicationIntentDigest(intent: E2EApplicationPlanIntent): string {
+  return sha256(canonicalJson(E2EApplicationPlanIntentSchema.parse(intent)));
+}
+
+/**
+ * The intent an application round is derived and admitted on, from the plan's intent as the schema reads it: its application scenarios and the targets they name,
+ * with the members that belong to portable checks emptied and the source-backed mock selections kept for those targets. It is the one derivation of that intent,
+ * used by the admission (which stores it as `admission.intent`) and by verification (which holds the approved plan to the admission by deriving it again), so a stored
+ * plan that leaves out what the schema makes optional is the same intent as the admission that writes those members out as empty lists.
+ */
+export function applicationRoundIntent(intent: E2EApplicationPlanIntent): E2EApplicationPlanIntent {
+  const fullIntent = E2EApplicationPlanIntentSchema.parse(intent);
+  const applicationScenarios = fullIntent.scenarios.filter((scenario) => !isPortableScenario(scenario));
+  const applicationTargetIds = new Set(applicationScenarios.flatMap((scenario) => scenario.requestedTargetIds));
+  return E2EApplicationPlanIntentSchema.parse({ ...fullIntent,
+    requestedTargetIds: fullIntent.requestedTargetIds.filter((targetId) => applicationTargetIds.has(targetId)),
+    portableOperationRefs: [], semanticExportDeltas: [], scenarios: applicationScenarios,
+    mockFixtureRefs: (fullIntent.mockFixtureRefs ?? []).filter((ref) => applicationTargetIds.has(ref.requestedTargetId)) });
+}
+
 /** What the approval's own derivation produced, for a caller that builds an admission from the same facts it just checked. */
 export type ApplicationDerivation = ReturnType<typeof deriveE2EApplicationFeatureExecutionSelection>;
 /**
@@ -71,16 +100,13 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
     if (!parsed.success) return refuse(`the application intent is not valid: ${parsed.error.issues[0]?.message ?? "unreadable"}`, "plan");
     const fullIntent = parsed.data;
     const policy = E2EPolicySchema.parse(input.policy);
-    // As operationStep does: a portable scenario is exactly one portable step. One that goes on to application steps is refused as a mix.
-    const isPortable = (scenario: E2EApplicationPlanIntent["scenarios"][number]) => scenario.steps.length === 1
-      && (scenario.steps[0]?.kind === "invoke-contract" || scenario.steps[0]?.kind === "inspect-contract");
-    const mixed = fullIntent.scenarios.find((scenario) => !isPortable(scenario) && scenario.steps.some((step) => step.kind === "invoke-contract" || step.kind === "inspect-contract"));
+    const mixed = fullIntent.scenarios.find((scenario) => !isPortableScenario(scenario) && scenario.steps.some((step) => step.kind === "invoke-contract" || step.kind === "inspect-contract"));
     if (mixed !== undefined) return refuse(`scenario ${mixed.scenarioId} cannot mix portable and application steps`, "plan");
-    const applicationScenarios = fullIntent.scenarios.filter((scenario) => !isPortable(scenario));
+    const applicationScenarios = fullIntent.scenarios.filter((scenario) => !isPortableScenario(scenario));
     if (applicationScenarios.length === 0) return refuse("the plan has no application scenario, so it is a portable plan: use schemaVersion 1", "plan");
     // Ruling BE: one CHECKS operation carries one admission, and an application admission runs no portable child group, so a version 2 plan carries no
     // portable criteria in M1.2 (mixed rounds wait for M1.3). Nothing is dropped silently: the plan is refused and the owner asks for the plan to be corrected.
-    const portableScenarios = fullIntent.scenarios.filter((scenario) => isPortable(scenario));
+    const portableScenarios = fullIntent.scenarios.filter((scenario) => isPortableScenario(scenario));
     if (portableScenarios.length > 0) {
       return refuse(`scenario ${portableScenarios.map((scenario) => scenario.scenarioId).join(", ")} is a portable check, and a plan with application scenarios runs only application scenarios in M1.2: ${BE_REMEDY}`, "plan");
     }
@@ -93,12 +119,8 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
     const scenarioIds = new Set(fullIntent.scenarios.map((scenario) => scenario.scenarioId));
     const omitted = policy.baselineScenarioIds.filter((id) => !scenarioIds.has(id));
     if (omitted.length > 0) return refuse(`the plan omits baseline scenarios pinned by the approved setup: ${omitted.join(", ")}`);
-    const applicationTargetIds = new Set(applicationScenarios.flatMap((scenario) => scenario.requestedTargetIds));
     const applicationScenarioIds = new Set(applicationScenarios.map((scenario) => scenario.scenarioId));
-    const intent = E2EApplicationPlanIntentSchema.parse({ ...fullIntent,
-      requestedTargetIds: fullIntent.requestedTargetIds.filter((targetId) => applicationTargetIds.has(targetId)),
-      portableOperationRefs: [], semanticExportDeltas: [], scenarios: applicationScenarios,
-      mockFixtureRefs: (fullIntent.mockFixtureRefs ?? []).filter((ref) => applicationTargetIds.has(ref.requestedTargetId)) });
+    const intent = applicationRoundIntent(fullIntent);
     const applicationPolicy = { ...policy, baselineScenarioIds: policy.baselineScenarioIds.filter((id) => applicationScenarioIds.has(id)) };
     const bindingDigest = sha256(canonicalJson(Ec2RuntimeBindingSchema.parse(input.runtimeBinding)));
     const discovered = inspectE2ERepository(input.snapshot, input.snapshot.candidate);
@@ -170,7 +192,7 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
       return refuse(`the plan lists targets as executable whose scenarios cannot run now (${blocked.slice(0, BLOCKED_LISTED).join("; ")}${more})`);
     }
     return { ok: true, derivation: selection, selection: E2EApplicationSelectionRecordSchema.parse({
-      schemaVersion: "e2e-application-selection/v1", intentDigest: sha256(canonicalJson(fullIntent)), planDigest, semanticApproval, setupApproval: input.setupApproval,
+      schemaVersion: "e2e-application-selection/v1", intentDigest: applicationIntentDigest(fullIntent), planDigest, semanticApproval, setupApproval: input.setupApproval,
       applicationApprovalBindingDigest: selection.applicationApprovalBinding?.bindingDigest ?? null, applicationExecutionPlanDigest: selection.plan.digest,
       applicationBundleDigest: selection.bundle.bundleDigest, executableTargetIds,
       unavailableCriteria: selection.plan.unavailableCriteria.map((item) => ({ criterionId: item.criterionId, reason: item.reason })),

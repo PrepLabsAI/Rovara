@@ -214,7 +214,7 @@ import {
   type PlanApprovalRef,
   type E2EApplicationPlanIntent,
   type E2EApplicationSelectionRecord,
-  E2EApplicationSelectionRecordSchema,
+  E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema,
   E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, E2EApplicationBuildSourceManifestSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   type E2EApplicationExecutionAdmission,
   type E2ERegisteredRuntime,
@@ -279,7 +279,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, type WorkflowE2EReadinessMarker, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, PROJECT_RECORD_NEEDS_ADMIN, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../e2e/feature-plan-planning-context.js";
 import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.js";
-import { evaluateApplicationPlanApproval, type ApplicationRefusalScope } from "../e2e/application-plan-approval.js";
+import { applicationIntentDigest, applicationRoundIntent, evaluateApplicationPlanApproval, type ApplicationRefusalScope } from "../e2e/application-plan-approval.js";
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { buildApplicationExecutionAdmission } from "../e2e/application-admission.js";
@@ -7580,9 +7580,14 @@ export async function workflowE2EApplicationAuthorityIsValid(
     if (plan === undefined) return false;
     const { e2e, artifact, approved } = plan;
     // An application admission is only ever verified for an approved application (v2) plan, and only for the intent that plan carries and the selection recorded for it.
-    const intent = approved.plan.e2e;
-    if (intent?.schemaVersion !== 2) return reject("application-admission-needs-application-plan");
-    if (canonicalJson(intent) !== canonicalJson(admission.intent)) return reject("approved-plan-is-not-the-admitted-intent");
+    const storedIntent = approved.plan.e2e;
+    if (storedIntent?.schemaVersion !== 2) return reject("application-admission-needs-application-plan");
+    // The stored plan is the planner's: it leaves out what the schema makes optional, which the admission writes out as empty lists. Both sides are therefore held in the
+    // form the admission builder derives its intent in (`applicationRoundIntent`), and the plan is bound to the approval record by the digest approval recorded.
+    const parsedIntent = E2EApplicationPlanIntentSchema.safeParse(storedIntent);
+    if (!parsedIntent.success) return reject("approved-plan-intent-is-not-readable");
+    const intent = parsedIntent.data;
+    if (canonicalJson(applicationRoundIntent(intent)) !== canonicalJson(admission.intent)) return reject("approved-plan-is-not-the-admitted-intent");
     const recorded = E2EApplicationSelectionRecordSchema.safeParse(e2e.applicationSelection);
     if (!recorded.success) return reject("no-recorded-application-selection");
     const projectAuthority = await loadCurrentProjectAuthority(dependencies, task, mark, reject);
@@ -7628,7 +7633,8 @@ export async function workflowE2EApplicationAuthorityIsValid(
     if (!unchanged.ok) return reject(`application-selection-changed: ${unchanged.reason}`);
     if (canonicalJson(admission.selectionInput.approvedSemanticApproval) !== canonicalJson(recorded.data.semanticApproval)
       || canonicalJson(admission.selectionInput.setupApproval) !== canonicalJson(recorded.data.setupApproval)
-      || admission.intentDigest !== recorded.data.intentDigest) return reject("canonical-approval-binding-mismatch");
+      || applicationIntentDigest(intent) !== recorded.data.intentDigest
+      || admission.intentDigest !== createHash("sha256").update(canonicalJson(admission.intent)).digest("hex")) return reject("canonical-approval-binding-mismatch");
     const fences = await currentAuthorityFences(dependencies, task, { catalogKey, latestProject, setupApproval, policy, creatorAuthority, creatorAccess, creatorMembershipKey, developer }, reject);
     if (fences === undefined) return false;
     // Each runtime row the verdict rests on, exactly as read, sits between the project's fences and the creator's.

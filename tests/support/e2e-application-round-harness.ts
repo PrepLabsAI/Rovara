@@ -57,6 +57,12 @@ export type RoundOptions = {
   applications?: number;
   /** Seeds the CHECKS dispatch with the compute warm-up already done (the default). */
   seedReadiness?: boolean;
+  /**
+   * How the approved plan stores its intent. "planner" (the default) is the plan as the real planner writes it: the members the schema makes optional and the planner
+   * leaves out (`portableOperationRefs`, `mockFixtureRefs`, `unavailableTargetRefs`) are absent. "normalized" stores the parsed intent with those members written out as empty
+   * lists, which no planner does and which hides every comparison of a stored intent with a derived one.
+   */
+  storedIntent?: "planner" | "normalized";
 };
 
 const READY_API = { kind: "api" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedSteps,
@@ -108,7 +114,11 @@ export async function startApplicationRound(options: RoundOptions = {}) {
     applicationRuntimeRefs: targets.flatMap((target) => context.runtimeRefs!.filter((ref) => ref.targetId === target.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! }))),
     runtimeAccountRefs: targets.flatMap((target) => context.runtimeAccountRefs!.filter((ref) => ref.applicationId === target.applicationId && ref.profileId === target.accountProfileId)),
     unavailableTargetRefs: [] });
-  await harness.artifact(workspaceId, String(planning.id), "plan.md", planAnswer(planDocument({ title: "Check the orders services", claims: [{ id: "1", text: "The orders services answer their health checks." }], e2e: intent })));
+  // The planner leaves out what the schema makes optional and it has nothing to say about; the stored plan keeps it out too (see `RoundOptions.storedIntent`).
+  const { portableOperationRefs: _portable, mockFixtureRefs: _mocks, unavailableTargetRefs: _unavailable, ...plannerIntent } = intent;
+  void _portable; void _mocks; void _unavailable;
+  const storedIntent = options.storedIntent === "normalized" ? intent : plannerIntent;
+  await harness.artifact(workspaceId, String(planning.id), "plan.md", planAnswer(planDocument({ title: "Check the orders services", claims: [{ id: "1", text: "The orders services answer their health checks." }], e2e: storedIntent as never })));
   await harness.finish(workspaceId, String(planning.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
 
   const workflowNow = () => (harness.db.get(taskKey.pk, taskKey.sk) as { workflow: { revision: number; stage: string; state: string; blockReason?: string; artifacts: Array<{ sha256: string }>;
