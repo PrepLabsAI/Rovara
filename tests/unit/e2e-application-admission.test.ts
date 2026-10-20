@@ -196,6 +196,15 @@ describe("the builder refuses with a specific reason, never a portable fallback"
     expect(refusalOf(() => buildApplicationExecutionAdmission(input))).toMatch(/web runtime.*READY/i);
   });
 
+  it("refuses a runtime row that would expire before the round could end, saying it has to be qualified again", async () => {
+    const soon = webApiRow("web", { expiresAt: new Date(Date.now() + 30_000).toISOString() });
+    const { input } = await inputs({ registeredRuntimes: [soon] });
+    expect(refusalOf(() => buildApplicationExecutionAdmission(input))).toMatch(/web runtime of profile linux-arm64-web-api-v1 expires at .* before this round could end.*qualified again/);
+    // A row that outlives the round's deadline is fine.
+    const later = webApiRow("web", { expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
+    expect(() => buildApplicationExecutionAdmission({ ...input, registeredRuntimes: [later] })).not.toThrow();
+  });
+
   it("refuses a runtime profile with no installed CLI host", async () => {
     const { input } = await inputs();
     const foreign = planFixture({});

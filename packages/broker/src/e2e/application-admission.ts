@@ -129,6 +129,11 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   // The run is torn down at its deadline plus the host's grace; the stale-run sweep must never reach a live run.
   if (spanMs + DEFAULT_DEADLINE_GRACE_MS >= STALE_RUN_SWEEP_AGE_MS) throw refusal("the round's allowed run time is not shorter than the stale-run sweep");
   const deadlineAt = new Date(admittedAtMs + spanMs).toISOString();
+  // A runtime that stops being READY mid-round would leave a finished run unverifiable, so a round does not start on one that expires before it could end.
+  for (const profileId of profileIds) {
+    const row = runtimeFor(profileId);
+    if (Date.parse(row.expiresAt) < Date.parse(deadlineAt)) throw refusal(`the ${kind} runtime of profile ${profileId} expires at ${row.expiresAt}, before this round could end at ${deadlineAt}; it has to be qualified again first`);
+  }
 
   // One build identity per application: the candidate, the approved recipe and lockfiles, the exported source and the installed toolchain. The output digest names
   // what the host builds from exactly these inputs; nothing is prebuilt.
