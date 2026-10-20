@@ -95,34 +95,68 @@ async function currentValue(git: HeldDirectory, directory: HeldDirectory | undef
 }
 
 /**
- * Replaces one ref or HEAD of the candidate: the value it has now (read through the held directory, under the lock) must still be `expected`, else the
+ * Sets one ref or HEAD of the candidate to `next`: the value it has now (read through the held directory, under the lock) must still be `expected`, else the
  * repository changed meanwhile and nothing is overwritten. Every directory down to the ref is opened once without following a symlink (candidate-fs.ts).
  */
-async function applyOne(layout: CandidateLayout, name: string, expected: string | undefined, next: string | undefined): Promise<void> {
-  const interrupted = () => agentXError("OPERATION_INTERRUPTED", `the repository's ${name} changed while AgentX was working on it`);
+async function applyOne(layout: CandidateLayout, name: string, expected: string | undefined, next: string): Promise<void> {
   const git = await openDirectory(layout.gitDirectory);
-  const parent = name === "HEAD" ? undefined : await openRefParent(git, name, next !== undefined);
+  const parent = name === "HEAD" ? undefined : await openRefParent(git, name, true);
   let lock: DirectoryLock | undefined;
   try {
     const directory = name === "HEAD" ? git : parent?.directory;
     const leaf = name === "HEAD" ? "HEAD" : parent?.leaf ?? "";
-    if (directory === undefined) {
-      // No loose directory: the ref can only be packed, and a packed ref is not removed here.
-      throw next === undefined && expected !== undefined ? agentXError("OPERATION_INTERRUPTED", `AgentX cannot remove ${name}: it is kept only in packed-refs`) : interrupted();
-    }
+    if (directory === undefined) throw agentXError("OPERATION_INTERRUPTED", `the repository's ${name} changed while AgentX was working on it`);
     lock = await lockIn(directory, leaf);
     const now = name === "HEAD"
       ? (await readFileIn(git, "HEAD", REF_FILE_BYTES))?.toString("utf8").replace(/\n$/u, "")
       : await currentValue(git, directory, leaf, name);
-    if (now !== expected) throw interrupted();
-    if (next === undefined) {
-      if ((await kindIn(directory, leaf)) !== "file") throw agentXError("OPERATION_INTERRUPTED", `AgentX cannot remove ${name}: it is kept only in packed-refs`);
-      await removeIn(directory, leaf);
-      return;
-    }
+    if (now !== expected) throw agentXError("OPERATION_INTERRUPTED", `the repository's ${name} changed while AgentX was working on it`);
     await commitLock(lock, `${next}\n`);
   } finally {
     if (lock !== undefined) await releaseLock(lock);
+    await parent?.close();
+    await git.close();
+  }
+}
+
+/** `packed-refs` text without the entry for `name` (and the peeled `^` line that follows it), everything else byte for byte: the header, the other entries, their peeled lines. */
+export function packedRefsWithout(text: string, name: string): string {
+  const kept: string[] = [];
+  let skipping = false;
+  for (const line of text.split("\n")) {
+    if (skipping && line.startsWith("^")) continue;
+    skipping = false;
+    const match = /^[0-9a-f]{40} (\S+)$/u.exec(line);
+    if (match?.[1] === name) { skipping = true; continue; }
+    kept.push(line);
+  }
+  return kept.join("\n");
+}
+
+/**
+ * Removes the ref `name` the way `git update-ref -d` does: `packed-refs.lock` and the ref's own lock are taken, the value it has now must still be `expected`,
+ * `packed-refs` is rewritten without it (and renamed over the old one), and only then the loose file is removed, so the packed value never shows again. The ref
+ * may be loose, packed, or both. Every directory is opened once without following a symlink (candidate-fs.ts).
+ */
+async function deleteRef(layout: CandidateLayout, name: string, expected: string): Promise<void> {
+  const git = await openDirectory(layout.gitDirectory);
+  const parent = await openRefParent(git, name, false);
+  const locks: DirectoryLock[] = [];
+  try {
+    const packedLock = await lockIn(git, "packed-refs");
+    locks.push(packedLock);
+    if (parent !== undefined) locks.push(await lockIn(parent.directory, parent.leaf));
+    if ((await currentValue(git, parent?.directory, parent?.leaf ?? "", name)) !== expected) {
+      throw agentXError("OPERATION_INTERRUPTED", `the repository's ${name} changed while AgentX was working on it`);
+    }
+    const packed = (await readFileIn(git, "packed-refs", PACKED_REFS_BYTES))?.toString("utf8");
+    if (packed !== undefined) {
+      const rewritten = packedRefsWithout(packed, name);
+      if (rewritten !== packed) await commitLock(packedLock, rewritten);
+    }
+    if (parent !== undefined && (await kindIn(parent.directory, parent.leaf)) === "file") await removeIn(parent.directory, parent.leaf);
+  } finally {
+    for (const lock of locks) await releaseLock(lock);
     await parent?.close();
     await git.close();
   }
@@ -137,7 +171,7 @@ async function applyRefsBack(git: IsolatedGit, before: RefState): Promise<void> 
     if (before.refs.get(name) !== value) await applyOne(git.layout, name, before.refs.get(name), value);
   }
   for (const [name, value] of before.refs) {
-    if (!after.refs.has(name)) await applyOne(git.layout, name, value, undefined);
+    if (!after.refs.has(name)) await deleteRef(git.layout, name, value);
   }
   if (after.head !== before.head) await applyOne(git.layout, "HEAD", before.head, after.head);
 }
