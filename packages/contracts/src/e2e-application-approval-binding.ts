@@ -3,7 +3,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { E2EApplicationApprovalBindingSchema, E2EApplicationPlanIntentSchema, PlanApprovalRefSchema, e2eApplicationApprovalBindingDigest,
   type E2EApplicationApprovalBinding, type E2EApplicationPlanIntent, type SourceRef } from "./e2e-application.js";
 import { e2eApplicationMetadataSourcePaths, e2eApplicationMetadataSourceRefs } from "./e2e-application-metadata.js";
-import { e2eTargetSourceIdentity, inspectE2ERepository, isE2EPlaceholderRuntimeProfileId } from "./e2e-catalog.js";
+import { e2eTargetSourceIdentity, inspectE2ERepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId } from "./e2e-catalog.js";
 import { E2EAppRecipeSchema, E2ESetupProposalSchema, type E2EAppRecipe, type E2ESetupProposal } from "./e2e.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
 
@@ -82,8 +82,10 @@ export function deriveE2EApplicationApprovalBinding(input: {
       || canonicalJson(e2eTargetSourceIdentity(sourceTarget)) !== canonicalJson(e2eTargetSourceIdentity(priorTarget))) {
       throw new Error(`application runtime target ${ref.targetId} differs from the source-derived and setup-approved target identity`);
     }
-    // A web/API target approved against a qualified runtime profile can only be assigned to that profile.
-    if (!isE2EPlaceholderRuntimeProfileId(priorTarget.runtimeProfileId) && ref.runtimeProfileId !== priorTarget.runtimeProfileId) {
+    // A web/API target approved against a qualified runtime profile can only be assigned to that profile, and a ref can name a qualified profile
+    // only for a target approved on it (a placeholder-approved target stays unavailable).
+    if (ref.runtimeProfileId !== priorTarget.runtimeProfileId
+      && (!isE2EPlaceholderRuntimeProfileId(priorTarget.runtimeProfileId) || isE2EQualifiedRuntimeProfileId(ref.runtimeProfileId))) {
       throw new Error(`application runtime target ${ref.targetId} runtime profile differs from its setup-approved runtime profile`);
     }
     if (ref.accountProfileId !== sourceTarget.accountProfileId) {

@@ -273,6 +273,11 @@ export function isE2EPlaceholderRuntimeProfileId(profileId: string): boolean {
   return profileId.endsWith("-phase-unavailable") || profileId === "no-device-selected";
 }
 
+/** Whether a runtime profile id is a qualified web/API profile (the Docker-hosted runtime), as opposed to a placeholder or a fixture id. */
+export function isE2EQualifiedRuntimeProfileId(profileId: string): boolean {
+  return QUALIFIED_RUNTIME_PROFILE_IDS.includes(profileId);
+}
+
 /**
  * The target as source discovery derives it. A web or API target may carry the qualified runtime profile it was approved against, which is not
  * derivable from source; this maps that one choice back to the discovery placeholder so an approved target compares equal to its source identity.

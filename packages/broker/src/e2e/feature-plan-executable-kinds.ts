@@ -11,7 +11,7 @@ export function describeFeatureE2EExecutableKinds(context: Pick<FeatureE2EPlanni
   const executable = (kind: string) => context.targets.filter((target) => target.kind === kind && !unavailable.has(target.targetId)).map((target) => target.targetId);
   return [
     "Targets in runtimeRefs that are not in unavailableTargetRefs can run real browser or API scenarios. For those targets only, a scenario may use exactly these kinds:",
-    ...kinds.map((item) => `- ${item.kind} targets (${executable(item.kind).join(", ")}): steps ${item.steps.join(", ")}; assertions ${item.assertions.join(", ")}.`),
+    ...kinds.map((item) => `- ${item.kind} targets (${executable(item.kind).join(", ")}): steps ${item.steps.filter((step) => step !== "agent").join(", ")}; assertions ${item.assertions.join(", ")}.`),
     "Do not use `agent` steps; they stay unavailable. A target in unavailableTargetRefs cannot run application scenarios (unavailableReasons says why): list it there instead of proposing executable scenarios for it.",
   ].join("\n");
 }

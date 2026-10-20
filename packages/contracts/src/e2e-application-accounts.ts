@@ -106,6 +106,15 @@ export function readE2EApplicationProjectContract(snapshot: E2ESourceSnapshot, a
   return contract;
 }
 
+/**
+ * Whether the launch recipe discovery yields for the application is the one its own `agentx.e2e` project contract declares (same digest). A
+ * recipe merely inferred from package.json is not: it has no service contract or accounts yet. The one rule planning and selection share.
+ */
+export function e2eApplicationRecipeIsProjectContract(snapshot: E2ESourceSnapshot, applicationId: string, recipe: { recipeDigest: string } | null): boolean {
+  if (recipe === null) return false;
+  try { return readE2EApplicationProjectContract(snapshot, applicationId)?.recipe.recipeDigest === recipe.recipeDigest; } catch { return false; }
+}
+
 export function e2eApplicationAccountTargetId(baseTargetId: string, profileId: string): string {
   return `account-target-${sha([baseTargetId, profileId])}`;
 }

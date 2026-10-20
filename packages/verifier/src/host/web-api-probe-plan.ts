@@ -164,14 +164,15 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     scenarios: [scenario], semanticExportDeltas: [], applicationRuntimeRefs: [{ targetId: target.targetId, applicationId: application.applicationId,
       recipeDigest: application.recipe!.recipeDigest, sourceRefs: e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths),
       runtimeProfileId, accountProfileId }], runtimeAccountRefs: [accountRef], unavailableTargetRefs: [] });
-  const setupProposal = proposeE2ESetup({ inspection: discovery.inspection, snapshot, expectedCandidate: candidate });
+  // The probe qualifies the runtime that targets are approved against, so its setup carries that qualified profile like a real approved setup.
+  const setupProposal = proposeE2ESetup({ inspection: discovery.inspection, snapshot, expectedCandidate: candidate, readyProfiles: [{ kind, profileId: runtimeProfileId }] });
   const setupApproval = { artifactId: "setup-approval", digest: hash(canonicalJson(setupProposal)) };
   const planDigest = "c".repeat(64);
   const semanticApproval = { artifactId: "semantic-approval", digest: "d".repeat(64) };
   const applicationApprovalBinding = deriveE2EApplicationApprovalBinding({ preparedSnapshot: snapshot, intent, artifactId: semanticApproval.artifactId,
     artifactSha256: semanticApproval.digest, planDigest, setupProposal, setupApproval });
   const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [scenario.scenarioId],
-    targets: discovery.inspection.proposedTargets, defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
+    targets: setupProposal.targets, defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
     // The real web engine reports screenshot and video capability, and the compiler binds the launch descriptor to the capture policy.
     capture: { screenshots: kind === "web", traces: false, video: kind === "web", downloads: false },
     limits: { runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 60_000, caseTimeoutMs: 120_000,

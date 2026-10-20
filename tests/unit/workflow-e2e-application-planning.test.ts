@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   E2EApplicationPlanIntentSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
-  e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup,
+  e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup, selectE2EApplicationExecutionPlan,
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { deriveE2EApplicationFeatureExecutionSelection } from "../../packages/broker/src/e2e/application-feature-plan-intent.js";
@@ -164,6 +164,16 @@ describe("browser and API scenarios on a qualified runtime profile", () => {
     expect(declared.unavailableCriteria).toEqual([{ criterionId: declared.criteria[0]!.criterionId, reason: "needs-project-contract" }]);
   });
 
+  it("never makes a target approved on the placeholder profile executable by naming the qualified profile in the plan", () => {
+    expect(() => plan({ setupReady: [], planRuntimeProfileId: PROFILE })).toThrow(/runtime profile/i);
+    // The same refusal holds in selection itself, with a binding that was derived while the target was approved on the qualified profile.
+    const approved = plan({});
+    const setup = approvedSetup(contractSnapshot, []);
+    const input = { ...approved.selectionInput, policy: { ...approved.selectionInput.policy, targets: setup.proposal.targets },
+      setupProposal: setup.proposal, setupApproval: setup.setupApproval };
+    expect(() => selectE2EApplicationExecutionPlan(input)).toThrow(/runtime profile/i);
+  });
+
   it("refuses a plan whose runtime profile is not the one the approved target carries", () => {
     expect(() => plan({ planRuntimeProfileId: "foreign-runtime-profile" })).toThrow(/runtime profile/i);
   });
@@ -189,7 +199,16 @@ describe("planning context for a qualified web target", () => {
     const text = describeFeatureE2EExecutableKinds(context);
     expect(text).toContain("navigate, fill, click, choose-file");
     expect(text).toContain("text, visible, csv");
-    expect(text).toContain("agent");
+    const offered = text.split("\n").filter((line) => line.startsWith("- web targets"));
+    expect(offered).toHaveLength(1);
+    expect(offered[0]).not.toContain("agent");
+  });
+
+  it("never offers agent steps, even when a registered descriptor lists them", () => {
+    const text = describeFeatureE2EExecutableKinds({ targets: [{ targetId: "web-1", applicationId: "app", kind: "web", accountProfileId: "synthetic" }],
+      unavailableTargetRefs: [], executableKinds: [{ kind: "web", steps: ["navigate", "agent", "click"], assertions: ["visible"] }] });
+    expect(text).toContain("steps navigate, click;");
+    expect(text.split("\n").filter((line) => line.startsWith("- web targets"))[0]).not.toContain("agent");
   });
 
   it("puts the same target in the unavailable list while its runtime is not READY now", () => {
@@ -222,14 +241,18 @@ describe("planning context for a qualified web target", () => {
     expect(text).toContain("api targets (api-1): steps request; assertions http-status, json, state.");
   });
 
-  it("keeps the P0 context shape for a target on the placeholder profile", () => {
+  it("keeps the exact pre-2.2 context and prompt for a policy with no target on a qualified profile (Ruling AQ)", () => {
     const setup = approvedSetup(contractSnapshot, [], ["web-1"]);
-    const context = buildFeatureE2EPlanningContext(setup.policy, contractSnapshot);
+    const context = buildFeatureE2EPlanningContext(setup.policy, contractSnapshot, { origin: "approved-setup", preparedCommitSha: null,
+      readyRuntimes: ready });
     if (context.status !== "available") throw new Error(context.reason);
     expect(context.runtimeRefs?.every((item) => item.runtimeProfileId === "web-phase-unavailable")).toBe(true);
-    expect(context.unavailableTargetRefs?.map((item) => item.targetId).sort()).toEqual(context.targets.map((item) => item.targetId).sort());
-    expect(context.unavailableReasons?.every((item) => item.reason === "runtime-unavailable")).toBe(true);
-    expect(context.executableKinds).toEqual([]);
+    expect(context.unavailableTargetRefs?.map((item) => item.targetId)).toEqual(["web-1"]);
+    expect(Object.keys(context)).not.toContain("unavailableReasons");
+    expect(Object.keys(context)).not.toContain("executableKinds");
+    // Hashes of the context JSON and of the planner instructions, computed from the code at 8ec3eb02 (before Task 2.2).
+    expect(sha(JSON.stringify(context))).toBe("08406287d684d9347d93acf5a2b7f392795721d4451f1042ef6ac4b9ec86067e");
+    expect(sha(planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context }))).toBe("17dbd45eb17aaabb817ba1c866c0561db14525f43f6e2ee5663ad266e6afaf2f");
   });
 });
 

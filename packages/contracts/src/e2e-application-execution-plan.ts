@@ -8,14 +8,13 @@ import { E2EExecutionPlanSchema, E2EPolicySchema, E2ERuntimeAvailabilitySchema, 
   E2EApiMockFixtureSchema, e2eExecutionPlanDigest, e2eScenarioBundleDigest, validateE2EScenarioBundleForPolicy,
   type E2EExpectedCase, type E2EExecutionPlan, type E2EMockSpec, type E2EScenario, type E2EScenarioBundle, type E2ESetupProposal } from "./e2e.js";
 import { e2eApplicationUpstreamTestIdFromIdentity, e2eCaseIdFromIdentity } from "./e2e-case-identity.js";
-import { e2eTargetSourceIdentity, inspectE2ERepository, isE2EPlaceholderRuntimeProfileId } from "./e2e-catalog.js";
+import { e2eTargetSourceIdentity, inspectE2ERepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId } from "./e2e-catalog.js";
 import { verifyE2ESourceSnapshot } from "./e2e-source.js";
 import { E2EPortableApprovalBindingSchema, type E2EPortableApprovalBinding } from "./e2e-portable.js";
 import { E2ERegisteredRuntimeSchema, type E2ERegisteredRuntime } from "./e2e-runtime-registration.js";
 import { e2eRuntimeKindMatchesTarget, resolveE2ERuntimeReadiness } from "./e2e-runtime-capabilities.js";
 import { createE2EOpenApiFixtureDescriptor, validateE2EOpenApiFixtureResponse } from "./e2e-openapi-fixture.js";
-import { readE2EApplicationProjectContract } from "./e2e-application-accounts.js";
-import { WEB_API_RUNTIME_PROFILE_ID } from "./e2e-web-api-qualification.js";
+import { e2eApplicationRecipeIsProjectContract } from "./e2e-application-accounts.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const stableId = (prefix: string, value: unknown) => prefix + sha256(canonicalJson(value));
@@ -146,7 +145,9 @@ function validateFullInput(input: E2EApplicationPlanSelectionInput): {
   }
   for (const ref of intent.applicationRuntimeRefs) {
     const approvedProfileId = policy.targets.find((target) => target.targetId === ref.targetId)?.runtimeProfileId;
-    if (approvedProfileId !== undefined && !isE2EPlaceholderRuntimeProfileId(approvedProfileId) && ref.runtimeProfileId !== approvedProfileId) {
+    // A ref may name a qualified profile only when the approved target carries that same profile, and an approved qualified profile only that ref.
+    if (approvedProfileId !== undefined && ref.runtimeProfileId !== approvedProfileId
+      && (!isE2EPlaceholderRuntimeProfileId(approvedProfileId) || isE2EQualifiedRuntimeProfileId(ref.runtimeProfileId))) {
       throw new Error(`application runtime profile for target ${ref.targetId} differs from the approved target runtime profile`);
     }
   }
@@ -262,11 +263,8 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
   const hasProjectContract = (applicationId: string): boolean => {
     let declared = projectContractByApplication.get(applicationId);
     if (declared === undefined) {
-      const recipe = discovered.inspection.applications.find((item) => item.applicationId === applicationId)?.recipe ?? null;
-      try {
-        const contract = readE2EApplicationProjectContract(input.sourceSnapshot, applicationId);
-        declared = contract !== null && recipe !== null && contract.recipe.recipeDigest === recipe.recipeDigest;
-      } catch { declared = false; }
+      declared = e2eApplicationRecipeIsProjectContract(input.sourceSnapshot, applicationId,
+        discovered.inspection.applications.find((item) => item.applicationId === applicationId)?.recipe ?? null);
       projectContractByApplication.set(applicationId, declared);
     }
     return declared;
@@ -301,9 +299,9 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
       continue;
     }
     const gatedApplicationId = ref?.applicationId ?? intent.unavailableTargetRefs?.find((item) => item.targetId === targetId)?.applicationId;
+    // Keyed on the profile the owner approved for the target (a ref cannot name a qualified profile the target does not carry).
     if (gatedApplicationId !== undefined && (policyTarget.kind === "web" || policyTarget.kind === "api")
-      && (policyTarget.runtimeProfileId === WEB_API_RUNTIME_PROFILE_ID || ref?.runtimeProfileId === WEB_API_RUNTIME_PROFILE_ID)
-      && !hasProjectContract(gatedApplicationId)) {
+      && isE2EQualifiedRuntimeProfileId(policyTarget.runtimeProfileId) && !hasProjectContract(gatedApplicationId)) {
       unavailable.push({ criterionId, reason: NEEDS_PROJECT_CONTRACT_REASON });
       continue;
     }

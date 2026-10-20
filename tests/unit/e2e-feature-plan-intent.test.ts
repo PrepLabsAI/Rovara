@@ -212,7 +212,9 @@ describe("source-bound portable feature plan binding", () => {
     const placeholder = buildFeatureE2EPlanningContext(policy, snapshot, { readyRuntimes });
     if (placeholder.status !== "available") return;
     expect(placeholder.runtimeRefs).toMatchObject([{ runtimeProfileId: "web-phase-unavailable" }]);
-    expect(placeholder.unavailableReasons).toEqual([{ targetId: "web-1", reason: "runtime-unavailable" }]);
+    // No target on a qualified profile: the pre-2.2 context shape (Ruling AQ).
+    expect(placeholder).not.toHaveProperty("unavailableReasons");
+    expect(placeholder).not.toHaveProperty("executableKinds");
   });
 
   it("binds an Owner-approved callable reference to the exact candidate package export and module bytes", () => {
