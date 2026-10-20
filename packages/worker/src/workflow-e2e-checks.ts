@@ -5,7 +5,7 @@ import {
   E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2EScenarioBundleSchema,
   ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   canonicalJson, e2eScenarioBundleDigest, selectE2EExecutionPlan, verifyE2ESourceSnapshot,
-  type E2ESourceSnapshot, type WorkerInvocation,
+  type E2ESourceSnapshot, type E2EWorkflowAdmissionRef, type WorkerInvocation,
 } from "@agentx/contracts";
 import { executeWorkflowE2EApplicationChecks, type WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
 import { collectE2EActualCliRun, compileE2EScenarios, e2ePrivateTransferMaxBytes, e2eSnapshotSourceDigest, observeInstalledRuntimeManifestForHost, runE2EActualCli } from "@agentx/verifier";
@@ -19,6 +19,36 @@ type Admission = {
   intent: unknown; policy: unknown; runtime: Record<string, unknown>; plan: unknown; bundle: unknown; selectionInput: Record<string, unknown>;
   portableApprovalBinding: unknown; round: unknown; groupAdmissions: Array<Record<string, unknown>>;
 };
+
+/** Reads the admission the invocation names through the broker's chunked private channel and holds it to the content address the reference carries. */
+export async function readWorkflowE2EAdmissionBytes(input: { reference: E2EWorkflowAdmissionRef;
+  readAdmission: (offset: number) => Promise<{ totalBytes: number; chunkBase64: string; sha256: string }>; throwIfCancelled?: () => void }): Promise<Buffer> {
+  const { reference } = input;
+  const throwIfCancelled = input.throwIfCancelled ?? (() => undefined);
+  const chunks: Buffer[] = [];
+  let totalBytes = -1;
+  let declaredDigest = "";
+  for (let offset = 0; totalBytes < 0 || offset < totalBytes; offset += 64 * 1024) {
+    throwIfCancelled();
+    const piece = await input.readAdmission(offset);
+    throwIfCancelled();
+    if (totalBytes < 0) { totalBytes = piece.totalBytes; declaredDigest = piece.sha256; }
+    const bytes = Buffer.from(piece.chunkBase64, "base64");
+    if (piece.totalBytes !== totalBytes || piece.sha256 !== declaredDigest || bytes.byteLength === 0 || bytes.byteLength > 64 * 1024
+      || bytes.toString("base64") !== piece.chunkBase64 || offset + bytes.byteLength > totalBytes) throw new Error("native E2E admission chunks are inconsistent");
+    chunks.push(bytes);
+  }
+  const admissionBytes = Buffer.concat(chunks);
+  if (admissionBytes.byteLength !== reference.admissionRef.byteLength || declaredDigest !== reference.admissionRef.sha256
+    || sha(admissionBytes) !== reference.admissionRef.sha256) throw new Error("native E2E admission content address is invalid");
+  return admissionBytes;
+}
+
+/** True only for an admission of the application kind (a browser or API round); anything else, unreadable included, is not one. */
+export async function workflowE2EAdmissionIsApplication(input: Parameters<typeof readWorkflowE2EAdmissionBytes>[0]): Promise<boolean> {
+  const bytes = await readWorkflowE2EAdmissionBytes(input);
+  try { return (JSON.parse(bytes.toString("utf8")) as { schemaVersion?: unknown } | null)?.schemaVersion === "workflow-e2e-application-admission/v1"; } catch { return false; }
+}
 
 /** Executes only the exact immutable admission named by the server-created CHECKS invocation. */
 export async function executeWorkflowE2EChecks(input: {
@@ -43,22 +73,7 @@ export async function executeWorkflowE2EChecks(input: {
     if (input.signal?.aborted) throw input.signal.reason instanceof Error ? input.signal.reason : new Error("native E2E checks were cancelled");
   };
   throwIfCancelled();
-  const chunks: Buffer[] = [];
-  let totalBytes = -1;
-  let declaredDigest = "";
-  for (let offset = 0; totalBytes < 0 || offset < totalBytes; offset += 64 * 1024) {
-    throwIfCancelled();
-    const piece = await input.readAdmission(offset);
-    throwIfCancelled();
-    if (totalBytes < 0) { totalBytes = piece.totalBytes; declaredDigest = piece.sha256; }
-    const bytes = Buffer.from(piece.chunkBase64, "base64");
-    if (piece.totalBytes !== totalBytes || piece.sha256 !== declaredDigest || bytes.byteLength === 0 || bytes.byteLength > 64 * 1024
-      || bytes.toString("base64") !== piece.chunkBase64 || offset + bytes.byteLength > totalBytes) throw new Error("native E2E admission chunks are inconsistent");
-    chunks.push(bytes);
-  }
-  const admissionBytes = Buffer.concat(chunks);
-  if (admissionBytes.byteLength !== reference.admissionRef.byteLength || declaredDigest !== reference.admissionRef.sha256
-    || sha(admissionBytes) !== reference.admissionRef.sha256) throw new Error("native E2E admission content address is invalid");
+  const admissionBytes = await readWorkflowE2EAdmissionBytes({ reference, readAdmission: input.readAdmission, throwIfCancelled });
   const parsedAdmission = JSON.parse(admissionBytes.toString("utf8")) as Admission;
   // The admission's own schema version picks the path. An application admission never reaches the portable code below, and a portable one never reaches Docker.
   if ((parsedAdmission as { schemaVersion?: unknown } | null)?.schemaVersion === "workflow-e2e-application-admission/v1") {

@@ -41,7 +41,7 @@ import {
   type TaskUsageOutcome,
 } from "./usage.js";
 import { assertWorkflowDependencyResumeTree, executeSerialWorkflowDependencies } from "./workflow-dependencies.js";
-import { executeWorkflowE2EChecks } from "./workflow-e2e-checks.js";
+import { executeWorkflowE2EChecks, workflowE2EAdmissionIsApplication } from "./workflow-e2e-checks.js";
 import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
 
 export interface TaskInvocationResult {
@@ -195,7 +195,10 @@ export async function runTaskInvocation(
       throw agentXError("RUNTIME_UNAVAILABLE", "the admitted E2E CHECKS runtime or evidence directory is unavailable");
     }
     const readiness = invocation.payload.readiness ?? [];
-    if (readiness.length === 0) throw agentXError("CONFIG_INVALID", "verification retry requires at least one selected project check");
+    const NO_PROJECT_CHECK = "verification retry requires at least one selected project check";
+    // A run with nothing to check at all is never valid. A round whose admission is an application admission (browser or API scenarios) is valid with no project
+    // check; which kind it is is only known once the admission is read, which the broker allows after the operation is durably RUNNING (below).
+    if (readiness.length === 0 && invocation.payload.workflowE2EAdmission === undefined) throw agentXError("CONFIG_INVALID", NO_PROJECT_CHECK);
     const events = new EventBatcher(dependencies.eventSink);
     const repositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase);
     const candidateBefore = await readCandidateRepositories(repositories);
@@ -208,6 +211,10 @@ export async function runTaskInvocation(
       // The broker authorizes the private admission read only after the operation is durably
       // RUNNING. Flush this transition before the first protected CHECKS callback.
       await events.flush();
+      if (readiness.length === 0 && !(await workflowE2EAdmissionIsApplication({ reference: invocation.payload.workflowE2EAdmission!,
+        readAdmission: (offset) => dependencies.workflowE2EAdmissionReader!(invocation.payload.workflowE2EAdmission!, offset) }))) {
+        throw agentXError("CONFIG_INVALID", NO_PROJECT_CHECK);
+      }
       await events.append("progress", { message: "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
       const runners = dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
