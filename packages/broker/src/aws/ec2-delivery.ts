@@ -44,6 +44,12 @@ export interface Ec2DeliveryDependencies {
    * worker built before them. Without it, no optional field is sent.
    */
   workerFeatures?: (url: string) => Promise<readonly string[]>;
+  /**
+   * Called, before the invocation is posted, when a planning run's schema-v2 application plan was dropped for a worker that does not list
+   * "task.workflowE2EApplicationPlan": the operation record must stop saying the version was offered, so the broker refuses a v2 plan it uploads.
+   * A failure fails the attempt (the run must not go out with the record still saying 2).
+   */
+  applicationPlanNotNegotiated?: (record: Ec2OutboxRecord) => Promise<void>;
   /** Rechecks fresh PEOPLE authority after compute is ready, immediately before signing and POST. */
   guardTaskDispatch?: (record: Ec2OutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
   /** Loads and validates the durable internal readiness marker before any session provisioning. */
@@ -116,6 +122,10 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     }
     if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures);
+    if (invocation.kind === "task" && invocation.payload.workflowE2EPlanVersion !== undefined
+      && !(sent.kind === "task" && sent.payload.workflowE2EPlanVersion !== undefined)) {
+      await dependencies.applicationPlanNotNegotiated?.(record);
+    }
     if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const payload = workerInvokeTokenPayload({
       workspaceId: record.workspaceId,

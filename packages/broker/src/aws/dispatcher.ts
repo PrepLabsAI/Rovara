@@ -32,6 +32,21 @@ export interface SqsEvent {
 export interface DispatcherLambdaContext { getRemainingTimeInMillis(): number }
 
 /** Validates an internal warm-up against its stored operation and every active workflow/workspace fence. */
+/**
+ * Clears the planning operation's record of the schema-v2 application plan when delivery dropped it for an older worker, so the broker refuses a
+ * v2 plan that run uploads (Ruling AW). Idempotent: a redelivery clears an already-cleared record.
+ */
+export function createApplicationPlanNegotiationRecorder(input: { documentClient: DynamoDBDocumentClient; tableName?: string }) {
+  return async (record: Ec2OutboxRecord): Promise<void> => {
+    await input.documentClient.send(new UpdateCommand({
+      TableName: input.tableName ?? requiredEnvironment("STATE_TABLE_NAME"),
+      Key: { pk: `WORKSPACE#${record.workspaceId}`, sk: `OPERATION#${record.operationId}` },
+      UpdateExpression: "REMOVE workflowE2EPlanVersion",
+      ConditionExpression: "attribute_exists(pk)",
+    }));
+  };
+}
+
 export function createWorkflowE2EReadinessValidator(input: { documentClient: DynamoDBDocumentClient; tableName?: string }) {
   return async (record: Ec2OutboxRecord, invocation: WorkerInvocation): Promise<"ORDINARY" | "READINESS" | "PARKED"> => {
     if (invocation.kind !== "resume") return "ORDINARY";
@@ -571,6 +586,7 @@ const deliverEc2 = createEc2Delivery({
   },
   workerFeatures: (url) => workerPingFeatures(url),
   guardTaskDispatch: taskDispatchGuard,
+  applicationPlanNotNegotiated: createApplicationPlanNegotiationRecorder({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
   validateWorkflowE2EReadiness: createWorkflowE2EReadinessValidator({ documentClient, ...(tableName === undefined ? {} : { tableName }) }),
   guardProjectSetupDispatch,
   async progress(record, message) {

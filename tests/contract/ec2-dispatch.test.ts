@@ -35,16 +35,18 @@ function recordFor(workspaceId = randomUUID(), fence = 2): Ec2OutboxRecord {
 function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}) {
   const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{\"accepted\":true}" }));
   const progress = vi.fn<Ec2DeliveryDependencies["progress"]>(async () => undefined);
+  const applicationPlanNotNegotiated = vi.fn<NonNullable<Ec2DeliveryDependencies["applicationPlanNotNegotiated"]>>(async () => undefined);
   const deliver = createEc2Delivery({
     sessions: { ensureSession: async () => ({ ready: true, generation: 3, privateIp: "10.42.128.10" }) },
     binding: async () => binding,
     sign: kmsSign,
     post,
     progress,
+    applicationPlanNotNegotiated,
     now: () => NOW,
     ...overrides,
   });
-  return { deliver, post, progress };
+  return { deliver, post, progress, applicationPlanNotNegotiated };
 }
 
 function readinessFixture() {
@@ -436,8 +438,12 @@ describe("ec2-ebs delivery", () => {
       const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EApplicationPlan"] });
       expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
       expect(postedPayload(capable.post)).toMatchObject({ workflowE2EPlanVersion: 2, prompt: wrap(asked) });
+      expect(capable.applicationPlanNotNegotiated).not.toHaveBeenCalled();
       const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] });
       expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      // The operation record must stop saying the plan version was offered, before the worker runs (Ruling AW).
+      expect(older.applicationPlanNotNegotiated).toHaveBeenCalledTimes(1);
+      expect(older.applicationPlanNotNegotiated).toHaveBeenCalledWith(record);
       expect(postedPayload(older.post)).not.toHaveProperty("workflowE2EPlanVersion");
       expect(postedPayload(older.post).prompt).toBe(wrap(portable));
       expect(postedPayload(older.post)).toMatchObject({ workflowMode: "PLAN", planFormat: "structured" });

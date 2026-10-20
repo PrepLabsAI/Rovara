@@ -15,6 +15,7 @@ import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runti
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
 import { portableFeatureIntentOf } from "../../packages/broker/src/e2e/portable-feature-intent.js";
+import { createApplicationPlanNegotiationRecorder } from "../../packages/broker/src/aws/dispatcher.js";
 import { decideTaskWorkflow } from "../../packages/broker/src/aws/developer-tasks.js";
 import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
@@ -335,6 +336,19 @@ describe("a mixed v2 intent (Ruling AV): application scenarios are derived, port
     const result = evaluate({ snapshot: mixedSnapshot, mutateIntent: (intent, fixture) => ({ ...withProposedCallable(intent, fixture),
       scenarios: [portableScenario(portableOperationId(".", fixture.application.applicationId))], applicationRuntimeRefs: [], runtimeAccountRefs: [], unavailableTargetRefs: [] }) });
     expect(refusal(result)).toMatch(/no application scenario.*schemaVersion 1/i);
+  });
+});
+
+describe("a scenario that starts with a portable step but continues with application steps (fix round 2)", () => {
+  it("is refused as mixing portable and application steps, not stripped as portable", () => {
+    const result = evaluate({ snapshot: mixedSnapshot, mutateIntent: (intent, fixture) => {
+      const operationId = portableOperationId(".", fixture.application.applicationId);
+      const mixedScenario = { ...portableScenario(operationId), scenarioId: "render-then-click", steps: [...portableScenario(operationId).steps, { kind: "click" as const, testId: "export-csv" }] };
+      const proposed = withProposedCallable(intent, fixture);
+      return { ...proposed, scenarios: [...intent.scenarios, mixedScenario] };
+    } });
+    expect(result.ok).toBe(false);
+    expect(refusal(result)).toMatch(/cannot mix portable and application steps/);
   });
 });
 
@@ -781,6 +795,41 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     expect(portableFeatureIntentOf({ ...approved!, e2e: undefined })).toEqual({ ok: false, reason: "canonical-e2e-intent-missing" });
     const v1 = { schemaVersion: 1 as const, requestedTargetIds: ["web-1"], accountContextRefs: [], scenarios: [], semanticExportDeltas: [] };
     expect(portableFeatureIntentOf({ ...approved!, e2e: v1 })).toEqual({ ok: true, intent: v1 });
+  });
+
+  // ---- Fix round 2 ----
+
+  it("refuses a v2 plan from a run the dispatcher downgraded to a worker without task.workflowE2EApplicationPlan (Ruling AW)", async () => {
+    const started = await startPlanning({ web: webApiRow("web"), api: webApiRow("api") });
+    // The broker offered version 2 and recorded it ...
+    expect(started.payload.workflowE2EPlanVersion).toBe(2);
+    const operationKey = { pk: `WORKSPACE#${started.workspaceId}`, sk: `OPERATION#${started.planningId}` };
+    expect(started.harness.db.get(operationKey.pk, operationKey.sk)).toMatchObject({ workflowE2EPlanVersion: 2 });
+    // ... then delivery found a worker without the feature and reported it (what createEc2Delivery does before it posts).
+    const outbox = started.harness.db.find((row) => row.entityType === "OUTBOX" && row.operationId === started.planningId)[0]!;
+    const input = started.harness.brokerInput as unknown as { documentClient: never; tableName: string };
+    await createApplicationPlanNegotiationRecorder({ documentClient: input.documentClient, tableName: input.tableName })(outbox as never);
+    expect(started.harness.db.get(operationKey.pk, operationKey.sk)).not.toHaveProperty("workflowE2EPlanVersion");
+    const context = buildFeatureE2EPlanningContext(started.policy, started.snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_WEB] });
+    if (context.status !== "available") throw new Error(context.reason);
+    const target = context.targets.find((item) => item.targetId === "web-1")!;
+    const forTarget = <T extends { applicationId: string; profileId?: string; accountProfileId?: string }>(refs: readonly T[]) => refs.filter((ref) => ref.applicationId === target.applicationId);
+    const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [], mockFixtureRefs: [],
+      accountContextRefs: forTarget(context.accountContextRefs).filter((ref) => ref.profileId === target.accountProfileId),
+      scenarios: [{ ...csvScenario, requestedTargetIds: [target.targetId], accountProfileId: target.accountProfileId }], semanticExportDeltas: [],
+      applicationRuntimeRefs: context.runtimeRefs!.filter((ref) => ref.targetId === target.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! })),
+      runtimeAccountRefs: forTarget(context.runtimeAccountRefs!).filter((ref) => ref.profileId === target.accountProfileId), unavailableTargetRefs: [] });
+    await started.harness.artifact(started.workspaceId, started.planningId, "plan.md", planAnswer(planDocument({ title: "Export CSV", claims: [{ id: "1", text: "Orders can be exported." }], e2e: intent })));
+    await started.harness.finish(started.workspaceId, started.planningId, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    const task = started.harness.db.get(`DEVTASK#${started.taskId}`, "META") as { workflow: { state: string; blockReason?: string; artifacts: unknown[] }; planUnreadable?: { errors: string[] } };
+    expect(task.workflow).toMatchObject({ state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.planUnreadable });
+    expect(task.workflow.artifacts).toEqual([]);
+    expect(task.planUnreadable?.errors.join(" ")).toMatch(/schemaVersion 2 was not offered for this planning step/);
+  });
+
+  it("still stores a v2 plan from a run whose worker was not downgraded", async () => {
+    const planned = await plannedWithApplicationIntent();
+    expect(workflowOf(planned).artifacts).toHaveLength(1);
   });
 
 });

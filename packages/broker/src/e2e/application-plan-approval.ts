@@ -56,7 +56,11 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
     const policy = E2EPolicySchema.parse(input.policy);
     // Ruling AV: the selection and binding are derived from the application scenarios only. Portable scenarios of a mixed intent follow the same
     // rules as a v1 plan (no source binding at approval, so a callable the plan proposes as future code is accepted) and never wait as unavailable.
-    const isPortable = (scenario: E2EApplicationPlanIntent["scenarios"][number]) => scenario.steps[0]?.kind === "invoke-contract" || scenario.steps[0]?.kind === "inspect-contract";
+    // As operationStep does: a portable scenario is exactly one portable step. One that goes on to application steps stays in the application part and is refused.
+    const isPortable = (scenario: E2EApplicationPlanIntent["scenarios"][number]) => scenario.steps.length === 1
+      && (scenario.steps[0]?.kind === "invoke-contract" || scenario.steps[0]?.kind === "inspect-contract");
+    const mixed = fullIntent.scenarios.find((scenario) => !isPortable(scenario) && scenario.steps.some((step) => step.kind === "invoke-contract" || step.kind === "inspect-contract"));
+    if (mixed !== undefined) return refuse(`scenario ${mixed.scenarioId} cannot mix portable and application steps`);
     const applicationScenarios = fullIntent.scenarios.filter((scenario) => !isPortable(scenario));
     if (applicationScenarios.length === 0) return refuse("the plan has no application scenario, so it is a portable plan: use schemaVersion 1");
     const scenarioIds = new Set(fullIntent.scenarios.map((scenario) => scenario.scenarioId));
