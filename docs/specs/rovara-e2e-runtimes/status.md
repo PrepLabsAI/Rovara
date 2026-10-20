@@ -6,11 +6,13 @@
 |---|---|---|---|
 | M1.0 | Fast lane: standing qualification grant (IaC), `scripts/test-deploy.ts`, web fixture repo | One command deploys a build to TEST; the fixture project is reachable without new grants | done, except registering the fixture project (moved to M1.2) |
 | M1.1 | Salvaged runtime, executor image, Docker application host, web/API runtime qualification | `linux-arm64-web-api-v1` qualifies on the TEST runner: CSV positive passes; the defect, egress and IMDS probes fail as expected | **done 2026-10-19** (live in TEST) |
-| M1.2 | Workflow wiring: discovery -> plan -> CHECKS -> verify -> publication for web/API | "Add Export CSV" request: the first candidate fails a real browser check -> send back -> repair -> passes -> draft PR with green CI | not started |
+| M1.2 | Workflow wiring: discovery -> plan -> CHECKS -> verify -> publication for web/API | "Add Export CSV" request: the first candidate fails a real browser check -> send back -> repair -> passes -> draft PR with green CI | **done 2026-10-20** (live demo in TEST: browser rounds verified PASS, security review send-back repaired twice, draft PR abhishek255/rovara-orders-web-fixture#1 green; see m1-live-acceptance.md) |
 | M1.3 | Synthetic accounts, external-origin mocks, screenshots/trace and per-scenario results in page/Slack | Viewer-refused and tenant-isolation scenarios with an external API mocked; failure shows a screenshot and expected vs actual | not started |
 | M1.4 | AI navigation (`agent` steps) through a governed model route | An agent step finds a renamed Export button; deterministic CSV assertions still decide | not started |
 
 ## Log
+
+- 2026-10-20: M1.2 live demo passed in TEST (task a43e54fe). Live findings fixed: legacy catalog pointer (FX1), stale control-plane Lambdas (FX2), SessionsSteps IAM (owner-approved), intent normalization and per-account collection (FX3), Slack retry re-approval (FX4). Worker git security hotfix (H3/H3b/H3c) released to production 16:48Z; production otherwise paused.
 
 - 2026-10-18: owner approved the standing TEST fast-lane packet (`test-fast-lane.md`) once. M1 asks for no per-run grants after this.
 - 2026-10-18: Task 0.1 committed: optional standing qualification transport (CDK context `agentx:e2eQualificationTransport=enabled`); deployed to TEST through the `qualification-transport` unit of `scripts/test-deploy.ts` (not yet deployed).
