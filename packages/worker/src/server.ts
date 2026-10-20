@@ -18,10 +18,13 @@ export interface WorkerExecutor {
   /** Feature-specific optional runtime gates are reported independently of ordinary worker health. */
   invocationFeatureDiagnostics?: Readonly<Record<string, unknown>>;
   /**
-   * Listed features this worker cannot use right now, asked on every /ping (for example application CHECKS while the executor image is missing): each is left out of
-   * the list the dispatcher reads, and its diagnostic says why. Features the executor does not name stay listed.
+   * Listed features this worker cannot use right now (for example application CHECKS while the executor image is missing), answered from what it already knows:
+   * /ping never waits on anything slow, because the broker's probes give up after 2 to 3 seconds. Each is left out of the list the dispatcher reads, and its
+   * diagnostic says why. Features the executor does not name stay listed.
    */
-  withheldInvocationFeatures?(): Promise<Readonly<Partial<Record<WorkerInvocationFeature, unknown>>>>;
+  withheldInvocationFeatures?(): Readonly<Partial<Record<WorkerInvocationFeature, unknown>>>;
+  /** Every feature `withheldInvocationFeatures` may name. If asking throws, all of these are withheld (fail closed). */
+  withholdableInvocationFeatures?: readonly WorkerInvocationFeature[];
 }
 
 export interface WorkerTerminalResult {
@@ -74,7 +77,10 @@ export function createWorkerServerState(
 export async function handleWorkerRequest(request: Request, state: WorkerServerState): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/ping") {
-    const withheld: Readonly<Record<string, unknown>> = await state.executor.withheldInvocationFeatures?.().catch(() => ({})) ?? {};
+    let withheld: Readonly<Record<string, unknown>> = {};
+    try { withheld = state.executor.withheldInvocationFeatures?.() ?? {}; } catch {
+      withheld = Object.fromEntries((state.executor.withholdableInvocationFeatures ?? []).map((feature) => [feature, { status: "unavailable", reason: "availability-check-failed" }]));
+    }
     const diagnostics = { ...state.invocationFeatureDiagnostics, ...withheld };
     return response(200, {
       status: state.activeOperations.size === 0 ? "Healthy" : "HealthyBusy",

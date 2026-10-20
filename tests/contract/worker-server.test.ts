@@ -123,7 +123,7 @@ describe("worker HTTP contract", () => {
   it("withholds a feature the executor reports as unavailable from /ping, with the reason, and lists it again once it is available", async () => {
     const root = await mkdtemp(join(tmpdir(), "agentx-withheld-feature-"));
     let withheld: Record<string, unknown> = { "task.workflowE2EApplicationChecks": { status: "unavailable", reason: "executor-image-not-on-host" } };
-    const state = createWorkerServerState(new OperationJournal(root), { execute: () => Promise.resolve(), withheldInvocationFeatures: async () => withheld });
+    const state = createWorkerServerState(new OperationJournal(root), { execute: () => Promise.resolve(), withheldInvocationFeatures: () => withheld });
     const ping = async () => (await handleWorkerRequest(new Request("http://worker/ping"), state)).json() as Promise<{ invocationFeatures: string[]; invocationFeatureDiagnostics?: Record<string, unknown> }>;
     const first = await ping();
     expect(first.invocationFeatures).not.toContain("task.workflowE2EApplicationChecks");
@@ -131,6 +131,17 @@ describe("worker HTTP contract", () => {
     expect(first.invocationFeatureDiagnostics).toMatchObject({ "task.workflowE2EApplicationChecks": { status: "unavailable", reason: "executor-image-not-on-host" } });
     withheld = {};
     expect((await ping()).invocationFeatures).toContain("task.workflowE2EApplicationChecks");
+  });
+
+  it("withholds every feature the executor may withhold, with a reason, when asking which are withheld throws (fails closed)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-withheld-throws-"));
+    const state = createWorkerServerState(new OperationJournal(root), { execute: () => Promise.resolve(),
+      withholdableInvocationFeatures: ["task.workflowE2EApplicationChecks"],
+      withheldInvocationFeatures: () => { throw new Error("availability unknown"); } });
+    const ping = await (await handleWorkerRequest(new Request("http://worker/ping"), state)).json() as { invocationFeatures: string[]; invocationFeatureDiagnostics?: Record<string, unknown> };
+    expect(ping.invocationFeatures).not.toContain("task.workflowE2EApplicationChecks");
+    expect(ping.invocationFeatures).toContain("task.workflowE2EApplicationPlan");
+    expect(ping.invocationFeatureDiagnostics).toMatchObject({ "task.workflowE2EApplicationChecks": { status: "unavailable", reason: "availability-check-failed" } });
   });
 
   // The journal reads SUCCEEDED a moment before the operation leaves the active set: the write lands,
