@@ -267,7 +267,7 @@ import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePlanReferenceError } from "../e2e/feature-plan-intent.js";
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
-import { applicationRuntimeRowFences, e2eRegisteredRuntimeKey, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
+import { applicationRuntimeRowFences, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
 import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
 import {

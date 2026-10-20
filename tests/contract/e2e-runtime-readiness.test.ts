@@ -146,7 +146,7 @@ describe("the fences on the runtime rows an application approval was derived fro
   const selected = { kind: "web" as const, profileId: registration.profileId };
 
   it("holds each selected row exactly as it was read, under the table it is stored in", () => {
-    const fences = applicationRuntimeRowFences({ tableName: "state", rows: [{ ...row, capabilities: { ...row.capabilities, kind: "web" } }], selected: [selected] });
+    const fences = applicationRuntimeRowFences({ tableName: "state", rows: [{ ...row, capabilities: { ...row.capabilities, kind: "web" } } as typeof row], selected: [selected] });
     expect(fences).toHaveLength(1);
     const check = (fences[0] as { ConditionCheck: { TableName: string; Key: unknown; ExpressionAttributeValues: Record<string, unknown> } }).ConditionCheck;
     expect(check.TableName).toBe("state");
@@ -157,7 +157,7 @@ describe("the fences on the runtime rows an application approval was derived fro
   it("throws, instead of leaving a selected row unfenced, when the row it selected is not among those read", () => {
     expect(() => applicationRuntimeRowFences({ tableName: "state", rows: [], selected: [selected] }))
       .toThrow(`the selected web runtime ${registration.profileId} is not among the runtime rows this approval was derived from`);
-    expect(() => applicationRuntimeRowFences({ tableName: "state", rows: [{ ...row, capabilities: { ...row.capabilities, kind: "api" } }], selected: [selected] })).toThrow(/not among the runtime rows/);
+    expect(() => applicationRuntimeRowFences({ tableName: "state", rows: [{ ...row, capabilities: { ...row.capabilities, kind: "api" } } as typeof row], selected: [selected] })).toThrow(/not among the runtime rows/);
   });
 
   it("fences nothing when nothing was selected", () => {

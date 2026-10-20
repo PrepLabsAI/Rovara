@@ -464,7 +464,9 @@ describe("ec2-ebs delivery", () => {
       it("never sends an application admission to a worker that does not list task.workflowE2EApplicationChecks, and says why", async () => {
         const record = checks(admission({ kind: "application" }));
         const older = delivery({ workerFeatures: async () => checksFeatures });
-        await expect(older.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining("task.workflowE2EApplicationChecks") });
+        const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
+        expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
+        expect(refusal?.message).toContain("task.workflowE2EApplicationChecks");
         expect(older.post).not.toHaveBeenCalled();
       });
 
