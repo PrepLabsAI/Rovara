@@ -1124,7 +1124,7 @@ describe("P0 normal project onboarding journey", () => {
       artifactId: currentPlanArtifact?.id, artifactSha256: currentPlanArtifact?.sha256,
       graphDigest: workflowApproval?.graphDigest, graphRunId: workflowApproval?.runId,
       workflowRevision: workflowApproval?.workflowRevision, actorId: workflowApproval?.actorId })));
-    const featureApprovalBinding = approvedCanonicalPlan?.e2e && currentPlanArtifact
+    const featureApprovalBinding = approvedCanonicalPlan?.e2e?.schemaVersion === 1 && currentPlanArtifact
       ? deriveE2EFeaturePortableApprovalBinding({ intent: approvedCanonicalPlan.e2e, snapshot: actualSnapshot,
         artifactId: currentPlanArtifact.id, artifactSha256: currentPlanArtifact.sha256, planDigest: approvedPlanDigest }) : undefined;
     expect(featureApprovalBinding?.operations, "the final committed candidate export must resolve every Owner-approved portable selector").toHaveLength(4);

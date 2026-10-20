@@ -95,8 +95,9 @@ describe("source-bound portable feature plan binding", () => {
     const parsed = parsePlanDocument(`\`\`\`agentx-plan\n${JSON.stringify({ schemaVersion: 1, title: "Render orders", why: [{ text: "Show orders from the source-backed API contract.", author: "owner" }],
       claims: [{ id: "1", text: "A user can view orders." }], notChanging: ["Existing access rules."], risks: ["The renderer is proposed future code."], decisions: [], e2e: proposed })}\n\`\`\``, { kind: "plan" });
     expect(parsed.ok).toBe(true);
-    if (!parsed.ok || parsed.plan.e2e === undefined) return;
-    expect(() => deriveE2EFeaturePortableApprovalBinding({ intent: parsed.plan.e2e!, snapshot: baseSnapshot,
+    if (!parsed.ok || parsed.plan.e2e?.schemaVersion !== 1) return;
+    const proposedIntent = parsed.plan.e2e;
+    expect(() => deriveE2EFeaturePortableApprovalBinding({ intent: proposedIntent, snapshot: baseSnapshot,
       artifactId: "feature-plan", artifactSha256: "b".repeat(64), planDigest: "c".repeat(64) })).toThrow();
 
     const finalModule = Buffer.from(`${baseModule.toString("utf8")}export async function renderOrders(input) { const response = await fetch("/orders?mode=" + encodeURIComponent(input.mode)); if (!response.ok) return "refused:" + response.status; const body = await response.json(); if (!Array.isArray(body.orders)) return "invalid-data"; return body.orders.map((row) => row.name).join(","); }\n`);
@@ -143,7 +144,7 @@ describe("source-bound portable feature plan binding", () => {
     const parsed = parsePlanDocument(`\`\`\`agentx-plan\n${JSON.stringify({ schemaVersion: 1, title: "Render orders", why: [{ text: "Show orders.", author: "owner" }],
       claims: [{ id: "1", text: "A user can view orders." }], notChanging: ["Existing access rules."], risks: ["Mock scenarios are proposals, not qualification evidence."], decisions: [], e2e: proposed })}\n\`\`\``, { kind: "plan" });
     expect(parsed.ok).toBe(true);
-    if (!parsed.ok || parsed.plan.e2e === undefined) return;
+    if (!parsed.ok || parsed.plan.e2e?.schemaVersion !== 1) return;
     const admission = deriveE2EFeatureExecutionAdmission({ intent: parsed.plan.e2e, snapshot, artifactId: "feature-plan", artifactSha256: "b".repeat(64),
       planDigest: "c".repeat(64), policy, runtimeCatalogId: "local-catalog", runtimeBinding: binding, featureVerifier: featureRecord,
       now: Date.parse("2026-10-13T12:30:00.000Z") });

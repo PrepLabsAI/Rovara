@@ -711,8 +711,8 @@ describe("the plan's e2e intent versions", () => {
   });
 
   it("renders the unavailable targets of a v2 intent", () => {
-    const unavailable = { schemaVersion: 2 as const, ...{ ...v2, applicationRuntimeRefs: [], runtimeAccountRefs: [],
-      unavailableTargetRefs: [{ targetId: "web-1", applicationId: "orders", accountProfileId: "synthetic", sourceRefs }] } };
+    const unavailable = { ...v2, applicationRuntimeRefs: [], runtimeAccountRefs: [],
+      unavailableTargetRefs: [{ targetId: "web-1", applicationId: "orders", accountProfileId: "synthetic", sourceRefs }] };
     expect(parsePlanDocument(planAnswer({ ...planDocument(), e2e: unavailable }), { kind: "plan" }).ok).toBe(true);
     expect(render(unavailable)).toContain("- Required but currently unavailable targets: `");
   });
