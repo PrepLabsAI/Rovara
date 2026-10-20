@@ -507,6 +507,32 @@ describe("Slack native workflow review controls", () => {
     expect(submitted).toContainEqual(expect.objectContaining({ taskId, userId: other, expectedRevision: workflow.revision }));
   });
 
+  describe("a failed fresh task authorization", () => {
+    const pressWith = (authorize: () => Promise<void>) => {
+      const handlers = workflowSlackHandlers({ loadTask: async () => task, authorize, openView: async () => undefined, submit: async () => undefined });
+      const press: SlackBlockAction = { actionId: "agentx_workflow_approve", value: JSON.stringify({ taskId, revision: workflow.revision, digest, decision: "APPROVE" }),
+        userId: other, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "", requestStartedAt: nowSeconds * 1_000,
+        thread, messageTs: "1695500001.000002", messageText: "plan", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" };
+      return () => handlers.handleAction(press);
+    };
+    const refused = (code?: string) => async () => { throw Object.assign(new Error("task authorization refused"), code === undefined ? {} : { code }); };
+
+    it.each(["FORBIDDEN", "TASK_NOT_FOUND"])("tells a member the task owner decides when the broker answers %s", async (code) => {
+      await expect(pressWith(refused(code))()).rejects.toThrow("Only the task owner can approve this step.");
+    });
+
+    it.each(["INTERNAL_ERROR", "RUNTIME_UNAVAILABLE", undefined])("does not blame the member for a %s failure: it asks them to try again, and logs the code", async (code) => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      try {
+        const press = pressWith(refused(code));
+        await expect(press()).rejects.toThrow("Something went wrong; try again in a minute.");
+        await expect(press()).rejects.not.toThrow(/task owner/);
+        expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+          component: "slack-interactivity", event: "workflow.authorize_failed", action: "decide", code: code ?? "UNKNOWN" }));
+      } finally { log.mockRestore(); }
+    });
+  });
+
   it("submits optional checks in one canonical order so a reordered resubmission is the same decision", async () => {
     const now = new Date(nowSeconds * 1_000).toISOString();
     const twoOptional = submitWorkflowArtifact(createWorkflowSnapshot({ taskId, ownerId: "b".repeat(64), now, checkPolicy: {

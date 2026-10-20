@@ -154,6 +154,15 @@ function errorName(error: unknown): string {
   return error instanceof Error ? error.name : "unknown";
 }
 
+/** What a member hears when the task authorization itself failed, not when it said no. */
+export const AUTHORIZATION_UNAVAILABLE_TEXT = "Something went wrong; try again in a minute.";
+
+/** The AgentX error code a failed authorization carries (the broker's own, from its reply), if any. */
+function authorizationErrorCode(error: unknown): string | undefined {
+  const code = error !== null && typeof error === "object" ? (error as { code?: unknown }).code : undefined;
+  return typeof code === "string" && code.length > 0 ? code : undefined;
+}
+
 interface HttpResponse { statusCode: number; headers: Record<string, string>; body: string }
 
 function respond(statusCode: number, body: unknown): HttpResponse {
@@ -789,6 +798,12 @@ export function createAwsSlackInteractivityHandler() {
     if (response.FunctionError !== undefined || response.Payload === undefined) throw new Error(`broker ${String(event.action)} failed`);
     return JSON.parse(Buffer.from(response.Payload).toString("utf8")) as BrokerReply;
   };
+  const brokerReplyErrorCode = (answer: BrokerReply): string | undefined => {
+    try {
+      const code = asRecord(asRecord(JSON.parse(answer.body ?? "")).error).code;
+      return typeof code === "string" ? code : undefined;
+    } catch { return undefined; }
+  };
   const taskPeopleRefusal = (answer: BrokerReply, fallback: string): WorkflowInteractionRefusal => {
     try {
       const message = asRecord(asRecord(JSON.parse(answer.body ?? "")).error).message;
@@ -803,7 +818,7 @@ export function createAwsSlackInteractivityHandler() {
     },
     async authorize(taskId, userId, thread, taskAction) {
       const answer = await invokeBroker({ source: "agentx.slack-ingress", action: "task-people-authorize", taskId, userId, thread, taskAction }, SLACK_FETCH_TIMEOUT_MILLISECONDS);
-      if (answer.statusCode !== 200) throw new Error("task authorization refused");
+      if (answer.statusCode !== 200) throw Object.assign(new Error("task authorization refused"), { code: brokerReplyErrorCode(answer) });
     },
     async getPeople(input) {
       const answer = await invokeBroker({ source: "agentx.slack-ingress", action: "task-people-read", ...input }, SLACK_FETCH_TIMEOUT_MILLISECONDS);
@@ -1167,7 +1182,13 @@ export function workflowSlackHandlers(deps: {
   const requireOwnerAction = async (task: Record<string, unknown>, taskId: string, userId: string, thread: SlackThread,
     action: "decide" | "retry" | "publish" | "feedback" | "close" | "control", legacyMessage: string, mention = true): Promise<void> => {
     if (deps.authorize !== undefined) {
-      try { await deps.authorize(taskId, userId, thread, action); } catch { throw new WorkflowInteractionRefusal(legacyMessage); }
+      try { await deps.authorize(taskId, userId, thread, action); } catch (error) {
+        // Only a definite "not yours" or "no such task" answer is the owner's message; anything else (a broker fault, a timeout, a malformed reply)
+        // says nothing about the member, so it is logged with its code and answered as a retryable failure.
+        const code = authorizationErrorCode(error);
+        console.log(JSON.stringify({ component: "slack-interactivity", event: "workflow.authorize_failed", taskId, action, code: code ?? "UNKNOWN", errorName: errorName(error) }));
+        throw new WorkflowInteractionRefusal(code === "FORBIDDEN" || code === "TASK_NOT_FOUND" ? legacyMessage : AUTHORIZATION_UNAVAILABLE_TEXT);
+      }
       return;
     }
     if (task.slackUserId !== userId) {

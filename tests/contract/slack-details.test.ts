@@ -512,7 +512,7 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
     const invocations: Array<Record<string, unknown>> = [];
     // Lambda queues the event (202) without waiting for the broker; the second time it refuses the invoke.
     let accepted = true;
-    let authorizationReply: "allow" | "deny" | "invalid-json" = "allow";
+    let authorizationReply: "allow" | "deny" | "fault" | "invalid-json" = "allow";
     vi.spyOn(LambdaClient.prototype, "send").mockImplementation((async (command: { input: Record<string, unknown> }) => {
       invocations.push(command.input);
       expect(command.input.FunctionName).toBe("broker");
@@ -523,7 +523,9 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
         if (authorizationReply === "invalid-json") return { StatusCode: 200, Payload: Buffer.from("{") };
         const reply = authorizationReply === "allow"
           ? { statusCode: 200, body: JSON.stringify({ authorized: true }) }
-          : { statusCode: 403, body: JSON.stringify({ error: { message: "Only the task owner can approve this step." } }) };
+          : authorizationReply === "fault"
+            ? { statusCode: 500, body: JSON.stringify({ error: { code: "INTERNAL_ERROR", message: "boom" } }) }
+            : { statusCode: 403, body: JSON.stringify({ error: { code: "FORBIDDEN", message: "Only the task owner can approve this step." } }) };
         return { StatusCode: 200, Payload: Buffer.from(JSON.stringify(reply)) };
       }
       expect(command.input.InvocationType).toBe("Event");
@@ -556,9 +558,17 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
     expect(invocations.slice(2).map((invocation) => invocation.InvocationType)).toEqual(["RequestResponse", "Event"]);
 
     authorizationReply = "deny";
-    expect(JSON.parse((await submit()).body)).toMatchObject({ response_action: "errors" });
+    expect((await submit()).body).toContain("Only the task owner can approve this step.");
     expect(invocations).toHaveLength(5);
     expect(invocations[4]).toMatchObject({ InvocationType: "RequestResponse", FunctionName: "broker" });
+
+    // A broker fault says nothing about this member: the code reaches the log and the member is asked to try again, not told they are not the owner.
+    authorizationReply = "fault";
+    const faultBody = (await submit()).body;
+    expect(faultBody).toContain("Something went wrong; try again in a minute.");
+    expect(faultBody).not.toContain("task owner");
+    expect(logs).toContainEqual(expect.objectContaining({ event: "workflow.authorize_failed", code: "INTERNAL_ERROR", action: "decide" }));
+    expect(invocations).toHaveLength(6);
 
     authorizationReply = "invalid-json";
     const beforeMalformedAuthorization = invocations.length;
