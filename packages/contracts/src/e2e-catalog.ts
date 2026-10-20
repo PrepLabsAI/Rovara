@@ -1,17 +1,18 @@
 import { createHash } from "node:crypto";
 import * as ts from "typescript";
 import {
-  E2EAppRecipeSchema, E2ERepositoryInspectionSchema, E2ESetupProposalSchema, type E2ERepositoryInspection, type E2ESetupProposal,
+  E2EAppRecipeSchema, E2ERepositoryInspectionSchema, E2ESetupProposalSchema, type E2EAppRecipe, type E2ERepositoryInspection, type E2ESetupProposal,
 } from "./e2e.js";
 import { canonicalJson } from "./canonical-json.js";
 import { bindE2EApplicationAccountTargets, readE2EApplicationProjectContract, type E2EApplicationProjectContract } from "./e2e-application-accounts.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
+import { e2ePackageManifests, e2eRunnerUnsafePath, parseE2EPackageManifest } from "./e2e-package-manifests.js";
 import type { CandidateManifest } from "./task-workflow.js";
 
 const MAX_SOURCE_FILES = 512;
 const MAX_SOURCE_FILE_BYTES = 512 * 1024;
 const unsafePathPart = /^(?:\.git|\.github|\.aws|\.ssh|\.env(?:\..*)?|secrets?|credentials?|.*(?:token|password|private[-_]?key).*)$/i;
-const runnerUnsafe = /(^|\/)(?:\.env(?:\..*)?|secrets?|credentials?|.*(?:token|password|private[-_]?key).*)$/i;
+const runnerUnsafe = e2eRunnerUnsafePath;
 
 export type E2EPortableSourceInspection = Readonly<{ parseable: boolean; exports: readonly Readonly<{ name: string; kind: "callable" | "data" | "unresolved" }>[] }>;
 /** Bounded AST-only capability classification; it never loads or evaluates candidate code. */
@@ -260,7 +261,21 @@ function verifySnapshot(snapshot: VerifiedE2ESourceSnapshot, expectedCandidate: 
   return sources;
 }
 
-export function proposeE2ESetup(input: { inspection: E2ERepositoryInspection; snapshot: VerifiedE2ESourceSnapshot; expectedCandidate: CandidateManifest }): E2ESetupProposal {
+/** A web or API runtime profile whose catalog row is READY for the installation (see admitE2ERegisteredRuntime). */
+export type E2EReadyRuntimeProfile = Readonly<{ kind: "web" | "api"; profileId: string }>;
+const unavailableRuntimeProfile = { web: "web-phase-unavailable", api: "api-phase-unavailable" } as const;
+
+/** The profile a target of this kind is proposed against; with several READY profiles of one kind the lexically first wins, so the choice is deterministic. */
+function readyProfileId(readyProfiles: readonly E2EReadyRuntimeProfile[], kind: "web" | "api"): string | undefined {
+  return readyProfiles.filter((item) => item.kind === kind).map((item) => item.profileId).sort()[0];
+}
+
+/**
+ * Proposes the setup for an inspected source snapshot. Web and API targets are proposed against the READY profile of their kind when
+ * `readyProfiles` has one; otherwise (and for every other target kind) they keep the phase-unavailable placeholder inspection assigned.
+ */
+export function proposeE2ESetup(input: { inspection: E2ERepositoryInspection; snapshot: VerifiedE2ESourceSnapshot; expectedCandidate: CandidateManifest;
+  readyProfiles?: readonly E2EReadyRuntimeProfile[] }): E2ESetupProposal {
   const parsed = E2ERepositoryInspectionSchema.parse(input.inspection);
   const sourceBytes = verifySnapshot(input.snapshot, input.expectedCandidate);
   if (parsed.candidateDigest !== input.snapshot.candidate.digest) throw new Error("inspection candidate does not match the immutable source snapshot");
@@ -285,8 +300,14 @@ export function proposeE2ESetup(input: { inspection: E2ERepositoryInspection; sn
     if (!scenario.requestedTargetIds.some((targetId) => applicationIds.has(targetsById.get(targetId)!.applicationId))) throw new Error("scenario assignment does not reference a discovered application target");
   }
   for (const missing of parsed.missingInputs) if (missing.targetIds.some((targetId) => !targetsById.has(targetId))) throw new Error("missing input references an unknown target");
+  const readyProfiles = input.readyProfiles ?? [];
+  const targets = parsed.proposedTargets.map((target) => {
+    if (target.kind !== "web" && target.kind !== "api") return target;
+    const profileId = readyProfileId(readyProfiles, target.kind);
+    return profileId === undefined || target.runtimeProfileId !== unavailableRuntimeProfile[target.kind] ? target : { ...target, runtimeProfileId: profileId };
+  });
   const proposal = {
-    candidateDigest: parsed.candidateDigest, applications: parsed.applications, targets: parsed.proposedTargets,
+    candidateDigest: parsed.candidateDigest, applications: parsed.applications, targets,
     dependencyEdges: parsed.dependencyEdges, scenarios: parsed.proposedScenarios, sources: parsed.sources,
     missingInputs: parsed.missingInputs,
     state: parsed.missingInputs.some((item) => item.disposition === "blocking") ? "needs-input" : "proposed",
@@ -294,12 +315,62 @@ export function proposeE2ESetup(input: { inspection: E2ERepositoryInspection; sn
   return E2ESetupProposalSchema.parse(proposal);
 }
 
+/**
+ * Re-derives a stored proposal from its source. A web or API target may carry a runtime profile other than the placeholder: the READY profile
+ * it was proposed against. That choice is not derivable from source (it was current catalog state at proposal time), so verification takes it
+ * from the proposal, re-derives everything else, and rejects any mismatch. The profile is only a catalog lookup key; readiness is re-checked at planning.
+ */
 export function verifyE2ESetupProposal(proposal: E2ESetupProposal, snapshot: VerifiedE2ESourceSnapshot, expectedCandidate: CandidateManifest): E2ESetupProposal {
+  const readyProfiles: E2EReadyRuntimeProfile[] = [];
+  const proposedTargets = proposal.targets.map((target) => {
+    if ((target.kind !== "web" && target.kind !== "api") || target.runtimeProfileId === unavailableRuntimeProfile[target.kind] || target.runtimeProfileId.endsWith("-phase-unavailable")) return target;
+    readyProfiles.push({ kind: target.kind, profileId: target.runtimeProfileId });
+    return { ...target, runtimeProfileId: unavailableRuntimeProfile[target.kind] };
+  });
   const inspection: E2ERepositoryInspection = { candidateDigest: proposal.candidateDigest, sources: proposal.sources, applications: proposal.applications,
-    proposedTargets: proposal.targets, dependencyEdges: proposal.dependencyEdges, proposedScenarios: proposal.scenarios, missingInputs: proposal.missingInputs };
-  const verified = proposeE2ESetup({ inspection, snapshot, expectedCandidate });
+    proposedTargets, dependencyEdges: proposal.dependencyEdges, proposedScenarios: proposal.scenarios, missingInputs: proposal.missingInputs };
+  const verified = proposeE2ESetup({ inspection, snapshot, expectedCandidate, readyProfiles });
   if (canonicalJson(E2ESetupProposalSchema.parse(proposal)) !== canonicalJson(verified)) throw new Error("setup proposal differs from independently source-derived proposal");
   return verified;
+}
+
+const NODE_WEB_PORT = "4317";
+const NODE_LOCKFILES = ["package-lock.json", "npm-shrinkwrap.json"];
+
+/** `npm ci` plus an optional `npm run build`, then `npm start`, for a root package that has a start script and a lockfile; otherwise null. */
+function nodeServiceRecipe(manifest: unknown, treePaths: ReadonlySet<string>): E2EAppRecipe | null {
+  if (manifest === null || typeof manifest !== "object" || Array.isArray(manifest)) return null;
+  const scripts = (manifest as { scripts?: unknown }).scripts;
+  const script = (name: string) => scripts !== null && typeof scripts === "object" && !Array.isArray(scripts) && typeof (scripts as Record<string, unknown>)[name] === "string"
+    && ((scripts as Record<string, string>)[name] as string).trim() !== "";
+  if (!script("start") || !NODE_LOCKFILES.some((path) => treePaths.has(path))) return null;
+  const command = (args: string[], timeoutMs: number) => ({ program: "npm", args, cwd: ".", timeoutMs, env: {} });
+  const body = {
+    schemaVersion: 1 as const, build: [command(["ci"], 300_000), ...(script("build") ? [command(["run", "build"], 300_000)] : [])],
+    launch: { kind: "service" as const, start: { ...command(["start"], 60_000), env: { PORT: NODE_WEB_PORT } }, health: { path: "/", expectedStatus: 200 } },
+    serviceProfileIds: [], seedProfileId: "synthetic-seed-v1", accountProfileIds: ["synthetic"], allowedOrigins: ["app-origin"],
+  };
+  return E2EAppRecipeSchema.parse({ ...body, recipeDigest: createHash("sha256").update(canonicalJson(body)).digest("hex") });
+}
+
+/**
+ * The launch recipe for the snapshot's root Node package. An explicit `package.json#agentx.e2e.recipe` (digest-checked) wins and is returned
+ * unchanged; otherwise the recipe is inferred from `scripts.start`, `scripts.build` and an npm lockfile in the tree. Null when neither applies.
+ */
+export function inferNodeWebRecipe(snapshot: E2ESourceSnapshot): E2EAppRecipe | null {
+  const sources = verifySnapshot(snapshot, snapshot.candidate);
+  const root = e2ePackageManifests(sources.values()).find((source) => source.path === "package.json");
+  if (root === undefined) return null;
+  let manifest: unknown;
+  try { manifest = parseE2EPackageManifest(root); } catch { return null; }
+  const explicit = manifest !== null && typeof manifest === "object" ? (manifest as { agentx?: { e2e?: { recipe?: unknown } } }).agentx?.e2e?.recipe : undefined;
+  if (explicit !== undefined) {
+    const parsed = E2EAppRecipeSchema.safeParse(explicit);
+    if (!parsed.success) return null;
+    const { recipeDigest, ...body } = parsed.data;
+    return createHash("sha256").update(canonicalJson(body)).digest("hex") === recipeDigest ? parsed.data : null;
+  }
+  return nodeServiceRecipe(manifest, new Set(snapshot.treePaths));
 }
 
 /** Discover a bounded app graph from an immutable source snapshot. Discovery parses data only; it never imports or executes candidate code. */
@@ -315,7 +386,7 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
     applications.push({ applicationId, kind, sourcePaths, recipe });
     proposedTargets.push(...targets);
   };
-  const manifests = [...sources.values()].filter((source) => /(^|\/)package\.json$/.test(source.path) && !runnerUnsafe.test(source.path)).sort((a, b) => a.path.localeCompare(b.path));
+  const manifests = e2ePackageManifests(sources.values());
   const manifestDirs = manifests.map((manifest) => manifest.path.includes("/") ? manifest.path.slice(0, manifest.path.lastIndexOf("/")) : ".");
   const deepestPackageDir = (path: string) => manifestDirs.filter((dir) => dir === "." || path.startsWith(dir + "/"))
     .sort((a, b) => componentDepth(b) - componentDepth(a) || a.localeCompare(b))[0];
@@ -323,8 +394,8 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
   const manifestsByName = new Map<string, typeof manifests>();
   for (const manifest of manifests) {
     try {
-      const value = JSON.parse(Buffer.from(manifest.bytes).toString("utf8")) as { name?: unknown };
-      if (typeof value.name === "string" && /^[a-zA-Z0-9_.@/-]{1,120}$/.test(value.name)) {
+      const value = parseE2EPackageManifest(manifest) as { name?: unknown } | null;
+      if (typeof value?.name === "string" && /^[a-zA-Z0-9_.@/-]{1,120}$/.test(value.name)) {
         declaredNames.set(value.name, (declaredNames.get(value.name) ?? 0) + 1);
         manifestsByName.set(value.name, [...(manifestsByName.get(value.name) ?? []), manifest]);
       }
@@ -337,7 +408,7 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
   });
   for (const manifest of orderedManifests.slice(0, 32)) {
     let data: unknown;
-    try { data = JSON.parse(Buffer.from(manifest.bytes).toString("utf8")); } catch { continue; }
+    try { data = parseE2EPackageManifest(manifest); } catch { continue; }
     if (data === null || typeof data !== "object" || Array.isArray(data)) continue;
     const pkg = data as { name?: unknown; scripts?: Record<string, unknown>; dependencies?: Record<string, unknown>; devDependencies?: Record<string, unknown>; exports?: unknown };
     const deps = { ...pkg.dependencies, ...pkg.devDependencies };
@@ -422,12 +493,13 @@ export function inspectE2ERepository(snapshot: VerifiedE2ESourceSnapshot, expect
       if (hasStart !== hasDev) {
         if (projectContract === null && !projectContractMalformed) {
           const script = hasStart ? "start" : "dev";
+          const inferred = hasStart && relDir === "." ? nodeServiceRecipe(pkg, new Set(snapshot.treePaths)) : null;
           const recipeBody = {
             schemaVersion: 1 as const, build: [],
             launch: { kind: "service" as const, start: { program: "npm", args: ["run", script], cwd: relDir, timeoutMs: 60_000, env: {} }, health: { path: "/", expectedStatus: 200 } },
             serviceProfileIds: [], seedProfileId: "synthetic-seed-v1", accountProfileIds: ["synthetic"], allowedOrigins: ["app-origin"],
           };
-          recipe = E2EAppRecipeSchema.parse({ ...recipeBody, recipeDigest: createHash("sha256").update(canonicalJson(recipeBody)).digest("hex") });
+          recipe = inferred ?? E2EAppRecipeSchema.parse({ ...recipeBody, recipeDigest: createHash("sha256").update(canonicalJson(recipeBody)).digest("hex") });
         }
       } else if (hasStart && hasDev) {
         if (projectContract === null && !projectContractMalformed) missingInputs.push({ inputId: "recipe-choice-" + (applications.length + 1), targetIds: target ? [target.targetId] : [], kind: "runtime", disposition: "blocking", reason: "The repository declares both start and dev recipes; choose the intended application launch contract", sourcePaths: [manifest.path] });

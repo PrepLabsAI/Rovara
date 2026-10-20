@@ -7,6 +7,7 @@ import {
   resolveE2ERuntimeReadiness,
   type E2EAssertion,
   type E2EEvidenceScope,
+  type E2EReadyRuntimeProfile,
   type E2ERuntimeReadiness,
   type E2ERuntimeReadinessInput,
   type E2EStep,
@@ -68,6 +69,28 @@ export function admitE2ERegisteredRuntime(recordInput: unknown, expected: Expect
   const expiresAt = Date.parse(runtime.expiresAt);
   if (qualifiedAt > expected.now || expiresAt <= expected.now) return undefined;
   return runtime;
+}
+
+/**
+ * The web/API kinds of `profileId` whose catalog row is READY and unexpired, for proposing targets against them. There is no project binding at
+ * proposal time, so each row is admitted against its own stored binding and capability digest: that still re-parses the row, checks its key,
+ * kind, state and validity window, but the project's binding is only matched later, at planning. A missing or unreadable row is simply not READY.
+ */
+export async function readReadyE2ERuntimeProfiles(input: { runtimeCatalogId: string; profileId: string; now: number;
+  read: (key: { pk: string; sk: string }) => Promise<unknown> }): Promise<E2EReadyRuntimeProfile[]> {
+  const ready: E2EReadyRuntimeProfile[] = [];
+  for (const kind of ["web", "api"] as const) {
+    let row: unknown;
+    try { row = await input.read(e2eRegisteredRuntimeKey(input.runtimeCatalogId, input.profileId, kind)); }
+    catch { continue; }
+    if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
+    const { binding, capabilityDigest } = row as { binding?: unknown; capabilityDigest?: unknown };
+    if (typeof capabilityDigest !== "string") continue;
+    const admitted = admitE2ERegisteredRuntime(row, { runtimeCatalogId: input.runtimeCatalogId, profileId: input.profileId, binding: binding as Ec2RuntimeBinding,
+      capabilityDigest, now: input.now, kind });
+    if (admitted !== undefined) ready.push({ kind, profileId: input.profileId });
+  }
+  return ready;
 }
 
 type RuntimeReadinessInput = {

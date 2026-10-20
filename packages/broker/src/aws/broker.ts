@@ -35,6 +35,7 @@ import {
   selectE2EExecutionPlan,
   inspectE2ERepository,
   proposeE2ESetup,
+  WEB_API_RUNTIME_PROFILE_ID,
   verifyE2ESourceSnapshot,
   verifyE2ESetupProposal,
   CHANNEL_TURN_REQUEST_MAX,
@@ -258,6 +259,7 @@ import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePlanReferenceError } from "../e2e/feature-plan-intent.js";
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
+import { readReadyE2ERuntimeProfiles } from "./e2e-runtime-readiness.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
 import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
 import {
@@ -1143,7 +1145,11 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (!sourceRepository || sourceRepository.repositoryId.toLowerCase() !== expectedRepositoryId.toLowerCase()) throw agentXError("FORBIDDEN", "captured source repository does not match the selected repository");
         verifyE2ESourceSnapshot(snapshot, candidate);
         const inspection = inspectE2ERepository(snapshot, candidate).inspection;
-        const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate });
+        // Web and API targets are proposed against the qualified runtime profile when this installation has one READY (Ruling Y4: one row per kind).
+        const readyProfiles = dependencies.e2eFeatureRuntimeCatalogId === undefined ? []
+          : await readReadyE2ERuntimeProfiles({ runtimeCatalogId: dependencies.e2eFeatureRuntimeCatalogId, profileId: WEB_API_RUNTIME_PROFILE_ID, now: Date.now(),
+            read: (key) => getItem<Record<string, unknown>>(dependencies, key) });
+        const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: candidate, readyProfiles });
         const policy = projectSetupPolicy(proposal);
         const repositoryName = urlParts[2].replace(/\.git$/i, "");
         const cleanedRepositoryName = repositoryName.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 63);

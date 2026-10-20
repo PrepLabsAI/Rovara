@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { canonicalJson, E2ETargetSchema, type E2ERuntimeCapabilityDescriptor, type E2ERuntimeReadinessInput } from "@agentx/contracts";
 import { E2ERuntimeCapabilityDescriptorSchema, e2eRuntimeCapabilityDigest } from "../../packages/contracts/src/index.js";
-import { e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
+import { e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness, readReadyE2ERuntimeProfiles } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 
 const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
@@ -70,5 +70,34 @@ describe("registered E2E runtime readiness", () => {
     expect(projectE2ERuntimeReadiness(input({ ...key, ...registration, qualifiedAt: "2026-10-13T12:31:00.000Z" }))).toMatchObject({ status: "UNQUALIFIED" });
     expect(projectE2ERuntimeReadiness(input({ ...key, ...registration, capabilities: { ...capabilities, host: { os: "win32", arch: "x64" } } }))).toMatchObject({ status: "INCOMPATIBLE" });
     expect(projectE2ERuntimeReadiness(input({ ...key, ...registration }, { requiredSteps: ["launch-app"] }))).toMatchObject({ status: "INCOMPATIBLE" });
+  });
+});
+
+describe("READY profiles for setup proposals", () => {
+  const apiCapabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ ...(({ browsers: _browsers, ...rest }) => rest)(capabilities), kind: "api", supportedSteps: ["request"], supportedAssertions: ["http-status"], protocols: ["http"] });
+  const rowFor = (kind: "web" | "api", overrides: Record<string, unknown> = {}) => {
+    const body = kind === "web" ? capabilities : apiCapabilities;
+    const apiProbeBase = { ...probeBase, capabilityDigest: e2eRuntimeCapabilityDigest(apiCapabilities) };
+    return { ...e2eRegisteredRuntimeKey(registration.runtimeCatalogId, registration.profileId, kind), ...registration, capabilities: body, capabilityDigest: e2eRuntimeCapabilityDigest(body),
+      probeManifest: kind === "web" ? probe : { ...apiProbeBase, manifestDigest: sha(apiProbeBase) }, ...overrides };
+  };
+  const readFrom = (rows: Record<string, unknown>) => async (rowKey: { pk: string; sk: string }) => rows[rowKey.sk];
+  const ask = (rows: Record<string, unknown>, now = "2026-10-13T12:30:00.000Z") =>
+    readReadyE2ERuntimeProfiles({ runtimeCatalogId: registration.runtimeCatalogId, profileId: registration.profileId, now: Date.parse(now), read: readFrom(rows) });
+
+  it("lists each kind whose own row is READY and unexpired", async () => {
+    const rows = { [`PROFILE#web-profile#web`]: rowFor("web"), [`PROFILE#web-profile#api`]: rowFor("api") };
+    expect(await ask(rows)).toEqual([{ kind: "web", profileId: "web-profile" }, { kind: "api", profileId: "web-profile" }]);
+  });
+
+  it("omits a kind whose row is missing, expired, parked, or holds the other kind's runtime", async () => {
+    expect(await ask({ [`PROFILE#web-profile#web`]: rowFor("web") })).toEqual([{ kind: "web", profileId: "web-profile" }]);
+    expect(await ask({ [`PROFILE#web-profile#web`]: rowFor("web") }, "2026-10-13T13:30:00.000Z")).toEqual([]);
+    expect(await ask({ [`PROFILE#web-profile#web`]: rowFor("web", { state: "PARKED" }) })).toEqual([]);
+    expect(await ask({ [`PROFILE#web-profile#api`]: rowFor("api", { capabilities, capabilityDigest: e2eRuntimeCapabilityDigest(capabilities) }) })).toEqual([]);
+  });
+
+  it("treats an unreadable catalog as no READY profile", async () => {
+    expect(await readReadyE2ERuntimeProfiles({ runtimeCatalogId: "c", profileId: "web-profile", now: 1, read: async () => { throw new Error("throttled"); } })).toEqual([]);
   });
 });
