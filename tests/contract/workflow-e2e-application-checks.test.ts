@@ -7,6 +7,8 @@ import { E2E_HARD_LIMITS, WorkerInvocationSchema, type E2EApplicationExecutionAd
 import { createDockerApplicationHost, DEFAULT_DEADLINE_GRACE_MS, STALE_RUN_SWEEP_AGE_MS, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e-checks.js";
+import { createEvidenceBudget } from "../../packages/worker/src/workflow-e2e-application-checks.js";
+import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES } from "@agentx/contracts";
 import type { CandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
 import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
@@ -120,6 +122,50 @@ describe("workflow E2E application rounds", () => {
     expect(aggregate.payload.groupRuns).toEqual([group.groupRun]);
     expect(result).toMatchObject({ roundId: s.admission.round.roundId, candidateDigest: s.admission.candidateDigest, processStatus: "SUCCEEDED" });
     expect(result.evidenceRef.key).toMatch(/^workflow-e2e-evidence\/sha256\//);
+  });
+
+  it("uploads UNKNOWN with the reason 'evidence too large', never the evidence, for a group whose evidence is over the group ceiling, and logs the sizes", async () => {
+    const s = await setup();
+    s.fake.onExecutor = s.okOutput;
+    s.collect.mockReturnValue({ collection: { marker: "x".repeat(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES + 1024) }, oracle: {}, unavailableReason: null,
+      qualification: { status: "PASS", reason: "all cases passed", runId: null, rawReportSha256: null, result: null } });
+    const logged: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation((line: unknown) => { logged.push(String(line)); });
+    let result: Awaited<ReturnType<typeof s.run>>;
+    try { result = await s.run(); } finally { log.mockRestore(); }
+    // Nothing over the ceiling reaches the broker, and the group is UNKNOWN for a reason that names the cause.
+    for (const item of s.saved) expect(item.bytes.byteLength).toBeLessThanOrEqual(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES);
+    const group = evidenceOf(s.saved, s.runId);
+    expect(group.groupRun).toMatchObject({ kind: "application", collection: { status: "UNKNOWN", reason: "evidence too large" }, unavailableReason: "evidence too large", actual: null, diagnostics: null });
+    expect(JSON.stringify(group)).not.toContain('"PASS"');
+    expect(evidenceOf(s.saved).payload.groupRuns).toEqual([group.groupRun]);
+    expect(result.processStatus).toBe("FAILED");
+    const entry = logged.map((line) => { try { return JSON.parse(line) as Record<string, unknown>; } catch { return undefined; } }).find((item) => item?.event === "workflow.e2e_evidence_too_large");
+    expect(entry).toMatchObject({ component: "worker", groupRunId: s.runId, limitBytes: E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES });
+    expect(Number(entry?.evidenceBytes)).toBeGreaterThan(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES);
+  });
+
+  it("also makes UNKNOWN a group whose evidence is under the group ceiling but would not leave the aggregate room for itself", async () => {
+    const s = await setup();
+    s.fake.onExecutor = s.okOutput;
+    // One group, so the aggregate ceiling is the group's; evidence just under it, with the aggregate's own envelope to fit beside it, cannot be accepted.
+    s.collect.mockReturnValue({ collection: { marker: "x".repeat(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES - 256 * 1024) }, oracle: {}, unavailableReason: null,
+      qualification: { status: "PASS", reason: "all cases passed", runId: null, rawReportSha256: null, result: null } });
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try { await s.run(); } finally { log.mockRestore(); }
+    expect(evidenceOf(s.saved, s.runId).groupRun).toMatchObject({ unavailableReason: "evidence too large", actual: null });
+    for (const item of s.saved) expect(item.bytes.byteLength).toBeLessThan(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES - 512 * 1024);
+  });
+
+  it("keeps the sum of what the groups upload within the aggregate ceiling: a group that would not fit is the one made UNKNOWN", () => {
+    const budget = createEvidenceBudget(24 * 1024 * 1024);
+    expect(E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES).toBe(24 * 1024 * 1024);
+    const eight = 8 * 1024 * 1024;
+    // Three groups of just under the group ceiling fit; the fourth would not, and the room kept for the aggregate's own envelope is not spent.
+    expect([1, 2, 3].map(() => budget.reserve(eight - 1024))).toEqual([true, true, true]);
+    expect(budget.reserve(eight - 1024)).toBe(false);
+    expect(budget.reserve(1024)).toBe(true);
+    expect(budget.remaining()).toBeGreaterThanOrEqual(0);
   });
 
   it("refuses a tree that is not the admitted one before it touches docker or the staging area", async () => {

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, canonicalJson, e2ePlanHasCompleteRequiredCriteria, type E2EApplicationExecutionAdmission, type E2EExecutionPlan, type E2ERound,
+import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, canonicalJson, e2ePlanHasCompleteRequiredCriteria, type E2EApplicationExecutionAdmission, type E2EExecutionPlan, type E2ERound,
   type E2EQualifiedResult } from "@agentx/contracts";
 import { createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
   e2eApplicationAggregateRunUsage, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
@@ -30,8 +30,9 @@ export type ApplicationEvidenceInput = Readonly<{
 }>;
 
 /**
- * What a group's evidence, and the round's aggregate, may weigh: the worker's own ceilings, so the broker accepts and reads exactly what the worker may send. A group's is
- * bounded by the application transfer bound of its cases and shards and by the group ceiling; the aggregate holds every group's run once, so it is the sum.
+ * What a group's evidence, and the round's aggregate, may weigh (Ruling BV): the worker's own ceilings, so the broker accepts and reads exactly what the worker may send.
+ * A group's is bounded by the group ceiling and by the application transfer bound of its cases and shards; the aggregate holds every group's run once, so it is their sum,
+ * and all of a round's evidence together stays within the aggregate ceiling.
  */
 export function applicationEvidenceLimits(admission: Pick<E2EApplicationExecutionAdmission, "groups">): { byGroup: ReadonlyMap<string, number>; aggregate: number } {
   const byGroup = new Map<string, number>();
@@ -39,7 +40,7 @@ export function applicationEvidenceLimits(admission: Pick<E2EApplicationExecutio
     byGroup.set(group.outerBinding.runId, Math.min(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES,
       e2eApplicationPrivateTransferMaxBytes(group.outerBinding.expectedCases.length, group.protocol === "trusted-e2e-application/v1" ? group.shards.length : 1)));
   }
-  return { byGroup, aggregate: [...byGroup.values()].reduce((total, limit) => total + limit, 0) };
+  return { byGroup, aggregate: Math.min(E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, [...byGroup.values()].reduce((total, limit) => total + limit, 0)) };
 }
 
 export type ApplicationGroupVerification = Readonly<{ runId: string; groupId: string; verdict: E2EVerdict; reason: string }>;

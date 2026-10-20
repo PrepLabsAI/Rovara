@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import {
   E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, canonicalJson,
   e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, validateE2EAppBuildBinding,
-  type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2EApplicationExecutionAdmission, type E2EApplicationGroupAdmission,
+  type E2ECreatorAuthority, type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2EApplicationExecutionAdmission, type E2EApplicationGroupAdmission,
   type E2EApplicationLaunchTarget, type E2EApplicationPlanIntent, type E2EAppArtifactRef, type E2EAppBuildManifest, type E2ERegisteredRuntime, type E2ERound,
   type E2EApplicationSelectionRecord, type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
 } from "@agentx/contracts";
@@ -40,6 +40,8 @@ export type ApplicationAdmissionInput = Readonly<{
   recordedSelection: E2EApplicationSelectionRecord;
   /** The plan identity of this round (its approved graph run, revision and actor), not the approval-time one. */
   planDigest: string;
+  /** The creator's access as the broker proved it now; the admission keeps it so verification can refuse a grant re-issued or a role changed during the round. */
+  creatorAuthority?: E2ECreatorAuthority;
   now: number;
 }>;
 
@@ -216,7 +218,8 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
     workflowRevision: input.workflowRevision, candidateDigest: candidate.digest, candidateCommitSha: input.snapshot.commitSha, candidateTreeSha: input.snapshot.treeSha,
     sourceSnapshot: wire, intent: selection.intent, intentDigest: selection.intentDigest, selectionInput: { ...selection, sourceSnapshot: wire },
     applicationApprovalBinding: approval, applicationBindings, runtimeBindings, launchTargets: [...launchTargets].sort((left, right) => (left.targetId < right.targetId ? -1 : 1)),
-    modelRoute: null, cliHosts, preparedEnvironments, policy: selection.policy, bundle: derivation.bundle, executionPlan: plan, portableProjection: null, round,
+    modelRoute: null, cliHosts, preparedEnvironments, policy: selection.policy, bundle: derivation.bundle, executionPlan: plan,
+    ...(input.creatorAuthority === undefined ? {} : { creatorAuthority: input.creatorAuthority }), portableProjection: null, round,
     groups: groupRuns.map((item) => item.admitted).sort((left, right) => (left.outerBinding.groupId < right.outerBinding.groupId ? -1 : 1)) };
   let bytes: Buffer;
   let admission: E2EApplicationExecutionAdmission;

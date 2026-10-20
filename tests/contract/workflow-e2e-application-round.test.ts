@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
-import { E2EApplicationSelectionRecordSchema, E2EWorkflowEvidenceRefSchema, E2EWorkflowGroupEvidenceRefSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, workflowSendBackOffered } from "@agentx/contracts";
+import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2EApplicationSelectionRecordSchema, E2EWorkflowEvidenceRefSchema, E2EWorkflowGroupEvidenceRefSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, workflowSendBackOffered } from "@agentx/contracts";
 import { e2eApplicationPrivateTransferMaxBytes } from "@agentx/verifier";
 import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { startTaskWorkflowPublicationFromSystem } from "../../packages/broker/src/aws/developer-tasks.js";
@@ -19,7 +19,10 @@ const PASS = { kind: "http-status", status: 200 } as const satisfies ObservedApi
 const FAIL = { kind: "http-status", status: 503 } as const satisfies ObservedApiOutcome;
 type Outcome = ObservedApiOutcome | readonly ObservedApiOutcome[];
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
-const GROUP_CEILING_BYTES = 26_214_400;
+const GROUP_CEILING_BYTES = 8 * 1024 * 1024;
+const AGGREGATE_CEILING_BYTES = 24 * 1024 * 1024;
+/** The portable bound the evidence references have always had; application evidence is held well below it. */
+const PORTABLE_REF_MAX_BYTES = 24 * 1024 * 1024;
 
 /** Collects every group of the round: `outcomes` holds, per group in admission order, what its targets observed. */
 async function collectAll(round: ApplicationRound, outcomes: readonly Outcome[], reportEdit?: (report: E2EApplicationReport, shard: number, group: number) => void) {
@@ -128,12 +131,13 @@ describe("uploading the evidence of an application round: group lookup, sizing a
     expect(proper.response.status, JSON.stringify(proper.response.body)).toBe(200);
   });
 
-  it("sizes an application upload from the admission's cases and shards: the worker's own group ceiling, and the sum of the groups' for the aggregate", async () => {
+  it("sizes an application upload from the admission's cases and shards: 8 MiB for a group, and the groups' sum (at most 24 MiB) for the aggregate", async () => {
     const round = await startApplicationRound({ applications: 4 });
     round.markRunning();
+    expect(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES).toBe(GROUP_CEILING_BYTES);
+    expect(E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES).toBe(AGGREGATE_CEILING_BYTES);
     const sized = round.applicationGroups.map((group) => ({ runId: group.outerBinding.runId,
       limit: Math.min(GROUP_CEILING_BYTES, e2eApplicationPrivateTransferMaxBytes(group.outerBinding.expectedCases.length, group.shards.length)) }));
-    // The ceiling is the worker's (25 MiB), which is above what a portable upload may carry (24 MiB): a portable bound would refuse the very bytes the worker may send.
     expect(sized.every((item) => item.limit === GROUP_CEILING_BYTES)).toBe(true);
     const init = (totalBytes: number, groupRunId?: string) => round.evidenceCall({ stage: "init", ...(groupRunId === undefined ? {} : { groupRunId }),
       totalBytes, chunkCount: Math.ceil(totalBytes / (64 * 1024)), sha256: "a".repeat(64) });
@@ -143,7 +147,7 @@ describe("uploading the evidence of an application round: group lookup, sizing a
       expect(JSON.stringify(over.body)).toMatch(/exceeds its admission-derived transfer bound/);
       expect(round.uploadRow(runId)).toBeUndefined();
     }
-    const aggregateLimit = sized.reduce((total, item) => total + item.limit, 0);
+    const aggregateLimit = Math.min(AGGREGATE_CEILING_BYTES, sized.reduce((total, item) => total + item.limit, 0));
     const overAggregate = await init(aggregateLimit + 1);
     expect(overAggregate.status).toBe(400);
     expect(JSON.stringify(overAggregate.body)).toMatch(/exceeds its admission-derived transfer bound/);
@@ -151,13 +155,34 @@ describe("uploading the evidence of an application round: group lookup, sizing a
     expect((await init(aggregateLimit)).status).toBe(200);
   });
 
-  it("holds the evidence references to the same ceilings, so what the broker accepts it can record", () => {
+  it("keeps the evidence references at the portable 24 MiB bound they have always had, which application evidence stays under", () => {
     const ref = (byteLength: number) => ({ groupRunId: randomUUID(), evidenceRef: { key: `workflow-e2e-group-evidence/sha256/${"a".repeat(64)}.json`, sha256: "a".repeat(64), byteLength } });
-    expect(E2EWorkflowGroupEvidenceRefSchema.safeParse(ref(GROUP_CEILING_BYTES)).success).toBe(true);
-    expect(E2EWorkflowGroupEvidenceRefSchema.safeParse(ref(GROUP_CEILING_BYTES + 1)).success).toBe(false);
+    expect(E2EWorkflowGroupEvidenceRefSchema.safeParse(ref(PORTABLE_REF_MAX_BYTES)).success).toBe(true);
+    expect(E2EWorkflowGroupEvidenceRefSchema.safeParse(ref(PORTABLE_REF_MAX_BYTES + 1)).success).toBe(false);
     const aggregate = (byteLength: number) => ({ key: `workflow-e2e-evidence/sha256/${"b".repeat(64)}.json`, sha256: "b".repeat(64), byteLength });
-    expect(E2EWorkflowEvidenceRefSchema.safeParse(aggregate(4 * GROUP_CEILING_BYTES)).success).toBe(true);
-    expect(E2EWorkflowEvidenceRefSchema.safeParse(aggregate(4 * GROUP_CEILING_BYTES + 1)).success).toBe(false);
+    expect(E2EWorkflowEvidenceRefSchema.safeParse(aggregate(PORTABLE_REF_MAX_BYTES)).success).toBe(true);
+    expect(E2EWorkflowEvidenceRefSchema.safeParse(aggregate(PORTABLE_REF_MAX_BYTES + 1)).success).toBe(false);
+    expect(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES).toBeLessThan(PORTABLE_REF_MAX_BYTES);
+    expect(E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES).toBeLessThanOrEqual(PORTABLE_REF_MAX_BYTES);
+  });
+
+  it("reads the admission once for the init and once for the finalize of an upload, not again for each chunk", async () => {
+    const round = await startApplicationRound();
+    round.markRunning();
+    const [group] = await collectAll(round, [PASS]);
+    const admissionKey = round.admissionRef.admissionRef.key;
+    const send = round.harness.s3.send.bind(round.harness.s3);
+    let admissionReads = 0;
+    round.harness.s3.send = async (command) => {
+      if (command.constructor.name === "GetObjectCommand" && command.input?.Key === admissionKey) admissionReads += 1;
+      return send(command);
+    };
+    // Log tails make the evidence span several 64 KiB chunks, as a real one does.
+    const uploaded = await round.upload(round.groupEnvelope({ ...group!.groupRun, diagnostics: { appLogTail: "x".repeat(200_000) } }), { groupRunId: group!.runId });
+    expect(uploaded.response.status, JSON.stringify(uploaded.response.body)).toBe(200);
+    const chunks = Math.ceil(uploaded.bytes.byteLength / 65_536);
+    expect(chunks, "the evidence spans several chunks").toBeGreaterThan(2);
+    expect(admissionReads).toBe(2);
   });
 
   it("takes the aggregate only in its application shape and only once every admitted group was accepted on its own", async () => {
@@ -478,9 +503,9 @@ describe("current authority at verification (the runtime row, the creator, the s
     return round;
   }
 
-  it("is UNKNOWN with a clear reason when the runtime row was requalified during the round (a new generation)", async () => {
+  it("is UNKNOWN, naming the generation, when the runtime row was requalified during the round", async () => {
     const round = await requalifiedDuringRound((row) => ({ ...row, generation: Number(row.generation) + 1, qualifiedAt: new Date(Date.now() - 1_000).toISOString() }));
-    blockedWith(round, /requalified during the round/);
+    blockedWith(round, /requalified during the round \(generation 5 now, 4 when admitted\)/);
     expect(e2eOf(round).failedRound).toBeUndefined();
     expect(await publicationChecksOf(round)).toBeUndefined();
   });
@@ -508,9 +533,13 @@ describe("current authority at verification (the runtime row, the creator, the s
     expect(workflowSendBackOffered(round.workflowNow() as never)).toBe(false);
   });
 
-  it("is UNKNOWN when the row's expiry moved, since that row is not the admitted one", async () => {
-    const round = await requalifiedDuringRound((row) => ({ ...row, expiresAt: new Date(Date.parse(String(row.expiresAt)) + 60_000).toISOString() }));
-    blockedWith(round, /requalified during the round/);
+  it("names the field that moved when the generation did not: the expiry, or the qualification time", async () => {
+    const expiry = await requalifiedDuringRound((row) => ({ ...row, expiresAt: new Date(Date.parse(String(row.expiresAt)) + 60_000).toISOString() }));
+    blockedWith(expiry, /requalified during the round \(expiresAt now .+, .+ when admitted\)/);
+    expect(expiry.workflowNow().blockReason).not.toMatch(/generation/);
+    const qualified = await requalifiedDuringRound((row) => ({ ...row, qualifiedAt: new Date(Date.parse(String(row.qualifiedAt)) + 1_000).toISOString() }));
+    blockedWith(qualified, /requalified during the round \(qualifiedAt now .+, .+ when admitted\)/);
+    expect(qualified.workflowNow().blockReason).not.toMatch(/generation/);
   });
 
   it("is UNKNOWN when the row is no longer READY, saying the runtime is not ready", async () => {
@@ -546,6 +575,50 @@ describe("current authority at verification (the runtime row, the creator, the s
     expect(round.workflowNow().stage).not.toBe("REVIEW");
   });
 
+  it("fences the whole runtime row, not only its generation and expiry: the endpoint, qualification time, manifest and runner environment too", async () => {
+    const changes: Array<[string, (row: Record<string, unknown>) => Record<string, unknown>]> = [
+      ["endpoint", (row) => ({ ...row, endpoint: "http://10.0.0.99:8080" })],
+      ["qualifiedAt", (row) => ({ ...row, qualifiedAt: new Date(Date.parse(String(row.qualifiedAt)) + 1_000).toISOString() })],
+      ["manifestDigest", (row) => ({ ...row, manifestDigest: "f".repeat(64) })],
+      ["runnerEnvironment", (row) => ({ ...row, runnerEnvironment: { ...(row.runnerEnvironment as Record<string, unknown>), os: "linux 9.9.9" } })],
+    ];
+    for (const [field, change] of changes) {
+      const round = await startApplicationRound();
+      const aggregate = await uploadAll(round, await collectAll(round, [PASS]));
+      const send = round.harness.db.send.bind(round.harness.db);
+      let raced = false;
+      round.harness.db.send = async (command) => {
+        const items = (command as { input?: { TransactItems?: Array<{ ConditionCheck?: { Key?: { pk?: string; sk?: string } } }> } }).input?.TransactItems;
+        if (!raced && command.constructor.name === "TransactWriteCommand" && items?.some((item) => item.ConditionCheck?.Key?.pk === apiRowKey.pk && item.ConditionCheck.Key.sk === apiRowKey.sk)) {
+          raced = true;
+          round.harness.db.set(change(round.harness.db.get(apiRowKey.pk, apiRowKey.sk)!));
+        }
+        return send(command);
+      };
+      try { await round.finishChecks(aggregate).catch(() => undefined); } finally { round.harness.db.send = send; }
+      expect(raced, field).toBe(true);
+      expect(e2eOf(round).qualifiedRound, field).toBeUndefined();
+      expect(round.workflowNow().stage, field).not.toBe("REVIEW");
+    }
+  });
+
+  it("holds the creator's access to the one the round was admitted under: a re-issued grant or a rebound channel during the round refuses", async () => {
+    const round = await startApplicationRound();
+    const proof = (round.admission as { creatorAuthority?: { kind: string; developerId: string; project: string } }).creatorAuthority;
+    expect(proof, "the admission carries the creator's access as it was").toBeDefined();
+    const aggregate = await uploadAll(round, await collectAll(round, [PASS]));
+    if (proof!.kind === "direct-membership") {
+      const key = { pk: `MEMBER#${proof!.developerId}`, sk: `PROJECT#${proof!.project}` };
+      round.harness.db.set({ ...round.harness.db.get(key.pk, key.sk)!, grantId: randomUUID() });
+    } else {
+      const bound = (round.admission as { creatorAuthority?: { teamId: string; bindings: Array<{ channelId: string }> } }).creatorAuthority!;
+      const key = { pk: `SLACK_BINDING#${bound.teamId}`, sk: `CHANNEL#${bound.bindings[0]!.channelId}` };
+      round.harness.db.set({ ...round.harness.db.get(key.pk, key.sk)!, updatedAt: new Date(Date.now() + 5_000).toISOString() });
+    }
+    await round.finishChecks(aggregate);
+    blockedWith(round, /creator-membership-proof-changed-or-unavailable/);
+  });
+
   it("is UNKNOWN when the creator lost access to the project before the verdict", async () => {
     const round = await startApplicationRound();
     const groups = await collectAll(round, [PASS]);
@@ -553,7 +626,7 @@ describe("current authority at verification (the runtime row, the creator, the s
     const creator = round.harness.db.get(`DEVELOPER#${MAYA.developerId}`, "META")!;
     round.harness.db.set({ ...creator, revoked: true });
     await round.finishChecks(aggregate);
-    blockedWith(round, /creator-membership-proof-changed-or-unavailable/);
+    blockedWith(round, /current-creator-identity-unavailable/);
   });
 
   it("is UNKNOWN when the candidate's stored export is no longer there to hold the admission's source against", async () => {
@@ -575,6 +648,29 @@ describe("current authority at verification (the runtime row, the creator, the s
     round.harness.db.set({ ...task, workflow: { ...task.workflow, e2e: rest } });
     await round.finishChecks(aggregate);
     blockedWith(round, /no-recorded-application-selection/);
+  });
+});
+
+describe("failures before authority is judged are worded as evidence, not as authority", () => {
+  it("says the evidence is incomplete, not that an authority snapshot could not be fenced, when an accepted group's stored evidence is gone", async () => {
+    const round = await startApplicationRound();
+    const aggregate = await uploadAll(round, await collectAll(round, [PASS]));
+    for (const key of [...round.harness.s3.objects.keys()]) if (key.startsWith("workflow-e2e-group-evidence/")) round.harness.s3.objects.delete(key);
+    await round.finishChecks(aggregate);
+    blockedWith(round, /incomplete or unknown \(accepted-group-evidence-integrity\)/);
+    expect(round.workflowNow().blockReason).not.toMatch(/fenced/);
+  });
+
+  it("says why, in the reason the owner reads, for a group whose evidence the worker found too large", async () => {
+    const round = await startApplicationRound();
+    const groups = await collectAll(round, [PASS]);
+    const aggregate = await uploadAll(round, groups, (groupRun) => {
+      groupRun.collection = { status: "UNKNOWN", reason: "evidence too large" };
+      groupRun.unavailableReason = "evidence too large"; groupRun.actual = null; groupRun.diagnostics = null;
+    });
+    await round.finishChecks(aggregate);
+    blockedWith(round, /incomplete or unknown \(.*evidence too large/);
+    expect(await publicationChecksOf(round)).toBeUndefined();
   });
 });
 

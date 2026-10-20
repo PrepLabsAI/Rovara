@@ -46,7 +46,7 @@ export function apiApplicationsSnapshot(count: number): { snapshot: E2ESourceSna
 export interface RoundBrokerHarness {
   db: { get(pk: string, sk: string): Record<string, unknown> | undefined; set(item: Record<string, unknown>): void; delete(pk: string, sk: string): void;
     find(predicate: (item: Record<string, unknown>) => boolean): Array<Record<string, unknown>>; send: (command: { constructor: { name: string }; input?: unknown }) => Promise<unknown> };
-  s3: { objects: Map<string, string> };
+  s3: { objects: Map<string, string>; send: (command: { constructor: { name: string }; input?: { Key?: string } }) => Promise<unknown> };
   brokerInput: unknown;
   actions: unknown;
   dev(who: Developer, method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }>;

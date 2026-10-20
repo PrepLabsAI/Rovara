@@ -187,6 +187,13 @@ const applicationBuildBindingValueSchema = z.object({ approval: E2EApplicationAp
 const applicationMapEntrySchema = z.object({ key: id(120), value: applicationBuildBindingValueSchema }).strict();
 const runtimeMapEntrySchema = z.object({ key: id(120), value: E2ERegisteredRuntimeSchema }).strict();
 const orderedUniqueKeys = (values: readonly string[]) => new Set(values).size === values.length && values.every((item, index) => index === 0 || values[index - 1]! < item);
+/** The creator's access as the broker proved it when it admitted the round (a direct membership grant, or the locally bound channels), compared again at verification. */
+export const E2ECreatorAuthoritySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("direct-membership"), developerId: id(200), project: id(200), role: z.enum(["developer", "administrator"]), grantId: id(64) }).strict(),
+  z.object({ kind: z.literal("channel-access"), developerId: id(200), project: id(200), teamId: id(64), channelIds: z.array(id(64)).min(1).max(64),
+    bindings: z.array(z.object({ channelId: id(64), updatedAt: id(40) }).strict()).min(1).max(64) }).strict(),
+]);
+export type E2ECreatorAuthority = z.infer<typeof E2ECreatorAuthoritySchema>;
 export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: z.literal("workflow-e2e-application-admission/v1"),
   taskId: id(120), operationId: id(120), operationFence: z.number().int().positive(), workflowRevision: z.number().int().positive(), candidateDigest: sha256,
   /** The exact commit and tree the worker builds from (`git archive <candidateCommitSha>`); the tree is checked against the repository before any build. */
@@ -198,6 +205,8 @@ export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: 
   preparedEnvironments: z.array(z.object({ groupId: id(80), preparedEnvironmentDigest: sha256,
     originByApplicationId: E2EApplicationPreparedGroupFactsSchema.shape.originByApplicationId }).strict()).max(4),
   policy: E2EPolicySchema, bundle: E2EScenarioBundleSchema, executionPlan: E2EExecutionPlanSchema,
+  /** The creator's access when the round was admitted (the broker's own proof); absent only from admissions the broker did not build. Verification requires it. */
+  creatorAuthority: E2ECreatorAuthoritySchema.optional(),
   portableProjection: E2EApplicationPortableProjectionSchema.nullable(), round: E2ERoundSchema,
   groups: z.array(E2EApplicationGroupAdmissionSchema).max(4), admissionDigest: sha256,
 }).strict().superRefine((admission, context) => {

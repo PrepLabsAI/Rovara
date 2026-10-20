@@ -420,16 +420,18 @@ describe("the approved assertion assets are the installed ones, byte for byte (R
   });
 });
 
-describe("how much evidence a group and the round may carry", () => {
-  it("is the worker's ceiling for a group (the application transfer bound is far above it), and the sum of the groups' for the aggregate", async () => {
+describe("how much evidence a group and the round may carry (Ruling BV)", () => {
+  it("is 8 MiB for a group, never above the transfer bound of its own cases and shards, and 24 MiB for the whole aggregate", async () => {
     const round = await roundOf(PASSING);
     const limits = applicationEvidenceLimits(round.admission);
     expect([...limits.byGroup.keys()]).toEqual([round.fixture.runId]);
-    expect(limits.byGroup.get(round.fixture.runId)).toBe(26_214_400);
-    expect(limits.aggregate).toBe(26_214_400);
-    // Never above the transfer bound of the group's own cases and shards.
+    expect(limits.byGroup.get(round.fixture.runId)).toBe(8 * 1024 * 1024);
+    expect(limits.aggregate).toBe(8 * 1024 * 1024);
     const binding = round.admission.groups[0]!;
     expect(limits.byGroup.get(round.fixture.runId)!).toBeLessThanOrEqual(e2eApplicationPrivateTransferMaxBytes(binding.outerBinding.expectedCases.length, binding.protocol === "trusted-e2e-application/v1" ? binding.shards.length : 1));
+    // Four groups would sum to 32 MiB; the aggregate as a whole stays at 24 MiB.
+    const four = { groups: [0, 1, 2, 3].map((index) => ({ ...binding, outerBinding: { ...binding.outerBinding, runId: `00000000-0000-4000-8000-00000000000${index}` } })) };
+    expect(applicationEvidenceLimits(four as never).aggregate).toBe(24 * 1024 * 1024);
   });
 });
 

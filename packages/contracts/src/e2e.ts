@@ -221,18 +221,18 @@ export const E2EWorkflowAdmissionRefSchema = z.object({
 }).strict();
 export type E2EWorkflowAdmissionRef = z.infer<typeof E2EWorkflowAdmissionRefSchema>;
 /**
- * The most evidence one group of an application round may carry: the worker's own ceiling for a group's upload (the application transfer bound,
- * `e2eApplicationPrivateTransferMaxBytes`, is far higher, so this is what binds). The broker accepts exactly what the worker may send.
+ * What an application round's evidence may weigh (Ruling BV): the worker refuses to upload more (the group is UNKNOWN, "evidence too large"), the broker accepts and reads no more.
+ * They are what the deployed broker can hold and process, of the same order as the portable bound (24 MiB) the evidence references keep. Revisit them with measured sizes.
  */
-export const E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES = 26_214_400;
-/** An application round has at most four groups, and its aggregate holds each group's run once, so it is at most four groups' ceilings. */
-export const E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES = 4 * E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES;
-export const E2EWorkflowEvidenceRefSchema = z.object({ key: z.string().regex(/^workflow-e2e-evidence\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest, byteLength: positiveInt.max(E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES) }).strict();
+export const E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES = 8 * 1024 * 1024;
+/** All of a round's evidence together, the aggregate included: the aggregate holds every group's run once. */
+export const E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES = 24 * 1024 * 1024;
+export const E2EWorkflowEvidenceRefSchema = z.object({ key: z.string().regex(/^workflow-e2e-evidence\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest, byteLength: positiveInt.max(24 * 1024 * 1024) }).strict();
 export type E2EWorkflowEvidenceRef = z.infer<typeof E2EWorkflowEvidenceRefSchema>;
 export const E2EWorkflowGroupEvidenceRefSchema = z.object({
   groupRunId: z.string().uuid(),
   evidenceRef: z.object({ key: z.string().regex(/^workflow-e2e-group-evidence\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest,
-    byteLength: positiveInt.max(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES) }).strict(),
+    byteLength: positiveInt.max(24 * 1024 * 1024) }).strict(),
 }).strict();
 export type E2EWorkflowGroupEvidenceRef = z.infer<typeof E2EWorkflowGroupEvidenceRefSchema>;
 

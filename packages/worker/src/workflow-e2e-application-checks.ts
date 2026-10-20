@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_HARD_LIMITS, canonicalJson, type E2EApplicationBuildSourceManifest, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
+import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_HARD_LIMITS, canonicalJson, type E2EApplicationBuildSourceManifest, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
   type WorkerInvocation } from "@agentx/contracts";
 import { collectE2EApplicationRun, decodeE2EApplicationExecutionAdmission, e2eApplicationPrivateTransferMaxBytes, runIsolatedE2EApplication,
   validateE2EApplicationExecutionAdmission, type DockerApplicationHost, type E2ECompiledApplicationSuite } from "@agentx/verifier";
@@ -13,6 +13,19 @@ const MAX_CONCURRENT_APPLICATION_GROUPS = 2;
 /** What a group that never reached a trustworthy result keeps of the host's redacted logs, per log. */
 const DIAGNOSTIC_TAIL_BYTES = 16 * 1024;
 const RUN_SEED_PROFILE_DIGEST = sha("rovara-docker-run-seed/v1");
+
+/** The room kept in the aggregate for its own envelope (the round and the framing), which is not any group's. */
+const AGGREGATE_ENVELOPE_RESERVE_BYTES = 1024 * 1024;
+const EVIDENCE_TOO_LARGE = "evidence too large";
+
+/**
+ * How much of a round's aggregate ceiling the groups' evidence has left (Ruling BV). Every group's evidence is uploaded, and the aggregate holds each group's run again, so
+ * together they must stay within the ceiling: a group whose evidence would not fit is the one made UNKNOWN, with a small run in its place.
+ */
+export function createEvidenceBudget(limit: number): { reserve(bytes: number): boolean; remaining(): number } {
+  let remaining = limit;
+  return { reserve(bytes) { if (bytes > remaining) return false; remaining -= bytes; return true; }, remaining: () => remaining };
+}
 
 /** What running an application admission needs: a staging directory the Docker host shares, the Docker host itself, and how the candidate commit is read. */
 export type WorkflowE2EApplicationRuntime = Readonly<{
@@ -119,6 +132,8 @@ export async function executeWorkflowE2EApplicationChecks(input: {
 
     const collect = runtime.collect ?? collectE2EApplicationRun;
     const groupLimit = (suite: E2ECompiledApplicationSuite) => Math.min(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, e2eApplicationPrivateTransferMaxBytes(suite.expectedCases.length, suite.shards.length));
+    const aggregateLimit = Math.min(E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, validated.applicationSuites.reduce((total, suite) => total + groupLimit(suite), 0));
+    const budget = createEvidenceBudget(Math.max(0, aggregateLimit - AGGREGATE_ENVELOPE_RESERVE_BYTES));
     const runGroup = async (index: number): Promise<{ groupRun: Record<string, unknown>; succeeded: boolean }> => {
       const compiled = validated.applicationSuites[index]!;
       const groupAdmission = admission.groups.find((item) => item.outerBinding.groupId === compiled.group.groupId);
@@ -153,13 +168,21 @@ export async function executeWorkflowE2EApplicationChecks(input: {
         collection: qualification ?? { status: "UNKNOWN", reason: unavailableReason }, unavailableReason,
         lifecycle: { cleanup: run.lifecycle.cleanup, process: run.lifecycle.process },
         actual: qualification === null ? null : { collection: collected, collectionInputs }, diagnostics };
-      const groupEvidence = Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-group-evidence/v1", admissionSha256: reference.admissionRef.sha256,
+      const envelope = (value: Record<string, unknown>) => Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-group-evidence/v1", admissionSha256: reference.admissionRef.sha256,
         taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
-        candidateDigest: admission.candidateDigest, round, groupRun }), "utf8");
+        candidateDigest: admission.candidateDigest, round, groupRun: value }), "utf8");
       const limit = groupLimit(compiled);
-      if (groupEvidence.byteLength > limit) throw new Error("native E2E application group evidence exceeds its group-derived ceiling");
-      await input.saveEvidence(groupEvidence, sha(groupEvidence), limit, binding.runId);
-      return { groupRun, succeeded: qualification !== null && run.lifecycle.process.exitCode === 0 };
+      let uploaded = { groupRun, evidence: envelope(groupRun), succeeded: qualification !== null && run.lifecycle.process.exitCode === 0 };
+      // Evidence the broker would refuse (over the group ceiling, or more than the aggregate has room for) is never sent: this group is UNKNOWN, for a reason that names the cause.
+      if (uploaded.evidence.byteLength > limit || !budget.reserve(uploaded.evidence.byteLength)) {
+        console.log(JSON.stringify({ component: "worker", event: "workflow.e2e_evidence_too_large", groupRunId: binding.runId, evidenceBytes: uploaded.evidence.byteLength,
+          limitBytes: limit, aggregateRemainingBytes: budget.remaining() }));
+        const reduced: Record<string, unknown> = { ...groupRun, collection: { status: "UNKNOWN", reason: EVIDENCE_TOO_LARGE }, unavailableReason: EVIDENCE_TOO_LARGE, actual: null, diagnostics: null };
+        uploaded = { groupRun: reduced, evidence: envelope(reduced), succeeded: false };
+        budget.reserve(Math.min(uploaded.evidence.byteLength, budget.remaining()));
+      }
+      await input.saveEvidence(uploaded.evidence, sha(uploaded.evidence), limit, binding.runId);
+      return { groupRun: uploaded.groupRun, succeeded: uploaded.succeeded };
     };
     const groups = await runWithConcurrency(validated.applicationSuites.length, MAX_CONCURRENT_APPLICATION_GROUPS, runGroup, (error) => controller.abort(error));
     input.throwIfCancelled();
@@ -167,7 +190,7 @@ export async function executeWorkflowE2EApplicationChecks(input: {
     const evidence = Buffer.from(JSON.stringify({ schemaVersion: "workflow-e2e-evidence/v1", admissionSha256: reference.admissionRef.sha256,
       taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
       candidateDigest: admission.candidateDigest, round, payload: { kind: "application", groupRuns } }), "utf8");
-    const byteLimit = validated.applicationSuites.reduce((total, suite) => total + groupLimit(suite), 0);
+    const byteLimit = aggregateLimit;
     if (evidence.byteLength > byteLimit) throw new Error("native E2E application evidence exceeds its stored group-derived ceiling");
     const evidenceRef = await input.saveEvidence(evidence, sha(evidence), byteLimit);
     return { evidenceRef, candidateDigest: admission.candidateDigest, roundId: round.roundId, processStatus: groups.every((item) => item.succeeded) ? "SUCCEEDED" : "FAILED" };
