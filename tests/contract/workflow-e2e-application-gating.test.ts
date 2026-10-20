@@ -1,9 +1,11 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { combineE2EVerdicts, type E2EVerdict } from "../../packages/broker/src/e2e/verdict.js";
-import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/broker/src/e2e/application-evidence.js";
+import { expectedApplicationAssertionAssets, verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/broker/src/e2e/application-evidence.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { aggregateEvidenceEnvelope, createApplicationEvidenceFixture, groupEvidenceEnvelope, type ApplicationEvidenceFixture } from "../support/e2e-application-evidence-fixture.js";
+import { canonicalJson } from "@agentx/contracts";
+import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStateProbeAsset } from "../../packages/verifier/src/application-state-probes.js";
 import { createPortableApplicationChildFixture } from "../support/e2e-application-fixture.js";
 
 // The broker's side of an application round: it never reads the worker's verdict, but recompiles, recollects and requalifies from the uploaded
@@ -336,6 +338,64 @@ describe("the oracle's expectations are the broker's, never the worker's (Ruling
     expect(result.verdict).toBe("UNKNOWN");
     expect(result.groups[0]!.reason.length).toBeLessThanOrEqual(300);
     expect(result.groups[0]!.reason).toMatch(/^x+$/u);
+  });
+});
+
+describe("the approved assertion assets are the installed ones, byte for byte (Ruling BH)", () => {
+  const stateRound = (extra: Partial<Parameters<typeof createApplicationEvidenceFixture>[0]> = {}) => roundOf({ probe: "api-state-positive-v1",
+    observed: { kind: "state", finalValue: { orders: "ready", version: 1 }, disposition: "ready" }, ...extra });
+  const reasonOfGroup = (result: ReturnType<typeof verifyApplicationE2EEvidence>) => result.groups[0]?.reason ?? result.reason;
+
+  it("passes the installed probe asset with its real manifest digest", async () => {
+    expect(verifyApplicationE2EEvidence((await stateRound()).input()).verdict).toBe("PASS");
+  });
+
+  it("is UNKNOWN when the manifest digest is not the installed asset's, whatever the worker made it", async () => {
+    const round = await stateRound();
+    const result = verifyApplicationE2EEvidence(withGroupRun(round, (groupRun) => {
+      ((actualOf(groupRun).collectionInputs.assertionAssets as Array<{ manifestDigest: string }>)[0]!).manifestDigest = "a".repeat(64);
+    }));
+    expect(result.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(result)).toMatch(/installed assertion assets/u);
+  });
+
+  it("is UNKNOWN when the runner honestly records a loosened probe schema, even though its own collection accepts it", async () => {
+    const loosened = { type: "object", required: ["version"], properties: { version: { type: "integer" } } };
+    const round = await stateRound({ stateProbeSchema: loosened,
+      stateProbeManifestDigest: e2eApplicationStateProbeManifestDigest("api-state-positive/v1", sha(Buffer.from(canonicalJson(loosened)))) });
+    expect(round.fixture.collected.qualification?.status, "the worker's own collection accepts a self-consistent loosened schema").toBe("PASS");
+    const result = verifyApplicationE2EEvidence(round.input());
+    expect(result.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(result)).toMatch(/installed assertion assets/u);
+  });
+
+  it("is UNKNOWN when the worker adds or drops an asset", async () => {
+    const round = await stateRound();
+    const extra = verifyApplicationE2EEvidence(withGroupRun(round, (groupRun) => {
+      const assets = actualOf(groupRun).collectionInputs.assertionAssets as Array<Record<string, unknown>>;
+      assets.push({ ...assets[0]!, assertionIndex: 1, kind: "json-schema", id: "orders-v1" });
+    }));
+    expect(extra.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(extra)).toMatch(/installed assertion assets/u);
+    const dropped = verifyApplicationE2EEvidence(withGroupRun(round, (groupRun) => { actualOf(groupRun).collectionInputs.assertionAssets = []; }));
+    expect(dropped.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(dropped)).toMatch(/installed assertion assets/u);
+  });
+
+  it("derives no asset for a JSON schema or a fixture root, since none are installed, and refuses the case", () => {
+    const state = { kind: "state", probeId: "api-state-positive/v1", equals: {}, pollTimeoutMs: 1000 };
+    const suiteFor = (assertion: Record<string, unknown>) => ({ expectedCases: [{ caseId: "case-1", scenarioId: "s" }], bundle: { scenarios: [{ scenarioId: "s", assertions: [assertion] }] } });
+    const ok = expectedApplicationAssertionAssets(suiteFor(state) as never);
+    expect(ok.ok).toBe(true);
+    if (ok.ok) expect(ok.assets).toEqual([{ caseId: "case-1", assertionIndex: 0, kind: "state-probe", id: "api-state-positive/v1",
+      manifestDigest: installedE2EApplicationStateProbeAsset("api-state-positive/v1")!.manifestDigest, sha256: installedE2EApplicationStateProbeAsset("api-state-positive/v1")!.sha256,
+      byteLength: installedE2EApplicationStateProbeAsset("api-state-positive/v1")!.byteLength }]);
+    for (const assertion of [{ kind: "json", responseId: "r", schemaRef: "orders-v1", equals: {} }, { kind: "file", fixtureRootId: "root", relativePath: "a", sha256: "a".repeat(64) },
+      { ...state, probeId: "unknown-probe/v1" }]) {
+      const refused = expectedApplicationAssertionAssets(suiteFor(assertion) as never);
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.reason).toMatch(/not installed/u);
+    }
   });
 });
 

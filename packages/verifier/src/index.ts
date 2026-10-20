@@ -55,6 +55,7 @@ export { E2E_REPORT_MAX_BYTES, E2E_APP_RPC_FRAME_MAX_BYTES, E2E_APP_LITERAL_MAX_
 export { E2E_EXECUTOR_HOST_PROFILE_ID, E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_MODULE_PATH, verifyExecutorHostRegistration } from "./executor/host-registry.js";
 export type { E2EWebRuntimePorts } from "./web-runtime.js";
 export { createAPIApplicationCliHost } from "./api-runtime.js";
+export { installedE2EApplicationStateProbeAsset, e2eApplicationStateProbeManifestDigest } from "./application-state-probes.js";
 export type { E2EApiRuntimePorts, E2EApiRuntimeResponse } from "./api-runtime.js";
 export { prepareE2EApplicationEnvironment, sealE2EApplicationEnvironment } from "./application-services.js";
 export type { E2EApplicationPreparationInputs, E2EApplicationEnvironmentPorts } from "./application-services.js";

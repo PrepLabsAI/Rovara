@@ -9232,6 +9232,9 @@ async function ensureWorkflowE2EComputeReadiness(
   // Keep the original creator's current project access in front of every warm-up start or resume.
   // The feature-round admission rechecks this authority again after compute becomes ready.
   await requireWorkflowE2ECreatorAuthority(dependencies, task);
+  // An approved application plan is checked, and refused, before any compute is woken for it: after the staleness and creator checks above (a revoked creator
+  // is paused for access, whatever the plan), before the warm-up below.
+  await refuseApplicationRoundBeforeWarmUp(dependencies, task);
   if (row.readinessOperationId === undefined) {
     const accessFence = await systemTaskDispatchAccessFence(routeDependencies, task);
     const workspaceResult = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName,
@@ -9378,8 +9381,6 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     // A fix for the pull requests already open is pushed to them by the same start, which sees they exist.
     let outcome: "STARTED" | "DUPLICATE" | "STALE";
     if (item.kind === "CHECKS") {
-      // An approved application plan is checked, and refused, before any compute is woken for it.
-      await refuseApplicationRoundBeforeWarmUp(dependencies, task);
       const readiness = await ensureWorkflowE2EComputeReadiness(dependencies, routeDependencies, item);
       if (readiness.status === "WAITING") return "DISPATCHED";
       if (readiness.status === "STALE") {

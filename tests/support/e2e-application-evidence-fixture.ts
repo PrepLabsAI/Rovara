@@ -4,6 +4,7 @@ import { canonicalJson, type E2EApplicationExecutionAdmission, type E2ERound, ty
 import { collectE2EApplicationRun } from "../../packages/verifier/src/application-collection.js";
 import { dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest } from "../../packages/verifier/src/host/executor-readback.js";
 import { E2EApplicationCaseCaptureSchema, E2EApplicationObservationBindingSchema, type E2EApplicationCollectionResult } from "../../packages/verifier/src/application-result-adapter.js";
+import { e2eApplicationStateProbeManifestDigest } from "../../packages/verifier/src/application-state-probes.js";
 import { expectedE2EApplicationReporterDigest } from "../../packages/verifier/src/application-runtime-assets.js";
 import { validateE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite, type ValidatedE2EApplicationAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import type { E2EApplicationReport } from "../../packages/verifier/src/application-report-schema.js";
@@ -47,7 +48,9 @@ export async function createApplicationEvidenceFixture(options: { probe: OrdersP
   /** Rewrites the runner's raw report before it is serialized (for example to make the scenario skipped). */
   reportEdit?: (report: E2EApplicationReport) => void;
   /** What the runner reports as its environment and limits (self-consistently, in the report and in the readback). Default: the admitted runtime's own, and the runner's configured limits. */
-  environment?: Record<string, unknown>; limits?: Record<string, number> }): Promise<ApplicationEvidenceFixture> {
+  environment?: Record<string, unknown>; limits?: Record<string, number>;
+  /** The approved state-probe document the executor records, and the manifest digest it gives it (default: the installed probe, with its real digest). */
+  stateProbeSchema?: unknown; stateProbeManifestDigest?: string }): Promise<ApplicationEvidenceFixture> {
   const probe = createOrdersExecutorPlan({ probe: options.probe, taskId: options.taskId ?? "44444444-4444-4444-8444-444444444444" });
   const admission: E2EApplicationExecutionAdmission = probe.plan.admission;
   const validated = validateE2EApplicationExecutionAdmission(admission);
@@ -97,11 +100,11 @@ export async function createApplicationEvidenceFixture(options: { probe: OrdersP
     assertionPassed = options.observed.status === assertion.equals && step.path === assertion.path;
   } else {
     if (assertion.kind !== "state") throw new Error("the state outcome needs a scenario with a state assertion");
-    const schema = frame("state-probe-schema", STATE_PROBE_SCHEMA);
+    const schema = frame("state-probe-schema", options.stateProbeSchema ?? STATE_PROBE_SCHEMA);
     const pendingValue = frame("state-sample-pending", { orders: "loading", version: 1 });
     const finalValue = frame("state-sample-final", options.observed.finalValue);
     supportingEvidence.push(schema, pendingValue, finalValue);
-    assertionAssets.push({ caseId: expected.caseId, assertionIndex: 0, kind: "state-probe", id: assertion.probeId, manifestDigest: sha("state-probe-manifest"), ref: schema.ref });
+    assertionAssets.push({ caseId: expected.caseId, assertionIndex: 0, kind: "state-probe", id: assertion.probeId, manifestDigest: options.stateProbeManifestDigest ?? e2eApplicationStateProbeManifestDigest(assertion.probeId, schema.ref.sha256), ref: schema.ref });
     observationFrame = frame("assertion-observation", { ...header, kind: "state", probeId: assertion.probeId, probeAssetRef: schema.ref,
       samples: [{ observedAt: timeAt(4), valueRef: pendingValue.ref, disposition: "pending", httpStatus: 200 },
         { observedAt: timeAt(5), valueRef: finalValue.ref, disposition: options.observed.disposition, httpStatus: 200 }] });

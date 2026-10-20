@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalJson, e2ePlanHasCompleteRequiredCriteria, type E2EExecutionPlan, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
 import { createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
-  e2eApplicationAggregateRunUsage, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
+  e2eApplicationAggregateRunUsage, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
   type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { combineE2EVerdicts, type E2EVerdict } from "./verdict.js";
 
@@ -63,7 +63,8 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
     if (sha256(input.admissionBytes) !== input.subject.admissionSha256) refuse("the stored admission does not match its content address");
     const admission = decodeE2EApplicationExecutionAdmission(input.admissionBytes);
     const subject = input.subject;
-    // Run ids are unique within a round (the round schema refuses a repeat when the admission decodes), so equal sets are equal lists.
+    // A repeated outer run id is refused by validateE2EApplicationExecutionAdmission, which ties each outer binding to the round's own bindings (whose run ids
+    // the round schema keeps unique), so equal sets of run ids are equal lists.
     const runIds = admission.groups.map((group) => group.outerBinding.runId);
     if (admission.taskId !== subject.taskId || admission.operationId !== subject.operationId || admission.operationFence !== subject.operationFence
       || admission.workflowRevision !== subject.workflowRevision || admission.candidateDigest !== subject.candidateDigest
@@ -152,6 +153,34 @@ function readGroupEnvelope(envelope: unknown, admission: ReturnType<typeof decod
 
 type Requalified = { verdict: E2EVerdict; reason: string; result?: E2EQualifiedResult };
 
+export type ExpectedAssertionAsset = Readonly<{ caseId: string; assertionIndex: number; kind: "state-probe"; id: string; manifestDigest: string; sha256: string; byteLength: number }>;
+type SuiteAssertions = Readonly<{ expectedCases: readonly { caseId: string; scenarioId: string }[];
+  bundle: Readonly<{ scenarios: readonly { scenarioId: string; assertions: readonly { kind: string; probeId?: string }[] }[] }> }>;
+
+/**
+ * The approved assertion assets a group's cases need, derived from the admitted scenarios and the installed fixed inventory (the executor's own state probes).
+ * The documents a sample is judged against are expected values, not observations, so the broker holds them: a worker may not supply a looser schema or another
+ * manifest digest. A JSON schema, a fixture root or a probe that is not installed has no installed asset, so a case that needs one is refused.
+ */
+export function expectedApplicationAssertionAssets(suite: SuiteAssertions): { ok: true; assets: ExpectedAssertionAsset[] } | { ok: false; reason: string } {
+  const assets: ExpectedAssertionAsset[] = [];
+  for (const expected of suite.expectedCases) {
+    const scenario = suite.bundle.scenarios.find((item) => item.scenarioId === expected.scenarioId);
+    if (scenario === undefined) return { ok: false, reason: "an admitted case has no scenario" };
+    for (const [index, assertion] of scenario.assertions.entries()) {
+      if (assertion.kind === "state") {
+        const installed = typeof assertion.probeId === "string" ? installedE2EApplicationStateProbeAsset(assertion.probeId) : undefined;
+        if (installed === undefined) return { ok: false, reason: "a state assertion names a probe that is not installed" };
+        assets.push({ caseId: expected.caseId, assertionIndex: index, kind: "state-probe", id: assertion.probeId!, manifestDigest: installed.manifestDigest,
+          sha256: installed.sha256, byteLength: installed.byteLength });
+      } else if (assertion.kind === "json" || assertion.kind === "file") {
+        return { ok: false, reason: `a ${assertion.kind} assertion needs an approved asset that is not installed in the executor` };
+      }
+    }
+  }
+  return { ok: true, assets };
+}
+
 /** The limits every application run's runner is configured with (the pinned runner's own, as the broker pins them for portable runs too). */
 const APPLICATION_RUNNER_LIMITS = Object.freeze({ maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 });
 const OWNER_REASON_MAX_CHARS = 300;
@@ -202,6 +231,18 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     // The one supervisor receipt the host attests is derived from the run id and the close time.
     const expectedSupervisorReceiptRefs = [dockerOwnedCleanupReceipt(binding.runId, inputs.ownedClosedAt).ref];
     if (!same(inputs.expectedSupervisorReceiptRefs, expectedSupervisorReceiptRefs)) return unknown("the supervisor receipt is not the one derived from the run id and the close time");
+    // The approved probe documents are the installed ones, byte for byte, with their manifest digests; only their retained references are the worker's.
+    const expectedAssets = expectedApplicationAssertionAssets(suite);
+    if (!expectedAssets.ok) return unknown(expectedAssets.reason);
+    const order = (row: { caseId: string; assertionIndex: number }) => `${row.caseId}\u0000${String(row.assertionIndex).padStart(4, "0")}`;
+    const suppliedAssets = (Array.isArray(inputs.assertionAssets) ? inputs.assertionAssets as unknown[] : []).map((raw) => {
+      const row = isObject(raw) ? raw : {};
+      const ref = isObject(row.ref) ? row.ref : {};
+      return { caseId: row.caseId, assertionIndex: row.assertionIndex, kind: row.kind, id: row.id, manifestDigest: row.manifestDigest, sha256: ref.sha256, byteLength: ref.byteLength,
+        mediaType: ref.mediaType, hasHandle: typeof ref.artifactId === "string" && ref.artifactId !== "" };
+    }).sort((left, right) => order({ caseId: String(left.caseId), assertionIndex: Number(left.assertionIndex) }).localeCompare(order({ caseId: String(right.caseId), assertionIndex: Number(right.assertionIndex) })));
+    const wanted = expectedAssets.assets.map((asset) => ({ ...asset, mediaType: "application/json", hasHandle: true })).sort((left, right) => order(left).localeCompare(order(right)));
+    if (!same(suppliedAssets, wanted)) return unknown("the group's assertion assets are not the installed assertion assets");
     const oracle = createE2EApplicationCollectionOracleFromCompiledSuite({ compiled: suite, binding, round, environment: runtime.runnerEnvironment, usage, limits: APPLICATION_RUNNER_LIMITS,
       expectedSupervisorReceiptRefs, ownedResourceInventoryDigest: inventoryDigest, observationBindings: inputs.observationBindings as never,
       assertionAssets: inputs.assertionAssets as never, governedModelReceipts: [], ownedClosedAt: inputs.ownedClosedAt });

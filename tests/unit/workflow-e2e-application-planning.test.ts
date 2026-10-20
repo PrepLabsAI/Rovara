@@ -870,7 +870,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     const admissionObjects = () => [...harness.s3.objects.keys()].filter((name) => name.startsWith("workflow-e2e-admissions/"));
     const readinessOperations = () => harness.db.find((row) => row.entityType === "OPERATION" && row.workspaceId === workspaceId && row.workflowE2EReadiness !== undefined);
     const workspaceNow = () => harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { status?: string; activeOperationId?: string } | undefined;
-    return { ...planned, runDispatch, taskNow, checksOperations, readinessOperations, workspaceNow, admissionObjects, dispatchRow: () => harness.db.get("WORKFLOW_DISPATCH", dispatchKey), taskKey: key };
+    return { ...planned, runDispatch, taskNow, checksOperations, readinessOperations, workspaceNow, admissionObjects, dispatchRow: () => harness.db.get("WORKFLOW_DISPATCH", dispatchKey) as (Record<string, unknown> & { taskAccessPausedAt?: string }) | undefined, taskKey: key };
   }
 
   /** The task is blocked for good, in plain words, and nothing was started or retried. */
@@ -995,6 +995,27 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
       expect(dispatched.readinessOperations(), "no warm-up operation was started").toEqual([]);
       expect(dispatched.workspaceNow(), "the workspace was not touched").toEqual(workspaceBefore);
       expect(dispatched.dispatchRow()).toBeUndefined();
+    });
+
+    it("pauses a v2 task whose creator lost access for access, instead of blocking it with the application reason (creator check first)", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atChecksDispatch(planned, { seedReadiness: false });
+      planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
+      const creator = planned.harness.db.get(`DEVELOPER#${MAYA.developerId}`, "META")!;
+      planned.harness.db.set({ ...creator, revoked: true });
+      const original = dispatched.dispatchRow()!;
+      await dispatched.runDispatch();
+      // Parked on its durable row for a later explicit owner action: not blocked, not retried, nothing warmed.
+      expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+      expect(dispatched.dispatchRow()).toMatchObject({ kind: "CHECKS" });
+      expect(dispatched.dispatchRow()?.taskAccessPausedAt).toEqual(expect.any(String));
+      expect(dispatched.readinessOperations()).toEqual([]);
+      // Once the creator is restored the same refusal applies.
+      planned.harness.db.set({ ...creator, revoked: false });
+      planned.harness.db.set(original);
+      await dispatched.runDispatch();
+      expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(dispatched.taskNow().workflow.blockReason).toMatch(reasonOf("the web runtime"));
     });
 
     it("also ends in the interim block before any warm-up when the selection is unchanged", async () => {
