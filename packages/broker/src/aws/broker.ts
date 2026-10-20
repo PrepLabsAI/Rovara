@@ -210,6 +210,11 @@ import {
   E2EWorkflowEvidenceRefSchema,
   E2EWorkflowGroupEvidenceRefSchema,
   type E2ESetupProposal,
+  type E2EPolicy,
+  type PlanApprovalRef,
+  type E2EApplicationPlanIntent,
+  type E2EApplicationSelectionRecord,
+  type E2ERegisteredRuntime,
   ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey,
   WorkerInvocationSchema,
@@ -259,7 +264,7 @@ import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePlanReferenceError } from "../e2e/feature-plan-intent.js";
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
-import { readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
+import { e2eRegisteredRuntimeKey, readProjectAdmittedE2ERuntimes, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
 import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
 import {
@@ -271,6 +276,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, type WorkflowE2EReadinessMarker, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../e2e/feature-plan-planning-context.js";
 import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.js";
+import { evaluateApplicationPlanApproval } from "../e2e/application-plan-approval.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
@@ -912,6 +918,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
           workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+          validateWorkflowE2EApplicationPlan: input => validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact),
           registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : url => dependencies.githubPullRequests.getRepositoryIdentity!(url),
           refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
       }
@@ -1091,6 +1098,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
           workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
           workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+          validateWorkflowE2EApplicationPlan: input => validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact),
           registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : url => dependencies.githubPullRequests.getRepositoryIdentity!(url),
           refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url), request.requestId);
       }
@@ -4046,6 +4054,102 @@ async function codingPlanWorkBreakdownContext(dependencies: AwsBrokerDependencie
   return { taskId: task.taskId, repositoryId: project.definition.repositories[0]!.name };
 }
 
+/**
+ * The approved setup's source snapshot and proposal, decoded from the stored proposal artifact and independently verified against the registered
+ * project, repository, policy and approval digests. Never the prepared checkout, and never trusted beyond what verification re-derives; a stored
+ * proposal that cannot be verified is a reason, not a snapshot.
+ */
+async function readApprovedSetupSource(dependencies: AwsBrokerDependencies, project: RegisteredProjectRecord, policy: E2EPolicy,
+  repository: { url: string; name: string }, expectedRepositoryId: string | undefined):
+  Promise<{ ok: true; snapshot: E2ESourceSnapshot; setupProposal: E2ESetupProposal; setupApproval: PlanApprovalRef } | { ok: false; reason: string }> {
+  const setupApproval = project.setupApproval;
+  if (setupApproval?.decision !== "approve") return { ok: false, reason: "the pinned project has no approved setup" };
+  try {
+    const stored = await readStoredText(dependencies.s3, dependencies.artifactBucketName, setupApproval.proposalRef, MAX_SETUP_PROPOSAL_BYTES);
+    if (stored === undefined || createHash("sha256").update(stored, "utf8").digest("hex") !== setupApproval.proposalSha256) {
+      return { ok: false, reason: "the approved setup proposal is missing or does not match its approval digest" };
+    }
+    const artifact: unknown = JSON.parse(stored);
+    if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) return { ok: false, reason: "the approved setup proposal is not an object" };
+    const record = artifact as Record<string, unknown>;
+    const rawSnapshot = record.snapshot;
+    if (!(record.schemaVersion === "project-setup-source-proposal/v1" && record.issuerOwnerKey === project.registeredBy
+      && record.repositoryUrl === repository.url && sameJsonContent(record.policy, policy)
+      && record.identityMapping && typeof record.identityMapping === "object" && !Array.isArray(record.identityMapping)
+      && (record.identityMapping as Record<string, unknown>).registeredRepositoryId === repository.name
+      && rawSnapshot && typeof rawSnapshot === "object" && !Array.isArray(rawSnapshot))) {
+      return { ok: false, reason: "the approved setup proposal does not belong to this project, repository and policy" };
+    }
+    const sourceRecord = rawSnapshot as Record<string, unknown>;
+    const rawSources = sourceRecord.sources;
+    if (!Array.isArray(rawSources)) return { ok: false, reason: "the approved setup proposal holds no source snapshot" };
+    const sources = rawSources.map((raw) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid stored source record");
+      const source = raw as Record<string, unknown>;
+      if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") {
+        throw new Error("invalid stored source record");
+      }
+      return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
+    });
+    const decoded = { ...sourceRecord, sources } as unknown as E2ESourceSnapshot;
+    const setupProposal = verifyE2ESetupProposal(E2ESetupProposalSchema.parse(record.proposal), decoded, decoded.candidate);
+    if (!(expectedRepositoryId !== undefined && isExactFeatureE2ESourceSnapshot(decoded, expectedRepositoryId, decoded.commitSha)
+      && decoded.candidate.digest === setupApproval.candidateDigest && setupProposal.candidateDigest === setupApproval.candidateDigest)) {
+      return { ok: false, reason: "the approved setup snapshot does not match the registered repository and its approved candidate" };
+    }
+    return { ok: true, snapshot: decoded, setupProposal,
+      setupApproval: { artifactId: `setup-proposal-${setupApproval.proposalSha256}`, digest: createHash("sha256").update(canonicalJson(E2ESetupProposalSchema.parse(setupProposal)), "utf8").digest("hex") } };
+  } catch {
+    // A stored setup snapshot that cannot be independently verified is not planner context and not approval authority.
+    return { ok: false, reason: "the approved setup snapshot could not be read and verified" };
+  }
+}
+
+/**
+ * Plan approval for a schema-v2 application intent: derives the selection against the task's pinned project (its own revision and runtime
+ * binding, never the latest), the approved setup snapshot, and the runtime rows READY right now (Ruling AL; not cached from planning). Returns the
+ * selection to record and conditions that keep each row as read until the approval commits, or throws: CONFIG_INVALID when the plan cannot be
+ * approved, RUNTIME_UNAVAILABLE when it cannot be evaluated (a missing snapshot or an unreadable row). Either way nothing is approved.
+ */
+async function validateWorkflowE2EApplicationPlan(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, intent: E2EApplicationPlanIntent,
+  artifact: { id: string; sha256: string }): Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems }> {
+  const unevaluable = (reason: string) => agentXError("RUNTIME_UNAVAILABLE",
+    `the application E2E plan could not be checked for approval (${reason}); nothing was approved. Keep this plan and approve it again once it can be checked, or request changes`);
+  const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
+  if (catalogId === undefined) throw unevaluable("no runtime catalog is configured");
+  let project: RegisteredProjectRecord;
+  try { project = await requireProject(dependencies, task.project, task.startingRevision); }
+  catch { throw unevaluable("the pinned project revision is unavailable"); }
+  const policy = E2EPolicySchema.safeParse(project.definition.e2e);
+  if (!policy.success) throw unevaluable("the pinned project has no valid E2E policy");
+  if (project.definition.repositories.length !== 1) throw unevaluable("application planning needs exactly one pinned repository");
+  const repository = project.definition.repositories[0]!;
+  const repositoryParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(repository.url);
+  const setup = await readApprovedSetupSource(dependencies, project, policy.data, repository,
+    repositoryParts?.[1] && repositoryParts[2] ? `${repositoryParts[1]}/${repositoryParts[2]}` : undefined);
+  if (!setup.ok) throw unevaluable(setup.reason);
+  const now = Date.now();
+  let rows: E2ERegisteredRuntime[];
+  try {
+    rows = await readProjectAdmittedE2ERuntimes({ runtimeCatalogId: catalogId, profileId: WEB_API_RUNTIME_PROFILE_ID, binding: parseRuntimeBinding(project.runtimeBinding), now,
+      read: (key) => getItem<Record<string, unknown>>(dependencies, key) });
+  } catch { throw unevaluable("the runtime catalog could not be read"); }
+  const evaluation = evaluateApplicationPlanApproval({ intent, taskId: task.taskId, artifact, snapshot: setup.snapshot, setupProposal: setup.setupProposal,
+    setupApproval: setup.setupApproval, policy: policy.data, registeredRuntimes: rows, runtimeCatalogId: catalogId,
+    runtimeBinding: parseRuntimeBinding(project.runtimeBinding), now });
+  if (!evaluation.ok) {
+    throw agentXError("CONFIG_INVALID", `the application E2E plan cannot be approved: ${evaluation.reason}. Request changes to correct the plan, or approve it again once the runtime is ready`);
+  }
+  // The rows this approval was derived from must still be exactly those when the approval commits.
+  const conditions: TransactItems = evaluation.selection.runtimeRows.map((row) => ({ ConditionCheck: { TableName: dependencies.tableName,
+    Key: e2eRegisteredRuntimeKey(row.runtimeCatalogId, row.profileId, row.kind),
+    ConditionExpression: "entityType = :entity AND #state = :ready AND runtimeCatalogId = :catalog AND catalogRevision = :revision AND generation = :generation AND bindingDigest = :binding AND capabilityDigest = :capability AND expiresAt = :expires",
+    ExpressionAttributeNames: { "#state": "state" },
+    ExpressionAttributeValues: { ":entity": "E2E_FEATURE_VERIFIER", ":ready": "READY", ":catalog": row.runtimeCatalogId, ":revision": row.catalogRevision,
+      ":generation": row.generation, ":binding": row.bindingDigest, ":capability": row.capabilityDigest, ":expires": row.expiresAt } } }));
+  return { selection: evaluation.selection, conditions };
+}
+
 /** Supplies source-backed feature-plan references only from the task's pinned project and immutable prepared commit. */
 async function codingPlanFeatureE2EContext(dependencies: AwsBrokerDependencies, workspaceId: string) {
   const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(workspaceId));
@@ -4064,44 +4168,11 @@ async function codingPlanFeatureE2EContext(dependencies: AwsBrokerDependencies, 
 
   let snapshot: E2ESourceSnapshot | undefined;
   let sourceOrigin: "prepared-commit" | "approved-setup" = "prepared-commit";
-  const setupApproval = project.setupApproval;
-  if (setupApproval?.decision === "approve") {
-    try {
-      const stored = await readStoredText(dependencies.s3, dependencies.artifactBucketName, setupApproval.proposalRef, MAX_SETUP_PROPOSAL_BYTES);
-      if (stored !== undefined && createHash("sha256").update(stored, "utf8").digest("hex") === setupApproval.proposalSha256) {
-        const artifact: unknown = JSON.parse(stored);
-        if (artifact && typeof artifact === "object" && !Array.isArray(artifact)) {
-          const record = artifact as Record<string, unknown>;
-          const rawSnapshot = record.snapshot;
-          if (record.schemaVersion === "project-setup-source-proposal/v1" && record.issuerOwnerKey === project.registeredBy
-            && record.repositoryUrl === repository.url && sameJsonContent(record.policy, parsedPolicy.data)
-            && record.identityMapping && typeof record.identityMapping === "object" && !Array.isArray(record.identityMapping)
-            && (record.identityMapping as Record<string, unknown>).registeredRepositoryId === repository.name
-            && rawSnapshot && typeof rawSnapshot === "object" && !Array.isArray(rawSnapshot)) {
-            const sourceRecord = rawSnapshot as Record<string, unknown>;
-            const rawSources = sourceRecord.sources;
-            if (Array.isArray(rawSources)) {
-              const sources = rawSources.map((raw) => {
-                if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("invalid stored source record");
-                const source = raw as Record<string, unknown>;
-                if (typeof source.path !== "string" || typeof source.sha256 !== "string" || typeof source.bytesBase64 !== "string" || source.kind !== "blob") {
-                  throw new Error("invalid stored source record");
-                }
-                return { path: source.path, sha256: source.sha256, bytes: Buffer.from(source.bytesBase64, "base64"), kind: "blob" as const };
-              });
-              const decoded = { ...sourceRecord, sources } as unknown as E2ESourceSnapshot;
-              const setupProposal = verifyE2ESetupProposal(E2ESetupProposalSchema.parse(record.proposal), decoded, decoded.candidate);
-              if (expectedRepositoryId !== undefined && isExactFeatureE2ESourceSnapshot(decoded, expectedRepositoryId, decoded.commitSha)
-                && decoded.candidate.digest === setupApproval.candidateDigest && setupProposal.candidateDigest === setupApproval.candidateDigest
-                && (prepared === undefined || decoded.commitSha === prepared.baseCommitSha)) {
-                snapshot = decoded;
-                if (prepared === undefined) sourceOrigin = "approved-setup";
-              }
-            }
-          }
-        }
-      }
-    } catch { /* A stored setup snapshot that cannot be independently verified is not planner context. */ }
+  // The approved setup's verified snapshot is planner context only when it is the prepared commit (or there is no prepared commit yet).
+  const approvedSetup = await readApprovedSetupSource(dependencies, project, parsedPolicy.data, repository, expectedRepositoryId);
+  if (approvedSetup.ok && (prepared === undefined || approvedSetup.snapshot.commitSha === prepared.baseCommitSha)) {
+    snapshot = approvedSetup.snapshot;
+    if (prepared === undefined) sourceOrigin = "approved-setup";
   }
 
   if (snapshot === undefined) {
@@ -5448,7 +5519,8 @@ async function keepSlackWorkflowPullRequests(dependencies: AwsBrokerDependencies
 async function decideSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowDecisionEvent) {
   // The same checks as every other Slack press: this Slack workspace, the task's owner, and the task's own thread.
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "decide this plan");
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks,
+    validateWorkflowE2EApplicationPlan: input => validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact) }, caller);
   const body = JSON.stringify({
     requestId, expectedRevision: event.expectedRevision, artifactDigest: event.artifactDigest,
     ...(event.decision === "APPROVE" && event.workBreakdownDigest !== undefined ? { workBreakdownDigest: event.workBreakdownDigest } : {}),

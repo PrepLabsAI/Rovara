@@ -164,7 +164,30 @@ export type E2EFailedRound = z.infer<typeof E2EFailedRoundSchema>;
 export const E2EWorkflowDisplayRefSchema = z.object({ schemaVersion: z.literal(1), key: z.string().regex(/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/),
   sha256: digest, byteLength: positiveInt.max(262_144), candidateDigest: digest, roundId: z.string().uuid(), groupRunIds: z.array(z.string().uuid()).min(1).max(4), admissionSha256: digest, evidenceSha256: digest }).strict();
 export type E2EWorkflowDisplayRef = z.infer<typeof E2EWorkflowDisplayRefSchema>;
-export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentRoundId: z.string().uuid().optional(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64), qualifiedRound: E2EQualifiedRoundSchema.optional(), failedRound: E2EFailedRoundSchema.optional(), displayRef: E2EWorkflowDisplayRefSchema.optional() }).strict();
+/**
+ * What plan approval derived for a plan that carries a v2 application intent: the digests that identify the approved selection, the targets that
+ * can run application scenarios, the criteria that will wait (and why), and the READY runtime rows it was derived against. Dispatch re-reads the
+ * rows and re-derives the selection (Ruling AL); this record is what the Owner approved, never authority to run.
+ */
+export const E2EApplicationSelectionRecordSchema = z.object({
+  schemaVersion: z.literal("e2e-application-selection/v1"),
+  intentDigest: digest,
+  /** The approval-time plan identity the selection was derived under (the canonical artifact; not the dispatch-time plan digest). */
+  planDigest: digest,
+  semanticApproval: z.object({ artifactId: id(120), digest }).strict(),
+  setupApproval: z.object({ artifactId: id(120), digest }).strict(),
+  /** The application approval binding of the executable subset; null when no target can run application scenarios yet. */
+  applicationApprovalBindingDigest: digest.nullable(),
+  executionPlanDigest: digest,
+  bundleDigest: digest,
+  executableTargetIds: z.array(id(80)).max(12),
+  unavailableCriteria: z.array(z.object({ criterionId: id(120), reason: id(500) }).strict()).max(64),
+  runtimeRows: z.array(z.object({ kind: z.enum(["web", "api"]), profileId: id(120), runtimeCatalogId: id(120), catalogRevision: positiveInt, generation: positiveInt,
+    bindingDigest: digest, capabilityDigest: digest, expiresAt: id(40) }).strict()).max(2),
+  evaluatedAt: id(40),
+}).strict();
+export type E2EApplicationSelectionRecord = z.infer<typeof E2EApplicationSelectionRecordSchema>;
+export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentRoundId: z.string().uuid().optional(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64), qualifiedRound: E2EQualifiedRoundSchema.optional(), failedRound: E2EFailedRoundSchema.optional(), displayRef: E2EWorkflowDisplayRefSchema.optional(), applicationSelection: E2EApplicationSelectionRecordSchema.optional() }).strict();
 export type E2EWorkflowProgress = z.infer<typeof E2EWorkflowProgressSchema>;
 export type E2EQualifiedRound = z.infer<typeof E2EQualifiedRoundSchema>;
 

@@ -2,18 +2,21 @@ import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
-  E2EApplicationPlanIntentSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
+  E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
+  deriveE2ESyntheticRuntimeAccountRef,
   e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup, selectE2EApplicationExecutionPlan,
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { deriveE2EApplicationFeatureExecutionSelection } from "../../packages/broker/src/e2e/application-feature-plan-intent.js";
+import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { buildFeatureE2EPlanningContext, describeFeatureE2EExecutableKinds }
   from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
-import { call } from "../support/slack-broker.js";
+import { call, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
+import { planAnswer, planDocument } from "../support/plan-documents.js";
 
 const PROFILE = WEB_API_RUNTIME_PROFILE_ID;
 // The broker reads the clock itself, so the rows are valid around the real current time.
@@ -25,8 +28,8 @@ const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123
   subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef" }], volumeSizeGiB: 32, volumeType: "gp3" as const };
 
 /** One v2 catalog row of the qualified profile, carrying the real registered capability descriptor of its kind. */
-function webApiRow(kind: "web" | "api", overrides: Record<string, unknown> = {}) {
-  const capabilities = webApiRuntimeCapabilities(kind, "a".repeat(64));
+function webApiRow(kind: "web" | "api", overrides: Record<string, unknown> = {}, editCapabilities: (value: ReturnType<typeof webApiRuntimeCapabilities>) => ReturnType<typeof webApiRuntimeCapabilities> = (value) => value) {
+  const capabilities = editCapabilities(webApiRuntimeCapabilities(kind, "a".repeat(64)));
   const capabilityDigest = e2eRuntimeCapabilityDigest(capabilities);
   const runnerEnvironment = { ci: true as const, trustNoticeShown: false as const, os: "linux 6.8.0", arch: "arm64", runtime: "node v22.23.2" };
   const runnerToolchain = { execPath: "/opt/node/bin/node", version: "v22.23.2" as const, platform: "linux", arch: "arm64" };
@@ -77,17 +80,21 @@ function approvedSetup(snapshot: E2ESourceSnapshot, readyProfiles: Ready, onlyTa
   return { inspection, proposal, policy, setupApproval: { artifactId: "setup", digest: shaCanonical(proposal) } };
 }
 
-/** Runs the production selection facade for one web scenario against the approved setup. */
-function plan(input: { snapshot?: E2ESourceSnapshot; scenario?: E2EScenario; targetId?: string; setupReady?: Ready; planRuntimeProfileId?: string; executable?: boolean;
-  registeredRuntimes?: ReturnType<typeof webApiRow>[]; modelRouteRevision?: string }) {
+type PlanInput = { snapshot?: E2ESourceSnapshot; scenario?: E2EScenario; targetId?: string; setupReady?: Ready; planRuntimeProfileId?: string; executable?: boolean;
+  registeredRuntimes?: ReturnType<typeof webApiRow>[]; modelRouteRevision?: string; accountRef?: { revision?: number; definitionDigest?: string }; sourceSha?: string };
+
+/** The approved setup, policy and v2 intent for one scenario on one target, as the selection facade and the approval evaluation both take them. */
+function planFixture(input: PlanInput) {
   const snapshot = input.snapshot ?? contractSnapshot;
   const scenario = input.scenario ?? csvScenario;
   const setup = approvedSetup(snapshot, input.setupReady ?? [{ kind: "web", profileId: PROFILE }]);
   const target = setup.proposal.targets.find((item) => item.targetId === (input.targetId ?? "web-1"))!;
   const application = setup.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
-  const refs = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths);
+  const refs = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths)
+    .map((ref) => (input.sourceSha === undefined ? ref : { ...ref, sha256: input.sourceSha }));
   const executable = input.executable ?? true;
-  const accountRef = { applicationId: application.applicationId, profileId: target.accountProfileId, revision: 1, definitionDigest: "2".repeat(64) };
+  const accountRef = { ...(application.recipe === null ? { applicationId: application.applicationId, profileId: target.accountProfileId, revision: 1, definitionDigest: "2".repeat(64) }
+    : deriveE2ESyntheticRuntimeAccountRef({ applicationId: application.applicationId, accountProfileId: target.accountProfileId, recipeDigest: application.recipe.recipeDigest })), ...input.accountRef };
   const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [], mockFixtureRefs: [],
     accountContextRefs: [{ applicationId: application.applicationId, profileId: target.accountProfileId, sourcePath: "package.json", sourceSha256: refs.find((ref) => ref.path === "package.json")!.sha256 }],
     scenarios: [scenario], semanticExportDeltas: [],
@@ -95,11 +102,17 @@ function plan(input: { snapshot?: E2ESourceSnapshot; scenario?: E2EScenario; tar
       sourceRefs: refs, runtimeProfileId: input.planRuntimeProfileId ?? target.runtimeProfileId, accountProfileId: target.accountProfileId }] : [],
     runtimeAccountRefs: executable ? [accountRef] : [],
     unavailableTargetRefs: executable ? [] : [{ targetId: target.targetId, applicationId: application.applicationId, accountProfileId: target.accountProfileId, sourceRefs: refs }] });
+  return { snapshot, scenario, setup, target, application, intent, accountRef, executable,
+    policy: { ...setup.policy, baselineScenarioIds: [scenario.scenarioId], modelRouteRevision: input.modelRouteRevision ?? null } };
+}
+
+/** Runs the production selection facade for one web scenario against the approved setup. */
+function plan(input: PlanInput) {
+  const { snapshot, setup, target, intent, accountRef, executable, policy } = planFixture(input);
   const semanticApproval = { artifactId: "feature-plan", digest: "1".repeat(64) };
   return deriveE2EApplicationFeatureExecutionSelection({ intent, snapshot, artifactId: semanticApproval.artifactId, artifactSha256: semanticApproval.digest,
     planDigest: "3".repeat(64), approvedSemanticApproval: semanticApproval, setupProposal: setup.proposal, setupApproval: setup.setupApproval,
-    policy: { ...setup.policy, baselineScenarioIds: [scenario.scenarioId], modelRouteRevision: input.modelRouteRevision ?? null },
-    registeredRuntimes: input.registeredRuntimes ?? [webApiRow("web")],
+    policy, registeredRuntimes: input.registeredRuntimes ?? [webApiRow("web")],
     runtimeAvailability: [{ targetId: target.targetId, profileId: PROFILE, connection: "connected", approval: "approved", qualification: "qualified",
       authorizationRevision: "web-auth-r1" }],
     runtimeAccountRefs: executable ? [accountRef] : [], runtimeCatalogId: "catalog", runtimeBinding: null as never, featureVerifier: null, now: NOW });
@@ -176,6 +189,93 @@ describe("browser and API scenarios on a qualified runtime profile", () => {
 
   it("refuses a plan whose runtime profile is not the one the approved target carries", () => {
     expect(() => plan({ planRuntimeProfileId: "foreign-runtime-profile" })).toThrow(/runtime profile/i);
+  });
+});
+
+const TASK_ID = "11111111-1111-4111-8111-111111111111";
+const APPROVED_ARTIFACT = { id: "feature-plan", sha256: "1".repeat(64) };
+const APPROVED_REF = { artifactId: APPROVED_ARTIFACT.id, digest: APPROVED_ARTIFACT.sha256 };
+
+/** The approval evaluation of the same fixture the selection facade tests use, with the rows the broker would have admitted. */
+function evaluate(input: PlanInput & { runtimeBinding?: typeof binding; artifact?: typeof APPROVED_ARTIFACT; policyBaselineIds?: string[]; setupSnapshot?: E2ESourceSnapshot }) {
+  const fx = planFixture(input);
+  return evaluateApplicationPlanApproval({ intent: fx.intent, taskId: TASK_ID, artifact: input.artifact ?? APPROVED_ARTIFACT,
+    snapshot: input.setupSnapshot ?? fx.snapshot, setupProposal: fx.setup.proposal, setupApproval: fx.setup.setupApproval,
+    policy: { ...fx.policy, baselineScenarioIds: input.policyBaselineIds ?? fx.policy.baselineScenarioIds },
+    registeredRuntimes: input.registeredRuntimes ?? [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: input.runtimeBinding ?? binding, now: NOW });
+}
+const refusal = (result: ReturnType<typeof evaluate>) => (result.ok ? "approved" : result.reason);
+
+describe("approving a plan that carries an application intent", () => {
+  it("derives the selection against the approved setup and the READY rows, and records what 2.3 and 2.4 read", () => {
+    const fx = planFixture({});
+    const result = evaluate({});
+    expect(result.ok, refusal(result)).toBe(true);
+    if (!result.ok) return;
+    const record = result.selection;
+    expect(record).toMatchObject({ schemaVersion: "e2e-application-selection/v1", semanticApproval: APPROVED_REF, setupApproval: fx.setup.setupApproval,
+      executableTargetIds: ["web-1"], unavailableCriteria: [], evaluatedAt: new Date(NOW).toISOString() });
+    expect(record.intentDigest).toBe(shaCanonical(fx.intent));
+    for (const field of ["planDigest", "applicationApprovalBindingDigest", "executionPlanDigest", "bundleDigest"] as const) expect(record[field]).toMatch(/^[a-f0-9]{64}$/);
+    expect(record.runtimeRows).toEqual([{ kind: "web", profileId: PROFILE, runtimeCatalogId: "catalog", catalogRevision: 3, generation: 4,
+      bindingDigest: shaCanonical(binding), capabilityDigest: webApiRow("web").capabilityDigest, expiresAt: webApiRow("web").expiresAt }]);
+    // The same approval is the same record, and a different artifact is a different binding.
+    expect(evaluate({})).toEqual(result);
+    const other = evaluate({ artifact: { id: "feature-plan", sha256: "4".repeat(64) } });
+    expect(other.ok && other.selection.planDigest).not.toBe(record.planDigest);
+  });
+
+  it("approves an intent that lists its target as unavailable, recording each criterion that will wait", () => {
+    const result = evaluate({ executable: false, setupReady: [] });
+    expect(result.ok, refusal(result)).toBe(true);
+    if (!result.ok) return;
+    expect(result.selection).toMatchObject({ executableTargetIds: [], applicationApprovalBindingDigest: null, runtimeRows: [] });
+    expect(result.selection.unavailableCriteria).toHaveLength(1);
+    expect(result.selection.unavailableCriteria[0]).toMatchObject({ reason: "application runtime assignment is explicitly unavailable" });
+    expect(result.selection.unavailableCriteria[0]!.criterionId).toMatch(/^criterion-/);
+  });
+
+  describe("refuses, never dropping a scenario and never falling back to portable", () => {
+    const cases: Array<[string, Parameters<typeof evaluate>[0], RegExp]> = [
+      ["the runtime row is missing", { registeredRuntimes: [] }, /web runtime.*READY/i],
+      ["only the other kind's row is READY", { registeredRuntimes: [webApiRow("api")] }, /web runtime.*READY/i],
+      ["the row is bound to another runtime binding", { runtimeBinding: { ...binding, launchTemplateId: "lt-fedcba9876543210" } }, /another runtime binding/i],
+      ["the row has expired", { registeredRuntimes: [webApiRow("web", { qualifiedAt: new Date(NOW - 7_200_000).toISOString(), expiresAt: new Date(NOW - 1_000).toISOString() })] }, /not READY/i],
+      ["the row is parked", { registeredRuntimes: [webApiRow("web", { state: "UNAVAILABLE" })] }, /not READY/i],
+      ["the descriptor does not support a step the scenario uses", { registeredRuntimes: [webApiRow("web", {}, (value) => ({ ...value,
+        supportedSteps: value.supportedSteps.filter((step) => step !== "click") }))] }, /not ready|unsupported|capabilit/i],
+      ["the scenario has an agent step", { modelRouteRevision: "route-v1", scenario: { ...csvScenario, scenarioId: "agent-orders",
+        steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] } }, /agent-steps-arrive-in-m1\.4/],
+      ["the launch recipe is only inferred, without a project contract", { snapshot: inferredSnapshot }, /needs-project-contract/],
+      ["the target is approved on the phase-unavailable profile but the plan names the qualified one", { setupReady: [], planRuntimeProfileId: PROFILE }, /runtime profile/i],
+      ["the plan names a runtime profile the target does not carry", { planRuntimeProfileId: "foreign-runtime-profile" }, /runtime profile/i],
+      ["the account reference is not the synthetic account identity", { accountRef: { definitionDigest: "2".repeat(64) } }, /account/i],
+      ["a source reference does not match the approved snapshot", { sourceSha: "9".repeat(64) }, /source/i],
+      ["the plan omits a baseline scenario the policy pins", { policyBaselineIds: ["pinned-baseline"] }, /baseline/i],
+    ];
+    for (const [name, input, expected] of cases) {
+      it(`when ${name}`, () => {
+        const result = evaluate(input);
+        expect(result.ok).toBe(false);
+        const reason = refusal(result);
+        expect(reason).toMatch(expected);
+        expect(reason.length).toBeLessThanOrEqual(600);
+        expect(reason).not.toMatch(/\p{Cc}/u);
+      });
+    }
+
+    it("when the application's metadata changed since the setup was approved", () => {
+      const changed = JSON.stringify({ ...(JSON.parse(ordersContractManifest) as Record<string, unknown>), description: "changed after setup approval" });
+      const result = evaluate({ setupSnapshot: snapshotOf({ "package.json": changed }) });
+      expect(result.ok).toBe(false);
+      expect(refusal(result)).toMatch(/source|metadata|setup/i);
+    });
+
+    it("lists every executable criterion that is not executable, by scenario and target", () => {
+      const reason = refusal(evaluate({ registeredRuntimes: [webApiRow("web", {}, (value) => ({ ...value, supportedAssertions: value.supportedAssertions.filter((kind) => kind !== "csv") }))] }));
+      expect(reason).toContain("export-csv");
+      expect(reason).toContain("web-1");
+    });
   });
 });
 
@@ -259,8 +359,11 @@ describe("planning context for a qualified web target", () => {
 // The ordinary feature PLAN, end to end through the broker: an approved setup whose web target was proposed against the READY profile,
 // planned against the project's current runtime catalog rows (Ruling AL: web and api rows, matched to the project's runtime binding).
 describe("ordinary feature PLAN with an approved qualified web target", () => {
-  async function plannedInvocation(rows: Record<"web" | "api", Record<string, unknown> | undefined>,
-    afterApproval?: (harness: Awaited<ReturnType<typeof createDeveloperTaskBroker>>) => void): Promise<{ prompt: string; workflowE2EPlanVersion?: number }> {
+  type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
+  type Rows = Record<"web" | "api", Record<string, unknown> | undefined>;
+  const SLACK_THREAD = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000099" };
+  /** Registers the project against its approved setup and the catalog rows, then starts a task and runs its preparation, up to the planning invocation. */
+  async function startPlanning(rows: Rows, afterApproval?: (harness: Harness) => void, viaSlack = false) {
     const snapshot = contractSnapshot;
     const capture = vi.fn(async () => snapshot);
     const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog" } });
@@ -284,15 +387,27 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
         setupApproval: { proposalRef, proposalSha256, decision: "approve" } } });
     expect(registration.status, JSON.stringify(registration.body)).toBe(201);
     afterApproval?.(harness);
-    const start = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments",
-      instructions: "Add an orders table with an Export CSV button", client: "planning-test", workflow: true, workflowPath: "QUICK" });
-    expect(start.status, JSON.stringify(start.body)).toBe(200);
-    const task = harness.db.get(`DEVTASK#${String((start.body.task as { taskId: string }).taskId)}`, "META") as { workspaceId: string };
+    const instructions = "Add an orders table with an Export CSV button";
+    let taskId: string;
+    if (viaSlack) {
+      const started = await harness.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread: SLACK_THREAD, userId: MAYA.slackUserId,
+        instructions, workflowPath: "QUICK", requestId: randomUUID() });
+      expect(started.statusCode, started.body).toBe(200);
+      taskId = String((JSON.parse(started.body) as { taskId: string }).taskId);
+    } else {
+      const start = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions, client: "planning-test", workflow: true, workflowPath: "QUICK" });
+      expect(start.status, JSON.stringify(start.body)).toBe(200);
+      taskId = String((start.body.task as { taskId: string }).taskId);
+    }
+    const task = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
     const preparation = harness.db.find((row) => row.pk === `WORKSPACE#${task.workspaceId}` && row.entityType === "OPERATION" && row.kind === "prepare")[0]!;
     await harness.finish(task.workspaceId, String(preparation.id), "SUCCEEDED", { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: snapshot.commitSha }] } });
     const planning = harness.db.find((row) => row.pk === `WORKSPACE#${task.workspaceId}` && row.entityType === "OPERATION" && row.workflowMode === "PLAN")[0]!;
-    return (harness.db.find((row) => row.entityType === "OUTBOX" && row.operationId === planning.id)[0]!.invocation as { payload: { prompt: string; workflowE2EPlanVersion?: number } }).payload;
+    const payload = (harness.db.find((row) => row.entityType === "OUTBOX" && row.operationId === planning.id)[0]!.invocation as { payload: { prompt: string; workflowE2EPlanVersion?: number } }).payload;
+    return { harness, taskId, workspaceId: task.workspaceId, planningId: String(planning.id), payload, snapshot, projectBinding, projectRow, capture, proposalRef,
+      policy: E2EPolicySchema.parse(proposalResponse.body.policy) };
   }
+  const plannedInvocation = async (rows: Rows, afterApproval?: (harness: Harness) => void) => (await startPlanning(rows, afterApproval)).payload;
   const plannedPrompt = async (...args: Parameters<typeof plannedInvocation>) => (await plannedInvocation(...args)).prompt;
 
   it("tells the planner the executable kinds and asks for the v2 application intent when the project's current web row is READY", async () => {
@@ -328,4 +443,197 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     expect(prompt).toContain('"reason":"runtime-not-ready"');
     expect(prompt).not.toContain("navigate, fill, click, choose-file");
   });
+
+  // ---- Plan APPROVE of a plan that carries the v2 application intent (Task 2.2b) ----
+
+  const READY_WEB = { kind: "web" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedSteps,
+    supportedAssertions: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedAssertions };
+  const webKey = e2eRegisteredRuntimeKey("catalog", PROFILE, "web");
+
+  /** A planning task whose planner has answered with the v2 intent a planner would build from the prompt's own context. */
+  async function plannedWithApplicationIntent(options: { viaSlack?: boolean; afterApproval?: (harness: Harness) => void; scenarios?: (target: { targetId: string; accountProfileId: string }) => E2EScenario[] } = {}) {
+    const started = await startPlanning({ web: webApiRow("web"), api: webApiRow("api") }, options.afterApproval, options.viaSlack === true);
+    const { harness, workspaceId, planningId, snapshot } = started;
+    const { policy } = started;
+    const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_WEB] });
+    if (context.status !== "available") throw new Error(context.reason);
+    const target = context.targets.find((item) => item.targetId === "web-1")!;
+    const forTarget = <T extends { applicationId: string }>(refs: readonly T[]) => refs.filter((ref) => ref.applicationId === target.applicationId);
+    const scenarios = options.scenarios?.(target) ?? [{ ...csvScenario, requestedTargetIds: [target.targetId], accountProfileId: target.accountProfileId }];
+    const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [], mockFixtureRefs: [],
+      accountContextRefs: forTarget(context.accountContextRefs).filter((ref) => ref.profileId === target.accountProfileId), scenarios, semanticExportDeltas: [],
+      applicationRuntimeRefs: context.runtimeRefs!.filter((ref) => ref.targetId === target.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! })),
+      runtimeAccountRefs: forTarget(context.runtimeAccountRefs!).filter((ref) => ref.profileId === target.accountProfileId), unavailableTargetRefs: [] });
+    const answer = planAnswer(planDocument({ title: "Export CSV", claims: [{ id: "1", text: "Orders can be exported as CSV." }], e2e: intent }));
+    await harness.artifact(workspaceId, planningId, "plan.md", answer);
+    await harness.finish(workspaceId, planningId, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    return { ...started, intent, target };
+  }
+  type Planned = Awaited<ReturnType<typeof plannedWithApplicationIntent>>;
+
+  const workflowOf = (planned: Planned) => (planned.harness.db.get(`DEVTASK#${planned.taskId}`, "META") as { workflow: { revision: number; stage: string; state: string; candidate?: unknown;
+    artifacts: Array<{ id: string; sha256: string; objectKey: string }>; e2e?: Record<string, unknown> } }).workflow;
+  const operationIds = (planned: Planned) => planned.harness.db.find((row) => row.pk === `WORKSPACE#${planned.workspaceId}` && row.entityType === "OPERATION").map((row) => row.id);
+  const decide = (planned: Planned, decision: "APPROVE" | "REQUEST_CHANGES") => {
+    const workflow = workflowOf(planned);
+    return planned.harness.dev(MAYA, "POST", `/v1/dev/tasks/${planned.taskId}/workflow/decision`, { requestId: randomUUID(), expectedRevision: workflow.revision, decision,
+      reason: decision === "APPROVE" ? "Approve the exact application intent" : "Correct the application intent", artifactDigest: workflow.artifacts.at(-1)!.sha256 });
+  };
+  const errorOf = (response: { body: Record<string, unknown> }) => response.body.error as { code?: string; message?: string };
+  /** The approval was refused: the task is exactly as it was (same revision, artifact, operations), and the owner can still request changes. */
+  async function expectRefusedThenRequestChanges(planned: Planned, code: RegExp, message: RegExp) {
+    const before = workflowOf(planned);
+    const operationsBefore = operationIds(planned);
+    const bytes = planned.harness.s3.objects.get(before.artifacts.at(-1)!.objectKey);
+    const refused = await decide(planned, "APPROVE");
+    expect(refused.status, JSON.stringify(refused.body)).toBeGreaterThanOrEqual(400);
+    expect(errorOf(refused).code).toMatch(code);
+    expect(errorOf(refused).message).toMatch(message);
+    const after = workflowOf(planned);
+    expect(after).toEqual(before);
+    expect(after.e2e).toBeUndefined();
+    expect(operationIds(planned)).toEqual(operationsBefore);
+    expect(planned.harness.s3.objects.get(before.artifacts.at(-1)!.objectKey)).toBe(bytes);
+    const requested = await decide(planned, "REQUEST_CHANGES");
+    expect(requested.status, JSON.stringify(requested.body)).toBe(200);
+    expect(operationIds(planned).length).toBeGreaterThan(operationsBefore.length);
+  }
+
+  it("records the derived selection beside the approved plan in the workflow's e2e progress", async () => {
+    const planned = await plannedWithApplicationIntent();
+    const artifact = workflowOf(planned).artifacts.at(-1)!;
+    expect(planned.harness.s3.objects.get(artifact.objectKey)).toContain('"schemaVersion":2');
+    const approved = await decide(planned, "APPROVE");
+    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
+    const workflow = workflowOf(planned);
+    expect(workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING", e2e: { required: true, contractDigest: artifact.sha256 } });
+    const record = E2EApplicationSelectionRecordSchema.parse(workflow.e2e!.applicationSelection);
+    expect(record).toMatchObject({ schemaVersion: "e2e-application-selection/v1", executableTargetIds: [planned.target.targetId], unavailableCriteria: [],
+      semanticApproval: { artifactId: artifact.id, digest: artifact.sha256 } });
+    expect(record.intentDigest).toBe(shaCanonical(planned.intent));
+    expect(record.applicationApprovalBindingDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(record.runtimeRows).toMatchObject([{ kind: "web", profileId: PROFILE, runtimeCatalogId: "catalog", catalogRevision: 3, generation: 4,
+      bindingDigest: shaCanonical(planned.projectBinding) }]);
+    // The rest of the progress is what a portable approval records: the same digests, derived the same way.
+    for (const field of ["policyDigest", "bundleDigest", "executionPlanDigest"]) expect(workflow.e2e![field]).toMatch(/^[a-f0-9]{64}$/);
+    expect(workflow.e2e).toMatchObject({ currentGroupRunIds: [], resultRefs: [] });
+  });
+
+  it("approves from Slack the same way", async () => {
+    const planned = await plannedWithApplicationIntent({ viaSlack: true });
+    const workflow = workflowOf(planned);
+    const answer = await planned.harness.handler({ source: "agentx.slack-ingress", action: "workflow-decision", taskId: planned.taskId, userId: MAYA.slackUserId, thread: SLACK_THREAD,
+      requestId: randomUUID(), expectedRevision: workflow.revision, artifactDigest: workflow.artifacts.at(-1)!.sha256, decision: "APPROVE", reason: "Approve", selectedOptionalCheckIds: [] });
+    expect(answer.statusCode, answer.body).toBe(200);
+    expect(JSON.parse(answer.body)).not.toMatchObject({ refused: true });
+    expect(workflowOf(planned)).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+    expect(E2EApplicationSelectionRecordSchema.safeParse(workflowOf(planned).e2e?.applicationSelection).success).toBe(true);
+  });
+
+  it("approves against the rows READY now, and the pinned project revision's binding rather than a later revision's", async () => {
+    const planned = await plannedWithApplicationIntent();
+    const pinned = planned.harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")
+      .sort((left, right) => Number((right.definition as { revision: number }).revision) - Number((left.definition as { revision: number }).revision))[0]!;
+    const definition = pinned.definition as { revision: number };
+    const otherBinding = { ...planned.projectBinding, launchTemplateId: "lt-fedcba9876543210" };
+    // A newer revision of the project is bound elsewhere; the task is pinned to the revision it started on.
+    planned.harness.db.set({ ...pinned, sk: `REV#${String(definition.revision + 1).padStart(12, "0")}`, definition: { ...definition, revision: definition.revision + 1 }, runtimeBinding: otherBinding });
+    const approved = await decide(planned, "APPROVE");
+    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
+    expect(workflowOf(planned).e2e?.applicationSelection).toMatchObject({ runtimeRows: [{ bindingDigest: shaCanonical(planned.projectBinding) }] });
+  });
+
+  describe("refuses, leaving the plan waiting so the owner can request changes", () => {
+    it("when the web runtime row is gone at approval time, although it was READY when the plan was written", async () => {
+      const planned = await plannedWithApplicationIntent();
+      planned.harness.db.delete(webKey.pk, webKey.sk);
+      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /cannot be approved.*READY/i);
+    });
+
+    it("when the row is bound to another runtime binding", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const row = planned.harness.db.get(webKey.pk, webKey.sk)!;
+      const other = { ...planned.projectBinding, launchTemplateId: "lt-fedcba9876543210" };
+      planned.harness.db.set({ ...row, binding: other, bindingDigest: shaCanonical(other) });
+      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /cannot be approved.*READY/i);
+    });
+
+    it("when the row has expired", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const row = planned.harness.db.get(webKey.pk, webKey.sk)!;
+      planned.harness.db.set({ ...row, qualifiedAt: new Date(Date.now() - 7_200_000).toISOString(), expiresAt: new Date(Date.now() - 1_000).toISOString() });
+      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /cannot be approved.*READY/i);
+    });
+
+    it("when a scenario uses an agent step", async () => {
+      const planned = await plannedWithApplicationIntent({ scenarios: (target) => [{ ...csvScenario, scenarioId: "agent-orders", requestedTargetIds: [target.targetId],
+        accountProfileId: target.accountProfileId, steps: [{ kind: "agent", goal: "open the orders page", maxActions: 3 }], assertions: [{ kind: "visible", testId: "orders", equals: true }] }] });
+      // The pinned policy has no model route, so the agent step is refused outright (with a route it waits as agent-steps-arrive-in-m1.4; see the evaluation cases).
+      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /agent steps require an approved model route/i);
+    });
+
+    it("when the plan's account reference is not the synthetic account identity", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const workflow = workflowOf(planned);
+      const artifact = workflow.artifacts.at(-1)!;
+      const text = planned.harness.s3.objects.get(artifact.objectKey)!;
+      expect(text).toContain(planned.intent.runtimeAccountRefs[0]!.definitionDigest);
+      // The stored artifact is content-addressed; a plan with another digest is a different artifact, so submit it as the planner's next answer instead.
+      const forged = { ...planned.intent, runtimeAccountRefs: [{ ...planned.intent.runtimeAccountRefs[0]!, definitionDigest: "2".repeat(64) }] };
+      await planned.harness.dev(MAYA, "POST", `/v1/dev/tasks/${planned.taskId}/workflow/decision`, { requestId: randomUUID(), expectedRevision: workflow.revision, decision: "REQUEST_CHANGES",
+        reason: "Resubmit", artifactDigest: artifact.sha256 });
+      const replanning = planned.harness.db.find((row) => row.pk === `WORKSPACE#${planned.workspaceId}` && row.entityType === "OPERATION" && row.workflowMode === "PLAN").at(-1)!;
+      await planned.harness.artifact(planned.workspaceId, String(replanning.id), "plan.md",
+        planAnswer(planDocument({ title: "Export CSV", claims: [{ id: "1", text: "Orders can be exported as CSV." }], e2e: forged })));
+      await planned.harness.finish(planned.workspaceId, String(replanning.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+      await expectRefusedThenRequestChanges(planned, /CONFIG_INVALID/, /synthetic account identity/i);
+    });
+
+    it("when the approved setup proposal can no longer be verified, saying it could not check rather than approving", async () => {
+      const planned = await plannedWithApplicationIntent();
+      planned.harness.s3.objects.set(planned.proposalRef, `${planned.harness.s3.objects.get(planned.proposalRef)!} `);
+      await expectRefusedThenRequestChanges(planned, /RUNTIME_UNAVAILABLE/, /could not be checked.*nothing was approved/i);
+    });
+
+    it("when the runtime row cannot be read, saying it could not check rather than treating the runtime as unqualified", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const send = planned.harness.db.send.bind(planned.harness.db);
+      planned.harness.db.send = async (command) => {
+        const input = (command as { input?: { Key?: { pk?: string; sk?: string } } }).input;
+        if (command.constructor.name === "GetCommand" && input?.Key?.pk === webKey.pk && input.Key.sk === webKey.sk) throw new Error("throttled");
+        return send(command);
+      };
+      try {
+        await expectRefusedThenRequestChanges(planned, /RUNTIME_UNAVAILABLE/, /runtime catalog could not be read.*nothing was approved/i);
+      } finally { planned.harness.db.send = send; }
+    });
+
+    it("when the row changes between being read and the approval committing", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const saved = planned.harness.db.get(webKey.pk, webKey.sk)!;
+      const before = workflowOf(planned);
+      const operationsBefore = operationIds(planned);
+      const send = planned.harness.db.send.bind(planned.harness.db);
+      let changed = false;
+      planned.harness.db.send = async (command) => {
+        const items = (command as { input?: { TransactItems?: Array<{ ConditionCheck?: { Key?: { pk?: string; sk?: string } } }> } }).input?.TransactItems;
+        if (!changed && command.constructor.name === "TransactWriteCommand" && items?.some((item) => item.ConditionCheck?.Key?.pk === webKey.pk && item.ConditionCheck.Key.sk === webKey.sk)) {
+          changed = true;
+          planned.harness.db.set({ ...saved, generation: 5 });
+        }
+        return send(command);
+      };
+      try {
+        const raced = await decide(planned, "APPROVE");
+        expect(changed).toBe(true);
+        expect(raced.status).not.toBe(200);
+        expect(workflowOf(planned)).toEqual(before);
+        expect(operationIds(planned)).toEqual(operationsBefore);
+      } finally { planned.harness.db.send = send; }
+    });
+  });
 });
+
+// Not here: the candidate-export / VERIFY flow. Task 2.4 dispatches an application round from the approved plan and re-derives the selection at
+// dispatch (Ruling AL) with evaluateApplicationPlanApproval, reading `workflow.e2e.applicationSelection` (see E2EApplicationSelectionRecordSchema);
+// its tests belong in tests/contract/workflow-e2e-application-gating.test.ts.

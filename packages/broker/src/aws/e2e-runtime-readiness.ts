@@ -75,7 +75,7 @@ type RuntimeRowReader = (key: { pk: string; sk: string }) => Promise<unknown>;
 
 /** Reads the `#web` and `#api` rows of a profile and admits each; a throttled or failed read is logged and fails closed to "not READY". */
 async function readAdmittedWebApiRuntimes(input: { runtimeCatalogId: string; profileId: string; now: number; read: RuntimeRowReader;
-  binding?: Ec2RuntimeBinding }): Promise<Array<{ kind: "web" | "api"; runtime: E2ERegisteredRuntime }>> {
+  binding?: Ec2RuntimeBinding; /** Rethrow a failed read instead of treating the row as not READY, for a caller that must tell the two apart. */ strict?: boolean }): Promise<Array<{ kind: "web" | "api"; runtime: E2ERegisteredRuntime }>> {
   const admittedRows: Array<{ kind: "web" | "api"; runtime: E2ERegisteredRuntime }> = [];
   for (const kind of ["web", "api"] as const) {
     let row: unknown;
@@ -84,6 +84,7 @@ async function readAdmittedWebApiRuntimes(input: { runtimeCatalogId: string; pro
       // Fail closed to "not READY", but say why: a throttled or failed read is not the same as an unqualified runtime.
       console.warn(JSON.stringify({ component: "broker", level: "warn", event: "e2e-runtime-catalog-read-failed", kind, profileId: input.profileId,
         runtimeCatalogId: input.runtimeCatalogId, error: error instanceof Error ? error.message : String(error) }));
+      if (input.strict === true) throw error;
       continue;
     }
     if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
@@ -118,6 +119,15 @@ export async function readProjectReadyE2ERuntimes(input: { runtimeCatalogId: str
   read: RuntimeRowReader }): Promise<ReadyE2ERuntime[]> {
   return (await readAdmittedWebApiRuntimes(input)).map(({ kind, runtime }) => ({ kind, profileId: input.profileId,
     supportedSteps: [...runtime.capabilities.supportedSteps], supportedAssertions: [...runtime.capabilities.supportedAssertions] }));
+}
+
+/**
+ * The registered web/API rows READY for this project's runtime binding right now, whole (planning only needs their summary), for plan approval to
+ * derive its selection against. Unlike the planning read, a row that cannot be read is an error here, not a quiet "not READY".
+ */
+export async function readProjectAdmittedE2ERuntimes(input: { runtimeCatalogId: string; profileId: string; binding: Ec2RuntimeBinding; now: number;
+  read: RuntimeRowReader }): Promise<E2ERegisteredRuntime[]> {
+  return (await readAdmittedWebApiRuntimes({ ...input, strict: true })).map(({ runtime }) => runtime);
 }
 
 type RuntimeReadinessInput = {

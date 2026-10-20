@@ -131,6 +131,8 @@ import {
   type WorkflowSendBackProblem,
   type WorkflowDependencyInvocation,
   type WorkflowFeatureE2EIntent,
+  type E2EApplicationPlanIntent,
+  type E2EApplicationSelectionRecord,
   type E2EWorkflowAdmissionRef,
   workflowDependencyAttemptTerminalProgress,
   WorkflowResolveFindingsInputSchema,
@@ -253,6 +255,13 @@ export interface DeveloperTaskRouteDependencies {
   workflowE2EPresentation?(input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }): Promise<DeveloperTaskView["e2ePresentation"] | undefined>;
   /** Atomic conditions for current managed-E2E authority, attached to publication admission. */
   workflowE2EPublicationChecks?(input: { task: DeveloperTaskRecord; operations: readonly unknown[] }): Promise<TransactItems | undefined>;
+  /**
+   * Evaluates a plan's schema-v2 application intent for approval against the task's pinned project, the approved setup snapshot and the runtime rows
+   * READY now: the selection to record and the conditions that keep those rows as read until the approval commits. It throws when the plan cannot be
+   * approved (CONFIG_INVALID) or cannot be evaluated (RUNTIME_UNAVAILABLE); without it a v2 plan is never approved.
+   */
+  validateWorkflowE2EApplicationPlan?(input: { task: DeveloperTaskRecord; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string } }):
+    Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems }>;
   /** Resolves only a URL loaded from the task's immutable registered project revision. */
   registeredRepositoryIdentity?(url: string): Promise<{ repositoryId: number; fullName: string } | undefined>;
 }
@@ -1920,16 +1929,29 @@ export async function decideTaskWorkflow(
   // A required feature-E2E obligation begins only when the Owner approves the canonical plan bytes that contain it.
   // The digests below identify the approved intent and its policy/bundle; candidate-specific execution-plan identity is
   // bound later by the server-created CHECKS admission and round.
+  let applicationConditions: TransactItems = [];
   if (request.decision === "APPROVE" && documentType === "plan" && loaded?.format === "structured" && loaded.plan.e2e !== undefined) {
     const pinnedProject = await deps.actions.projectRevision(task.project, task.startingRevision);
     if (pinnedProject?.definition.e2e === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the approved feature E2E intent has no pinned project policy");
     const intent = loaded.plan.e2e;
     const policy = E2EPolicySchema.parse(pinnedProject.definition.e2e);
+    // A v2 application intent is approved only after the broker derives its selection against the approved setup and the runtime rows READY now;
+    // a refusal leaves the plan waiting (the owner can request changes), and a broker without the check never approves one.
+    let applicationSelection: E2EApplicationSelectionRecord | undefined;
+    if (intent.schemaVersion === 2) {
+      if (deps.validateWorkflowE2EApplicationPlan === undefined) {
+        throw agentXError("RUNTIME_UNAVAILABLE", "application E2E plans cannot be approved here: the check against the approved setup and the ready runtimes is not installed");
+      }
+      const validated = await deps.validateWorkflowE2EApplicationPlan({ task, intent, artifact: { id: decided!.id, sha256: decided!.sha256 } });
+      applicationSelection = validated.selection;
+      applicationConditions = validated.conditions;
+    }
     const bundleBody = { schemaVersion: 1 as const, planDigest: decided!.sha256, templateVersion: "trusted-e2e/v1", scenarios: intent.scenarios, bundleDigest: "0".repeat(64) };
     const bundleDigest = e2eScenarioBundleDigest(bundleBody);
     const intentDigest = createHash("sha256").update(canonicalJson({ domain: "workflow-e2e-approved-intent/v1", artifactDigest: decided!.sha256, intent })).digest("hex");
     next = WorkflowSnapshotSchema.parse({ ...next, e2e: { contractDigest: decided!.sha256, policyDigest: e2ePolicyDigest(policy),
-      bundleDigest, executionPlanDigest: intentDigest, required: true, currentGroupRunIds: [], resultRefs: [] } });
+      bundleDigest, executionPlanDigest: intentDigest, required: true, currentGroupRunIds: [], resultRefs: [],
+      ...(applicationSelection === undefined ? {} : { applicationSelection }) } });
   }
   const receivedAt = iso(deps);
   if (request.decision === "REJECT") {
@@ -2028,6 +2050,7 @@ export async function decideTaskWorkflow(
           ...detailItems,
           ...lockItems,
           ...(included.length === 0 ? [] : [counterTouch(deps, taskId)]),
+          ...applicationConditions,
           accessFence(deps, access),
         ];
       }, { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}), ...(workflowDependencies === undefined ? {} : { workflowDependencies }) });
