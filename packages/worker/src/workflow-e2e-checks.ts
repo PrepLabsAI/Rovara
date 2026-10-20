@@ -7,6 +7,7 @@ import {
   canonicalJson, e2eScenarioBundleDigest, selectE2EExecutionPlan, verifyE2ESourceSnapshot,
   type E2ESourceSnapshot, type WorkerInvocation,
 } from "@agentx/contracts";
+import { executeWorkflowE2EApplicationChecks, type WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
 import { collectE2EActualCliRun, compileE2EScenarios, e2ePrivateTransferMaxBytes, e2eSnapshotSourceDigest, observeInstalledRuntimeManifestForHost, runE2EActualCli } from "@agentx/verifier";
 
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -27,6 +28,13 @@ export async function executeWorkflowE2EChecks(input: {
   sourceRoot: string; evidenceRoot: string; deadlineAt?: number; signal?: AbortSignal;
   /** Trusted local supervisor observation; it carries no evidence or qualification authority. */
   onOwnedContainerRunning?: (receipt: Readonly<{ containerId: string; requestId: string; sourceDigest: string; observedAt: string; inspectBytes: Uint8Array }>) => Promise<void>;
+  /**
+   * The Docker application runtime an application admission runs on, or how to build it once it is needed. Portable admissions never ask for it, so a worker
+   * without one still runs portable rounds.
+   */
+  application?: WorkflowE2EApplicationRuntime | (() => WorkflowE2EApplicationRuntime);
+  /** The local directory of the candidate repository with this id, for `git archive`; an application admission falls back to `sourceRoot`. */
+  candidateRepositoryRoot?: (repositoryId: string) => string | undefined;
 }): Promise<{ evidenceRef: { key: string; sha256: string }; candidateDigest: string; roundId: string; processStatus: "SUCCEEDED" | "FAILED" }> {
   const { invocation } = input;
   const reference = invocation.payload.workflowE2EAdmission;
@@ -51,7 +59,20 @@ export async function executeWorkflowE2EChecks(input: {
   const admissionBytes = Buffer.concat(chunks);
   if (admissionBytes.byteLength !== reference.admissionRef.byteLength || declaredDigest !== reference.admissionRef.sha256
     || sha(admissionBytes) !== reference.admissionRef.sha256) throw new Error("native E2E admission content address is invalid");
-  const admission = JSON.parse(admissionBytes.toString("utf8")) as Admission;
+  const parsedAdmission = JSON.parse(admissionBytes.toString("utf8")) as Admission;
+  // The admission's own schema version picks the path. An application admission never reaches the portable code below, and a portable one never reaches Docker.
+  if ((parsedAdmission as { schemaVersion?: unknown } | null)?.schemaVersion === "workflow-e2e-application-admission/v1") {
+    return executeWorkflowE2EApplicationChecks({ invocation, reference, admissionBytes,
+      runtime: () => {
+        const application = typeof input.application === "function" ? input.application() : input.application;
+        if (application === undefined) throw new Error("native E2E application admission needs a configured Docker application runtime");
+        return application;
+      },
+      candidateRepositoryRoot: input.candidateRepositoryRoot ?? (() => undefined), fallbackRepositoryRoot: input.sourceRoot,
+      saveEvidence: input.saveEvidence, ...(input.deadlineAt === undefined ? {} : { deadlineAt: input.deadlineAt }),
+      ...(input.signal === undefined ? {} : { signal: input.signal }), throwIfCancelled });
+  }
+  const admission = parsedAdmission;
   if (admission.schemaVersion !== "workflow-e2e-admission/v1" || admission.taskId !== reference.taskId
     || admission.operationId !== invocation.operationId || admission.operationFence !== invocation.fence
     || admission.workflowRevision !== reference.workflowRevision || admission.candidateDigest !== reference.candidateDigest

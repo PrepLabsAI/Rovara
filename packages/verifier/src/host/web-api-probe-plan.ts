@@ -125,7 +125,7 @@ export type WebApiProbePlan = Readonly<{
  * `appRoot` is the app tree whose package.json is the contract: the installed qualification app in production, the source fixture in tests.
  * `runId` binds the run to a qualification challenge; without it the run id is random.
  */
-export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot: string; runId?: string; deadlineMs?: number; healthTimeoutMs?: number; role?: "owner" | "viewer";
+export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot: string; runId?: string; /** The workflow task id the run is bound to; default is a fixed qualification label. */ taskId?: string; deadlineMs?: number; healthTimeoutMs?: number; role?: "owner" | "viewer";
   /** Build commands for the recipe (the fixture itself builds nothing); the recipe digest is recomputed to match. */
   recipeBuild?: { program: string; args: string[]; cwd: string; timeoutMs: number; env: Record<string, string> }[];
   /** Overrides of the recipe's start command (arguments, timeout, env); the recipe digest is recomputed to match. */
@@ -223,7 +223,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     preparedEnvironmentsByGroup: new Map([[group.groupId, { preparedEnvironmentDigest, originByApplicationId: [{ applicationId: application.applicationId, origin: WEB_API_PROBE_APP_ORIGIN }] }]]) };
   const compiled = compileE2EApplicationScenarios({ context, groupId: group.groupId });
   const roundId = randomUUID();
-  const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId: options.runId ?? randomUUID(), roundId, taskId: "task-orders", operationId: randomUUID(), operationFence: 1,
+  const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId: options.runId ?? randomUUID(), roundId, taskId: options.taskId ?? "task-orders", operationId: randomUUID(), operationFence: 1,
     workflowRevision: 1, groupId: group.groupId, executionPlanDigest: executionPlan.digest, executionMode: group.mode, mockManifestDigest: group.mockManifestDigest,
     authorizationRevision: "orders-auth-r1", candidateDigest: candidate.digest, planDigest, policyDigest: e2ePolicyDigest(policy), bundleDigest: bundle.bundleDigest,
     appBuildDigest: hash(canonicalJson(compiled.inventory)), environmentDigest: preparedEnvironmentDigest, runtimeManifestDigest: runtime.manifestDigest,
@@ -240,6 +240,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
       configDigest: item.expectedConfigDigest, expectedCaseIds: [...item.expectedCaseIds] })) };
   const admissionBody = { schemaVersion: "workflow-e2e-application-admission/v1" as const, taskId: binding.taskId, operationId: binding.operationId,
     operationFence: binding.operationFence, workflowRevision: binding.workflowRevision, candidateDigest: candidate.digest,
+    candidateCommitSha: snapshot.commitSha, candidateTreeSha: snapshot.treeSha,
     sourceSnapshot: sourceSnapshotWire, intent, intentDigest: hash(canonicalJson(intent)),
     selectionInput: { ...selectionInput, sourceSnapshot: sourceSnapshotWire }, applicationApprovalBinding,
     applicationBindings: [...applicationBindings].map(([key, value]) => ({ key, value })).sort((a, b) => a.key.localeCompare(b.key)),

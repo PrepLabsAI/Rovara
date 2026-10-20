@@ -6,12 +6,12 @@ import { loadWebApiQualificationProbeAssets } from "../application-runtime-probe
 import { runIsolatedE2EApplication } from "../application-runtime.js";
 import { resolveE2EExecutorSuite } from "../executor/suite.js";
 import { deriveWebApiProbeObservation } from "../web-api-probe-evidence.js";
-import { createDockerApplicationHost, e2eRunNetworks, type DockerCli } from "./docker-application-host.js";
+import { WEB_API_BUILD_IMAGE, createDockerApplicationHost, e2eRunNetworks, type DockerCli } from "./docker-application-host.js";
 import { createWebApiProbePlan, webApiProbeDriver, webApiProbeRunInput } from "./web-api-probe-plan.js";
 import { installedWebApiQualificationAppRoot, stageWebApiQualificationApp, verifyWebApiQualificationApp } from "./web-api-qualification-app.js";
 
-/** The pinned Node base image that builds and runs the candidate; the same one the executor image is built from. */
-export const WEB_API_BUILD_IMAGE = "public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5";
+/** The pinned Node base image that builds and runs the candidate; the same one the executor image is built from (defined beside the host that uses it). */
+export { WEB_API_BUILD_IMAGE };
 /** The most raw bytes of a blocked-requests file kept: 196,608 bytes is exactly the 262,144 base64 characters the evidence schema allows. */
 export const MAX_BLOCKED_REQUESTS_BYTES = 196_608;
 /** The most raw bytes of a Chromium sandbox attestation kept: 49,152 bytes is exactly the 65,536 base64 characters the evidence schema allows. */

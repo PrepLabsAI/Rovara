@@ -59,7 +59,7 @@ export type { E2EApiRuntimePorts, E2EApiRuntimeResponse } from "./api-runtime.js
 export { prepareE2EApplicationEnvironment, sealE2EApplicationEnvironment } from "./application-services.js";
 export type { E2EApplicationPreparationInputs, E2EApplicationEnvironmentPorts } from "./application-services.js";
 export { createDockerApplicationHost, createProcessDockerCli, sweepStaleRovaraRuns, dockerOwnedResourceInventory, dockerOwnedResourceInventoryDigest,
-  e2eRunNetworks, ROVARA_RUN_LABEL, ROVARA_CREATED_LABEL } from "./host/docker-application-host.js";
+  e2eRunNetworks, ROVARA_RUN_LABEL, ROVARA_CREATED_LABEL, STALE_RUN_SWEEP_AGE_MS, WEB_API_BUILD_IMAGE } from "./host/docker-application-host.js";
 export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, DockerApplicationUnavailableReason, DockerBuildResult } from "./host/docker-application-host.js";
 export { executorContainerArgs } from "./host/executor-container.js";
 export { installedExecutorSeccompProfilePath, verifyExecutorSeccompProfile } from "./host/executor-seccomp.js";

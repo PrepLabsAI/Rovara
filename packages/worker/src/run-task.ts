@@ -41,6 +41,7 @@ import {
 } from "./usage.js";
 import { assertWorkflowDependencyResumeTree, executeSerialWorkflowDependencies } from "./workflow-dependencies.js";
 import { executeWorkflowE2EChecks } from "./workflow-e2e-checks.js";
+import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
 
 export interface TaskInvocationResult {
   /** The broker-issued conversation ID, which stays the same for every turn of one conversation. */
@@ -74,6 +75,8 @@ export async function runTaskInvocation(
     workflowE2EEvidenceRoot?: string;
     /** Fixed worker installation root that contains the pinned public E2E CLI package. */
     workflowE2ERuntimeRoot?: string;
+    /** The Docker application runtime application admissions run on (or how to build it once needed); only the worker's own wiring sets it. */
+    workflowE2EApplicationRuntime?: WorkflowE2EApplicationRuntime | (() => WorkflowE2EApplicationRuntime);
     /** Trusted host-only hook for observing the exact owned contained process; no invocation data can set it. */
     workflowE2EOnOwnedContainerRunning?: (receipt: Readonly<{ containerId: string; requestId: string; sourceDigest: string; observedAt: string; inspectBytes: Uint8Array }>) => Promise<void>;
     authorizeFeedbackApproval?: FeedbackApprovalAuthorizer;
@@ -238,6 +241,8 @@ export async function runTaskInvocation(
           saveEvidence: dependencies.workflowE2EEvidenceSink!,
           sourceRoot: dependencies.workflowE2ERuntimeRoot ?? process.cwd(),
           evidenceRoot: dependencies.workflowE2EEvidenceRoot!,
+          candidateRepositoryRoot: (repositoryId) => repositories.find((repository) => repository.repositoryId === repositoryId)?.directory,
+          ...(dependencies.workflowE2EApplicationRuntime === undefined ? {} : { application: dependencies.workflowE2EApplicationRuntime }),
           signal: stop.signal,
           ...(dependencies.workflowE2EOnOwnedContainerRunning === undefined ? {} : { onOwnedContainerRunning: dependencies.workflowE2EOnOwnedContainerRunning }),
         });

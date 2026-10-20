@@ -68,6 +68,13 @@ export function e2eRunNetworks(runId: string): { internal: string; build: string
   const suffix = createHash("sha256").update(runId).digest("hex").slice(0, 8);
   return { internal: `rovara-e2e-${runId}`, build: `rovara-e2e-build-${runId}`, internalBridge: `rvi${suffix}`, buildBridge: `rvb${suffix}` };
 }
+/**
+ * A run's resources older than this are swept as stale at the start of every allocation (`sweepStaleRovaraRuns`). Every application group deadline must stay
+ * strictly below it, or a run still inside its own deadline could be swept away by a sibling run's allocation.
+ */
+export const STALE_RUN_SWEEP_AGE_MS = 3_600_000;
+/** The pinned Node base image that builds a web/API candidate and runs it. */
+export const WEB_API_BUILD_IMAGE = "public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5";
 const ADMIN_TIMEOUT_MS = 30_000;
 const MAX_TAIL_BYTES = 64 * 1024;
 const APP_PORT = 4317;
@@ -442,7 +449,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       admissionDigest: validated.admission.admissionDigest, app: { origin: E2E_EXECUTOR_APP_ORIGIN, health: { path: launch.health.path, expectedStatus: launch.health.expectedStatus,
         timeoutMs: Math.min(launch.start.timeoutMs, 120_000) } }, deadlineAt, accounts: run.accounts });
     try {
-      await sweepStaleRovaraRuns(docker, 3_600_000, { now: deps.now, runRoot: deps.runRoot }).catch(() => 0);
+      await sweepStaleRovaraRuns(docker, STALE_RUN_SWEEP_AGE_MS, { now: deps.now, runRoot: deps.runRoot }).catch(() => 0);
       await mkdir(deps.runRoot, { recursive: true, mode: 0o700 });
       await mkdir(workspace, { mode: 0o700 });
       await mkdir(dirs.owned, { mode: 0o755 }); await mkdir(dirs.out, { mode: 0o755 });

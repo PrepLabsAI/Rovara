@@ -183,6 +183,8 @@ const runtimeMapEntrySchema = z.object({ key: id(120), value: E2ERegisteredRunti
 const orderedUniqueKeys = (values: readonly string[]) => new Set(values).size === values.length && values.every((item, index) => index === 0 || values[index - 1]! < item);
 export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: z.literal("workflow-e2e-application-admission/v1"),
   taskId: id(120), operationId: id(120), operationFence: z.number().int().positive(), workflowRevision: z.number().int().positive(), candidateDigest: sha256,
+  /** The exact commit and tree the worker builds from (`git archive <candidateCommitSha>`); the tree is checked against the repository before any build. */
+  candidateCommitSha: sha1, candidateTreeSha: sha1,
   sourceSnapshot: sourceSnapshotWireSchema, intent: E2EApplicationPlanIntentSchema, intentDigest: sha256,
   selectionInput: applicationSelectionInputSchema, applicationApprovalBinding: E2EApplicationApprovalBindingSchema.nullable(), applicationBindings: z.array(applicationMapEntrySchema).max(12),
   runtimeBindings: z.array(runtimeMapEntrySchema).max(12), launchTargets: z.array(E2EApplicationLaunchTargetSchema).max(12), modelRoute: z.object({ routeId: id(120), routeRevision: id(120) }).strict().nullable(),
@@ -195,6 +197,10 @@ export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: 
 }).strict().superRefine((admission, context) => {
   if (admission.portableProjection && !portableSelectionInputSchema.safeParse(admission.portableProjection.selectionInput).success) {
     context.addIssue({ code: "custom", path: ["portableProjection", "selectionInput"], message: "portable projection selection input has an invalid strict wire shape" });
+  }
+  if (admission.candidateCommitSha !== admission.sourceSnapshot.commitSha || admission.candidateTreeSha !== admission.sourceSnapshot.treeSha
+    || admission.candidateCommitSha !== admission.selectionInput.sourceSnapshot.commitSha || admission.candidateTreeSha !== admission.selectionInput.sourceSnapshot.treeSha) {
+    context.addIssue({ code: "custom", path: ["candidateCommitSha"], message: "candidate commit and tree must be the exact commit and tree of the admitted source snapshot" });
   }
   const portableSelection = admission.portableProjection?.selectionInput as { sourceSnapshot?: z.infer<typeof sourceSnapshotWireSchema> } | undefined;
   const wireSources = [admission.sourceSnapshot, admission.selectionInput.sourceSnapshot,

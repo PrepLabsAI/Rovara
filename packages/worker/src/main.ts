@@ -17,6 +17,7 @@ import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRunt
 import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
 import { postWorkerTerminalResult } from "./terminal-callback.js";
 import { executeWorkerCancelInvocation } from "./cancel-invocation.js";
+import { createWorkflowE2EApplicationRuntime } from "./workflow-e2e-application-runtime.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
@@ -81,6 +82,8 @@ const state = createWorkerServerState(
           ...(invocation.payload.workflowE2EAdmission === undefined ? {} : {
             workflowE2EEvidenceRoot: requiredEnvironment("CONTAINED_FOUNDATION_EVIDENCE_DIR"),
             workflowE2ERuntimeRoot: process.cwd(),
+            // Built only when an application admission asks for it, so a worker without EXECUTOR_IMAGE still runs portable rounds.
+            workflowE2EApplicationRuntime: () => createWorkflowE2EApplicationRuntime(process.env),
           }),
           cancellationController,
         });
