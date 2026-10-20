@@ -10,7 +10,7 @@ import { createWebApiProbeRunner, type WebApiProbeRunnerDeps } from "../../packa
  * the executor reported is the one reading the result. So this swaps in the reported path for the duration of that one check; nothing else about
  * the production runner is changed.
  */
-const collectOnThisHost: typeof collectE2EApplicationRun = (input) => {
+export const collectOnThisHost: typeof collectE2EApplicationRun = (input) => {
   const original = process.execPath;
   process.execPath = input.actual.runnerToolchain.execPath;
   try { return collectE2EApplicationRun(input); } finally { process.execPath = original; }
