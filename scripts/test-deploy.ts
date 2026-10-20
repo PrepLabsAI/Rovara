@@ -10,7 +10,7 @@
 // are not exactly the expected ones is deleted, never executed. Credentials come from
 // `aws login --profile <profile>` only.
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -799,8 +799,20 @@ export function saveDescribedChangeSet(directory: string, described: Partial<Des
   const path = join(directory, `change-set-${name}.json`);
   // The first page of changes, the paging token and the SDK metadata are not part of the record; `changes` holds every page.
   const header = Object.fromEntries(Object.entries(described).filter(([key]) => key !== "$metadata" && key !== "Changes" && key !== "NextToken"));
-  writeFileSync(path, `${JSON.stringify({ ...header, Changes: changes }, null, 2)}\n`);
+  // Owner-only: the record holds nothing secret today, but it sits in a shared temp directory. `mode` applies only to a new file, so an old one is narrowed too.
+  writeFileSync(path, `${JSON.stringify({ ...header, Changes: changes }, null, 2)}\n`, { mode: 0o600 });
+  chmodSync(path, 0o600);
   return path;
+}
+
+/** Runs the save; if it throws, deletes the change set (best effort) and fails, so a change set that could not be recorded is never left to be executed later. */
+export async function saveChangeSetOrDrop(save: () => string, drop: () => Promise<unknown>): Promise<string> {
+  try {
+    return save();
+  } catch (error) {
+    await drop().catch(() => undefined);
+    throw new Error(`the change set could not be saved (${error instanceof Error ? error.message : String(error)}). It was deleted and nothing was applied.`, { cause: error });
+  }
 }
 
 export function observedChanges(changes: readonly Change[]): ObservedChange[] {
@@ -902,7 +914,7 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
     changes.push(...(page.Changes ?? []));
     token = page.NextToken;
   }
-  console.log(`change set ${changeSetName} saved to ${saveDescribedChangeSet(context.outputDir, described, changes)}`);
+  console.log(`change set ${changeSetName} saved to ${await saveChangeSetOrDrop(() => saveDescribedChangeSet(context.outputDir, described, changes), dropChangeSet)}`);
   const observed = observedChanges(changes);
   console.log(`change set ${changeSetName}:\n${observed.map((change) => `  ${change.action} ${change.logicalId} ${change.type ?? ""} ${(change.attributes ?? []).join(",")}`).join("\n")}`);
   try {

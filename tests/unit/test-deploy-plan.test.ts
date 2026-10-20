@@ -1,8 +1,8 @@
-import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Change } from "@aws-sdk/client-cloudformation";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CONTROL_PLANE_LAMBDAS,
   DEFAULT_DEPLOY_UNITS,
@@ -20,6 +20,7 @@ import {
   resolveArtifactBucket,
   resolveCodeArtifactBucket,
   resolveTestStacks,
+  saveChangeSetOrDrop,
   saveDescribedChangeSet,
   verifyStackResources,
   waitForStackUpdate,
@@ -1015,5 +1016,37 @@ describe("saveDescribedChangeSet", () => {
       expect(path.startsWith(join(dir, "change-set-"))).toBe(true);
       expect(path.slice(dir.length + 1)).not.toContain("/");
     } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  it("writes the file readable by its owner only, even over a file that was more open", () => {
+    const dir = mkdtempSync(join(tmpdir(), "test-deploy-evidence-"));
+    try {
+      const first = saveDescribedChangeSet(dir, { StackName: "s", ChangeSetName: "c" }, []);
+      expect(statSync(first).mode & 0o777).toBe(0o600);
+      writeFileSync(first, "old", { mode: 0o644 });
+      const again = saveDescribedChangeSet(dir, { StackName: "s", ChangeSetName: "c" }, []);
+      expect(again).toBe(first);
+      expect(statSync(again).mode & 0o777).toBe(0o600);
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe("saveChangeSetOrDrop", () => {
+  it("returns the saved path and leaves the change set alone when the save works", async () => {
+    const drop = vi.fn(async () => undefined);
+    await expect(saveChangeSetOrDrop(() => "/evidence/change-set-x.json", drop)).resolves.toBe("/evidence/change-set-x.json");
+    expect(drop).not.toHaveBeenCalled();
+  });
+
+  it("deletes the change set and fails, naming the cause, when the save throws", async () => {
+    const drop = vi.fn(async () => undefined);
+    await expect(saveChangeSetOrDrop(() => { throw new Error("ENOSPC: no space left on device"); }, drop)).rejects.toThrow(/could not be saved.*ENOSPC.*deleted and nothing was applied/s);
+    expect(drop).toHaveBeenCalledTimes(1);
+  });
+
+  it("still fails with the save's cause when deleting the change set fails too", async () => {
+    const drop = vi.fn(async () => { throw new Error("AccessDenied"); });
+    await expect(saveChangeSetOrDrop(() => { throw new Error("EACCES"); }, drop)).rejects.toThrow(/EACCES/);
+    expect(drop).toHaveBeenCalledTimes(1);
   });
 });
