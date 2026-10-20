@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { WEB_API_REQUIRED_PROBES, canonicalJson, webApiProbeRunId } from "../../packages/contracts/src/index.js";
+import { webApiApplicationLaunchTarget } from "../../packages/verifier/src/web-api-launch-target.js";
 import { createWebApiProbePlan, webApiAppStartGuardArgs, webApiBuildProbeCommand, webApiProbeDriver } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 import { installedWebApiQualificationAppRoot } from "../../packages/verifier/src/host/web-api-qualification-app.js";
 import { webApiChallenge } from "../support/web-api-qualification.js";
@@ -31,6 +32,15 @@ describe("the production web/API probe plan", () => {
     expect(webApiProbeDriver("app-host-denial-v1")).toMatchObject({ probe: "api-state-positive-v1", recipeBuild: null, startArgs: webApiAppStartGuardArgs() });
     expect(webApiAppStartGuardArgs()[0]).toBe("--input-type=module");
     for (const probe of WEB_API_REQUIRED_PROBES.filter((item) => item.probeId !== "app-host-denial-v1")) expect(webApiProbeDriver(probe.probeId).startArgs).toBeNull();
+  });
+
+  it.each(["web-csv-positive-v1", "api-state-positive-v1"] as const)("declares the launch target of %s exactly as the broker's admission builder does", (probe) => {
+    const { plan } = createWebApiProbePlan({ probe, appRoot });
+    const admission = plan.admission;
+    const target = admission.executionPlan.effectiveTargets[0]!;
+    const rebuilt = webApiApplicationLaunchTarget({ target: { targetId: target.targetId, kind: target.kind as "web" | "api", applicationId: target.applicationId, runtimeProfileId: target.runtimeProfileId },
+      runtime: admission.runtimeBindings[0]!.value, capture: admission.policy.capture });
+    expect(rebuilt).toEqual(admission.launchTargets[0]);
   });
 
   it("runs the probe under the run id it is given, in the binding the collector later checks", () => {

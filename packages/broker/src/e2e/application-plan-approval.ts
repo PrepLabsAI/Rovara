@@ -38,9 +38,16 @@ export type ApplicationPlanApprovalInput = {
   runtimeCatalogId: string;
   runtimeBinding: Ec2RuntimeBinding;
   now: number;
+  /**
+   * The plan identity the derivation is made under. Approval leaves it out (the identity of the canonical plan artifact); dispatch gives its own, derived
+   * from the approved graph run, revision and actor, so the admission it builds is bound to that one round.
+   */
+  planDigest?: string;
 };
 
-export type ApplicationPlanApproval = { ok: true; selection: E2EApplicationSelectionRecord } | { ok: false; reason: string };
+/** What the approval's own derivation produced, for a caller that builds an admission from the same facts it just checked. */
+export type ApplicationDerivation = ReturnType<typeof deriveE2EApplicationFeatureExecutionSelection>;
+export type ApplicationPlanApproval = { ok: true; selection: E2EApplicationSelectionRecord; derivation: ApplicationDerivation } | { ok: false; reason: string };
 
 /**
  * Evaluates whether the Owner may approve a plan carrying an application intent, against the approved setup and the READY rows now.
@@ -124,7 +131,7 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
       if (!usedRows.some((used) => used.row === row)) usedRows.push({ kind: target.kind, row });
     }
     // The approval-time identity of the plan: the canonical artifact. Dispatch derives its own plan digest and re-runs the whole selection.
-    const planDigest = sha256(canonicalJson({ domain: "workflow-e2e-application-approval-plan/v1", taskId: input.taskId, artifactId: input.artifact.id, artifactSha256: input.artifact.sha256 }));
+    const planDigest = input.planDigest ?? sha256(canonicalJson({ domain: "workflow-e2e-application-approval-plan/v1", taskId: input.taskId, artifactId: input.artifact.id, artifactSha256: input.artifact.sha256 }));
     const semanticApproval = { artifactId: input.artifact.id, digest: input.artifact.sha256 };
     const selection = deriveE2EApplicationFeatureExecutionSelection({ intent, snapshot: input.snapshot, artifactId: semanticApproval.artifactId,
       artifactSha256: semanticApproval.digest, planDigest, approvedSemanticApproval: semanticApproval, setupProposal: input.setupProposal,
@@ -142,7 +149,7 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
       const more = blocked.length > BLOCKED_LISTED ? `; and ${blocked.length - BLOCKED_LISTED} more` : "";
       return refuse(`the plan lists targets as executable whose scenarios cannot run now (${blocked.slice(0, BLOCKED_LISTED).join("; ")}${more})`);
     }
-    return { ok: true, selection: E2EApplicationSelectionRecordSchema.parse({
+    return { ok: true, derivation: selection, selection: E2EApplicationSelectionRecordSchema.parse({
       schemaVersion: "e2e-application-selection/v1", intentDigest: sha256(canonicalJson(fullIntent)), planDigest, semanticApproval, setupApproval: input.setupApproval,
       applicationApprovalBindingDigest: selection.applicationApprovalBinding?.bindingDigest ?? null, applicationExecutionPlanDigest: selection.plan.digest,
       applicationBundleDigest: selection.bundle.bundleDigest, executableTargetIds,

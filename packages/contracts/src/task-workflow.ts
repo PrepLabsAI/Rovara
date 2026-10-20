@@ -36,6 +36,14 @@ export const WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE = "AgentX couldn't open the pu
  * Why the broker stopped a step, written for the task owner: Slack shows these word for word. Any other block reason
  * is internal and is replaced by a plain sentence before it reaches the owner.
  */
+/**
+ * How the block reason of a CHECKS dispatch that refused an application round begins, so the owner's actions can tell them apart. A refused round (the
+ * candidate's build source, its manifest or its runtime inputs are not usable) is fixed by sending the task back to coding. A selection that is no longer
+ * the approved one (a runtime row or the approved setup changed) is fixed by approving the plan again against what is ready now, which retrying the checks does.
+ */
+export const WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX = "The approved browser and API checks could not be started: ";
+export const WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX = "The approved browser and API checks can no longer run as approved: ";
+
 export const WORKFLOW_BLOCK_REASONS = {
   checksUnconfirmed: "AgentX couldn't confirm the selected checks ran on the final code. Choose checks and retry.",
   checkRetryStale: "This check run no longer matches the task's current step. Use the latest update in the thread.",

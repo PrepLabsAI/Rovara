@@ -8,6 +8,13 @@ import { z } from "zod";
 export const E2E_EXECUTOR_HOST_PROFILE_ID = "linux-arm64-web-api-v1" as const;
 export const E2E_EXECUTOR_HOST_ENTRY_POINT_ID = "rovara-e2e-executor-host/v1" as const;
 export const E2E_EXECUTOR_HOST_MODULE_PATH = "dist/executor/host-entry.js" as const;
+/**
+ * The host module is one re-export line, so its emitted bytes, and therefore the digest the registry pins, are the same everywhere. The broker takes the
+ * descriptor an admission names from here, with no file to read; a test keeps the digest equal to the registry's and the source equal to this line.
+ */
+export const E2E_EXECUTOR_HOST_ENTRY_SOURCE = 'export { createE2EApplicationCliHost } from "./host.js";\n' as const;
+export const E2E_EXECUTOR_HOST_DESCRIPTOR = Object.freeze({ entryPointId: E2E_EXECUTOR_HOST_ENTRY_POINT_ID,
+  entryPointManifestDigest: createHash("sha256").update(E2E_EXECUTOR_HOST_ENTRY_SOURCE).digest("hex") });
 const REGISTRY_PATH = "assets/application-runtime-v1/cli-hosts.json";
 
 const registrySchema = z.object({ schemaVersion: z.literal("application-cli-host-registry/v1"),

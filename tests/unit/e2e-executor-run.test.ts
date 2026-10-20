@@ -4,7 +4,7 @@ import { existsSync, realpathSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_MODULE_PATH, E2E_EXECUTOR_HOST_PROFILE_ID, verifyExecutorHostRegistration } from "../../packages/verifier/src/executor/host-registry.js";
+import { E2E_EXECUTOR_HOST_DESCRIPTOR, E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_ENTRY_SOURCE, E2E_EXECUTOR_HOST_MODULE_PATH, E2E_EXECUTOR_HOST_PROFILE_ID, verifyExecutorHostRegistration } from "../../packages/verifier/src/executor/host-registry.js";
 import { spawn } from "node:child_process";
 import { startAppForwarder } from "../../packages/verifier/src/executor/app-forward.js";
 import { listOutputFiles, runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
@@ -43,6 +43,11 @@ describe("executor host registry", () => {
     const source = await readFile(join(verifierRoot, "src/executor/host-entry.ts"), "utf8");
     expect(source).toBe('export { createE2EApplicationCliHost } from "./host.js";\n');
     expect(createHash("sha256").update(source).digest("hex")).toBe(registry.hosts[0]!.entryPointManifestDigest);
+  });
+
+  it("gives the broker the same host descriptor without reading a file: the registry's row, and the module source itself", async () => {
+    expect(E2E_EXECUTOR_HOST_DESCRIPTOR).toEqual({ entryPointId: registry.hosts[0]!.entryPointId, entryPointManifestDigest: registry.hosts[0]!.entryPointManifestDigest });
+    expect(E2E_EXECUTOR_HOST_ENTRY_SOURCE).toBe(await readFile(join(verifierRoot, "src/executor/host-entry.ts"), "utf8"));
   });
 
   it.runIf(built)("reports the built host available", async () => {

@@ -10,6 +10,7 @@ import { compileE2EApplicationScenarios, encodeE2EApplicationExecutionAdmission,
 import { encodeE2EApplicationBuildSourceArchive } from "../application-build-source.js";
 import { loadWebApiQualificationProbeAssets } from "../application-runtime-probes.js";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "../rovara-http-engine-descriptor.js";
+import { webApiApplicationLaunchTarget } from "../web-api-launch-target.js";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID } from "../executor/host-registry.js";
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -208,15 +209,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const preparedEnvironmentDigest = "7".repeat(64);
   const runtimeBindings = new Map([[runtimeProfileId, runtime]]);
   const cliHostsByProfile = new Map([[runtimeProfileId, registeredHost()]]);
-  const launchTargets = [{ targetId: target.targetId, profileId: runtimeProfileId, factoryId: "executor-host", factoryManifestDigest: runtime.manifestDigest,
-    // The real @e2e-dev/web 0.14.0 engine descriptor, as the pinned runner's own report states it for a web target.
-    engine: kind === "web" ? { name: "web", version: "0.14.0", spiVersion: 1 as const, platform: "web",
-      capabilities: ["actions", "artifacts", "browser", "keyboard", "location", "observation", "pointer", "state"] }
-      // An API target runs on Rovara's pinned first-party HTTP engine, which contributes only the assertion-step fixture.
-      : { name: ROVARA_HTTP_ENGINE_DESCRIPTOR.name, version: ROVARA_HTTP_ENGINE_DESCRIPTOR.version, spiVersion: 1 as const, platform: "api",
-        capabilities: [...ROVARA_HTTP_ENGINE_DESCRIPTOR.capabilities] },
-    artifactCapabilities: kind === "web" ? ["screenshot" as const, "video" as const] : [], stateCapability: kind === "web",
-    app: kind === "web" ? { url: WEB_API_PROBE_APP_ORIGIN, identity: application.applicationId, environment: "test" as const } : null }];
+  const launchTargets = [webApiApplicationLaunchTarget({ target: { targetId: target.targetId, kind, applicationId: application.applicationId, runtimeProfileId }, runtime, capture: policy.capture })];
   const bundleBody = { schemaVersion: 1 as const, planDigest, templateVersion: "trusted-e2e-application/v1" as const, scenarios: [scenario], bundleDigest: "0".repeat(64) };
   const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };
   const context = { selectionInput, executionPlan, bundle, applicationBindings, runtimeBindings, launchTargets, modelRoute: null, cliHostsByProfile,
