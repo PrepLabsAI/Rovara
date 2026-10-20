@@ -1,15 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { agentXError } from "@agentx/contracts";
 import { assertNoEmbeddedRepositories, assertNoLfsFiles, isRefusedForNetwork, isolatedGitEnvironment, networkRefusal } from "./git.js";
+import { commitLock, kindIn, lockIn, openDirectory, readFileIn, releaseLock, removeIn, type DirectoryLock, type HeldDirectory } from "./candidate-fs.js";
 import { runGitWithCredential, type GitCredential } from "./git-auth.js";
-import {
-  HEX40, isSafeRefName, readSmallFile, takeLock, verifyRefDirectories, withIsolatedGit,
-  type CandidateLayout, type HeldLock, type IsolatedGit,
-} from "./isolated-git.js";
+import { HEX40, isSafeRefName, openRefParent, readSmallFile, withIsolatedGit, type CandidateLayout, type IsolatedGit } from "./isolated-git.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -84,50 +82,57 @@ async function copyRefsIn(git: IsolatedGit): Promise<RefState> {
   return state;
 }
 
-async function currentValue(layout: CandidateLayout, name: string): Promise<string | undefined> {
-  if (!(await verifyRefDirectories(layout, name, false))) return undefined;
-  const stat = await lstat(join(layout.gitDirectory, name)).catch(() => undefined);
-  if (stat !== undefined && !stat.isDirectory()) {
-    const loose = await readSmallFile(join(layout.gitDirectory, name), REF_FILE_BYTES);
+/** The text of the loose ref `leaf` of `directory`, else the packed value of `name`, through the held directories. */
+async function currentValue(git: HeldDirectory, directory: HeldDirectory | undefined, leaf: string, name: string): Promise<string | undefined> {
+  if (directory !== undefined && (await kindIn(directory, leaf)) === "file") {
+    const loose = await readFileIn(directory, leaf, REF_FILE_BYTES);
     if (loose !== undefined) return plainRefValue(name, loose.toString("utf8").replace(/\n$/u, ""));
   }
-  return (await readRefState(layout.gitDirectory)).refs.get(name);
+  for (const line of (await readFileIn(git, "packed-refs", PACKED_REFS_BYTES))?.toString("utf8").split("\n") ?? []) {
+    const match = /^([0-9a-f]{40}) (refs\/\S+)$/u.exec(line);
+    if (match?.[2] === name) return match[1];
+  }
+  return undefined;
 }
 
-/** The text of one ref or of HEAD as the candidate has it now, compared with what the throwaway started from before it is replaced. */
+/**
+ * Replaces one ref or HEAD of the candidate: the value it has now (read through the held directory, under the lock) must still be `expected`, else the
+ * repository changed meanwhile and nothing is overwritten. Every directory down to the ref is opened once without following a symlink (candidate-fs.ts).
+ */
 async function applyOne(layout: CandidateLayout, name: string, expected: string | undefined, next: string | undefined): Promise<void> {
   const interrupted = () => agentXError("OPERATION_INTERRUPTED", `the repository's ${name} changed while AgentX was working on it`);
-  const isHead = name === "HEAD";
-  if (!isHead) await verifyRefDirectories(layout, name, next !== undefined);
-  const path = join(layout.gitDirectory, name);
-  const lock: HeldLock = await takeLock(`${path}.lock`);
-  let renamed = false;
+  const git = await openDirectory(layout.gitDirectory);
+  const parent = name === "HEAD" ? undefined : await openRefParent(git, name, next !== undefined);
+  let lock: DirectoryLock | undefined;
   try {
-    const now = isHead
-      ? (await readSmallFile(path, REF_FILE_BYTES))?.toString("utf8").replace(/\n$/u, "")
-      : await currentValue(layout, name);
+    const directory = name === "HEAD" ? git : parent?.directory;
+    const leaf = name === "HEAD" ? "HEAD" : parent?.leaf ?? "";
+    if (directory === undefined) {
+      // No loose directory: the ref can only be packed, and a packed ref is not removed here.
+      throw next === undefined && expected !== undefined ? agentXError("OPERATION_INTERRUPTED", `AgentX cannot remove ${name}: it is kept only in packed-refs`) : interrupted();
+    }
+    lock = await lockIn(directory, leaf);
+    const now = name === "HEAD"
+      ? (await readFileIn(git, "HEAD", REF_FILE_BYTES))?.toString("utf8").replace(/\n$/u, "")
+      : await currentValue(git, directory, leaf, name);
     if (now !== expected) throw interrupted();
     if (next === undefined) {
-      const loose = await readSmallFile(path, REF_FILE_BYTES).catch(() => undefined);
-      if (loose === undefined) throw agentXError("OPERATION_INTERRUPTED", `AgentX cannot remove ${name}: it is kept only in packed-refs`);
-      await unlink(path);
+      if ((await kindIn(directory, leaf)) !== "file") throw agentXError("OPERATION_INTERRUPTED", `AgentX cannot remove ${name}: it is kept only in packed-refs`);
+      await removeIn(directory, leaf);
       return;
     }
-    await lock.handle.writeFile(`${next}\n`);
-    await lock.handle.sync();
-    await lock.handle.close();
-    await rename(lock.path, path);
-    renamed = true;
+    await commitLock(lock, `${next}\n`);
   } finally {
-    if (!renamed) {
-      await lock.handle.close().catch(() => undefined);
-      await unlink(lock.path).catch(() => undefined);
-    }
+    if (lock !== undefined) await releaseLock(lock);
+    await parent?.close();
+    await git.close();
   }
 }
 
 /** Applies what the work changed in the throwaway repository's refs and HEAD to the candidate: refs first, then HEAD. */
 async function applyRefsBack(git: IsolatedGit, before: RefState): Promise<void> {
+  // The objects the refs will name are in the candidate's object directory before any ref names them.
+  await git.exportObjects();
   const after = await readRefState(git.gitDir);
   for (const [name, value] of after.refs) {
     if (before.refs.get(name) !== value) await applyOne(git.layout, name, before.refs.get(name), value);
@@ -157,27 +162,20 @@ async function persistIndex(git: IsolatedGit, original: Buffer | undefined): Pro
     throw error;
   });
   if (next === undefined || (original !== undefined && original.equals(next))) return;
-  const real = join(git.layout.gitDirectory, "index");
-  const lock = await takeLock(`${real}.lock`);
-  let renamed = false;
+  const directory = await openDirectory(git.layout.gitDirectory);
+  let lock: DirectoryLock | undefined;
   try {
-    const now = await readSmallFile(real, INDEX_BYTES);
+    lock = await lockIn(directory, "index");
+    const now = await readFileIn(directory, "index", INDEX_BYTES);
     if ((now === undefined) !== (original === undefined) || (now !== undefined && original !== undefined && !now.equals(original))) {
       throw agentXError("OPERATION_INTERRUPTED", "the repository's index changed while AgentX was working on it");
     }
-    await lock.handle.writeFile(next);
-    await lock.handle.sync();
-    await lock.handle.close();
     // Stamped as the worker's copy is, for the same reason: the entries were checked against that time.
     const stamp = await stat(git.workIndex);
-    await utimes(lock.path, stamp.atime, stamp.mtime);
-    await rename(lock.path, real);
-    renamed = true;
+    await commitLock(lock, next, { atime: stamp.atime, mtime: stamp.mtime });
   } finally {
-    if (!renamed) {
-      await lock.handle.close().catch(() => undefined);
-      await unlink(lock.path).catch(() => undefined);
-    }
+    if (lock !== undefined) await releaseLock(lock);
+    await directory.close();
   }
 }
 
@@ -241,7 +239,6 @@ export async function withIsolatedRepository<T>(
         args: [...git.location, ...args],
         credential,
         cwd: git.scratch,
-        environment: { ...(mode === "write" ? { GIT_OBJECT_DIRECTORY: git.layout.objects } : {}) },
         ...(runOptions.timeout === undefined ? {} : { timeout: runOptions.timeout }),
         ...(runOptions.maxBuffer === undefined ? {} : { maxBuffer: runOptions.maxBuffer }),
       })).stdout,

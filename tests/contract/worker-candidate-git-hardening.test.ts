@@ -407,7 +407,7 @@ describe("honest repositories give the same trees, commits and exports as plain 
     const head = await git(box.directory, "rev-parse", "HEAD");
     await writeFile(join(box.directory, "tracked.txt"), "changed\n");
     await writeFile(join(box.directory, ".git", "index.lock"), "");
-    await expect(commitCandidateWorktree(inputOf(box))).rejects.toThrow(/could not be safely committed/);
+    await expect(commitCandidateWorktree(inputOf(box))).rejects.toThrow(/the repository is locked by .*index\.lock/);
     expect(await git(box.directory, "rev-parse", "HEAD")).toBe(head);
   });
 });

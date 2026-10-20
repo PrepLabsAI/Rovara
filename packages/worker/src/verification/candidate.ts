@@ -1,8 +1,11 @@
 import { createHash } from "node:crypto";
-import { open, readFile, rename, unlink } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { resolve } from "node:path";
 import { AgentXError, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, agentXError, createCandidateManifest, isSafeE2ESourcePath, type CandidateManifest } from "@agentx/contracts";
+import { commitLock, lockIn, openDirectory, readFileIn, releaseLock, type DirectoryLock, type HeldDirectory } from "../candidate-fs.js";
 import { snapshotTree, withIsolatedGit, type IsolatedGit } from "../isolated-git.js";
+
+const INDEX_BYTES = 512 * 1024 * 1024;
 
 export interface CandidateRepositoryInput {
   repositoryId: string;
@@ -180,10 +183,14 @@ export async function commitCandidateWorktree(
 }
 
 async function commitRepository(git: IsolatedGit, input: CandidateRepositoryInput): Promise<CandidateRepositoryIdentity> {
+  // `.git` is opened once without following a symlink, and the real index and its lock are read and written through that descriptor (candidate-fs.ts).
+  const gitDirectory = await openDirectory(git.layout.gitDirectory);
+  try { return await commitRepositoryIn(git, gitDirectory, input); } finally { await gitDirectory.close(); }
+}
+
+async function commitRepositoryIn(git: IsolatedGit, gitDirectory: HeldDirectory, input: CandidateRepositoryInput): Promise<CandidateRepositoryIdentity> {
   const identityOf = (commitSha: string, treeSha: string): CandidateRepositoryIdentity => ({ repositoryId: input.repositoryId, commitSha, treeSha,
     ...(input.baseCommitSha === undefined ? {} : { baseCommitSha: input.baseCommitSha }) });
-  const realIndex = join(git.layout.gitDirectory, "index");
-  const lockPath = `${realIndex}.lock`;
   const run = async (args: readonly string[], index: "temporary" | "real" | "none" = "temporary"): Promise<string> =>
     (await git.text(args, { index, maxBuffer: 1024 * 1024 })).trim();
   const commitOf = async (): Promise<string> => run(["rev-parse", "--verify", `${await git.headCommit()}^{commit}`], "none");
@@ -200,10 +207,7 @@ async function commitRepository(git: IsolatedGit, input: CandidateRepositoryInpu
   const oldTree = await run(["rev-parse", `${oldHead}^{tree}`], "none");
   const unmerged = await run(["ls-files", "--unmerged", "-z"], "real");
   if (unmerged !== "") throw agentXError("CONFIG_INVALID", "the repository index has unresolved entries; resolve them before the implementation can be saved");
-  const indexBefore = await readFile(realIndex).catch((error: unknown) => {
-    if ((error as { code?: unknown }).code === "ENOENT") return undefined;
-    throw error;
-  });
+  const indexBefore = await readFileIn(gitDirectory, "index", INDEX_BYTES);
   const indexMatches = async (revision: string): Promise<boolean> => {
     try {
       await run(["diff", "--cached", "--quiet", revision], "real");
@@ -224,41 +228,32 @@ async function commitRepository(git: IsolatedGit, input: CandidateRepositoryInpu
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("candidate commit is invalid");
 
   const candidateIndex = await readFile(git.temporaryIndex);
-  let lockCreated = false;
   let refAdvanced = false;
-  let lockHandle: Awaited<ReturnType<typeof open>> | undefined;
+  let lock: DirectoryLock | undefined;
   try {
     // Git's normal index.lock protocol prevents a concurrent index writer from being overwritten.
-    lockHandle = await open(lockPath, "wx", 0o600);
-    lockCreated = true;
-    await lockHandle.writeFile(candidateIndex);
-    await lockHandle.sync();
-    await lockHandle.close();
-    lockHandle = undefined;
+    lock = await lockIn(gitDirectory, "index");
 
     // Refuse a changed worktree or real index before advancing the worker-owned HEAD.
     const currentHead = await git.headCommit();
-    const currentIndex = await readFile(realIndex).catch((error: unknown) => {
-      if ((error as { code?: unknown }).code === "ENOENT") return undefined;
-      throw error;
-    });
+    const currentIndex = await readFileIn(gitDirectory, "index", INDEX_BYTES);
     if (currentHead !== oldHead || !sameOptionalBytes(indexBefore, currentIndex)) {
       throw agentXError("OPERATION_INTERRUPTED", "the repository changed while AgentX was saving the implementation candidate");
     }
     if (await snapshotTree(git, oldHead) !== tree) {
       throw agentXError("OPERATION_INTERRUPTED", "the repository files changed while AgentX was saving the implementation candidate");
     }
+    // The commit and trees are in the candidate's object directory before HEAD names the commit.
+    await git.exportObjects();
     await git.advanceHead(oldHead, commit);
     refAdvanced = true;
-    await rename(lockPath, realIndex);
-    lockCreated = false;
+    // The index carries the modification time of the worker's temporary one: Git judges which entries may be "racily clean" by comparing them with it.
+    const stamp = await stat(git.temporaryIndex);
+    await commitLock(lock, candidateIndex, { atime: stamp.atime, mtime: stamp.mtime });
 
     const newHead = await commitOf();
     const newTree = await run(["rev-parse", "--verify", `${newHead}^{tree}`], "none");
-    const indexAfter = await readFile(realIndex).catch((error: unknown) => {
-      if ((error as { code?: unknown }).code === "ENOENT") return undefined;
-      throw error;
-    });
+    const indexAfter = await readFileIn(gitDirectory, "index", INDEX_BYTES);
     if (!sameOptionalBytes(candidateIndex, indexAfter)) {
       throw agentXError("OPERATION_INTERRUPTED", "the repository index changed while AgentX was saving the implementation candidate");
     }
@@ -274,8 +269,7 @@ async function commitRepository(git: IsolatedGit, input: CandidateRepositoryInpu
     }
     return identityOf(newHead, newTree);
   } catch (error) {
-    await lockHandle?.close().catch(() => undefined);
-    if (lockCreated) await unlink(lockPath).catch(() => undefined);
+    if (lock !== undefined) await releaseLock(lock);
     if (refAdvanced && error instanceof Error && !(error instanceof AgentXError)) {
       throw agentXError("OPERATION_INTERRUPTED", "the candidate commit was saved but its index could not be synchronized; the workspace must be checked before retrying");
     }

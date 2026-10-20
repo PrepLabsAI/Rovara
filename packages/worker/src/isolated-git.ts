@@ -1,10 +1,13 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { constants } from "node:fs";
-import { lstat, mkdir, mkdtemp, open, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, mkdtemp, open, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { agentXError } from "@agentx/contracts";
+import { candidateWriteStep, commitLock, kindIn, lockIn, openDirectory, readFileIn, releaseLock, type DirectoryLock, type HeldDirectory } from "./candidate-fs.js";
 import { assertNoEmbeddedRepositories, assertNoLfsFiles, isolatedGitEnvironment } from "./git.js";
 
 const execFile = promisify(execFileCallback);
@@ -128,12 +131,16 @@ export interface IsolatedGit {
   headCommit(): Promise<string>;
   /** Moves what HEAD names (the branch it points at, or HEAD itself when detached) from `expected` to `next`, under Git's own lock file protocol. */
   advanceHead(expected: string, next: string): Promise<void>;
+  /** Copies the objects Git created in the throwaway repository into the candidate's object directory. Idempotent; a `"write"` session also does it when `use` returns. */
+  exportObjects(): Promise<void>;
 }
 
 /**
- * Runs `use` against a throwaway bare repository this worker created under the temporary directory, then removes it on every path. `"read"` lets Git read the
- * candidate's objects through `objects/info/alternates`, so nothing is written to the candidate. `"write"` makes the candidate's object directory Git's own, so blobs
- * and trees Git writes (the tree of a snapshot, a commit) land where the candidate repository and later reviews can read them.
+ * Runs `use` against a throwaway bare repository this worker created under the temporary directory, then removes it on every path. Git reads the candidate's
+ * objects through `objects/info/alternates` and writes the objects it creates (the tree of a snapshot, a commit, a fetched pack) to the throwaway repository's own
+ * object directory. `"write"` then copies them into the candidate's object directory, where the candidate repository and later reviews read them, through the
+ * worker's own descriptor-relative writes (candidate-fs.ts) rather than through Git, which would follow a symlink the agent put in `objects/`. `"read"` writes
+ * nothing to the candidate.
  */
 export async function withIsolatedGit<T>(directory: string, mode: "read" | "write", use: (git: IsolatedGit) => Promise<T>): Promise<T> {
   const layout = await candidateLayout(directory);
@@ -143,10 +150,8 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
     const initEnv = isolatedGitEnvironment(layout.workTree);
     await execFile("git", ["init", "--bare", "--quiet", "--template=", gitDir], { cwd: scratch, env: initEnv });
     await mkdir(join(gitDir, "info"), { recursive: true });
-    if (mode === "read") {
-      await mkdir(join(gitDir, "objects", "info"), { recursive: true });
-      await writeFile(join(gitDir, "objects", "info", "alternates"), `${layout.objects}\n`, { mode: 0o600 });
-    }
+    await mkdir(join(gitDir, "objects", "info"), { recursive: true });
+    await writeFile(join(gitDir, "objects", "info", "alternates"), `${layout.objects}\n`, { mode: 0o600 });
     // Ignore patterns and attributes are plain text: the files carry no command, and the agent's own exclusions and attributes keep deciding what `add` stages.
     for (const name of ["exclude", "attributes"]) {
       const bytes = await readSmallFile(join(layout.gitDirectory, "info", name), SMALL_FILE_BYTES).catch(() => undefined);
@@ -159,7 +164,6 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
     const location = [`--git-dir=${gitDir}`, `--work-tree=${layout.workTree}`] as const;
     const indexFiles = { temporary: temporaryIndex, real: realIndex, work: workIndex } as const;
     const env = (index: IndexKind = "temporary"): NodeJS.ProcessEnv => isolatedGitEnvironment(layout.workTree, {
-      ...(mode === "write" ? { GIT_OBJECT_DIRECTORY: layout.objects } : {}),
       ...(index === "none" ? {} : { GIT_INDEX_FILE: indexFiles[index] }),
     }, config);
     const run = async (args: readonly string[], options: IsolatedRunOptions, encoding: "utf8" | "buffer") => {
@@ -171,14 +175,17 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
       child.child.stdin?.end(options.input);
       return (await child).stdout;
     };
-    return await use({
-      layout, scratch, temporaryIndex, workIndex, gitDir, location, env,
+    const exportObjects = () => copyObjectsOut(join(gitDir, "objects"), layout);
+    const result = await use({
+      layout, scratch, temporaryIndex, workIndex, gitDir, location, env, exportObjects,
       spawnSpec: (args, index = "none") => ({ args: [...location, ...args], env: env(index), cwd: scratch }),
       text: async (args, options = {}) => (await run(args, options, "utf8")) as string,
       bytes: async (args, options = {}) => (await run(args, options, "buffer")) as unknown as Buffer,
       headCommit: () => readHead(layout).then((head) => head.commit),
       advanceHead: (expected, next) => advanceHead(layout, expected, next),
     });
+    if (mode === "write") await exportObjects();
+    return result;
   } finally {
     await rm(scratch, { recursive: true, force: true });
   }
@@ -226,100 +233,130 @@ export function isSafeRefName(name: string): boolean {
   return name.split("/").every((part) => part !== "" && !part.startsWith(".") && !part.endsWith(".lock"));
 }
 
-/**
- * Checks that every directory from `.git` down to the parent of `ref` is a real directory: not a symlink, and (since `.git` is a real path) its real path is
- * itself, so it is inside `.git`. A missing directory is created one level at a time when `create` is set, never through anything that exists as a symlink.
- * Returns false when a directory is missing and `create` is not set (the loose ref cannot exist). Anything else is refused.
- */
-export async function verifyRefDirectories(layout: CandidateLayout, ref: string, create: boolean): Promise<boolean> {
-  let current = layout.gitDirectory;
-  for (const part of ref.split("/").slice(0, -1)) {
-    current = join(current, part);
-    let stat = await lstat(current).catch(() => undefined);
-    if (stat === undefined) {
-      if (!create) return false;
-      await mkdir(current, { mode: 0o777 });
-      stat = await lstat(current);
+const OBJECT_DIRECTORY = /^[0-9a-f]{2}$/;
+const LOOSE_OBJECT = /^[0-9a-f]{38}$/;
+const PACK_FILE = /^pack-[0-9a-f]+\.(pack|idx|rev|bitmap|mtimes)$/;
+
+async function copyInto(directory: HeldDirectory, source: string, name: string): Promise<void> {
+  if ((await kindIn(directory, name)) !== undefined) return;
+  const temporary = `tmp_obj_${randomUUID()}`;
+  await candidateWriteStep(`object ${directory.path.split("/").slice(-1)[0]}/${name}`);
+  await copyFile(source, directory.entry(temporary), fsConstants.COPYFILE_EXCL);
+  await rename(directory.entry(temporary), directory.entry(name));
+}
+
+/** Copies the loose objects and packs in `source` (an object directory the worker owns) that the candidate's object directory does not have yet. Packs go in with their index last. */
+async function copyObjectsOut(source: string, layout: CandidateLayout): Promise<void> {
+  const target = await openDirectory(layout.objects);
+  try {
+    for (const entry of await readdir(source, { withFileTypes: true })) {
+      if (entry.isDirectory() && OBJECT_DIRECTORY.test(entry.name)) {
+        const files = (await readdir(join(source, entry.name))).filter((name) => LOOSE_OBJECT.test(name));
+        if (files.length === 0) continue;
+        const directory = await target.subdirectory(entry.name, true);
+        try { for (const name of files) await copyInto(directory!, join(source, entry.name, name), name); } finally { await directory?.close(); }
+      } else if (entry.isDirectory() && entry.name === "pack") {
+        const names = (await readdir(join(source, "pack"))).filter((name) => PACK_FILE.test(name));
+        if (names.length === 0) continue;
+        const directory = await target.subdirectory("pack", true);
+        try {
+          for (const name of [...names].sort((left, right) => Number(left.endsWith(".idx")) - Number(right.endsWith(".idx")))) await copyInto(directory!, join(source, "pack", name), name);
+        } finally { await directory?.close(); }
+      }
     }
-    if (!stat.isDirectory() || (await realpath(current)) !== current) throw new Error(`candidate repository has a symlink or a file where the directory ${part} of ${ref} should be`);
+  } finally {
+    await target.close();
   }
-  return true;
+}
+
+/** The directory holding the loose ref `ref` (every level opened without following a symlink, made first when `create` is set), held until `close`; `undefined` when it does not exist. */
+async function openRefParent(git: HeldDirectory, ref: string, create: boolean): Promise<{ directory: HeldDirectory; leaf: string; close(): Promise<void> } | undefined> {
+  const parts = ref.split("/");
+  const leaf = parts.pop()!;
+  const opened: HeldDirectory[] = [];
+  let current = git;
+  const close = async () => { for (const directory of opened.reverse()) await directory.close().catch(() => undefined); };
+  try {
+    for (const part of parts) {
+      const next = await current.subdirectory(part, create);
+      if (next === undefined) { await close(); return undefined; }
+      opened.push(next);
+      current = next;
+    }
+  } catch (error) {
+    await close();
+    throw error;
+  }
+  return { directory: current, leaf, close };
 }
 
 type Head = { kind: "detached" } | { kind: "branch"; ref: string };
 
-/** The one place HEAD's commit is resolved without Git: the branch HEAD names, as a loose ref file or a line of packed-refs. A symbolic ref chain, an odd name or a symlink on the way is refused. */
-async function readHead(layout: CandidateLayout): Promise<Head & { commit: string }> {
-  const headBytes = await readSmallFile(join(layout.gitDirectory, "HEAD"), 4096);
+/**
+ * The one place HEAD's commit is resolved without Git: the branch HEAD names, as a loose ref file or a line of packed-refs, all read through the held `.git`
+ * directory. A symbolic ref chain, an odd name or a symlink on the way is refused. `parent` is the held directory of the branch's loose ref when the caller holds it.
+ */
+async function readHeadHeld(git: HeldDirectory, parent?: { directory: HeldDirectory; leaf: string }): Promise<Head & { commit: string }> {
+  const headBytes = await readFileIn(git, "HEAD", 4096);
   if (headBytes === undefined) throw new Error("candidate repository has no HEAD");
   const headText = headBytes.toString("utf8").replace(/\n$/u, "");
   if (HEX40.test(headText)) return { kind: "detached", commit: headText };
   const symbolic = /^ref: (\S+)$/u.exec(headText);
   if (symbolic?.[1] === undefined || !isSafeRefName(symbolic[1])) throw new Error("candidate HEAD is not a commit or a plain branch reference");
   const ref = symbolic[1];
-  const loosePath = join(layout.gitDirectory, ref);
-  const stat = await verifyRefDirectories(layout, ref, false) ? await lstat(loosePath).catch(() => undefined) : undefined;
-  if (stat !== undefined && !stat.isDirectory()) {
-    if (!stat.isFile()) throw new Error("candidate branch reference is not a plain file");
-    const text = (await readSmallFile(loosePath, 4096))?.toString("utf8").replace(/\n$/u, "") ?? "";
-    if (!HEX40.test(text)) throw new Error("candidate branch reference does not name a commit");
-    return { kind: "branch", ref, commit: text };
+  const own = parent === undefined ? await openRefParent(git, ref, false) : undefined;
+  const where = parent ?? own;
+  try {
+    if (where !== undefined && (await kindIn(where.directory, where.leaf)) === "file") {
+      const text = (await readFileIn(where.directory, where.leaf, 4096))?.toString("utf8").replace(/\n$/u, "") ?? "";
+      if (!HEX40.test(text)) throw new Error("candidate branch reference does not name a commit");
+      return { kind: "branch", ref, commit: text };
+    }
+    if (where !== undefined && (await kindIn(where.directory, where.leaf)) === "other") throw new Error("candidate branch reference is not a plain file");
+  } finally {
+    await own?.close();
   }
-  const packed = await readSmallFile(join(layout.gitDirectory, "packed-refs"), PACKED_REFS_CAP_BYTES);
+  const packed = await readFileIn(git, "packed-refs", PACKED_REFS_CAP_BYTES);
   for (const line of packed?.toString("utf8").split("\n") ?? []) {
     if (line.length === 41 + ref.length && line[40] === " " && line.endsWith(ref) && HEX40.test(line.slice(0, 40))) return { kind: "branch", ref, commit: line.slice(0, 40) };
   }
   throw new Error("candidate branch has no commit");
 }
 
-export type HeldLock = { path: string; handle: Awaited<ReturnType<typeof open>>; released: boolean };
-
-/** Creates `path` exclusively, as Git takes a lock; a lock that is already there is another Git process's, or a crash's, and is named. */
-export async function takeLock(path: string): Promise<HeldLock> {
-  try {
-    return { path, handle: await open(path, "wx", 0o666), released: false };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      throw agentXError("OPERATION_INTERRUPTED", `the repository is locked by ${path}: another Git process is using it, or a crash left the file behind. Remove it if no Git process is running, then try again.`);
-    }
-    throw error;
-  }
+export async function readHead(layout: CandidateLayout): Promise<Head & { commit: string }> {
+  const git = await openDirectory(layout.gitDirectory);
+  try { return await readHeadHeld(git); } finally { await git.close(); }
 }
 
 /**
  * Moves HEAD's commit from `expected` to `next` the way `git update-ref HEAD <next> <expected>` does, minus the reflog (no entry is written): the ref file is
  * created exclusively as `<name>.lock` (another Git holding that lock refuses us, as it would refuse itself), HEAD's own lock is held too when HEAD names a
  * branch, so a concurrent checkout cannot move HEAD underneath, the commit it holds is checked to still be `expected`, and the lock is renamed over the ref.
- * Every directory down to the ref is a real directory, checked before the lock is taken and again while it is held. No Git process runs in the candidate's
- * repository, so no config or hook of it can.
+ * Every directory down to the ref is opened once, without following a symlink, and every operation goes through those descriptors (candidate-fs.ts). No Git
+ * process runs in the candidate's repository, so no config or hook of it can.
  */
 async function advanceHead(layout: CandidateLayout, expected: string, next: string): Promise<void> {
   if (!HEX40.test(expected) || !HEX40.test(next)) throw new Error("candidate commit is invalid");
-  const head = await readHead(layout);
-  const headPath = join(layout.gitDirectory, "HEAD");
-  const target = head.kind === "detached" ? headPath : join(layout.gitDirectory, head.ref);
-  if (head.kind === "branch") await verifyRefDirectories(layout, head.ref, true);
-  const held: HeldLock[] = [];
+  const git = await openDirectory(layout.gitDirectory);
+  const held: DirectoryLock[] = [];
+  let parent: Awaited<ReturnType<typeof openRefParent>>;
   try {
-    const headLock = await takeLock(`${headPath}.lock`);
+    const head = await readHeadHeld(git);
+    if (head.kind === "branch") parent = await openRefParent(git, head.ref, true);
+    const headLock = await lockIn(git, "HEAD");
     held.push(headLock);
-    const targetLock = head.kind === "detached" ? headLock : await takeLock(`${target}.lock`);
+    const targetLock = head.kind === "detached" ? headLock : await lockIn(parent!.directory, parent!.leaf);
     if (targetLock !== headLock) held.push(targetLock);
-    if (head.kind === "branch" && !(await verifyRefDirectories(layout, head.ref, false))) throw new Error("candidate branch directory disappeared while HEAD was being updated");
-    const locked = await readHead(layout);
+    const locked = await readHeadHeld(git, parent);
     if (locked.commit !== expected || locked.kind !== head.kind || (locked.kind === "branch" && head.kind === "branch" && locked.ref !== head.ref)) {
       throw new Error("candidate HEAD moved while it was being updated");
     }
-    await targetLock.handle.writeFile(`${next}\n`);
-    await targetLock.handle.sync();
-    await targetLock.handle.close();
-    await rename(targetLock.path, target);
-    targetLock.released = true;
+    await commitLock(targetLock, `${next}\n`);
   } finally {
-    for (const lock of held) {
-      if (lock.released) continue;
-      await lock.handle.close().catch(() => undefined);
-      await unlink(lock.path).catch(() => undefined);
-    }
+    for (const lock of held) await releaseLock(lock);
+    await parent?.close();
+    await git.close();
   }
 }
+
+export { openRefParent, readHeadHeld };
