@@ -2,7 +2,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { constants } from "node:fs";
 import { lstat, mkdir, mkdtemp, open, realpath, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { promisify } from "node:util";
 import { agentXError } from "@agentx/contracts";
 import { assertNoEmbeddedRepositories, assertNoLfsFiles, isolatedGitEnvironment } from "./git.js";
@@ -76,6 +76,11 @@ async function candidateConfigValues(layout: CandidateLayout, scratch: string, g
     if (record === "") continue;
     const newline = record.indexOf("\n");
     const key = newline < 0 ? record : record.slice(0, newline);
+    // Files this setting ignores would be staged into the candidate's tree and published, and the worker does not read the file it names.
+    if (key === "core.excludesfile" && (newline < 0 || record.slice(newline + 1) !== "")) {
+      throw agentXError("CONFIG_INVALID", "the repository's Git config sets core.excludesFile, which AgentX does not honour when it captures your files, so files it ignores would be included. " +
+        "Unset it (git config --unset core.excludesFile) and put the patterns in .gitignore or .git/info/exclude.");
+    }
     if (!KEPT_CONFIG_KEYS.has(key)) continue;
     // A key with no value is a boolean true.
     const value = newline < 0 ? "true" : record.slice(newline + 1);
@@ -186,9 +191,29 @@ function isSafeRefName(name: string): boolean {
   return name.split("/").every((part) => part !== "" && !part.startsWith(".") && !part.endsWith(".lock"));
 }
 
+/**
+ * Checks that every directory from `.git` down to the parent of `ref` is a real directory: not a symlink, and (since `.git` is a real path) its real path is
+ * itself, so it is inside `.git`. A missing directory is created one level at a time when `create` is set, never through anything that exists as a symlink.
+ * Returns false when a directory is missing and `create` is not set (the loose ref cannot exist). Anything else is refused.
+ */
+async function verifyRefDirectories(layout: CandidateLayout, ref: string, create: boolean): Promise<boolean> {
+  let current = layout.gitDirectory;
+  for (const part of ref.split("/").slice(0, -1)) {
+    current = join(current, part);
+    let stat = await lstat(current).catch(() => undefined);
+    if (stat === undefined) {
+      if (!create) return false;
+      await mkdir(current, { mode: 0o777 });
+      stat = await lstat(current);
+    }
+    if (!stat.isDirectory() || (await realpath(current)) !== current) throw new Error(`candidate repository has a symlink or a file where the directory ${part} of ${ref} should be`);
+  }
+  return true;
+}
+
 type Head = { kind: "detached" } | { kind: "branch"; ref: string };
 
-/** The one place HEAD's commit is resolved without Git: the branch HEAD names, as a loose ref file or a line of packed-refs. A symbolic ref chain or an odd name is refused. */
+/** The one place HEAD's commit is resolved without Git: the branch HEAD names, as a loose ref file or a line of packed-refs. A symbolic ref chain, an odd name or a symlink on the way is refused. */
 async function readHead(layout: CandidateLayout): Promise<Head & { commit: string }> {
   const headBytes = await readSmallFile(join(layout.gitDirectory, "HEAD"), 4096);
   if (headBytes === undefined) throw new Error("candidate repository has no HEAD");
@@ -198,7 +223,7 @@ async function readHead(layout: CandidateLayout): Promise<Head & { commit: strin
   if (symbolic?.[1] === undefined || !isSafeRefName(symbolic[1])) throw new Error("candidate HEAD is not a commit or a plain branch reference");
   const ref = symbolic[1];
   const loosePath = join(layout.gitDirectory, ref);
-  const stat = await lstat(loosePath).catch(() => undefined);
+  const stat = await verifyRefDirectories(layout, ref, false) ? await lstat(loosePath).catch(() => undefined) : undefined;
   if (stat !== undefined && !stat.isDirectory()) {
     if (!stat.isFile()) throw new Error("candidate branch reference is not a plain file");
     const text = (await readSmallFile(loosePath, 4096))?.toString("utf8").replace(/\n$/u, "") ?? "";
@@ -212,33 +237,54 @@ async function readHead(layout: CandidateLayout): Promise<Head & { commit: strin
   throw new Error("candidate branch has no commit");
 }
 
+type HeldLock = { path: string; handle: Awaited<ReturnType<typeof open>>; released: boolean };
+
+/** Creates `path` exclusively, as Git takes a lock; a lock that is already there is another Git process's, or a crash's, and is named. */
+async function takeLock(path: string): Promise<HeldLock> {
+  try {
+    return { path, handle: await open(path, "wx", 0o666), released: false };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+      throw agentXError("OPERATION_INTERRUPTED", `the repository is locked by ${path}: another Git process is using it, or a crash left the file behind. Remove it if no Git process is running, then try again.`);
+    }
+    throw error;
+  }
+}
+
 /**
- * Moves HEAD's commit from `expected` to `next` the way `git update-ref HEAD <next> <expected>` does, minus the reflog: the ref file is created exclusively as
- * `<name>.lock` (another Git holding that lock refuses us, as it would refuse itself), the commit it holds is checked to still be `expected`, and the lock is
- * renamed over the ref. No Git process runs in the candidate's repository, so no config or hook of it can.
+ * Moves HEAD's commit from `expected` to `next` the way `git update-ref HEAD <next> <expected>` does, minus the reflog (no entry is written): the ref file is
+ * created exclusively as `<name>.lock` (another Git holding that lock refuses us, as it would refuse itself), HEAD's own lock is held too when HEAD names a
+ * branch, so a concurrent checkout cannot move HEAD underneath, the commit it holds is checked to still be `expected`, and the lock is renamed over the ref.
+ * Every directory down to the ref is a real directory, checked before the lock is taken and again while it is held. No Git process runs in the candidate's
+ * repository, so no config or hook of it can.
  */
 async function advanceHead(layout: CandidateLayout, expected: string, next: string): Promise<void> {
   if (!HEX40.test(expected) || !HEX40.test(next)) throw new Error("candidate commit is invalid");
   const head = await readHead(layout);
-  const target = head.kind === "detached" ? join(layout.gitDirectory, "HEAD") : join(layout.gitDirectory, head.ref);
-  if (head.kind === "branch") await mkdir(dirname(target), { recursive: true });
-  const lock = `${target}.lock`;
-  const handle = await open(lock, "wx", 0o666);
-  let renamed = false;
+  const headPath = join(layout.gitDirectory, "HEAD");
+  const target = head.kind === "detached" ? headPath : join(layout.gitDirectory, head.ref);
+  if (head.kind === "branch") await verifyRefDirectories(layout, head.ref, true);
+  const held: HeldLock[] = [];
   try {
+    const headLock = await takeLock(`${headPath}.lock`);
+    held.push(headLock);
+    const targetLock = head.kind === "detached" ? headLock : await takeLock(`${target}.lock`);
+    if (targetLock !== headLock) held.push(targetLock);
+    if (head.kind === "branch" && !(await verifyRefDirectories(layout, head.ref, false))) throw new Error("candidate branch directory disappeared while HEAD was being updated");
     const locked = await readHead(layout);
     if (locked.commit !== expected || locked.kind !== head.kind || (locked.kind === "branch" && head.kind === "branch" && locked.ref !== head.ref)) {
       throw new Error("candidate HEAD moved while it was being updated");
     }
-    await handle.writeFile(`${next}\n`);
-    await handle.sync();
-    await handle.close();
-    await rename(lock, target);
-    renamed = true;
+    await targetLock.handle.writeFile(`${next}\n`);
+    await targetLock.handle.sync();
+    await targetLock.handle.close();
+    await rename(targetLock.path, target);
+    targetLock.released = true;
   } finally {
-    if (!renamed) {
-      await handle.close().catch(() => undefined);
-      await unlink(lock).catch(() => undefined);
+    for (const lock of held) {
+      if (lock.released) continue;
+      await lock.handle.close().catch(() => undefined);
+      await unlink(lock.path).catch(() => undefined);
     }
   }
 }

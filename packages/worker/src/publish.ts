@@ -352,7 +352,7 @@ async function prepareCandidatePublicationCommit(input: {
     if (error instanceof AgentXError) throw error;
     throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
   }
-  const workspaceTree = await temporaryIndexTree(input.git);
+  const workspaceTree = await temporaryIndexTree({ directory: input.git.directory });
   if (workspaceTree !== input.candidateTreeSha) throw agentXError("CONFIG_INVALID", WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE);
   if (input.retrying) {
     const head = (await input.git(["rev-parse", "HEAD"])).trim();
@@ -373,9 +373,9 @@ async function prepareCandidatePublicationCommit(input: {
 /**
  * The tree of HEAD plus every tracked and untracked change, staged in a throwaway index. Git runs in a worker-owned throwaway repository that never sees the
  * workspace's config (isolated-git.ts), the same way the verified candidate's tree is computed, so a filter the agent writes while this runs cannot execute and
- * the tree compared to the checked candidate is the one that capture computes. `git.env` is not used: that environment is built from a one-time read of the config.
+ * the tree compared to the checked candidate is the one that capture computes. It takes only the directory: no environment built from a read of the workspace's config applies.
  */
-export async function temporaryIndexTree(git: { readonly directory: string; readonly env?: NodeJS.ProcessEnv }): Promise<string> {
+export async function temporaryIndexTree(git: { readonly directory: string }): Promise<string> {
   try {
     return await withIsolatedGit(git.directory, "write", async (isolated) => snapshotTree(isolated, await isolated.headCommit()));
   } catch (error) {
