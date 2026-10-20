@@ -4,7 +4,8 @@ import { createCandidateManifest, WorkflowSnapshotSchema, type WorkflowSnapshot 
 import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
 import { startTaskWorkflowPublicationFromSystem, taskPageUrl } from "../../packages/broker/src/aws/developer-tasks.js";
 import type { workflowE2ECurrentAuthorityIsValid as AuthorityIsValid, WorkflowE2EVerificationDiagnostic } from "../../packages/broker/src/aws/broker.js";
-import { loadSlackBroker } from "../support/slack-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
+import { createTaskWebApi } from "../../packages/broker/src/aws/task-web-api.js";
 import { DEV_ISSUER, MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer, planDocument } from "../support/plan-documents.js";
 
@@ -136,30 +137,102 @@ describe("publication of a project whose catalog row predates latestRevision", (
     expect(catalogRevision(harness)).toBe(1);
   });
 
-  it("refuses a project with no revision history by name as CONFIG_INVALID, never as a busy workspace", async () => {
+  const NEEDS_ADMIN = "This project's settings record needs an administrator to register it again.";
+  const unrepairableLogs = (spy: { mock: { calls: unknown[][] } }) => brokerLogs(spy).filter((line) => line.event === "project.catalog_pointer_unrepairable");
+
+  it("refuses a project with no revision history with a plain sentence, logs the project and reason, and is never a busy workspace", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     const { workspaceId, start } = await readyToPublish(harness);
     makeLegacyCatalog(harness);
     for (const project of harness.db.find((item) => item.entityType === "PROJECT" && (item.definition as { name?: string } | undefined)?.name === "payments")) {
       harness.db.delete(String(project.pk), String(project.sk));
     }
+    log.mockClear();
     const refusal = await start().then(() => undefined, (error: unknown) => error as Error & { code?: string });
     expect(refusal).toMatchObject({ code: "CONFIG_INVALID" });
-    expect(refusal?.message).toContain("project payments");
-    expect(refusal?.message).toContain("cannot be repaired");
-    expect(refusal?.message).not.toContain("WORKSPACE_BUSY");
+    expect(refusal?.message).toBe(`CONFIG_INVALID: ${NEEDS_ADMIN}`);
+    expect(unrepairableLogs(log)).toEqual([expect.objectContaining({ component: "broker", project: "payments", reason: expect.stringContaining("history") as unknown })]);
     expect(catalogRevision(harness)).toBeUndefined();
     expect(publications(harness, workspaceId)).toHaveLength(0);
   });
 
-  it("refuses an ambiguous catalog row by name as CONFIG_INVALID and leaves it untouched", async () => {
+  it("refuses an ambiguous catalog row the same way and leaves it untouched", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
     const { start } = await readyToPublish(harness);
     // A catalog row that names another project is not this project's index: it is never rewritten.
     const ambiguous = { pk: CATALOG.pk, sk: CATALOG.sk, entityType: "PROJECT_CATALOG", name: "someone-else", firstRegisteredAt: "2026-10-08T20:03:16.000Z" };
     harness.db.set(ambiguous);
-    await expect(start()).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("project payments") as unknown });
+    log.mockClear();
+    await expect(start()).rejects.toMatchObject({ code: "CONFIG_INVALID", message: `CONFIG_INVALID: ${NEEDS_ADMIN}` });
+    expect(unrepairableLogs(log)).toEqual([expect.objectContaining({ project: "payments" })]);
     expect(harness.db.get(CATALOG.pk, CATALOG.sk)).toEqual(ambiguous);
+  });
+
+  it("never creates a catalog row: an absent row is refused the same way and stays absent", async () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const { workspaceId, start } = await readyToPublish(harness);
+    harness.db.delete(CATALOG.pk, CATALOG.sk);
+    log.mockClear();
+    await expect(start()).rejects.toMatchObject({ code: "CONFIG_INVALID", message: `CONFIG_INVALID: ${NEEDS_ADMIN}` });
+    expect(unrepairableLogs(log)).toEqual([expect.objectContaining({ project: "payments", reason: "catalog-row-absent" })]);
+    expect(harness.db.get(CATALOG.pk, CATALOG.sk)).toBeUndefined();
+    expect(publications(harness, workspaceId)).toHaveLength(0);
+    await expect(harness.actions.ensureProjectCatalogPointer("payments")).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    expect(harness.db.get(CATALOG.pk, CATALOG.sk)).toBeUndefined();
+  });
+
+  it("tells the owner the plain sentence on Retry through the API", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
+    await finishImplementation();
+    await passReviews(harness, workspaceId, candidate);
+    await harness.finish(workspaceId, String(publications(harness, workspaceId)[0]!.id), "FAILED", { error: "push refused" });
+    harness.db.set({ pk: CATALOG.pk, sk: CATALOG.sk, entityType: "PROJECT_CATALOG", name: "someone-else" });
+    const retried = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/publish-retry`, { requestId: randomUUID(), expectedRevision: taskWorkflow(harness, taskId).revision });
+    expect(retried.status).toBe(400);
+    expect(retried.body.error).toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining(NEEDS_ADMIN) as unknown });
+  });
+
+  it("tells the owner the plain sentence in the Slack thread and on the task page", async () => {
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
+    // A task started from Slack, so its Retry button can be pressed there.
+    const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000071" };
+    const started = await harness.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread, userId: MAYA.slackUserId,
+      instructions: "Fix the retry bug", workflowPath: "QUICK", requestId: randomUUID() });
+    const taskId = String((JSON.parse(started.body) as { taskId: string }).taskId);
+    const workspaceId = String(harness.db.get(`DEVTASK#${taskId}`, "META")!.workspaceId);
+    const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
+    harness.db.set({ ...record, workflow: { ...record.workflow, checkPolicy: { required: [REQUIRED_CHECK], optional: [], selectedOptionalIds: [] } } });
+    await harness.finish(workspaceId, String(operations(harness, workspaceId).find((item) => item.kind === "prepare")?.id), "SUCCEEDED", PREPARED);
+    const plan = "# Plan\n\n1. Fix retry handling.\n";
+    await finishPlanningWithMarkdown(harness, workspaceId, String(operations(harness, workspaceId).find((item) => item.workflowMode === "PLAN")!.id), plan);
+    await harness.handler({ source: "agentx.slack-ingress", action: "workflow-decision", taskId, userId: MAYA.slackUserId, thread, requestId: randomUUID(),
+      expectedRevision: taskWorkflow(harness, taskId).revision, artifactDigest: createHash("sha256").update(plan).digest("hex"), decision: "APPROVE", reason: "Approved in Slack.", selectedOptionalCheckIds: [] });
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
+    const implementation = operations(harness, workspaceId).find((item) => item.workflowMode === "IMPLEMENT")!;
+    await harness.finish(workspaceId, String(implementation.id), "SUCCEEDED", { result: { workflowCandidateRepositories: candidate.repositories, workflowCheckCandidateRepositories: candidate.repositories, checks: passingChecks() } });
+    await passReviews(harness, workspaceId, candidate);
+    await harness.finish(workspaceId, String(publications(harness, workspaceId)[0]!.id), "FAILED", { error: "push refused" });
+    const revision = taskWorkflow(harness, taskId).revision;
+    const ambiguous = { pk: CATALOG.pk, sk: CATALOG.sk, entityType: "PROJECT_CATALOG", name: "someone-else" };
+    harness.db.set(ambiguous);
+
+    const pressed = await harness.handler({ source: "agentx.slack-ingress", action: "workflow-publish-retry", taskId, userId: MAYA.slackUserId, thread, requestId: randomUUID(), expectedRevision: revision });
+    expect(JSON.parse(pressed.body)).toMatchObject({ refused: true, message: NEEDS_ADMIN });
+    expect(publications(harness, workspaceId)).toHaveLength(1);
+
+    const deps = { origin: DEV_ISSUER, authenticateSession: async () => ({ developerId: MAYA.developerId, sessionId: "s", amr: "slack" as const, name: "Maya" }),
+      decide: async () => { throw Object.assign(new Error(`CONFIG_INVALID: ${NEEDS_ADMIN}`), { code: "CONFIG_INVALID" }); } };
+    const csrf = "c".repeat(43);
+    const web = await createTaskWebApi(deps as never)({ method: "POST", path: `/review/${taskId}/task/api/decision`, requestId: "r",
+      headers: { origin: new URL(DEV_ISSUER).origin, cookie: `__Host-agentx_review_session=s; __Host-agentx_review_csrf=${csrf}`, "x-agentx-csrf": csrf, "content-type": "application/json" },
+      body: JSON.stringify({ requestId: randomUUID(), expectedRevision: 1, artifactDigest: "a".repeat(64), decision: "APPROVE", answers: [], includedCommentIds: [] }) },
+    new URL(`${new URL(DEV_ISSUER).origin}/review/${taskId}/task/api/decision`));
+    expect(web.statusCode).toBe(409);
+    expect(JSON.parse(web.body)).toEqual({ error: "changed", message: NEEDS_ADMIN });
   });
 
   describe("a cancelled publication acceptance", () => {
@@ -305,6 +378,13 @@ describe("required-E2E publication authority of a project whose catalog row pred
     harness.db.set(ambiguous);
     expect(await check()).toEqual({ valid: false, reason: "config-invalid-project-catalog-pointer-unrepairable:payments" });
     expect(harness.db.get(CATALOG.pk, CATALOG.sk)).toEqual(ambiguous);
+  });
+
+  it("never creates an absent catalog row: it is refused with the same reason and stays absent", async () => {
+    const { harness, check } = await approvedE2ETask();
+    harness.db.delete(CATALOG.pk, CATALOG.sk);
+    expect(await check()).toEqual({ valid: false, reason: "config-invalid-project-catalog-pointer-unrepairable:payments" });
+    expect(harness.db.get(CATALOG.pk, CATALOG.sk)).toBeUndefined();
   });
 
   it("keeps the strict check: a pointer that is not the newest revision is still refused", async () => {

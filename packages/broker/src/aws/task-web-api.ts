@@ -10,6 +10,7 @@ import {
   type TaskPeopleChangeResult, type TaskPeopleRoleRequest, type TaskPeopleTakeOwnershipRequest, type TaskPeopleView,
 } from "@agentx/contracts";
 import type { DeveloperTaskView } from "@agentx/contracts";
+import { PROJECT_RECORD_NEEDS_ADMIN } from "./broker-shared.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import type { PageCommentView } from "./plan-page/comments.js";
@@ -126,6 +127,7 @@ function refusalResponse(error: unknown): WebResponse {
   if (typeof code === "string" && HIDDEN.has(code)) return json(404, NOT_FOUND);
   // The decision's own refusals: who decided and when, or that a newer version is ready (written for the page).
   if (code === "IDEMPOTENCY_CONFLICT") return json(409, { error: "changed", message: text });
+  if (code === "CONFIG_INVALID" && text === PROJECT_RECORD_NEEDS_ADMIN) return json(409, { error: "changed", message: text });
   if (code === "CONFIG_INVALID") return PAGE_SAFE_MESSAGES.has(text) ? invalid(text) : json(409, { error: "changed", message: TASK_CHANGED });
   if (code === "TASK_BUSY" || code === "WORKSPACE_BUSY") return json(409, { error: "busy", message: "AgentX is busy with this task. Try again in a minute." });
   return json(503, { error: "unavailable", message: "AgentX couldn't do that right now. Try again shortly." });

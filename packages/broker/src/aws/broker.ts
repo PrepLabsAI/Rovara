@@ -266,7 +266,7 @@ import {
 } from "./cancellation.js";
 import { aiToolTurn, completedTurn, developerFooter, E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
-import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, type WorkflowE2EReadinessMarker, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
+import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, type WorkflowE2EReadinessMarker, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, PROJECT_RECORD_NEEDS_ADMIN, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../e2e/feature-plan-planning-context.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
@@ -1341,6 +1341,7 @@ const SLACK_PLAIN_REFUSALS: ReadonlyMap<string, string> = new Map([
   [FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_BUSY],
   [FEEDBACK_REVIEW_RETRY_CHANGED, FEEDBACK_REVIEW_RETRY_CHANGED],
   [FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_CHANGED_SINCE_CARD],
+  [PROJECT_RECORD_NEEDS_ADMIN, PROJECT_RECORD_NEEDS_ADMIN],
 ]);
 /**
  * Task 19: the broker refusals a Slack press can meet in the normal course of things, by what the presser hears. A
@@ -1861,13 +1862,14 @@ async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, p
   return { catalog, newestRevision };
 }
 
-async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDependencies, projectName: string): Promise<void> {
+async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDependencies, projectName: string, options: { createCatalogRow?: boolean } = {}): Promise<void> {
   // This is an index-only repair after the immutable revision has already been
   // authenticated. It never rewrites project, membership, approval, or setup rows.
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const snapshot = await readProjectCatalogSnapshot(dependencies, projectName);
     const targetRevision = snapshot.newestRevision;
     if (targetRevision < 1) throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is unavailable");
+    if (snapshot.catalog === undefined && options.createCatalogRow === false) throw agentXError("PROJECT_REVISION_MISMATCH", "catalog-row-absent");
     if (snapshot.catalog?.latestRevision === targetRevision) return;
     const key = projectCatalogKey(projectName);
     try {
@@ -1902,17 +1904,25 @@ async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDep
  * Publication authority guards the project's catalog row with `latestRevision = :latest`. Rows written before the
  * catalog pointer existed have no `latestRevision`, and the guard can never hold for them. Before such a guard is
  * built, the pointer is repaired from the immutable revision history by the same index-only repair registration
- * uses (conditional on the attribute still being absent). A project whose history is missing or ambiguous is refused
- * by name with CONFIG_INVALID, never as a busy workspace. A catalog row that already has its pointer is left alone.
+ * uses (conditional on the attribute still being absent). It repairs a row that exists; it never creates one. A project
+ * whose catalog row is absent, or whose history is missing or ambiguous, is refused with CONFIG_INVALID (never as a busy
+ * workspace): the owner hears PROJECT_RECORD_NEEDS_ADMIN, and the broker log names the project and the reason. A catalog
+ * row that already has its pointer is left alone. The E2E current-authority check also runs this when a task or Slack
+ * card is presented, so a legacy project's first view writes the (index-only, conditional) pointer.
  */
 async function ensureProjectCatalogPointer(dependencies: AwsBrokerDependencies, projectName: string): Promise<void> {
   const catalog = await getItem<{ latestRevision?: unknown }>(dependencies, projectCatalogKey(projectName));
   if (catalog?.latestRevision !== undefined) return;
+  const refuse = (reason: string): never => {
+    console.log(JSON.stringify({ component: "broker", event: "project.catalog_pointer_unrepairable", project: projectName, reason }));
+    throw agentXError("CONFIG_INVALID", PROJECT_RECORD_NEEDS_ADMIN);
+  };
+  if (catalog === undefined) return refuse("catalog-row-absent");
   try {
-    await repairProjectCatalogPointerFromHistory(dependencies, projectName);
+    await repairProjectCatalogPointerFromHistory(dependencies, projectName, { createCatalogRow: false });
   } catch (error) {
     if (!(error instanceof AgentXError) || error.code !== "PROJECT_REVISION_MISMATCH") throw error;
-    throw agentXError("CONFIG_INVALID", `project ${projectName} has no latest-revision pointer and it cannot be repaired from its revision history (${error.message.replace(/^PROJECT_REVISION_MISMATCH: /u, "")}); an administrator must register its latest revision again`);
+    return refuse(error.message.replace(/^PROJECT_REVISION_MISMATCH: /u, ""));
   }
 }
 
