@@ -53,17 +53,15 @@ const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, 
   env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test" } }).trim();
 const docker = (...args: string[]) => execFileSync("docker", args, { encoding: "utf8" }).trim();
 
-/** The project's ordinary check, which the worker runs beside the browser round and which both candidates pass: the defect is in what the browser sees, not in the syntax. */
-const ORDINARY_CHECK = { cwd: "repo/demo", executable: "node", args: ["--check", "server.mjs"], timeoutSeconds: 30 };
-
 /**
  * The worker's collector holds the toolchain the executor reported (a Linux Node in the executor image) against the process reading the result, which is the worker
- * itself on EC2 (same image, same path). On the CI runner only the path differs, and `collectOnThisHost` covers that; on a Mac the executor still runs on Linux, so the
- * platform differs too. This lends the collector the reported platform for its one synchronous call and nothing else.
+ * itself on EC2 (same image, same path). On the CI runner only the path differs, and `collectOnThisHost` covers that. On a Mac the executor still runs on Linux, so the
+ * platform differs too: only there, and only for the one synchronous `collect` call, the collector is lent the reported platform. Linux takes the plain path.
  */
 const collectLikeTheWorker: typeof collectOnThisHost = (input) => {
+  if (process.platform === "linux") return collectOnThisHost(input);
   const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
-  if (process.platform !== input.actual.runnerToolchain.platform) Object.defineProperty(process, "platform", { ...platform, value: input.actual.runnerToolchain.platform });
+  Object.defineProperty(process, "platform", { ...platform, value: input.actual.runnerToolchain.platform });
   try { return collectOnThisHost(input); } finally { Object.defineProperty(process, "platform", platform); }
 };
 
@@ -138,7 +136,7 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     expect(approval.status, JSON.stringify(approval.body)).toBe(200);
     const definition = projectRow().definition as Record<string, unknown> & { revision: number };
     const registration = await call(harness.handler, { method: "POST", path: "/v1/admin/projects", user: admin,
-      body: { definition: { ...definition, revision: definition.revision + 1, readiness: [ORDINARY_CHECK], e2e: proposalResponse.body.policy }, runtimeBinding: projectRow().runtimeBinding, setupApproval: { proposalRef, proposalSha256, decision: "approve" } } });
+      body: { definition: { ...definition, revision: definition.revision + 1, e2e: proposalResponse.body.policy }, runtimeBinding: projectRow().runtimeBinding, setupApproval: { proposalRef, proposalSha256, decision: "approve" } } });
     expect(registration.status, JSON.stringify(registration.body)).toBe(201);
     const policy = E2EPolicySchema.parse(proposalResponse.body.policy);
 
