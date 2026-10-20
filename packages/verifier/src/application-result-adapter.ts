@@ -889,7 +889,14 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
     const runtimeRef = input.compiled.runtimeAdmissionContext.selectionInput.intent.applicationRuntimeRefs.find((item) => item.targetId === expected.targetId);
     const application = input.compiled.applicationBindings.get(runtimeRef?.applicationId ?? "");
     const runtime = runtimeRef ? input.compiled.runtimeBindings.get(runtimeRef.runtimeProfileId) : undefined;
-    const accountRef = runtimeRef ? input.compiled.runtimeAdmissionContext.selectionInput.runtimeAccountRefs.find((item) => item.applicationId === runtimeRef.applicationId) : undefined;
+    // The case's own account: one application can carry several (an owner and a viewer), so the reference is the one of this case's application and account profile, and
+    // exactly one (as approval and the executor's `accountRefFor` resolve it). Never the application's first.
+    const accountRefs = runtimeRef ? input.compiled.runtimeAdmissionContext.selectionInput.runtimeAccountRefs
+      .filter((item) => item.applicationId === runtimeRef.applicationId && item.profileId === expected.accountProfileId) : [];
+    if (runtimeRef && accountRefs.length !== 1) {
+      throw new Error(`the admitted selection has ${accountRefs.length === 0 ? "no" : "more than one"} runtime account reference for account profile ${expected.accountProfileId} of application ${runtimeRef.applicationId}`);
+    }
+    const accountRef = accountRefs[0];
     const target = input.compiled.runtimeAdmissionContext.launchTargets.find((item) => item.targetId === expected.targetId);
     if (!scenario || !runtimeRef || !application || !runtime || !accountRef || !target) throw new Error("compiled case lacks exact scenario, application, runtime, account, or target binding");
     const originEntry = input.compiled.originByApplicationId.find((item) => item.applicationId === runtimeRef.applicationId);

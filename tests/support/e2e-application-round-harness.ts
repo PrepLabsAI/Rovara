@@ -33,11 +33,16 @@ export const healthScenario = (targetId: string, accountProfileId: string, index
   requestedTargetIds: [targetId], required: true, accountProfileId, minimumEvidence: "runtime", requiredRealComponentIds: [],
   steps: [{ kind: "request", requestId: "health", path: "/health", method: "GET", body: {} }], assertions: [{ kind: "http-status", path: "/health", method: "GET", equals: 200 }] });
 
-export function apiApplicationsSnapshot(count: number): { snapshot: E2ESourceSnapshot; tree: Record<string, string> } {
+/**
+ * `accounts` makes each application's API target available on those account profiles of the project contract (one target per account, as a web target is for the
+ * orders fixture), so one application carries several accounts. The first application's base target is `api-1`.
+ */
+export function apiApplicationsSnapshot(count: number, accounts: readonly string[] = []): { snapshot: E2ESourceSnapshot; tree: Record<string, string> } {
   const manifest = JSON.parse(ordersContractManifest) as { name: string; agentx: { e2e: Record<string, unknown> } };
   const tree: Record<string, string> = {};
-  for (const name of APPLICATION_NAMES.slice(0, count)) {
-    tree[`api-${name}/package.json`] = JSON.stringify({ ...manifest, name: `@acme/${name}`, dependencies: { express: "4.0.0" }, agentx: { e2e: { ...manifest.agentx.e2e, targetAccounts: [] } } });
+  for (const [index, name] of APPLICATION_NAMES.slice(0, count).entries()) {
+    tree[`api-${name}/package.json`] = JSON.stringify({ ...manifest, name: `@acme/${name}`, dependencies: { express: "4.0.0" },
+      agentx: { e2e: { ...manifest.agentx.e2e, targetAccounts: accounts.map((profileId) => ({ baseTargetId: `api-${index + 1}`, profileId })) } } });
   }
   return { snapshot: snapshotOf(tree), tree };
 }
@@ -63,6 +68,8 @@ export type RoundOptions = {
    * lists, which no planner does and which hides every comparison of a stored intent with a derived one.
    */
   storedIntent?: "planner" | "normalized";
+  /** Account profiles of the one application's project contract, each with its own target and scenario (needs `applications` of 1). Without it, the application has one account. */
+  accounts?: readonly string[];
 };
 
 const READY_API = { kind: "api" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedSteps,
@@ -75,7 +82,9 @@ export const apiRowKey = e2eRegisteredRuntimeKey("catalog", PROFILE, "api");
  */
 export async function startApplicationRound(options: RoundOptions = {}) {
   const applications = options.applications ?? 1;
-  const { snapshot, tree } = apiApplicationsSnapshot(applications);
+  const accounts = options.accounts ?? [];
+  if (accounts.length > 0 && applications !== 1) throw new Error("accounts need exactly one application");
+  const { snapshot, tree } = apiApplicationsSnapshot(applications, accounts);
   const capture = async () => snapshot;
   const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
   const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
@@ -106,8 +115,10 @@ export async function startApplicationRound(options: RoundOptions = {}) {
 
   const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_API] });
   if (context.status !== "available") throw new Error(context.reason);
-  const targets = context.targets.filter((item) => item.kind === "api").sort((left, right) => left.targetId.localeCompare(right.targetId));
-  if (targets.length !== applications) throw new Error(`expected ${applications} api targets, found ${targets.length}`);
+  const targets = context.targets.filter((item) => item.kind === "api" && (accounts.length === 0 || accounts.includes(item.accountProfileId)))
+    .sort((left, right) => left.accountProfileId.localeCompare(right.accountProfileId) || left.targetId.localeCompare(right.targetId));
+  const expectedTargets = accounts.length > 0 ? accounts.length : applications;
+  if (targets.length !== expectedTargets) throw new Error(`expected ${expectedTargets} api targets, found ${targets.length}: ${JSON.stringify(context.targets.map((item) => [item.targetId, item.accountProfileId]))}`);
   const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: targets.map((item) => item.targetId), portableOperationRefs: [], mockFixtureRefs: [],
     accountContextRefs: targets.flatMap((target) => context.accountContextRefs.filter((ref) => ref.applicationId === target.applicationId && ref.profileId === target.accountProfileId)),
     scenarios: targets.map((target, index) => healthScenario(target.targetId, target.accountProfileId, index)), semanticExportDeltas: [],

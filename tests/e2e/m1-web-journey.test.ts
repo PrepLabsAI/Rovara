@@ -88,7 +88,12 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
   const roots: string[] = [];
   afterAll(async () => { for (const dir of roots.splice(0)) await rm(dir, { recursive: true, force: true }).catch(() => undefined); }, 120_000);
 
-  it("runs the CSV export scenario through the real Docker host and real Chromium, sends the defective candidate back, and publishes the fixed one on its passing round", async () => {
+  /**
+   * One journey, in two shapes. "single-account": one scenario for the owner account, a defective candidate sent back, a fixed one published. "two-accounts": two scenarios
+   * for the two accounts (owner and viewer) of the same one application, as a planner writes a multi-role test, on the fixed candidate. Either way the stored plan is the
+   * planner's own (what its schema leaves optional is not written), never the parsed intent with empty lists written out.
+   */
+  async function journey(variant: "single-account" | "two-accounts") {
     const evidenceBase = process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR;
     const base = await realpath(evidenceBase ?? tmpdir());
     const root = await mkdtemp(join(await realpath(tmpdir()), "m1-web-journey-"));
@@ -154,19 +159,30 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
       supportedAssertions: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedAssertions };
     const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [readyWeb] });
     if (context.status !== "available") throw new Error(context.reason);
-    const target = context.targets.find((item) => item.kind === "web" && item.accountProfileId === "orders-owner");
+    const targetOf = (profileId: string) => context.targets.find((item) => item.kind === "web" && item.accountProfileId === profileId);
+    const target = targetOf("orders-owner");
     expect(target, JSON.stringify(context.targets)).toBeDefined();
+    const viewerTarget = targetOf("orders-viewer");
+    if (variant === "two-accounts") expect(viewerTarget, JSON.stringify(context.targets)).toBeDefined();
     const orders = (JSON.parse(await readFile(join(FIXTURE_ROOT, "fixtures/orders.json"), "utf8")) as { orders: Array<{ id: string; tenantId: string; customer: string; total: number; state: string }> }).orders;
     const scenario: E2EScenario = { scenarioId: "export-orders-csv", requirementId: "orders-export", requestedTargetIds: [target!.targetId], required: true, accountProfileId: target!.accountProfileId,
       minimumEvidence: "runtime", requiredRealComponentIds: [], steps: [{ kind: "navigate", path: "/" }, { kind: "click", testId: "download-orders" }],
       assertions: [{ kind: "csv", downloadName: "orders.csv", columns: ["id", "customer", "total", "state"],
         rows: orders.filter((order) => order.tenantId === "tenant-a").map((order) => [order.id, order.customer, String(order.total), order.state]) }] };
-    const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target!.targetId], portableOperationRefs: [], mockFixtureRefs: [],
-      accountContextRefs: context.accountContextRefs.filter((ref) => ref.applicationId === target!.applicationId && ref.profileId === target!.accountProfileId),
-      scenarios: [scenario], semanticExportDeltas: [],
-      applicationRuntimeRefs: context.runtimeRefs!.filter((ref) => ref.targetId === target!.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! })),
-      runtimeAccountRefs: context.runtimeAccountRefs!.filter((ref) => ref.applicationId === target!.applicationId && ref.profileId === target!.accountProfileId), unavailableTargetRefs: [] });
-    await harness.artifact(workspaceId, String(planning.id), "plan.md", planAnswer(planDocument({ title: "Add an orders CSV export", claims: [{ id: "1", text: "The orders page exports the owner's orders as CSV." }], e2e: intent })));
+    // The viewer of the same application: the page opens for it and shows the export button (what it may do with it is another scenario's matter).
+    const viewerScenario: E2EScenario | undefined = viewerTarget === undefined ? undefined : { scenarioId: "viewer-sees-export", requirementId: "orders-export-visible", requestedTargetIds: [viewerTarget.targetId],
+      required: true, accountProfileId: viewerTarget.accountProfileId, minimumEvidence: "runtime", requiredRealComponentIds: [],
+      steps: [{ kind: "navigate", path: "/" }], assertions: [{ kind: "visible", testId: "download-orders", equals: true }] };
+    const accountTargets = variant === "two-accounts" ? [target!, viewerTarget!] : [target!];
+    const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: accountTargets.map((item) => item.targetId), portableOperationRefs: [], mockFixtureRefs: [],
+      accountContextRefs: accountTargets.flatMap((item) => context.accountContextRefs.filter((ref) => ref.applicationId === item.applicationId && ref.profileId === item.accountProfileId)),
+      scenarios: variant === "two-accounts" ? [scenario, viewerScenario!] : [scenario], semanticExportDeltas: [],
+      applicationRuntimeRefs: accountTargets.flatMap((item) => context.runtimeRefs!.filter((ref) => ref.targetId === item.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! }))),
+      runtimeAccountRefs: accountTargets.flatMap((item) => context.runtimeAccountRefs!.filter((ref) => ref.applicationId === item.applicationId && ref.profileId === item.accountProfileId)), unavailableTargetRefs: [] });
+    // The plan is stored the way the planner writes it: what the schema makes optional and the planner has nothing to say about is left out, not written as empty lists.
+    const { portableOperationRefs: _portable, mockFixtureRefs: _mocks, unavailableTargetRefs: _unavailable, ...plannerIntent } = intent;
+    void _portable; void _mocks; void _unavailable;
+    await harness.artifact(workspaceId, String(planning.id), "plan.md", planAnswer(planDocument({ title: "Add an orders CSV export", claims: [{ id: "1", text: "The orders page exports the owner's orders as CSV." }], e2e: plannerIntent as never })));
     await harness.finish(workspaceId, String(planning.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
     const workflowNow = () => (harness.db.get(taskKey.pk, taskKey.sk) as { workflow: { revision: number; stage: string; state: string; blockReason?: string; artifacts: Array<{ sha256: string }>;
       candidate?: { digest: string }; e2e?: Record<string, unknown> } }).workflow;
@@ -280,9 +296,41 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
       await harness.handler({ source: "agentx.workflow-dispatch-recovery" });
     }
 
+    /** Nothing of any round is left behind: no container, network or volume still carries the run label, and the run directory is empty. */
+    const nothingLeftBehind = async () => {
+      const labelled = (kind: "ps" | "network" | "volume") => docker(...(kind === "ps" ? ["ps", "-a", "--filter", "label=rovara.run", "--format", "{{.Names}}"]
+        : [kind, "ls", "--filter", "label=rovara.run", "--format", "{{.Name}}"]));
+      expect({ containers: labelled("ps"), networks: labelled("network"), volumes: labelled("volume") }).toEqual({ containers: "", networks: "", volumes: "" });
+      expect(await readdir(runRoot)).toEqual([]);
+    };
+
     // The creator's sign-in record, as the broker reads it before it warms compute for a round.
     const creator = harness.db.get(`DEVELOPER#${MAYA.developerId}`, "META");
     if (creator !== undefined) harness.db.set({ ...creator, entityType: "DEVELOPER" });
+
+    if (variant === "two-accounts") {
+      // The coder implements the export (the fixture app as it ships); the broker admits one round of two cases, one per account; the worker runs both in real Chromium on the
+      // Docker host; the broker verifies the evidence itself, case by case, each against its own account.
+      faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${candidates.fixed}/." repo/demo/` })]), fauxAssistantMessage("I added the orders CSV export.")]);
+      await writePreparationManifest(Number((harness.db.get(taskKey.pk, taskKey.sk) as { startingRevision?: number }).startingRevision ?? 1));
+      const implemented = await runOperation("IMPLEMENT");
+      expect(implemented.operation.status, JSON.stringify(implemented.operation)).toBe("SUCCEEDED");
+      expect(workflowNow(), JSON.stringify(workflowNow())).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+      await completeReadiness();
+      const checks = await runOperation("CHECKS");
+      expect(checks.operation.status, JSON.stringify({ operation: checks.operation, workflow: workflowNow() })).toBe("SUCCEEDED");
+      // A round that did not pass says why: the group evidence's own diagnostics (the executor's log tail) go with the failure.
+      const diagnostics = (checks.operation.workflowE2EGroupEvidenceRefs as Array<{ evidenceRef: { key: string } }> | undefined ?? []).map((ref) => (JSON.parse(harness.s3.objects.get(ref.evidenceRef.key)!) as { groupRun: { diagnostics: unknown } }).groupRun.diagnostics);
+      expect(workflowNow(), JSON.stringify({ blockReason: workflowNow().blockReason, diagnostics })).toMatchObject({ stage: "REVIEW" });
+      expect((workflowNow().e2e as { qualifiedRound?: unknown }).qualifiedRound).toBeDefined();
+      const refs = checks.operation.workflowE2EGroupEvidenceRefs as Array<{ evidenceRef: { key: string } }>;
+      const cases = refs.flatMap((ref) => (JSON.parse(harness.s3.objects.get(ref.evidenceRef.key)!) as { groupRun: { collection: { result: { cases: Array<{ scenarioId?: string; assertionReceipts: Array<{ assertionIndex: number; status: string }> }> } } } })
+        .groupRun.collection.result.cases);
+      expect(cases, "one case per account of the one application").toHaveLength(2);
+      for (const item of cases) expect(item.assertionReceipts.map((receipt) => [receipt.assertionIndex, receipt.status])).toEqual([[0, "passed"]]);
+      await nothingLeftBehind();
+      return;
+    }
 
     // Step 2: the coder implements the export; candidate 1 is the fixture app with its extra-order defect.
     const implementation = (candidate: string) => fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${candidate}/." repo/demo/` })]);
@@ -355,10 +403,15 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     expect(checks?.length ?? 0).toBeGreaterThan(0);
     expect(JSON.stringify(checks)).toContain(webRowKey.sk);
 
-    // Step 7: nothing of either round is left behind: no container, network or volume still carries the run label, and the run directory is empty.
-    const labelled = (kind: "ps" | "network" | "volume") => docker(...(kind === "ps" ? ["ps", "-a", "--filter", "label=rovara.run", "--format", "{{.Names}}"]
-      : [kind, "ls", "--filter", "label=rovara.run", "--format", kind === "network" ? "{{.Name}}" : "{{.Name}}"]));
-    expect({ containers: labelled("ps"), networks: labelled("network"), volumes: labelled("volume") }).toEqual({ containers: "", networks: "", volumes: "" });
-    expect(await readdir(runRoot)).toEqual([]);
+    // Step 7: nothing of either round is left behind.
+    await nothingLeftBehind();
+  }
+
+  it("runs the CSV export scenario through the real Docker host and real Chromium, sends the defective candidate back, and publishes the fixed one on its passing round", async () => {
+    await journey("single-account");
+  }, 1_800_000);
+
+  it("runs two scenarios on two accounts of the same application (owner and viewer), as the planner wrote them, and passes the round on the fixed candidate", async () => {
+    await journey("two-accounts");
   }, 1_800_000);
 });
