@@ -51,14 +51,15 @@ async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: Fa
   const repositoryRoot = await temp("candidate-repository-");
   const calls: string[] = [];
   const treeOf = vi.fn<CandidateGit["treeOf"]>(async () => options.treeSha ?? admission.candidateTreeSha);
-  const archiveInto = vi.fn<CandidateGit["archiveInto"]>(async (_root, _commitSha, destination) => {
+  const materializeInto = vi.fn<CandidateGit["materializeInto"]>(async (_root, _commitSha, destination) => {
     for (const source of admission.sourceSnapshot.sources) {
       const path = join(destination, source.path);
       await mkdir(dirname(path), { recursive: true });
       await writeFile(path, Buffer.from(source.bytesBase64, "base64"));
     }
+    return [];
   });
-  const git: CandidateGit = { treeOf, archiveInto };
+  const git: CandidateGit = { treeOf, materializeInto };
   const hosts: DockerApplicationHost[] = [];
   const createHost = vi.fn((input: Parameters<WorkflowE2EApplicationRuntime["createHost"]>[0]) => {
     const host = createDockerApplicationHost({ ...input, docker: fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, now: () => Date.now(),
@@ -86,7 +87,7 @@ async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: Fa
   const runId = admission.groups[0]!.outerBinding.runId;
   const groupId = admission.groups[0]!.outerBinding.groupId;
   const okOutput = (outDir: string) => writeExecutorOutput(outDir, { exitCode: 0, reason: null, runId, groupId });
-  return { fake, fixture, admission, invocation, saved, saveEvidence, readAdmission, runRoot, repositoryRoot, calls, treeOf, archiveInto, createHost, collect, run, runId, groupId, okOutput };
+  return { fake, fixture, admission, invocation, saved, saveEvidence, readAdmission, runRoot, repositoryRoot, calls, treeOf, materializeInto, createHost, collect, run, runId, groupId, okOutput };
 }
 
 type SavedEvidence = { schemaVersion: string; round: unknown; groupRun: Record<string, unknown>; groupRuns?: unknown;
@@ -103,7 +104,7 @@ describe("workflow E2E application rounds", () => {
     expect(s.createHost).toHaveBeenCalledTimes(1);
     expect(s.calls).toEqual(["allocate", "execute", "close"]);
     expect(s.treeOf).toHaveBeenCalledWith(s.repositoryRoot, s.admission.candidateCommitSha, expect.anything());
-    expect(s.archiveInto).toHaveBeenCalledWith(s.repositoryRoot, s.admission.candidateCommitSha, expect.stringContaining(s.runRoot), expect.anything());
+    expect(s.materializeInto).toHaveBeenCalledWith(s.repositoryRoot, s.admission.candidateCommitSha, expect.stringContaining(s.runRoot), expect.anything());
     // The staged candidate is private to the round and gone afterwards, and the host removed every labeled resource.
     expect(await readdir(s.runRoot)).toEqual([]);
     expect(s.fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
@@ -125,7 +126,7 @@ describe("workflow E2E application rounds", () => {
     const s = await setup({ treeSha: "f".repeat(40) });
     await expect(s.run()).rejects.toThrow("candidate tree does not match admission");
     expect(s.treeOf).toHaveBeenCalledTimes(1);
-    expect(s.archiveInto).not.toHaveBeenCalled();
+    expect(s.materializeInto).not.toHaveBeenCalled();
     expect(s.createHost).not.toHaveBeenCalled();
     expect(s.fake.calls).toEqual([]);
     expect(await readdir(s.runRoot)).toEqual([]);
@@ -182,7 +183,7 @@ describe("workflow E2E application rounds", () => {
       admissionRef: { key: `workflow-e2e-admissions/sha256/${portableSha}.json`, sha256: portableSha, byteLength: portableBytes.byteLength } } } });
     const construct = vi.fn(() => { throw new Error("the docker host must not be constructed"); });
     const touched = vi.fn(() => { throw new Error("portable admission must not touch the application runtime"); });
-    const eager = { runRoot: s.runRoot, createHost: construct, git: { treeOf: touched, archiveInto: touched } } as unknown as WorkflowE2EApplicationRuntime;
+    const eager = { runRoot: s.runRoot, createHost: construct, git: { treeOf: touched, materializeInto: touched } } as unknown as WorkflowE2EApplicationRuntime;
     const lazy = vi.fn(() => eager);
     for (const application of [eager, lazy]) {
       const failure = await executeWorkflowE2EChecks({ invocation, readAdmission: portableRead, saveEvidence: s.saveEvidence, sourceRoot: "/workspace/runtime",
@@ -209,7 +210,7 @@ describe("workflow E2E application rounds", () => {
     const s = await setup();
     const other = WorkerInvocationSchema.parse({ ...s.invocation, payload: { ...s.invocation.payload, workflowE2EAdmission: { ...s.invocation.payload.workflowE2EAdmission, groupRunIds: [randomUUID()] } } });
     await expect(executeWorkflowE2EChecks({ invocation: other, readAdmission: s.readAdmission, saveEvidence: s.saveEvidence, sourceRoot: "/workspace/runtime",
-      evidenceRoot: "/evidence", application: { runRoot: s.runRoot, createHost: s.createHost, git: { treeOf: s.treeOf, archiveInto: s.archiveInto } },
+      evidenceRoot: "/evidence", application: { runRoot: s.runRoot, createHost: s.createHost, git: { treeOf: s.treeOf, materializeInto: s.materializeInto } },
       candidateRepositoryRoot: () => s.repositoryRoot } as Parameters<typeof executeWorkflowE2EChecks>[0])).rejects.toThrow(/signed CHECKS invocation/);
     expect(s.treeOf).not.toHaveBeenCalled();
     expect(s.createHost).not.toHaveBeenCalled();
@@ -217,12 +218,13 @@ describe("workflow E2E application rounds", () => {
 
   it("refuses a staged tree that differs from the approved build source manifest", async () => {
     const s = await setup();
-    s.archiveInto.mockImplementationOnce(async (_root: string, _sha: string, destination: string) => {
+    s.materializeInto.mockImplementationOnce(async (_root: string, _sha: string, destination: string) => {
       for (const source of s.admission.sourceSnapshot.sources) {
         await mkdir(dirname(join(destination, source.path)), { recursive: true });
         await writeFile(join(destination, source.path), Buffer.from(source.bytesBase64, "base64"));
       }
       await writeFile(join(destination, "extra.js"), "process.exit(0)");
+      return [];
     });
     await expect(s.run()).rejects.toThrow(/approved build source/);
     expect(s.createHost).not.toHaveBeenCalled();
@@ -251,7 +253,7 @@ describe("workflow E2E application rounds", () => {
     expect(s.fake.calls).toEqual([]);
     // Nor does a worker that offers no repository lookup at all fall back to its runtime root.
     await expect(executeWorkflowE2EChecks({ invocation: s.invocation, readAdmission: s.readAdmission, saveEvidence: s.saveEvidence, sourceRoot: "/workspace/runtime",
-      evidenceRoot: "/evidence", application: { runRoot: s.runRoot, createHost: s.createHost, git: { treeOf: s.treeOf, archiveInto: s.archiveInto } },
+      evidenceRoot: "/evidence", application: { runRoot: s.runRoot, createHost: s.createHost, git: { treeOf: s.treeOf, materializeInto: s.materializeInto } },
     })).rejects.toThrow("candidate repository is not on this worker");
     expect(s.treeOf).not.toHaveBeenCalled();
   });

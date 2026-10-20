@@ -1,87 +1,174 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, readdir, readFile, realpath, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
 
 const SHA1 = /^[a-f0-9]{40}$/;
-const GIT_OUTPUT_CAP_BYTES = 4096;
 const STDERR_TAIL_BYTES = 2048;
 const REGULAR_FILE_CAP_BYTES = 8 * 1024 * 1024;
+const TREE_LISTING_CAP_BYTES = 32 * 1024 * 1024;
+const MAX_TREE_ENTRIES = 100_000;
+const MAX_FILES = 10_000;
+const MAX_TOTAL_FILE_BYTES = 64 * 1024 * 1024;
+const BLOB_STREAM_CAP_BYTES = MAX_TOTAL_FILE_BYTES + MAX_FILES * 128;
 
-/** How the worker reads the candidate commit it is about to build. The default is the `git` and `tar` on this machine. */
+/** An entry of the candidate tree that is not a regular file and so is never written: a symlink (120000) or a submodule (160000). */
+export type SkippedTreeEntry = { path: string; mode: string };
+
+/** How the worker reads the candidate commit it is about to build. The default never runs git inside the candidate's own repository. */
 export type CandidateGit = {
-  /** The tree id of `commitSha` (`git -C <root> rev-parse <commitSha>^{tree}`). */
+  /** The tree id of `commitSha`, resolved by git in a worker-owned throwaway repository that only borrows the candidate's objects. */
   treeOf(repositoryRoot: string, commitSha: string, signal: AbortSignal): Promise<string>;
-  /** Extracts exactly the files of commit `commitSha` (`git -C <root> archive`) into the existing directory `destination`. */
-  archiveInto(repositoryRoot: string, commitSha: string, destination: string, signal: AbortSignal): Promise<void>;
+  /**
+   * Writes exactly the regular files (100644, 100755) of commit `commitSha` into the existing directory `destination`, byte for byte, applying no filter,
+   * attribute or export substitution. Symlinks and submodules are not written; they are returned so the caller can hold them to the approved omissions.
+   */
+  materializeInto(repositoryRoot: string, commitSha: string, destination: string, signal: AbortSignal): Promise<ReadonlyArray<SkippedTreeEntry>>;
 };
 
 /** The part of an approved build source manifest the worker enforces on what it staged. */
 export type ApprovedBuildSource = {
   files: ReadonlyArray<{ path: string; mode: "100644" | "100755"; sha256: string }>;
-  omissions: ReadonlyArray<{ path: string }>;
+  omissions: ReadonlyArray<{ path: string; mode: string }>;
 };
 
 /**
- * Everything git and tar get from this process. The candidate's own code can write into its repository, so git is told to trust nothing but the
- * objects named by id: no replace refs, no system or global config, no home directory, and none of this worker's credentials.
+ * Everything git gets from this process: no replace objects, no system or global config, no home directory, no credentials, no prompts. Git is only ever
+ * run in a repository this worker just created, so there is no candidate-controlled config or attributes for it to read.
  */
 export function candidateGitEnvironment(): Record<string, string> {
   return { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", GIT_NO_REPLACE_OBJECTS: "1", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_ATTR_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" };
 }
-/**
- * Repository-local attribute files cannot be switched off by environment, so the global one is pinned empty and `enforceApprovedBuildSource` holds the content.
- * `safe.directory` is set on the command line (a protected place) for the worker's own repository path only: with no home or global config, git would
- * otherwise refuse a repository whose owner is not the worker's user.
- */
-const gitFlags = (repositoryRoot: string): string[] => ["-c", "core.attributesFile=/dev/null", "-c", `safe.directory=${repositoryRoot}`];
+const GIT_FLAGS = ["-c", "core.attributesFile=/dev/null"] as const;
 const NOT_A_SHA = "candidate commit is not a full lowercase hex object id";
 const tailOf = (text: string): string => (text.length <= STDERR_TAIL_BYTES ? text : text.slice(text.length - STDERR_TAIL_BYTES)).trim();
 
-export function createProcessCandidateGit(): CandidateGit {
+/** Runs `git` with the hardened environment and no shell; kills it on abort or when its output passes `maxBytes`. */
+function runGit(args: readonly string[], options: { cwd: string; signal: AbortSignal; maxBytes: number; input?: Buffer }): Promise<Buffer> {
+  return new Promise<Buffer>((resolve, reject) => {
+    if (options.signal.aborted) { reject(options.signal.reason instanceof Error ? options.signal.reason : new Error("candidate git was cancelled")); return; }
+    const child = spawn("git", [...GIT_FLAGS, ...args], { cwd: options.cwd, env: candidateGitEnvironment(), stdio: ["pipe", "pipe", "pipe"] });
+    const chunks: Buffer[] = []; let total = 0; let stderr = "";
+    let settled = false;
+    const finish = (error?: Error, value?: Buffer) => {
+      if (settled) return;
+      settled = true;
+      options.signal.removeEventListener("abort", onAbort);
+      if (error) { child.kill("SIGKILL"); reject(error); } else resolve(value!);
+    };
+    const onAbort = () => finish(options.signal.reason instanceof Error ? options.signal.reason : new Error("candidate git was cancelled"));
+    options.signal.addEventListener("abort", onAbort, { once: true });
+    child.stdout.on("data", (chunk: Buffer) => {
+      total += chunk.byteLength;
+      if (total > options.maxBytes) { finish(new Error("candidate source exceeds its size bound")); return; }
+      chunks.push(chunk);
+    });
+    child.stderr.on("data", (chunk: Buffer) => { stderr = tailOf(stderr + chunk.toString("utf8")); });
+    child.stdin.on("error", () => undefined);
+    child.once("error", (error) => finish(new Error(`could not run git: ${error.message}`)));
+    child.once("close", (code) => { if (code === 0) finish(undefined, Buffer.concat(chunks)); else finish(new Error(`git ${args.find((arg) => !arg.startsWith("-") && !arg.startsWith("/")) ?? ""} failed: ${stderr}`)); });
+    child.stdin.end(options.input);
+  });
+}
+
+const NOT_PLAIN = "candidate repository is not a plain git directory";
+async function plainDirectory(path: string): Promise<void> {
+  const stat = await lstat(path).catch(() => undefined);
+  if (stat === undefined || !stat.isDirectory() || stat.isSymbolicLink() || (await realpath(path)) !== path) throw new Error(NOT_PLAIN);
+}
+
+/**
+ * Runs `use` against a throwaway bare repository this worker owns, created under `scratchRoot` with an empty template, no refs, no config beyond git's own
+ * defaults, and `objects/info/alternates` naming only the candidate's object directory. Nothing of the candidate repository except its objects is readable
+ * by git here, and the throwaway is removed on every path.
+ */
+async function withBorrowedObjects<T>(scratchRoot: string, repositoryRoot: string, signal: AbortSignal, use: (gitDir: string) => Promise<T>): Promise<T> {
+  const realRepository = await realpath(repositoryRoot).catch(() => { throw new Error(NOT_PLAIN); });
+  const gitDirectory = join(realRepository, ".git");
+  const objects = join(gitDirectory, "objects");
+  await plainDirectory(gitDirectory);
+  await plainDirectory(objects);
+  if (objects.includes("\n")) throw new Error(NOT_PLAIN);
+  await mkdir(scratchRoot, { recursive: true, mode: 0o700 });
+  const work = await mkdtemp(join(scratchRoot, "git-"));
+  try {
+    const gitDir = join(work, "borrowed.git");
+    await runGit(["init", "--bare", "--quiet", "--template=", gitDir], { cwd: work, signal, maxBytes: 4096 });
+    await mkdir(join(gitDir, "objects", "info"), { recursive: true });
+    await writeFile(join(gitDir, "objects", "info", "alternates"), `${objects}\n`, { mode: 0o600 });
+    return await use(gitDir);
+  } finally {
+    await rm(work, { recursive: true, force: true });
+  }
+}
+
+const FILE_MODES = new Set(["100644", "100755"]);
+const SKIPPED_MODES = new Set(["120000", "160000"]);
+
+/** Writes `bytes` at `relativePath` under `root`: folders are created or must be real directories, the file is created exclusively, and nothing is followed. */
+async function writeFileConfined(root: string, relativePath: string, bytes: Buffer, executable: boolean): Promise<void> {
+  const parts = relativePath.split("/");
+  if (parts.some((part) => part === "" || part === "." || part === "..") || relativePath.startsWith("/") || relativePath.includes("\0")) throw new Error(`${MISMATCH}: unsafe path`);
+  let current = await realpath(root);
+  for (const part of parts.slice(0, -1)) {
+    current = join(current, part);
+    const stat = await lstat(current).catch(() => undefined);
+    if (stat === undefined) await mkdir(current, { mode: 0o755 });
+    else if (!stat.isDirectory()) throw new Error(`${MISMATCH}: ${relativePath} passes through a symlink or file`);
+  }
+  const target = join(current, parts.at(-1)!);
+  await writeFile(target, bytes, { flag: "wx", mode: executable ? 0o755 : 0o644 });
+  // The mode is set outright: a process umask must not make the tree unreadable to the build container's user.
+  await chmod(target, executable ? 0o755 : 0o644);
+}
+
+export function createProcessCandidateGit(scratchRoot: string): CandidateGit {
   return {
-    treeOf: (repositoryRoot, commitSha, signal) => new Promise<string>((resolve, reject) => {
-      if (!SHA1.test(commitSha)) { reject(new Error(NOT_A_SHA)); return; }
-      execFile("git", [...gitFlags(repositoryRoot), "-C", repositoryRoot, "rev-parse", `${commitSha}^{tree}`], { env: candidateGitEnvironment(), maxBuffer: GIT_OUTPUT_CAP_BYTES, signal, encoding: "utf8" }, (error, stdout, stderr) => {
-        if (error) { reject(new Error(`could not read the candidate tree: ${tailOf(stderr) || error.message}`)); return; }
-        const tree = stdout.trim();
-        if (!SHA1.test(tree)) { reject(new Error("git did not answer with a tree id")); return; }
-        resolve(tree);
+    treeOf: async (repositoryRoot, commitSha, signal) => {
+      if (!SHA1.test(commitSha)) throw new Error(NOT_A_SHA);
+      return withBorrowedObjects(scratchRoot, repositoryRoot, signal, async (gitDir) => {
+        const tree = (await runGit([`--git-dir=${gitDir}`, "rev-parse", `${commitSha}^{tree}`], { cwd: dirname(gitDir), signal, maxBytes: 4096 })).toString("utf8").trim();
+        if (!SHA1.test(tree)) throw new Error("git did not answer with a tree id");
+        return tree;
       });
-    }),
-    archiveInto: (repositoryRoot, commitSha, destination, signal) => new Promise<void>((resolve, reject) => {
-      if (!SHA1.test(commitSha)) { reject(new Error(NOT_A_SHA)); return; }
-      if (signal.aborted) { reject(signal.reason instanceof Error ? signal.reason : new Error("candidate extraction was cancelled")); return; }
-      const archive = spawn("git", [...gitFlags(repositoryRoot), "-C", repositoryRoot, "archive", "--format=tar", commitSha], { env: candidateGitEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
-      // -p keeps the archive's modes whatever this process's umask is: the build container's unprivileged user must be able to read the tree.
-      const extract = spawn("tar", ["-x", "-p", "-f", "-", "-C", destination, "--no-same-owner"], { env: candidateGitEnvironment(), stdio: ["pipe", "ignore", "pipe"] });
-      let archiveStderr = ""; let extractStderr = "";
-      let archiveCode: number | null | undefined; let extractCode: number | null | undefined;
-      let settled = false;
-      const finish = (error?: Error) => {
-        if (settled) return;
-        settled = true;
-        signal.removeEventListener("abort", onAbort);
-        if (error) { archive.kill("SIGKILL"); extract.kill("SIGKILL"); reject(error); } else resolve();
-      };
-      const onAbort = () => finish(signal.reason instanceof Error ? signal.reason : new Error("candidate extraction was cancelled"));
-      const check = () => {
-        if (archiveCode === undefined || extractCode === undefined) return;
-        if (archiveCode !== 0) finish(new Error(`git archive failed: ${tailOf(archiveStderr)}`));
-        else if (extractCode !== 0) finish(new Error(`tar failed: ${tailOf(extractStderr)}`));
-        else finish();
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-      archive.stderr.on("data", (chunk: Buffer) => { archiveStderr = tailOf(archiveStderr + chunk.toString("utf8")); });
-      extract.stderr.on("data", (chunk: Buffer) => { extractStderr = tailOf(extractStderr + chunk.toString("utf8")); });
-      extract.stdin.on("error", () => undefined);
-      archive.stdout.pipe(extract.stdin);
-      archive.once("error", (error) => finish(new Error(`could not run git: ${error.message}`)));
-      extract.once("error", (error) => finish(new Error(`could not run tar: ${error.message}`)));
-      archive.once("close", (code) => { archiveCode = code ?? 1; check(); });
-      extract.once("close", (code) => { extractCode = code ?? 1; check(); });
-    }),
+    },
+    materializeInto: async (repositoryRoot, commitSha, destination, signal) => {
+      if (!SHA1.test(commitSha)) throw new Error(NOT_A_SHA);
+      return withBorrowedObjects(scratchRoot, repositoryRoot, signal, async (gitDir) => {
+        const cwd = dirname(gitDir);
+        const listing = await runGit([`--git-dir=${gitDir}`, "ls-tree", "-r", "-z", "--full-tree", `${commitSha}^{tree}`], { cwd, signal, maxBytes: TREE_LISTING_CAP_BYTES });
+        const records = listing.toString("utf8").split("\0").filter((record) => record !== "");
+        if (records.length > MAX_TREE_ENTRIES) throw new Error("candidate tree has more entries than the build source allows");
+        const files: Array<{ path: string; mode: string; sha: string }> = [];
+        const skipped: SkippedTreeEntry[] = [];
+        for (const record of records) {
+          const match = /^(\d{6}) (blob|commit) ([0-9a-f]{40})\t(.+)$/s.exec(record);
+          if (!match) throw new Error("git listed a tree entry in an unexpected form");
+          const [, mode, type, sha, path] = match as unknown as [string, string, string, string, string];
+          if (SKIPPED_MODES.has(mode)) skipped.push({ path, mode });
+          else if (FILE_MODES.has(mode) && type === "blob") files.push({ path, mode, sha });
+          else throw new Error(`candidate tree entry ${path} has a mode the build source cannot hold`);
+        }
+        if (files.length > MAX_FILES) throw new Error("candidate tree has more files than the build source allows");
+        const blobs = files.length === 0 ? Buffer.alloc(0) : await runGit([`--git-dir=${gitDir}`, "cat-file", "--batch"],
+          { cwd, signal, maxBytes: BLOB_STREAM_CAP_BYTES, input: Buffer.from(`${files.map((file) => file.sha).join("\n")}\n`) });
+        let offset = 0; let totalBytes = 0;
+        for (const file of files) {
+          const newline = blobs.indexOf(0x0a, offset);
+          const header = newline < 0 ? [] : blobs.subarray(offset, newline).toString("utf8").split(" ");
+          const size = Number(header[2]);
+          if (header[0] !== file.sha || header[1] !== "blob" || !Number.isSafeInteger(size) || size < 0 || size > REGULAR_FILE_CAP_BYTES) throw new Error(`candidate blob for ${file.path} is missing or too large`);
+          totalBytes += size;
+          if (totalBytes > MAX_TOTAL_FILE_BYTES) throw new Error("candidate files exceed the build source size bound");
+          const bytes = blobs.subarray(newline + 1, newline + 1 + size);
+          if (bytes.byteLength !== size || blobs[newline + 1 + size] !== 0x0a) throw new Error(`candidate blob for ${file.path} is truncated`);
+          await writeFileConfined(destination, file.path, bytes, file.mode === "100755");
+          offset = newline + 2 + size;
+        }
+        return skipped;
+      });
+    },
   };
 }
 
@@ -156,7 +243,7 @@ export async function enforceApprovedBuildSource(directory: string, manifest: Ap
 
 /**
  * Stages the exact candidate commit for a build: the repository's tree for that commit must be the admitted one before anything is created, then the commit is
- * extracted into a fresh `destination` (its parent must exist) and held to every approved build source manifest. A refused tree is removed.
+ * written (blobs only) into a fresh `destination` and held to every approved build source manifest. A refused tree is removed.
  */
 export async function stageCandidateSource(input: { git: CandidateGit; repositoryRoot: string; commitSha: string; treeSha: string; destination: string;
   manifests: readonly ApprovedBuildSource[]; signal: AbortSignal }): Promise<void> {
@@ -167,7 +254,13 @@ export async function stageCandidateSource(input: { git: CandidateGit; repositor
   await removeWithoutFollowing(dirname(input.destination), basename(input.destination));
   await mkdir(input.destination, { mode: 0o755 });
   try {
-    await input.git.archiveInto(input.repositoryRoot, input.commitSha, input.destination, input.signal);
+    const skipped = await input.git.materializeInto(input.repositoryRoot, input.commitSha, input.destination, input.signal);
+    // A symlink or submodule is never written; it must be one the approved build source explicitly omits (path and mode), or the tree is refused.
+    for (const entry of skipped) {
+      if (!input.manifests.every((manifest) => manifest.omissions.some((omission) => omission.path === entry.path && omission.mode === entry.mode))) {
+        throw new Error(`candidate contains a symlink or submodule the approved build source does not omit: ${entry.path}`);
+      }
+    }
     // The build container's unprivileged user reads this tree through a read-only mount.
     await chmod(input.destination, 0o755);
     for (const manifest of input.manifests) await enforceApprovedBuildSource(input.destination, manifest);

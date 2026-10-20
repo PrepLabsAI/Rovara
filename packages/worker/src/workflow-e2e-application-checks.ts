@@ -114,7 +114,7 @@ export async function executeWorkflowE2EApplicationChecks(input: {
     for (const suite of validated.applicationSuites) for (const application of suite.applicationBindings.values()) manifests.set(application.buildSource.manifest.manifestDigest, application.buildSource.manifest);
     assertBuildSourceBelongsToCandidate([...manifests.values()], admitted);
     await mkdir(resolve(runtime.runRoot), { recursive: true, mode: 0o700 });
-    await stageCandidateSource({ git: runtime.git ?? createProcessCandidateGit(), repositoryRoot,
+    await stageCandidateSource({ git: runtime.git ?? createProcessCandidateGit(resolve(runtime.runRoot)), repositoryRoot,
       commitSha: admission.candidateCommitSha, treeSha: admission.candidateTreeSha, destination: stagedSource, manifests: [...manifests.values()], signal: controller.signal });
     input.throwIfCancelled();
 
