@@ -106,8 +106,16 @@ describe("report-unreadable log note", () => {
     const long = reportUnreadableNote("shard-1", "r", Buffer.from(`HEAD${"x".repeat(100_000)}TAIL`));
     expect(long).toContain("HEAD");
     expect(long).not.toContain("TAIL");
-    expect(Buffer.byteLength(long)).toBeLessThan(8 * 1024);
+    expect(Buffer.byteLength(long)).toBeLessThan(17 * 1024);
     expect(long).toContain("100008 bytes of stderr");
+  });
+
+  it("also carries a bounded head of stdout, the report that did not parse, when there is one", () => {
+    const note = reportUnreadableNote("shard-1", "application report does not match pinned report-1 structure", Buffer.alloc(0), Buffer.from(`{"run":{"status":"weird"}}${"y".repeat(50_000)}`));
+    expect(note).toContain("stderr was empty");
+    expect(note).toContain('stdout head (16384 of 50026 bytes of stdout): {"run":{"status":"weird"}}');
+    expect(Buffer.byteLength(note)).toBeLessThan(17 * 1024);
+    expect(reportUnreadableNote("shard-1", "r", Buffer.from("e"))).not.toContain("stdout head");
   });
 
   it("says so when the CLI wrote nothing to stderr", () => {

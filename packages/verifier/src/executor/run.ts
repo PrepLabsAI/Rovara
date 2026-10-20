@@ -65,16 +65,25 @@ function runProcess(executable: string, args: readonly string[], options: { cwd:
 const processRecord = (result: ProcessResult) => ({ status: result.status, signal: result.signal, startedAt: result.startedAt, finishedAt: result.finishedAt,
   timedOut: result.timedOut, aborted: result.aborted, outputExceeded: result.outputExceeded, stdoutSha256: sha(result.stdout), stderrSha256: sha(result.stderr),
   stdoutBytes: result.stdout.byteLength, stderrBytes: result.stderr.byteLength });
-/** How much of the CLI's stderr the executor's own log keeps when a shard's report cannot be read (the full stderr is also in the shard's run.stderr.txt, redacted). */
-const UNREADABLE_STDERR_HEAD_BYTES = 4 * 1024;
-/** The executor.log line for a shard whose report is unreadable: the parse reason and a bounded head of what the CLI wrote to stderr, cut on a character boundary. */
-export function reportUnreadableNote(shardId: string, reason: string, stderr: Uint8Array): string {
-  let end = Math.min(stderr.byteLength, UNREADABLE_STDERR_HEAD_BYTES);
+/** How much of the CLI's stderr and stdout the executor's own log keeps when a shard's report cannot be read (the full streams are also in the shard's output files, redacted). */
+const UNREADABLE_HEAD_BYTES = 16 * 1024;
+/** The head of `bytes` as text, cut on a character boundary, with how many bytes there were. */
+function boundedHead(bytes: Uint8Array): { text: string; shown: number } {
+  let end = Math.min(bytes.byteLength, UNREADABLE_HEAD_BYTES);
   // Back off a partial multi-byte sequence at the cut so no replacement character appears.
-  if (end < stderr.byteLength) while (end > 0 && (stderr[end]! & 0xc0) === 0x80) end -= 1;
-  const head = Buffer.from(stderr.subarray(0, end)).toString("utf8").trim();
-  const shown = head === "" ? "stderr was empty" : `stderr head (${end} of ${stderr.byteLength} bytes of stderr): ${head}`;
-  return `shard ${shardId}: report unreadable (${reason}); ${shown}`;
+  if (end < bytes.byteLength) while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1;
+  return { text: Buffer.from(bytes.subarray(0, end)).toString("utf8").trim(), shown: end };
+}
+/**
+ * The executor.log line for a shard whose report is unreadable: the parse reason, a bounded head of what the CLI wrote to stderr and (when there is any, as for a report that
+ * parsed as JSON but not as the pinned structure) a bounded head of its stdout.
+ */
+export function reportUnreadableNote(shardId: string, reason: string, stderr: Uint8Array, stdout: Uint8Array = new Uint8Array()): string {
+  const err = boundedHead(stderr);
+  const out = boundedHead(stdout);
+  const errPart = err.text === "" ? "stderr was empty" : `stderr head (${err.shown} of ${stderr.byteLength} bytes of stderr): ${err.text}`;
+  const outPart = out.text === "" ? "" : `; stdout head (${out.shown} of ${stdout.byteLength} bytes of stdout): ${out.text}`;
+  return `shard ${shardId}: report unreadable (${reason}); ${errPart}${outPart}`;
 }
 const cleanCompletion = (result: ProcessResult) => !result.signal && !result.timedOut && !result.aborted && !result.outputExceeded;
 
@@ -192,7 +201,7 @@ async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApp
   }
   const parsed = parseE2EApplicationReport(run.stdout);
   if (parsed.kind !== "parsed") {
-    await input.log(reportUnreadableNote(shard.shardId, parsed.reason, run.stderr));
+    await input.log(reportUnreadableNote(shard.shardId, parsed.reason, run.stderr, run.stdout));
     return { ...base, list: processRecord(list), run: record, upstreamRunId, reportBytes: null, failed: false, completed: false, reason: "report-unreadable" };
   }
   const summary = parsed.report.run.summary;

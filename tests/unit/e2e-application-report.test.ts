@@ -72,6 +72,18 @@ describe("application report parser", () => {
     expect(module.E2EApplicationReportSchema.safeParse(invalidLog).success).toBe(false);
   });
 
+  it("reads the app log levels the pinned runner writes, 'warning' (an HTTP 4xx the page got) included", async () => {
+    const module = await import("../../packages/verifier/src/application-report-schema.js");
+    for (const level of ["debug", "info", "warning", "error"]) {
+      const withLog = report();
+      Object.assign(withLog.run.results[0]!.attempts[0]!, { appLog: [{ source: "network", level, text: "GET http://127.0.0.1:4317/api/orders.csv 403 Forbidden", at }] });
+      expect(module.parseE2EApplicationReport(Buffer.from(JSON.stringify(withLog))).kind, level).toBe("parsed");
+    }
+    const unknown = report();
+    Object.assign(unknown.run.results[0]!.attempts[0]!, { appLog: [{ source: "network", level: "fatal", text: "x", at }] });
+    expect(module.parseE2EApplicationReport(Buffer.from(JSON.stringify(unknown))).kind).toBe("unavailable");
+  });
+
   it("rejects invalid UTF-8 and report bytes over the application-specific hard bound", async () => {
     const module = await import("../../packages/verifier/src/application-report-schema.js");
     expect(module.parseE2EApplicationReport(Uint8Array.from([0xff, 0xfe])).kind).toBe("unavailable");

@@ -93,7 +93,7 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
    * for the two accounts (owner and viewer) of the same one application, as a planner writes a multi-role test, on the fixed candidate. Either way the stored plan is the
    * planner's own (what its schema leaves optional is not written), never the parsed intent with empty lists written out.
    */
-  async function journey(variant: "single-account" | "two-accounts") {
+  async function journey(variant: "single-account" | "two-accounts" | "viewer-refused") {
     const evidenceBase = process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR;
     const base = await realpath(evidenceBase ?? tmpdir());
     const root = await mkdtemp(join(await realpath(tmpdir()), "m1-web-journey-"));
@@ -163,7 +163,7 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     const target = targetOf("orders-owner");
     expect(target, JSON.stringify(context.targets)).toBeDefined();
     const viewerTarget = targetOf("orders-viewer");
-    if (variant === "two-accounts") expect(viewerTarget, JSON.stringify(context.targets)).toBeDefined();
+    if (variant !== "single-account") expect(viewerTarget, JSON.stringify(context.targets)).toBeDefined();
     const orders = (JSON.parse(await readFile(join(FIXTURE_ROOT, "fixtures/orders.json"), "utf8")) as { orders: Array<{ id: string; tenantId: string; customer: string; total: number; state: string }> }).orders;
     const scenario: E2EScenario = { scenarioId: "export-orders-csv", requirementId: "orders-export", requestedTargetIds: [target!.targetId], required: true, accountProfileId: target!.accountProfileId,
       minimumEvidence: "runtime", requiredRealComponentIds: [], steps: [{ kind: "navigate", path: "/" }, { kind: "click", testId: "download-orders" }],
@@ -172,11 +172,13 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     // The viewer of the same application: the page opens for it and shows the export button (what it may do with it is another scenario's matter).
     const viewerScenario: E2EScenario | undefined = viewerTarget === undefined ? undefined : { scenarioId: "viewer-sees-export", requirementId: "orders-export-visible", requestedTargetIds: [viewerTarget.targetId],
       required: true, accountProfileId: viewerTarget.accountProfileId, minimumEvidence: "runtime", requiredRealComponentIds: [],
-      steps: [{ kind: "navigate", path: "/" }], assertions: [{ kind: "visible", testId: "download-orders", equals: true }] };
-    const accountTargets = variant === "two-accounts" ? [target!, viewerTarget!] : [target!];
+      // "viewer-refused": the viewer presses the export button and the app answers HTTP 403 (it prints "Access refused (403)"): a forbidden action, asserted as refused.
+      steps: variant === "viewer-refused" ? [{ kind: "navigate", path: "/" }, { kind: "click", testId: "download-orders" }] : [{ kind: "navigate", path: "/" }],
+      assertions: variant === "viewer-refused" ? [{ kind: "text", testId: "orders-access-error", equals: "Access refused (403)" }] : [{ kind: "visible", testId: "download-orders", equals: true }] };
+    const accountTargets = variant !== "single-account" ? [target!, viewerTarget!] : [target!];
     const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: accountTargets.map((item) => item.targetId), portableOperationRefs: [], mockFixtureRefs: [],
       accountContextRefs: accountTargets.flatMap((item) => context.accountContextRefs.filter((ref) => ref.applicationId === item.applicationId && ref.profileId === item.accountProfileId)),
-      scenarios: variant === "two-accounts" ? [scenario, viewerScenario!] : [scenario], semanticExportDeltas: [],
+      scenarios: variant !== "single-account" ? [scenario, viewerScenario!] : [scenario], semanticExportDeltas: [],
       applicationRuntimeRefs: accountTargets.flatMap((item) => context.runtimeRefs!.filter((ref) => ref.targetId === item.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! }))),
       runtimeAccountRefs: accountTargets.flatMap((item) => context.runtimeAccountRefs!.filter((ref) => ref.applicationId === item.applicationId && ref.profileId === item.accountProfileId)), unavailableTargetRefs: [] });
     // The plan is stored the way the planner writes it: what the schema makes optional and the planner has nothing to say about is left out, not written as empty lists.
@@ -308,7 +310,7 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
     const creator = harness.db.get(`DEVELOPER#${MAYA.developerId}`, "META");
     if (creator !== undefined) harness.db.set({ ...creator, entityType: "DEVELOPER" });
 
-    if (variant === "two-accounts") {
+    if (variant !== "single-account") {
       // The coder implements the export (the fixture app as it ships); the broker admits one round of two cases, one per account; the worker runs both in real Chromium on the
       // Docker host; the broker verifies the evidence itself, case by case, each against its own account.
       faux.setResponses([fauxAssistantMessage([fauxToolCall("bash", { command: `cp -R "${candidates.fixed}/." repo/demo/` })]), fauxAssistantMessage("I added the orders CSV export.")]);
@@ -413,5 +415,9 @@ describe.runIf(dockerReady)("M1 native web journey: a failing browser round, sen
 
   it("runs two scenarios on two accounts of the same application (owner and viewer), as the planner wrote them, and passes the round on the fixed candidate", async () => {
     await journey("two-accounts");
+  }, 1_800_000);
+
+  it("runs a viewer scenario whose click is refused with HTTP 403 as a verdict, never as an unreadable report", async () => {
+    await journey("viewer-refused");
   }, 1_800_000);
 });
