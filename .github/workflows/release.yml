@@ -102,8 +102,9 @@ jobs:
           PUBLISH_EXECUTOR: ${{ vars.AGENTX_PUBLISH_EXECUTOR_IMAGE }}
         run: |
           VERSION="${VERSION#v}"
+          # The executor goes first: its smoke test can fail, and a pushed tag is immutable, so a failure must stop the job before the worker or slack image is pushed.
           images="worker slack"
-          if [ "$PUBLISH_EXECUTOR" = "true" ]; then images="$images executor"; fi
+          if [ "$PUBLISH_EXECUTOR" = "true" ]; then images="executor $images"; fi
           for image in $images; do
             dockerfile=environments/base/Dockerfile
             [ "$image" = slack ] && dockerfile=environments/slack/Dockerfile

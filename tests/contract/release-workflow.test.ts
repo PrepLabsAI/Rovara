@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
@@ -121,7 +122,7 @@ describe("release workflow", () => {
     // registry-confirmed digest as the worker, and recorded in release.json for the runtime stack to take.
     expect(wf.jobs.images!.outputs?.executor).toBe("${{ steps.push.outputs.executor }}");
     // Off by default: a tagged release must not fail on a repository the owner has not created yet.
-    expect(push).toContain('if [ "$PUBLISH_EXECUTOR" = "true" ]; then images="$images executor"; fi');
+    expect(push).toContain('if [ "$PUBLISH_EXECUTOR" = "true" ]; then images="executor $images"; fi');
     expect(push).toContain("for image in $images; do");
     expect(wf.jobs.images!.steps.find((step) => step.id === "push")?.env?.PUBLISH_EXECUTOR).toBe("${{ vars.AGENTX_PUBLISH_EXECUTOR_IMAGE }}");
     expect(push).toContain("environments/e2e-executor/Dockerfile");
@@ -160,6 +161,18 @@ describe("release workflow", () => {
     // The registry still confirms what was pushed, whichever branch pushed it.
     expect(push.indexOf("registry_digest=$(")).toBeGreaterThan(push.indexOf("docker push"));
     expect(push).not.toMatch(/--no-sandbox|seccomp=unconfined/);
+  });
+
+  it("builds, smokes and pushes the executor before it pushes the worker or the slack image (Ruling AI)", async () => {
+    // Image tags are immutable once pushed: a failing executor smoke after the worker and slack
+    // pushes would leave half a release in the registry. Run the push step's own list-building
+    // lines to see the order the loop would take, rather than matching text.
+    const wf = await workflow();
+    const push = wf.jobs.images!.steps.find((step) => step.id === "push")!.run!;
+    const lines = push.split("\n").filter((line) => /^\s*images=|^\s*if \[ "\$PUBLISH_EXECUTOR"/.test(line)).join("\n");
+    const order = (flag: string) => execFileSync("bash", ["-c", `PUBLISH_EXECUTOR=${flag}\n${lines}\necho "$images"`], { encoding: "utf8" }).trim();
+    expect(order("true")).toBe("executor worker slack");
+    expect(order("")).toBe("worker slack");
   });
 
   it("runs the images push step with shell: bash, so a failing `imagetools inspect | tr` fails the step instead of being swallowed by the pipe", async () => {
