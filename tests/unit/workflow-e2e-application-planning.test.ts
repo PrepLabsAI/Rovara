@@ -19,6 +19,7 @@ import { portableFeatureIntentOf } from "../../packages/broker/src/e2e/portable-
 import { createApplicationPlanNegotiationRecorder } from "../../packages/broker/src/aws/dispatcher.js";
 import { decideTaskWorkflow, taskPageStage } from "../../packages/broker/src/aws/developer-tasks.js";
 import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
+import * as routes from "../../packages/broker/src/aws/developer-routes.js";
 import { decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON, isE2EPlanCorrectionBlockReason } from "../../packages/broker/src/developer/task-records.js";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
@@ -572,7 +573,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     const answer = planAnswer(planDocument({ title: "Export CSV", claims: [{ id: "1", text: "Orders can be exported as CSV." }], e2e: intent }));
     await harness.artifact(workspaceId, planningId, "plan.md", answer);
     await harness.finish(workspaceId, planningId, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
-    return { ...started, intent, target };
+    return { ...started, intent, target, viaSlack: options.viaSlack === true };
   }
   type Planned = Awaited<ReturnType<typeof plannedWithApplicationIntent>>;
 
@@ -581,6 +582,12 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
   const operationIds = (planned: Planned) => planned.harness.db.find((row) => row.pk === `WORKSPACE#${planned.workspaceId}` && row.entityType === "OPERATION").map((row) => row.id);
   const decide = (planned: Planned, decision: "APPROVE" | "REQUEST_CHANGES") => {
     const workflow = workflowOf(planned);
+    // A task started from Slack belongs to its Slack owner: the owner decides from the thread, and the answer is shaped like the route's.
+    if (planned.viaSlack) {
+      return planned.harness.handler({ source: "agentx.slack-ingress", action: "workflow-decision", taskId: planned.taskId, userId: MAYA.slackUserId, thread: SLACK_THREAD,
+        requestId: randomUUID(), expectedRevision: workflow.revision, artifactDigest: workflow.artifacts.at(-1)!.sha256, decision, reason: "Approve the exact application intent",
+        selectedOptionalCheckIds: [] }).then((answer) => ({ status: answer.statusCode, body: JSON.parse(answer.body) as Record<string, unknown> }));
+    }
     return planned.harness.dev(MAYA, "POST", `/v1/dev/tasks/${planned.taskId}/workflow/decision`, { requestId: randomUUID(), expectedRevision: workflow.revision, decision,
       reason: decision === "APPROVE" ? "Approve the exact application intent" : "Correct the application intent", artifactDigest: workflow.artifacts.at(-1)!.sha256 });
   };
@@ -853,6 +860,8 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     harness.db.set({ ...workspaceSessionKey(workspaceId), workspaceId, state: "READY", generation: 2 });
     const creator = harness.db.get(`DEVELOPER#${MAYA.developerId}`, "META");
     if (creator !== undefined) harness.db.set({ ...creator, entityType: "DEVELOPER" });
+    // A task started from Slack is owned by the Slack caller's own developer identity, which the round's creator check reads.
+    if (creator !== undefined && task.developerId !== MAYA.developerId) harness.db.set({ ...creator, pk: `DEVELOPER#${String(task.developerId)}`, entityType: "DEVELOPER" });
     const dispatchKey = String(dispatch.sk);
     const runDispatch = async () => { await harness.handler({ source: "agentx.workflow-dispatch-recovery" }); };
     const taskNow = () => harness.db.get(key.pk, key.sk) as { workflow: { stage: string; state: string; blockReason?: string; revision: number } };
@@ -1353,6 +1362,63 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
         expect(twice).toHaveLength(2);
         expect(twice[0]).toEqual(history[0]);
         expect((twice[1]!.previous as { selectionDigest: string }).selectionDigest).toBe(fingerprint(after).selectionDigest);
+      });
+
+      describe("the same press from Slack", () => {
+        const slackRetry = (planned: Planned, dispatched: AtApplication) => planned.harness.handler({ source: "agentx.slack-ingress", action: "workflow-retry", taskId: planned.taskId,
+          userId: MAYA.slackUserId, thread: SLACK_THREAD, requestId: randomUUID(), expectedRevision: dispatched.taskNow().workflow.revision, selectedOptionalCheckIds: [] });
+        const refusalsOf = (planned: Planned) => planned.harness.db.find((row) => row.pk === `DEVTASK#${planned.taskId}` && String(row.sk).startsWith("REFUSAL#")).map((row) => String(row.message));
+        const blocked = async () => {
+          const planned = await plannedWithApplicationIntent({ viaSlack: true });
+          const dispatched = await atApplicationDispatch(planned);
+          planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
+          await dispatched.runDispatch();
+          expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX);
+          return { planned, dispatched };
+        };
+
+        it("Choose checks and retry approves the plan again, dispatches, and records the re-approval", async () => {
+          const { planned, dispatched } = await blocked();
+          const answer = await slackRetry(planned, dispatched);
+          expect(answer.statusCode, answer.body).toBe(200);
+          expect(JSON.parse(answer.body)).not.toMatchObject({ refused: true });
+          expect(workflowOf(planned).e2e!.applicationReapprovals).toHaveLength(1);
+          expect(dispatched.dispatchRows().filter((row) => row.workflowRevision === dispatched.taskNow().workflow.revision)).toHaveLength(1);
+          expect(refusalsOf(planned)).toEqual([]);
+        });
+
+        it("says in a plain sentence why a plan that cannot be approved against what is ready now was not approved again", async () => {
+          const { planned, dispatched } = await blocked();
+          const before = workflowOf(planned);
+          planned.harness.db.delete(webKey.pk, webKey.sk);
+          const answer = await slackRetry(planned, dispatched);
+          expect(answer.statusCode, answer.body).toBe(200);
+          const message = String((JSON.parse(answer.body) as { message?: string }).message);
+          expect(message).toMatch(/cannot be approved/i);
+          expect(message).not.toContain("I couldn't save that");
+          expect(refusalsOf(planned)).toEqual([message]);
+          expect(workflowOf(planned)).toEqual(before);
+        });
+
+        it("says in a plain sentence why the plan was not approved again when the approval check is not installed", async () => {
+          const { planned, dispatched } = await blocked();
+          const before = workflowOf(planned);
+          const original = developerTaskRouteDependencies;
+          const spy = vi.spyOn(routes, "developerTaskRouteDependencies").mockImplementation((deps, ...rest) => {
+            const without = { ...deps };
+            delete without.validateWorkflowE2EApplicationPlan;
+            return original(without, ...rest);
+          });
+          try {
+            const answer = await slackRetry(planned, dispatched);
+            expect(answer.statusCode, answer.body).toBe(200);
+            const message = String((JSON.parse(answer.body) as { message?: string }).message);
+            expect(message).toMatch(/plan cannot be approved again here/i);
+            expect(message).not.toContain("I couldn't save that");
+            expect(refusalsOf(planned)).toEqual([message]);
+            expect(workflowOf(planned)).toEqual(before);
+          } finally { spy.mockRestore(); }
+        });
       });
 
       describe("a refusal caused by the runtime's state asks for an administrator, not for new code (Fix round 1, I2)", () => {

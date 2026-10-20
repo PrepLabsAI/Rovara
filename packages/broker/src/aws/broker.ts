@@ -925,11 +925,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
         return await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
-          workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
-          workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
-          validateWorkflowE2EApplicationPlan: input => validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact),
-          registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : url => dependencies.githubPullRequests.getRepositoryIdentity!(url),
-          refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
+          ...workflowApplicationRouteDependencies(dependencies) }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
       }
       // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
       if (event.routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
@@ -1105,11 +1101,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
         return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
           ...(dependencies.chatgpt === undefined ? {} : { chatgpt: dependencies.chatgpt }),
-          workflowE2EPresentation: input => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
-          workflowE2EPublicationChecks: input => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
-          validateWorkflowE2EApplicationPlan: input => validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact),
-          registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : url => dependencies.githubPullRequests.getRepositoryIdentity!(url),
-          refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url), request.requestId);
+          ...workflowApplicationRouteDependencies(dependencies) }, request, url), request.requestId);
       }
 
       const identity = identityFromJwtClaims(request.jwtClaims, {
@@ -1384,10 +1376,25 @@ function slackLostRace(reason: string, decidedBy: unknown): string {
   return at < 0 ? escaped : `${escaped.slice(0, at)} by <@${slackUserId}> ${escaped.slice(at + plain.length)}`;
 }
 
+/**
+ * The reasons the plan-approval check gives when a plan cannot be approved (or approved again) against the approved setup and the
+ * runtimes that are ready now, by their opening words (validateWorkflowE2EApplicationPlan, decideTaskWorkflow and retryTaskWorkflow).
+ * They name what to do next, so the presser hears them as a sentence; the rest of a reason is data and is never said.
+ */
+const SLACK_PLAN_APPROVAL_REASONS = /^(the application E2E plan cannot be approved: |the application E2E plan could not be checked for approval \(|the plan cannot be approved again here: |the approved plan no longer carries the application intent )/u;
+function slackPlanApprovalRefusal(reason: string): string | undefined {
+  if (!SLACK_PLAN_APPROVAL_REASONS.test(reason)) return undefined;
+  const escaped = reason.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;").slice(0, 400);
+  const sentence = `${escaped.charAt(0).toUpperCase()}${escaped.slice(1)}`;
+  return /[.!?]$/u.test(sentence) ? sentence : `${sentence}.`;
+}
+
 function slackRefusalMessage(code: string, outOfDate: string, reason = "", decidedBy?: unknown): string | undefined {
   switch (code) {
     // A refusal the presser can act on is said as it is; any other means the press no longer fits the task.
-    case "CONFIG_INVALID": return SLACK_PLAIN_REFUSALS.get(reason) ?? outOfDate;
+    case "CONFIG_INVALID": return SLACK_PLAIN_REFUSALS.get(reason) ?? slackPlanApprovalRefusal(reason) ?? outOfDate;
+    // A plan that could not be checked for approval: the reason says to keep the plan and try again, so the presser hears it. Any other is unexpected.
+    case "RUNTIME_UNAVAILABLE": return slackPlanApprovalRefusal(reason);
     // A lost race says who decided and when (the owner's name is redacted; Slack's markup characters are escaped).
     case "IDEMPOTENCY_CONFLICT": return LOST_RACE.test(reason) ? slackLostRace(reason, decidedBy) : outOfDate;
     case "WORKSPACE_BUSY":
@@ -5415,7 +5422,7 @@ export function isSlackWorkflowResolveFindingsEvent(event: unknown): event is Sl
 /** The owner's answers to the blocking review findings, through the same route an AI tool uses; the route holds every rule. */
 async function resolveSlackWorkflowFindings(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowResolveFindingsEvent) {
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "resolve these review findings");
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
+  const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision, candidateDigest: event.candidateDigest,
     resolutions: event.resolutions.map((resolution) => ({ findingId: resolution.findingId, action: resolution.action, note: resolution.note })) });
   const path = `/v1/dev/tasks/${taskId}/workflow/review-findings`;
@@ -5428,6 +5435,27 @@ export function isSlackWorkflowCloseEvent(event: unknown): event is SlackWorkflo
   return value.source === "agentx.slack-ingress" && value.action === "workflow-close" && value.requestContext === undefined
     && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
     && typeof value.thread === "object" && value.thread !== null;
+}
+
+/**
+ * The application wiring every task route needs (the E2E presentation and publication checks, the plan-approval check, the
+ * registered repository identity and the PR feedback refresh). The HTTP routes and every Slack workflow press build their
+ * route dependencies from this one place, so a press can never reach a route whose check is not installed.
+ */
+function workflowApplicationRouteDependencies(dependencies: AwsBrokerDependencies) {
+  return {
+    workflowE2EPresentation: (input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }) => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
+    workflowE2EPublicationChecks: (input: { task: DeveloperTaskRecord; operations: readonly unknown[] }) => workflowE2EPublicationChecks(dependencies, input.task, input.operations),
+    validateWorkflowE2EApplicationPlan: (input: { task: DeveloperTaskRecord; intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string } }) => validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact),
+    registeredRepositoryIdentity: dependencies.githubPullRequests.getRepositoryIdentity === undefined ? undefined : (url: string) => dependencies.githubPullRequests.getRepositoryIdentity!(url),
+    refreshTaskFeedback: (taskId: string) => refreshTaskFeedbackForOwnerDecision(dependencies, taskId),
+  };
+}
+
+/** The route dependencies of a Slack workflow press: the same application wiring as the HTTP routes. */
+function slackWorkflowRouteDependencies(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, developer: NonNullable<AwsBrokerDependencies["developer"]>, caller: DeveloperCaller) {
+  return developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks,
+    ...workflowApplicationRouteDependencies(dependencies) }, caller);
 }
 
 /** The owner's task, read for a Slack workflow press from its own thread; anyone else, or another thread, is refused. */
@@ -5507,7 +5535,7 @@ async function slackTaskAccess(
 /** Task 16: Send back to coding, through the same route an AI tool uses. */
 async function sendSlackWorkflowBack(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowSendBackEvent) {
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "send this task back to coding");
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
+  const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision, instructions: "Fix the problems listed above, then report what changed." });
   const path = `/v1/dev/tasks/${taskId}/workflow/send-back`;
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
@@ -5521,7 +5549,7 @@ async function sendSlackWorkflowBack(dependencies: AwsBrokerDependencies, tasks:
  */
 async function closeSlackWorkflowTask(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowCloseEvent) {
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "close this task");
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
+  const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   const body = JSON.stringify({ requestId, discard_unpublished: true });
   const path = `/v1/dev/tasks/${taskId}/close`;
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
@@ -5539,7 +5567,7 @@ export function isSlackWorkflowReviewRetryEvent(event: unknown): event is SlackW
 async function retrySlackWorkflowChecks(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowRetryEvent) {
   // The same checks as every other Slack press: this Slack workspace, the task's owner, and the task's own thread.
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "retry verification");
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
+  const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   const instructions = event.step === "plan" ? "The previous planning run stopped before it saved a plan. Plan the request again."
     : event.step === "coding" ? "Retry the coding step." : "Retry the owner-selected project checks without changing code.";
   const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision, instructions,
@@ -5552,7 +5580,7 @@ async function retrySlackWorkflowChecks(dependencies: AwsBrokerDependencies, tas
 async function retrySlackWorkflowReviews(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowReviewRetryEvent) {
   // The same checks as every other Slack press: this Slack workspace, the task's owner, and the task's own thread.
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "retry reviews");
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
+  const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision, candidateDigest: event.candidateDigest,
     instructions: "Retry the independent read-only code and security reviews on the same verified candidate. Do not edit files." });
   const path = `/v1/dev/tasks/${taskId}/workflow/review`;
@@ -5581,7 +5609,7 @@ export function isSlackWorkflowPublishRetryEvent(event: unknown): event is Slack
 async function retrySlackWorkflowPublication(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowPublishRetryEvent) {
   // The same checks as every other Slack press: this Slack workspace, the task's owner, and the task's own thread.
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "retry opening the pull request");
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
+  const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision });
   const path = `/v1/dev/tasks/${taskId}/workflow/publish-retry`;
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
@@ -5609,7 +5637,7 @@ export function isSlackWorkflowKeepPullRequestsEvent(event: unknown): event is S
 /** Keep the pull request as it is, through the same route an AI tool uses. */
 async function keepSlackWorkflowPullRequests(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowKeepPullRequestsEvent) {
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "keep the pull request as it is");
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
+  const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision });
   const path = `/v1/dev/tasks/${taskId}/workflow/keep-pull-requests`;
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
@@ -5618,8 +5646,7 @@ async function keepSlackWorkflowPullRequests(dependencies: AwsBrokerDependencies
 async function decideSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowDecisionEvent) {
   // The same checks as every other Slack press: this Slack workspace, the task's owner, and the task's own thread.
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "decide this plan");
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks,
-    validateWorkflowE2EApplicationPlan: input => validateWorkflowE2EApplicationPlan(dependencies, input.task, input.intent, input.artifact) }, caller);
+  const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   const body = JSON.stringify({
     requestId, expectedRevision: event.expectedRevision, artifactDigest: event.artifactDigest,
     ...(event.decision === "APPROVE" && event.workBreakdownDigest !== undefined ? { workBreakdownDigest: event.workBreakdownDigest } : {}),
@@ -5667,8 +5694,7 @@ async function decideSlackWorkflowFeedbackFindings(dependencies: AwsBrokerDepend
     && (typeof event.ownerNote !== "string" || event.ownerNote.trim().length === 0 || event.ownerNote.trim().length > 500)) {
     throw agentXError("CONFIG_INVALID", event.selection === "ANSWER" ? "add your answer before sending it" : "add a short note before requesting changes");
   }
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
-    developer, now: Date.now, tasks, refreshTaskFeedback: id => refreshTaskFeedbackForOwnerDecision(dependencies, id) }, caller);
+  const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   const view = await getWorkflowFeedbackReview(routeDeps, caller, taskId);
   const findings = Array.isArray(view.findings) ? view.findings as Array<Record<string, unknown>> : [];
   // An answer approves only the questions its card showed; the owner's words say how. Recommended fixes are approved apart.
@@ -5706,7 +5732,7 @@ export function isSlackWorkflowFeedbackReviewRetryEvent(event: unknown): event i
 async function retrySlackWorkflowFeedbackReview(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowFeedbackReviewRetryEvent) {
   // The same checks as every other Slack press: this Slack workspace, the task's owner, and the task's own thread.
   const { taskId, developer, caller } = await ownedSlackWorkflowTask(dependencies, event, "retry this review", true);
-  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
+  const routeDeps = slackWorkflowRouteDependencies(dependencies, tasks, developer, caller);
   return retryTaskWorkflowFeedbackReview(routeDeps, caller, taskId, { reviewDigest: event.reviewDigest });
 }
 
