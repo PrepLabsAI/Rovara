@@ -215,7 +215,7 @@ import {
   type E2EApplicationPlanIntent,
   type E2EApplicationSelectionRecord,
   E2EApplicationSelectionRecordSchema,
-  E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES,
+  E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, E2EApplicationBuildSourceManifestSchema, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   type E2ERegisteredRuntime,
   ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey,
@@ -280,7 +280,8 @@ import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from 
 import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.js";
 import { evaluateApplicationPlanApproval } from "../e2e/application-plan-approval.js";
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
-import { ApplicationDispatchRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
+import { ApplicationDispatchRefusal, applicationRoundRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
+import { buildApplicationExecutionAdmission } from "../e2e/application-admission.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
@@ -290,7 +291,7 @@ import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThr
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
-import { CandidateBuildSourceBodySchema, StoredCandidateBuildSourceSchema, assessCandidateBuildSource, type StoredCandidateBuildSource } from "./candidate-build-source.js";
+import { CandidateBuildSourceBodySchema, StoredCandidateBuildSourceSchema, assessCandidateBuildSource, candidateBuildSourceAdmissionReference, type StoredCandidateBuildSource } from "./candidate-build-source.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
@@ -4114,7 +4115,10 @@ async function readApprovedSetupSource(dependencies: AwsBrokerDependencies, proj
 
 /** What deriving a task's application selection against the approved setup and the runtime rows READY right now came to. */
 type ApplicationSelectionNow =
-  | { ok: true; selection: E2EApplicationSelectionRecord; conditions: TransactItems }
+  | { ok: true; selection: E2EApplicationSelectionRecord; conditions: TransactItems;
+    /** What the derivation read, for a caller that builds the admission from the same facts: the pinned policy, the approved setup and the READY rows. */
+    inputs: { policy: E2EPolicy; setup: { snapshot: E2ESourceSnapshot; setupProposal: E2ESetupProposal; setupApproval: PlanApprovalRef }; rows: E2ERegisteredRuntime[];
+      runtimeCatalogId: string; runtimeBinding: ReturnType<typeof parseRuntimeBinding> } }
   /** `unevaluable`: something it needs could not be read (try again later). `refused`: it read everything and the plan cannot run as approved. */
   | { ok: false; kind: "unevaluable" | "refused"; reason: string };
 
@@ -4156,7 +4160,8 @@ async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBroke
     ExpressionAttributeNames: { "#state": "state" },
     ExpressionAttributeValues: { ":entity": "E2E_FEATURE_VERIFIER", ":ready": "READY", ":catalog": row.runtimeCatalogId, ":revision": row.catalogRevision,
       ":generation": row.generation, ":binding": row.bindingDigest, ":capability": row.capabilityDigest, ":expires": row.expiresAt } } }));
-  return { ok: true, selection: evaluation.selection, conditions };
+  return { ok: true, selection: evaluation.selection, conditions, inputs: { policy: policy.data,
+    setup: { snapshot: setup.snapshot, setupProposal: setup.setupProposal, setupApproval: setup.setupApproval }, rows, runtimeCatalogId: catalogId, runtimeBinding: parseRuntimeBinding(project.runtimeBinding) } };
 }
 
 /**
@@ -7160,12 +7165,7 @@ async function workflowE2ECurrentAuthorityIsValid(
       return reject("creator-membership-proof-changed-or-unavailable");
     }
     stage = "candidate-source-operation";
-    const sourceOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
-      .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "IMPLEMENT")
-      .map((item) => item as unknown as OperationRecord)
-      .filter((item) => item.candidateSourceRef?.candidateDigest === candidate.digest)
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-    const sourceOperation = sourceOperations[0];
+    const sourceOperation = await candidateSourceOperation(dependencies, task, candidate.digest);
     if (!sourceOperation) return reject("candidate-source-operation-missing");
     stage = "candidate-source-export";
     const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, sourceOperation, candidate);
@@ -9612,38 +9612,56 @@ async function getWorkflowE2ECreatorIdentity(dependencies: AwsBrokerDependencies
   return response.Item?.entityType === "DEVELOPER" ? response.Item : undefined;
 }
 
-/** What an owner is told when an approved application round reaches dispatch on a broker that cannot yet build its admission. Nothing ran. */
-const APPLICATION_ROUND_NOT_DISPATCHABLE = "The approved browser and API checks could not be started: this AgentX version cannot dispatch application rounds yet. Nothing was run. Send the task back to coding or close it.";
-
-/**
- * The block text for a selection that is no longer the approved one. The remedy comes first (the workflow keeps only the first 500 characters of a block reason):
- * the runtime rows are compared exactly, and a row that was merely requalified is not the approved one, so retrying the checks refuses again until the plan is
- * approved again against the rows that are there now.
- */
-const APPLICATION_SELECTION_REFUSAL = "The approved application checks can no longer run as approved, and retrying will not help until the plan is approved again: ";
-
 /**
  * Ruling AL, dispatch half: derives the approved application selection again from the approved setup and the runtime rows READY right now, and refuses
- * (a terminal ApplicationDispatchRefusal that blocks the workflow with its reason) when anything differs from what the Owner approved. A selection that
- * cannot be derived because something could not be read is a retryable RUNTIME_UNAVAILABLE instead. It never widens what was approved.
+ * (a terminal ApplicationDispatchRefusal that blocks the workflow with its reason) when anything differs from what the Owner approved. The block text begins with
+ * `WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX`: a row that was merely requalified is not the approved one, and the comparison stays byte-exact, so the owner's
+ * way on is to retry the checks, which approves the same plan again against the rows that are there now (see `retryTaskWorkflow`). A selection that cannot be derived
+ * because something could not be read is a retryable RUNTIME_UNAVAILABLE instead. It never widens what was approved. Returns what the derivation read.
  */
 async function requireApplicationSelectionStillCurrent(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, intent: E2EApplicationPlanIntent,
-  artifact: { id: string; sha256: string }): Promise<void> {
+  artifact: { id: string; sha256: string }): Promise<Extract<ApplicationSelectionNow, { ok: true }>> {
   const recorded = E2EApplicationSelectionRecordSchema.safeParse(task.workflow?.e2e?.applicationSelection);
-  if (!recorded.success) throw new ApplicationDispatchRefusal("The approved application checks could not be started: the approved plan has no recorded application selection.");
+  if (!recorded.success) throw applicationRoundRefusal("the approved plan has no recorded application selection");
   const current = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact);
   if (!current.ok) {
     if (current.kind === "unevaluable") throw agentXError("RUNTIME_UNAVAILABLE", `the approved application selection could not be checked at dispatch (${current.reason})`);
-    throw new ApplicationDispatchRefusal(`${APPLICATION_SELECTION_REFUSAL}${current.reason}`);
+    throw new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}${current.reason}`);
   }
   const unchanged = applicationSelectionStillCurrent(recorded.data, current.selection);
-  if (!unchanged.ok) throw new ApplicationDispatchRefusal(`${APPLICATION_SELECTION_REFUSAL}${unchanged.reason}`);
+  if (!unchanged.ok) throw new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}${unchanged.reason}`);
+  return current;
+}
+
+const NO_COMMITTED_EXPORT_REASON = "the candidate has no committed source export, so there is no source to build and run";
+const NO_BUILD_SOURCE_REASON = "no build source manifest was exported for this candidate";
+
+/** The newest IMPLEMENT operation that exported the given candidate's committed source (its `candidateSourceRef` names the candidate). */
+async function candidateSourceOperation(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, candidateDigest: string): Promise<OperationRecord | undefined> {
+  return (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
+    .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "IMPLEMENT")
+    .map((item) => item as unknown as OperationRecord)
+    .filter((operation) => operation.candidateSourceRef?.candidateDigest === candidateDigest)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
 }
 
 /**
- * Refuses a task whose approved plan is an application plan before its workspace is warmed: the selection is checked (Ruling AL), and while application rounds
- * cannot be dispatched the dispatch ends in its terminal block. Only a task that carries an application selection record is read here, so a portable task
- * reads nothing extra; an application plan without its record is refused later, by `startWorkflowE2EChecksDispatch`.
+ * The build source the worker exported for the candidate and the broker judged (Task 2.4b), as the IMPLEMENT operation records it: READY, or a refusal with its
+ * reason. Absent means the worker sent nothing (an old worker, a delivery failure), which is refused too. Never falls back to anything.
+ */
+function readyCandidateBuildSource(operation: OperationRecord, candidateDigest: string): Extract<StoredCandidateBuildSource, { status: "READY" }> {
+  if (operation.candidateBuildSource === undefined) throw applicationRoundRefusal(NO_BUILD_SOURCE_REASON);
+  const stored = StoredCandidateBuildSourceSchema.safeParse(operation.candidateBuildSource);
+  if (!stored.success) throw applicationRoundRefusal("the stored build source record for this candidate cannot be read");
+  if (stored.data.candidateDigest !== candidateDigest) throw applicationRoundRefusal("the stored build source record is for another candidate than the one being checked");
+  if (stored.data.status === "REFUSED") throw applicationRoundRefusal(stored.data.reason);
+  return stored.data;
+}
+
+/**
+ * Checks an approved application plan before its workspace is warmed: the selection is checked (Ruling AL) and the candidate must have a usable build source, so
+ * compute is never woken for a round that cannot run. Only a task that carries an application selection record is read here, so a portable task reads nothing
+ * extra; the rest of the round's inputs are read, and the admission built, by `startWorkflowE2EChecksDispatch`. Every refusal is terminal and carries its reason.
  */
 async function refuseApplicationRoundBeforeWarmUp(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord): Promise<void> {
   const workflow = task.workflow;
@@ -9653,7 +9671,100 @@ async function refuseApplicationRoundBeforeWarmUp(dependencies: AwsBrokerDepende
   const approved = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), artifact, {});
   if (approved?.format !== "structured" || approved.plan.e2e?.schemaVersion !== 2) return;
   await requireApplicationSelectionStillCurrent(dependencies, task, approved.plan.e2e, artifact);
-  throw new ApplicationDispatchRefusal(APPLICATION_ROUND_NOT_DISPATCHABLE);
+  if (workflow.candidate === undefined) return;
+  const source = await candidateSourceOperation(dependencies, task, workflow.candidate.digest);
+  if (source === undefined) throw applicationRoundRefusal(NO_COMMITTED_EXPORT_REASON);
+  readyCandidateBuildSource(source, workflow.candidate.digest);
+}
+
+/** The exported build source manifest, read back and held to the digest and size the broker recorded when it judged it. */
+async function readCandidateBuildSourceManifest(dependencies: AwsBrokerDependencies, stored: Extract<StoredCandidateBuildSource, { status: "READY" }>) {
+  let bytes: Buffer | undefined;
+  try {
+    const response = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: stored.manifestRef.key,
+      Range: `bytes=0-${E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES - 1}` })) as { Body?: { transformToByteArray(): Promise<Uint8Array> } };
+    bytes = response.Body === undefined ? undefined : Buffer.from(await response.Body.transformToByteArray());
+  } catch (error) {
+    const name = error && typeof error === "object" ? (error as { name?: unknown }).name : undefined;
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (name !== "NoSuchKey" && status !== 404) throw error;
+  }
+  if (bytes === undefined) throw applicationRoundRefusal("the exported build source manifest is missing from storage");
+  if (bytes.byteLength !== stored.manifestRef.byteLength || createHash("sha256").update(bytes).digest("hex") !== stored.manifestRef.sha256) {
+    throw applicationRoundRefusal("the stored build source manifest does not match the digest recorded for it");
+  }
+  let json: unknown;
+  try { json = JSON.parse(bytes.toString("utf8")) as unknown; } catch { throw applicationRoundRefusal("the stored build source manifest is not valid JSON"); }
+  const manifest = E2EApplicationBuildSourceManifestSchema.safeParse(json);
+  if (!manifest.success) throw applicationRoundRefusal(`the stored build source manifest is not valid: ${manifest.error.issues[0]?.message ?? "unreadable"}`);
+  if (manifest.data.manifestDigest !== stored.manifestDigest) throw applicationRoundRefusal("the stored build source manifest is not the one the record names");
+  return manifest.data;
+}
+
+/** Stores an admission under its content address; an object already there must be the same bytes. */
+async function storeWorkflowE2EAdmission(dependencies: AwsBrokerDependencies, input: { key: string; sha256: string; bytes: Buffer; taskId: string; candidateDigest: string }): Promise<void> {
+  if (input.bytes.byteLength > WORKFLOW_E2E_ADMISSION_MAX_BYTES) throw agentXError("CONFIG_INVALID", "the immutable E2E admission exceeds its bounded object size");
+  try {
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: input.key,
+      Body: input.bytes, ContentType: "application/json", Metadata: { sha256: input.sha256, task: input.taskId, candidate: input.candidateDigest }, IfNoneMatch: "*" }));
+  } catch (error) {
+    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+    if (status !== 412 && (error as { name?: unknown } | undefined)?.name !== "PreconditionFailed") throw error;
+    if (await readStoredText(dependencies.s3, dependencies.artifactBucketName, input.key, input.bytes.byteLength + 1) !== input.bytes.toString("utf8")) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "the content-addressed E2E admission object conflicts with its digest");
+    }
+  }
+}
+
+/**
+ * Admits and starts one application round for an approved v2 plan: the selection is checked against what was approved (Ruling AL), the candidate's stored
+ * export and build source are read and held to the candidate, the admission is built from them and the approved setup, and the one CHECKS operation that carries
+ * exactly that one admission is started. Anything missing or disagreeing is a terminal refusal with its reason: never the portable path, never a retry loop.
+ * The operation record keeps the round id, the per-group run ids and the admission reference; Task 2.4d verifies the round from them.
+ */
+async function startApplicationE2EChecksDispatch(
+  dependencies: AwsBrokerDependencies,
+  routeDependencies: Parameters<typeof startTaskWorkflowE2EChecksFromSystem>[0],
+  input: { task: DeveloperTaskRecord; expected: { workflowRevision: number; candidateDigest: string }; caller: Parameters<typeof startTaskWorkflowReviewFromSystem>[3];
+    intent: E2EApplicationPlanIntent; artifact: { id: string; sha256: string };
+    approval: NonNullable<ReturnType<typeof resolveWorkflowE2ECanonicalApproval>> },
+): Promise<"STARTED" | "DUPLICATE" | "STALE"> {
+  const { task, expected, intent, artifact, approval } = input;
+  const workflow = task.workflow!;
+  const candidate = workflow.candidate!;
+  const current = await requireApplicationSelectionStillCurrent(dependencies, task, intent, artifact);
+  const sourceOperation = await candidateSourceOperation(dependencies, task, candidate.digest);
+  if (sourceOperation === undefined) throw applicationRoundRefusal(NO_COMMITTED_EXPORT_REASON);
+  const stored = readyCandidateBuildSource(sourceOperation, candidate.digest);
+  const exportRecord = await getItem<Record<string, unknown>>(dependencies, { pk: `WORKSPACE#${task.workspaceId}`, sk: `CANDIDATE_EXPORT#${sourceOperation.id}` });
+  if (exportRecord === undefined || canonicalJson(exportRecord.buildSource ?? null) !== canonicalJson(stored)) {
+    throw applicationRoundRefusal("the candidate's build source record on its export and on its operation are missing or disagree");
+  }
+  const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, sourceOperation, candidate);
+  if (sourceExport === undefined || sourceExport.repositories.length !== 1) throw applicationRoundRefusal("the stored candidate source export is unavailable or does not hold exactly one repository");
+  const repository = sourceExport.repositories[0]!;
+  if (stored.repositoryId !== repository.repositoryId || stored.commitSha !== repository.commitSha || stored.treeSha !== repository.treeSha) {
+    throw applicationRoundRefusal("the stored build source is for another commit or tree than the exported candidate");
+  }
+  const manifest = await readCandidateBuildSourceManifest(dependencies, stored);
+  const snapshot: E2ESourceSnapshot = { candidate, commitSha: repository.commitSha, treeSha: repository.treeSha, treeComplete: true, treePaths: repository.treePaths,
+    sources: repository.sources.map((source) => ({ path: source.path, sha256: source.sha256, kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") })) };
+  // The original creator's current project access, once more now that compute is ready (the admission schema has no field for it; verification checks it again).
+  await requireWorkflowE2ECreatorAuthority(dependencies, task);
+  const workspace = await routeDependencies.actions.workspace(task.workspaceId);
+  const operationId = randomUUID();
+  const planDigest = createHash("sha256").update(canonicalJson({
+    domain: "workflow-application-e2e-approved-plan/v1", taskId: task.taskId, artifactId: approval.artifactId, artifactSha256: approval.artifactDigest,
+    graphDigest: approval.graphDigest, graphRunId: approval.runId, workflowRevision: approval.workflowRevision, actorId: approval.actorId,
+  })).digest("hex");
+  const built = buildApplicationExecutionAdmission({ taskId: task.taskId, operationId, operationFence: workspace.fence + 1, workflowRevision: workflow.revision + 1, roundId: randomUUID(),
+    runId: randomUUID, intent, artifact, snapshot, setupProposal: current.inputs.setup.setupProposal, setupApproval: current.inputs.setup.setupApproval, policy: current.inputs.policy,
+    registeredRuntimes: current.inputs.rows, runtimeCatalogId: current.inputs.runtimeCatalogId, runtimeBinding: current.inputs.runtimeBinding,
+    buildSource: { manifest, reference: candidateBuildSourceAdmissionReference(stored) }, planDigest, now: Date.now() });
+  const admissionRef = E2EWorkflowAdmissionRefSchema.parse({ schemaVersion: 1, taskId: task.taskId, workflowRevision: workflow.revision + 1, candidateDigest: candidate.digest,
+    roundId: built.roundId, groupRunIds: built.groupRunIds, admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength } });
+  await storeWorkflowE2EAdmission(dependencies, { key: admissionRef.admissionRef.key, sha256: built.sha256, bytes: built.bytes, taskId: task.taskId, candidateDigest: candidate.digest });
+  return startTaskWorkflowE2EChecksFromSystem(routeDependencies, task.taskId, expected, admissionRef, operationId, input.caller);
 }
 
 /** Creates the content-addressed admission and starts the separate current CHECKS operation. */
@@ -9687,10 +9798,9 @@ async function startWorkflowE2EChecksDispatch(
   if (canonicalApproval === undefined) {
     throw agentXError("RUNTIME_UNAVAILABLE", "the canonical Owner-approved E2E intent is unavailable or stale");
   }
-  // An application (v2) intent is never dispatched through the portable path below. Its approved selection must still be exactly what runs now.
+  // An application (v2) intent is never dispatched through the portable path below: it has its own admission, and every way it can fail ends in a block.
   if (approved.plan.e2e?.schemaVersion === 2) {
-    await requireApplicationSelectionStillCurrent(dependencies, task, approved.plan.e2e, artifact);
-    throw new ApplicationDispatchRefusal(APPLICATION_ROUND_NOT_DISPATCHABLE);
+    return startApplicationE2EChecksDispatch(dependencies, routeDependencies, { task, expected, caller, intent: approved.plan.e2e, artifact, approval: canonicalApproval });
   }
   const portableIntent = portableFeatureIntentOf(approved.plan);
   if (!portableIntent.ok) {
@@ -9698,12 +9808,7 @@ async function startWorkflowE2EChecksDispatch(
       ? "the canonical E2E intent is unavailable" : "application E2E intents are not dispatched by the portable feature checks");
   }
   const e2eIntent = portableIntent.intent;
-  const sourceOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
-    .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "IMPLEMENT")
-    .map((item) => item as unknown as OperationRecord)
-    .filter((operation) => operation.candidateSourceRef?.candidateDigest === candidate.digest)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-  const sourceOperation = sourceOperations[0];
+  const sourceOperation = await candidateSourceOperation(dependencies, task, candidate.digest);
   if (sourceOperation === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the current candidate has no first-party committed source export");
   const sourceExport = await loadWorkflowCandidateSourceExport(dependencies, sourceOperation, candidate);
   if (sourceExport === undefined || sourceExport.repositories.length !== 1) {
@@ -9755,17 +9860,7 @@ async function startWorkflowE2EChecksDispatch(
   const admissionRef = E2EWorkflowAdmissionRefSchema.parse({ schemaVersion: 1, taskId: task.taskId, workflowRevision,
     candidateDigest: candidate.digest, roundId, groupRunIds: built.round.groupBindings.map((binding) => binding.runId),
     admissionRef: { key: `workflow-e2e-admissions/sha256/${admissionSha}.json`, sha256: admissionSha, byteLength: admissionBytes.byteLength } });
-  if (admissionBytes.byteLength > 24 * 1024 * 1024) throw agentXError("CONFIG_INVALID", "the immutable E2E admission exceeds its bounded object size");
-  try {
-    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: admissionRef.admissionRef.key,
-      Body: admissionBytes, ContentType: "application/json", Metadata: { sha256: admissionSha, task: task.taskId, candidate: candidate.digest }, IfNoneMatch: "*" }));
-  } catch (error) {
-    const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
-    if (status !== 412 && (error as { name?: unknown } | undefined)?.name !== "PreconditionFailed") throw error;
-    if (await readStoredText(dependencies.s3, dependencies.artifactBucketName, admissionRef.admissionRef.key, admissionBytes.byteLength + 1) !== admissionBytes.toString("utf8")) {
-      throw agentXError("RUNTIME_UNAVAILABLE", "the content-addressed E2E admission object conflicts with its digest");
-    }
-  }
+  await storeWorkflowE2EAdmission(dependencies, { key: admissionRef.admissionRef.key, sha256: admissionSha, bytes: admissionBytes, taskId: task.taskId, candidateDigest: candidate.digest });
   return startTaskWorkflowE2EChecksFromSystem(routeDependencies, task.taskId, expected, admissionRef, operationId, caller);
 }
 

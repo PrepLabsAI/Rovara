@@ -1,4 +1,4 @@
-import { canonicalJson, type E2EApplicationSelectionRecord } from "@agentx/contracts";
+import { WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, canonicalJson, type E2EApplicationSelectionRecord } from "@agentx/contracts";
 
 /**
  * A dispatch of an approved application round that must not happen, with the plain reason the owner sees. It is terminal for that dispatch: the
@@ -7,6 +7,18 @@ import { canonicalJson, type E2EApplicationSelectionRecord } from "@agentx/contr
  * are there now. A dispatch that merely could not read what it needs is not this: it fails like any other and is retried within its budget.
  */
 export class ApplicationDispatchRefusal extends Error {}
+
+const ROUND_REFUSAL_REASON_MAX_CHARS = 380;
+/**
+ * A refusal to dispatch an application round whose inputs are not usable (the candidate's build source, its manifest, the runtime inputs or the plan itself). The
+ * block text begins with `WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX`, so the owner is offered the action that fixes it (sending the task back to coding), and ends with
+ * that remedy; the workflow keeps only the first 500 characters of a block reason, so the reason is kept short enough for both to fit.
+ */
+export function applicationRoundRefusal(reason: string): ApplicationDispatchRefusal {
+  const line = reason.replace(/\p{Cc}+/gu, " ").replace(/\s+/gu, " ").trim();
+  const short = line.length > ROUND_REFUSAL_REASON_MAX_CHARS ? `${line.slice(0, ROUND_REFUSAL_REASON_MAX_CHARS - 3)}...` : line;
+  return new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX}${short} Send the task back to coding, or close it.`);
+}
 
 type RuntimeRow = E2EApplicationSelectionRecord["runtimeRows"][number];
 const rowKey = (row: RuntimeRow) => `${row.kind}:${row.profileId}`;

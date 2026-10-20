@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, createCandidateManifest,
+  E2EWorkflowAdmissionRefSchema, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, workflowSendBackOffered,
   WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey, readCanonicalPlan, portableOperationId, type E2EApplicationPlanIntent,
   selectE2EApplicationExecutionPlan,
   type E2EScenario, type E2ESourceSnapshot,
@@ -17,7 +18,9 @@ import { portableFeatureIntentOf } from "../../packages/broker/src/e2e/portable-
 import { createApplicationPlanNegotiationRecorder } from "../../packages/broker/src/aws/dispatcher.js";
 import { decideTaskWorkflow } from "../../packages/broker/src/aws/developer-tasks.js";
 import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
+import { decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
+import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { call, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 import { NOW, PROFILE, apiSnapshot, approvedSetup, binding, contractSnapshot, csvScenario, inferredSnapshot, ordersContractManifest, planFixture, sha, shaCanonical, snapshotOf, webAndApiFixture, webApiRow,
@@ -786,15 +789,16 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
 
   /**
    * Approves the v2 plan and puts the task where the broker dispatches its checks: VERIFY/WAITING on a candidate, with the dispatch row due, its compute
-   * readiness operation done and the session READY. Nothing of the candidate export is needed: an application selection is checked before any source is read.
+   * readiness operation done and the session READY. Nothing of the candidate export is seeded here: an application selection is checked before any source is read.
    */
-  async function atChecksDispatch(planned: Planned, options: { mutateTask?: (task: Record<string, unknown>) => Record<string, unknown>; seedReadiness?: boolean; attempts?: number } = {}) {
+  async function atChecksDispatch(planned: Planned, options: { mutateTask?: (task: Record<string, unknown>) => Record<string, unknown>; seedReadiness?: boolean; attempts?: number;
+    /** The task's candidate; by default a fabricated one, since an application selection is checked before any source is read. */ candidate?: ReturnType<typeof createCandidateManifest> } = {}) {
     expect((await decide(planned, "APPROVE")).status).toBe(200);
     const { harness, taskId, workspaceId } = planned;
     const key = { pk: `DEVTASK#${taskId}`, sk: "META" };
     const task = harness.db.get(key.pk, key.sk)!;
     const approved = WorkflowSnapshotSchema.parse(task.workflow);
-    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "e".repeat(40), baseCommitSha: planned.snapshot.commitSha }]);
+    const candidate = options.candidate ?? createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "e".repeat(40), baseCommitSha: planned.snapshot.commitSha }]);
     const verifying = WorkflowSnapshotSchema.parse({ ...approved, revision: approved.revision + 1, stage: "VERIFY", state: "WAITING", candidate });
     harness.db.set(options.mutateTask === undefined ? { ...task, workflow: verifying } : options.mutateTask({ ...task, workflow: verifying }));
     const readyOperationId = randomUUID();
@@ -820,7 +824,20 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     const admissionObjects = () => [...harness.s3.objects.keys()].filter((name) => name.startsWith("workflow-e2e-admissions/"));
     const readinessOperations = () => harness.db.find((row) => row.entityType === "OPERATION" && row.workspaceId === workspaceId && row.workflowE2EReadiness !== undefined);
     const workspaceNow = () => harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { status?: string; activeOperationId?: string } | undefined;
-    return { ...planned, runDispatch, taskNow, checksOperations, readinessOperations, workspaceNow, admissionObjects, dispatchRow: () => harness.db.get("WORKFLOW_DISPATCH", dispatchKey) as (Record<string, unknown> & { taskAccessPausedAt?: string }) | undefined, taskKey: key };
+    const dispatchRows = () => harness.db.find((row) => row.pk === "WORKFLOW_DISPATCH" && row.taskId === taskId) as Array<Record<string, unknown> & { sk: string; workflowRevision: number }>;
+    /** Marks the compute warm-up done for the task's current dispatch row, as it is for the first one by default (a retry writes a fresh row that would warm up again). */
+    const reseedReadiness = () => {
+      for (const row of dispatchRows()) {
+        if (row.readinessOperationId !== undefined) continue;
+        const operationId = randomUUID();
+        harness.db.set({ ...row, readinessOperationId: operationId });
+        harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, entityType: "OPERATION", id: operationId, workspaceId, kind: "resume", status: "SUCCEEDED", fence: 2,
+          requestId: operationId, payloadHash: "a".repeat(64), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          workflowE2EReadiness: { purpose: "workflow-e2e-readiness", taskId, workflowRevision: row.workflowRevision, candidateDigest: candidate.digest, dispatchSk: row.sk,
+            outboxId: workflowRequestId("agentx-workflow-e2e-readiness-outbox", taskId, row.workflowRevision, candidate.digest), readyGeneration: 2 } });
+      }
+    };
+    return { ...planned, runDispatch, taskNow, checksOperations, readinessOperations, workspaceNow, admissionObjects, dispatchRows, reseedReadiness, candidate, dispatchRow: () => harness.db.get("WORKFLOW_DISPATCH", dispatchKey) as (Record<string, unknown> & { taskAccessPausedAt?: string }) | undefined, taskKey: key };
   }
 
   /** The task is blocked for good, in plain words, and nothing was started or retried. */
@@ -836,22 +853,30 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
   }
 
-  it("blocks a v2-approved task at CHECKS dispatch instead of running it as a portable round or looping on the portable refusal (Ruling AX, the 2.2b carry)", async () => {
+  const noPortableAdmission = (dispatched: Awaited<ReturnType<typeof atChecksDispatch>>) => {
+    for (const name of dispatched.admissionObjects()) {
+      expect((JSON.parse(dispatched.harness.s3.objects.get(name)!) as { schemaVersion?: unknown }).schemaVersion, name).toBe("workflow-e2e-application-admission/v1");
+    }
+  };
+
+  it("never runs a v2-approved task as a portable round: with no candidate export it blocks, with the reason, and never loops (Ruling AX, the 2.2b carry)", async () => {
     const dispatched = await atChecksDispatch(await plannedWithApplicationIntent());
     expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
-    await expectBlockedAtDispatch(dispatched, /cannot dispatch application rounds yet.*Nothing was run/s);
+    await expectBlockedAtDispatch(dispatched, /no committed source export/);
+    expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX);
+    noPortableAdmission(dispatched);
   });
 
   describe("the selection approved at plan APPROVE must still be the one dispatched (Ruling AL)", () => {
-    const refusalPrefix = "The approved application checks can no longer run as approved, and retrying will not help until the plan is approved again: ";
+    const refusalPrefix = WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX;
     const reasonOf = (text: string) => new RegExp(refusalPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + text, "s");
 
     it("passes the unchanged selection through the check (it is the only thing left standing between it and the round)", async () => {
       const dispatched = await atChecksDispatch(await plannedWithApplicationIntent());
       await dispatched.runDispatch();
-      // Not the "no longer run as approved" refusal: the selection derived again equals the recorded one.
+      // Not the "no longer run as approved" refusal: the selection derived again equals the recorded one. What stops it is the next input, the candidate export.
       expect(dispatched.taskNow().workflow.blockReason).not.toContain(refusalPrefix);
-      expect(dispatched.taskNow().workflow.blockReason).toContain("cannot dispatch application rounds yet");
+      expect(dispatched.taskNow().workflow.blockReason).toContain("no committed source export");
     });
 
     it("refuses when the runtime row was replaced by a new generation", async () => {
@@ -968,20 +993,12 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
       expect(dispatched.taskNow().workflow.blockReason).toMatch(reasonOf("the web runtime"));
     });
 
-    it("also ends in the interim block before any warm-up when the selection is unchanged", async () => {
-      const dispatched = await atChecksDispatch(await plannedWithApplicationIntent(), { seedReadiness: false });
-      await dispatched.runDispatch();
-      expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
-      expect(dispatched.taskNow().workflow.blockReason).toContain("cannot dispatch application rounds yet");
-      expect(dispatched.readinessOperations()).toEqual([]);
-    });
-
-    it("names the real remedy: the plan has to be approved again, retrying the checks will refuse again", async () => {
+    it("names the real remedy: retry the checks, which approves the plan again against the rows that are ready now", async () => {
       const planned = await plannedWithApplicationIntent();
       const dispatched = await atChecksDispatch(planned);
       planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
       await dispatched.runDispatch();
-      expect(dispatched.taskNow().workflow.blockReason).toMatch(/retrying will not help until the plan is approved again/);
+      expect(dispatched.taskNow().workflow.blockReason).toMatch(/Retry the checks to approve the plan again against what is ready now/);
     });
 
     /** Fails the first transaction that deletes the dispatch row (the block write), and lets every later one through. */
@@ -1035,6 +1052,249 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
       expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.checksUnconfirmed });
       expect(dispatched.dispatchRow()).toBeUndefined();
       expect(dispatched.checksOperations()).toEqual([]);
+    });
+  });
+
+  // ---- Task 2.4c: a real single-kind round ----
+
+  describe("dispatching an approved application round (Task 2.4c)", () => {
+    afterEach(disposeRealCandidates);
+    const ORDERS_TREE = { "package.json": ordersContractManifest, "src/orders.js": "export const orders = [];\n" };
+    type BuildSourceSeed = "READY" | "absent" | "REFUSED" | "another-candidate" | "another-digest" | "another-tree" | "no-object" | "tampered-object" | "export-record-differs";
+
+    /**
+     * Puts the task at CHECKS dispatch on a real committed candidate whose export and build source are stored exactly as the broker stores them after an IMPLEMENT
+     * run: the export object, the IMPLEMENT operation's `candidateSourceRef` and `candidateBuildSource`, the export record's `buildSource` and the manifest object.
+     */
+    async function atApplicationDispatch(planned: Planned, options: { buildSource?: BuildSourceSeed; withoutExport?: boolean; seedReadiness?: boolean; tree?: Record<string, string> } = {}) {
+      const real = await createRealCandidate(options.tree ?? ORDERS_TREE, { repositoryId: "demo", baseCommitSha: planned.snapshot.commitSha });
+      const dispatched = await atChecksDispatch(planned, { candidate: real.source.candidate, ...(options.seedReadiness === undefined ? {} : { seedReadiness: options.seedReadiness }) });
+      const { harness, workspaceId } = planned;
+      // The coding run that produced the candidate is over: its operation is done and the workspace is free for the CHECKS operation.
+      for (const operation of harness.db.find((row) => row.pk === `WORKSPACE#${workspaceId}` && row.entityType === "OPERATION" && row.workflowMode === "IMPLEMENT")) harness.db.set({ ...operation, status: "SUCCEEDED" });
+      const { activeOperationId: _active, ...freed } = harness.db.get(`WORKSPACE#${workspaceId}`, "META")!;
+      void _active;
+      harness.db.set({ ...freed, status: "READY" });
+      const seed = options.buildSource ?? "READY";
+      if (options.withoutExport !== true) {
+        const exportText = JSON.stringify(real.source);
+        const exportKey = `workflow-candidate-sources/sha256/${sha(exportText)}.json`;
+        harness.s3.objects.set(exportKey, exportText);
+        const other = seed === "another-candidate" ? await createRealCandidate({ ...(options.tree ?? ORDERS_TREE), "src/extra.js": "export const extra = 1;\n" }, { repositoryId: "demo", baseCommitSha: planned.snapshot.commitSha }) : undefined;
+        const refused = { status: "REFUSED" as const, reason: "the worker could not export a build source manifest: a source file is over the per-file limit", candidateDigest: real.source.candidate.digest };
+        const stored = seed === "absent" ? undefined : seed === "REFUSED" ? refused : seed === "another-candidate" ? other!.stored
+          : seed === "another-digest" ? { ...real.stored, candidateDigest: "9".repeat(64) } : seed === "another-tree" ? { ...real.stored, treeSha: "9".repeat(40) } : real.stored;
+        const manifestText = seed === "tampered-object" ? real.manifestBytes.toString("utf8").replace("candidate-index-tree", "candidate-index-tree ").replace("committed-tree", "committed-tree ") : real.manifestBytes.toString("utf8");
+        if (stored?.status === "READY" && seed !== "no-object") harness.s3.objects.set(stored.manifestRef.key, seed === "another-candidate" ? other!.manifestBytes.toString("utf8") : manifestText);
+        const operationId = randomUUID();
+        const at = new Date(Date.now() + 1000).toISOString();
+        harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, entityType: "OPERATION", id: operationId, workspaceId, kind: "task", workflowMode: "IMPLEMENT", status: "SUCCEEDED",
+          fence: 1, requestId: randomUUID(), payloadHash: "a".repeat(64), createdAt: at, updatedAt: at,
+          candidateSourceRef: { key: exportKey, sha256: sha(exportText), byteLength: Buffer.byteLength(exportText), candidateDigest: real.source.candidate.digest },
+          ...(stored === undefined ? {} : { candidateBuildSource: stored }) });
+        harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_EXPORT#${operationId}`, entityType: "WORKFLOW_CANDIDATE_EXPORT", schemaVersion: 1, operationId, status: "COMPLETE", createdAt: at,
+          ...(stored === undefined ? {} : { buildSource: seed === "export-record-differs" ? refused : stored }) });
+      }
+      return { ...dispatched, real, candidate: real.source.candidate };
+    }
+    type AtApplication = Awaited<ReturnType<typeof atApplicationDispatch>>;
+    const operationRef = (dispatched: AtApplication) => E2EWorkflowAdmissionRefSchema.parse(dispatched.checksOperations()[0]!.workflowE2EAdmission);
+
+    it("starts one CHECKS operation carrying exactly one application admission the worker decodes, for the exported commit and tree", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atApplicationDispatch(planned);
+      await dispatched.runDispatch();
+      expect(dispatched.taskNow().workflow, JSON.stringify(dispatched.taskNow().workflow)).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
+      expect(dispatched.checksOperations()).toHaveLength(1);
+      expect(dispatched.dispatchRow()).toBeUndefined();
+      // The one admission is an application admission, stored content addressed and read back by the worker through its immutable reference.
+      expect(dispatched.admissionObjects()).toHaveLength(1);
+      noPortableAdmission(dispatched);
+      const ref = operationRef(dispatched);
+      const bytes = planned.harness.s3.objects.get(ref.admissionRef.key)!;
+      expect(sha(bytes)).toBe(ref.admissionRef.sha256);
+      expect(Buffer.byteLength(bytes)).toBe(ref.admissionRef.byteLength);
+      const admission = decodeE2EApplicationExecutionAdmission(bytes);
+      expect(() => validateE2EApplicationExecutionAdmission(admission)).not.toThrow();
+      expect(admission.candidateCommitSha).toBe(dispatched.real.identity.commitSha);
+      expect(admission.candidateTreeSha).toBe(dispatched.real.identity.treeSha);
+      expect(admission.sourceSnapshot).toMatchObject({ commitSha: dispatched.real.identity.commitSha, treeSha: dispatched.real.identity.treeSha });
+      expect(admission.candidateDigest).toBe(dispatched.candidate.digest);
+      expect(admission.taskId).toBe(planned.taskId);
+      expect(admission.portableProjection).toBeNull();
+      // Nothing else runs it: a second pass finds no dispatch row and starts nothing more.
+      await dispatched.runDispatch();
+      expect(dispatched.checksOperations()).toHaveLength(1);
+      expect(dispatched.admissionObjects()).toHaveLength(1);
+    });
+
+    it("records, for verification of the round, its id, the per-group run ids and the admission digest on the operation and the workflow", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atApplicationDispatch(planned);
+      await dispatched.runDispatch();
+      const operation = dispatched.checksOperations()[0]!;
+      const ref = operationRef(dispatched);
+      const admission = decodeE2EApplicationExecutionAdmission(planned.harness.s3.objects.get(ref.admissionRef.key)!);
+      expect(ref).toMatchObject({ taskId: planned.taskId, candidateDigest: dispatched.candidate.digest, roundId: admission.round.roundId, admissionRef: { sha256: sha(planned.harness.s3.objects.get(ref.admissionRef.key)!) } });
+      expect(ref.groupRunIds).toEqual(admission.round.groupBindings.map((binding) => binding.runId));
+      expect(ref.groupRunIds).toEqual(admission.groups.map((group) => group.outerBinding.runId));
+      expect(ref.groupRunIds.length).toBeGreaterThan(0);
+      expect(admission.operationId).toBe(operation.id);
+      expect(admission.operationFence).toBe(operation.fence);
+      const workflow = workflowOf(planned);
+      expect(workflow.e2e).toMatchObject({ currentRoundId: ref.roundId, currentGroupRunIds: ref.groupRunIds });
+      expect(admission.workflowRevision).toBe(workflow.revision);
+      // The admission digest identifies exactly the stored content.
+      const { admissionDigest, ...body } = admission;
+      expect(admissionDigest).toBe(shaCanonical(body));
+      // The worker is handed the same reference in its CHECKS invocation.
+      const outbox = planned.harness.db.find((row) => row.entityType === "OUTBOX" && row.operationId === operation.id)[0]!;
+      expect((outbox.invocation as { payload: { workflowE2EAdmission?: unknown } }).payload.workflowE2EAdmission).toEqual(ref);
+    });
+
+    describe("blocks with a specific reason, never a portable fallback and never a loop, when", () => {
+      const cases: Array<[string, Parameters<typeof atApplicationDispatch>[1], RegExp]> = [
+        ["the candidate has no committed source export", { withoutExport: true }, /no committed source export/],
+        ["no build source manifest was exported for the candidate", { buildSource: "absent" }, /no build source manifest was exported for this candidate/],
+        ["the export refused its build source, with the stored reason", { buildSource: "REFUSED" }, /the worker could not export a build source manifest: a source file is over the per-file limit/],
+        ["the stored manifest is for another candidate", { buildSource: "another-candidate" }, /build source.*(another|different).*(candidate|commit|tree)/i],
+        ["the stored build source record names another candidate digest, with the same commit and tree", { buildSource: "another-digest" }, /build source record is for another candidate/i],
+        ["the stored build source record names another tree than the export holds", { buildSource: "another-tree" }, /build source is for another commit or tree/i],
+        ["the stored manifest object is missing", { buildSource: "no-object" }, /build source manifest.*(missing|unavailable|not found)/i],
+        ["the stored manifest object is not the bytes its record names", { buildSource: "tampered-object" }, /build source manifest.*(changed|digest|differs|does not match)/i],
+        ["the export record and the operation disagree about the build source", { buildSource: "export-record-differs" }, /build source.*(disagree|differ|does not match)/i],
+        ["the candidate's application metadata changed since the setup was approved", { tree: { ...ORDERS_TREE, "package.json": JSON.stringify({ ...(JSON.parse(ordersContractManifest) as Record<string, unknown>), description: "changed after setup approval" }) } },
+          /changed since setup approval|replan|metadata|source/i],
+      ];
+      for (const [name, options, reason] of cases) {
+        it(name, async () => {
+          const dispatched = await atApplicationDispatch(await plannedWithApplicationIntent(), options);
+          await expectBlockedAtDispatch(dispatched, reason);
+          expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX);
+          expect(dispatched.taskNow().workflow.blockReason!.length).toBeLessThanOrEqual(500);
+          noPortableAdmission(dispatched);
+        });
+      }
+
+      it("the approved runtime row changed since approval, before anything is read from the export (Ruling AL, byte-exact)", async () => {
+        const planned = await plannedWithApplicationIntent();
+        const dispatched = await atApplicationDispatch(planned);
+        planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
+        await expectBlockedAtDispatch(dispatched, /can no longer run as approved.*web runtime/s);
+        expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX);
+      });
+    });
+
+    it("refuses before warming the workspace when the candidate's build source was refused, so compute is never woken for a round that cannot run", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atApplicationDispatch(planned, { buildSource: "REFUSED", seedReadiness: false });
+      const workspaceBefore = dispatched.workspaceNow();
+      await dispatched.runDispatch();
+      expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(dispatched.taskNow().workflow.blockReason).toMatch(/per-file limit/);
+      expect(dispatched.readinessOperations()).toEqual([]);
+      expect(dispatched.workspaceNow()).toEqual(workspaceBefore);
+      expect(dispatched.dispatchRow()).toBeUndefined();
+    });
+
+    it("warms the workspace first for a round that can run, and waits for it: nothing is blocked and nothing admitted yet", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atApplicationDispatch(planned, { seedReadiness: false });
+      await dispatched.runDispatch();
+      expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+      expect(dispatched.readinessOperations()).toHaveLength(1);
+      expect(dispatched.checksOperations()).toEqual([]);
+      expect(dispatched.admissionObjects()).toEqual([]);
+      expect(dispatched.dispatchRow()).toMatchObject({ kind: "CHECKS" });
+    });
+
+    describe("the owner's way out of a blocked application round", () => {
+      const selectionOf = (planned: Planned) => E2EApplicationSelectionRecordSchema.parse(workflowOf(planned).e2e!.applicationSelection);
+      const retry = (planned: Planned, dispatched: AtApplication) => planned.harness.dev(MAYA, "POST", `/v1/dev/tasks/${planned.taskId}/workflow/retry`,
+        { requestId: randomUUID(), expectedRevision: dispatched.taskNow().workflow.revision, instructions: "Approve the plan again against the runtime that is ready now" });
+
+      it("offers retrying the checks, which approves the same plan again against the rows that are there now, and the round then starts (Ruling AL stays byte-exact)", async () => {
+        const planned = await plannedWithApplicationIntent();
+        const dispatched = await atApplicationDispatch(planned);
+        planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
+        await dispatched.runDispatch();
+        expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+        const approvedBefore = selectionOf(planned);
+        expect(approvedBefore.runtimeRows[0]).toMatchObject({ generation: 4 });
+        const artifact = workflowOf(planned).artifacts.at(-1)!;
+
+        const retried = await retry(planned, dispatched);
+        expect(retried.status, JSON.stringify(retried.body)).toBe(200);
+        expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+        const approvedAfter = selectionOf(planned);
+        // The same plan, approved again against the row that is ready now.
+        expect(approvedAfter.runtimeRows[0]).toMatchObject({ generation: 5 });
+        expect(approvedAfter.semanticApproval).toEqual({ artifactId: artifact.id, digest: artifact.sha256 });
+        expect(approvedAfter.intentDigest).toBe(approvedBefore.intentDigest);
+        expect(workflowOf(planned).e2e).toMatchObject({ contractDigest: artifact.sha256, required: true });
+        expect(dispatched.dispatchRows().filter((row) => row.workflowRevision === dispatched.taskNow().workflow.revision)).toHaveLength(1);
+
+        dispatched.reseedReadiness();
+        await dispatched.runDispatch();
+        expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
+        expect(dispatched.checksOperations()).toHaveLength(1);
+        // And the comparison is still exact: a row that moves again after this approval blocks again.
+      });
+
+      it("does not loosen the comparison: a row that moves after the plan is approved again blocks the next dispatch again", async () => {
+        const planned = await plannedWithApplicationIntent();
+        const dispatched = await atApplicationDispatch(planned);
+        planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
+        await dispatched.runDispatch();
+        expect((await retry(planned, dispatched)).status).toBe(200);
+        planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 6 });
+        dispatched.reseedReadiness();
+        await dispatched.runDispatch();
+        expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+        expect(dispatched.taskNow().workflow.blockReason).toContain(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX);
+        expect(dispatched.checksOperations()).toEqual([]);
+      });
+
+      it("refuses the retry, saying why and changing nothing, when the plan cannot be approved against what is ready now", async () => {
+        const planned = await plannedWithApplicationIntent();
+        const dispatched = await atApplicationDispatch(planned);
+        planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
+        await dispatched.runDispatch();
+        const before = workflowOf(planned);
+        planned.harness.db.delete(webKey.pk, webKey.sk);
+        const retried = await retry(planned, dispatched);
+        expect(retried.status).toBeGreaterThanOrEqual(400);
+        expect(errorOf(retried).message).toMatch(/web runtime.*READY|cannot be approved/i);
+        expect(workflowOf(planned)).toEqual(before);
+        expect(dispatched.dispatchRows()).toEqual([]);
+      });
+
+      it("approves nothing again for a block that is not a changed selection: retrying the checks keeps the recorded selection", async () => {
+        const planned = await plannedWithApplicationIntent();
+        const dispatched = await atApplicationDispatch(planned, { buildSource: "REFUSED" });
+        await dispatched.runDispatch();
+        const recorded = structuredClone(workflowOf(planned).e2e!.applicationSelection);
+        planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
+        const retried = await retry(planned, dispatched);
+        expect(retried.status, JSON.stringify(retried.body)).toBe(200);
+        expect(workflowOf(planned).e2e!.applicationSelection).toEqual(recorded);
+      });
+
+      it("offers sending the task back to coding when the candidate's build source was refused, and the coder is told why", async () => {
+        const planned = await plannedWithApplicationIntent();
+        const dispatched = await atApplicationDispatch(planned, { buildSource: "REFUSED" });
+        await dispatched.runDispatch();
+        const task = dispatched.taskNow() as unknown as { workflow: Parameters<typeof workflowSendBackOffered>[0] & { revision: number } };
+        expect(workflowSendBackOffered(task.workflow)).toBe(true);
+        const operationsBefore = operationIds(planned);
+        const sent = await planned.harness.dev(MAYA, "POST", `/v1/dev/tasks/${planned.taskId}/workflow/send-back`,
+          { requestId: randomUUID(), expectedRevision: task.workflow.revision, instructions: "Shrink the oversized file and try again" });
+        expect(sent.status, JSON.stringify(sent.body)).toBe(200);
+        expect(workflowOf(planned)).toMatchObject({ stage: "IMPLEMENT" });
+        const coding = planned.harness.db.find((row) => row.pk === `WORKSPACE#${planned.workspaceId}` && row.entityType === "OPERATION" && !operationsBefore.includes(row.id) && row.workflowMode === "IMPLEMENT")[0]!;
+        const prompt = (planned.harness.db.find((row) => row.entityType === "OUTBOX" && row.operationId === coding.id)[0]!.invocation as { payload: { prompt: string } }).payload.prompt;
+        expect(prompt).toContain("per-file limit");
+      });
     });
   });
 

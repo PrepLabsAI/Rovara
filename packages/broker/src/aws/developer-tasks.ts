@@ -103,6 +103,7 @@ import {
   WorkflowFeedbackReviewRetryRequestSchema,
   WORKFLOW_PLAN_MAX_BYTES,
   WORKFLOW_BLOCK_REASONS,
+  WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
   canonicalPlanJson,
   canonicalJson,
@@ -2218,7 +2219,9 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       throw agentXError("CONFIG_INVALID", "keep only checks the approved plan proposed");
     }
     const selected = workflowSelectedChecks({ ...policy, selectedOptionalIds, selectedProposedIds });
-    if (selected.length === 0) throw agentXError("CONFIG_INVALID", "keep at least one check before retrying verification, or close the task");
+    // An application round's retry re-admits the approved browser and API checks; it runs no project check, so a task that has none can still retry it.
+    const readmitsApplicationRound = workflow.e2e?.required === true && workflow.e2e.applicationSelection !== undefined;
+    if (selected.length === 0 && !readmitsApplicationRound) throw agentXError("CONFIG_INVALID", "keep at least one check before retrying verification, or close the task");
     await actionableWorkspace(deps, task);
     const receivedAt = iso(deps);
     const { blockReason: _previousBlockReason, ...unblocked } = workflow;
@@ -2251,13 +2254,28 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       void _currentRoundId;
       void _currentGroupRunIds;
       void _displayRef;
+      // A block that says the approved selection changed (a runtime row was requalified, say) is fixed by approving the same plan again against what is ready now.
+      // The owner's retry is that action: the plan's own canonical intent is derived again exactly as plan approval derives it, and the new selection is recorded.
+      // The dispatch comparison stays byte-exact; nothing is loosened, and a plan that cannot be approved now is refused here with the reason, changing nothing.
+      let reapproved: { selection: E2EApplicationSelectionRecord; conditions: TransactItems } | undefined;
+      if (workflow.e2e.applicationSelection !== undefined && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true) {
+        const planArtifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
+        const intent = (await approvedCodingPlan(deps, workflow)).e2eIntent;
+        if (planArtifact === undefined || workflow.e2e.contractDigest !== planArtifact.sha256 || intent?.schemaVersion !== 2) {
+          throw agentXError("CONFIG_INVALID", "the approved plan no longer carries the application intent this round was approved for; send the task back to coding or close it");
+        }
+        if (deps.validateWorkflowE2EApplicationPlan === undefined) {
+          throw agentXError("RUNTIME_UNAVAILABLE", "the plan cannot be approved again here: the check against the approved setup and the ready runtimes is not installed");
+        }
+        reapproved = await deps.validateWorkflowE2EApplicationPlan({ task, intent, artifact: { id: planArtifact.id, sha256: planArtifact.sha256 } });
+      }
       const next = WorkflowSnapshotSchema.parse({
         ...retryBase,
         revision: workflow.revision + 1,
         stage: "VERIFY",
         state: "WAITING",
         checkPolicy: { ...policy, selectedOptionalIds, selectedProposedIds },
-        e2e: { ...unqualifiedE2E, currentGroupRunIds: [] },
+        e2e: { ...unqualifiedE2E, currentGroupRunIds: [], ...(reapproved === undefined ? {} : { applicationSelection: reapproved.selection }) },
         verificationRetries: [...(workflow.verificationRetries ?? []), {
           requestId: request.requestId, actorId: access.actorId, selectedOptionalCheckIds: selectedOptionalIds,
           selectedProposedCheckIds: selectedProposedIds, at: receivedAt,
@@ -2280,6 +2298,8 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
             response: "The owner authorized a fresh verification round. AgentX is rechecking the current approved source and runtime before dispatch.",
           })),
           workflowDispatchItem(deps.tableName, taskId, next.revision, "CHECKS", workflow.candidate.digest, receivedAt),
+          // The rows the new approval was derived from must still be exactly those when it commits.
+          ...(reapproved?.conditions ?? []),
           accessFence(deps, access),
         ] }));
       } catch (error) {

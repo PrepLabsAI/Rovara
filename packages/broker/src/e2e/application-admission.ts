@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, canonicalJson,
+  E2EPolicySchema, E2ERoundSchema, E2ERunBindingSchema, E2E_EXECUTOR_COMPILED_ORIGIN, E2E_HARD_LIMITS, canonicalJson,
   e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, validateE2EAppBuildBinding,
   type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2EApplicationExecutionAdmission, type E2EApplicationGroupAdmission,
   type E2EApplicationLaunchTarget, type E2EApplicationPlanIntent, type E2EAppArtifactRef, type E2EAppBuildManifest, type E2ERegisteredRuntime, type E2ERound,
@@ -11,11 +11,10 @@ import {
   encodeE2EApplicationExecutionAdmission, validateE2EApplicationBuildSourceManifest, validateE2EApplicationExecutionAdmission, webApiApplicationLaunchTarget,
   type E2EApplicationCompilationContext,
 } from "@agentx/verifier";
-import { ApplicationDispatchRefusal } from "./application-dispatch-check.js";
+import { applicationRoundRefusal } from "./application-dispatch-check.js";
 import { BF_REASON, evaluateApplicationPlanApproval } from "./application-plan-approval.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
-const REASON_MAX_CHARS = 380;
 
 /** Everything the broker knows when it admits one application round, none of it from the worker. */
 export type ApplicationAdmissionInput = Readonly<{
@@ -55,16 +54,13 @@ export type ApplicationAdmission = Readonly<{
   kind: "web" | "api";
 }>;
 
-function refusal(reason: string): ApplicationDispatchRefusal {
-  const line = reason.replace(/\p{Cc}+/gu, " ").replace(/\s+/gu, " ").trim();
-  return new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX}${line.length > REASON_MAX_CHARS ? `${line.slice(0, REASON_MAX_CHARS - 3)}...` : line}`);
-}
+const refusal = applicationRoundRefusal;
 const failure = (error: unknown) => (error instanceof Error ? error.message : "unreadable input");
 
 /**
  * Builds the application admission a worker decodes (`decodeE2EApplicationExecutionAdmission`) for one single-kind round, from the approved intent, the exported
  * candidate and the approved setup, and checks it with the worker's own validator before returning it. Every input that is missing or does not agree is a
- * refusal (`ApplicationDispatchRefusal`) with a specific reason: nothing is defaulted, and nothing falls back to the portable path.
+ * refusal (an `ApplicationDispatchRefusal`) with a specific reason: nothing is defaulted, and nothing falls back to the portable path.
  *
  * The selection and the application approval binding are derived against the exported candidate (the source the round builds), under this round's plan
  * identity; that derivation re-checks the candidate against the approved setup, so an application whose recipe, identity metadata or targets changed since

@@ -42,7 +42,7 @@ export const WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE = "AgentX couldn't open the pu
  * the approved one (a runtime row or the approved setup changed) is fixed by approving the plan again against what is ready now, which retrying the checks does.
  */
 export const WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX = "The approved browser and API checks could not be started: ";
-export const WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX = "The approved browser and API checks can no longer run as approved: ";
+export const WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX = "The approved browser and API checks can no longer run as approved. Retry the checks to approve the plan again against what is ready now. What changed: ";
 
 export const WORKFLOW_BLOCK_REASONS = {
   checksUnconfirmed: "AgentX couldn't confirm the selected checks ran on the final code. Choose checks and retry.",
@@ -1747,6 +1747,8 @@ export function workflowSendBackOffered(workflow: {
   if (workflow.stage === "VERIFY") {
     // Review only: a rerun of the agent's own tests regressed, and no result was recorded for it.
     if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.regressionFound) return true;
+    // A required browser and API round that could not be admitted from this candidate (its build source or inputs are unusable): only new code can fix that.
+    if (workflow.e2e?.required === true && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX) === true) return true;
     // Review only: there is no check to retry, so coding again is the way on, except from rewritten history.
     if (workflowIsReviewOnly(workflow.checkPolicy)) return workflow.blockReason !== WORKFLOW_HISTORY_REWRITTEN_MESSAGE;
     const failedOrdinaryCheck = current !== undefined && workflow.verification?.candidateDigest === current
@@ -1914,7 +1916,11 @@ export function sendBackProblems(workflow: WorkflowSnapshot): WorkflowSendBackPr
     && failure.groupRunIds.every((runId, index) => runId === workflow.e2e?.currentGroupRunIds[index])
     ? [{ source: "check" as const, text: `required E2E verification failed for the current round (${failure.groupRunIds.join(", ")})` }]
     : [];
-  return [...findings, ...failed, ...failedE2E, ...regressed];
+  // A browser and API round that could not be started from this candidate: the coder is told why, in the words the owner saw.
+  const refusedRound = workflow.stage === "VERIFY" && workflow.state === "BLOCKED" && workflow.e2e?.required === true && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX) === true
+    ? [{ source: "check" as const, text: `the browser and API checks could not be started: ${workflow.blockReason.slice(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX.length).replace(/ Send the task back to coding, or close it\.$/, "")}` }]
+    : [];
+  return [...findings, ...failed, ...failedE2E, ...refusedRound, ...regressed];
 }
 
 /** The problems as plain lines, "- [code review] text (file:line)" and "- check <label> failed", for people to read. */

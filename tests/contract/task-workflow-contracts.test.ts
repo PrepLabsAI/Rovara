@@ -859,6 +859,21 @@ describe("sending blocked work back to coding (Task 16)", () => {
     expect(workflowContracts.WORKFLOW_BLOCK_REASONS.checksBroken).toBe("the checks couldn't run");
   });
 
+  it("offers Send Back from a refused application round, and tells the coder why, but not from a changed selection (which approving the plan again fixes)", () => {
+    const base = { ...ready(), stage: "VERIFY" as const, state: "BLOCKED" as const, reviews: [],
+      e2e: { contractDigest: "a".repeat(64), policyDigest: "b".repeat(64), bundleDigest: "c".repeat(64), executionPlanDigest: "d".repeat(64), required: true, currentGroupRunIds: [], resultRefs: [] },
+      verification: { candidateDigest: candidate.digest, producer: "agentx-worker-checks", environmentId: "w", recordedAt: "2026-10-05T12:01:00.000Z", results: [{ checkId: "unit", status: "PASS" as const }] } };
+    const refused = WorkflowSnapshotSchema.parse({ ...base, blockReason: `${workflowContracts.WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX}a source file is over the per-file limit. Send the task back to coding, or close it.` });
+    expect(workflowContracts.workflowSendBackOffered(refused)).toBe(true);
+    expect(workflowContracts.sendBackProblems(refused)).toEqual([{ source: "check", text: "the browser and API checks could not be started: a source file is over the per-file limit." }]);
+    const changed = WorkflowSnapshotSchema.parse({ ...base, blockReason: `${workflowContracts.WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}the web runtime was replaced` });
+    expect(workflowContracts.workflowSendBackOffered(changed)).toBe(false);
+    expect(workflowContracts.sendBackProblems(changed)).toEqual([]);
+    // Only a task whose E2E round is required is offered it.
+    const notRequired = WorkflowSnapshotSchema.parse({ ...base, e2e: { ...base.e2e, required: false }, blockReason: refused.blockReason });
+    expect(workflowContracts.workflowSendBackOffered(notRequired)).toBe(false);
+  });
+
   it("offers Send Back from a broker-bound current E2E failure even when ordinary checks passed", () => {
     const roundId = "11111111-1111-4111-8111-111111111111";
     const runId = "22222222-2222-4222-8222-222222222222";
