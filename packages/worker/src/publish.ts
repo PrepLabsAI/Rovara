@@ -15,8 +15,9 @@ import {
   type WorkerInvocation,
 } from "@agentx/contracts";
 import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME, assertNoEmbeddedRepositories, assertNoLfsFiles, gitHardenedEnvironment } from "./git.js";
-import { assertCredentialFreeRemote, pushCommitFromIsolatedRepository, runGitWithCredential } from "./git-auth.js";
+import { assertCredentialFreeRemote, pushCommitFromIsolatedRepository } from "./git-auth.js";
 import { snapshotTree, withIsolatedGit } from "./isolated-git.js";
+import { withIsolatedRepository } from "./isolated-repository.js";
 import { stopWorkspaceProcesses } from "./workspace-processes.js";
 import { sweepWorkspaceContainers } from "./workspace-containers.js";
 import type { PullRequestSink } from "./callback-client.js";
@@ -283,15 +284,14 @@ async function fetchBase(input: {
   credential: Awaited<ReturnType<RepositoryCredentialProvider>>;
 }): Promise<void> {
   try {
-    await runGitWithCredential({
-      directory: input.git.directory,
-      args: [
-        "-C", input.git.directory, "fetch", "--no-tags", input.remoteUrl,
-        `refs/heads/${input.baseBranch}:refs/remotes/origin/${input.baseBranch}`,
-      ],
-      credential: input.credential,
-      timeout: 300_000,
-      maxBuffer: MAX_GIT_OUTPUT,
+    // In a throwaway repository, never the workspace's own: the token reaches no Git process whose config the agent controls.
+    await withIsolatedRepository(input.git.directory, "write", { refs: true }, async (repository) => {
+      await repository.assertNetworkSafe();
+      await repository.credentialed(
+        ["fetch", "--no-tags", input.remoteUrl, `refs/heads/${input.baseBranch}:refs/remotes/origin/${input.baseBranch}`],
+        input.credential,
+        { timeout: 300_000, maxBuffer: MAX_GIT_OUTPUT },
+      );
     });
   } catch (error) {
     // A refusal of the repository's own config is the project's to fix, not a runtime failure.

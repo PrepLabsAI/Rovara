@@ -11,7 +11,8 @@ import {
   type PullRequestLifecycleResult,
 } from "@agentx/contracts";
 import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME, assertNoEmbeddedRepositories, assertNoLfsFiles, gitHardenedEnvironment } from "./git.js";
-import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
+import { assertCredentialFreeRemote, type GitCredential } from "./git-auth.js";
+import { withIsolatedRepository } from "./isolated-repository.js";
 import type { PullRequestUpdateSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
@@ -72,10 +73,10 @@ export async function maintainPullRequest(options: {
   const credential = await options.credentialProvider(repository);
   await credentialedGit(repositoryPath, [
     // From the registered URL, never the remote's name, so a repository remote setting cannot redirect it.
-    "-C", repositoryPath, "fetch", "--no-tags", repository.url,
+    "fetch", "--no-tags", repository.url,
     `refs/heads/${invocation.payload.headBranch}:refs/remotes/origin/${invocation.payload.headBranch}`,
     `refs/heads/${invocation.payload.baseBranch}:refs/remotes/origin/${invocation.payload.baseBranch}`,
-  ], credential, "Git fetch failed");
+  ], credential, "Git fetch failed", { mode: "write", refs: true });
   const remoteHead = (await git(repositoryPath, ["rev-parse", `refs/remotes/origin/${invocation.payload.headBranch}^{commit}`])).trim();
   if (remoteHead !== invocation.payload.expectedHeadCommit) {
     throw agentXError("STALE_FENCE", "pull request head changed since AgentX last observed it");
@@ -259,25 +260,35 @@ async function validateCandidate(
  */
 async function push(directory: string, url: string, branch: string, credential: Awaited<ReturnType<RepositoryCredentialProvider>>) {
   assertCredentialFreeRemote(url);
-  await credentialedGit(directory, ["-C", directory, "push", "--porcelain", url, `HEAD:refs/heads/${branch}`], credential, "Git push failed");
-  await git(directory, ["update-ref", `refs/remotes/origin/${branch}`, "HEAD"]);
+  await credentialedGit(directory, ["push", "--porcelain", url, `HEAD:refs/heads/${branch}`], credential, "Git push failed",
+    { mode: "read", refs: true, after: ["update-ref", `refs/remotes/origin/${branch}`, "HEAD"] });
 }
 
 /** The commit a branch of the registered URL points at, or undefined when the branch does not exist. */
 async function remoteBranchHead(directory: string, url: string, branch: string, credential: Awaited<ReturnType<RepositoryCredentialProvider>>): Promise<string | undefined> {
   assertCredentialFreeRemote(url);
-  const listed = await credentialedGit(directory, ["-C", directory, "ls-remote", url, `refs/heads/${branch}`], credential, "Git ls-remote failed");
+  const listed = await credentialedGit(directory, ["ls-remote", url, `refs/heads/${branch}`], credential, "Git ls-remote failed", { mode: "read" });
   return listed.split("\n").map((line) => line.split("\t")).find(([, ref]) => ref === `refs/heads/${branch}`)?.[0];
 }
 
+/**
+ * A credentialed command run in a throwaway repository (isolated-repository.ts), never in the workspace repository: the token reaches no Git process whose
+ * config the agent controls, whenever the agent wrote it. `after` runs in the same session, so refs it writes are applied to the workspace with the command's.
+ */
 async function credentialedGit(
   directory: string,
   args: string[],
-  credential: Awaited<ReturnType<RepositoryCredentialProvider>>,
+  credential: GitCredential,
   fallback: string,
+  options: { mode: "read" | "write"; refs?: boolean; after?: readonly string[] },
 ): Promise<string> {
   try {
-    return (await runGitWithCredential({ directory, args, credential, timeout: 300_000, maxBuffer: MAX_GIT_OUTPUT })).stdout;
+    return await withIsolatedRepository(directory, options.mode, { refs: options.refs === true }, async (repository) => {
+      await repository.assertNetworkSafe();
+      const stdout = await repository.credentialed(args, credential, { timeout: 300_000, maxBuffer: MAX_GIT_OUTPUT });
+      if (options.after !== undefined) await repository.text(options.after, { index: "none" });
+      return stdout;
+    });
   } catch (error) {
     // A refusal of the repository's own config is the project's to fix, not a runtime failure.
     if (error instanceof AgentXError) throw error;

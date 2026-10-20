@@ -16,8 +16,8 @@ const execFile = promisify(execFileCallback);
 // (objects, which carry none either). Nothing in this module starts Git with the candidate's `.git` as its git directory, and nothing reads the candidate's
 // `.git/config` except `candidateConfigValues`, which copies a handful of plain-value keys under a strict grammar and never an executable setting.
 
-const NOT_PLAIN = "candidate repository is not a plain git directory";
-const HEX40 = /^[0-9a-f]{40}$/;
+export const NOT_PLAIN = "candidate repository is not a plain git directory";
+export const HEX40 = /^[0-9a-f]{40}$/;
 const SMALL_FILE_BYTES = 1024 * 1024;
 const PACKED_REFS_CAP_BYTES = 256 * 1024 * 1024;
 
@@ -44,7 +44,7 @@ export async function candidateLayout(directory: string): Promise<CandidateLayou
 }
 
 /** Reads a small regular file without following a symlink at its path; `undefined` when it is absent. */
-async function readSmallFile(path: string, limit: number): Promise<Buffer | undefined> {
+export async function readSmallFile(path: string, limit: number): Promise<Buffer | undefined> {
   let handle;
   try {
     handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
@@ -90,9 +90,14 @@ async function candidateConfigValues(layout: CandidateLayout, scratch: string, g
   return [...kept];
 }
 
+export type IndexKind = "temporary" | "real" | "none" | "work";
+
 export type IsolatedRunOptions = {
-  /** Which index file Git works on: the worker's temporary one (the default), the candidate's real `.git/index`, or none. */
-  index?: "temporary" | "real" | "none";
+  /**
+   * Which index file Git works on: the worker's temporary one (the default), the candidate's real `.git/index`, none, or `"work"`: the worker's copy of the real
+   * index (see isolated-repository.ts), the index a command that mirrors the work tree (checkout, reset, status) uses.
+   */
+  index?: IndexKind;
   maxBuffer?: number;
 };
 
@@ -102,9 +107,13 @@ export interface IsolatedGit {
   readonly scratch: string;
   /** The worker's temporary index file (it does not exist until Git writes it). */
   readonly temporaryIndex: string;
+  /** The worker's copy of the real index; it exists only after isolated-repository.ts has copied it. */
+  readonly workIndex: string;
+  /** The throwaway repository's own git directory. */
+  readonly gitDir: string;
   /** The Git arguments that name the throwaway repository and the candidate's work tree, for helpers that spawn Git themselves. */
   readonly location: readonly string[];
-  env(index?: "temporary" | "real" | "none"): NodeJS.ProcessEnv;
+  env(index?: IndexKind): NodeJS.ProcessEnv;
   text(args: readonly string[], options?: IsolatedRunOptions): Promise<string>;
   bytes(args: readonly string[], options?: IsolatedRunOptions): Promise<Buffer>;
   /** The commit HEAD names, read from the candidate's HEAD and refs files. */
@@ -137,16 +146,18 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
     }
     const config = await candidateConfigValues(layout, scratch, gitDir);
     const temporaryIndex = join(scratch, "index");
+    const workIndex = join(scratch, "work-index");
     const realIndex = join(layout.gitDirectory, "index");
     const location = [`--git-dir=${gitDir}`, `--work-tree=${layout.workTree}`] as const;
-    const env = (index: "temporary" | "real" | "none" = "temporary"): NodeJS.ProcessEnv => isolatedGitEnvironment(layout.workTree, {
+    const indexFiles = { temporary: temporaryIndex, real: realIndex, work: workIndex } as const;
+    const env = (index: IndexKind = "temporary"): NodeJS.ProcessEnv => isolatedGitEnvironment(layout.workTree, {
       ...(mode === "write" ? { GIT_OBJECT_DIRECTORY: layout.objects } : {}),
-      ...(index === "none" ? {} : { GIT_INDEX_FILE: index === "real" ? realIndex : temporaryIndex }),
+      ...(index === "none" ? {} : { GIT_INDEX_FILE: indexFiles[index] }),
     }, config);
     const run = async (args: readonly string[], options: IsolatedRunOptions, encoding: "utf8" | "buffer") => (await execFile("git", [...location, ...args],
       { cwd: scratch, env: env(options.index), encoding, maxBuffer: options.maxBuffer ?? SMALL_FILE_BYTES })).stdout;
     return await use({
-      layout, scratch, temporaryIndex, location, env,
+      layout, scratch, temporaryIndex, workIndex, gitDir, location, env,
       text: async (args, options = {}) => (await run(args, options, "utf8")) as string,
       bytes: async (args, options = {}) => (await run(args, options, "buffer")) as unknown as Buffer,
       headCommit: () => readHead(layout).then((head) => head.commit),
@@ -184,7 +195,7 @@ export async function snapshotTree(git: IsolatedGit, commit: string): Promise<st
 }
 
 /** Git's own rules for a ref name, applied strictly: anything unusual is refused rather than guessed at. */
-function isSafeRefName(name: string): boolean {
+export function isSafeRefName(name: string): boolean {
   if (!name.startsWith("refs/") || name.length > 255 || name.endsWith("/") || name.endsWith(".") || name.includes("//") || name.includes("..") || name.includes("@{")) return false;
   // eslint-disable-next-line no-control-regex
   if (/[\u0000- \u007f~^:?*[\\]/u.test(name)) return false;
@@ -196,7 +207,7 @@ function isSafeRefName(name: string): boolean {
  * itself, so it is inside `.git`. A missing directory is created one level at a time when `create` is set, never through anything that exists as a symlink.
  * Returns false when a directory is missing and `create` is not set (the loose ref cannot exist). Anything else is refused.
  */
-async function verifyRefDirectories(layout: CandidateLayout, ref: string, create: boolean): Promise<boolean> {
+export async function verifyRefDirectories(layout: CandidateLayout, ref: string, create: boolean): Promise<boolean> {
   let current = layout.gitDirectory;
   for (const part of ref.split("/").slice(0, -1)) {
     current = join(current, part);
@@ -237,10 +248,10 @@ async function readHead(layout: CandidateLayout): Promise<Head & { commit: strin
   throw new Error("candidate branch has no commit");
 }
 
-type HeldLock = { path: string; handle: Awaited<ReturnType<typeof open>>; released: boolean };
+export type HeldLock = { path: string; handle: Awaited<ReturnType<typeof open>>; released: boolean };
 
 /** Creates `path` exclusively, as Git takes a lock; a lock that is already there is another Git process's, or a crash's, and is named. */
-async function takeLock(path: string): Promise<HeldLock> {
+export async function takeLock(path: string): Promise<HeldLock> {
   try {
     return { path, handle: await open(path, "wx", 0o666), released: false };
   } catch (error) {

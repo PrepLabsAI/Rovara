@@ -158,12 +158,12 @@ export interface GitHardenedEnvironmentOptions {
 /** The only remote keys a clone AgentX made has, and that network calls accept. */
 const ALLOWED_REMOTE_KEYS = new Set(["remote.origin.url", "remote.origin.fetch"]);
 
-function isRefusedForNetwork(key: string): boolean {
+export function isRefusedForNetwork(key: string): boolean {
   if (/^(?:url|http)\./u.test(key) || key === "extensions.partialclone") return true;
   return key.startsWith("remote.") && !ALLOWED_REMOTE_KEYS.has(key);
 }
 
-function networkRefusal(keys: readonly string[]): Error {
+export function networkRefusal(keys: readonly string[]): Error {
   const unique = [...new Set(keys)].sort();
   const shown = unique.slice(0, 10).join(", ");
   const more = unique.length > 10 ? ` and ${unique.length - 10} more` : "";
