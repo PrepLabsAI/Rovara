@@ -76,7 +76,10 @@ export async function executeWorkflowE2EChecks(input: {
   const admissionBytes = await readWorkflowE2EAdmissionBytes({ reference, readAdmission: input.readAdmission, throwIfCancelled });
   const parsedAdmission = JSON.parse(admissionBytes.toString("utf8")) as Admission;
   // The admission's own schema version picks the path. An application admission never reaches the portable code below, and a portable one never reaches Docker.
-  if ((parsedAdmission as { schemaVersion?: unknown } | null)?.schemaVersion === "workflow-e2e-application-admission/v1") {
+  const isApplicationAdmission = (parsedAdmission as { schemaVersion?: unknown } | null)?.schemaVersion === "workflow-e2e-application-admission/v1";
+  // The reference's kind is what the dispatcher used to decide which worker may receive the round, so it is not trusted alone: it must say what the admission is.
+  if (isApplicationAdmission !== (reference.kind === "application")) throw new Error("native E2E reference kind does not match the admission it names");
+  if (isApplicationAdmission) {
     return executeWorkflowE2EApplicationChecks({ invocation, reference, admissionBytes,
       runtime: () => {
         const application = typeof input.application === "function" ? input.application() : input.application;
