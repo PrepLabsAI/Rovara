@@ -150,12 +150,13 @@ describe("settling on a verdict about a browser whose renderers are still starti
   it("stops waiting the moment the caller aborts instead of finishing the settle time", async () => {
     const controller = new AbortController();
     const run = sequence([false]);
-    // The caller cancels right after the first look (no timer), so the abort can never land before the look or after the settle time.
-    const inspect = async () => { const attestation = await run.inspect(); controller.abort(new Error("executor cancelled")); return attestation; };
+    // The real clock and a real pause: the poll is 10 s and the settle time 30 s, so only the abort can end the wait. It is scheduled from inside the look and
+    // lands on a later turn of the event loop, after the loop has entered the pause, which is what must wake on abort.
+    const inspect = async () => { const attestation = await run.inspect(); setImmediate(() => controller.abort(new Error("executor cancelled"))); return attestation; };
     const started = Date.now();
-    const result = await attestWhenSettled({ ...input, signal: controller.signal }, { settleMs: 30_000, pollMs: 10_000, inspect, clock: settleClock() });
+    const result = await attestWhenSettled({ ...input, signal: controller.signal }, { settleMs: 30_000, pollMs: 10_000, inspect });
     expect(result.verdict).toMatchObject({ sandboxed: false });
-    expect(run.calls()).toBe(1);
+    expect(run.calls()).toBe(2); // the look before the pause, and the one the loop takes on waking, which then sees the abort and stops
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 

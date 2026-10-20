@@ -12,6 +12,8 @@ const STARTUP_TIMEOUT_MS = 30_000;
 const GRACEFUL_EXIT_MS = 3_000;
 const KILLED_EXIT_MS = 2_000;
 const EXIT_POLL_MS = 25;
+/** However slow the process table is to read, the waits for the browser's processes to exit end this long after the main process has exited. */
+const EXIT_WAIT_CEILING_MS = 8_000;
 /** Removing the profile directory: attempts of `fs.rm` (itself retrying ENOTEMPTY and busy errors), with a pause between attempts. */
 const PROFILE_REMOVAL_ATTEMPTS = 4;
 const PROFILE_REMOVAL_PAUSE_MS = 100;
@@ -19,8 +21,11 @@ const PROFILE_REMOVAL_PAUSE_MS = 100;
 const pause = (milliseconds: number): Promise<void> => new Promise((resolve) => { setTimeout(resolve, milliseconds); });
 const describeError = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
-/** One process as the operating system lists it: its parent, and whether it has already exited and is only waiting to be reaped. */
-export type ProcessEntry = Readonly<{ ppid: number; zombie: boolean }>;
+/**
+ * One process as the operating system lists it: its parent, whether it has already exited and is only waiting to be reaped, and when it started (the kernel's
+ * start time in procfs, `lstart` from ps). A pid alone can be reused by an unrelated process; a pid with the start time it had when it was recorded cannot.
+ */
+export type ProcessEntry = Readonly<{ ppid: number; zombie: boolean; start: string }>;
 export type ProcessTable = ReadonlyMap<number, ProcessEntry>;
 
 /** Every process on the host: from procfs where there is one (the executor container), otherwise from `ps` (a developer's macOS). Empty when neither answers. */
@@ -34,17 +39,19 @@ export async function readProcessTable(procRoot = "/proc"): Promise<ProcessTable
         const stat = await readFile(`${procRoot}/${name}/stat`, "utf8");
         const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
         const ppid = Number(fields[1]);
-        if (Number.isInteger(ppid)) table.set(Number(name), { ppid, zombie: fields[0] === "Z" || fields[0] === "X" });
+        // Field 22 (index 19 after the state) is the start time in clock ticks since boot.
+        if (Number.isInteger(ppid)) table.set(Number(name), { ppid, zombie: fields[0] === "Z" || fields[0] === "X", start: fields[19] ?? "" });
       } catch { /* the process exited while the table was read */ }
     }
     return table;
   } catch { /* no procfs: ask ps */ }
   return new Promise((resolve) => {
-    execFile("ps", ["-A", "-o", "pid=,ppid=,stat="], { timeout: 5_000 }, (error, stdout) => {
+    execFile("ps", ["-A", "-o", "pid=,ppid=,stat=,lstart="], { timeout: 5_000 }, (error, stdout) => {
       if (error) { resolve(table); return; }
       for (const line of stdout.split("\n")) {
-        const [pid, ppid, state] = line.trim().split(/\s+/);
-        if (/^\d+$/.test(pid ?? "") && /^\d+$/.test(ppid ?? "")) table.set(Number(pid), { ppid: Number(ppid), zombie: state?.startsWith("Z") ?? false });
+        // lstart is several words ("Mon Oct 19 22:48:13 2026"): everything after the state.
+        const [pid, ppid, state, ...started] = line.trim().split(/\s+/);
+        if (/^\d+$/.test(pid ?? "") && /^\d+$/.test(ppid ?? "")) table.set(Number(pid), { ppid: Number(ppid), zombie: state?.startsWith("Z") ?? false, start: started.join(" ") });
       }
       resolve(table);
     });
@@ -108,8 +115,9 @@ export async function launchLocalChromium(input: { downloadDir: string; signal: 
    * replaces the outcome of the work it follows, so this is the only place such a problem is visible. The default writes it to stderr.
    */
   onCleanupDiagnostic?: (message: string) => void | Promise<void>;
-  /** Test seams for removing the profile directory. */
-  removeDirectory?: (path: string, options: RmOptions) => Promise<void>; sleep?: (milliseconds: number) => Promise<void> }): Promise<LocalChromium> {
+  /** Test seams: removing the profile directory, the pause between looks, the clock the waits are bounded on, and the process table. */
+  removeDirectory?: (path: string, options: RmOptions) => Promise<void>; sleep?: (milliseconds: number) => Promise<void>; now?: () => number;
+  readProcesses?: () => Promise<ProcessTable> }): Promise<LocalChromium> {
   const executable = input.executablePath ?? chromium.executablePath();
   try { await access(executable); } catch { throw new Error(`chromium executable is not installed at ${executable}`); }
   await mkdir(input.downloadDir, { recursive: true, mode: 0o755 });
@@ -140,7 +148,16 @@ export async function launchLocalChromium(input: { downloadDir: string; signal: 
   // Chromium's own exit is not the end of its work: its network, GPU and utility helpers outlive the main process by a moment and keep writing into the
   // profile, so removing the profile as soon as the main process exits races them (ENOTEMPTY). Cleanup waits for every process below the browser first.
   const stopEveryProcess = async (): Promise<void> => {
-    const tracked = new Set<number>(exited || child.pid === undefined ? [] : subtreeOf(child.pid, await readProcessTable()));
+    const now = input.now ?? Date.now;
+    const sleep = input.sleep ?? pause;
+    const readProcesses = input.readProcesses ?? (() => readProcessTable());
+    // Each tracked pid is kept with the start time it had when it was recorded: a pid that is later listed with another start time is a different
+    // process that reused the number, and is neither waited for nor signalled.
+    const tracked = new Map<number, string>();
+    if (!exited && child.pid !== undefined) {
+      const table = await readProcesses();
+      for (const pid of subtreeOf(child.pid, table)) tracked.set(pid, table.get(pid)?.start ?? "");
+    }
     if (!exited) {
       child.kill("SIGTERM");
       const killer = setTimeout(() => { if (!exited) child.kill("SIGKILL"); }, GRACEFUL_EXIT_MS);
@@ -149,15 +166,21 @@ export async function launchLocalChromium(input: { downloadDir: string; signal: 
     }
     tracked.delete(child.pid ?? -1);
     const alive = async (): Promise<number[]> => {
-      const table = await readProcessTable();
-      for (const pid of [...tracked]) for (const below of subtreeOf(pid, table)) tracked.add(below);
-      return [...tracked].filter((pid) => table.has(pid) && !table.get(pid)!.zombie);
+      const table = await readProcesses();
+      const same = (pid: number): boolean => table.has(pid) && table.get(pid)!.start === tracked.get(pid);
+      for (const pid of [...tracked.keys()]) if (same(pid)) for (const below of subtreeOf(pid, table)) if (!tracked.has(below)) tracked.set(below, table.get(below)?.start ?? "");
+      return [...tracked.keys()].filter((pid) => same(pid) && !table.get(pid)!.zombie);
     };
-    // Bounded by the number of looks, not by the wall clock, so a slow table read cannot shorten the wait.
+    const begun = now();
+    // A wait ends when nothing is left, or at the later of its look count and its time (so a fast table cannot cut it short and a slow one cannot stretch
+    // it), and never later than the ceiling after the main process exited.
     const waitFor = async (milliseconds: number): Promise<number[]> => {
+      const phaseBegun = now();
       let remaining = await alive();
-      for (let looks = 0; remaining.length > 0 && looks < milliseconds / EXIT_POLL_MS; looks += 1) {
-        await (input.sleep ?? pause)(EXIT_POLL_MS);
+      for (let looks = 0; remaining.length > 0; looks += 1) {
+        if (now() - begun >= EXIT_WAIT_CEILING_MS) break;
+        if (looks >= milliseconds / EXIT_POLL_MS && now() - phaseBegun >= milliseconds) break;
+        await sleep(EXIT_POLL_MS);
         remaining = await alive();
       }
       return remaining;

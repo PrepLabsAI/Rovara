@@ -36,7 +36,6 @@ export class FakeDockerCli implements DockerCli {
   /** Settles once the executor "container" is running (hung, gated or about to write its output): the point at which a test may cancel or expire the run. */
   readonly executorStarted: Promise<void>;
   private markExecutorStarted: () => void = () => undefined;
-  private timeOutExecutor: (() => void) | null = null;
   /** The `timeoutMs` the host gave the executor's `docker run`, which is where the host's deadline reaches Docker. */
   executorTimeoutMs: number | null = null;
   buildOutput = "";
@@ -46,8 +45,6 @@ export class FakeDockerCli implements DockerCli {
 
   failOn(what: "build", code: number): void { this.build.exitCode = code; void what; }
   hangOn(what: "executor"): void { this.hanging = what; }
-  /** The docker CLI's own timeout firing on a hung executor (exit 124), at the moment a test chooses instead of after a real wait. */
-  expireExecutorTimeout(): void { this.timeOutExecutor?.(); }
   exitCodeOfExecutor(code: number): void { this.executorExit = code; }
   exitDuringExecutor(what: "app", code: number, logs: string): void { void what; this.appExit = { code, logs }; this.hanging = "executor"; }
   /** A labeled resource whose creation time is missing or unreadable: the sweep must leave it alone. */
@@ -170,7 +167,6 @@ export class FakeDockerCli implements DockerCli {
       if (this.hanging === "executor") {
         const code = await new Promise<number>((resolve) => {
           this.releaseExecutor = resolve;
-          this.timeOutExecutor = () => { clearTimeout(timer); resolve(124); };
           const timer = setTimeout(() => resolve(124), opts.timeoutMs);
           opts.signal.addEventListener("abort", () => { clearTimeout(timer); resolve(130); }, { once: true });
         });
