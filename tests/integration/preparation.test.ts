@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readFile, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -31,7 +31,10 @@ describe("workspace preparation", () => {
     await chmod(backing, 0o755);
     const owner = await stat(backing);
     const runtimeBackingOwner = { uid: owner.uid, gid: owner.gid };
-    await linkInstalledRuntimeDependencies(join(backing, "evidence", "actual-cli", "project"), root);
+    // A hermetic packaged root: the host profile's own (/opt/agentx on Linux) is absent on CI hosts.
+    const installedRoot = await realpath(await mkdtemp(join(tmpdir(), "agentx-installed-worker-")));
+    await mkdir(join(installedRoot, "node_modules"), { recursive: true });
+    await linkInstalledRuntimeDependencies(join(backing, "evidence", "actual-cli", "project"), root, installedRoot);
 
     await expect(prepareWorkspace({ ...optionsWithoutBacking, trustedRuntimeBackingOwner: runtimeBackingOwner })).resolves.toMatchObject({ complete: true });
     await expect(prepareWorkspace({

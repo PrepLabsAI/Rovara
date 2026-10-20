@@ -31,10 +31,17 @@ export class FakeDockerCli implements DockerCli {
   imageArrivesDuringFailedPull = false;
   pullStderr = "pull access denied";
   appStartFails = false;
-  /** When set, the executor "container" ignores the abort signal and finishes (with its normal output) after this many milliseconds. */
-  executorIgnoresAbortForMs: number | null = null;
+  /** When set, the executor "container" ignores the abort signal and finishes (with its normal output) only once this promise settles: the test, not a timer, decides when. */
+  executorIgnoresAbortUntil: Promise<void> | null = null;
+  /** Settles once the executor "container" is running (hung, gated or about to write its output): the point at which a test may cancel or expire the run. */
+  readonly executorStarted: Promise<void>;
+  private markExecutorStarted: () => void = () => undefined;
+  /** The `timeoutMs` the host gave the executor's `docker run`, which is where the host's deadline reaches Docker. */
+  executorTimeoutMs: number | null = null;
   buildOutput = "";
   executorStdout = "executor said hello\n";
+
+  constructor() { this.executorStarted = new Promise<void>((resolve) => { this.markExecutorStarted = resolve; }); }
 
   failOn(what: "build", code: number): void { this.build.exitCode = code; void what; }
   hangOn(what: "executor"): void { this.hanging = what; }
@@ -150,6 +157,8 @@ export class FakeDockerCli implements DockerCli {
     }
     if (name.startsWith("rovara-executor-")) {
       this.resources.set(name, { kind: "container", name, labels: this.mark(args), state: "running", exitCode: 0, logs: "" });
+      this.executorTimeoutMs = opts.timeoutMs;
+      this.markExecutorStarted();
       const outMount = args.find((value, index) => args[index - 1] === "-v" && value.endsWith(":/out"))!.replace(/:\/out$/, "");
       if (this.appExit) {
         const app = [...this.resources.values()].find((item) => item.name.startsWith("rovara-app-"))!;
@@ -163,7 +172,7 @@ export class FakeDockerCli implements DockerCli {
         });
         return { code, stdout: "", stderr: "" };
       }
-      if (this.executorIgnoresAbortForMs !== null) await new Promise((done) => setTimeout(done, this.executorIgnoresAbortForMs!));
+      if (this.executorIgnoresAbortUntil !== null) await this.executorIgnoresAbortUntil;
       await this.onExecutor(outMount, args);
       this.events.push("executor finished");
       return { code: this.executorExit, stdout: this.executorStdout, stderr: "" };

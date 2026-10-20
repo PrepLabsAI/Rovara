@@ -231,6 +231,12 @@ export function validateE2EApplicationLaunchTarget(target: E2EExecutionPlan["eff
     if (launch.engine.capabilities.length < 2 || !launch.engine.capabilities.includes("actions") || !launch.engine.capabilities.includes("observation")) {
       throw new Error("application engine is missing required action or observation capabilities");
     }
+    // The runner computes an engine's `artifacts` and `state` capabilities from the hooks it carries, and the executor carries only what the admission allows, so the
+    // declared list names them exactly when the declared artifact and state capabilities do.
+    if (target.kind === "web" && (launch.engine.capabilities.includes("artifacts") !== (launch.artifactCapabilities.length > 0)
+      || launch.engine.capabilities.includes("state") !== launch.stateCapability)) {
+      throw new Error("application engine capabilities differ from the declared artifact and state capabilities");
+    }
   }
 }
 function validateBindings(context: E2EApplicationCompilationContext, plan: E2EExecutionPlan, snapshot: E2ESourceSnapshot): {

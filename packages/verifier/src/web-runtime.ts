@@ -71,7 +71,32 @@ function fixturesOf(value: unknown): WebFixtures {
   return row as WebFixtures;
 }
 
-/** The engine as the runner sees it: the pinned web engine plus the shared assertion-step fixture. Its live surface stays on the original. */
+/**
+ * What the admission allows the web engine to do, as the launch declaration states it: the artifact kinds it may record and whether it has a state hook. Both come
+ * from the admitted capture policy and the admitted runtime row, never from the engine.
+ */
+export type WebEngineAdmission = Readonly<{ artifactCapabilities: readonly ("screenshot" | "video")[]; stateCapability: boolean }>;
+
+/**
+ * The pinned web engine, made exactly as capable as the admission says. The runner reports an engine's artifact and state capabilities from the hooks it has, so an
+ * engine that keeps a screenshot or a video hook when capture is off, or a state hook the runtime row does not list, would report more than was admitted and the oracle
+ * would (rightly) refuse the run. Without `artifacts` it records nothing; without `startVideo` it records no video; without `state` it has no state hook. Its capability
+ * list follows its hooks, as the runner computes it. A video without a screenshot is not something this engine can be (its video hook belongs to `artifacts`), so a
+ * policy asking for that is held against an engine that reports both and is refused by the oracle.
+ */
+export function admitWebEngine(base: ReturnType<typeof web>, admitted: WebEngineAdmission) {
+  const screenshot = admitted.artifactCapabilities.includes("screenshot");
+  const video = admitted.artifactCapabilities.includes("video");
+  const { artifacts, state, capabilities, ...rest } = base;
+  const kept = new Set(capabilities);
+  if (!screenshot && !video) kept.delete("artifacts");
+  if (!admitted.stateCapability) kept.delete("state");
+  return Object.freeze({ ...rest, capabilities: kept,
+    ...(artifacts !== undefined && (screenshot || video) ? { artifacts: video ? artifacts : { screenshot: artifacts.screenshot.bind(artifacts) } } : {}),
+    ...(admitted.stateCapability ? { state } : {}) }) as typeof base;
+}
+
+/** The engine as the runner sees it: the admitted web engine plus the shared assertion-step fixture. Its live surface stays on the original. */
 function withAssertionSteps(base: ReturnType<typeof web>) {
   return Object.freeze({ ...base, fixtures: Object.freeze({ ...base.fixtures, [ASSERTION_FIXTURE]: assertionStepFixture }) });
 }
@@ -334,15 +359,15 @@ async function observeWebAssertions(input: { caseId: string; scenario: E2EScenar
 }
 
 /** Construct an effect-free fixed Chromium host; browser endpoint resolution stays lazy until the first SDK connection. */
-export function createWebApplicationCliHost(input: { launchContext: E2EApplicationCliLaunchContext; declaration: WebDeclaration; ports: E2EWebRuntimePorts }): Omit<E2EApplicationCliHost, "launchContext" | "installedModule"> {
-  const { launchContext, declaration, ports } = input;
+export function createWebApplicationCliHost(input: { launchContext: E2EApplicationCliLaunchContext; declaration: WebDeclaration; ports: E2EWebRuntimePorts; engineAdmission: WebEngineAdmission }): Omit<E2EApplicationCliHost, "launchContext" | "installedModule"> {
+  const { launchContext, declaration, ports, engineAdmission } = input;
   if (launchContext.selectedTarget.kind !== "web" || launchContext.selectedTarget.browser !== "chromium"
     || declaration.target.app === null || declaration.target.app.identity !== launchContext.selectedTarget.applicationId) {
     throw new Error("web host requires the exact selected Chromium target and its source-bound application identity");
   }
   const liveEngine = web({ browser: "chromium", viewport: launchContext.selectedTarget.viewport,
     connect: { cdpEndpoint: (signal) => ports.resolveOwnedCdpEndpoint(signal) } });
-  const engine = withAssertionSteps(liveEngine);
+  const engine = withAssertionSteps(admitWebEngine(liveEngine, engineAdmission));
   const descriptor = E2EApplicationCliHostDescriptorSchema.parse(launchContext.cliHost.descriptor);
   return Object.freeze({ profileId: launchContext.cliHost.profileId, descriptor, engine,
     async runCase(caseId: string, rawFixtures: unknown): Promise<void> {
@@ -452,7 +477,7 @@ export function createWebRuntime(input: { compiled: E2ECompiledApplicationSuite;
     run: (signal: AbortSignal) => runIsolatedE2EApplication({ input: input.runInput, compiled: input.compiled, ports: lifecycle, signal }),
     prepare: (preparation: E2EApplicationPreparationInputs, signal: AbortSignal) => prepareE2EApplicationEnvironment(preparation, input.environment, signal),
     seal: (request: Parameters<typeof sealE2EApplicationEnvironment>[0], signal: AbortSignal) => sealE2EApplicationEnvironment(request, input.environment, signal),
-    createCliHost: (host: { launchContext: E2EApplicationCliLaunchContext; declaration: WebDeclaration }) =>
+    createCliHost: (host: { launchContext: E2EApplicationCliLaunchContext; declaration: WebDeclaration; engineAdmission: WebEngineAdmission }) =>
       createWebApplicationCliHost({ ...host, ports }),
   });
 }

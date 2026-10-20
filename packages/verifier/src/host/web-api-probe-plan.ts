@@ -10,6 +10,7 @@ import { compileE2EApplicationScenarios, encodeE2EApplicationExecutionAdmission,
 import { encodeE2EApplicationBuildSourceArchive } from "../application-build-source.js";
 import { loadWebApiQualificationProbeAssets } from "../application-runtime-probes.js";
 import { ROVARA_HTTP_ENGINE_DESCRIPTOR } from "../rovara-http-engine-descriptor.js";
+import { webApiApplicationLaunchTarget } from "../web-api-launch-target.js";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID } from "../executor/host-registry.js";
 
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -125,7 +126,7 @@ export type WebApiProbePlan = Readonly<{
  * `appRoot` is the app tree whose package.json is the contract: the installed qualification app in production, the source fixture in tests.
  * `runId` binds the run to a qualification challenge; without it the run id is random.
  */
-export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot: string; runId?: string; deadlineMs?: number; healthTimeoutMs?: number; role?: "owner" | "viewer";
+export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot: string; runId?: string; /** The workflow task id the run is bound to; default is a fixed qualification label. */ taskId?: string; deadlineMs?: number; healthTimeoutMs?: number; role?: "owner" | "viewer";
   /** Build commands for the recipe (the fixture itself builds nothing); the recipe digest is recomputed to match. */
   recipeBuild?: { program: string; args: string[]; cwd: string; timeoutMs: number; env: Record<string, string> }[];
   /** Overrides of the recipe's start command (arguments, timeout, env); the recipe digest is recomputed to match. */
@@ -164,14 +165,15 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     scenarios: [scenario], semanticExportDeltas: [], applicationRuntimeRefs: [{ targetId: target.targetId, applicationId: application.applicationId,
       recipeDigest: application.recipe!.recipeDigest, sourceRefs: e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths),
       runtimeProfileId, accountProfileId }], runtimeAccountRefs: [accountRef], unavailableTargetRefs: [] });
-  const setupProposal = proposeE2ESetup({ inspection: discovery.inspection, snapshot, expectedCandidate: candidate });
+  // The probe qualifies the runtime that targets are approved against, so its setup carries that qualified profile like a real approved setup.
+  const setupProposal = proposeE2ESetup({ inspection: discovery.inspection, snapshot, expectedCandidate: candidate, readyProfiles: [{ kind, profileId: runtimeProfileId }] });
   const setupApproval = { artifactId: "setup-approval", digest: hash(canonicalJson(setupProposal)) };
   const planDigest = "c".repeat(64);
   const semanticApproval = { artifactId: "semantic-approval", digest: "d".repeat(64) };
   const applicationApprovalBinding = deriveE2EApplicationApprovalBinding({ preparedSnapshot: snapshot, intent, artifactId: semanticApproval.artifactId,
     artifactSha256: semanticApproval.digest, planDigest, setupProposal, setupApproval });
   const policy: E2EPolicy = { schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [scenario.scenarioId],
-    targets: discovery.inspection.proposedTargets, defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
+    targets: setupProposal.targets, defaultSandboxProfileId: "sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
     // The real web engine reports screenshot and video capability, and the compiler binds the launch descriptor to the capture policy.
     capture: { screenshots: kind === "web", traces: false, video: kind === "web", downloads: false },
     limits: { runTimeoutMs: 600_000, startupTimeoutMs: 60_000, preparationTimeoutMs: 60_000, caseTimeoutMs: 120_000,
@@ -207,22 +209,14 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const preparedEnvironmentDigest = "7".repeat(64);
   const runtimeBindings = new Map([[runtimeProfileId, runtime]]);
   const cliHostsByProfile = new Map([[runtimeProfileId, registeredHost()]]);
-  const launchTargets = [{ targetId: target.targetId, profileId: runtimeProfileId, factoryId: "executor-host", factoryManifestDigest: runtime.manifestDigest,
-    // The real @e2e-dev/web 0.14.0 engine descriptor, as the pinned runner's own report states it for a web target.
-    engine: kind === "web" ? { name: "web", version: "0.14.0", spiVersion: 1 as const, platform: "web",
-      capabilities: ["actions", "artifacts", "browser", "keyboard", "location", "observation", "pointer", "state"] }
-      // An API target runs on Rovara's pinned first-party HTTP engine, which contributes only the assertion-step fixture.
-      : { name: ROVARA_HTTP_ENGINE_DESCRIPTOR.name, version: ROVARA_HTTP_ENGINE_DESCRIPTOR.version, spiVersion: 1 as const, platform: "api",
-        capabilities: [...ROVARA_HTTP_ENGINE_DESCRIPTOR.capabilities] },
-    artifactCapabilities: kind === "web" ? ["screenshot" as const, "video" as const] : [], stateCapability: kind === "web",
-    app: kind === "web" ? { url: WEB_API_PROBE_APP_ORIGIN, identity: application.applicationId, environment: "test" as const } : null }];
+  const launchTargets = [webApiApplicationLaunchTarget({ target: { targetId: target.targetId, kind, applicationId: application.applicationId, runtimeProfileId }, runtime, capture: policy.capture })];
   const bundleBody = { schemaVersion: 1 as const, planDigest, templateVersion: "trusted-e2e-application/v1" as const, scenarios: [scenario], bundleDigest: "0".repeat(64) };
   const bundle = { ...bundleBody, bundleDigest: e2eScenarioBundleDigest(bundleBody) };
   const context = { selectionInput, executionPlan, bundle, applicationBindings, runtimeBindings, launchTargets, modelRoute: null, cliHostsByProfile,
     preparedEnvironmentsByGroup: new Map([[group.groupId, { preparedEnvironmentDigest, originByApplicationId: [{ applicationId: application.applicationId, origin: WEB_API_PROBE_APP_ORIGIN }] }]]) };
   const compiled = compileE2EApplicationScenarios({ context, groupId: group.groupId });
   const roundId = randomUUID();
-  const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId: options.runId ?? randomUUID(), roundId, taskId: "task-orders", operationId: randomUUID(), operationFence: 1,
+  const binding = E2ERunBindingSchema.parse({ schemaVersion: 1, runId: options.runId ?? randomUUID(), roundId, taskId: options.taskId ?? "task-orders", operationId: randomUUID(), operationFence: 1,
     workflowRevision: 1, groupId: group.groupId, executionPlanDigest: executionPlan.digest, executionMode: group.mode, mockManifestDigest: group.mockManifestDigest,
     authorizationRevision: "orders-auth-r1", candidateDigest: candidate.digest, planDigest, policyDigest: e2ePolicyDigest(policy), bundleDigest: bundle.bundleDigest,
     appBuildDigest: hash(canonicalJson(compiled.inventory)), environmentDigest: preparedEnvironmentDigest, runtimeManifestDigest: runtime.manifestDigest,
@@ -239,6 +233,7 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
       configDigest: item.expectedConfigDigest, expectedCaseIds: [...item.expectedCaseIds] })) };
   const admissionBody = { schemaVersion: "workflow-e2e-application-admission/v1" as const, taskId: binding.taskId, operationId: binding.operationId,
     operationFence: binding.operationFence, workflowRevision: binding.workflowRevision, candidateDigest: candidate.digest,
+    candidateCommitSha: snapshot.commitSha, candidateTreeSha: snapshot.treeSha,
     sourceSnapshot: sourceSnapshotWire, intent, intentDigest: hash(canonicalJson(intent)),
     selectionInput: { ...selectionInput, sourceSnapshot: sourceSnapshotWire }, applicationApprovalBinding,
     applicationBindings: [...applicationBindings].map(([key, value]) => ({ key, value })).sort((a, b) => a.key.localeCompare(b.key)),

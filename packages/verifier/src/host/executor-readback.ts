@@ -157,6 +157,15 @@ const ownedCleanupReceipt = (binding: Pick<E2ERunBinding, "runId">, cleanup: Own
   runId: binding.runId, removedAt: cleanup.removedAt, network: cleanup.network, containers: [...cleanup.containers].sort(compare),
   inventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId) }, "application/json", `rovara-owned-cleanup-${binding.runId}`);
 
+/**
+ * The owned-cleanup receipt the host attests once a run's resources are gone, recomputed from nothing but the run id and the close time: the inventory is a pure
+ * function of the run id, so a broker can derive the receipt (and its reference) it expects without taking it from the worker.
+ */
+export function dockerOwnedCleanupReceipt(runId: string, removedAt: string): { ref: E2EApplicationEvidenceRef; bytes: Uint8Array } {
+  const inventory = dockerOwnedResourceInventory(runId);
+  return ownedCleanupReceipt({ runId }, { removedAt, containers: inventory.containers, network: inventory.network });
+}
+
 /** What `collectE2EApplicationRun` takes besides the actual run, the compiled suite, the binding and the round. */
 export type DockerCollectionInputs = Readonly<{ environment: { ci: boolean; trustNoticeShown: boolean; os: string; arch: string; runtime: string };
   usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>;

@@ -144,6 +144,34 @@ describe("source-owned application account contracts", () => {
     expect(legacy.proposedTargets[0]?.accountProfileId).toBe("synthetic");
   });
 
+  describe("reader and catalog agree on which package manifests exist", () => {
+    const contractSnapshot = (extra: Array<{ path: string; bytes: Buffer }>) => {
+      const base = sourceSnapshot();
+      const project = sourceProject(base.snapshot.sources[0]!.bytes);
+      project.agentx.e2e.targetAccounts = [{ baseTargetId: "web-1", profileId: "orders-owner" }];
+      const files = [{ path: base.snapshot.sources[0]!.path, bytes: Buffer.from(JSON.stringify(project)) }, ...extra];
+      const sources = files.map((file) => ({ path: file.path, sha256: sha(file.bytes.toString("utf8")), bytes: file.bytes, kind: "blob" as const }));
+      // Lossy-decoded bytes hash differently from their utf8 text, so hash the raw bytes as the snapshot verifier does.
+      for (const source of sources) source.sha256 = createHash("sha256").update(source.bytes).digest("hex");
+      return { candidate: base.candidate, snapshot: { ...base.snapshot, treePaths: sources.map((source) => source.path), sources } as E2ESourceSnapshot };
+    };
+    const orders = JSON.stringify({ name: "orders-app" });
+    const expectContractRecipe = (extra: Array<{ path: string; bytes: Buffer }>) => {
+      const { snapshot, candidate } = contractSnapshot(extra);
+      const inspection = inspectE2ERepository(snapshot, candidate).inspection;
+      expect(inspection.missingInputs.filter((input) => input.inputId.startsWith("application-project-contract-"))).toEqual([]);
+      expect(inspection.applications.find((app) => app.sourcePaths.includes("apps/orders/package.json"))?.recipe).toEqual(recipe());
+    };
+
+    it("ignores a same-named file that only ends in package.json", () => {
+      expectContractRecipe([{ path: "docs/old-package.json", bytes: Buffer.from(orders) }]);
+    });
+
+    it("counts a same-named manifest the same way the catalog decodes it", () => {
+      expectContractRecipe([{ path: "apps/zz-legacy/package.json", bytes: Buffer.concat([Buffer.from('{"name":"orders-app","description":"'), Buffer.from([0xff]), Buffer.from('"}')]) }]);
+    });
+  });
+
   describe("mainline discovery for packages outside the source project contract", () => {
     const snapshotOf = (pkg: unknown) => {
       const bytes = Buffer.from(JSON.stringify(pkg));

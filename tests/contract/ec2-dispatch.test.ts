@@ -1,10 +1,11 @@
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkerInvocationSchema, agentXError, taskGraphDigest, workflowPublicationContext, workflowPublicationContextDigest, workspaceSessionKey, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
+import { WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, agentXError, taskGraphDigest, workflowPublicationContext, workflowPublicationContextDigest, workspaceSessionKey, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
 import { guardTaskDispatch as coreGuardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
 import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
+import type { FeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
 import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import { appendOperationEvent } from "../../packages/broker/src/aws/operation-events.js";
 import { SessionManager, workspaceBinding } from "../../packages/broker/src/aws/sessions.js";
@@ -31,19 +32,23 @@ function recordFor(workspaceId = randomUUID(), fence = 2): Ec2OutboxRecord {
   return { id: randomUUID(), entityType: "OUTBOX", status: "QUEUED", operationId, workspaceId, deploymentMode: "ec2-ebs" as const, invocation };
 }
 
-function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}) {
+function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}, without: ReadonlyArray<keyof Ec2DeliveryDependencies> = []) {
   const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{\"accepted\":true}" }));
   const progress = vi.fn<Ec2DeliveryDependencies["progress"]>(async () => undefined);
-  const deliver = createEc2Delivery({
+  const applicationPlanNotNegotiated = vi.fn<NonNullable<Ec2DeliveryDependencies["applicationPlanNotNegotiated"]>>(async () => undefined);
+  const dependencies: Ec2DeliveryDependencies = {
     sessions: { ensureSession: async () => ({ ready: true, generation: 3, privateIp: "10.42.128.10" }) },
     binding: async () => binding,
     sign: kmsSign,
     post,
     progress,
+    applicationPlanNotNegotiated,
     now: () => NOW,
     ...overrides,
-  });
-  return { deliver, post, progress };
+  };
+  for (const key of without) delete dependencies[key];
+  const deliver = createEc2Delivery(dependencies);
+  return { deliver, post, progress, applicationPlanNotNegotiated };
 }
 
 function readinessFixture() {
@@ -418,6 +423,117 @@ describe("ec2-ebs delivery", () => {
         event: "dispatch.structured_plans_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
       }));
       log.mockRestore();
+    });
+
+    it("hands a version 2 application plan only to a worker that lists task.workflowE2EApplicationPlan; an older worker gets the portable-only prompt", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const context: FeatureE2EPlanningContext = { status: "available",
+        source: { origin: "approved-setup", commitSha: "a".repeat(40), treeSha: "b".repeat(40), candidateDigest: "c".repeat(64),
+          preparedCommitStatus: "UNKNOWN", preparedCommitSha: null, currentCheckoutUnverified: true },
+        baselineScenarioIds: [], targets: [{ targetId: "web-1", applicationId: "orders", kind: "web", accountProfileId: "synthetic" }],
+        runtimeRefs: [], unavailableTargetRefs: [], unavailableReasons: [], runtimeAccountRefs: [], portableOperations: [], mockFixtures: [], accountContextRefs: [],
+        executableKinds: [{ kind: "web", steps: ["navigate", "click"], assertions: ["visible"] }] };
+      const asked = planDocumentInstructions({ kind: "plan", path: "QUICK", e2ePlanningContext: context });
+      const portable = planDocumentInstructions({ kind: "plan", path: "QUICK", e2ePlanningContext: context, applicationPlans: false });
+      const wrap = (instructions: string) => `Planning phase only.\n\n${instructions}\n\nRequest:\nadd it`;
+      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", workflowE2EPlanVersion: 2, prompt: wrap(asked) });
+      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EApplicationPlan"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post)).toMatchObject({ workflowE2EPlanVersion: 2, prompt: wrap(asked) });
+      expect(capable.applicationPlanNotNegotiated).not.toHaveBeenCalled();
+      const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      // The operation record must stop saying the plan version was offered, before the worker runs (Ruling AW).
+      expect(older.applicationPlanNotNegotiated).toHaveBeenCalledTimes(1);
+      expect(older.applicationPlanNotNegotiated).toHaveBeenCalledWith(record);
+      expect(postedPayload(older.post)).not.toHaveProperty("workflowE2EPlanVersion");
+      expect(postedPayload(older.post).prompt).toBe(wrap(portable));
+      expect(postedPayload(older.post)).toMatchObject({ workflowMode: "PLAN", planFormat: "structured" });
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.application_plan_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
+    describe("application E2E admissions (Ruling BQ, mixed fleet)", () => {
+      const admission = (extra: Record<string, unknown> = {}) => ({ schemaVersion: 1, taskId: randomUUID(), workflowRevision: 3, candidateDigest: "a".repeat(64), roundId: randomUUID(), groupRunIds: [randomUUID()],
+        admissionRef: { key: `workflow-e2e-admissions/sha256/${"b".repeat(64)}.json`, sha256: "b".repeat(64), byteLength: 100 }, ...extra });
+      const checks = (ref: unknown) => taskRecord({ workflowMode: "CHECKS", readiness: [], workflowE2EAdmission: ref });
+      const checksFeatures = ["task.workflowMode", "task.workflowChecks", "task.readiness", "task.workflowE2EAdmission"];
+
+      it("never sends an application admission to a worker that does not list task.workflowE2EApplicationChecks, and says why", async () => {
+        const record = checks(admission({ kind: "application" }));
+        const older = delivery({ workerFeatures: async () => checksFeatures });
+        const refusal = await older.deliver(record, record.invocation).then(() => undefined, (error: unknown) => error as { code?: string; message?: string });
+        expect(refusal?.code).toBe("RUNTIME_UNAVAILABLE");
+        expect(refusal?.message).toContain("task.workflowE2EApplicationChecks");
+        expect(older.post).not.toHaveBeenCalled();
+      });
+
+      it("fails closed for an application admission when the worker cannot be asked which features it lists", async () => {
+        const record = checks(admission({ kind: "application" }));
+        const unprobed = delivery();
+        await expect(unprobed.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+        expect(unprobed.post).not.toHaveBeenCalled();
+        const failing = delivery({ workerFeatures: async () => { throw new Error("ping down"); } });
+        await expect(failing.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+        expect(failing.post).not.toHaveBeenCalled();
+      });
+
+      it("hands an application admission, unchanged, to a worker that lists the feature", async () => {
+        const ref = admission({ kind: "application" });
+        const record = checks(ref);
+        const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"] });
+        expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+        expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
+      });
+
+      it("still hands a portable admission to a worker that predates application CHECKS", async () => {
+        const ref = admission();
+        const record = checks(ref);
+        const older = delivery({ workerFeatures: async () => checksFeatures });
+        expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+        expect(postedPayload(older.post).workflowE2EAdmission).toEqual(ref);
+      });
+
+      it("is advertised by the worker's own /ping feature list", () => {
+        expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EApplicationChecks");
+      });
+    });
+
+    it("refuses to downgrade a version 2 application plan when no applicationPlanNotNegotiated recorder is wired, instead of posting a run the operation record still calls version 2 (2.2b N4)", async () => {
+      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", workflowE2EPlanVersion: 2 });
+      const unwired = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] }, ["applicationPlanNotNegotiated"]);
+      await expect(unwired.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+      expect(unwired.post).not.toHaveBeenCalled();
+    });
+
+    it("sends an ordinary portable structured plan unchanged to a worker without the application plan feature", async () => {
+      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured" });
+      const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post)).toMatchObject({ workflowMode: "PLAN", planFormat: "structured" });
+      expect(postedPayload(older.post)).not.toHaveProperty("workflowE2EPlanVersion");
+    });
+
+    it("never hands a version 2 intent in the reviewers' approved plan to a worker that cannot parse it", async () => {
+      const sha256 = "a".repeat(64);
+      const v1 = { schemaVersion: 1, requestedTargetIds: ["web-1"], accountContextRefs: [], scenarios: [], semanticExportDeltas: [] };
+      const v2 = { ...v1, schemaVersion: 2, applicationRuntimeRefs: [], runtimeAccountRefs: [] };
+      const review = (e2eIntent: unknown) => taskRecord({ workflowMode: "REVIEW", workflowReviewPlan: { markdown: "Plan", sha256, e2eIntent } });
+      const features = ["task.workflowMode", "task.workflowReview", "task.workflowReviewPlan"];
+      const older = delivery({ workerFeatures: async () => features });
+      const withV2 = review(v2);
+      expect(await older.deliver(withV2, withV2.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post).workflowReviewPlan).toEqual({ markdown: "Plan", sha256 });
+      const capable = delivery({ workerFeatures: async () => [...features, "task.workflowE2EApplicationPlan"] });
+      expect(await capable.deliver(withV2, withV2.invocation)).toBe("DELIVERED");
+      expect((postedPayload(capable.post).workflowReviewPlan as { e2eIntent: unknown }).e2eIntent).toEqual(v2);
+      // A v1 intent is carried exactly as before, whatever the worker advertises.
+      const withV1 = review(v1);
+      const olderV1 = delivery({ workerFeatures: async () => features });
+      expect(await olderV1.deliver(withV1, withV1.invocation)).toBe("DELIVERED");
+      expect((postedPayload(olderV1.post).workflowReviewPlan as { e2eIntent: unknown }).e2eIntent).toEqual(v1);
     });
 
     it("asks a planning run for anchor lines only on a worker that lists task.codeAnchors; an older worker is sent the prompt without them", async () => {

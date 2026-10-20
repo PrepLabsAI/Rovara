@@ -38,7 +38,7 @@ function comment(n: number, extra: Partial<PageCommentView> = {}): PageCommentVi
   };
 }
 
-interface PageOptions { version?: number; body?: PlanDocument; comments?: PageCommentView[]; access?: typeof owner | typeof commenter; waiting?: boolean; optionalChecks?: TaskDocumentView["optionalChecks"]; askAvailable?: boolean }
+interface PageOptions { applicationRetry?: { canRetry: boolean }; version?: number; body?: PlanDocument; comments?: PageCommentView[]; access?: typeof owner | typeof commenter; waiting?: boolean; optionalChecks?: TaskDocumentView["optionalChecks"]; askAvailable?: boolean }
 async function pageHtml(options: PageOptions = {}): Promise<string> {
   const version = options.version ?? 2;
   const documents = [doc(1, plan(), false), ...(version > 2 ? [doc(2, plan(), false)] : []), doc(version, options.body ?? plan())];
@@ -50,6 +50,7 @@ async function pageHtml(options: PageOptions = {}): Promise<string> {
     ...(options.waiting === false ? {} : { waiting: { kind: "coding plan", version, artifactDigest: digest } }),
     optionalChecks: options.optionalChecks ?? [{ id: "lint", label: "Lint", selected: false }],
     ...(options.askAvailable === undefined ? {} : { askAvailable: options.askAvailable }),
+    ...(options.applicationRetry === undefined ? {} : { applicationRetry: options.applicationRetry }),
   };
   const web = createTaskWeb({ authenticateSession: async () => caller, getTaskDocumentView: async () => view });
   const answer = await web({ method: "GET", path: `/review/${taskId}/task`, headers: { cookie: SESSION }, requestId: "r" }, new URL(`https://agentx.example.test/review/${taskId}/task`));
@@ -131,6 +132,57 @@ const posts = (page: Page, path: string) => page.sent.filter((entry) => entry.me
 const commentBoxes = (page: Page) => page.byId("decide-comments-list").querySelectorAll("input[type=checkbox]");
 
 describe("the deciding and commenting script", () => {
+  describe("retrying a blocked browser and API round", () => {
+    const blockedPage = async (canRetry = true) => (await pageHtml({ waiting: false, applicationRetry: { canRetry } }));
+
+    it("shows the owner a Retry button that posts the page's revision and a fresh request ID, then reloads", async () => {
+      const page = boot(await blockedPage(), { respond: (entry) => entry.url.endsWith("/api/retry") ? { status: 200, body: { revision: 8 } } : { status: 200, body: {} } });
+      const button = page.byId("retry-application");
+      expect(button.hidden).toBe(false);
+      button.click();
+      await page.settle();
+      expect(posts(page, "/api/retry")).toHaveLength(1);
+      expect(posts(page, "/api/retry")[0]!.body).toEqual({ requestId: posts(page, "/api/retry")[0]!.body.requestId, expectedRevision: 7 });
+      expect(posts(page, "/api/retry")[0]!.body.requestId).toMatch(/^aaaaaaaa-aaaa-4aaa-8aaa-/);
+      expect(page.reloads).toHaveLength(1);
+    });
+
+    it("says why when the broker refuses, keeps the same request ID for the same press, and starts a fresh one after the task changed", async () => {
+      let status = 503;
+      const page = boot(await blockedPage(), { respond: (entry) => entry.url.endsWith("/api/retry") ? { status, body: status === 409 ? { error: "changed", message: "This task changed. Refresh the page and try again." } : {} } : { status: 200, body: {} } });
+      page.byId("retry-application").click();
+      await page.settle();
+      expect(page.byId("retry-error").hidden).toBe(false);
+      expect(page.byId("retry-error").textContent).toBe("AgentX couldn't do that right now. Try again shortly.");
+      expect(page.byId("retry-application").disabled).toBe(false);
+      page.byId("retry-application").click();
+      await page.settle();
+      const [first, second] = posts(page, "/api/retry");
+      expect(second!.body.requestId).toBe(first!.body.requestId);
+      status = 409;
+      page.byId("retry-application").click();
+      await page.settle();
+      expect(page.byId("retry-error").textContent).toBe("This task changed. Refresh the page and try again.");
+      status = 503;
+      page.byId("retry-application").click();
+      await page.settle();
+      const all = posts(page, "/api/retry");
+      expect(all[3]!.body.requestId).not.toBe(all[2]!.body.requestId);
+      expect(page.reloads).toEqual([]);
+    });
+
+    it("gives a reader who is not the owner no button and no way to post", async () => {
+      const html = await blockedPage(false);
+      expect(html).not.toContain('id="retry-application"');
+      expect(html).toContain("Only the task owner can retry these checks.");
+      expect(boot(html).sent.filter((entry) => entry.method === "POST")).toEqual([]);
+    });
+
+    it("shows nothing when the task is not blocked on an application round", async () => {
+      expect(await pageHtml({ waiting: false })).not.toContain("application-retry");
+    });
+  });
+
   it("submits a server-bound People role proposal and navigates only to its validated local confirmation", async () => {
     const personId = id(80), requestId = id(81);
     const panel = renderTaskPeoplePanel(taskId, { revision: 4, orphaned: false, canManage: true, canTakeOwnership: false,

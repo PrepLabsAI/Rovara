@@ -650,8 +650,8 @@ function structuredCardClaims(plan: PlanDocument): NonNullable<WorkflowMessageCo
 /**
  * The approval card's link and summary: the document is read through its recorded key and its digest checked; then a
  * Canvas holds the full text (recorded before and after it is created, so a retry never makes a second one). When no
- * Canvas can be linked, the task page is; when nothing can be, the card says so. A document whose digest does not
- * match is neither summarised nor linked.
+ * Canvas can be linked, the task page is. A document whose digest does not match is neither summarised nor linked
+ * (it returns nothing), and the card then links the task page itself, so the owner can still reach the plan.
  */
 async function prepareDocumentLink(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot): Promise<{ url?: string; summary?: string[]; structured?: NonNullable<WorkflowMessageContext["structured"]>; workBreakdownDigest?: string }> {
   const unavailable = (reason: string) => deps.log({ event: "developer_notifier.document_link_unavailable", taskId: task.taskId, workflowRevision: workflow.revision, reason });
@@ -801,6 +801,13 @@ function reopenedOf(value: unknown): Array<{ repositoryId: string; number: numbe
   });
 }
 
+/** Whether a browser and API test round has started for the workflow's current candidate. */
+function e2eRoundStarted(workflow: WorkflowSnapshot): boolean {
+  const { e2e, candidate } = workflow;
+  if (e2e === undefined || candidate === undefined) return false;
+  return e2e.currentRoundId !== undefined || e2e.qualifiedRound?.candidateDigest === candidate.digest || e2e.failedRound?.candidateDigest === candidate.digest;
+}
+
 async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot, reopenedPullRequests?: ReadonlyArray<{ repositoryId: string; number: number }>): Promise<Reply | undefined> {
   // A task closed in Slack has its own closed reply; a second "closed" line would say it twice.
   if (workflow.stage === "CLOSED" && task.closedAt !== undefined) return undefined;
@@ -838,7 +845,7 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
     })
     : undefined;
   const unavailableE2E = workflow.e2e?.required === true && e2eBlocks === undefined
-    ? [renderE2EUnavailableSlackBlock(context.taskPageUrl)]
+    ? [renderE2EUnavailableSlackBlock(context.taskPageUrl, e2eRoundStarted(workflow))]
     : [];
   const blocks = e2eBlocks === undefined
     ? [...(message.blocks ?? []), ...unavailableE2E].slice(0, 50)

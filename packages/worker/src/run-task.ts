@@ -29,6 +29,7 @@ import { WorkerOperationCancelledError, type WorkerCancellationController } from
 import type { FeedbackApprovalAuthorizer, FeedbackBundleReader } from "./callback-client.js";
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
 import { candidateUnchangedSinceBase, commitCandidateWorktree, readCandidateRepositories, readCommittedCandidateSourceExport, type CandidateRepositoryInput, type CommittedCandidateSourceExport } from "./verification/candidate.js";
+import { exportCandidateBuildSourceInScratch, type CandidateBuildSourceExport } from "./e2e-build-source-export.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
@@ -40,7 +41,8 @@ import {
   type TaskUsageOutcome,
 } from "./usage.js";
 import { assertWorkflowDependencyResumeTree, executeSerialWorkflowDependencies } from "./workflow-dependencies.js";
-import { executeWorkflowE2EChecks } from "./workflow-e2e-checks.js";
+import { executeWorkflowE2EChecks, workflowE2EAdmissionIsApplication } from "./workflow-e2e-checks.js";
+import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
 
 export interface TaskInvocationResult {
   /** The broker-issued conversation ID, which stays the same for every turn of one conversation. */
@@ -54,6 +56,8 @@ export interface TaskInvocationResult {
   workflowCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
   /** Fixed worker export, uploaded on its separate capability before the model-visible terminal result. */
   workflowCandidateSourceExport?: CommittedCandidateSourceExport;
+  /** The build source manifest of that export (or why there is none), uploaded on its own request after the export and stripped from the terminal result. */
+  workflowCandidateBuildSource?: CandidateBuildSourceExport;
   /** Repository identities captured when the final successful check round ended. */
   workflowCheckCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
   workflowReviews?: WorkflowReviewReport[];
@@ -74,6 +78,8 @@ export async function runTaskInvocation(
     workflowE2EEvidenceRoot?: string;
     /** Fixed worker installation root that contains the pinned public E2E CLI package. */
     workflowE2ERuntimeRoot?: string;
+    /** The Docker application runtime application admissions run on (or how to build it once needed); only the worker's own wiring sets it. */
+    workflowE2EApplicationRuntime?: WorkflowE2EApplicationRuntime | (() => WorkflowE2EApplicationRuntime);
     /** Trusted host-only hook for observing the exact owned contained process; no invocation data can set it. */
     workflowE2EOnOwnedContainerRunning?: (receipt: Readonly<{ containerId: string; requestId: string; sourceDigest: string; observedAt: string; inspectBytes: Uint8Array }>) => Promise<void>;
     authorizeFeedbackApproval?: FeedbackApprovalAuthorizer;
@@ -189,7 +195,10 @@ export async function runTaskInvocation(
       throw agentXError("RUNTIME_UNAVAILABLE", "the admitted E2E CHECKS runtime or evidence directory is unavailable");
     }
     const readiness = invocation.payload.readiness ?? [];
-    if (readiness.length === 0) throw agentXError("CONFIG_INVALID", "verification retry requires at least one selected project check");
+    const NO_PROJECT_CHECK = "verification retry requires at least one selected project check";
+    // A run with nothing to check at all is never valid. A round whose admission is an application admission (browser or API scenarios) is valid with no project
+    // check; which kind it is is only known once the admission is read, which the broker allows after the operation is durably RUNNING (below).
+    if (readiness.length === 0 && invocation.payload.workflowE2EAdmission === undefined) throw agentXError("CONFIG_INVALID", NO_PROJECT_CHECK);
     const events = new EventBatcher(dependencies.eventSink);
     const repositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase);
     const candidateBefore = await readCandidateRepositories(repositories);
@@ -202,6 +211,10 @@ export async function runTaskInvocation(
       // The broker authorizes the private admission read only after the operation is durably
       // RUNNING. Flush this transition before the first protected CHECKS callback.
       await events.flush();
+      if (readiness.length === 0 && !(await workflowE2EAdmissionIsApplication({ reference: invocation.payload.workflowE2EAdmission!,
+        readAdmission: (offset) => dependencies.workflowE2EAdmissionReader!(invocation.payload.workflowE2EAdmission!, offset) }))) {
+        throw agentXError("CONFIG_INVALID", NO_PROJECT_CHECK);
+      }
       await events.append("progress", { message: "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
       const runners = dependencies.checkRunners ?? createCheckRunners({
         rootPath: canonicalRoot,
@@ -238,6 +251,8 @@ export async function runTaskInvocation(
           saveEvidence: dependencies.workflowE2EEvidenceSink!,
           sourceRoot: dependencies.workflowE2ERuntimeRoot ?? process.cwd(),
           evidenceRoot: dependencies.workflowE2EEvidenceRoot!,
+          candidateRepositoryRoot: (repositoryId) => repositories.find((repository) => repository.repositoryId === repositoryId)?.directory,
+          ...(dependencies.workflowE2EApplicationRuntime === undefined ? {} : { application: dependencies.workflowE2EApplicationRuntime }),
           signal: stop.signal,
           ...(dependencies.workflowE2EOnOwnedContainerRunning === undefined ? {} : { onOwnedContainerRunning: dependencies.workflowE2EOnOwnedContainerRunning }),
         });
@@ -656,8 +671,15 @@ export async function runTaskInvocation(
         // an anchor line the workspace does not have; a citation whose lines are merely off is corrected in the answer.
         if (plan && invocation.payload.planFormat === "structured") {
           const kind = planDocumentKind(invocation.payload.workflowPhase);
+          // A version 2 application intent is read only when the broker negotiated it; otherwise it is a problem to fix, like any unreadable plan.
+          const readPlan = (answer: string): ReturnType<typeof parsePlanDocument> => {
+            const parsed = parsePlanDocument(answer, { kind });
+            return parsed.ok && parsed.plan.e2e?.schemaVersion === 2 && invocation.payload.workflowE2EPlanVersion !== 2
+              ? { ok: false, errors: ["the plan: e2e schemaVersion 2 was not offered for this planning step; use the schemaVersion 1 portable intent, or leave e2e out"] }
+              : parsed;
+          };
           const checkCitations = async (answer: string) => {
-            const read = parsePlanDocument(answer, { kind });
+            const read = readPlan(answer);
             if (!read.ok) return { read, issues: [] as string[], answer };
             const checked = await checkCodeCitations(read.plan, canonicalRoot, manifest.repositories);
             if (sameCitedRanges(read.plan, checked.plan)) return { read, issues: checked.issues, answer };
@@ -775,6 +797,15 @@ export async function runTaskInvocation(
       if (workflowCandidateRepositories !== undefined && await candidateUnchangedSinceBase(workflowRepositories, workflowCandidateRepositories)) {
         throw agentXError("CONFIG_INVALID", WORKFLOW_NO_CODE_CHANGE_MESSAGE);
       }
+      // The application build source is computed from the exact committed export, through the safe git path, and only for a run that changed the code
+      // (one that left it as it was is refused above). It never decides the export: a candidate the build source cannot hold still exports, and the
+      // reason travels so application dispatch can refuse with it.
+      let workflowCandidateBuildSource: CandidateBuildSourceExport | undefined;
+      if (workflowCandidateSourceExport !== undefined) {
+        const exportedRepository = workflowCandidateSourceExport.repositories[0];
+        workflowCandidateBuildSource = await exportCandidateBuildSourceInScratch({ signal: verificationStop.signal, candidate: workflowCandidateSourceExport.candidate,
+          repositoryRoot: workflowRepositories.find((repository) => repository.repositoryId === exportedRepository?.repositoryId)?.directory ?? "" });
+      }
       if (workflowDependencies !== undefined) {
         if (workflowCandidateRepositories === undefined) throw agentXError("OPERATION_INTERRUPTED", "the final work breakdown candidate could not be recorded");
         const terminalByItem = new Map((workflowDependencies.resumeProgress ?? []).map((progress) => [progress.itemId, progress] as const));
@@ -808,6 +839,7 @@ export async function runTaskInvocation(
         conversationId, reopened: registered !== undefined, checks,
         ...(workflowCandidateRepositories === undefined ? {} : { workflowCandidateRepositories }),
         ...(workflowCandidateSourceExport === undefined ? {} : { workflowCandidateSourceExport }),
+        ...(workflowCandidateBuildSource === undefined ? {} : { workflowCandidateBuildSource }),
         ...(workflowDependenciesResult === undefined ? {} : { workflowDependenciesResult }),
         ...(workflowCandidateRepositories === undefined || reportedChecksCandidate === undefined ? {} : { workflowCheckCandidateRepositories: reportedChecksCandidate }),
       };

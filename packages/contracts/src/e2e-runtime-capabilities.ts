@@ -121,7 +121,8 @@ function parseStrictUtcIsoTimestamp(value: string): number | null {
   return Number.isFinite(timestamp) && timestamp === date.getTime() ? timestamp : null;
 }
 
-function profileKindMatches(target: E2ERuntimeReadinessInput["target"], descriptor: E2ERuntimeCapabilityDescriptor): boolean {
+/** Whether a registered runtime of this descriptor kind can serve a target of the target's kind (a profile may register one row per kind). */
+export function e2eRuntimeKindMatchesTarget(target: E2ERuntimeReadinessInput["target"], descriptor: E2ERuntimeCapabilityDescriptor): boolean {
   if (target.kind === "default-sandbox") return descriptor.kind === "default-sandbox";
   if (target.kind === "web") return descriptor.kind === "web";
   if (target.kind === "api") return descriptor.kind === "api";
@@ -132,7 +133,7 @@ function profileKindMatches(target: E2ERuntimeReadinessInput["target"], descript
 }
 
 function targetCompatible(target: E2ERuntimeReadinessInput["target"], descriptor: E2ERuntimeCapabilityDescriptor): boolean {
-  if (descriptor.profileId !== target.runtimeProfileId || !profileKindMatches(target, descriptor)) return false;
+  if (descriptor.profileId !== target.runtimeProfileId || !e2eRuntimeKindMatchesTarget(target, descriptor)) return false;
   if (target.kind === "web" && descriptor.kind === "web") return descriptor.browsers.includes(target.browser);
   if (target.kind === "api" && descriptor.kind === "api") return descriptor.protocols.includes(target.protocol);
   if (target.kind === "mobile" && (descriptor.kind === "android" || descriptor.kind === "ios")) {

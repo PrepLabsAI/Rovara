@@ -7,6 +7,7 @@ import { E2ERuntimeAccountRefSchema, type E2ERuntimeAccountRef } from "./e2e-app
 import { E2EApplicationExternalConnectionRefSchema } from "./e2e-application-services.js";
 import { E2EApplicationServiceContractSchema } from "./e2e-application-services.js";
 import { verifyE2ESourceSnapshot, type E2ESourceSnapshot } from "./e2e-source.js";
+import { e2ePackageManifests, parseE2EPackageManifest } from "./e2e-package-manifests.js";
 
 const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
@@ -55,18 +56,19 @@ function nativeProjectContract(snapshot: E2ESourceSnapshot, path: string): E2EAp
 
 export function readE2EApplicationProjectContract(snapshot: E2ESourceSnapshot, applicationId: string): E2EApplicationProjectContract | null {
   verifyE2ESourceSnapshot(snapshot, snapshot.candidate);
-  const packages = snapshot.sources.filter((source) => source.kind === "blob" && source.path.endsWith("package.json"));
+  // The catalog's filtered manifests and decoder, so same-name counts (and the identities derived from them) agree with discovery.
+  const packages = e2ePackageManifests(snapshot.sources);
   const declaredNames = new Map<string, number>();
   for (const source of packages) {
     try {
-      const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(source.bytes)) as { name?: unknown };
-      if (typeof value.name === "string" && /^[a-zA-Z0-9_.@/-]{1,120}$/.test(value.name)) declaredNames.set(value.name, (declaredNames.get(value.name) ?? 0) + 1);
+      const value = parseE2EPackageManifest(source) as { name?: unknown } | null;
+      if (typeof value?.name === "string" && /^[a-zA-Z0-9_.@/-]{1,120}$/.test(value.name)) declaredNames.set(value.name, (declaredNames.get(value.name) ?? 0) + 1);
     } catch { /* Invalid package manifests are handled as source-cited malformed inputs by discovery. */ }
   }
   const matched = packages.filter((source) => {
     try {
-      const parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(source.bytes)) as { name?: unknown };
-      if (typeof parsed.name !== "string") return false;
+      const parsed = parseE2EPackageManifest(source) as { name?: unknown } | null;
+      if (typeof parsed?.name !== "string") return false;
       const directory = source.path.includes("/") ? source.path.slice(0, source.path.lastIndexOf("/")) : ".";
       const resolvedId = (declaredNames.get(parsed.name) ?? 0) > 1
         ? `${parsed.name.slice(0, 106)}-${createHash("sha256").update(directory).digest("hex").slice(0, 12)}`
@@ -95,13 +97,22 @@ export function readE2EApplicationProjectContract(snapshot: E2ESourceSnapshot, a
   const nativeSidecar = packageRoot === "." ? ".agentx/e2e-application.json" : `${packageRoot}/.agentx/e2e-application.json`;
   if (snapshot.sources.some((item) => item.path === nativeSidecar)) throw new Error("same application cannot have both package and native project contract authorities");
   if (source.bytes.byteLength > 262_144) throw new Error("application package metadata exceeds its source byte limit");
-  const raw = copyBoundedE2EJsonData(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(source.bytes)), { maxBytes: 262_144, maxDepth: 32 }) as Record<string, unknown>;
+  const raw = copyBoundedE2EJsonData(parseE2EPackageManifest(source), { maxBytes: 262_144, maxDepth: 32 }) as Record<string, unknown>;
   const e2eRoot = (raw.agentx && typeof raw.agentx === "object" && !Array.isArray(raw.agentx) ? raw.agentx as Record<string, unknown> : undefined);
   if (!e2eRoot || !Object.hasOwn(e2eRoot, "e2e")) return null;
   const contract = E2EApplicationProjectContractSchema.parse(e2eRoot.e2e);
   const { recipeDigest, ...body } = contract.recipe;
   if (sha(body) !== recipeDigest) throw new Error("application source recipe digest does not match its canonical fields");
   return contract;
+}
+
+/**
+ * Whether the launch recipe discovery yields for the application is the one its own `agentx.e2e` project contract declares (same digest). A
+ * recipe merely inferred from package.json is not: it has no service contract or accounts yet. The one rule planning and selection share.
+ */
+export function e2eApplicationRecipeIsProjectContract(snapshot: E2ESourceSnapshot, applicationId: string, recipe: { recipeDigest: string } | null): boolean {
+  if (recipe === null) return false;
+  try { return readE2EApplicationProjectContract(snapshot, applicationId)?.recipe.recipeDigest === recipe.recipeDigest; } catch { return false; }
 }
 
 export function e2eApplicationAccountTargetId(baseTargetId: string, profileId: string): string {
@@ -130,6 +141,15 @@ export function deriveE2EApplicationRuntimeAccountRef(definitionInput: E2EApplic
   const definition = E2EApplicationAccountDefinitionSchema.parse(definitionInput);
   return E2ERuntimeAccountRefSchema.parse({ applicationId: definition.applicationId, profileId: definition.profileId, revision: definition.revision,
     definitionDigest: e2eApplicationAccountDefinitionDigest(definition) });
+}
+/**
+ * The account identity of a synthetic application account: one the host generates per run from the project's own recipe (Ruling C), so no
+ * registered definition exists to read a revision or digest from. It is derived from the recipe alone, so the planning context can show it to
+ * the planner and approval can recompute it; a different value in a plan is a claim about an account that does not exist.
+ */
+export function deriveE2ESyntheticRuntimeAccountRef(input: { applicationId: string; accountProfileId: string; recipeDigest: string }): E2ERuntimeAccountRef {
+  return E2ERuntimeAccountRefSchema.parse({ applicationId: input.applicationId, profileId: input.accountProfileId, revision: 1,
+    definitionDigest: sha({ schemaVersion: "e2e-synthetic-account/v1", applicationId: input.applicationId, profileId: input.accountProfileId, recipeDigest: input.recipeDigest }) });
 }
 export function validateE2EApplicationAccountBinding(input: { contract: E2EApplicationProjectContract; definition: E2EApplicationAccountDefinition;
   expectedRef: E2ERuntimeAccountRef; now: string }): E2ERuntimeAccountRef {

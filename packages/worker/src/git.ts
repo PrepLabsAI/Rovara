@@ -7,13 +7,19 @@ import { agentXError } from "@agentx/contracts";
 const execFile = promisify(execFileCallback);
 
 /**
- * AgentX's own Git calls on a workspace repository (candidate capture, turn diffs and fingerprints,
- * original-code restore, review reads, publication, pull request maintenance, workspace close, and
- * later the base-to-candidate review diff and publish tree checks) MUST run under
- * {@link gitHardenedEnvironment}. The coding agent controls that repository's `.git/config`,
- * `.gitattributes` and hooks, so under an ordinary environment a configured filter, merge or diff
- * driver, fsmonitor, hook, credential helper, signing program, pager or transport would run
- * commands on the worker host, see a push token, or change what AgentX reads as the agent's work.
+ * AgentX never runs Git with a workspace repository's own `.git` as its git directory. The coding agent controls that
+ * repository's `.git/config`, `.gitattributes` and hooks and keeps running while the worker works, so a configured
+ * filter, merge or diff driver, fsmonitor, hook, credential helper, signing program, pager or transport would run
+ * commands on the worker host, see a push token, or change what AgentX reads as the agent's work, and no read of that
+ * config made beforehand holds while Git runs. Every Git call on a workspace repository (candidate capture and commit,
+ * turn diffs and fingerprints, original-code restore, review reads, publication, pull request maintenance, workspace
+ * close, preparation) runs in a throwaway repository the worker made (isolated-git.ts, isolated-repository.ts), under
+ * {@link isolatedGitEnvironment}: the static hardening below, no probe of any workspace config.
+ *
+ * {@link gitHardenedEnvironment} still reads a repository's config once, when the environment is built, and cannot name
+ * a driver written afterwards. It is for worker-owned repositories only (git-auth.ts's push and credentialed calls),
+ * and no worker module passes it a workspace directory (a test pins that). Every environment built here sets
+ * GIT_NO_REPLACE_OBJECTS.
  *
  * Project-owned commands (setup and readiness) are the project's own code and get
  * {@link projectCommandEnvironment} instead, which keeps the worker's Git settings as they were.
@@ -90,6 +96,8 @@ function staticGitEnvironment(
     GIT_CONFIG_NOSYSTEM: "1",
     GIT_CONFIG_GLOBAL: "/dev/null",
     GIT_TERMINAL_PROMPT: "0",
+    // A refs/replace entry in the agent's repository must not change which bytes a commit, tree or blob stands for.
+    GIT_NO_REPLACE_OBJECTS: "1",
   });
   const settings: ReadonlyArray<readonly [string, string]> = [
     ["safe.directory", directory],
@@ -103,6 +111,19 @@ function staticGitEnvironment(
     environment[`GIT_CONFIG_VALUE_${index}`] = value;
   });
   return environment;
+}
+
+/**
+ * The environment for Git run against a worker-owned throwaway git directory (see isolated-git.ts): the static
+ * hardening, `extra` (such as GIT_OBJECT_DIRECTORY and GIT_INDEX_FILE) and `config`. No repository's config is
+ * probed because no repository's config is read. `workTree` only names Git's safe directory.
+ */
+export function isolatedGitEnvironment(
+  workTree: string,
+  extra: Readonly<Record<string, string>> = {},
+  config: ReadonlyArray<readonly [string, string]> = [],
+): NodeJS.ProcessEnv {
+  return staticGitEnvironment(workTree, { GIT_ATTR_NOSYSTEM: "1", ...extra }, [["core.attributesFile", "/dev/null"], ...config]);
 }
 
 /**
@@ -137,12 +158,12 @@ export interface GitHardenedEnvironmentOptions {
 /** The only remote keys a clone AgentX made has, and that network calls accept. */
 const ALLOWED_REMOTE_KEYS = new Set(["remote.origin.url", "remote.origin.fetch"]);
 
-function isRefusedForNetwork(key: string): boolean {
+export function isRefusedForNetwork(key: string): boolean {
   if (/^(?:url|http)\./u.test(key) || key === "extensions.partialclone") return true;
   return key.startsWith("remote.") && !ALLOWED_REMOTE_KEYS.has(key);
 }
 
-function networkRefusal(keys: readonly string[]): Error {
+export function networkRefusal(keys: readonly string[]): Error {
   const unique = [...new Set(keys)].sort();
   const shown = unique.slice(0, 10).join(", ");
   const more = unique.length > 10 ? ` and ${unique.length - 10} more` : "";
@@ -216,11 +237,18 @@ export async function gitHardenedEnvironment(
  * holds a `.git`, such as a submodule a project's setup initialised. `git add`, `diff-files` and
  * `diff-index` check such a nested repository by running Git inside it under its own config, whose
  * filters this module has not neutralised. Run it, with the same environment (and index), before
- * `git add`.
+ * `git add`. `location` is the Git arguments that name the repository: always a throwaway repository's (`--git-dir`, `--work-tree`), never the agent's own.
+ * Returns every gitlink path the index records (none has a `.git`, or this refuses). That check is a
+ * point in time: a caller that stages the work tree must also keep Git away from those paths.
  */
-export async function assertNoEmbeddedRepositories(directory: string, env: NodeJS.ProcessEnv): Promise<void> {
+export async function assertNoEmbeddedRepositories(
+  directory: string,
+  env: NodeJS.ProcessEnv,
+  location: readonly string[],
+  cwd?: string,
+): Promise<readonly string[]> {
   const gitlinks = await new Promise<string[]>((resolvePaths, reject) => {
-    const child = spawn("git", ["-C", directory, "ls-files", "--stage", "-z"], { env, stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn("git", [...location, "ls-files", "--stage", "-z"], { env, stdio: ["ignore", "pipe", "ignore"], ...(cwd === undefined ? {} : { cwd }) });
     const found: string[] = [];
     let rest = "";
     child.stdout.setEncoding("utf8");
@@ -244,6 +272,7 @@ export async function assertNoEmbeddedRepositories(directory: string, env: NodeJ
       );
     }
   }
+  return gitlinks;
 }
 
 /**
@@ -251,13 +280,13 @@ export async function assertNoEmbeddedRepositories(directory: string, env: NodeJ
  * `filter=lfs`. AgentX's Git runs no hooks, so Git LFS's pre-push hook would never upload the
  * objects and a pull request would hold only pointers. Run it before staging for a push.
  */
-export async function assertNoLfsFiles(directory: string, env: NodeJS.ProcessEnv): Promise<void> {
+export async function assertNoLfsFiles(directory: string, env: NodeJS.ProcessEnv, location: readonly string[], cwd?: string): Promise<void> {
   let found: boolean;
   try {
     const { stdout } = await execFile(
       "git",
-      ["-C", directory, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ":(attr:filter=lfs)"],
-      { env, encoding: "utf8", maxBuffer: 1024 * 1024 },
+      [...location, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ":(attr:filter=lfs)"],
+      { env, encoding: "utf8", maxBuffer: 1024 * 1024, ...(cwd === undefined ? {} : { cwd }) },
     );
     found = stdout !== "";
   } catch (error) {

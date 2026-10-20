@@ -53,6 +53,40 @@ const call = async (deps: TaskWebApiDependencies, request: AdaptedHttpRequest) =
 };
 
 describe("task page API", () => {
+  describe("retrying a blocked application round", () => {
+    const retry = (extra: Record<string, unknown> = {}) => ({ requestId: randomUUID(), expectedRevision: 4, ...extra });
+
+    it("is its own path, and reaches only the retry with the session's caller and the strict body", async () => {
+      expect(TASK_PAGE_API.test(api("retry"))).toBe(true);
+      const deps = fakeDeps({ retryApplicationRound: async (who, _taskId, input) => { (deps.calls).push({ name: "retry", caller: who, input }); return { revision: 5 }; } });
+      const body = retry();
+      const answer = await call(deps, post(api("retry"), body));
+      expect(answer.statusCode).toBe(200);
+      expect(answer.json).toEqual({ revision: 5 });
+      expect(deps.calls.filter((entry) => entry.name !== "state")).toEqual([{ name: "retry", caller, input: body }]);
+    });
+
+    it("refuses anything but exactly a request ID and a revision, a missing CSRF header and another origin, and is not found without the dependency", async () => {
+      const deps = fakeDeps({ retryApplicationRound: async () => ({ revision: 5 }) });
+      for (const bad of [retry({ instructions: "x" }), retry({ actorId: "x" }), { requestId: randomUUID() }, { expectedRevision: 4 }, retry({ expectedRevision: 0 }), retry({ requestId: "nope" })]) {
+        expect((await call(deps, post(api("retry"), bad))).statusCode, JSON.stringify(bad)).toBe(400);
+      }
+      expect((await call(deps, post(api("retry"), retry(), { origin: "https://evil.example" }))).statusCode).toBe(403);
+      expect((await call(deps, post(api("retry"), retry(), { "x-agentx-csrf": undefined }))).statusCode).toBe(403);
+      expect((await call(deps, { ...get(api("retry")), method: "GET" })).statusCode).toBe(405);
+      expect((await call(fakeDeps(), post(api("retry"), retry()))).statusCode).toBe(404);
+    });
+
+    it("answers a refusal the way a decision's is: a non-owner as 403, a changed task as 409", async () => {
+      const owners = fakeDeps({ retryApplicationRound: async () => { throw Object.assign(new Error("FORBIDDEN: Only owners retry."), { code: "FORBIDDEN", pageReason: "owners_only" }); } });
+      expect((await call(owners, post(api("retry"), retry()))).statusCode).toBe(403);
+      const changed = fakeDeps({ retryApplicationRound: async () => { throw Object.assign(new Error("IDEMPOTENCY_CONFLICT: This task changed. Refresh the page and try again."), { code: "IDEMPOTENCY_CONFLICT" }); } });
+      const answer = await call(changed, post(api("retry"), retry()));
+      expect(answer.statusCode).toBe(409);
+      expect(answer.json).toMatchObject({ error: "changed", message: "This task changed. Refresh the page and try again." });
+    });
+  });
+
   it("matches only its own paths", () => {
     expect(TASK_PAGE_API.test(api("state"))).toBe(true);
     expect(TASK_PAGE_API.test(api(`comments/${randomUUID()}/edit`))).toBe(true);

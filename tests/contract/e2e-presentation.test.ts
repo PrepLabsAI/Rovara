@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { E2ESharedView } from "../../packages/contracts/src/e2e-view.js";
-import { renderE2EMcpProjection, renderE2EPageHtml, renderE2ESlackBlocks } from "../../packages/broker/src/e2e-presentation.js";
+import { renderE2EMcpProjection, renderE2EPageHtml, renderE2ESlackBlocks, renderE2EUnavailableSlackBlock } from "../../packages/broker/src/e2e-presentation.js";
 
 const view: E2ESharedView = {
   schemaVersion: 1,
@@ -81,5 +81,26 @@ describe("E2E presentation adapters", () => {
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<script>alert");
     expect(renderE2EMcpProjection(partial).view).toEqual(partial);
+  });
+});
+
+describe("the E2E fallback when no display projection can be shown", () => {
+  const page = "https://agentx.example.test/review/t1/task";
+  it("says the tests have not run yet, never a status, when no round has started", () => {
+    const text = renderE2EUnavailableSlackBlock(page, false).text.text;
+    expect(text).toBe(`Browser and API tests haven't run yet. <${page}|Open the task page for status.>`);
+    expect(text).not.toMatch(/UNKNOWN|PASS|FAIL|Manifest|status:/i);
+  });
+
+  it("says the results could not be shown, never a verdict, once a round has started", () => {
+    const text = renderE2EUnavailableSlackBlock(page, true).text.text;
+    expect(text).toBe(`I couldn't show the test results here. <${page}|Open the task page for the latest status.>`);
+    expect(text).not.toMatch(/UNKNOWN|PASS|Manifest/);
+  });
+
+  it("falls back to plain words with no task page, and treats an unstated round as started", () => {
+    expect(renderE2EUnavailableSlackBlock(undefined, false).text.text).toBe("Browser and API tests haven't run yet. Open the task page for status.");
+    expect(renderE2EUnavailableSlackBlock(undefined, true).text.text).toBe("I couldn't show the test results here. Open the task page for the latest status.");
+    expect(renderE2EUnavailableSlackBlock(page).text.text).toContain("I couldn't show the test results here.");
   });
 });

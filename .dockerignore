@@ -8,3 +8,8 @@ coverage/
 dist/
 cdk.out/
 .release-synth/
+# Host build output and installed dependencies at any depth (packages/*/dist, tsbuildinfo, packages/*/node_modules):
+# the Dockerfiles install and build inside the image, so a built checkout must not leak into the context.
+**/dist
+**/*.tsbuildinfo
+**/node_modules

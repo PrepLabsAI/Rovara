@@ -25,6 +25,8 @@ async function fakeProc(processes: Record<number, { nspid: number[]; seccompFilt
 }
 const container = { nspid: [40], seccompFilters: 1, uidMap: "         0          0 4294967295\n" };
 const sandboxed = { nspid: [77, 3], seccompFilters: 2, uidMap: "      1000       1000          1\n" };
+/** The settle time is measured on this clock, which moves only when the code under test pauses between looks: how many looks fit in it never depends on machine load. */
+const settleClock = () => { let elapsed = 0; return { now: () => elapsed, sleep: async (milliseconds: number) => { elapsed += milliseconds; } }; };
 const listing = (renderers: number[], browser = 40) => async () => ({ browserPid: browser, rendererPids: renderers });
 
 describe("reading what the kernel shows about a Chromium process", () => {
@@ -120,7 +122,7 @@ describe("settling on a verdict about a browser whose renderers are still starti
     let calls = 0;
     return { inspect: async () => { const step = steps[Math.min(calls, steps.length - 1)]!; calls += 1; if (step instanceof Error) throw step; return attestation(step); }, calls: () => calls };
   };
-  const options = (inspect: () => Promise<ReturnType<typeof attestation>>, settleMs = 1_000) => ({ settleMs, pollMs: 5, inspect: inspect as never });
+  const options = (inspect: () => Promise<ReturnType<typeof attestation>>, settleMs = 1_000) => ({ settleMs, pollMs: 5, inspect: inspect as never, clock: settleClock() });
 
   it("waits for a renderer that has not installed its seccomp filter yet and accepts it once it shows", async () => {
     const run = sequence([false, false, true]);
@@ -148,10 +150,13 @@ describe("settling on a verdict about a browser whose renderers are still starti
   it("stops waiting the moment the caller aborts instead of finishing the settle time", async () => {
     const controller = new AbortController();
     const run = sequence([false]);
-    setTimeout(() => controller.abort(new Error("executor cancelled")), 100);
+    // The real clock and a real pause: the poll is 10 s and the settle time 30 s, so only the abort can end the wait. It is scheduled from inside the look and
+    // lands on a later turn of the event loop, after the loop has entered the pause, which is what must wake on abort.
+    const inspect = async () => { const attestation = await run.inspect(); setImmediate(() => controller.abort(new Error("executor cancelled"))); return attestation; };
     const started = Date.now();
-    const result = await attestWhenSettled({ ...input, signal: controller.signal }, { settleMs: 30_000, pollMs: 10_000, inspect: run.inspect });
+    const result = await attestWhenSettled({ ...input, signal: controller.signal }, { settleMs: 30_000, pollMs: 10_000, inspect });
     expect(result.verdict).toMatchObject({ sandboxed: false });
+    expect(run.calls()).toBe(2); // the look before the pause, and the one the loop takes on waking, which then sees the abort and stops
     expect(Date.now() - started).toBeLessThan(5_000);
   });
 
@@ -206,7 +211,7 @@ describe("a DevTools session that lists Chromium's processes", () => {
     const devtools = await answeringDevTools();
     const procRoot = await fakeProc({ 40: container, 77: container });
     try {
-      const result = await attestWhenSettled({ cdpEndpoint: devtools.url, browserPid: 40, runId, groupId: "group-1", signal: new AbortController().signal, procRoot }, { settleMs: 300, pollMs: 20 });
+      const result = await attestWhenSettled({ cdpEndpoint: devtools.url, browserPid: 40, runId, groupId: "group-1", signal: new AbortController().signal, procRoot }, { settleMs: 300, pollMs: 20, clock: settleClock() });
       expect(result.verdict).toMatchObject({ sandboxed: false });
       expect(devtools.methods.filter((method) => method === "Target.createTarget")).toHaveLength(1);
       expect(devtools.methods.filter((method) => method === "SystemInfo.getProcessInfo").length).toBeGreaterThan(2);

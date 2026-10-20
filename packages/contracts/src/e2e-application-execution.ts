@@ -19,6 +19,12 @@ const sha1 = z.string().regex(/^[a-f0-9]{40}$/);
 const id = (max: number) => z.string().trim().min(1).max(max);
 const sourcePath = z.string().min(1).max(1024).refine(isSafeE2ESourcePath, "source path is not allowed by the existing safe-source policy");
 
+/**
+ * The most a build source manifest may weigh when it is exported for a candidate. The manifest travels inside the application admission (whose own object is
+ * bounded at 24 MiB), so it gets a third of that; the worker refuses a candidate whose manifest would be larger and the broker refuses to store one.
+ */
+export const E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
+
 export const E2EApplicationBuildSourceRefSchema = z.object({ artifactId: id(200), sha256, byteLength: z.number().int().positive().max(112 * 1024 * 1024), manifestDigest: sha256 }).strict();
 export type E2EApplicationBuildSourceRef = z.infer<typeof E2EApplicationBuildSourceRefSchema>;
 
@@ -181,8 +187,17 @@ const applicationBuildBindingValueSchema = z.object({ approval: E2EApplicationAp
 const applicationMapEntrySchema = z.object({ key: id(120), value: applicationBuildBindingValueSchema }).strict();
 const runtimeMapEntrySchema = z.object({ key: id(120), value: E2ERegisteredRuntimeSchema }).strict();
 const orderedUniqueKeys = (values: readonly string[]) => new Set(values).size === values.length && values.every((item, index) => index === 0 || values[index - 1]! < item);
+/** The creator's access as the broker proved it when it admitted the round (a direct membership grant, or the locally bound channels), compared again at verification. */
+export const E2ECreatorAuthoritySchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("direct-membership"), developerId: id(200), project: id(200), role: z.enum(["developer", "administrator"]), grantId: id(64) }).strict(),
+  z.object({ kind: z.literal("channel-access"), developerId: id(200), project: id(200), teamId: id(64), channelIds: z.array(id(64)).min(1).max(64),
+    bindings: z.array(z.object({ channelId: id(64), updatedAt: id(40) }).strict()).min(1).max(64) }).strict(),
+]);
+export type E2ECreatorAuthority = z.infer<typeof E2ECreatorAuthoritySchema>;
 export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: z.literal("workflow-e2e-application-admission/v1"),
   taskId: id(120), operationId: id(120), operationFence: z.number().int().positive(), workflowRevision: z.number().int().positive(), candidateDigest: sha256,
+  /** The exact commit and tree the worker builds from (staged from that commit's tree with `git ls-tree` and `git cat-file`); the tree is checked against the repository before any build. */
+  candidateCommitSha: sha1, candidateTreeSha: sha1,
   sourceSnapshot: sourceSnapshotWireSchema, intent: E2EApplicationPlanIntentSchema, intentDigest: sha256,
   selectionInput: applicationSelectionInputSchema, applicationApprovalBinding: E2EApplicationApprovalBindingSchema.nullable(), applicationBindings: z.array(applicationMapEntrySchema).max(12),
   runtimeBindings: z.array(runtimeMapEntrySchema).max(12), launchTargets: z.array(E2EApplicationLaunchTargetSchema).max(12), modelRoute: z.object({ routeId: id(120), routeRevision: id(120) }).strict().nullable(),
@@ -190,11 +205,17 @@ export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: 
   preparedEnvironments: z.array(z.object({ groupId: id(80), preparedEnvironmentDigest: sha256,
     originByApplicationId: E2EApplicationPreparedGroupFactsSchema.shape.originByApplicationId }).strict()).max(4),
   policy: E2EPolicySchema, bundle: E2EScenarioBundleSchema, executionPlan: E2EExecutionPlanSchema,
+  /** The creator's access when the round was admitted (the broker's own proof); absent only from admissions the broker did not build. Verification requires it. */
+  creatorAuthority: E2ECreatorAuthoritySchema.optional(),
   portableProjection: E2EApplicationPortableProjectionSchema.nullable(), round: E2ERoundSchema,
   groups: z.array(E2EApplicationGroupAdmissionSchema).max(4), admissionDigest: sha256,
 }).strict().superRefine((admission, context) => {
   if (admission.portableProjection && !portableSelectionInputSchema.safeParse(admission.portableProjection.selectionInput).success) {
     context.addIssue({ code: "custom", path: ["portableProjection", "selectionInput"], message: "portable projection selection input has an invalid strict wire shape" });
+  }
+  if (admission.candidateCommitSha !== admission.sourceSnapshot.commitSha || admission.candidateTreeSha !== admission.sourceSnapshot.treeSha
+    || admission.candidateCommitSha !== admission.selectionInput.sourceSnapshot.commitSha || admission.candidateTreeSha !== admission.selectionInput.sourceSnapshot.treeSha) {
+    context.addIssue({ code: "custom", path: ["candidateCommitSha"], message: "candidate commit and tree must be the exact commit and tree of the admitted source snapshot" });
   }
   const portableSelection = admission.portableProjection?.selectionInput as { sourceSnapshot?: z.infer<typeof sourceSnapshotWireSchema> } | undefined;
   const wireSources = [admission.sourceSnapshot, admission.selectionInput.sourceSnapshot,

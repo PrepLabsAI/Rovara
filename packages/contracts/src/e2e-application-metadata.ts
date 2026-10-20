@@ -5,12 +5,17 @@ const dependencyLockfileName = /^(?:package-lock\.json|npm-shrinkwrap\.json|pnpm
 const applicationIdentityName = /(?:^|\/)(?:AndroidManifest\.xml|Info\.plist|[^/]+\.xcodeproj\/project\.pbxproj|[^/]+\.xcworkspace\/contents\.xcworkspacedata|[^/]+\.csproj|[^/]+\.sln|CMakeLists\.txt|meson\.build)$/i;
 const buildMetadataName = /(?:^|\/)(?:build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|gradle\.properties|Podfile|project\.yml|Package\.swift|Cargo\.toml|go\.mod)$/i;
 
+/** An application with neither a source-owned package.json nor a native project identity file: its identity cannot be established, which is not a malformed source. */
+export class E2EApplicationIdentityMissingError extends Error {
+  override name = "E2EApplicationIdentityMissingError";
+}
+
 export function e2eApplicationMetadataSourcePaths(appSourcePaths: readonly string[], sourcePaths: readonly string[], applicationId: string): string[] {
   const packagePaths = appSourcePaths.filter((path) => /(^|\/)package\.json$/i.test(path));
   if (packagePaths.length > 1) throw new Error(`application ${applicationId} has ambiguous source-owned package identity`);
   const packagePath = packagePaths[0];
   const identityPaths = appSourcePaths.filter((path) => applicationIdentityName.test(path));
-  if (packagePath === undefined && identityPaths.length === 0) throw new Error(`application ${applicationId} has no source-owned package or native project identity metadata`);
+  if (packagePath === undefined && identityPaths.length === 0) throw new E2EApplicationIdentityMissingError(`application ${applicationId} has no source-owned package or native project identity metadata`);
   const appDirectory = packagePath === undefined ? undefined : packagePath.includes("/") ? packagePath.slice(0, packagePath.lastIndexOf("/")) : ".";
   const nativeRoots = identityPaths.map((path) => {
     const androidProject = /^(.*?)(?:\/src\/main\/)AndroidManifest\.xml$/i.exec(path);

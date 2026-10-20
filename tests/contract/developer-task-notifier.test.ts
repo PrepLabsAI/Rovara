@@ -253,10 +253,36 @@ describe("required E2E notifier fallback", () => {
       body: JSON.stringify({ id: `${h.taskId}:workflow:9`, kind: "workflow", taskId: h.taskId, workflowRevision: 9, at: noticeAt }) }] });
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "workflow", outcome: "posted" }));
     const blocks = JSON.stringify(h.posts.at(-1)?.blocks ?? []);
-    expect(blocks).toContain("Required E2E status: UNKNOWN");
-    expect(blocks).toContain("Manifest/results unavailable");
+    // A round has started, so the owner is told the results could not be shown here, never a status.
+    expect(blocks).toContain("I couldn't show the test results here.");
+    expect(blocks).toContain("Open the task page for the latest status.");
+    expect(blocks).not.toContain("UNKNOWN");
+    expect(blocks).not.toContain("Manifest/results unavailable");
     expect(blocks).toContain(`/review/${h.taskId}/task`);
     expect(blocks).not.toContain("0/0");
+  });
+
+  it("says the browser and API tests have not run yet while no round has started for the candidate", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
+      workflowE2EBlocks: async () => undefined,
+      reviewUrlBase: "https://agentx.example.test",
+    });
+    await h.pump();
+    const current = h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: Record<string, unknown> };
+    const workflow = { ...current.workflow, revision: 9, stage: "IMPLEMENT", state: "RUNNING",
+      e2e: { contractDigest: "b".repeat(64), policyDigest: "c".repeat(64), bundleDigest: "d".repeat(64), executionPlanDigest: "e".repeat(64),
+        required: true, currentGroupRunIds: [], resultRefs: [] } };
+    await h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" }, UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ExpressionAttributeValues: { ":workflow": workflow, ":now": new Date(h.now()).toISOString() } }));
+    const share = (h.db.get(`DEVTASK#${h.taskId}`, "META") as { share: { sharedAt: string } }).share;
+    const noticeAt = new Date(Math.max(h.now(), Date.parse(share.sharedAt) + 1)).toISOString();
+    await h.handle({ Records: [{ eventSource: "aws:sqs", messageId: "e2e-not-run", receiptHandle: "e2e-not-run",
+      body: JSON.stringify({ id: `${h.taskId}:workflow:9`, kind: "workflow", taskId: h.taskId, workflowRevision: 9, at: noticeAt }) }] });
+    const blocks = JSON.stringify(h.posts.at(-1)?.blocks ?? []);
+    expect(blocks).toContain("Browser and API tests haven't run yet.");
+    expect(blocks).toContain("Open the task page for status.");
+    expect(blocks).not.toMatch(/UNKNOWN|PASS|Manifest/);
+    expect(blocks).toContain(`/review/${h.taskId}/task`);
   });
 });
 
@@ -1012,7 +1038,11 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
     expect(createPlanCanvas).not.toHaveBeenCalled();
     expect(h.posts.at(-1)!.text).not.toContain("Payments that fail with a timeout");
-    expect(h.posts.at(-1)!.text).not.toContain("/review/");
+    // The owner can still reach the plan: the card links the task page (not the document) and does not send them to an admin.
+    expect(h.posts.at(-1)!.text).toContain(`<https://agentx.example.test/review/${h.taskId}/task|Open the task page to read the plan>`);
+    expect(h.posts.at(-1)!.text).toContain("I couldn't show the plan summary here.");
+    expect(h.posts.at(-1)!.text).not.toContain("ask an AgentX admin");
+    expect(JSON.stringify(h.posts.at(-1)!.blocks)).toContain("agentx_workflow_approve");
     expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.document_link_unavailable", reason: "integrity_check_failed" }));
   });
 

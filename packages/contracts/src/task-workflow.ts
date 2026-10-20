@@ -36,6 +36,22 @@ export const WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE = "AgentX couldn't open the pu
  * Why the broker stopped a step, written for the task owner: Slack shows these word for word. Any other block reason
  * is internal and is replaced by a plain sentence before it reaches the owner.
  */
+/**
+ * How the block reason of a CHECKS dispatch that refused an application round begins, so the owner's actions can tell them apart. A refused round (the
+ * candidate's build source, its manifest or its runtime inputs are not usable) is fixed by sending the task back to coding. A selection that is no longer
+ * the approved one (a runtime row or the approved setup changed) is fixed by approving the plan again against what is ready now, which retrying the checks does.
+ */
+export const WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX = "The approved browser and API checks could not be started: ";
+/**
+ * A runtime-state refusal: the registered runtime cannot carry the round now (no READY row of the plan's kind, a row that expires before the round could end, no installed
+ * host). Only an administrator qualifying the runtime again fixes it, and then one retry approves the plan again and dispatches. The remedy comes first (the block reason
+ * keeps its first 500 characters); send-back to coding is never offered for it.
+ */
+export const WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX = "The approved browser and API checks cannot run on the runtime as it is now. An administrator must qualify the runtime again, then retry the checks to approve the plan again. Why: ";
+/** The approved plan itself can no longer be approved (portable criteria, web and API together): the task goes back to plan review, where Request changes is the way on. */
+export const WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX = "The approved browser and API plan can no longer run as written. Request changes and submit a corrected plan before coding resumes. Why: ";
+export const WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX = "The approved browser and API checks can no longer run as approved. Retry the checks to approve the plan again against what is ready now. What changed: ";
+
 export const WORKFLOW_BLOCK_REASONS = {
   checksUnconfirmed: "AgentX couldn't confirm the selected checks ran on the final code. Choose checks and retry.",
   checkRetryStale: "This check run no longer matches the task's current step. Use the latest update in the thread.",
@@ -85,6 +101,18 @@ export const WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON = "the final candid
 
 /** Why an AgentX worker refused, before running, to push a reviewed fix: it is too old to push exactly the reviewed tree. */
 export const WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED = "pushing a reviewed fix needs a worker that pushes exactly the reviewed tree";
+
+/**
+ * Whether a blocked verification is the block of an approved browser and API round that a retry can fix: the approved selection changed, the runtime was unusable until
+ * an administrator qualified it again, or the round was refused. One retry approves the plan again (Slack and the task page both offer it); a task whose block is
+ * anything else is retried through its checks instead.
+ */
+export function workflowApplicationRetryOffered(workflow: { stage: string; state: string; blockReason?: string | undefined;
+  e2e?: { required?: boolean | undefined; applicationSelection?: unknown } | undefined }): boolean {
+  return workflow.stage === "VERIFY" && workflow.state === "BLOCKED" && workflow.e2e?.required === true && workflow.e2e.applicationSelection !== undefined
+    && [WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX]
+      .some((prefix) => workflow.blockReason?.startsWith(prefix) === true);
+}
 
 /** Whether the owner may ask AgentX to open the draft pull request again: it is ready, or AgentX gave up on its own. */
 export function workflowPublicationRetryable(workflow: { stage: string; state: string; blockReason?: string | undefined }): boolean {
@@ -1739,6 +1767,10 @@ export function workflowSendBackOffered(workflow: {
   if (workflow.stage === "VERIFY") {
     // Review only: a rerun of the agent's own tests regressed, and no result was recorded for it.
     if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.regressionFound) return true;
+    // Blocks that only an administrator qualifying the runtime, or approving the plan again, can fix: new code cannot, even for a task with no checks.
+    if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true) return false;
+    // A required browser and API round that could not be admitted from this candidate (its build source or inputs are unusable): only new code can fix that.
+    if (workflow.e2e?.required === true && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX) === true) return true;
     // Review only: there is no check to retry, so coding again is the way on, except from rewritten history.
     if (workflowIsReviewOnly(workflow.checkPolicy)) return workflow.blockReason !== WORKFLOW_HISTORY_REWRITTEN_MESSAGE;
     const failedOrdinaryCheck = current !== undefined && workflow.verification?.candidateDigest === current
@@ -1906,7 +1938,11 @@ export function sendBackProblems(workflow: WorkflowSnapshot): WorkflowSendBackPr
     && failure.groupRunIds.every((runId, index) => runId === workflow.e2e?.currentGroupRunIds[index])
     ? [{ source: "check" as const, text: `required E2E verification failed for the current round (${failure.groupRunIds.join(", ")})` }]
     : [];
-  return [...findings, ...failed, ...failedE2E, ...regressed];
+  // A browser and API round that could not be started from this candidate: the coder is told why, in the words the owner saw.
+  const refusedRound = workflow.stage === "VERIFY" && workflow.state === "BLOCKED" && workflow.e2e?.required === true && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX) === true
+    ? [{ source: "check" as const, text: `the browser and API checks could not be started: ${workflow.blockReason.slice(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX.length).replace(/ Send the task back to coding, or close it\.$/, "")}` }]
+    : [];
+  return [...findings, ...failed, ...failedE2E, ...refusedRound, ...regressed];
 }
 
 /** The problems as plain lines, "- [code review] text (file:line)" and "- check <label> failed", for people to read. */

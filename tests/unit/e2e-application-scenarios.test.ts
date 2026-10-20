@@ -430,7 +430,8 @@ describe("application scenario compilation", () => {
     const admissionGroups = [...mapping.mappings, ...appAdmissions].sort((left, right) => left.outerBinding.groupId.localeCompare(right.outerBinding.groupId));
     const admissionBody = { schemaVersion: "workflow-e2e-application-admission/v1" as const, taskId: binding.taskId,
       operationId: binding.operationId, operationFence: binding.operationFence, workflowRevision: binding.workflowRevision,
-      candidateDigest: candidate.digest, sourceSnapshot: sourceWire, intent: selectionInput.intent, intentDigest: selectionInput.intentDigest,
+      candidateDigest: candidate.digest, candidateCommitSha: snapshot.commitSha, candidateTreeSha: snapshot.treeSha,
+      sourceSnapshot: sourceWire, intent: selectionInput.intent, intentDigest: selectionInput.intentDigest,
       selectionInput: { ...selectionInput, sourceSnapshot: sourceWire }, applicationApprovalBinding,
       applicationBindings: [...applicationBindings].sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => ({ key, value })),
       runtimeBindings: [...runtimeBindings].sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => ({ key, value })),

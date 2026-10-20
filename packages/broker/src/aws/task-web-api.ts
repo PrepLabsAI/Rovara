@@ -10,6 +10,7 @@ import {
   type TaskPeopleChangeResult, type TaskPeopleRoleRequest, type TaskPeopleTakeOwnershipRequest, type TaskPeopleView,
 } from "@agentx/contracts";
 import type { DeveloperTaskView } from "@agentx/contracts";
+import { PROJECT_RECORD_NEEDS_ADMIN } from "./broker-shared.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import type { PageCommentView } from "./plan-page/comments.js";
@@ -17,7 +18,7 @@ import type { PlanAnchor } from "./plan-page/render-plan.js";
 import { CSRF_COOKIE, SESSION_COOKIE, csrfCookie, isCsrfToken, parseCookie, safeResponse, type WebResponse } from "./web-session.js";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-export const TASK_PAGE_API = new RegExp(`^/review/(${UUID})/task/api/(state|comments|comments/(${UUID})/(edit|delete)|suggestions|decision|people|people/role|people/take-ownership|people/requests/(${UUID})(/confirm)?)$`, "i");
+export const TASK_PAGE_API = new RegExp(`^/review/(${UUID})/task/api/(state|comments|comments/(${UUID})/(edit|delete)|suggestions|decision|retry|people|people/role|people/take-ownership|people/requests/(${UUID})(/confirm)?)$`, "i");
 /** Any path under the task page's API, known or not: it is the API's to answer, never the PR feedback page's. */
 export const TASK_PAGE_API_PREFIX = new RegExp(`^/review/(${UUID})/task/api(/|$)`, "i");
 
@@ -61,6 +62,10 @@ export const PageDecisionInputSchema = z.object({
 });
 export type PageDecisionInput = z.infer<typeof PageDecisionInputSchema>;
 
+/** The owner's retry of a blocked browser and API round, from the page: the same re-approval the Slack button makes. Nothing else rides along. */
+export const PageRetryInputSchema = z.object({ requestId: z.string().uuid(), expectedRevision: z.number().int().positive() }).strict();
+export type PageRetryInput = z.infer<typeof PageRetryInputSchema>;
+
 /** The text's length is checked by the comment store, so the page can say "Keep comments under 2,000 characters." */
 const CommentTextSchema = z.string().max(PAGE_API_BODY_MAX_BYTES);
 
@@ -93,6 +98,8 @@ export interface TaskWebApiDependencies {
   setSuggestion(caller: DeveloperCaller, taskId: string, input: PageSuggestionInput): Promise<unknown>;
   /** Must refuse a caller who may not decide with an error carrying `pageReason: "owners_only"`. */
   decide(caller: DeveloperCaller, taskId: string, input: PageDecisionInput): Promise<{ revision: number }>;
+  /** Retries a blocked application round (the owner only; any other block is refused) and answers the new revision. Without it, the retry path is not found. */
+  retryApplicationRound?(caller: DeveloperCaller, taskId: string, input: PageRetryInput): Promise<{ revision: number }>;
   getPeople?(caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView>;
   proposePeopleRole?(caller: DeveloperCaller, taskId: string, input: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult>;
   proposeOwnership?(caller: DeveloperCaller, taskId: string, input: TaskPeopleTakeOwnershipRequest): Promise<TaskPeopleChangeResult>;
@@ -126,6 +133,7 @@ function refusalResponse(error: unknown): WebResponse {
   if (typeof code === "string" && HIDDEN.has(code)) return json(404, NOT_FOUND);
   // The decision's own refusals: who decided and when, or that a newer version is ready (written for the page).
   if (code === "IDEMPOTENCY_CONFLICT") return json(409, { error: "changed", message: text });
+  if (code === "CONFIG_INVALID" && text === PROJECT_RECORD_NEEDS_ADMIN) return json(409, { error: "changed", message: text });
   if (code === "CONFIG_INVALID") return PAGE_SAFE_MESSAGES.has(text) ? invalid(text) : json(409, { error: "changed", message: TASK_CHANGED });
   if (code === "TASK_BUSY" || code === "WORKSPACE_BUSY") return json(409, { error: "busy", message: "AgentX is busy with this task. Try again in a minute." });
   return json(503, { error: "unavailable", message: "AgentX couldn't do that right now. Try again shortly." });
@@ -242,6 +250,12 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
         if (!parsed.success) return invalid();
         await deps.setSuggestion(caller, taskId, parsed.data);
         return json(200, { ok: true });
+      }
+      if (endpoint === "retry") {
+        if (deps.retryApplicationRound === undefined) return json(404, { error: "not_found" });
+        const parsedRetry = PageRetryInputSchema.safeParse(value);
+        if (!parsedRetry.success) return invalid();
+        return json(200, await deps.retryApplicationRound(caller, taskId, parsedRetry.data));
       }
       const parsed = PageDecisionInputSchema.safeParse(value);
       if (!parsed.success) return invalid();

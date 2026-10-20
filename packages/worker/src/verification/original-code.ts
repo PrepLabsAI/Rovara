@@ -6,14 +6,12 @@
 // touched, and ignored files (built extensions, node_modules, virtual environments) stay as they are, so the before runs
 // use the same environment as the agent's. The agent's files are kept under ORIGINAL_CODE_REF until they are restored,
 // so a worker that stops mid-way loses nothing: recoverAgentFiles puts them back before the next task.
-import { execFile } from "node:child_process";
-import { copyFile, mkdtemp, rm, rmdir, unlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
-import { assertNoEmbeddedRepositories, gitHardenedEnvironment } from "../git.js";
+import { rmdir, unlink } from "node:fs/promises";
+import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { assertNoEmbeddedRepositories } from "../git.js";
+import { addWorkTree } from "../isolated-git.js";
+import { runIsolatedGit, withIsolatedRepository } from "../isolated-repository.js";
 
-const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT_BYTES = 268_435_456;
 const GIT_TIMEOUT_MS = 10 * 60_000;
 /** Holds the agent's files (a tree) while a repository shows its original code. Never a branch, so `git branch` stays quiet. */
@@ -115,10 +113,11 @@ async function restore(directory: string, agentTree: string): Promise<void> {
  * Built in a copy of the index, so the repository's own index is never changed and unchanged files are not rehashed.
  */
 async function workingTree(directory: string): Promise<string> {
-  return withTemporaryIndex(directory, true, async (env) => {
-    await assertNoEmbeddedRepositories(directory, { ...(await gitHardenedEnvironment(directory)), ...env });
-    await git(directory, ["add", "--all", "--", "."], env);
-    return git(directory, ["write-tree"], env);
+  // In a throwaway repository that never reads the workspace repository's config (isolated-repository.ts), on a copy of the repository's index.
+  return withIsolatedRepository(directory, "write", { index: "work" }, async (repository) => {
+    const gitlinks = await assertNoEmbeddedRepositories(repository.layout.workTree, repository.env("work"), repository.location, repository.workTreeCwd);
+    await addWorkTree(repository, "work", gitlinks);
+    return (await repository.text(["write-tree"], { index: "work", maxBuffer: MAX_GIT_OUTPUT_BYTES })).trim();
   });
 }
 
@@ -142,10 +141,10 @@ async function writeTree(directory: string, from: string, to: string): Promise<v
   }
   for (const path of remove) await removeFile(directory, path);
   if (write.length === 0) return;
-  await withTemporaryIndex(directory, false, async (env) => {
-    await git(directory, ["read-tree", to], env);
-    await git(directory, ["checkout-index", "--force", "-z", "--stdin"], env, true, `${write.join("\0")}\0`);
-    return "";
+  // The files are written from Git's object store with no filter of the repository's: none is defined in the throwaway repository.
+  await withIsolatedRepository(directory, "read", {}, async (repository) => {
+    await repository.text(["read-tree", to], { index: "temporary", maxBuffer: MAX_GIT_OUTPUT_BYTES });
+    await repository.text(["checkout-index", "--force", "-z", "--stdin"], { index: "temporary", maxBuffer: MAX_GIT_OUTPUT_BYTES, input: `${write.join("\0")}\0` });
   });
 }
 
@@ -164,40 +163,12 @@ async function removeFile(root: string, path: string): Promise<void> {
   }
 }
 
-async function withTemporaryIndex<T>(
-  directory: string,
-  copyRepositoryIndex: boolean,
-  work: (env: Record<string, string>) => Promise<T>,
-): Promise<T> {
-  const folder = await mkdtemp(join(tmpdir(), "agentx-index-"));
-  const index = join(folder, "index");
-  try {
-    if (copyRepositoryIndex) {
-      const own = resolve(directory, await git(directory, ["rev-parse", "--git-path", "index"]));
-      await copyFile(own, index).catch(() => undefined);
-    }
-    return await work({ GIT_INDEX_FILE: index });
-  } finally {
-    await rm(folder, { recursive: true, force: true });
-  }
-}
-
-/** Runs Git in `directory` under AgentX's hardened Git environment, with `env` over it. Exported for tests. */
-export async function git(directory: string, args: string[], env: Record<string, string> = {}, trim = true, input?: string): Promise<string> {
-  const child = execFileAsync("git", ["-C", directory, ...args], {
-    timeout: GIT_TIMEOUT_MS,
-    maxBuffer: MAX_GIT_OUTPUT_BYTES,
-    env: { ...(await gitHardenedEnvironment(directory)), ...env },
-  });
-  const stdin = child.child.stdin;
-  if (stdin !== null) {
-    // A Git command can exit before its standard input is written or closed (every command but checkout-index ignores
-    // it). The pipe's EPIPE then arrives as an error event, which, unhandled, would crash the worker. Git's own exit
-    // status still decides the result below.
-    stdin.on("error", () => undefined);
-    if (input === undefined) stdin.end();
-    else stdin.end(input);
-  }
-  const { stdout } = await child;
+/**
+ * Runs one Git command for the repository `directory` names, in a throwaway repository that never reads the repository's own config, hooks or attributes files
+ * (isolated-repository.ts), starting in the work tree. `env` is ignored: the throwaway repository's environment is the worker's own. Exported for tests.
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export async function git(directory: string, args: string[], _env: Record<string, string> = {}, trim = true, input?: string): Promise<string> {
+  const stdout = await runIsolatedGit(directory, args, { timeout: GIT_TIMEOUT_MS, maxBuffer: MAX_GIT_OUTPUT_BYTES, cwd: "worktree", ...(input === undefined ? {} : { input }) });
   return trim ? stdout.trim() : stdout;
 }

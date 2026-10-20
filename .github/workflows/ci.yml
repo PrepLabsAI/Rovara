@@ -158,6 +158,13 @@ jobs:
           ROVARA_DOCKER: "1"
           ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
         run: npx vitest run tests/linux
+      # The browser path end to end through the real worker, broker and this Docker host: a failing round, send-back, a passing round, publication.
+      # It skips unless Docker and the executor image are provided, so it is a native-suite file that only this job runs.
+      - name: Native browser journey
+        env:
+          ROVARA_DOCKER: "1"
+          ROVARA_EXECUTOR_IMAGE: rovara-e2e-executor:ci
+        run: npx vitest run --config vitest.native-p0.config.ts tests/e2e/m1-web-journey.test.ts
 
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:

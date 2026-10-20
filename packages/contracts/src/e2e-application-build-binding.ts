@@ -33,6 +33,11 @@ function expectedOutputPlatform(target: ReturnType<typeof inspectE2ERepository>[
   return target.kind;
 }
 
+/** The dependency lockfiles among an application's approved source references: the set a build manifest must name exactly. */
+export function e2eApplicationLockfileRefs(refs: readonly SourceRef[]): SourceRef[] {
+  return refs.filter((ref) => dependencyLockfileName.test(ref.path.slice(ref.path.lastIndexOf("/") + 1)));
+}
+
 /** Shared pure validation for the exact source, recipe, lock, candidate, and artifact binding. */
 export function validateE2EAppBuildBinding(input: {
   finalSnapshot: E2ESourceSnapshot;
@@ -67,8 +72,7 @@ export function validateE2EAppBuildBinding(input: {
       throw new Error(`approved target ${ref.targetId} application source or recipe identity changed`);
     }
   }
-  const expectedLocks = (refs: readonly SourceRef[]) => refs.filter((ref) => dependencyLockfileName.test(ref.path.slice(ref.path.lastIndexOf("/") + 1)));
-  if (!sameRefs(manifest.lockfileRefs, expectedLocks(approvedApplication.sourceRefs))) throw new Error("build manifest lockfile references differ from the exact approved lockfile set");
+  if (!sameRefs(manifest.lockfileRefs, e2eApplicationLockfileRefs(approvedApplication.sourceRefs))) throw new Error("build manifest lockfile references differ from the exact approved lockfile set");
   if (manifest.candidateDigest !== input.finalSnapshot.candidate.digest || manifest.repository.repositoryId !== input.finalSnapshot.candidate.repositories[0]?.repositoryId
     || manifest.repository.commitSha !== input.finalSnapshot.commitSha || manifest.repository.treeSha !== input.finalSnapshot.treeSha) {
     throw new Error("build manifest candidate and repository identity do not match the complete final protected source");

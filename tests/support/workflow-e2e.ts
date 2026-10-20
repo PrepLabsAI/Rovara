@@ -1103,7 +1103,7 @@ export async function createWorkflowE2E(options: {
       loadTask: async (id) => db.reorder(structuredClone(db.get(`DEVTASK#${id}`, "META"))),
       authorize: async (taskId, userId, thread, taskAction) => {
         const answer = await invokePeople("task-people-authorize", { taskId, userId, thread, taskAction });
-        if (answer.statusCode !== 200) throw new Error("task authorization refused");
+        if (answer.statusCode !== 200) throw Object.assign(new Error("task authorization refused"), { code: (answer.body as { error?: { code?: unknown } } | undefined)?.error?.code });
       },
       getPeople: async (input) => {
         const answer = await invokePeople("task-people-read", input);

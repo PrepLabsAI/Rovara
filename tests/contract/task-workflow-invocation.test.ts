@@ -27,6 +27,17 @@ describe("workflow-mode worker invocation", () => {
     expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode: "ADMIN" } }).success).toBe(false);
   });
 
+  it("requires explicit structured planning mode for the negotiated application E2E plan version", () => {
+    const capable = { workflowMode: "PLAN", planFormat: "structured", workflowE2EPlanVersion: 2 };
+    expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, ...capable } }).success).toBe(true);
+    expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowE2EPlanVersion: 2 } }).success).toBe(false);
+    expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode: "PLAN", workflowE2EPlanVersion: 2 } }).success).toBe(false);
+    expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode: "IMPLEMENT", planFormat: "structured", workflowE2EPlanVersion: 2 } }).success).toBe(false);
+    // Only version 2 is an opt-in: version 1 is what every worker already parses and is never sent.
+    expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, ...capable, workflowE2EPlanVersion: 1 } }).success).toBe(false);
+    expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EApplicationPlan");
+  });
+
   it("requires a task, revision, and candidate binding for the separate feedback critic operation", () => {
     const binding = { taskId: "44444444-4444-4444-8444-444444444444", workflowRevision: 8, candidateDigest: "a".repeat(64) };
     expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReview: binding } }).success).toBe(true);

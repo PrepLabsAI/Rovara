@@ -1,8 +1,5 @@
-import { execFile as execFileCallback, spawn } from "node:child_process";
-import { promisify } from "node:util";
-import { gitHardenedEnvironment } from "../git.js";
-
-const execFile = promisify(execFileCallback);
+import { spawn } from "node:child_process";
+import { withIsolatedGit } from "../isolated-git.js";
 
 const OBJECT_ID = /^[a-f0-9]{40}$/;
 
@@ -27,9 +24,9 @@ function checkedObjects(input: { baseCommitSha: string; treeSha: string }): void
  * Runs Git and reads at most `maxBytes` of its output; past that it stops Git and reports the output as cut.
  * A Git failure (a nonzero exit before the limit) rejects.
  */
-function readGitOutput(args: readonly string[], env: NodeJS.ProcessEnv, maxBytes: number): Promise<{ bytes: Buffer; truncated: boolean }> {
+function readGitOutput(spec: { args: string[]; env: NodeJS.ProcessEnv; cwd: string }, maxBytes: number): Promise<{ bytes: Buffer; truncated: boolean }> {
   return new Promise((resolveOutput, reject) => {
-    const child = spawn("git", args, { env, stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn("git", spec.args, { env: spec.env, cwd: spec.cwd, stdio: ["ignore", "pipe", "ignore"] });
     const chunks: Buffer[] = [];
     let length = 0;
     let truncated = false;
@@ -62,9 +59,10 @@ function readGitOutput(args: readonly string[], env: NodeJS.ProcessEnv, maxBytes
 export async function candidateDiff(input: { directory: string; baseCommitSha: string; treeSha: string; maxBytes: number }): Promise<{ text: string; truncated: boolean }> {
   checkedObjects(input);
   if (!Number.isInteger(input.maxBytes) || input.maxBytes < 1) throw new Error("diff size limit is invalid");
-  const { bytes } = await readGitOutput([
-    "-C", input.directory, ...SAFE_DIFF_CONFIG, "diff", ...SAFE_DIFF_OPTIONS, "--stat", "--patch", input.baseCommitSha, input.treeSha, "--",
-  ], await gitHardenedEnvironment(input.directory), input.maxBytes);
+  // Both sides are objects, so no work tree file is read; the throwaway repository means no config or attributes file of the workspace repository either.
+  const { bytes } = await withIsolatedGit(input.directory, "read", (git) => readGitOutput(git.spawnSpec([
+    ...SAFE_DIFF_CONFIG, "diff", ...SAFE_DIFF_OPTIONS, "--stat", "--patch", input.baseCommitSha, input.treeSha, "--",
+  ]), input.maxBytes));
   if (bytes.byteLength <= input.maxBytes) return { text: bytes.toString("utf8"), truncated: false };
   let end = input.maxBytes;
   // Step back over UTF-8 continuation bytes (10xxxxxx) so the cut never splits a character.
@@ -141,10 +139,10 @@ export function parseCandidateChanges(nameStatus: string, patch: string, patchTr
 /** The paths and changed new-side lines from the base commit to the checked tree. */
 export async function candidateChanges(input: { directory: string; baseCommitSha: string; treeSha: string }): Promise<CandidateChange[]> {
   checkedObjects(input);
-  const env = await gitHardenedEnvironment(input.directory);
   const objects = [input.baseCommitSha, input.treeSha, "--"];
-  const { stdout: names } = await execFile("git", ["-C", input.directory, ...SAFE_DIFF_CONFIG, "diff", ...SAFE_DIFF_OPTIONS, "--name-status", "-z", ...objects],
-    { env, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
-  const patch = await readGitOutput(["-C", input.directory, ...SAFE_DIFF_CONFIG, "diff", ...SAFE_DIFF_OPTIONS, "-U0", ...objects], env, CHANGE_PATCH_MAX_BYTES);
+  const { names, patch } = await withIsolatedGit(input.directory, "read", async (git) => ({
+    names: await git.text([...SAFE_DIFF_CONFIG, "diff", ...SAFE_DIFF_OPTIONS, "--name-status", "-z", ...objects], { index: "none", maxBuffer: 16 * 1024 * 1024 }),
+    patch: await readGitOutput(git.spawnSpec([...SAFE_DIFF_CONFIG, "diff", ...SAFE_DIFF_OPTIONS, "-U0", ...objects]), CHANGE_PATCH_MAX_BYTES),
+  }));
   return parseCandidateChanges(names, patch.bytes.subarray(0, CHANGE_PATCH_MAX_BYTES).toString("utf8"), patch.truncated);
 }

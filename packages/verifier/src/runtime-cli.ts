@@ -94,10 +94,17 @@ export async function runE2EActualCli(input: E2EActualCliInput): Promise<E2EActu
   return runE2EActualCliWithSessionFactory(input, createE2EWorkerSession);
 }
 
-/** Links dependencies from the installed worker package root, never from a mounted candidate checkout. */
-export async function linkInstalledRuntimeDependencies(project: string, _sourceRoot: string): Promise<string> {
+/**
+ * Links dependencies from the installed worker package root, never from a mounted candidate checkout.
+ * The root defaults to the host profile's fixed location (/opt/agentx on Linux, which only a worker
+ * image has); only trusted host code and tests may pass another one, never app or invocation data.
+ */
+export async function linkInstalledRuntimeDependencies(
+  project: string,
+  _sourceRoot: string,
+  installedRuntimeRoot: string = CONTAINED_RUNTIME_PROFILE?.installedRuntimeRoot ?? packagedRuntimeRoot(),
+): Promise<string> {
   void _sourceRoot;
-  const installedRuntimeRoot = CONTAINED_RUNTIME_PROFILE?.installedRuntimeRoot ?? packagedRuntimeRoot();
   const dependencyRoot = join(installedRuntimeRoot, "node_modules");
   const info = await import("node:fs/promises").then(({ lstat }) => lstat(dependencyRoot));
   if (!info.isDirectory() || info.isSymbolicLink() || await realpath(dependencyRoot) !== dependencyRoot) throw new Error("installed runner dependencies are unavailable at the fixed runtime root");

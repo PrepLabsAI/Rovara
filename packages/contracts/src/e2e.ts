@@ -164,19 +164,73 @@ export type E2EFailedRound = z.infer<typeof E2EFailedRoundSchema>;
 export const E2EWorkflowDisplayRefSchema = z.object({ schemaVersion: z.literal(1), key: z.string().regex(/^private\/[^/]+\/[^/]+\/workflow-e2e-display\/[a-f0-9]{64}\.json$/),
   sha256: digest, byteLength: positiveInt.max(262_144), candidateDigest: digest, roundId: z.string().uuid(), groupRunIds: z.array(z.string().uuid()).min(1).max(4), admissionSha256: digest, evidenceSha256: digest }).strict();
 export type E2EWorkflowDisplayRef = z.infer<typeof E2EWorkflowDisplayRefSchema>;
-export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentRoundId: z.string().uuid().optional(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64), qualifiedRound: E2EQualifiedRoundSchema.optional(), failedRound: E2EFailedRoundSchema.optional(), displayRef: E2EWorkflowDisplayRefSchema.optional() }).strict();
+/**
+ * What plan approval derived for a plan that carries a v2 application intent: the digests that identify the approved selection, the targets that
+ * can run application scenarios, the criteria that will wait (and why), and the READY runtime rows it was derived against. Dispatch re-reads the
+ * rows and re-derives the selection (Ruling AL); this record is what the Owner approved, never authority to run.
+ */
+export const E2EApplicationSelectionRecordSchema = z.object({
+  schemaVersion: z.literal("e2e-application-selection/v1"),
+  /** sha256 of the whole canonical intent, portable scenarios included (the facade digests only the application part). */
+  intentDigest: digest,
+  /** The approval-time plan identity the selection was derived under (the canonical artifact; not the dispatch-time plan digest). */
+  planDigest: digest,
+  semanticApproval: z.object({ artifactId: id(120), digest }).strict(),
+  setupApproval: z.object({ artifactId: id(120), digest }).strict(),
+  /** The application approval binding of the executable subset; null when no target can run application scenarios yet. */
+  applicationApprovalBindingDigest: digest.nullable(),
+  /**
+   * The application execution plan and scenario bundle derived at approval from the application scenarios only (template `trusted-e2e-application/v1`,
+   * under `planDigest`). They are not `workflow.e2e.executionPlanDigest`/`bundleDigest`, which identify the approved intent and its portable bundle
+   * (`trusted-e2e/v1`) exactly as for a v1 plan. Dispatch derives its own plan, so these identify what the Owner approved and are never compared with it.
+   */
+  applicationExecutionPlanDigest: digest,
+  applicationBundleDigest: digest,
+  executableTargetIds: z.array(id(80)).max(12),
+  unavailableCriteria: z.array(z.object({ criterionId: id(120), reason: id(500) }).strict()).max(64),
+  runtimeRows: z.array(z.object({ kind: z.enum(["web", "api"]), profileId: id(120), runtimeCatalogId: id(120), catalogRevision: positiveInt, generation: positiveInt,
+    bindingDigest: digest, capabilityDigest: digest, expiresAt: id(40) }).strict()).max(2),
+  evaluatedAt: id(40),
+}).strict();
+export type E2EApplicationSelectionRecord = z.infer<typeof E2EApplicationSelectionRecordSchema>;
+/** What identifies an approved application selection, for the audit of a re-approval: the whole record's digest, the intent, the executable targets and the runtime rows. */
+const E2EApplicationSelectionFingerprintSchema = z.object({ selectionDigest: digest, intentDigest: digest, executableTargetIds: z.array(id(80)).max(12), runtimeRowsDigest: digest }).strict();
+export type E2EApplicationSelectionFingerprint = z.infer<typeof E2EApplicationSelectionFingerprintSchema>;
+export function e2eApplicationSelectionFingerprint(record: E2EApplicationSelectionRecord): E2EApplicationSelectionFingerprint {
+  const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
+  return { selectionDigest: sha(record), intentDigest: record.intentDigest, executableTargetIds: [...record.executableTargetIds], runtimeRowsDigest: sha(record.runtimeRows) };
+}
+/**
+ * The owner's re-approval of an application plan against the runtime rows READY now (a retry after the approved selection changed): who, why, when, and the selection
+ * it replaced and the one it recorded. Appended, never overwritten, so what the owner authorized can always be reconstructed.
+ */
+export const E2EApplicationReapprovalSchema = z.object({ requestId: id(120), actorId: id(200), reason: id(500), at: id(40),
+  previous: E2EApplicationSelectionFingerprintSchema, current: E2EApplicationSelectionFingerprintSchema }).strict();
+export type E2EApplicationReapproval = z.infer<typeof E2EApplicationReapprovalSchema>;
+export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentRoundId: z.string().uuid().optional(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64), qualifiedRound: E2EQualifiedRoundSchema.optional(), failedRound: E2EFailedRoundSchema.optional(), displayRef: E2EWorkflowDisplayRefSchema.optional(), applicationSelection: E2EApplicationSelectionRecordSchema.optional(), applicationReapprovals: z.array(E2EApplicationReapprovalSchema).max(20).optional() }).strict();
 export type E2EWorkflowProgress = z.infer<typeof E2EWorkflowProgressSchema>;
 export type E2EQualifiedRound = z.infer<typeof E2EQualifiedRoundSchema>;
 
-/** Server-assigned admission object reference for a separate native CHECKS operation. */
+/**
+ * Server-assigned admission object reference for a separate native CHECKS operation. `kind` is "application" for a browser or API round (and absent for a
+ * portable one): the dispatcher reads it, with no access to the stored admission, to hand such a round only to a worker that lists
+ * "task.workflowE2EApplicationChecks" (Ruling BQ, mixed fleet).
+ */
 export const E2EWorkflowAdmissionRefSchema = z.object({
-  schemaVersion: z.literal(1), taskId: z.string().uuid(), workflowRevision: positiveInt,
+  schemaVersion: z.literal(1), kind: z.literal("application").optional(), taskId: z.string().uuid(), workflowRevision: positiveInt,
   candidateDigest: digest, roundId: z.string().uuid(), groupRunIds: z.array(z.string().uuid()).min(1).max(4).refine((values) => new Set(values).size === values.length), admissionRef: z.object({
     key: z.string().regex(/^workflow-e2e-admissions\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest,
     byteLength: positiveInt.max(24 * 1024 * 1024),
   }).strict(),
 }).strict();
 export type E2EWorkflowAdmissionRef = z.infer<typeof E2EWorkflowAdmissionRefSchema>;
+/**
+ * What an application round's evidence may weigh (Ruling BV): the worker refuses to upload more (the group is UNKNOWN, "evidence too large"), the broker accepts and reads no more.
+ * They are what the deployed broker can hold and process, of the same order as the portable bound (24 MiB) the evidence references keep. Revisit them with measured sizes.
+ */
+export const E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES = 8 * 1024 * 1024;
+/** All of a round's evidence together, the aggregate included: the aggregate holds every group's run once. */
+export const E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES = 24 * 1024 * 1024;
 export const E2EWorkflowEvidenceRefSchema = z.object({ key: z.string().regex(/^workflow-e2e-evidence\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest, byteLength: positiveInt.max(24 * 1024 * 1024) }).strict();
 export type E2EWorkflowEvidenceRef = z.infer<typeof E2EWorkflowEvidenceRefSchema>;
 export const E2EWorkflowGroupEvidenceRefSchema = z.object({

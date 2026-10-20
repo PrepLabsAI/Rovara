@@ -10,7 +10,7 @@ import {
   type Ec2RuntimeBinding,
   type WorkerInvocation,
 } from "@agentx/contracts";
-import { asksForCodeAnchors, withoutCodeAnchorText } from "./broker-shared.js";
+import { asksForApplicationPlan, asksForCodeAnchors, withoutApplicationPlanText, withoutCodeAnchorText } from "./broker-shared.js";
 import type { Ec2OutboxRecord } from "./lambda.js";
 import type { SessionManager } from "./sessions.js";
 
@@ -44,6 +44,12 @@ export interface Ec2DeliveryDependencies {
    * worker built before them. Without it, no optional field is sent.
    */
   workerFeatures?: (url: string) => Promise<readonly string[]>;
+  /**
+   * Called, before the invocation is posted, when a planning run's schema-v2 application plan was dropped for a worker that does not list
+   * "task.workflowE2EApplicationPlan": the operation record must stop saying the version was offered, so the broker refuses a v2 plan it uploads.
+   * A failure fails the attempt (the run must not go out with the record still saying 2).
+   */
+  applicationPlanNotNegotiated?: (record: Ec2OutboxRecord) => Promise<void>;
   /** Rechecks fresh PEOPLE authority after compute is ready, immediately before signing and POST. */
   guardTaskDispatch?: (record: Ec2OutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
   /** Loads and validates the durable internal readiness marker before any session provisioning. */
@@ -116,6 +122,15 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     }
     if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures);
+    if (invocation.kind === "task" && invocation.payload.workflowE2EPlanVersion !== undefined
+      && !(sent.kind === "task" && sent.payload.workflowE2EPlanVersion !== undefined)) {
+      // Without the recorder the operation record would keep saying version 2 was offered while the worker was sent a portable-only run, so the broker would
+      // accept a v2 plan it never asked for: a missing recorder is a wiring error, and the run does not go out.
+      if (dependencies.applicationPlanNotNegotiated === undefined) {
+        throw agentXError("CONFIG_INVALID", "the application plan version was dropped for this worker but no applicationPlanNotNegotiated recorder is configured");
+      }
+      await dependencies.applicationPlanNotNegotiated(record);
+    }
     if (await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     const payload = workerInvokeTokenPayload({
       workspaceId: record.workspaceId,
@@ -158,7 +173,8 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
  * an older one reviews without being told which checks ran, and its workflowReviewPlan goes only to one whose /ping lists
  * "task.workflowReviewPlan"; an older one reviews without seeing the approved plan, and its workflowReviewFeedback goes only to one whose
  * /ping lists "task.workflowReviewFeedback"; an older one judges a feedback fix against the plan alone. The retry note goes only to one whose /ping lists "task.workflowReviewNote"; older workers review without it. A planning run's workflowPhase and planFormat go only to one whose /ping lists
- * "task.structuredPlans"; an older one plans without checking the answer's format. A planning prompt asks for anchor lines on
+ * "task.structuredPlans"; an older one plans without checking the answer's format. A planning run's workflowE2EPlanVersion (the schema-v2 application plan)
+ * goes only to one whose /ping lists "task.workflowE2EApplicationPlan"; an older one is sent the portable-only prompt, and its review plan without a v2 intent. A planning prompt asks for anchor lines on
  * code citations only on one whose /ping lists "task.codeAnchors"; for an older one that text is left out of the prompt. The invoke token signs the operation, not the payload, so
  * dropping a field leaves it valid. A ping that fails fails the attempt: the worker journals a hash of
  * the whole invocation, so a retry must send what the first attempt would have, and a blip must not
@@ -180,6 +196,9 @@ async function forWorker(
   const carriesWorkflowBase = invocation.kind === "task" && invocation.payload.workflowBase !== undefined;
   const carriesStructuredPlans = invocation.kind === "task" && (invocation.payload.workflowPhase !== undefined || invocation.payload.planFormat !== undefined);
   const carriesCodeAnchors = invocation.kind === "task" && asksForCodeAnchors(invocation.payload.prompt);
+  const carriesApplicationPlans = invocation.kind === "task" && (invocation.payload.workflowE2EPlanVersion !== undefined || asksForApplicationPlan(invocation.payload.prompt)
+    || invocation.payload.workflowReviewPlan?.e2eIntent?.schemaVersion === 2);
+  const carriesApplicationAdmission = invocation.kind === "task" && invocation.payload.workflowE2EAdmission?.kind === "application";
   const carriesReportChecks = invocation.kind === "publish" && invocation.payload.reportChecks !== undefined;
   const carriesCandidateTree = invocation.kind === "publish" && invocation.payload.candidateTreeSha !== undefined;
   const carriesPublicationMode = invocation.kind === "publish" && invocation.payload.publicationMode !== undefined;
@@ -188,7 +207,7 @@ async function forWorker(
   const carriesPullRequestUpdate = invocation.kind === "maintain" && invocation.payload.workflowCandidateTreeSha !== undefined;
   const carriesChatGpt = invocation.kind === "task" && invocation.payload.chatgpt !== undefined;
   const carriesProjectSetupSmoke = invocation.kind === "project-setup-smoke";
-  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesReportChecks && !carriesCandidateTree && !carriesPublicationMode && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
+  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesApplicationPlans && !carriesApplicationAdmission && !carriesReportChecks && !carriesCandidateTree && !carriesPublicationMode && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -214,6 +233,11 @@ async function forWorker(
   }
   if (carriesWorkflowDependencies && !features.includes("task.workflowDependencies")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "ordered work requires a compatible worker that advertises task.workflowDependencies");
+  }
+  // A worker built before application CHECKS cannot run an application admission, and the admission's content decides what the round proves, so it is never
+  // sent one (and never a trimmed one): the attempt fails with this reason instead (Ruling BQ, mixed fleet).
+  if (carriesApplicationAdmission && !features.includes("task.workflowE2EApplicationChecks")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "browser and API verification needs a worker that runs application admissions (it must list task.workflowE2EApplicationChecks); this worker predates it, so no application round was sent to it");
   }
   if (carriesProjectSetupSmoke && !features.includes("project.setupSmoke")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "project setup smoke requires a worker that implements project.setupSmoke");
@@ -336,11 +360,21 @@ async function forWorker(
       workspaceId: invocation.workspaceId,
     }));
   }
-  const sent = withoutCodeAnchors(withNote, features);
-  if (sent !== withNote) {
+  const anchored = withoutCodeAnchors(withNote, features);
+  if (anchored !== withNote) {
     console.log(JSON.stringify({
       component: "dispatcher",
       event: "dispatch.code_anchors_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
+  const sent = withoutApplicationPlans(anchored, features);
+  if (sent !== anchored) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.application_plan_omitted",
       reason,
       operationId: invocation.operationId,
       workspaceId: invocation.workspaceId,
@@ -353,6 +387,33 @@ async function forWorker(
 function withoutCodeAnchors(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
   if (invocation.kind !== "task" || !asksForCodeAnchors(invocation.payload.prompt) || features.includes("task.codeAnchors")) return invocation;
   return { ...invocation, payload: { ...invocation.payload, prompt: withoutCodeAnchorText(invocation.payload.prompt) } };
+}
+
+/**
+ * A worker that does not list "task.workflowE2EApplicationPlan" parses only the portable schemaVersion 1 intent, so it is never handed a version 2
+ * one: a planning run is sent the portable-only prompt without the plan version, and a review's approved plan without its (version 2) E2E intent.
+ * The edit is deterministic, so a retry sends what the first attempt did.
+ */
+function withoutApplicationPlans(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || features.includes("task.workflowE2EApplicationPlan")) return invocation;
+  const payload = { ...invocation.payload };
+  let changed = false;
+  if (payload.workflowE2EPlanVersion !== undefined) {
+    delete payload.workflowE2EPlanVersion;
+    changed = true;
+  }
+  const prompt = withoutApplicationPlanText(payload.prompt);
+  if (prompt !== payload.prompt) {
+    payload.prompt = prompt;
+    changed = true;
+  }
+  if (payload.workflowReviewPlan?.e2eIntent?.schemaVersion === 2) {
+    const { e2eIntent: _applicationIntent, ...plan } = payload.workflowReviewPlan;
+    void _applicationIntent;
+    payload.workflowReviewPlan = plan;
+    changed = true;
+  }
+  return changed ? { ...invocation, payload } : invocation;
 }
 
 /** A planning run without the kind and format of plan it writes, for a worker that does not parse them; it plans without checking the answer's format. */

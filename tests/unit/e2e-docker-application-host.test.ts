@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { E2EExecutorPlanSchema } from "@agentx/contracts";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
-import { createDockerApplicationHost, createProcessDockerCli, e2eRunNetworks, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
+import { createDockerApplicationHost, createProcessDockerCli, dockerOwnedCleanupReceipt, dockerOwnedResourceInventory, e2eRunNetworks, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
 import { executorContainerArgs } from "../../packages/verifier/src/host/executor-container.js";
 import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
 import { createOrdersExecutorPlan, type OrdersExecutorFixture } from "../support/e2e-orders-executor-fixture.js";
@@ -284,10 +284,22 @@ describe("docker application host", () => {
     expect(await readdir(s.runRoot)).toEqual([]);
   });
 
+  // The three tests below are about what happens when a deadline arrives or a caller cancels while the executor runs. Their deadlines are measured on a
+  // fake clock (timers and Date only; file and process I/O stay real), and every moment is chosen by the test: it advances the clock or aborts only
+  // once the executor is running, so machine load can neither expire a deadline early nor let one pass unnoticed.
+  const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  afterEach(() => { vi.useRealTimers(); });
+
   it("kills the run at the deadline and never reports a result", async () => {
+    fakeTimers();
     const fake = new FakeDockerCli(); const s = await setup({ fake, deadlineMs: 400 });
     fake.hangOn("executor");
-    const result = await runWith(s);
+    const running = runWith(s);
+    await fake.executorStarted;
+    // Docker's own timeout for the executor is the time left plus the grace: the deadline reaches Docker, not just the host's timers.
+    expect(fake.executorTimeoutMs).toBe(400 + 60);
+    await vi.advanceTimersByTimeAsync(400);
+    const result = await running;
     expect(result.unavailableReason).toBe("deadline-exceeded");
     expect(result.actualRun).toBeNull();
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
@@ -297,8 +309,10 @@ describe("docker application host", () => {
   it("is cancelled by the caller's signal and still cleans up", async () => {
     const fake = new FakeDockerCli(); const s = await setup({ fake }); fake.hangOn("executor");
     const controller = new AbortController();
-    setTimeout(() => controller.abort(new Error("operator cancelled")), 100);
-    const result = await runWith(s, controller.signal);
+    const running = runWith(s, controller.signal);
+    await fake.executorStarted;
+    controller.abort(new Error("operator cancelled"));
+    const result = await running;
     expect(result.actualRun).toBeNull();
     // The lifecycle refuses to read back after a cancellation; the host's own reason is the cancellation, never a result.
     expect(result.unavailableReason).toBe("application proof readback was cancelled before dispatch");
@@ -320,12 +334,21 @@ describe("docker application host", () => {
   });
 
   it("waits for an execution still in flight at the deadline before removing anything, and never returns its late result", async () => {
+    fakeTimers();
     const fake = new FakeDockerCli(); const hook = vi.fn(async () => undefined);
     const s = await setup({ fake, deadlineMs: 300, onRunOutput: hook });
-    // The executor does not stop when the signal fires: it finishes, cleanly and in full, well after the deadline.
-    fake.executorIgnoresAbortForMs = 900;
+    // The executor does not stop when the signal fires: it finishes, cleanly and in full, only when the test lets it, after the deadline.
+    let letExecutorFinish!: () => void;
+    fake.executorIgnoresAbortUntil = new Promise<void>((resolve) => { letExecutorFinish = resolve; });
     fake.onExecutor = okOutput(s);
-    const result = await runWith(s);
+    const running = runWith(s);
+    await fake.executorStarted;
+    await vi.advanceTimersByTimeAsync(300);
+    // Give the host every chance to remove things too early: many turns of the event loop (real I/O completes in them) while the executor is still running.
+    for (let turn = 0; turn < 50; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(fake.events.some((event) => event.startsWith("rm "))).toBe(false);
+    letExecutorFinish();
+    const result = await running;
     expect(result.unavailableReason).toBe("deadline-exceeded");
     expect(result.actualRun).toBeNull();
     expect(hook).not.toHaveBeenCalled();
@@ -333,7 +356,7 @@ describe("docker application host", () => {
     expect(fake.events.indexOf("executor finished")).toBeGreaterThanOrEqual(0);
     expect(fake.events.indexOf("executor finished")).toBeLessThan(fake.events.findIndex((event) => event.startsWith("rm ")));
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
-  }, 20_000);
+  });
 
   it("isolates concurrent runs", async () => {
     const fake = new FakeDockerCli();
@@ -521,6 +544,20 @@ describe("docker application host", () => {
       }
     });
 
+    it("attests exactly the run's inventory as the containers it removed, so the cleanup receipt a broker derives from the run id is the one the host attests", async () => {
+      const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep });
+      fake.onExecutor = okOutput(s);
+      const result = await runWith(s);
+      expect(result.unavailableReason).toBeNull();
+      const { cleanup } = s.assemble.mock.calls[0]![0] as { cleanup: { removedAt: string; containers: string[]; network: string } };
+      // Not "contains the app": the whole list, so a run that left a build container, lost its executor or removed something that is not its own would differ from the derivation.
+      const inventory = dockerOwnedResourceInventory(s.runId);
+      expect([...cleanup.containers].sort()).toEqual([...inventory.containers].sort());
+      expect(cleanup.network).toBe(inventory.network);
+      const derived = JSON.parse(Buffer.from(dockerOwnedCleanupReceipt(s.runId, cleanup.removedAt).bytes).toString("utf8")) as { containers: string[]; network: string; removedAt: string };
+      expect(derived).toMatchObject({ containers: [...cleanup.containers].sort(), network: cleanup.network, removedAt: cleanup.removedAt });
+    });
+
     it("never reads or returns the out directory when the executor exits 2, whatever it says", async () => {
       for (const reason of ["output-scan-failed", "credential-leak", "internal-error"]) {
         const fake = new FakeDockerCli(); const s = await setup({ fake });
@@ -655,11 +692,18 @@ describe("process docker cli", () => {
 
   it("kills the docker process on timeout (124) and on abort (130)", async () => {
     const cli = await shim("sleep 30");
-    const started = Date.now();
-    expect((await cli.run(["run"], { signal: signal(), timeoutMs: 100 })).code).toBe(124);
-    const controller = new AbortController(); setTimeout(() => controller.abort(), 50);
-    expect((await cli.run(["run"], { signal: controller.signal, timeoutMs: 20_000 })).code).toBe(130);
-    expect(Date.now() - started).toBeLessThan(5_000);
+    // The timeout is the host's own setTimeout, driven here by the test; the child is a real process that never exits on its own, so the code can only come from the kill.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const timedOut = cli.run(["run"], { signal: signal(), timeoutMs: 100 });
+      await vi.advanceTimersByTimeAsync(100);
+      expect((await timedOut).code).toBe(124);
+    } finally { vi.useRealTimers(); }
+    // An abort needs no timer at all: the listener is attached as the call starts.
+    const controller = new AbortController();
+    const aborted = cli.run(["run"], { signal: controller.signal, timeoutMs: 20_000 });
+    controller.abort();
+    expect((await aborted).code).toBe(130);
   });
 
   it("reports a missing docker binary as 127 instead of throwing", async () => {

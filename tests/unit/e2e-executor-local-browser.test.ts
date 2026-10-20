@@ -140,9 +140,9 @@ const verdicts: readonly (readonly [OrdersProbeName, string | undefined, Verdict
   ["api-state-positive-v1", undefined, "PASS", null],
   ["web-csv-positive-v1", "extra-order.json", "FAILED", "csv"],
   ["api-status-mismatch-v1", undefined, "FAILED", "http-status"],
-  // A state that never settles on the approved value is unavailable by the evaluator's own rules (only a settled sample is a verdict),
-  // so a wrong contract is never PASS and never FAILED.
-  ["api-state-positive-v1", "state-contract.json", "UNKNOWN", null],
+  // A state that stays on another value (a well-formed 2xx answer of the approved shape) until the poll times out is a definite mismatch (Ruling W). One that never
+  // settles because the app answers non-2xx or malformed JSON is unavailable (UNKNOWN); that case needs an app that does so, and is covered in e2e-api-state-timeout.test.ts.
+  ["api-state-positive-v1", "state-contract.json", "FAILED", "state"],
 ];
 
 describe.runIf(enabled)("host readback of a real executor run (local, no Docker)", () => {

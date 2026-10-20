@@ -147,11 +147,15 @@ export type SettledChromiumSandbox = Readonly<{ attestation: ChromiumSandboxAtte
  * sandbox is still refused, with the last facts seen. A read that fails is retried the same way and its last error thrown if nothing was ever read.
  */
 export async function attestWhenSettled(input: InspectChromiumSandboxInput, options: Readonly<{ settleMs: number; pollMs?: number;
-  /** Test seam: one look at the browser. The default is `inspectChromiumSandbox` over one DevTools session shared by every look. */ inspect?: (input: InspectChromiumSandboxInput) => Promise<ChromiumSandboxAttestation> }>): Promise<SettledChromiumSandbox> {
+  /** Test seam: one look at the browser. The default is `inspectChromiumSandbox` over one DevTools session shared by every look. */ inspect?: (input: InspectChromiumSandboxInput) => Promise<ChromiumSandboxAttestation>;
+  /** Test seam: the clock the settle time is measured on, and the pause between looks. Production uses the wall clock. */
+  clock?: Readonly<{ now(): number; sleep(milliseconds: number, signal: AbortSignal): Promise<void> }> }>): Promise<SettledChromiumSandbox> {
   // One session, one blank tab for every look: a freshly spawned renderer is not caught half-started again each time.
   const lister = options.inspect === undefined && input.listProcesses === undefined ? openChromiumProcessLister(input.cdpEndpoint, input.signal, Math.max(1_000, options.settleMs)) : null;
   const inspect = options.inspect ?? (lister === null ? inspectChromiumSandbox : (request: InspectChromiumSandboxInput) => inspectChromiumSandbox({ ...request, listProcesses: () => lister.list() }));
-  const end = Date.now() + options.settleMs;
+  const now = (): number => (options.clock ? options.clock.now() : Date.now());
+  const sleep = (milliseconds: number, signal: AbortSignal): Promise<void> => (options.clock ? options.clock.sleep(milliseconds, signal) : pause(milliseconds, signal));
+  const end = now() + options.settleMs;
   let last: SettledChromiumSandbox | null = null;
   let lastError: unknown = null;
   try {
@@ -162,8 +166,8 @@ export async function attestWhenSettled(input: InspectChromiumSandboxInput, opti
         last = { attestation, verdict };
         if (verdict.sandboxed) return last;
       } catch (error) { lastError = error; }
-      if (Date.now() >= end || input.signal.aborted) break;
-      await pause(Math.min(options.pollMs ?? 200, Math.max(0, end - Date.now())), input.signal);
+      if (now() >= end || input.signal.aborted) break;
+      await sleep(Math.min(options.pollMs ?? 200, Math.max(0, end - now())), input.signal);
     }
   } finally { await lister?.close(); }
   if (last !== null) return last;

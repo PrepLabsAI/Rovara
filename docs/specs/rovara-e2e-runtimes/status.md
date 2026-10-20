@@ -6,11 +6,13 @@
 |---|---|---|---|
 | M1.0 | Fast lane: standing qualification grant (IaC), `scripts/test-deploy.ts`, web fixture repo | One command deploys a build to TEST; the fixture project is reachable without new grants | done, except registering the fixture project (moved to M1.2) |
 | M1.1 | Salvaged runtime, executor image, Docker application host, web/API runtime qualification | `linux-arm64-web-api-v1` qualifies on the TEST runner: CSV positive passes; the defect, egress and IMDS probes fail as expected | **done 2026-10-19** (live in TEST) |
-| M1.2 | Workflow wiring: discovery -> plan -> CHECKS -> verify -> publication for web/API | "Add Export CSV" request: the first candidate fails a real browser check -> send back -> repair -> passes -> draft PR with green CI | not started |
+| M1.2 | Workflow wiring: discovery -> plan -> CHECKS -> verify -> publication for web/API | "Add Export CSV" request: the first candidate fails a real browser check -> send back -> repair -> passes -> draft PR with green CI | **done 2026-10-20** (live demo in TEST: browser rounds verified PASS, security review send-back repaired twice, draft PR abhishek255/rovara-orders-web-fixture#1 green; see m1-live-acceptance.md) |
 | M1.3 | Synthetic accounts, external-origin mocks, screenshots/trace and per-scenario results in page/Slack | Viewer-refused and tenant-isolation scenarios with an external API mocked; failure shows a screenshot and expected vs actual | not started |
 | M1.4 | AI navigation (`agent` steps) through a governed model route | An agent step finds a renamed Export button; deterministic CSV assertions still decide | not started |
 
 ## Log
+
+- 2026-10-20: M1.2 live demo passed in TEST (task a43e54fe). Live findings fixed: legacy catalog pointer (FX1), stale control-plane Lambdas (FX2), SessionsSteps IAM (owner-approved), intent normalization and per-account collection (FX3), Slack retry re-approval (FX4). Worker git security hotfix (H3/H3b/H3c) released to production 16:48Z; production otherwise paused.
 
 - 2026-10-18: owner approved the standing TEST fast-lane packet (`test-fast-lane.md`) once. M1 asks for no per-run grants after this.
 - 2026-10-18: Task 0.1 committed: optional standing qualification transport (CDK context `agentx:e2eQualificationTransport=enabled`); deployed to TEST through the `qualification-transport` unit of `scripts/test-deploy.ts` (not yet deployed).
@@ -37,6 +39,8 @@
   - `scripts/test-qualify-runtime.ts --apply` qualified a new runner `i-064d6c00c2d299684` (10.42.133.107) with all **9 probes**, including network walls and the Chromium sandbox, on the first attempt;
   - rows `#web`/`#api` are READY (revision 2), expiring 2026-10-26T23:54Z;
   - the previous runner `i-0cfe8d699d3b4b7af` and its data volume were removed.
+- 2026-10-19: M1.2 Task 2.1 (discovery proposes qualified web/API targets): a root web/API package with `scripts.start` and an npm lockfile now gets an inferred launch recipe (`npm ci`, optional `npm run build`, `npm start`), not the old `npm run start` one, so its `recipeDigest` changes. Setup proposals stored before this re-verify differently (their recipe no longer matches discovery's); planning falls back to capturing the prepared commit, which is safe. Web/API targets in new proposals carry the READY runtime profile `linux-arm64-web-api-v1` instead of the `*-phase-unavailable` placeholders.
+- 2026-10-19: M1.2 Task 2.2 (planner admits browser/API scenarios): planning reads the project's approved targets (the policy), so a web/API target on `linux-arm64-web-api-v1` plans as executable. It is executable only while the `#web` or `#api` catalog row is READY for the project's runtime binding (re-read at every plan) and its launch recipe is the project's own `agentx.e2e` contract; a recipe only inferred from `package.json` plans as unavailable with reason `needs-project-contract` until Task 2.3 adds host support (Ruling AN). `agent` steps stay unavailable with reason `agent-steps-arrive-in-m1.4`. The planner is told the step and assertion kinds from the registered descriptor of each READY row. Not yet wired: the plan document's `e2e` member still parses only the v1 portable `E2EFeaturePlanIntent`, so a planner cannot yet submit the v2 application intent that carries `applicationRuntimeRefs` (the selection code and its tests are ready for it).
 
 ## Before M1.2 runs untrusted candidates
 

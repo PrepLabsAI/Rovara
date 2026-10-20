@@ -8,7 +8,7 @@ import { chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { BashOperations, InlineExtension } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   agentxPreambleSha256,
   AGENTX_PREAMBLE_VERSION,
@@ -34,6 +34,7 @@ import { runWorkflowFeedbackReview } from "../../packages/worker/src/verificatio
 import { commitCandidateWorktree, readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
 import { CHECKS_MESSAGE_TYPE, checksArtifactContent, compactCheckReport } from "../../packages/worker/src/verification/extension.js";
 import { AgentFilesRestoreError, type OriginalCode } from "../../packages/worker/src/verification/original-code.js";
+import * as buildSourceExport from "../../packages/worker/src/e2e-build-source-export.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
@@ -96,6 +97,11 @@ function budgetSequence(budgets: number[]): () => number {
   let round = 0;
   return () => budgets[Math.min(round++, budgets.length - 1)]!;
 }
+
+vi.mock("../../packages/worker/src/e2e-build-source-export.js", async (importOriginal) => {
+  const original: typeof buildSourceExport = await importOriginal();
+  return { ...original, exportCandidateBuildSourceInScratch: vi.fn(original.exportCandidateBuildSourceInScratch) };
+});
 
 /** One model request: the conversation the model was given, without the system message. */
 type Request = Array<{ role: string; content: unknown }>;
@@ -202,6 +208,26 @@ const CHANGED_ONE_FILE: FauxResponseStep[] = [
   fauxAssistantMessage(`Wrote a note.\n${DONE}`),
 ];
 
+describe("the build source manifest is only computed for a run that changed the code", () => {
+  it("does not compute it when the coding run left the code as the task started", async () => {
+    const compute = vi.mocked(buildSourceExport.exportCandidateBuildSourceInScratch);
+    compute.mockClear();
+    const run = await runTask({ steps: [fauxAssistantMessage(`Nothing to change.\n${DONE}`)], workflowMode: "IMPLEMENT", readiness: [], rootPath: await gitWorkspaceRoot() });
+    expect(String(run.failure)).toContain("the coding run left the code as it was when the task started");
+    expect(compute).not.toHaveBeenCalled();
+    expect(run.result).toBeUndefined();
+  });
+
+  it("computes it once for a run that changed a file", async () => {
+    const compute = vi.mocked(buildSourceExport.exportCandidateBuildSourceInScratch);
+    compute.mockClear();
+    const run = await runTask({ steps: CHANGED_ONE_FILE, workflowMode: "IMPLEMENT", readiness: [], rootPath: await gitWorkspaceRoot() });
+    expect(run.failure).toBeUndefined();
+    expect(compute).toHaveBeenCalledTimes(1);
+    expect(run.result?.workflowCandidateBuildSource).toMatchObject({ status: "READY" });
+  });
+});
+
 describe("verification-only retries", () => {
   it("runs only selected project checks without opening a model session or editing files", async () => {
     const fake = fakeRunners({ project: [{ exitCode: 0, timedOut: false, stdout: "lint passed\n", stderr: "" }] });
@@ -255,6 +281,13 @@ describe("verification-only retries", () => {
     expect(run.result?.workflowCandidateSourceExport?.repositories[0]?.commitSha).toBe(checkedHead);
     expect(run.result?.workflowCandidateSourceExport?.repositories[0]?.treePaths).toContain("untracked-source.mjs");
     expect(run.result?.workflowCandidateSourceExport?.repositories[0]?.treePaths).toContain("notes.md");
+    // The build source manifest describes that exact export: same commit and tree, and every tree path exactly once.
+    const buildSource = run.result?.workflowCandidateBuildSource;
+    expect(buildSource, JSON.stringify(buildSource)).toMatchObject({ status: "READY", manifest: { sourceState: "committed-tree", repository: { commitSha: checkedHead, treeSha: checkedTree },
+      candidateDigest: run.result?.workflowCandidateSourceExport?.candidate.digest } });
+    if (buildSource?.status === "READY") {
+      expect(buildSource.manifest.treeEntries.map((entry) => entry.path).sort()).toEqual([...run.result!.workflowCandidateSourceExport!.repositories[0]!.treePaths].sort());
+    }
     expect(execFileSync("git", ["-C", repository, "diff", "--cached", "--quiet", "HEAD"], { encoding: "utf8" })).toBe("");
     expect(execFileSync("git", ["-C", repository, "status", "--porcelain"], { encoding: "utf8" }).trim()).toBe("");
     expect(await readFile(indexPath)).not.toEqual(originalIndex);
@@ -380,6 +413,7 @@ describe("verification-only retries", () => {
     expect(result.workflowCheckCandidateRepositories).toEqual(result.workflowCandidateRepositories);
     expect(result.workflowCandidateSourceExport?.repositories[0]?.commitSha).toBe(checkedHead);
     expect(result.workflowCandidateSourceExport?.repositories[0]?.treePaths).toContain("retained-untracked.mjs");
+    expect(result.workflowCandidateBuildSource).toMatchObject({ status: "READY", manifest: { repository: { commitSha: checkedHead } } });
   });
 
   it("does not bind selected checks when a check mutates the finalized candidate", async () => {
@@ -398,6 +432,7 @@ describe("verification-only retries", () => {
     expect(run.result?.checks).toMatchObject({ status: "not_verified", notVerifiedReason: "error" });
     expect(run.result?.workflowCheckCandidateRepositories).toBeUndefined();
     expect(run.result?.workflowCandidateSourceExport).toBeUndefined();
+    expect(run.result?.workflowCandidateBuildSource).toBeUndefined();
   });
 
   it("names the code a coding run whose checks were stopped finished on, so a review-only task can go on to review", async () => {

@@ -69,3 +69,39 @@ The web/API registration expires 7 days after the qualification that wrote it. M
 ### Recording the evidence in `status.md`
 
 Add one entry to the Log and set M1.1 to done, with: the deployed commit SHA; both stack names with `UPDATE_COMPLETE` and the Lambda `CodeSha256` values; the worker and executor image digests; the run's UUID, the role unique ID and the `e2e-runtime/<role unique ID>:<instance ID>/` prefix; the challenge ID and the proposal's sha256 (the registration answer's `proposalSha256`); the two catalog rows with their revisions; the instance ID and when it was ended. Never paste the challenge file (it holds a one-use secret) or any token.
+
+## M1.2 live demo (TEST, 2026-10-20)
+
+**Result:** passed. First shipped end-to-end browser verification of a real feature.
+
+- Environment: agentxlivetest123, branch `claude/rovara-e2e-m1-2-workflow` (TEST ran a7f014ec, then df8a677b for the Slack retry wiring). Qualified runner `i-0ea63cdc793ff48c6`; rows `PROFILE#linux-arm64-web-api-v1#web/#api` revision 4.
+- Project: `rovara-web-fixture` (repo `abhishek255/rovara-orders-web-fixture`), Slack `#rovara-web-fixture`.
+- Request (Slack): "Add an Export CSV button to the orders page. Export only the selected date range and the current tenant's orders."
+- Task: `a43e54fe-236e-499d-9e10-b950cdef12d7`.
+
+| Step | Outcome |
+|---|---|
+| Plan | v2 application intent, two web scenarios: `owner-csv-export` (orders-owner), `viewer-csv-export` (orders-viewer); owner approved |
+| Coding + project checks | PASS |
+| Browser round 1 (candidate 9b051f39) | broker-verified PASS (round ba4756b9) |
+| Security review | BLOCKED: CSV injection (MEDIUM), unvalidated from/to (LOW) |
+| Send-back 1 → browser round (candidate 77ae80f3) | broker-verified PASS (round 2ac2a059) |
+| Security review | BLOCKED: `total` column unprotected (MEDIUM) |
+| Send-back 2 → browser round (candidate 822e59fc) | broker-verified PASS (round 6667a8b2) |
+| Review | PASS |
+| Pull request | draft https://github.com/abhishek255/rovara-orders-web-fixture/pull/1, CI green |
+
+Pass criteria from the plan:
+- At least one browser scenario FAILED on a real candidate before a repair: **not exercised live** (the agent's first CSV export passed its browser scenarios). The repair loop was exercised live through the security review (two send-backs, each re-running the browser round). The browser FAILED → send-back → PASS path is covered by `tests/e2e/m1-web-journey.test.ts` in CI `linux-runtime`.
+- PASS on the repaired candidate: yes (three verified rounds).
+- Draft PR in `rovara-orders-web-fixture` with green CI: yes.
+- Rovara page shows the scenario results: task page shows the qualified round.
+
+Live findings fixed on the way (all on the branch, reviewed, CI green):
+1. FX1: publication failed for projects registered before 2026-10-14 (missing catalog `latestRevision`), shown as WORKSPACE_BUSY; was in the paused production queue.
+2. FX2: TEST deploys left 9 control-plane Lambdas on 2026-10-14 code (notifier could not read v2 plans; SessionsSteps did not pass the executor image); plan cards now always link the task page; E2E fallback wording no longer reads as a verdict.
+3. IAM (owner-approved): SessionsSteps role could not read `worker-executor-image`.
+4. FX3: verification compared the raw stored intent with the admission's derived intent; collector resolved accounts by application only (two-account plans went UNKNOWN).
+5. FX4: Slack "Choose checks and retry" could not re-approve after requalification.
+
+Security hotfix shipped to production the same day (worker git hardening, H3/H3b/H3c backported onto 2deee3d7, release 236bcc99).

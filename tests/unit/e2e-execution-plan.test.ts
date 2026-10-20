@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createCandidateManifest, e2eExecutionPlanDigest, e2ePlanHasCompleteRequiredCriteria, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
+import { WEB_API_RUNTIME_PROFILE_ID, createCandidateManifest, e2eExecutionPlanDigest, e2ePlanHasCompleteRequiredCriteria, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { effectiveContractTargetId, portableE2EUpstreamTestId, PORTABLE_E2E_TEST_PATH, selectE2EExecutionPlan as selectRawE2EExecutionPlan } from "../../packages/broker/src/e2e/execution-plan.js";
 import { withTestPortableApproval } from "../e2e-test-approval.js";
 import { inspectE2ERepository } from "../../packages/broker/src/e2e/discovery.js";
@@ -51,6 +51,29 @@ describe("safe E2E execution plan selection", () => {
     expect(plan.groups.flatMap((group) => group.expectedCases).every((item) => item.agentId === "default" && item.upstreamTestId.startsWith(`${PORTABLE_E2E_TEST_PATH}::case-`))).toBe(true);
     expect(portableE2EUpstreamTestId(["feature", "web", "contract-web", "a".repeat(64)])).toBe(portableE2EUpstreamTestId(["feature", "web", "contract-web", "a".repeat(64)]));
     expect(e2eExecutionPlanDigest({ ...plan, digest: "0".repeat(64) })).toBe(plan.digest);
+  });
+
+  it("selects a portable-only plan exactly as it did before qualified web/API targets (digest snapshots of the P0 fixture)", () => {
+    expect(selectE2EExecutionPlan(input).digest).toBe("fcb69ea4c412b74e803652e32e4e94e46b7bb42b019509e675ba88b46ec141c9");
+    expect(selectE2EExecutionPlan({ ...input, scenarios: [{ ...scenario, requestedTargetIds: [web.targetId] }], mockableComponents: [] }).digest)
+      .toBe("af366268137c691282b8626f35550fff4a0cceddd4be17cabbc0212cc87752c8");
+  });
+
+  it("plans a policy whose web target was approved against the qualified runtime profile exactly like the placeholder policy", () => {
+    const approved: E2EPolicy = { ...policy, targets: policy.targets.map((target) => target.kind === "web"
+      ? { ...target, runtimeProfileId: WEB_API_RUNTIME_PROFILE_ID } : target) };
+    expect(approved.targets[0]).not.toEqual(policy.targets[0]);
+    const placeholder = selectE2EExecutionPlan(input);
+    const qualified = selectE2EExecutionPlan({ ...input, policy: approved });
+    // The approved target is part of each case's identity, so case ids bind the approved profile; the plan's shape is unchanged.
+    const withoutCases = (criteria: typeof placeholder.criteria) => criteria.map(({ expectedCaseIds, ...criterion }) => ({ ...criterion, expectedCaseCount: expectedCaseIds.length }));
+    expect(withoutCases(qualified.criteria)).toEqual(withoutCases(placeholder.criteria));
+    expect(qualified.unavailableCriteria).toEqual(placeholder.unavailableCriteria);
+    expect(qualified.groups.map((group) => [group.mode, group.targetIds, group.expectedCases.length]))
+      .toEqual(placeholder.groups.map((group) => [group.mode, group.targetIds, group.expectedCases.length]));
+    expect(qualified.groups[0]?.expectedCases[0]?.caseId).not.toBe(placeholder.groups[0]?.expectedCases[0]?.caseId);
+    expect(() => selectE2EExecutionPlan({ ...input, policy: { ...policy, targets: policy.targets.map((target) => target.kind === "web"
+      ? { ...target, runtimeProfileId: "invented-profile" } : target) } })).toThrow(/differs from the source-derived target inventory/);
   });
 
   it("keeps an unavailable native floor visible when the sandbox is absent or caller supplies an unsafe mock", () => {

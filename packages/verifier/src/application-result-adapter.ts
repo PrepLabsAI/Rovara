@@ -4,7 +4,7 @@ import { z } from "zod";
 import { canonicalJson, copyBoundedE2EJsonData, E2EApplicationEvidenceRefSchema, E2ECaseCoverageSchema,
   E2EExpectedCaseSchema, E2EQualifiedResultSchema, E2ERoundSchema, E2ERunBindingSchema, E2EAssertionSchema,
   E2EScenarioSchema, E2ERuntimeAccountRefSchema, E2EAppArtifactRefSchema, E2EMockSpecSchema, type E2EApplicationEvidenceRef, type E2ECaseCoverage, type E2EQualifiedResult,
-  type E2ERound, type E2ERunBinding } from "@agentx/contracts";
+  type E2ERound, type E2ERunBinding, type E2ERuntimeAccountRef } from "@agentx/contracts";
 import { E2E_REPORT_MAX_BYTES, E2E_APP_RPC_FRAME_MAX_BYTES, e2ePrivateTransferMaxBytes, type E2EStructuralQualification } from "./result-adapter.js";
 import { parseE2EApplicationReport, type E2EApplicationReport } from "./application-report-schema.js";
 import type { E2ECompiledApplicationSuite } from "./application-scenarios.js";
@@ -103,7 +103,8 @@ export const E2EApplicationAssertionObservationSchema = z.discriminatedUnion("ki
   z.object({ ...observationHeader, kind: z.literal("csv"), downloadId: id(256), downloadName: id(512), contentRef: observationRef }).strict(),
   z.object({ ...observationHeader, kind: z.literal("json"), responseId: id(256), schemaRef: id(256), schemaAssetRef: observationRef, bodyRef: observationRef }).strict(),
   z.object({ ...observationHeader, kind: z.literal("state"), probeId: id(256), probeAssetRef: observationRef, samples: z.array(z.object({ observedAt: utc,
-    valueRef: observationRef, disposition: z.enum(["pending", "ready", "failed"]) }).strict()).min(1).max(100) }).strict(),
+    // "timed-out" is only ever the last sample: a 2xx answer (see httpStatus) that still held another value when the poll budget ran out.
+    valueRef: observationRef, disposition: z.enum(["pending", "ready", "failed", "timed-out"]), httpStatus: z.number().int().min(100).max(599).optional() }).strict()).min(1).max(100) }).strict(),
   z.object({ ...observationHeader, kind: z.literal("file"), fixtureRootId: id(256), relativePath: id(1024), rootAssetRef: observationRef, contentRef: observationRef }).strict(),
 ]);
 export type E2EApplicationAssertionObservation = z.infer<typeof E2EApplicationAssertionObservationSchema>;
@@ -298,16 +299,23 @@ export function evaluateE2EApplicationAssertionObservation(input: { assertion: z
       if (canonicalJson(probeSchema) !== probeText || !isSupportedJsonSchema(probeSchema)) return { supported: false, passed: false, value: null };
     } catch { return { supported: false, passed: false, value: null }; }
     const sampleTimes = observation.samples.map((item) => Date.parse(item.observedAt));
+    const lastSample = observation.samples.at(-1);
+    // A poll ends ready, or (Ruling W) timed out on a 2xx answer: a definite mismatch. Anything else (a 429 or 503 that kept it pending, a failed or
+    // unreadable answer, a timeout with no recorded 2xx status) is not an answer about the feature, so the observation is unsupported.
+    const timedOut = lastSample?.disposition === "timed-out";
     if (!sampleTimes.every(Number.isFinite) || sampleTimes.some((time, index) => index > 0 && time < sampleTimes[index - 1]!)
       || sampleTimes.at(-1)! - sampleTimes[0]! > assertion.pollTimeoutMs
-      || observation.samples.at(-1)?.disposition !== "ready"
+      || (lastSample?.disposition !== "ready" && !(timedOut && lastSample.httpStatus !== undefined && lastSample.httpStatus >= 200 && lastSample.httpStatus < 300))
       || observation.samples.slice(0, -1).some((sample) => sample.disposition !== "pending")) return { supported: false, passed: false, value: null };
     const sampleValues = observation.samples.map((sample) => JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(proofBytesFor(input.proofBytes, sample.valueRef))) as unknown);
     const value = sampleValues.at(-1);
     if (sampleValues.some((sample) => !schemaMatches(sample, probeSchema))) {
       return { supported: false, passed: false, value };
     }
-    return { supported: true, passed: canonicalJson(value) === canonicalJson(assertion.equals), value };
+    const matches = canonicalJson(value) === canonicalJson(assertion.equals);
+    // A sample that holds the approved value was never a timeout.
+    if (timedOut && matches) return { supported: false, passed: false, value };
+    return { supported: true, passed: matches, value };
   }
   if (observation.kind === "file" && assertion.kind === "file") {
     if (!input.assetBinding || input.assetBinding.kind !== "fixture-root" || input.assetBinding.id !== assertion.fixtureRootId
@@ -856,6 +864,24 @@ export function e2eApplicationReportTargetMatches(reportTarget: ReportTarget, ex
     && reportTarget.platform === engine.platform && canonicalJson([...reportTarget.capabilities].sort()) === canonicalJson([...engine.capabilities].sort());
 }
 
+/**
+ * The runtime account reference of one case: the single reference of the case's application and account profile (one application can carry several accounts, an owner and a
+ * viewer, so never the application's first), and only when the case's own runtime reference is for that same account. The oracle is the second line after admission
+ * validation, so it holds the reference and the case to each other itself.
+ */
+export function admittedRuntimeAccountRef(input: { runtimeRef: Readonly<{ targetId: string; applicationId: string; accountProfileId: string }>; accountProfileId: string;
+  runtimeAccountRefs: readonly E2ERuntimeAccountRef[] }): E2ERuntimeAccountRef {
+  const { runtimeRef, accountProfileId } = input;
+  if (runtimeRef.accountProfileId !== accountProfileId) {
+    throw new Error(`the admitted runtime reference of target ${runtimeRef.targetId} is for account profile ${runtimeRef.accountProfileId}, not the case's account profile ${accountProfileId}`);
+  }
+  const matches = input.runtimeAccountRefs.filter((item) => item.applicationId === runtimeRef.applicationId && item.profileId === accountProfileId);
+  if (matches.length !== 1) {
+    throw new Error(`the admitted selection has ${matches.length === 0 ? "no" : "more than one"} runtime account reference for account profile ${accountProfileId} of application ${runtimeRef.applicationId}`);
+  }
+  return matches[0]!;
+}
+
 type Environment = Readonly<{ ci: boolean; trustNoticeShown: boolean; os: string; arch: string; runtime: string }>;
 export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { compiled: E2ECompiledApplicationSuite; binding: E2ERunBinding; round: E2ERound;
   environment: Environment; usage: Readonly<Record<string, number>>; limits: Readonly<Record<string, number>>;
@@ -881,7 +907,10 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
     const runtimeRef = input.compiled.runtimeAdmissionContext.selectionInput.intent.applicationRuntimeRefs.find((item) => item.targetId === expected.targetId);
     const application = input.compiled.applicationBindings.get(runtimeRef?.applicationId ?? "");
     const runtime = runtimeRef ? input.compiled.runtimeBindings.get(runtimeRef.runtimeProfileId) : undefined;
-    const accountRef = runtimeRef ? input.compiled.runtimeAdmissionContext.selectionInput.runtimeAccountRefs.find((item) => item.applicationId === runtimeRef.applicationId) : undefined;
+    // The case's own account: one application can carry several (an owner and a viewer), so the reference is the one of this case's application and account profile, and
+    // exactly one (as approval and the executor's `accountRefFor` resolve it). Never the application's first.
+    const accountRef = runtimeRef ? admittedRuntimeAccountRef({ runtimeRef, accountProfileId: expected.accountProfileId,
+      runtimeAccountRefs: input.compiled.runtimeAdmissionContext.selectionInput.runtimeAccountRefs }) : undefined;
     const target = input.compiled.runtimeAdmissionContext.launchTargets.find((item) => item.targetId === expected.targetId);
     if (!scenario || !runtimeRef || !application || !runtime || !accountRef || !target) throw new Error("compiled case lacks exact scenario, application, runtime, account, or target binding");
     const originEntry = input.compiled.originByApplicationId.find((item) => item.applicationId === runtimeRef.applicationId);
@@ -896,7 +925,7 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
       accountContextId: expected.accountContextId, accountContextDigest: expected.accountContextDigest, assertionDigests: [...expected.assertionDigests], scenario });
   }
   const body = E2EApplicationCollectionOracleSchema.parse({ protocol: "e2e-application-oracle/v1", binding, round, groupId: group.groupId,
-    compiledInventoryDigest: input.compiled.inventory.digest, expectedShardIds: input.compiled.shards.map((item) => item.shardId), expectedCases: input.compiled.expectedCases,
+    compiledInventoryDigest: input.compiled.inventory.digest, expectedShardIds, expectedCases: input.compiled.expectedCases,
     expectedSupervisorReceiptRefs, ownedResourceInventoryDigest: input.ownedResourceInventoryDigest,
     selectionPackets: input.compiled.shards.map((item) => item.selection), compiledShardConfigDigests: input.compiled.shards.map((item) => ({ shardId: item.shardId, configDigest: item.expectedConfigDigest })),
     expectedMockComponentIdsByTarget: [...new Set(input.compiled.shards.map((item) => item.targetId))].map((targetId) => ({ targetId,

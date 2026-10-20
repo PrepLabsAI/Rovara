@@ -178,6 +178,7 @@ export function createCompiledApiApplicationFixture(options: { modelRoute?: { ro
       configDigest: item.expectedConfigDigest, expectedCaseIds: [...item.expectedCaseIds] })) };
   const admissionBody = { schemaVersion: "workflow-e2e-application-admission/v1" as const, taskId: binding.taskId, operationId: binding.operationId,
     operationFence: binding.operationFence, workflowRevision: binding.workflowRevision, candidateDigest: candidate.digest,
+    candidateCommitSha: snapshot.commitSha, candidateTreeSha: snapshot.treeSha,
     sourceSnapshot: sourceSnapshotWire, intent, intentDigest: hash(canonicalJson(intent)),
     selectionInput: { ...selectionInput, sourceSnapshot: sourceSnapshotWire }, applicationApprovalBinding,
     applicationBindings: [...applicationBindings].map(([key, value]) => ({ key, value })).sort((a, b) => a.key.localeCompare(b.key)),
@@ -372,6 +373,7 @@ export function createPortableApplicationChildFixture() {
   const bundle = { ...fullBundleBody, bundleDigest: e2eScenarioBundleDigest(fullBundleBody) };
   const admissionBody = { schemaVersion: "workflow-e2e-application-admission/v1" as const, taskId: outerBinding.taskId, operationId: outerBinding.operationId,
     operationFence: outerBinding.operationFence, workflowRevision: outerBinding.workflowRevision, candidateDigest: candidate.digest,
+    candidateCommitSha: snapshot.commitSha, candidateTreeSha: snapshot.treeSha,
     sourceSnapshot: sourceSnapshotWire, intent, intentDigest: selectionInput.intentDigest, selectionInput: { ...selectionInput, sourceSnapshot: sourceSnapshotWire },
     applicationApprovalBinding: null, applicationBindings: [], runtimeBindings: [], launchTargets: [],
     modelRoute: { routeId: "fixture-route", routeRevision: policy.modelRouteRevision! }, cliHosts: [], preparedEnvironments: [],

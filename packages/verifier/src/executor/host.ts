@@ -9,6 +9,7 @@ import { createAPIApplicationCliHost, type E2EApiRuntimePorts } from "../api-run
 import { createWebApplicationCliHost, type E2EWebRuntimePorts } from "../web-runtime.js";
 import type { E2EApplicationCliHost, E2EApplicationCliLaunchContext } from "../application-runtime-bootstrap.js";
 import { readE2EApplicationInstalledFileFixture } from "../application-runtime-assets.js";
+import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStateProbeAsset } from "../application-state-probes.js";
 import { isPinnedRovaraHttpEngine } from "../rovara-http-engine-descriptor.js";
 import { createExecutorSessionStore } from "./accounts.js";
 import { createFileCaseLedger } from "./case-ledger.js";
@@ -31,12 +32,6 @@ export const ExecutorHostContextSchema = z.object({
   browserPid: z.number().int().nonnegative().nullable(),
 }).strict();
 export type ExecutorHostContext = z.infer<typeof ExecutorHostContextSchema>;
-
-/** The installed read-only state probe: the shape of `GET /api/orders/state` every sample must match before its value is compared. */
-const STATE_PROBE_SCHEMAS: Readonly<Record<string, unknown>> = Object.freeze({
-  "api-state-positive/v1": { type: "object", required: ["orders", "version"], additionalProperties: false,
-    properties: { orders: { type: "string" }, version: { type: "integer" } } },
-});
 
 type Declaration = Readonly<{
   preparedEnvironmentDigest: string;
@@ -193,7 +188,11 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         } finally { await session.detach().catch(() => undefined); }
       },
     });
-    const inner = createWebApplicationCliHost({ launchContext, declaration, ports });
+    // The engine is as capable as the admission says: its declared artifact and state capabilities, which the compiler validated against the admitted capture policy and runtime row.
+    const launchTarget = resolved.suite.runtimeAdmissionContext.launchTargets.find((item) => item.targetId === launchContext.selectedTarget.targetId);
+    if (!launchTarget) throw new Error("the admitted launch declaration has no entry for the selected web target");
+    const inner = createWebApplicationCliHost({ launchContext, declaration, ports,
+      engineAdmission: { artifactCapabilities: launchTarget.artifactCapabilities, stateCapability: launchTarget.stateCapability } });
     // The case adapter opens its own first page and its assertion steps; nothing may run before them.
     return inner;
   }
@@ -204,12 +203,12 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
     const ports: E2EApiRuntimePorts = Object.freeze({ ...shared, request: store.request,
       readApprovedJsonSchema: async () => { throw new Error("no JSON schema assets are installed in this executor"); },
       readApprovedStateProbe: async (request: { caseId: string; assertionIndex: number; probeId: string }) => {
-        const schema = STATE_PROBE_SCHEMAS[request.probeId];
-        if (!schema) throw new Error("state probe is not in the installed fixed probe inventory");
-        const bytes = Buffer.from(canonicalJson(schema), "utf8");
+        const installed = installedE2EApplicationStateProbeAsset(request.probeId);
+        if (!installed) throw new Error("state probe is not in the installed fixed probe inventory");
+        const bytes = installed.bytes;
         const ref = await ledger.recordApprovedAsset({ caseId: request.caseId, assetId: request.probeId, bytes });
         const assetBinding = { caseId: request.caseId, assertionIndex: request.assertionIndex, kind: "state-probe" as const, id: request.probeId,
-          manifestDigest: sha(canonicalJson({ probeId: request.probeId, assetSha256: ref.sha256 })), ref };
+          manifestDigest: e2eApplicationStateProbeManifestDigest(request.probeId, ref.sha256), ref };
         await ledger.recordAssetBinding(assetBinding);
         return { proof: { ref, bytes: Uint8Array.from(bytes) }, assetBinding };
       },

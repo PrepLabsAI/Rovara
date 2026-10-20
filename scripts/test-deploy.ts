@@ -1,7 +1,7 @@
 // One-command, plan-first deploy of a build to an allowlisted TEST installation.
 //
 //   npx tsx scripts/test-deploy.ts --env agentxlivetest123 --profile agentx-test [--apply]
-//     [--only broker,dispatcher,worker-image,executor-image,qualification-transport]
+//     [--only control-plane-code,broker,dispatcher,worker-image,executor-image,qualification-transport]
 //
 // Without --apply it prints the plan and exits 0 (it only reads: DescribeStacks for the current
 // parameters). With --apply it runs the plan. The plan reproduces the P0 TEST procedure: every
@@ -47,9 +47,14 @@ import {
 } from "./release-common.js";
 import { deterministicZip } from "./release/zip.js";
 
-export type DeployUnit = "broker" | "dispatcher" | "worker-image" | "executor-image" | "qualification-transport";
-export const DEPLOY_UNITS: readonly DeployUnit[] = ["broker", "dispatcher", "worker-image", "executor-image", "qualification-transport"];
-const DEFAULT_UNITS: readonly DeployUnit[] = ["broker", "dispatcher", "worker-image"];
+/**
+ * `control-plane-code` rebuilds every packaged control-plane Lambda (CONTROL_PLANE_LAMBDAS) in one change set; `broker` and
+ * `dispatcher` rebuild just those two, and are contained in `control-plane-code`.
+ */
+export type DeployUnit = "control-plane-code" | "broker" | "dispatcher" | "worker-image" | "executor-image" | "qualification-transport";
+export const DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "broker", "dispatcher", "worker-image", "executor-image", "qualification-transport"];
+/** What a normal TEST deploy changes: all control-plane code, so no function is left on old code, and the worker image. */
+export const DEFAULT_DEPLOY_UNITS: readonly DeployUnit[] = ["control-plane-code", "worker-image"];
 const DEFAULT_REGION = "us-east-1";
 const ALLOWLIST_ERROR = "test-deploy only targets allowlisted TEST installations";
 
@@ -114,7 +119,7 @@ export type TemplatePlan =
     };
 
 export type DeployStep =
-  | { id: string; kind: "build-lambda-zip"; unit: "broker" | "dispatcher"; logicalId: string; entry: string; zipPath: string }
+  | { id: string; kind: "build-lambda-zip"; unit: LambdaUnit; logicalId: string; entry: string; zipPath: string; extraFiles?: ReadonlyArray<ExtraFile> }
   | { id: string; kind: "upload-artifact"; bucketFromStack: "access"; logicalId: string; from: string; keyPrefix: string }
   | { id: string; kind: "ecr-push"; image: "worker" | "executor"; repositoryUri: string; revision: string }
   | {
@@ -132,10 +137,49 @@ export type DeployStep =
   | { id: string; kind: "verify-stack-resources"; stack: string; createdBy: string; logicalIdPrefix: string; expectedStatus: string }
   | { id: string; kind: "verify-stack-parameter"; stack: string; key: string; expected: StepRef };
 
-const LAMBDAS = {
+/** A file the release bundle holds beside the handler (`packagedFunction`'s extraFiles): repo-relative source, name in the zip. */
+export interface ExtraFile {
+  from: string;
+  name: string;
+}
+interface LambdaSpec {
+  logicalId: string;
+  entry: string;
+  extraFiles?: ReadonlyArray<ExtraFile>;
+}
+/**
+ * Every control-plane stack Lambda built with `packagedFunction` (infra/lib), by its logical ID in the deployed template. They all
+ * bundle broker and contracts code, so a TEST deploy that leaves one behind leaves it parsing documents with old contracts. The
+ * installer's setup page is in another stack and is not here; a unit test keeps this list equal to the infra's entries.
+ */
+export const CONTROL_PLANE_LAMBDAS = {
   broker: { logicalId: "BrokerE1355FD6", entry: "packages/broker/src/aws/broker.ts" },
   dispatcher: { logicalId: "DispatcherD4A12972", entry: "packages/broker/src/aws/dispatcher.ts" },
-} as const;
+  "plan-evidence": { logicalId: "PlanEvidence3615C4CB", entry: "packages/broker/src/aws/plan-evidence-handler.ts" },
+  "outbox-publisher": { logicalId: "OutboxPublisherD572F72E", entry: "packages/broker/src/aws/outbox-publisher.ts" },
+  "slack-ingress": { logicalId: "SlackIngress5C88FFA0", entry: "packages/broker/src/aws/slack-ingress.ts" },
+  "eval-batch-tick": { logicalId: "EvalBatchTickA4585B04", entry: "packages/broker/src/aws/eval-batch-tick.ts" },
+  "developer-sign-in": { logicalId: "DeveloperSignInFunction10B62B05", entry: "packages/broker/src/aws/developer-identity.ts" },
+  "developer-task-notifier": { logicalId: "DeveloperTaskNotifierFunction551419CC", entry: "packages/broker/src/aws/developer-task-notifier.ts" },
+  "sessions-steps": {
+    logicalId: "SessionsSteps3B98DD2B", entry: "packages/broker/src/aws/session-steps.ts",
+    extraFiles: [{ from: "packages/worker/ec2/boot.sh", name: "boot.sh" }],
+  },
+  "sessions-reaper": { logicalId: "SessionsReaper8FEF958E", entry: "packages/broker/src/aws/session-reaper.ts" },
+  "sessions-reconciler": { logicalId: "SessionsReconciler4316A0A2", entry: "packages/broker/src/aws/session-reconciler.ts" },
+} as const satisfies Record<string, LambdaSpec>;
+/**
+ * Repo-built control-plane Lambdas that test-deploy does not move, with why. The proof function is invoked through a published
+ * Lambda version (its ARN is the Dispatcher's TASK_PERSON_PROOF_FUNCTION_ARN), and a version is immutable: new code in the function
+ * changes nothing that runs, and a new version is a template change this script does not make. A contract test requires every
+ * repo-built Lambda of the synthesized control-plane template to be in exactly one of this and CONTROL_PLANE_LAMBDAS.
+ */
+export const CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED: Readonly<Record<string, string>> = {
+  TaskPersonProofFunction817A5A36: "invoked through a published Lambda version, which a code-only change set cannot move; it needs a CDK deploy",
+};
+export type LambdaUnit = keyof typeof CONTROL_PLANE_LAMBDAS;
+const LAMBDAS: Readonly<Record<LambdaUnit, LambdaSpec>> = CONTROL_PLANE_LAMBDAS;
+const LAMBDA_UNITS = Object.keys(CONTROL_PLANE_LAMBDAS) as LambdaUnit[];
 const QUALIFICATION = { logicalIdPrefix: "E2eQualificationTransport", construct: CDK_CONSTRUCT_IDS["control-plane"], context: { "agentx:e2eQualificationTransport": "enabled" } } as const;
 const WORKER_IMAGE_PARAMETER = "WorkerImageUri";
 const EXECUTOR_IMAGE_PARAMETER = "ExecutorImageUri";
@@ -187,14 +231,24 @@ export function resolveArtifactBucket(runner: AwsReader, region: string, env: st
   return bucket;
 }
 
-/** As `resolveArtifactBucket`, and the control-plane stack's deployed `logicalId` Lambda must already read its code from that bucket. */
+/**
+ * As `resolveArtifactBucket`, and the control-plane stack's deployed `logicalId` Lambda must already read its code from that bucket.
+ * A function the release pipeline deployed names its bucket through a stack parameter (`{ Ref }`); that parameter's current value
+ * is the bucket. One an earlier TEST deploy replaced names it literally.
+ */
 export function resolveCodeArtifactBucket(runner: AwsReader, region: string, env: string, logicalId: string): string {
   const bucket = resolveArtifactBucket(runner, region, env);
   const stack = resolveTestStacks(env)["control-plane"];
   const body = runner.aws(["cloudformation", "get-template", "--stack-name", stack, "--template-stage", "Original", "--query", "TemplateBody", "--region", region, "--output", "json"]).stdout;
   const template = JSON.parse(body) as CfnTemplate;
-  const deployed = (template.Resources?.[logicalId]?.Properties?.Code as { S3Bucket?: unknown } | undefined)?.S3Bucket;
-  if (typeof deployed !== "string") throw new Error(`the deployed ${logicalId} in ${stack} has no literal Code S3Bucket to compare with ${bucket}; stop for review`);
+  const declared = (template.Resources?.[logicalId]?.Properties?.Code as { S3Bucket?: unknown } | undefined)?.S3Bucket;
+  let deployed: string | undefined;
+  if (typeof declared === "string") deployed = declared;
+  else if (declared !== null && typeof declared === "object" && Object.keys(declared).length === 1 && typeof (declared as { Ref?: unknown }).Ref === "string") {
+    const parameter = (declared as { Ref: string }).Ref;
+    deployed = describeStack(runner, region, stack).Parameters?.find((candidate) => candidate.ParameterKey === parameter)?.ParameterValue;
+  }
+  if (typeof deployed !== "string") throw new Error(`the deployed ${logicalId} in ${stack} has no literal Code S3Bucket, or one given by a parameter, to compare with ${bucket}; stop for review`);
   if (deployed !== bucket) {
     throw new Error(`the deployed ${logicalId} reads its code from s3://${deployed}, but the access stack's ArtifactBucketName is s3://${bucket}; refusing to upload code to a bucket the function does not use`);
   }
@@ -209,8 +263,8 @@ export function planTestDeploy(
   const units = DEPLOY_UNITS.filter((unit) => input.only.includes(unit));
   if (units.length === 0) throw new Error("nothing to deploy: --only names no deploy unit");
   const identityMode = input.identityMode ?? "cognito";
-  if (units.includes("qualification-transport") && units.some((unit) => unit === "broker" || unit === "dispatcher")) {
-    throw new Error("qualification-transport changes the control-plane template; run it on its own, apart from broker and dispatcher");
+  if (units.includes("qualification-transport") && units.some((unit) => unit === "broker" || unit === "dispatcher" || unit === "control-plane-code")) {
+    throw new Error("qualification-transport changes the control-plane template; run it on its own, apart from control-plane-code, broker and dispatcher");
   }
   const { revision } = input.artifacts;
   if (!/^[a-f0-9]{7,40}$/.test(revision)) throw new Error("the revision must be a hexadecimal git commit");
@@ -277,12 +331,14 @@ export function planTestDeploy(
     );
   }
 
-  const lambdas = (["broker", "dispatcher"] as const).filter((unit) => units.includes(unit));
+  // One change set holds every Lambda code change of the run, so the exact-change guard has one list of code units to check.
+  const allCode = units.includes("control-plane-code");
+  const lambdas = LAMBDA_UNITS.filter((unit) => allCode || units.some((chosen) => chosen === unit));
   if (lambdas.length > 0) {
     for (const unit of lambdas) {
-      const { logicalId, entry } = LAMBDAS[unit];
+      const { logicalId, entry, extraFiles } = LAMBDAS[unit];
       steps.push(
-        { id: `build-${unit}`, kind: "build-lambda-zip", unit, logicalId, entry, zipPath: join(input.artifacts.outputDir, `${unit}-${revision}.zip`) },
+        { id: `build-${unit}`, kind: "build-lambda-zip", unit, logicalId, entry, zipPath: join(input.artifacts.outputDir, `${unit}-${revision}.zip`), ...(extraFiles === undefined ? {} : { extraFiles }) },
         { id: `upload-${unit}`, kind: "upload-artifact", bucketFromStack: "access", logicalId, from: `build-${unit}`, keyPrefix: `test-deploy/${revision}/${logicalId}-` },
       );
     }
@@ -345,27 +401,54 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
   // The code units whose own change is exactly the expected one: only their Arn re-evaluations may be accepted.
   const exactUnits = new Set<string>();
   const reevaluations: ObservedChange[] = [];
+  const unitChanges: ObservedChange[] = [];
   for (const change of changes) {
-    const label = labelOf(change);
     if (change.action !== expected.action || !matchesId(change.logicalId)) {
       if (expected.allowArnReevaluations === true && expected.action === "Modify" && change.action === "Modify") reevaluations.push(change);
-      else problems.push(label);
-      continue;
-    }
+      else problems.push(labelOf(change));
+    } else unitChanges.push(change);
+  }
+  // Pass 1: each code unit's own change. With Arn re-evaluations allowed, a unit may also carry Dynamic ResourceAttribute details
+  // (it reads another unit's Arn, as the Broker reads the sign-in function's); they are judged in pass 2, once it is known which
+  // units are changed only in Code.
+  const crossDetails = new Map<string, ObservedDetail[]>();
+  const baseClean = new Set<string>();
+  for (const change of unitChanges) {
+    const label = labelOf(change);
     const before = problems.length;
     if (change.replacement !== undefined && change.replacement !== "" && change.replacement !== "False") problems.push(`${label}: would replace the resource (Replacement ${change.replacement})`);
-    if (expected.allowedAttributes !== undefined) {
-      const attributes = change.attributes ?? [];
+    const attributes = change.attributes ?? [];
+    const details = change.details ?? [];
+    if (expected.allowArnReevaluations === true) {
+      const isOwn = (detail: ObservedDetail) => detail.evaluation === "Static" && detail.changeSource === "DirectModification";
+      const isCross = (detail: ObservedDetail) => detail.evaluation === "Dynamic" && detail.changeSource === "ResourceAttribute";
+      if (details.length === 0) problems.push(`${label}: its change details are not reported, so they cannot be checked`);
+      else if (details.some((detail) => !isOwn(detail) && !isCross(detail))) problems.push(`${label}: has a change that is not a Static DirectModification`);
+      else if (!details.some(isOwn)) problems.push(`${label}: has no Static DirectModification of its own, only re-evaluations`);
+      else if (expected.allowedAttributes !== undefined) {
+        // Only the unit's own (Static) details name what it changes; attributes and details are reported in the same order.
+        const own = attributes.length === details.length ? attributes.filter((_, index) => isOwn(details[index]!)) : attributes;
+        const extra = own.filter((attribute) => !(expected.allowedAttributes ?? []).includes(attribute));
+        if (own.length === 0) problems.push(`${label}: changed attributes are not reported, so they cannot be checked`);
+        else if (extra.length > 0) problems.push(`${label}: also changes ${extra.join(", ")}`);
+      }
+      crossDetails.set(change.logicalId, details.filter(isCross));
+    } else if (expected.allowedAttributes !== undefined) {
       const extra = attributes.filter((attribute) => !(expected.allowedAttributes ?? []).includes(attribute));
       if (attributes.length === 0) problems.push(`${label}: changed attributes are not reported, so they cannot be checked`);
       else if (extra.length > 0) problems.push(`${label}: also changes ${extra.join(", ")}`);
     }
-    if (expected.allowArnReevaluations === true) {
-      const details = change.details ?? [];
-      if (details.length === 0) problems.push(`${label}: its change details are not reported, so they cannot be checked`);
-      else if (details.some((detail) => detail.evaluation !== "Static" || detail.changeSource !== "DirectModification")) problems.push(`${label}: has a change that is not a Static DirectModification`);
-    }
-    if (problems.length === before) exactUnits.add(change.logicalId);
+    if (problems.length === before) baseClean.add(change.logicalId);
+  }
+  // Pass 2: a unit's re-evaluation of another unit's Arn is a no-op only when that other unit is in this change set and changed
+  // only in Code. A Static detail, any other cause, the unit's own Arn, or a unit that is not clean is refused.
+  for (const change of unitChanges) {
+    if (!baseClean.has(change.logicalId)) continue;
+    const label = labelOf(change);
+    const bad = (crossDetails.get(change.logicalId) ?? []).filter((detail) =>
+      !(detail.causingEntity !== undefined && [...baseClean].some((unit) => unit !== change.logicalId && detail.causingEntity === arnOf(unit))));
+    if (bad.length > 0) problems.push(`${label}: re-evaluates on ${bad.map((detail) => detail.causingEntity ?? "no entity").join(", ")}, which is not the Arn of another code unit changed only in Code`);
+    else exactUnits.add(change.logicalId);
   }
   const noOpReevaluations: string[] = [];
   for (const change of reevaluations) {
@@ -600,7 +683,7 @@ export function parseTestDeployArgs(argv: readonly string[]): TestDeployArgs {
   const profile = values.get("--profile");
   if (profile === undefined) throw new Error("--profile is required");
   const onlyValue = values.get("--only");
-  const only = onlyValue === undefined ? [...DEFAULT_UNITS] : onlyValue.split(",").map((name) => {
+  const only = onlyValue === undefined ? [...DEFAULT_DEPLOY_UNITS] : onlyValue.split(",").map((name) => {
     const unit = DEPLOY_UNITS.find((candidate) => candidate === name.trim());
     if (unit === undefined) throw new Error(`unknown deploy unit ${name}; expected one of ${DEPLOY_UNITS.join(", ")}`);
     return unit;
@@ -616,7 +699,7 @@ export function formatPlan(steps: readonly DeployStep[]): string {
   return steps.map((step, index) => {
     const head = `${index + 1}. [${step.id}]`;
     switch (step.kind) {
-      case "build-lambda-zip": return `${head} build ${step.logicalId} zip from ${step.entry} -> ${step.zipPath}`;
+      case "build-lambda-zip": return `${head} build ${step.logicalId} zip from ${step.entry}${(step.extraFiles ?? []).map((file) => ` plus ${file.name} from ${file.from}`).join("")} -> ${step.zipPath}`;
       case "upload-artifact": return `${head} upload ${step.from} zip to the access stack's versioned artifact bucket (after checking versioning is Enabled and that ${step.logicalId} already reads its code from it) under ${step.keyPrefix}<sha256>.zip`;
       case "ecr-push": return `${head} build the ${step.image} image and push it to the existing repository ${step.repositoryUri} (tag test-*), then pin its digest; test-deploy never creates a repository, and stops if this one is missing`;
       case "create-change-set": {
@@ -626,7 +709,7 @@ export function formatPlan(steps: readonly DeployStep[]): string {
           : `deployed template plus ${step.template.logicalIdPrefix}*${(step.template.parameterNames ?? []).length === 0 ? "" : ` and parameter ${(step.template.parameterNames ?? []).join(", ")}`} from a CDK synth of ${step.template.construct} (${[`identity=${step.template.identityMode}`, ...Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`)].join(", ")})`;
         const allowed = [...(step.expect.logicalIds ?? []), ...(step.expect.logicalIdPrefixes ?? []).map((prefix) => `${prefix}*`)].join(", ");
         const reevaluations = step.expect.allowArnReevaluations === true
-          ? `, plus Modify entries accepted only as no-op re-evaluations caused by ${(step.expect.logicalIds ?? []).map(arnOf).join(", ")} (every detail Dynamic ResourceAttribute, never a replacement)`
+          ? `, plus Modify entries accepted only as no-op re-evaluations caused by ${(step.expect.logicalIds ?? []).map(arnOf).join(", ")} (every detail Dynamic ResourceAttribute, never a replacement; a code unit may carry such a detail only when another listed code unit's Arn causes it)`
           : "";
         return `${head} create change set on ${step.stack}: ${template}; ${step.parameters.length} parameters, ${changed.length === 0 ? "all UsePreviousValue" : `changing only ${changed.join(", ")}`}; abort unless the only changes are ${step.expect.action} ${allowed}${reevaluations}`;
       }
@@ -843,7 +926,12 @@ async function applyStep(context: ApplyContext, step: DeployStep): Promise<void>
         if (output === undefined) throw new Error(`esbuild produced no ${name} for ${step.entry}`);
         return Buffer.from(output.contents);
       };
-      const zip = deterministicZip([{ path: "index.js", data: file("index.js") }, { path: "index.js.map", data: file("index.js.map") }]);
+      // The release bundle holds the handler, its source map and any extra files copied beside it.
+      const zip = deterministicZip([
+        { path: "index.js", data: file("index.js") },
+        { path: "index.js.map", data: file("index.js.map") },
+        ...(step.extraFiles ?? []).map((extra) => ({ path: extra.name, data: readFileSync(extra.from) })),
+      ]);
       mkdirSync(join(step.zipPath, ".."), { recursive: true });
       writeFileSync(step.zipPath, zip);
       recordOutput(context, step.id, { zipPath: step.zipPath, sha256Hex: sha256(zip).digest("hex"), sha256Base64: sha256(zip).digest("base64") });

@@ -53,6 +53,8 @@ describe("API application runtime", () => {
   it("aborts a slow owned request at the case cap and never dispatches the later step", async () => {
     let requests = 0;
     let finishes = 0;
+    // The case cap is reached while the first request is outstanding: the request itself says when (no timer), so the cap cannot land before the request starts.
+    const caseCap = new AbortController();
     const executionPorts: E2EApiRuntimePorts = { ...ports,
       actionWindows: { begin: async () => ({ actionId: "slow-action" }), finish: async () => { finishes += 1; return { confirmed: true as const }; } },
       evidence: { recordCaseEvidence: async ({ bytes, mediaType }) => ({ artifactId: `ref-${requests}-${bytes.byteLength}`,
@@ -62,6 +64,7 @@ describe("API application runtime", () => {
         await new Promise<never>((_resolve, reject) => {
           const fail = () => reject(new Error("owned request cancelled"));
           if (signal.aborted) fail(); else signal.addEventListener("abort", fail, { once: true });
+          caseCap.abort();
         });
         throw new Error("unreachable");
       },
@@ -72,7 +75,7 @@ describe("API application runtime", () => {
         { kind: "request", requestId: "later", method: "POST", path: "/orders", body: { create: true } }], assertions: [] };
     await expect(executeE2EAPIApplicationScenario({ caseId: "case-1", scenario: scenario as never, sessionRef: "session",
       origin: "http://127.0.0.1:43124", ports: executionPorts, plan: { expected: { assertionDigests: [] } } as never,
-      binding: {} as never, signal: AbortSignal.timeout(25) })).rejects.toThrow(/cancelled/);
+      binding: {} as never, signal: caseCap.signal })).rejects.toThrow(/cancelled/);
     expect(requests).toBe(1);
     expect(finishes).toBe(1);
   });
@@ -168,6 +171,10 @@ describe("API application runtime", () => {
 
   it("binds repeated same-path assertions to the last approved request and preserves distinct observed response IDs", async () => {
     const at = "2026-10-17T12:00:00.000Z";
+    // The state poll's budget is measured on this clock, which moves only when the code under test sleeps or a stand-in request "takes time": no
+    // real timer or machine load can decide whether a sample arrived inside the budget.
+    let clockMs = 1_000_000;
+    const clock = { now: () => clockMs, sleep: async (milliseconds: number) => { clockMs += milliseconds; } };
     const proofBytes = (artifactId: string, bytes: Uint8Array, mediaType: "application/json" | "application/octet-stream" = "application/json") => ({
       ref: { artifactId, sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: bytes.byteLength, mediaType }, bytes });
     const schemaBytes = Buffer.from(canonicalJson({ type: "object", required: ["ok"], properties: { ok: { type: "boolean" } }, additionalProperties: false }));
@@ -223,7 +230,7 @@ describe("API application runtime", () => {
     const plan = { expected: { caseId: "case-1", accountContextId: "account-context", accountContextDigest: sha,
       assertionDigests: ["a".repeat(64), "b".repeat(64), "c".repeat(64)] } };
     const actual = await executeE2EAPIApplicationScenario({ caseId: "case-1", scenario: scenario as never, sessionRef: "session",
-      origin: "http://127.0.0.1:43124", ports: executionPorts, plan: plan as never, binding: binding as never, signal: new AbortController().signal });
+      origin: "http://127.0.0.1:43124", ports: executionPorts, plan: plan as never, binding: binding as never, signal: new AbortController().signal, clock });
     expect(actual.assertions.map((item) => item.outcome)).toEqual(["passed", "passed", "passed"]);
     expect(statePolls).toBe(2);
     expect(actionEvents).toHaveLength(4);
@@ -251,12 +258,12 @@ describe("API application runtime", () => {
       sessionRef: "session", origin: "http://127.0.0.1:43124", ports: matchingErrorPorts,
       plan: { expected: { ...plan.expected, assertionDigests: ["f".repeat(64)] } } as never,
       binding: { ...binding, assertionProducers: [{ assertionIndex: 0, producer }] } as never,
-      signal: new AbortController().signal });
+      signal: new AbortController().signal, clock });
     expect(pendingResult.assertions[0]?.outcome).not.toBe("passed");
     expect(pendingResult.assertions[0]?.reason).not.toBe("assertion-observed");
 
     const latePorts: E2EApiRuntimePorts = { ...executionPorts, request: async (input) => {
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      clockMs += 10; // the response arrives 10 ms into a 1 ms budget
       return { requestId: "late-request", responseId: "late-response", method: input.method, path: input.path,
         status: 200, body: Buffer.from(canonicalJson({ version: 1, tenantId: "tenant-a", orderIds: ["a1", "a2"] })),
         contentType: "application/json", origin: input.origin, observedAt: at };
@@ -265,7 +272,7 @@ describe("API application runtime", () => {
       sessionRef: "session", origin: "http://127.0.0.1:43124", ports: latePorts,
       plan: { expected: { ...plan.expected, assertionDigests: ["1".repeat(64)] } } as never,
       binding: { ...binding, assertionProducers: [{ assertionIndex: 0, producer }] } as never,
-      signal: new AbortController().signal });
+      signal: new AbortController().signal, clock });
     expect(lateResult.assertions[0]?.outcome).not.toBe("passed");
     expect(lateResult.assertions[0]?.reason).not.toBe("assertion-observed");
   });

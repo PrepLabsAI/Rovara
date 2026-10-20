@@ -1,7 +1,9 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import type { Change } from "@aws-sdk/client-cloudformation";
 import { describe, expect, it } from "vitest";
 import {
+  CONTROL_PLANE_LAMBDAS,
+  DEFAULT_DEPLOY_UNITS,
   assertOnlyExpectedChanges,
   executeChangeSetAndWait,
   firstFailureReason,
@@ -581,7 +583,9 @@ describe("parseTestDeployArgs", () => {
   it("requires env and profile, defaults to a dry run and the code and worker-image units", () => {
     const parsed = parseTestDeployArgs(["--env", ENV, "--profile", "agentx-test"]);
     expect(parsed).toMatchObject({ env: ENV, profile: "agentx-test", apply: false, region: "us-east-1" });
-    expect(parsed.only).toEqual(["broker", "dispatcher", "worker-image"]);
+    // Every control-plane Lambda by default, so a normal TEST deploy cannot leave one on old code.
+    expect(parsed.only).toEqual(["control-plane-code", "worker-image"]);
+    expect(parsed.only).toEqual([...DEFAULT_DEPLOY_UNITS]);
     expect(() => parseTestDeployArgs(["--profile", "agentx-test"])).toThrow("--env is required");
     expect(() => parseTestDeployArgs(["--env", ENV])).toThrow("--profile is required");
   });
@@ -757,5 +761,229 @@ describe("liftSynthArguments", () => {
     // Cognito is the engine's default and adds no identity context; an own-OIDC environment adds it.
     expect(list.join(" ")).not.toContain("agentxIdentity");
     expect(args({ identityMode: "oidc" }).join(" ")).toContain("-c agentxIdentity=oidc");
+  });
+});
+
+
+const ALL_IDS = [
+  "BrokerE1355FD6", "DeveloperSignInFunction10B62B05", "DeveloperTaskNotifierFunction551419CC", "DispatcherD4A12972", "EvalBatchTickA4585B04",
+  "OutboxPublisherD572F72E", "PlanEvidence3615C4CB", "SessionsReaper8FEF958E", "SessionsReconciler4316A0A2", "SessionsSteps3B98DD2B", "SlackIngress5C88FFA0",
+];
+
+describe("the control-plane-code unit", () => {
+  const steps = plan(["control-plane-code"]);
+  const builds = steps.filter((step): step is Extract<DeployStep, { kind: "build-lambda-zip" }> => step.kind === "build-lambda-zip");
+  const changeSets = steps.filter((step): step is Extract<DeployStep, { kind: "create-change-set" }> => step.kind === "create-change-set");
+
+  it("rebuilds every packaged control-plane Lambda in one change set, then verifies each one's CodeSha256", () => {
+    expect(builds.map((build) => build.logicalId).sort()).toEqual([...ALL_IDS].sort());
+    expect(steps.filter((step) => step.kind === "upload-artifact")).toHaveLength(ALL_IDS.length);
+    expect(changeSets).toHaveLength(1);
+    expect(changeSets[0]).toMatchObject({
+      stack: CONTROL_PLANE,
+      template: { source: "lambda-code" },
+      expect: { action: "Modify", allowedAttributes: ["Properties.Code"], allowArnReevaluations: true },
+    });
+    expect([...(changeSets[0]!.expect.logicalIds ?? [])].sort()).toEqual([...ALL_IDS].sort());
+    const patched = changeSets[0]!.template.source === "lambda-code" ? changeSets[0]!.template.patches.map((patch) => patch.logicalId) : [];
+    expect(patched.sort()).toEqual([...ALL_IDS].sort());
+    expect(kinds(steps).filter((kind) => kind === "execute-change-set")).toHaveLength(1);
+    const verifies = steps.filter((step): step is Extract<DeployStep, { kind: "verify-lambda-code" }> => step.kind === "verify-lambda-code");
+    expect(verifies.map((verify) => verify.logicalId).sort()).toEqual([...ALL_IDS].sort());
+    for (const verify of verifies) {
+      const build = builds.find((candidate) => candidate.logicalId === verify.logicalId)!;
+      expect(verify).toMatchObject({ stack: CONTROL_PLANE, expectedSha256Base64: { fromStep: build.id, output: "sha256Base64" } });
+    }
+    // The verifies come only after the one execute.
+    expect(kinds(steps).indexOf("execute-change-set")).toBeLessThan(kinds(steps).indexOf("verify-lambda-code"));
+  });
+
+  it("copies boot.sh beside the session steps handler, as the release bundle does", () => {
+    const sessionsSteps = builds.find((build) => build.logicalId === "SessionsSteps3B98DD2B");
+    expect(sessionsSteps).toMatchObject({ entry: "packages/broker/src/aws/session-steps.ts", extraFiles: [{ from: "packages/worker/ec2/boot.sh", name: "boot.sh" }] });
+    expect(builds.filter((build) => build.extraFiles !== undefined)).toHaveLength(1);
+  });
+
+  it("includes broker and dispatcher once when they are also named", () => {
+    const both = plan(["control-plane-code", "broker", "dispatcher"]);
+    expect(both).toEqual(steps);
+  });
+
+  it("keeps broker and dispatcher as units of their own", () => {
+    const only = plan(["broker"]).filter((step) => step.kind === "build-lambda-zip");
+    expect(only).toHaveLength(1);
+  });
+
+  it("names every packaged function the infra builds, except the installer's page", () => {
+    const entries = new Set<string>();
+    for (const file of readdirSync(new URL("../../infra/lib/", import.meta.url))) {
+      if (!file.endsWith(".ts")) continue;
+      const text = readFileSync(new URL(`../../infra/lib/${file}`, import.meta.url), "utf8");
+      for (const match of text.matchAll(/packagedFunction\(\s*(?:this|scope),\s*"[A-Za-z]+",\s*"([^"]+)"/g)) entries.add(match[1]!);
+    }
+    // The setup page belongs to the installer stack, which test-deploy never changes.
+    entries.delete("packages/cli/src/init/ui/setup-lambda.ts");
+    expect([...entries].sort()).toEqual(Object.values(CONTROL_PLANE_LAMBDAS).map((lambda) => lambda.entry).sort());
+  });
+
+  it("says in the printed plan that the whole set changes only Code", () => {
+    const text = formatPlan(steps);
+    expect(text).toContain("DeveloperTaskNotifierFunction551419CC.Arn");
+    expect(text).toContain("boot.sh");
+    expect(text).toContain("abort unless the only changes are Modify");
+  });
+});
+
+describe("assertOnlyExpectedChanges for every control-plane Lambda (change set derived from the TEST template)", () => {
+  const live = JSON.parse(readFileSync(new URL("../fixtures/test-deploy/control-plane-all-code-change-set.json", import.meta.url), "utf8")) as { Changes: Change[] };
+  const expectation = (logicalIds: readonly string[]) => ({ action: "Modify", logicalIds, allowedAttributes: ["Properties.Code"], allowArnReevaluations: true }) as const;
+  const all = expectation(ALL_IDS);
+  const fresh = (): Change[] => structuredClone(live.Changes);
+  const find = (changes: Change[], logicalId: string) => changes.find((change) => change.ResourceChange?.LogicalResourceId === logicalId)!.ResourceChange!;
+
+  it("accepts exactly the Code changes and the no-op Arn re-evaluations", () => {
+    const result = assertOnlyExpectedChanges(observedChanges(fresh()), all);
+    expect(result.noOpReevaluations).toContain("SlackIngressIntegration");
+    expect(result.noOpReevaluations).toContain("SessionsProvisioner9C44055B");
+    for (const logicalId of ALL_IDS) expect(result.noOpReevaluations).not.toContain(logicalId);
+  });
+
+  it("refuses when the same change set is judged against fewer code units", () => {
+    expect(() => assertOnlyExpectedChanges(observedChanges(fresh()), expectation(ALL_IDS.filter((id) => id !== "SlackIngress5C88FFA0")))).toThrow(/Modify SlackIngress5C88FFA0/);
+  });
+
+  it("refuses a change set that is missing one of the code units", () => {
+    const changes = fresh().filter((change) => change.ResourceChange?.LogicalResourceId !== "PlanEvidence3615C4CB");
+    expect(() => assertOnlyExpectedChanges(observedChanges(changes), all)).toThrow(/missing the expected Modify PlanEvidence3615C4CB/);
+  });
+
+  it("refuses a code unit that also changes its environment", () => {
+    const changes = fresh();
+    find(changes, "DeveloperTaskNotifierFunction551419CC").Details?.push({ Target: { Attribute: "Properties", Name: "Environment", RequiresRecreation: "Never" }, Evaluation: "Static", ChangeSource: "DirectModification" });
+    expect(() => assertOnlyExpectedChanges(observedChanges(changes), all)).toThrow(/DeveloperTaskNotifierFunction551419CC.*Properties.Environment/);
+  });
+
+  it("refuses an unrelated change, an added resource and a replaced code unit", () => {
+    const unrelated = fresh();
+    unrelated.push({ Type: "Resource", ResourceChange: { Action: "Modify", LogicalResourceId: "State", ResourceType: "AWS::DynamoDB::Table", Replacement: "False", Details: [{ Target: { Attribute: "Properties", Name: "BillingMode" }, Evaluation: "Static", ChangeSource: "DirectModification" }] } });
+    expect(() => assertOnlyExpectedChanges(observedChanges(unrelated), all)).toThrow(/State/);
+    const added = fresh();
+    added.push({ Type: "Resource", ResourceChange: { Action: "Add", LogicalResourceId: "NewQueue", ResourceType: "AWS::SQS::Queue" } });
+    expect(() => assertOnlyExpectedChanges(observedChanges(added), all)).toThrow(/Add NewQueue/);
+    const replaced = fresh();
+    find(replaced, "SessionsSteps3B98DD2B").Replacement = "True";
+    expect(() => assertOnlyExpectedChanges(observedChanges(replaced), all)).toThrow(/SessionsSteps3B98DD2B.*replace/);
+  });
+
+  describe("a code unit that reads another code unit's Arn (Broker reads DeveloperSignIn's)", () => {
+    const environment = (changes: Change[]) => {
+      const detail = find(changes, "BrokerE1355FD6").Details?.find((candidate) => candidate.Target?.Name === "Environment");
+      if (detail === undefined) throw new Error("fixture has no Broker Environment detail");
+      return detail;
+    };
+
+    it("models the live shape: Broker's Code is Static and its Environment is a Dynamic re-evaluation caused by DeveloperSignIn's Arn", () => {
+      const detail = environment(fresh());
+      expect(detail).toMatchObject({ Evaluation: "Dynamic", ChangeSource: "ResourceAttribute", CausingEntity: "DeveloperSignInFunction10B62B05.Arn" });
+      expect(find(fresh(), "BrokerE1355FD6").Details).toHaveLength(2);
+    });
+
+    it("accepts it, and still accepts Broker's own Arn dependents", () => {
+      const result = assertOnlyExpectedChanges(observedChanges(fresh()), all);
+      expect(result.noOpReevaluations).toContain("BrokerIntegration");
+      expect(result.noOpReevaluations).not.toContain("BrokerE1355FD6");
+    });
+
+    it("refuses the same extra detail when it is Static", () => {
+      const changes = fresh();
+      environment(changes).Evaluation = "Static";
+      delete environment(changes).CausingEntity;
+      expect(() => assertOnlyExpectedChanges(observedChanges(changes), all)).toThrow(/BrokerE1355FD6/);
+      const direct = fresh();
+      environment(direct).ChangeSource = "DirectModification";
+      expect(() => assertOnlyExpectedChanges(observedChanges(direct), all)).toThrow(/BrokerE1355FD6/);
+    });
+
+    it("refuses it when the cause is not a code unit of this change set", () => {
+      const outside = fresh();
+      environment(outside).CausingEntity = "State.Arn";
+      expect(() => assertOnlyExpectedChanges(observedChanges(outside), all)).toThrow(/BrokerE1355FD6/);
+      // DeveloperSignIn is a real function, but not a unit of this run: Broker's dependence on it is not accepted.
+      expect(() => assertOnlyExpectedChanges(observedChanges(fresh()), expectation(ALL_IDS.filter((id) => id !== "DeveloperSignInFunction10B62B05")))).toThrow(/BrokerE1355FD6/);
+    });
+
+    it("refuses a cause that is another attribute of a unit, the unit itself, or no entity at all", () => {
+      for (const cause of ["DeveloperSignInFunction10B62B05.Version", "BrokerE1355FD6.Arn", "DeveloperSignInFunction10B62B05", undefined]) {
+        const changes = fresh();
+        if (cause === undefined) delete environment(changes).CausingEntity;
+        else environment(changes).CausingEntity = cause;
+        expect(() => assertOnlyExpectedChanges(observedChanges(changes), all), String(cause)).toThrow(/BrokerE1355FD6/);
+      }
+    });
+
+    it("refuses it when the unit that causes it is itself changed by more than its Code", () => {
+      const changes = fresh();
+      find(changes, "DeveloperSignInFunction10B62B05").Details?.push({ Target: { Attribute: "Properties", Name: "Environment", RequiresRecreation: "Never" }, Evaluation: "Static", ChangeSource: "DirectModification" });
+      expect(() => assertOnlyExpectedChanges(observedChanges(changes), all)).toThrow(/DeveloperSignInFunction10B62B05/);
+    });
+
+    it("refuses it when the unit would be replaced, and a Dynamic detail on a unit without a Code change", () => {
+      const replaced = fresh();
+      find(replaced, "BrokerE1355FD6").Replacement = "True";
+      expect(() => assertOnlyExpectedChanges(observedChanges(replaced), all)).toThrow(/BrokerE1355FD6.*replace/);
+      const noCode = fresh();
+      find(noCode, "BrokerE1355FD6").Details = [environment(noCode)];
+      expect(() => assertOnlyExpectedChanges(observedChanges(noCode), all)).toThrow(/BrokerE1355FD6/);
+    });
+
+    it("refuses a cycle of two units that each only re-evaluate on the other", () => {
+      const changes = fresh();
+      find(changes, "BrokerE1355FD6").Details = [environment(changes)];
+      find(changes, "DeveloperSignInFunction10B62B05").Details = [{ Target: { Attribute: "Properties", Name: "Environment", RequiresRecreation: "Never" }, Evaluation: "Dynamic", ChangeSource: "ResourceAttribute", CausingEntity: "BrokerE1355FD6.Arn" }];
+      expect(() => assertOnlyExpectedChanges(observedChanges(changes), all)).toThrow(/BrokerE1355FD6|DeveloperSignInFunction10B62B05/);
+    });
+  });
+
+  it("refuses a dependent whose change is caused by something other than a code unit's Arn", () => {
+    const changes = fresh();
+    const detail = find(changes, "SlackIngressIntegration").Details?.[0];
+    detail!.CausingEntity = "State.Arn";
+    expect(() => assertOnlyExpectedChanges(observedChanges(changes), all)).toThrow(/SlackIngressIntegration/);
+  });
+});
+
+describe("resolveCodeArtifactBucket for a function whose Code reads its bucket from a stack parameter", () => {
+  const PARAMETER = "AssetParameters4cc08d20a47075d98e1d1c0c3ec8a5c2fde4f48a7ec4017107965683d0be0353S3BucketBC7C2282";
+  function runnerWith(parameterValue: string | undefined, code: unknown = { S3Bucket: { Ref: PARAMETER } }) {
+    const calls: string[][] = [];
+    const result = (stdout: unknown) => ({ status: 0, stdout: JSON.stringify(stdout), stderr: "" });
+    return {
+      calls,
+      aws(args: readonly string[]) {
+        calls.push([...args]);
+        if (args[1] === "describe-stacks") {
+          const stack = args[args.indexOf("--stack-name") + 1];
+          if (stack === ACCESS) return result({ Outputs: [{ OutputKey: "ArtifactBucketName", OutputValue: ACCESS_BUCKET }] });
+          return result({ Parameters: parameterValue === undefined ? [] : [{ ParameterKey: PARAMETER, ParameterValue: parameterValue }] });
+        }
+        if (args[1] === "get-template") return result({ Resources: { DeveloperSignInFunction10B62B05: { Type: "AWS::Lambda::Function", Properties: { Code: code } } } });
+        if (args[1] === "get-bucket-versioning") return result({ Status: "Enabled" });
+        throw new Error(`unexpected aws call ${args.join(" ")}`);
+      },
+    };
+  }
+
+  it("accepts it when the parameter's current value is the access bucket", () => {
+    expect(resolveCodeArtifactBucket(runnerWith(ACCESS_BUCKET), "us-east-1", ENV, "DeveloperSignInFunction10B62B05")).toBe(ACCESS_BUCKET);
+  });
+
+  it("refuses, naming both buckets, when the parameter names another bucket", () => {
+    expect(() => resolveCodeArtifactBucket(runnerWith(CONTROL_BUCKET), "us-east-1", ENV, "DeveloperSignInFunction10B62B05"))
+      .toThrow(new RegExp(`${ACCESS_BUCKET}.*${CONTROL_BUCKET}|${CONTROL_BUCKET}.*${ACCESS_BUCKET}`));
+  });
+
+  it("refuses when the parameter is not on the stack, or the bucket is neither a literal nor a parameter", () => {
+    expect(() => resolveCodeArtifactBucket(runnerWith(undefined), "us-east-1", ENV, "DeveloperSignInFunction10B62B05")).toThrow(/S3Bucket/);
+    expect(() => resolveCodeArtifactBucket(runnerWith(ACCESS_BUCKET, { S3Bucket: { "Fn::ImportValue": "x" } }), "us-east-1", ENV, "DeveloperSignInFunction10B62B05")).toThrow(/S3Bucket/);
   });
 });

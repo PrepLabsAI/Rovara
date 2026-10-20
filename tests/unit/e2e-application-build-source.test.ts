@@ -150,15 +150,16 @@ describe("exact candidate application build source", () => {
 
       const stalledDirectory = await realpath(await mkdtemp(join(tmpdir(), "e2e-app-stalled-")));
       const controller = new AbortController();
-      const abortTimer = setTimeout(() => controller.abort(), 15);
       let readerSignal: AbortSignal | undefined;
       try {
         await expect(materializeE2EApplicationBuildSource({ manifest, reference, expectedCandidate: candidate,
           inspectionSnapshot: snapshot, binding, destination: stalledDirectory, signal: controller.signal,
-          readChunk: async (_offset, signal) => { readerSignal = signal; return new Promise(() => undefined); } })).rejects.toThrow(/chunk read exceeded|cancelled or exceeded/);
+          // The read never settles, and the caller cancels only once the read is under way: no wall-clock timer decides whether the abort lands
+          // before or after the first read (it used to, and under load it could land before, so the reader never saw a signal).
+          readChunk: async (_offset, signal) => { readerSignal = signal; controller.abort(); return new Promise(() => undefined); } })).rejects.toThrow(/chunk read exceeded|cancelled or exceeded/);
         expect(readerSignal?.aborted).toBe(true);
         expect(await readdir(stalledDirectory)).toEqual([]);
-      } finally { clearTimeout(abortTimer); await rm(stalledDirectory, { recursive: true, force: true }); }
+      } finally { await rm(stalledDirectory, { recursive: true, force: true }); }
 
       const preDispatchDirectory = await realpath(await mkdtemp(join(tmpdir(), "e2e-app-predispatch-")));
       const preDispatchSignal = { aborted: false, reason: undefined,

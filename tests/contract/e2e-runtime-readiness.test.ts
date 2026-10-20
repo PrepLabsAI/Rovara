@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { canonicalJson, E2ETargetSchema, type E2ERuntimeCapabilityDescriptor, type E2ERuntimeReadinessInput } from "@agentx/contracts";
 import { E2ERuntimeCapabilityDescriptorSchema, e2eRuntimeCapabilityDigest } from "../../packages/contracts/src/index.js";
-import { e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
+import { applicationRuntimeRowFences, e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 
 const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
@@ -70,5 +70,97 @@ describe("registered E2E runtime readiness", () => {
     expect(projectE2ERuntimeReadiness(input({ ...key, ...registration, qualifiedAt: "2026-10-13T12:31:00.000Z" }))).toMatchObject({ status: "UNQUALIFIED" });
     expect(projectE2ERuntimeReadiness(input({ ...key, ...registration, capabilities: { ...capabilities, host: { os: "win32", arch: "x64" } } }))).toMatchObject({ status: "INCOMPATIBLE" });
     expect(projectE2ERuntimeReadiness(input({ ...key, ...registration }, { requiredSteps: ["launch-app"] }))).toMatchObject({ status: "INCOMPATIBLE" });
+  });
+});
+
+describe("READY profiles for setup proposals", () => {
+  const apiCapabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ ...Object.fromEntries(Object.entries(capabilities).filter(([name]) => name !== "browsers")), kind: "api", supportedSteps: ["request"], supportedAssertions: ["http-status"], protocols: ["http"] });
+  const rowFor = (kind: "web" | "api", overrides: Record<string, unknown> = {}) => {
+    const body = kind === "web" ? capabilities : apiCapabilities;
+    const apiProbeBase = { ...probeBase, capabilityDigest: e2eRuntimeCapabilityDigest(apiCapabilities) };
+    return { ...e2eRegisteredRuntimeKey(registration.runtimeCatalogId, registration.profileId, kind), ...registration, capabilities: body, capabilityDigest: e2eRuntimeCapabilityDigest(body),
+      probeManifest: kind === "web" ? probe : { ...apiProbeBase, manifestDigest: sha(apiProbeBase) }, ...overrides };
+  };
+  const readFrom = (rows: Record<string, unknown>) => async (rowKey: { pk: string; sk: string }) => rows[rowKey.sk];
+  const ask = (rows: Record<string, unknown>, now = "2026-10-13T12:30:00.000Z") =>
+    readReadyE2ERuntimeProfiles({ runtimeCatalogId: registration.runtimeCatalogId, profileId: registration.profileId, now: Date.parse(now), read: readFrom(rows) });
+
+  it("lists each kind whose own row is READY and unexpired", async () => {
+    const rows = { [`PROFILE#web-profile#web`]: rowFor("web"), [`PROFILE#web-profile#api`]: rowFor("api") };
+    expect(await ask(rows)).toEqual([{ kind: "web", profileId: "web-profile" }, { kind: "api", profileId: "web-profile" }]);
+  });
+
+  it("omits a kind whose row is missing, expired, parked, or holds the other kind's runtime", async () => {
+    expect(await ask({ [`PROFILE#web-profile#web`]: rowFor("web") })).toEqual([{ kind: "web", profileId: "web-profile" }]);
+    expect(await ask({ [`PROFILE#web-profile#web`]: rowFor("web") }, "2026-10-13T13:30:00.000Z")).toEqual([]);
+    expect(await ask({ [`PROFILE#web-profile#web`]: rowFor("web", { state: "PARKED" }) })).toEqual([]);
+    expect(await ask({ [`PROFILE#web-profile#api`]: rowFor("api", { capabilities, capabilityDigest: e2eRuntimeCapabilityDigest(capabilities) }) })).toEqual([]);
+  });
+
+  it("treats an unreadable catalog as no READY profile and says so, distinct from an unqualified runtime", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      expect(await readReadyE2ERuntimeProfiles({ runtimeCatalogId: "c", profileId: "web-profile", now: 1, read: async () => { throw new Error("throttled"); } })).toEqual([]);
+      const logged = warn.mock.calls.map(([line]) => JSON.parse(String(line)) as Record<string, unknown>);
+      expect(logged).toHaveLength(2);
+      expect(logged[0]).toMatchObject({ component: "broker", level: "warn", event: "e2e-runtime-catalog-read-failed", kind: "web", profileId: "web-profile", error: "throttled" });
+      warn.mockClear();
+      expect(await ask({})).toEqual([]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally { warn.mockRestore(); }
+  });
+});
+
+describe("READY runtimes for a project's runtime binding at planning", () => {
+  const apiCapabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ ...Object.fromEntries(Object.entries(capabilities).filter(([name]) => name !== "browsers")),
+    kind: "api", supportedSteps: ["request"], supportedAssertions: ["http-status", "json"], protocols: ["http"] });
+  const apiProbeBase = { ...probeBase, capabilityDigest: e2eRuntimeCapabilityDigest(apiCapabilities) };
+  const rowFor = (kind: "web" | "api", overrides: Record<string, unknown> = {}) => ({
+    ...e2eRegisteredRuntimeKey(registration.runtimeCatalogId, registration.profileId, kind), ...registration,
+    capabilities: kind === "web" ? capabilities : apiCapabilities, capabilityDigest: e2eRuntimeCapabilityDigest(kind === "web" ? capabilities : apiCapabilities),
+    probeManifest: kind === "web" ? probe : { ...apiProbeBase, manifestDigest: sha(apiProbeBase) }, ...overrides });
+  const ask = (rows: Record<string, unknown>, projectBinding: typeof binding = binding) => readProjectReadyE2ERuntimes({
+    runtimeCatalogId: registration.runtimeCatalogId, profileId: registration.profileId, binding: projectBinding, now: Date.parse("2026-10-13T12:30:00.000Z"),
+    read: async (rowKey) => rows[rowKey.sk] });
+
+  it("returns each READY kind with the steps and assertions its own registered descriptor supports", async () => {
+    const rows = { "PROFILE#web-profile#web": rowFor("web"), "PROFILE#web-profile#api": rowFor("api") };
+    expect(await ask(rows)).toEqual([
+      { kind: "web", profileId: "web-profile", supportedSteps: ["navigate"], supportedAssertions: ["visible"] },
+      { kind: "api", profileId: "web-profile", supportedSteps: ["request"], supportedAssertions: ["http-status", "json"] },
+    ]);
+  });
+
+  it("drops a row bound to another runtime binding, an expired row and a row that holds the other kind's runtime", async () => {
+    const other = { ...binding, launchTemplateId: "lt-fedcba9876543210" };
+    const rows = { "PROFILE#web-profile#web": rowFor("web"), "PROFILE#web-profile#api": rowFor("api") };
+    expect(await ask(rows, other)).toEqual([]);
+    expect(await ask({ ...rows, "PROFILE#web-profile#web": rowFor("web", { expiresAt: "2026-10-13T12:20:00.000Z" }) })).toMatchObject([{ kind: "api" }]);
+    expect(await ask({ "PROFILE#web-profile#web": rowFor("web", { capabilities: apiCapabilities, capabilityDigest: e2eRuntimeCapabilityDigest(apiCapabilities) }) })).toEqual([]);
+    expect(await ask({})).toEqual([]);
+  });
+});
+
+describe("the fences on the runtime rows an application approval was derived from", () => {
+  const row = { ...key, ...registration } as unknown as Parameters<typeof applicationRuntimeRowFences>[0]["rows"][number];
+  const selected = { kind: "web" as const, profileId: registration.profileId };
+
+  it("holds each selected row exactly as it was read, under the table it is stored in", () => {
+    const fences = applicationRuntimeRowFences({ tableName: "state", rows: [{ ...row, capabilities: { ...row.capabilities, kind: "web" } } as typeof row], selected: [selected] });
+    expect(fences).toHaveLength(1);
+    const check = (fences[0] as { ConditionCheck: { TableName: string; Key: unknown; ExpressionAttributeValues: Record<string, unknown> } }).ConditionCheck;
+    expect(check.TableName).toBe("state");
+    expect(check.Key).toEqual(e2eRegisteredRuntimeKey(registration.runtimeCatalogId, registration.profileId, "web"));
+    expect(check.ExpressionAttributeValues).toMatchObject({ ":generation": registration.generation, ":manifest": registration.manifestDigest, ":ready": "READY" });
+  });
+
+  it("throws, instead of leaving a selected row unfenced, when the row it selected is not among those read", () => {
+    expect(() => applicationRuntimeRowFences({ tableName: "state", rows: [], selected: [selected] }))
+      .toThrow(`the selected web runtime ${registration.profileId} is not among the runtime rows this approval was derived from`);
+    expect(() => applicationRuntimeRowFences({ tableName: "state", rows: [{ ...row, capabilities: { ...row.capabilities, kind: "api" } } as typeof row], selected: [selected] })).toThrow(/not among the runtime rows/);
+  });
+
+  it("fences nothing when nothing was selected", () => {
+    expect(applicationRuntimeRowFences({ tableName: "state", rows: [], selected: [] })).toEqual([]);
   });
 });

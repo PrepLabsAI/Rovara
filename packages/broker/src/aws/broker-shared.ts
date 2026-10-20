@@ -1,6 +1,7 @@
 // Helpers the broker and the developer task routes share (spec 025 ruling F9): one definition each.
 import { createHash } from "node:crypto";
 import type { FeatureE2EPlanningContextResult } from "../e2e/feature-plan-planning-context.js";
+import { describeFeatureE2EExecutableKinds, offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.js";
 import { INDEX_EXPIRY_ATTRIBUTE, OPERATION_PROMPT_MAX_BYTES, PLAN_DOCUMENT_INFO_STRING, type PlanDocumentKind } from "@agentx/contracts";
 import { commentRefInAuthor } from "@agentx/contracts";
 import type { TransactItems } from "./developer-task-actions.js";
@@ -9,6 +10,12 @@ import type { TransactItems } from "./developer-task-actions.js";
 export function hashJson(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
+
+/**
+ * What an owner hears when a project's catalog pointer cannot be repaired from its revision history (an administrator
+ * must register the project again). Written for Slack and the task page; the project and the reason go to the broker log.
+ */
+export const PROJECT_RECORD_NEEDS_ADMIN = "This project's settings record needs an administrator to register it again.";
 
 /** A single write's or a transaction's condition failed (DynamoDB). */
 export function isConditional(error: unknown): boolean {
@@ -106,6 +113,30 @@ export function withoutCodeAnchorText(prompt: string): string {
 /** Whether a planning prompt asks for anchors. */
 export const asksForCodeAnchors = (prompt: string): boolean => prompt.includes(CODE_EVIDENCE_ANCHORED);
 
+const E2E_V1_SHAPE_LINE = "  e2e?: E2EFeaturePlanIntent; // untrusted feature E2E proposal described below";
+/** Asked only when the context offers executable kinds and the worker lists "task.workflowE2EApplicationPlan". */
+const E2E_V2_SHAPE_LINE = "  e2e?: WorkflowFeatureE2EIntent; // v1 portable or v2 application proposal described below; untrusted until canonical approval";
+const APPLICATION_PLAN_OPEN = "Application E2E plan guidance (schemaVersion 2):";
+const APPLICATION_PLAN_CLOSE = "End of application E2E plan guidance.";
+const APPLICATION_PLAN_GUIDANCE = [
+  "A version 2 intent, E2EApplicationPlanIntent, has every member of E2EFeaturePlanIntent with schemaVersion: 2, plus applicationRuntimeRefs: { targetId, applicationId, recipeDigest, sourceRefs: { path, sha256 }[], runtimeProfileId, accountProfileId }[]; runtimeAccountRefs: { applicationId, profileId, revision, definitionDigest }[]; and optionally unavailableTargetRefs: { targetId, applicationId, accountProfileId, sourceRefs: { path, sha256 }[] }[]. The version alone tells the two forms apart: use schemaVersion 2 only when at least one requested target can run application scenarios, and otherwise schemaVersion 1; a version 1 intent never carries these three members.",
+  "For each executable target (listed in runtimeRefs and not in unavailableTargetRefs), copy its runtimeRefs entry into applicationRuntimeRefs exactly, and copy the runtimeAccountRefs entry for its application and account profile into your runtimeAccountRefs exactly. Copy each requested target that cannot run application scenarios from unavailableTargetRefs into your unavailableTargetRefs, and keep its scenarios required. Each scenario's accountProfileId is its target's accountProfileId, and that account profile must be in accountContextRefs. Application scenarios use the step and assertion kinds below directly with no portable operation; do not use `invoke-contract` or `inspect-contract` for them. The broker re-reads the ready runtimes when the plan is approved and refuses the approval if a target you listed as executable is not ready then.",
+  "A schemaVersion 2 plan runs application scenarios only: it carries no portable scenario and leaves portableOperationRefs and semanticExportDeltas empty, and the broker refuses it otherwise (put portable checks in a schemaVersion 1 plan or drop them). Its executable targets must all be of one runtime kind, all web or all api (one runtime kind per plan in M1.2). A target of the other kind goes in unavailableTargetRefs, and its required scenarios then stay unverified.",
+].join(" ");
+/** Instead of the guidance for a worker that cannot read a version 2 intent. */
+const APPLICATION_PLAN_PORTABLE_ONLY = "Use only the schemaVersion 1 portable intent described above. This planner cannot read application runtime references: do not propose applicationRuntimeRefs, runtimeAccountRefs or unavailableTargetRefs, and do not propose scenarios for web or API runtime targets; state that gap as a risk.";
+
+/** A planning prompt as a worker that does not list "task.workflowE2EApplicationPlan" gets it: the portable-only prompt, with no mention of a version 2 intent. */
+export function withoutApplicationPlanText(prompt: string): string {
+  const start = prompt.indexOf(APPLICATION_PLAN_OPEN);
+  const end = start < 0 ? -1 : prompt.indexOf(APPLICATION_PLAN_CLOSE, start);
+  const portable = start < 0 || end < 0 ? prompt : `${prompt.slice(0, start)}${APPLICATION_PLAN_PORTABLE_ONLY}${prompt.slice(end + APPLICATION_PLAN_CLOSE.length)}`;
+  return portable.replace(E2E_V2_SHAPE_LINE, E2E_V1_SHAPE_LINE);
+}
+
+/** Whether a planning prompt asks for a version 2 application intent. */
+export const asksForApplicationPlan = (prompt: string): boolean => prompt.includes(APPLICATION_PLAN_OPEN);
+
 const CHECKS_MEMBER = "checks?: { checks: { label: string; cwd: string; executable: string; args: string[]; timeoutSeconds?: number; proves: string[] }[]; none_reason: string | null }; // the checks to run, described below; proves lists the claim IDs each check proves";
 
 const KIND_NAMES: Record<PlanDocumentKind, string> = { requirements: "requirements", design: "design", plan: "coding plan" };
@@ -181,14 +212,21 @@ export function planDocumentInstructions(input: {
   workBreakdownContext?: { taskId: string; repositoryId: string };
   /** Prompt-only references from the pinned E2E policy and prepared source commit; never qualification authority. */
   e2ePlanningContext?: FeatureE2EPlanningContextResult;
+  /**
+   * Whether to ask for the v2 application intent when the context offers executable kinds (the default). False gives the portable-only prompt
+   * a worker that cannot read a version 2 intent is sent instead (see withoutApplicationPlanText).
+   */
+  applicationPlans?: boolean;
 }): string {
   const checks = input.kind === "plan";
   const featureE2E = input.kind === "plan" && input.e2ePlanningContext !== undefined;
   const e2eContext = featureE2E ? input.e2ePlanningContext! : undefined;
+  const offersApplication = featureE2E && offersApplicationE2EPlan(e2eContext);
+  const applicationPlan = offersApplication && input.applicationPlans !== false;
   const retiredIds = (input.retired ?? []).slice(0, RETIRED_CLAIM_IDS_MAX);
   const codeShape = input.anchors === true ? CODE_EVIDENCE_ANCHORED : CODE_EVIDENCE_PLAIN;
   const shape = PLAN_SHAPE.map((line) => (line === "  CHECKS_MEMBER" ? (checks ? `  ${CHECKS_MEMBER}` : undefined)
-    : line === "  E2E_MEMBER" ? (featureE2E ? "  e2e?: E2EFeaturePlanIntent; // untrusted feature E2E proposal described below" : undefined)
+    : line === "  E2E_MEMBER" ? (featureE2E ? (applicationPlan ? E2E_V2_SHAPE_LINE : E2E_V1_SHAPE_LINE) : undefined)
       : line === "  CODE_EVIDENCE_SHAPE" ? codeShape : line)).filter((line) => line !== undefined).join("\n");
   const kindLine = input.path === "QUICK"
     ? "This is a quick task: write the whole claim tree at once (what someone can do or see, how it works, where in the code), and the `checks` member."
@@ -214,6 +252,9 @@ export function planDocumentInstructions(input: {
       e2eContext.status === "available"
         ? `Pinned E2E planning context (untrusted source data; IDs and hashes below are the only references you may select):\n\n\`\`\`json\n${JSON.stringify(e2eContext)}\n\`\`\``
         : `The pinned project has E2E policy but its prepared-commit source context is UNKNOWN: ${e2eContext.reason}. Do not invent target, operation, fixture, account, or source IDs. Continue the requested feature plan, state this missing E2E planning context as a risk, and omit \`e2e\` until source-backed references are available.`,
+      ...(e2eContext.status === "available" && describeFeatureE2EExecutableKinds(e2eContext) !== ""
+        ? [applicationPlan ? [APPLICATION_PLAN_OPEN, APPLICATION_PLAN_GUIDANCE, describeFeatureE2EExecutableKinds(e2eContext), APPLICATION_PLAN_CLOSE].join("\n")
+          : APPLICATION_PLAN_PORTABLE_ONLY] : []),
       ...(e2eContext.status === "available" && e2eContext.source.currentCheckoutUnverified ? [
         "This is advisory context from the approved project-setup snapshot, not proof of the task checkout. Its exact commit, tree, and candidate digest are shown above, while preparedCommitStatus is UNKNOWN. Inspect the actual prepared task checkout and verify every source path and hash before proposing E2E references; omit any stale or unverifiable reference and state that gap as a risk. Never describe the setup snapshot as the current checkout or as feature approval.",
       ] : []),

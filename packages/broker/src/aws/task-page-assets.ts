@@ -226,6 +226,8 @@ export const TASK_PAGE_DECIDING_COPY = {
   submitOther: "Approve and continue",
   send: "Send",
   needOne: "Include at least one comment or write a note.",
+  retrying: "Retrying…",
+  retried: "Retried. AgentX is checking the plan against the runtime again.",
   sending: "Sending…",
   sent: "Sent. AgentX is on the next step.",
   changed: "This task changed. Refresh the page and try again.",
@@ -317,6 +319,7 @@ var revision=Number(data.revision)||0;
 var commentSeq=Number(data.commentSeq)||0;
 var canComment=data.canComment===true,canDecide=data.canDecide===true,canSuggest=data.canSuggest===true,canAsk=data.canAsk===true&&data.askAvailable!==false;
 var canRead=data.canRead===undefined?true:data.canRead===true,canManagePeople=data.canManagePeople===true,canTakeOwnership=data.canTakeOwnership===true;
+var canRetry=data.canRetry===true;
 var hasProjection=false,peopleRevision=null,accessGeneration=0;
 function validProjection(state){
   var keys=["canRead","canComment","canSuggest","canDecide","canAsk","canManagePeople","canTakeOwnership"];
@@ -368,6 +371,8 @@ function openAround(node){for(var up=node;up;up=up.parentElement){if(up.tagName=
 function applyCurrentAccess(){
   var controls=document.querySelectorAll(".comment-open,.reply-open,.comment-edit,.comment-delete,.suggest,#decide-next,#decide-approve,#decide-request-changes,#decide-submit");
   var radios=document.querySelectorAll("input");
+  var retryNode=document.getElementById("retry-application");
+  if(retryNode&&!canRead){retryNode.disabled=true;retryNode.hidden=true;}
   for(var i=0;i<controls.length;i++){
     var node=controls[i],nodeId=node.getAttribute("id")||"",nodeName=node.getAttribute("name")||"",allowed=node.classList&&node.classList.contains("suggest")?canSuggest:(nodeId.indexOf("decide-")===0||nodeName.indexOf("answer-")===0)?canDecide:canComment;
     node.disabled=!allowed;
@@ -418,6 +423,7 @@ function stopAccess(clearAllDrafts){
 function canPost(path,body){
   if(stopped||!canRead)return false;
   if(path==="decision")return canDecide;
+  if(path==="retry")return canRetry;
   if(path==="suggestions")return canSuggest;
   if(path==="comments"||path.indexOf("comments/")===0)return canComment&&!(body&&body.ask===true&&!canAsk);
   if(path==="people/role")return canManagePeople;
@@ -1198,6 +1204,28 @@ function submit(){
     sending=false;el("decide-submit").disabled=false;
     fail(said(answer),answer.status===409);
   },function(){if(generation!==accessGeneration){sending=false;return;}sending=false;el("decide-submit").disabled=false;fail(COPY.unavailable,false);});
+}
+
+/* ---------- Retrying a blocked browser and API round ---------- */
+var retryButton=el("retry-application"),retryId=null,retrying=false;
+function retryFail(text){var node=el("retry-error");if(node){node.textContent=text;node.hidden=false;}var status=el("retry-status");if(status)status.textContent="";retrying=false;if(retryButton)retryButton.disabled=false;}
+if(retryButton&&canRetry){
+  retryButton.hidden=false;
+  retryButton.addEventListener("click",function(){
+    if(retrying||stopped||!canRead)return;
+    /* The same press again keeps its ID, so the broker treats it as a replay. */
+    if(retryId===null)retryId=uuid();
+    retrying=true;retryButton.disabled=true;
+    var failure=el("retry-error");if(failure)failure.hidden=true;
+    var status=el("retry-status");if(status)status.textContent=COPY.retrying;
+    var generation=accessGeneration;
+    call("POST","retry",{requestId:retryId,expectedRevision:revision}).then(function(answer){
+      if(generation!==accessGeneration){retrying=false;return;}
+      if(answer.status===200){if(status)status.textContent=COPY.retried;location.reload();return;}
+      if(answer.status===409)retryId=null;
+      retryFail(said(answer));
+    },function(){if(generation!==accessGeneration){retrying=false;return;}retryFail(COPY.unavailable);});
+  });
 }
 
 /* ---------- People changes: server-made proposals and explicit confirmation ---------- */

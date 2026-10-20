@@ -3,6 +3,7 @@
 // No module-level state and no environment reads, so the reconciler can load it without the broker's.
 import { createHmac, randomUUID } from "node:crypto";
 import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import type { StoredCandidateBuildSource } from "./candidate-build-source.js";
 import {
   OperationSchema,
   agentXError,
@@ -49,9 +50,13 @@ export interface OperationRecord extends Operation {
   chatgptThread?: { teamId: string; channelId: string; threadTs: string };
   workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | undefined;
   candidateSourceRef?: { key: string; sha256: string; byteLength: number; candidateDigest: string };
+  /** The build source manifest the worker exported for that candidate, or why there is none (see StoredCandidateBuildSourceSchema); absent when the worker sent nothing. */
+  candidateBuildSource?: StoredCandidateBuildSource;
   workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } | undefined;
   /** A PR feedback review started by a broker that gives the critic only the owner's notes for its round (absent: an earlier release's run). */
   feedbackNotesScoped?: true;
+  /** A planning run that was asked for the schema-v2 application plan (absent: it was not, so a v2 plan from it is refused). */
+  workflowE2EPlanVersion?: 2;
   publication?: {
     repository: string;
     repositoryUrl: string;
@@ -108,7 +113,7 @@ export interface CallbackClaims {
   workspaceId: string;
   operationId: string;
   fence: number;
-  actions: Array<"events" | "artifacts" | "result" | "candidate-export" | "e2e-admission" | "e2e-evidence" | "feedback-bundles" | "feedback-approval" | "pull-request" | "pull-request-update" | "codebuild" | "chatgpt-token" | "chatgpt-status">;
+  actions: Array<"events" | "artifacts" | "result" | "candidate-export" | "candidate-build-source" | "e2e-admission" | "e2e-evidence" | "feedback-bundles" | "feedback-approval" | "pull-request" | "pull-request-update" | "codebuild" | "chatgpt-token" | "chatgpt-status">;
   expiresAt: number;
 }
 
@@ -220,7 +225,7 @@ export function issueCapability(
       "artifacts",
       "events",
       "result",
-      ...(allowCandidateExport ? ["candidate-export" as const] : []),
+      ...(allowCandidateExport ? ["candidate-export" as const, "candidate-build-source" as const] : []),
       ...(allowWorkflowE2E ? ["e2e-admission" as const, "e2e-evidence" as const] : []),
       ...(allowFeedbackBundles ? ["feedback-bundles" as const] : []),
       ...(allowFeedbackApproval ? ["feedback-approval" as const] : []),
