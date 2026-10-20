@@ -124,7 +124,7 @@ export async function maintainPullRequest(options: {
       workspaceTree = (await git(repositoryPath, ["write-tree"])).trim();
     } else {
       // In a temporary index, as the reviewed tree was computed, so the real index is untouched.
-      workspaceTree = await temporaryIndexTree({ directory: repositoryPath, env: await gitHardenedEnvironment(repositoryPath) });
+      workspaceTree = await temporaryIndexTree({ directory: repositoryPath });
       if (workspaceTree !== reviewedTree) throw agentXError("CONFIG_INVALID", WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE);
     }
     const publishedTree = (await git(repositoryPath, ["rev-parse", `${remoteHead}^{tree}`])).trim();

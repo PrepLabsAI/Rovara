@@ -151,14 +151,14 @@ describe("worker git calls on a candidate repository never honour its repo-local
     await writeFile(join(box.directory, "tracked.txt"), "changed\n");
     const [captured] = await readCandidateRepositories(inputOf(box));
     process.env.SHIM_INJECT = "filter";
-    const tree = await temporaryIndexTree({ directory: box.directory, env: {} });
+    const tree = await temporaryIndexTree({ directory: box.directory });
     expect(await fired(box)).toEqual([]);
     // The same tree capture computes, apart from the .gitattributes file this test's injection adds to the work tree.
     expect(tree).toMatch(/^[a-f0-9]{40}$/);
     expect(tree).not.toBe(captured?.treeSha);
     delete process.env.SHIM_INJECT;
     await rm(join(box.directory, ".gitattributes"));
-    expect(await temporaryIndexTree({ directory: box.directory, env: {} })).toBe(captured?.treeSha);
+    expect(await temporaryIndexTree({ directory: box.directory })).toBe(captured?.treeSha);
   });
 
   it("does not run a filter that arrives through include.path after the worker looked at the config", async () => {
@@ -409,5 +409,100 @@ describe("honest repositories give the same trees, commits and exports as plain 
     await writeFile(join(box.directory, ".git", "index.lock"), "");
     await expect(commitCandidateWorktree(inputOf(box))).rejects.toThrow(/could not be safely committed/);
     expect(await git(box.directory, "rev-parse", "HEAD")).toBe(head);
+  });
+});
+
+describe("fix round 1: the worker's own ref writer, excludesFile, locks", () => {
+  /** Every file (not directory) under `root`, relative. */
+  async function filesUnder(root: string, prefix = ""): Promise<string[]> {
+    const found: string[] = [];
+    for (const entry of await readdir(join(root, prefix), { withFileTypes: true })) {
+      const path = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      if (entry.isDirectory()) found.push(...await filesUnder(root, path));
+      else found.push(path);
+    }
+    return found.sort();
+  }
+  /** Moves `.git/<relative>` out of the repository and leaves a symlink to it. */
+  async function relocate(box: Sandbox, relative: string): Promise<string> {
+    const outside = join(box.root, `outside-${randomUUID()}`);
+    await rename(join(box.directory, ".git", relative), outside);
+    await symlink(outside, join(box.directory, ".git", relative));
+    return outside;
+  }
+  async function refusesAndTouchesNothing(box: Sandbox, outside: string): Promise<void> {
+    const before = await filesUnder(outside);
+    await writeFile(join(box.directory, "tracked.txt"), "changed\n");
+    await expect(commitCandidateWorktree(inputOf(box))).rejects.toThrow();
+    await expect(readCandidateRepositories(inputOf(box))).rejects.toThrow(/not a readable Git worktree/);
+    expect(await filesUnder(outside)).toEqual(before);
+    await expect(readFile(join(box.directory, ".git", "index.lock"))).rejects.toThrow();
+  }
+
+  it("refuses a symlinked .git/refs and writes nothing through it", async () => {
+    const box = await sandbox();
+    await git(box.directory, "pack-refs", "--all");
+    await refusesAndTouchesNothing(box, await relocate(box, "refs"));
+  });
+
+  it("refuses a symlinked .git/refs/heads and writes nothing through it", async () => {
+    const box = await sandbox();
+    await git(box.directory, "pack-refs", "--all");
+    await refusesAndTouchesNothing(box, await relocate(box, join("refs", "heads")));
+  });
+
+  it("refuses a symlinked intermediate directory under refs/heads/feature/", async () => {
+    const box = await sandbox();
+    await git(box.directory, "checkout", "--quiet", "-b", "feature/deep/x");
+    await git(box.directory, "pack-refs", "--all");
+    const feature = join(box.directory, ".git", "refs", "heads", "feature");
+    await rm(feature, { recursive: true, force: true });
+    const outside = join(box.root, "outside-deep");
+    await mkdir(join(outside, "deep"), { recursive: true });
+    await symlink(outside, feature);
+    await refusesAndTouchesNothing(box, outside);
+  });
+
+  it("refuses a candidate whose own config sets core.excludesFile, and says why", async () => {
+    const box = await sandbox();
+    await writeFile(join(box.root, "ignore-list"), "*.secret\n");
+    await git(box.directory, "config", "core.excludesFile", join(box.root, "ignore-list"));
+    await writeFile(join(box.directory, "a.secret"), "x\n");
+    const refusal = await readCandidateRepositories(inputOf(box)).then(() => undefined, (error: unknown) => error);
+    expect(refusal).toMatchObject({ code: "CONFIG_INVALID" });
+    expect((refusal as Error).message).toMatch(/core\.excludesFile/);
+    await expect(commitCandidateWorktree(inputOf(box))).rejects.toThrow(/core\.excludesFile/);
+    await expect(candidateUnchangedSinceBase(inputOf(box, "a".repeat(40)), [{ repositoryId: "payments", commitSha: "b".repeat(40), treeSha: "c".repeat(40), baseCommitSha: "a".repeat(40) }])).rejects.toThrow(/core\.excludesFile/);
+  });
+
+  it("names the stale lock file a crash left on the branch ref", async () => {
+    const box = await sandbox();
+    const branch = await git(box.directory, "symbolic-ref", "HEAD");
+    const lock = join(box.directory, ".git", `${branch}.lock`);
+    await writeFile(lock, "");
+    await writeFile(join(box.directory, "tracked.txt"), "changed\n");
+    await expect(commitCandidateWorktree(inputOf(box))).rejects.toThrow(lock);
+    await expect(readFile(join(box.directory, ".git", "index.lock"))).rejects.toThrow();
+  });
+
+  it("takes HEAD's lock when HEAD is symbolic, so a concurrent checkout cannot move the branch underneath", async () => {
+    const box = await sandbox();
+    const head = await git(box.directory, "rev-parse", "HEAD");
+    const lock = join(box.directory, ".git", "HEAD.lock");
+    await writeFile(lock, "");
+    await writeFile(join(box.directory, "tracked.txt"), "changed\n");
+    await expect(commitCandidateWorktree(inputOf(box))).rejects.toThrow(lock);
+    expect(await git(box.directory, "rev-parse", "HEAD")).toBe(head);
+    await expect(readFile(join(box.directory, ".git", "index.lock"))).rejects.toThrow();
+  });
+
+  it("leaves no lock file behind after a successful commit, symbolic or detached", async () => {
+    for (const detach of [false, true]) {
+      const box = await sandbox();
+      if (detach) await git(box.directory, "checkout", "--quiet", "--detach");
+      await writeFile(join(box.directory, "tracked.txt"), "changed\n");
+      await commitCandidateWorktree(inputOf(box));
+      expect((await filesUnder(join(box.directory, ".git"))).filter((path) => path.endsWith(".lock"))).toEqual([]);
+    }
   });
 });
