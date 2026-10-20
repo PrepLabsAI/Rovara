@@ -1,11 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
-  WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey, readCanonicalPlan, deriveE2ESyntheticRuntimeAccountRef, portableOperationId, type E2EApplicationPlanIntent,
-  e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup, selectE2EApplicationExecutionPlan,
-  type E2EPolicy, type E2EScenario, type E2ESourceSnapshot,
+  E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, createCandidateManifest,
+  WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey, readCanonicalPlan, portableOperationId, type E2EApplicationPlanIntent,
+  selectE2EApplicationExecutionPlan,
+  type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import { deriveE2EApplicationFeatureExecutionSelection } from "../../packages/broker/src/e2e/application-feature-plan-intent.js";
 import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
@@ -21,94 +20,9 @@ import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/de
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
 import { call, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
+import { NOW, PROFILE, apiSnapshot, approvedSetup, binding, contractSnapshot, csvScenario, inferredSnapshot, ordersContractManifest, planFixture, sha, shaCanonical, snapshotOf, webAndApiFixture, webApiRow,
+  type PlanInput } from "../support/e2e-application-plan-fixtures.js";
 
-const PROFILE = WEB_API_RUNTIME_PROFILE_ID;
-// The broker reads the clock itself, so the rows are valid around the real current time.
-const NOW = Date.now();
-const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
-const shaCanonical = (value: unknown) => sha(canonicalJson(value));
-const ordersContractManifest = readFileSync(new URL("../fixtures/e2e-web-api-app/package.json", import.meta.url), "utf8");
-const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
-  subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef" }], volumeSizeGiB: 32, volumeType: "gp3" as const };
-
-/** One v2 catalog row of the qualified profile, carrying the real registered capability descriptor of its kind. */
-function webApiRow(kind: "web" | "api", overrides: Record<string, unknown> = {}, editCapabilities: (value: ReturnType<typeof webApiRuntimeCapabilities>) => ReturnType<typeof webApiRuntimeCapabilities> = (value) => value) {
-  const capabilities = editCapabilities(webApiRuntimeCapabilities(kind, "a".repeat(64)));
-  const capabilityDigest = e2eRuntimeCapabilityDigest(capabilities);
-  const runnerEnvironment = { ci: true as const, trustNoticeShown: false as const, os: "linux 6.8.0", arch: "arm64", runtime: "node v22.23.2" };
-  const runnerToolchain = { execPath: "/opt/node/bin/node", version: "v22.23.2" as const, platform: "linux", arch: "arm64" };
-  const probeBody = { schemaVersion: "e2e-runtime-probe-manifest/v1" as const, profileId: PROFILE, capabilityDigest,
-    runtimeManifestDigest: capabilities.runtimeManifestDigest, suiteDigest: "c".repeat(64), fixtureRefs: [{ path: "fixtures/smoke.json", sha256: "d".repeat(64) }],
-    positiveProbeIds: ["web-csv-positive"], negativeProbeIds: ["web-csv-negative"] };
-  return E2ERegisteredRuntimeSchema.parse({ schemaVersion: 2, entityType: "E2E_FEATURE_VERIFIER", runtimeCatalogId: "catalog", catalogRevision: 3,
-    profileId: PROFILE, generation: 4, binding, bindingDigest: shaCanonical(binding), endpoint: "http://10.0.0.8:8080",
-    transportCorrelationId: "11111111-1111-4111-8111-111111111111", manifestDigest: capabilities.runtimeManifestDigest,
-    runnerEnvironment, runnerEnvironmentDigest: shaCanonical(runnerEnvironment), runnerToolchain, runnerToolchainDigest: shaCanonical(runnerToolchain),
-    capabilities, capabilityDigest, probeManifest: { ...probeBody, manifestDigest: shaCanonical(probeBody) },
-    qualificationEvidenceRef: { key: "runtime-evidence/qual-4.json", sha256: "e".repeat(64), byteLength: 128 },
-    state: "READY", qualifiedAt: new Date(NOW - 60_000).toISOString(), expiresAt: new Date(NOW + 3_600_000).toISOString(), ...overrides });
-}
-
-function snapshotOf(contents: Record<string, string>): E2ESourceSnapshot {
-  const candidate = createCandidateManifest([{ repositoryId: "example/demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
-  const sources = Object.entries(contents).map(([path, text]) => ({ path, sha256: sha(text), bytes: Buffer.from(text), kind: "blob" as const }));
-  return { candidate, commitSha: "a".repeat(40), treeSha: "b".repeat(40), treeComplete: true, treePaths: sources.map((source) => source.path), sources };
-}
-/** The orders fixture: its package.json carries the agentx.e2e project contract (the explicit launch recipe). */
-const contractSnapshot = snapshotOf({ "package.json": ordersContractManifest });
-/** A web package with a start script and a lockfile: discovery infers its launch recipe; there is no project contract. */
-const inferredSnapshot = snapshotOf({ "package.json": JSON.stringify({ name: "shop-web", scripts: { start: "node server.js" } }), "package-lock.json": "{}" });
-
-/** The same project contract on an API package: discovery proposes an API target for it. */
-const apiSnapshot = (() => {
-  const manifest = JSON.parse(ordersContractManifest) as { name: string; agentx: { e2e: Record<string, unknown> } };
-  return snapshotOf({ "package.json": JSON.stringify({ ...manifest, name: "@acme/orders-api", dependencies: { express: "4.0.0" },
-    agentx: { e2e: { ...manifest.agentx.e2e, targetAccounts: [] } } }) });
-})();
-
-const csvScenario: E2EScenario = { scenarioId: "export-csv", requirementId: "orders-export", requestedTargetIds: ["web-1"], required: true,
-  accountProfileId: "synthetic", minimumEvidence: "runtime", requiredRealComponentIds: [],
-  steps: [{ kind: "navigate", path: "/orders" }, { kind: "click", testId: "export-csv" }],
-  assertions: [{ kind: "csv", downloadName: "orders.csv", columns: ["id", "total"], rows: [["1", "10"]] }] };
-
-type Ready = ReadonlyArray<{ kind: "web" | "api"; profileId: string }>;
-/** Approved setup proposal and the project policy derived from it, exactly as the setup-proposals route builds them. */
-function approvedSetup(snapshot: E2ESourceSnapshot, readyProfiles: Ready, onlyTargetIds?: readonly string[]) {
-  const inspection = inspectE2ERepository(snapshot, snapshot.candidate).inspection;
-  const proposal = proposeE2ESetup({ inspection, snapshot, expectedCandidate: snapshot.candidate, readyProfiles });
-  const policy: E2EPolicy = E2EPolicySchema.parse({ schemaVersion: 1, policyRevision: 1, executionMode: "trusted-scenarios", baselineScenarioIds: [],
-    targets: proposal.targets.filter((target) => onlyTargetIds === undefined || onlyTargetIds.includes(target.targetId)), defaultSandboxProfileId: "default-sandbox", fallback: "mock-unconnected", modelRouteRevision: null,
-    capture: { screenshots: false, traces: false, video: false, downloads: false },
-    limits: { runTimeoutMs: 60_000, startupTimeoutMs: 10_000, preparationTimeoutMs: 10_000, caseTimeoutMs: 10_000, maxActionsPerCase: 10,
-      maxModelRequests: 1, maxInputTokens: 1, maxOutputTokens: 1, maxSpendUsd: null } });
-  return { inspection, proposal, policy, setupApproval: { artifactId: "setup", digest: shaCanonical(proposal) } };
-}
-
-type PlanInput = { snapshot?: E2ESourceSnapshot; scenario?: E2EScenario; targetId?: string; setupReady?: Ready; planRuntimeProfileId?: string; executable?: boolean;
-  registeredRuntimes?: ReturnType<typeof webApiRow>[]; modelRouteRevision?: string; accountRef?: { revision?: number; definitionDigest?: string }; sourceSha?: string };
-
-/** The approved setup, policy and v2 intent for one scenario on one target, as the selection facade and the approval evaluation both take them. */
-function planFixture(input: PlanInput) {
-  const snapshot = input.snapshot ?? contractSnapshot;
-  const scenario = input.scenario ?? csvScenario;
-  const setup = approvedSetup(snapshot, input.setupReady ?? [{ kind: "web", profileId: PROFILE }]);
-  const target = setup.proposal.targets.find((item) => item.targetId === (input.targetId ?? "web-1"))!;
-  const application = setup.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
-  const refs = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths)
-    .map((ref) => (input.sourceSha === undefined ? ref : { ...ref, sha256: input.sourceSha }));
-  const executable = input.executable ?? true;
-  const accountRef = { ...(application.recipe === null ? { applicationId: application.applicationId, profileId: target.accountProfileId, revision: 1, definitionDigest: "2".repeat(64) }
-    : deriveE2ESyntheticRuntimeAccountRef({ applicationId: application.applicationId, accountProfileId: target.accountProfileId, recipeDigest: application.recipe.recipeDigest })), ...input.accountRef };
-  const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [], mockFixtureRefs: [],
-    accountContextRefs: [{ applicationId: application.applicationId, profileId: target.accountProfileId, sourcePath: "package.json", sourceSha256: refs.find((ref) => ref.path === "package.json")!.sha256 }],
-    scenarios: [scenario], semanticExportDeltas: [],
-    applicationRuntimeRefs: executable ? [{ targetId: target.targetId, applicationId: application.applicationId, recipeDigest: application.recipe!.recipeDigest,
-      sourceRefs: refs, runtimeProfileId: input.planRuntimeProfileId ?? target.runtimeProfileId, accountProfileId: target.accountProfileId }] : [],
-    runtimeAccountRefs: executable ? [accountRef] : [],
-    unavailableTargetRefs: executable ? [] : [{ targetId: target.targetId, applicationId: application.applicationId, accountProfileId: target.accountProfileId, sourceRefs: refs }] });
-  return { snapshot, scenario, setup, target, application, intent, accountRef, executable,
-    policy: { ...setup.policy, baselineScenarioIds: [scenario.scenarioId], modelRouteRevision: input.modelRouteRevision ?? null } };
-}
 
 /** Runs the production selection facade for one web scenario against the approved setup. */
 function plan(input: PlanInput) {
@@ -388,40 +302,13 @@ describe("approval refusals the first round left untested", () => {
 
 describe("one runtime kind per application plan (Ruling BF)", () => {
   const BF_REASON = "one runtime kind per plan in M1.2";
-  const apiScenario: E2EScenario = { scenarioId: "orders-health", requirementId: "orders-api", requestedTargetIds: [], required: true, accountProfileId: "synthetic", minimumEvidence: "runtime",
-    requiredRealComponentIds: [], steps: [{ kind: "request", requestId: "health", path: "/health", method: "GET", body: {} }], assertions: [{ kind: "http-status", path: "/health", method: "GET", equals: 200 }] };
-  /** A repository with a web application and an API application that both carry the orders project contract, both approved on the qualified profile. */
-  function bothKinds() {
-    const manifest = JSON.parse(ordersContractManifest) as { name: string; agentx: { e2e: Record<string, unknown> } };
-    const snapshot = snapshotOf({ "package.json": ordersContractManifest,
-      "api/package.json": JSON.stringify({ ...manifest, name: "@acme/orders-api", dependencies: { express: "4.0.0" }, agentx: { e2e: { ...manifest.agentx.e2e, targetAccounts: [] } } }) });
-    const setup = approvedSetup(snapshot, [{ kind: "web", profileId: PROFILE }, { kind: "api", profileId: PROFILE }]);
-    const web = setup.proposal.targets.find((item) => item.targetId === "web-1")!;
-    const api = setup.proposal.targets.find((item) => item.kind === "api")!;
-    const ref = (target: typeof web) => {
-      const application = setup.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
-      const sourceRefs = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths);
-      return { application, sourceRefs, runtime: { targetId: target.targetId, applicationId: application.applicationId, recipeDigest: application.recipe!.recipeDigest, sourceRefs,
-        runtimeProfileId: target.runtimeProfileId, accountProfileId: target.accountProfileId },
-      account: deriveE2ESyntheticRuntimeAccountRef({ applicationId: application.applicationId, accountProfileId: target.accountProfileId, recipeDigest: application.recipe!.recipeDigest }) };
-    };
-    const policy = { ...setup.policy, baselineScenarioIds: [csvScenario.scenarioId, apiScenario.scenarioId] };
-    const scenarios = [{ ...csvScenario, requestedTargetIds: [web.targetId], accountProfileId: web.accountProfileId }, { ...apiScenario, requestedTargetIds: [api.targetId], accountProfileId: api.accountProfileId }];
-    const build = (executable: { web: boolean; api: boolean }) => {
-      const refs = { web: ref(web), api: ref(api) };
-      return E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [web.targetId, api.targetId], portableOperationRefs: [], mockFixtureRefs: [],
-        accountContextRefs: (["web", "api"] as const).map((kind) => ({ applicationId: refs[kind].application.applicationId, profileId: (kind === "web" ? web : api).accountProfileId,
-          sourcePath: refs[kind].sourceRefs[0]!.path, sourceSha256: refs[kind].sourceRefs[0]!.sha256 })),
-        scenarios, semanticExportDeltas: [],
-        applicationRuntimeRefs: (["web", "api"] as const).filter((kind) => executable[kind]).map((kind) => refs[kind].runtime),
-        runtimeAccountRefs: (["web", "api"] as const).filter((kind) => executable[kind]).map((kind) => refs[kind].account),
-        unavailableTargetRefs: (["web", "api"] as const).filter((kind) => !executable[kind]).map((kind) => ({ targetId: (kind === "web" ? web : api).targetId,
-          applicationId: refs[kind].application.applicationId, accountProfileId: (kind === "web" ? web : api).accountProfileId, sourceRefs: refs[kind].sourceRefs })) });
-    };
-    const run = (intent: E2EApplicationPlanIntent) => evaluateApplicationPlanApproval({ intent, taskId: TASK_ID, artifact: APPROVED_ARTIFACT, snapshot, setupProposal: setup.proposal,
-      setupApproval: setup.setupApproval, policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: NOW });
-    return { snapshot, setup, policy, build, run, web, api };
-  }
+  const bothKinds = () => {
+    const fixture = webAndApiFixture();
+    const run = (intent: E2EApplicationPlanIntent) => evaluateApplicationPlanApproval({ intent, taskId: TASK_ID, artifact: APPROVED_ARTIFACT, snapshot: fixture.snapshot,
+      setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
+      runtimeCatalogId: "catalog", runtimeBinding: binding, now: NOW });
+    return { ...fixture, run };
+  };
 
   it("refuses an intent whose executable targets span web and api, saying why", () => {
     const fixture = bothKinds();
