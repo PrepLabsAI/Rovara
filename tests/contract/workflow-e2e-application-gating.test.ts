@@ -1,12 +1,13 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { combineE2EVerdicts, type E2EVerdict } from "../../packages/broker/src/e2e/verdict.js";
-import { expectedApplicationAssertionAssets, verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/broker/src/e2e/application-evidence.js";
+import { applicationEvidenceLimits, expectedApplicationAssertionAssets, verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/broker/src/e2e/application-evidence.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { aggregateEvidenceEnvelope, createApplicationEvidenceFixture, groupEvidenceEnvelope, type ApplicationEvidenceFixture } from "../support/e2e-application-evidence-fixture.js";
 import { canonicalJson } from "@agentx/contracts";
 import { e2eApplicationStateProbeManifestDigest, installedE2EApplicationStateProbeAsset } from "../../packages/verifier/src/application-state-probes.js";
 import { createPortableApplicationChildFixture } from "../support/e2e-application-fixture.js";
+import { e2eApplicationPrivateTransferMaxBytes } from "@agentx/verifier";
 
 // The broker's side of an application round: it never reads the worker's verdict, but recompiles, recollects and requalifies from the uploaded
 // raw evidence. Every group here is genuinely collected by the real collector from a real probe admission.
@@ -117,6 +118,26 @@ describe("verifying an application round's evidence", () => {
       expect(result.reason).toMatch(/aggregate/u);
       // The groups are still re-collected, for display.
       expect(result.groups).toHaveLength(1);
+    }
+  });
+
+  it("shows no group's result as passed or failed while the round is not complete: without the aggregate, or when the operation did not end successfully", async () => {
+    for (const config of [PASSING, FAILING]) {
+      const passing = config === PASSING;
+      const round = await roundOf(config);
+      expect(verifyApplicationE2EEvidence(round.input()).results[0]?.status).toBe(passing ? "passed" : "failed");
+      // A failing group's FAILED stands once the aggregate is there, whatever became of the operation; what is shown stays unavailable until the round is complete.
+      const incomplete: Array<[ApplicationEvidenceInput, E2EVerdict]> = [
+        [round.input({ aggregate: undefined, terminalStatus: undefined }), "UNKNOWN"],
+        [round.input({ terminalStatus: undefined }), passing ? "UNKNOWN" : "FAILED"],
+        [round.input({ terminalStatus: "FAILED" }), passing ? "UNKNOWN" : "FAILED"],
+      ];
+      for (const [input, verdict] of incomplete) {
+        const result = verifyApplicationE2EEvidence(input);
+        expect(result.verdict).toBe(verdict);
+        expect(result.results).toHaveLength(1);
+        expect(result.results[0]).toMatchObject({ status: "unavailable", reason: "application-round-not-complete" });
+      }
     }
   });
 
@@ -396,6 +417,19 @@ describe("the approved assertion assets are the installed ones, byte for byte (R
       expect(refused.ok).toBe(false);
       if (!refused.ok) expect(refused.reason).toMatch(/not installed/u);
     }
+  });
+});
+
+describe("how much evidence a group and the round may carry", () => {
+  it("is the worker's ceiling for a group (the application transfer bound is far above it), and the sum of the groups' for the aggregate", async () => {
+    const round = await roundOf(PASSING);
+    const limits = applicationEvidenceLimits(round.admission);
+    expect([...limits.byGroup.keys()]).toEqual([round.fixture.runId]);
+    expect(limits.byGroup.get(round.fixture.runId)).toBe(26_214_400);
+    expect(limits.aggregate).toBe(26_214_400);
+    // Never above the transfer bound of the group's own cases and shards.
+    const binding = round.admission.groups[0]!;
+    expect(limits.byGroup.get(round.fixture.runId)!).toBeLessThanOrEqual(e2eApplicationPrivateTransferMaxBytes(binding.outerBinding.expectedCases.length, binding.protocol === "trusted-e2e-application/v1" ? binding.shards.length : 1));
   });
 });
 

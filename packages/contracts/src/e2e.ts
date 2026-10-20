@@ -220,12 +220,19 @@ export const E2EWorkflowAdmissionRefSchema = z.object({
   }).strict(),
 }).strict();
 export type E2EWorkflowAdmissionRef = z.infer<typeof E2EWorkflowAdmissionRefSchema>;
-export const E2EWorkflowEvidenceRefSchema = z.object({ key: z.string().regex(/^workflow-e2e-evidence\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest, byteLength: positiveInt.max(24 * 1024 * 1024) }).strict();
+/**
+ * The most evidence one group of an application round may carry: the worker's own ceiling for a group's upload (the application transfer bound,
+ * `e2eApplicationPrivateTransferMaxBytes`, is far higher, so this is what binds). The broker accepts exactly what the worker may send.
+ */
+export const E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES = 26_214_400;
+/** An application round has at most four groups, and its aggregate holds each group's run once, so it is at most four groups' ceilings. */
+export const E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES = 4 * E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES;
+export const E2EWorkflowEvidenceRefSchema = z.object({ key: z.string().regex(/^workflow-e2e-evidence\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest, byteLength: positiveInt.max(E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES) }).strict();
 export type E2EWorkflowEvidenceRef = z.infer<typeof E2EWorkflowEvidenceRefSchema>;
 export const E2EWorkflowGroupEvidenceRefSchema = z.object({
   groupRunId: z.string().uuid(),
   evidenceRef: z.object({ key: z.string().regex(/^workflow-e2e-group-evidence\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest,
-    byteLength: positiveInt.max(24 * 1024 * 1024) }).strict(),
+    byteLength: positiveInt.max(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES) }).strict(),
 }).strict();
 export type E2EWorkflowGroupEvidenceRef = z.infer<typeof E2EWorkflowGroupEvidenceRefSchema>;
 

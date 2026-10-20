@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { E2E_HARD_LIMITS, canonicalJson, type E2EApplicationBuildSourceManifest, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
+import { E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2E_HARD_LIMITS, canonicalJson, type E2EApplicationBuildSourceManifest, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
   type WorkerInvocation } from "@agentx/contracts";
 import { collectE2EApplicationRun, decodeE2EApplicationExecutionAdmission, e2eApplicationPrivateTransferMaxBytes, runIsolatedE2EApplication,
   validateE2EApplicationExecutionAdmission, type DockerApplicationHost, type E2ECompiledApplicationSuite } from "@agentx/verifier";
@@ -10,7 +10,6 @@ import { admittedRepositoryOf, assertBuildSourceBelongsToCandidate, createProces
 
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const MAX_CONCURRENT_APPLICATION_GROUPS = 2;
-const GROUP_EVIDENCE_CEILING_BYTES = 26_214_400;
 /** What a group that never reached a trustworthy result keeps of the host's redacted logs, per log. */
 const DIAGNOSTIC_TAIL_BYTES = 16 * 1024;
 const RUN_SEED_PROFILE_DIGEST = sha("rovara-docker-run-seed/v1");
@@ -119,7 +118,7 @@ export async function executeWorkflowE2EApplicationChecks(input: {
     input.throwIfCancelled();
 
     const collect = runtime.collect ?? collectE2EApplicationRun;
-    const groupLimit = (suite: E2ECompiledApplicationSuite) => Math.min(GROUP_EVIDENCE_CEILING_BYTES, e2eApplicationPrivateTransferMaxBytes(suite.expectedCases.length, suite.shards.length));
+    const groupLimit = (suite: E2ECompiledApplicationSuite) => Math.min(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, e2eApplicationPrivateTransferMaxBytes(suite.expectedCases.length, suite.shards.length));
     const runGroup = async (index: number): Promise<{ groupRun: Record<string, unknown>; succeeded: boolean }> => {
       const compiled = validated.applicationSuites[index]!;
       const groupAdmission = admission.groups.find((item) => item.outerBinding.groupId === compiled.group.groupId);

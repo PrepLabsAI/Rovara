@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { canonicalJson, e2ePlanHasCompleteRequiredCriteria, type E2EExecutionPlan, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
+import { E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, canonicalJson, e2ePlanHasCompleteRequiredCriteria, type E2EApplicationExecutionAdmission, type E2EExecutionPlan, type E2ERound,
+  type E2EQualifiedResult } from "@agentx/contracts";
 import { createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
-  e2eApplicationAggregateRunUsage, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
+  e2eApplicationAggregateRunUsage, e2eApplicationPrivateTransferMaxBytes, installedE2EApplicationStateProbeAsset, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
   type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { combineE2EVerdicts, type E2EVerdict } from "./verdict.js";
 
@@ -27,6 +28,19 @@ export type ApplicationEvidenceInput = Readonly<{
   /** How the CHECKS operation ended, as recorded or as it is being recorded. Only a SUCCEEDED operation can be PASS. */
   terminalStatus: "SUCCEEDED" | "FAILED" | undefined;
 }>;
+
+/**
+ * What a group's evidence, and the round's aggregate, may weigh: the worker's own ceilings, so the broker accepts and reads exactly what the worker may send. A group's is
+ * bounded by the application transfer bound of its cases and shards and by the group ceiling; the aggregate holds every group's run once, so it is the sum.
+ */
+export function applicationEvidenceLimits(admission: Pick<E2EApplicationExecutionAdmission, "groups">): { byGroup: ReadonlyMap<string, number>; aggregate: number } {
+  const byGroup = new Map<string, number>();
+  for (const group of admission.groups) {
+    byGroup.set(group.outerBinding.runId, Math.min(E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES,
+      e2eApplicationPrivateTransferMaxBytes(group.outerBinding.expectedCases.length, group.protocol === "trusted-e2e-application/v1" ? group.shards.length : 1)));
+  }
+  return { byGroup, aggregate: [...byGroup.values()].reduce((total, limit) => total + limit, 0) };
+}
 
 export type ApplicationGroupVerification = Readonly<{ runId: string; groupId: string; verdict: E2EVerdict; reason: string }>;
 export type ApplicationEvidenceVerification = Readonly<{
@@ -106,17 +120,21 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
     if (aggregateRuns !== undefined && !same([...aggregateRuns.keys()].sort(), [...runIds].sort())) refuse("the aggregate does not cover the admitted groups exactly once");
 
     const combined = combineE2EVerdicts(groups.map((group) => group.verdict));
+    // What is shown of the groups is held to the same rule as the verdict: without the round's aggregate and a successful end of the operation, no group's result is
+    // authoritative, so none is shown as passed or failed (a group's result with nothing but its own upload behind it is a claim in flight).
+    const authoritative = aggregateRuns !== undefined && input.terminalStatus === "SUCCEEDED";
+    const shown = authoritative ? results : results.map((result): E2EQualifiedResult => ({ ...result, status: "unavailable", reason: "application-round-not-complete" }));
     const reasonOf = (verdict: E2EVerdict) => groups.filter((group) => group.verdict === verdict).map((group) => `${group.groupId}: ${group.reason}`).join("; ");
     if (aggregateRuns === undefined) {
-      return { verdict: "UNKNOWN", reason: "the round's aggregate evidence has not been accepted, so no group result is authoritative", plan, round, groups, results };
+      return { verdict: "UNKNOWN", reason: "the round's aggregate evidence has not been accepted, so no group result is authoritative", plan, round, groups, results: shown };
     }
-    if (combined === "FAILED") return { verdict: "FAILED", reason: reasonOf("FAILED"), plan, round, groups, results };
-    if (combined !== "PASS") return { verdict: "UNKNOWN", reason: reasonOf("UNKNOWN"), plan, round, groups, results };
+    if (combined === "FAILED") return { verdict: "FAILED", reason: reasonOf("FAILED"), plan, round, groups, results: shown };
+    if (combined !== "PASS") return { verdict: "UNKNOWN", reason: reasonOf("UNKNOWN"), plan, round, groups, results: shown };
     if (input.terminalStatus !== "SUCCEEDED") {
-      return { verdict: "UNKNOWN", reason: input.terminalStatus === undefined ? "the CHECKS operation has not ended" : "the CHECKS operation did not end successfully", plan, round, groups, results };
+      return { verdict: "UNKNOWN", reason: input.terminalStatus === undefined ? "the CHECKS operation has not ended" : "the CHECKS operation did not end successfully", plan, round, groups, results: shown };
     }
-    if (!e2ePlanHasCompleteRequiredCriteria(plan)) return { verdict: "UNKNOWN", reason: "a required criterion has no executable scenario", plan, round, groups, results };
-    return { verdict: "PASS", reason: "every admitted application group was independently re-collected as passing", plan, round, groups, results };
+    if (!e2ePlanHasCompleteRequiredCriteria(plan)) return { verdict: "UNKNOWN", reason: "a required criterion has no executable scenario", plan, round, groups, results: shown };
+    return { verdict: "PASS", reason: "every admitted application group was independently re-collected as passing", plan, round, groups, results: shown };
   } catch (error) {
     const reason = error instanceof Unverifiable ? error.message : `the evidence could not be verified (${error instanceof Error ? error.name : "unknown"})`;
     return { verdict: "UNKNOWN", reason, ...(plan === undefined ? {} : { plan }), ...(round === undefined ? {} : { round }), groups: [], results: [] };
