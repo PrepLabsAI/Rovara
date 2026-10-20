@@ -904,7 +904,7 @@ export function createE2EApplicationCollectionOracleFromCompiledSuite(input: { c
       accountContextId: expected.accountContextId, accountContextDigest: expected.accountContextDigest, assertionDigests: [...expected.assertionDigests], scenario });
   }
   const body = E2EApplicationCollectionOracleSchema.parse({ protocol: "e2e-application-oracle/v1", binding, round, groupId: group.groupId,
-    compiledInventoryDigest: input.compiled.inventory.digest, expectedShardIds: input.compiled.shards.map((item) => item.shardId), expectedCases: input.compiled.expectedCases,
+    compiledInventoryDigest: input.compiled.inventory.digest, expectedShardIds, expectedCases: input.compiled.expectedCases,
     expectedSupervisorReceiptRefs, ownedResourceInventoryDigest: input.ownedResourceInventoryDigest,
     selectionPackets: input.compiled.shards.map((item) => item.selection), compiledShardConfigDigests: input.compiled.shards.map((item) => ({ shardId: item.shardId, configDigest: item.expectedConfigDigest })),
     expectedMockComponentIdsByTarget: [...new Set(input.compiled.shards.map((item) => item.targetId))].map((targetId) => ({ targetId,

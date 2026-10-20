@@ -1,0 +1,235 @@
+import { createHash, randomUUID } from "node:crypto";
+import {
+  E2EApplicationPlanIntentSchema, E2EPolicySchema, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey,
+  type E2EApplicationExecutionAdmission, type E2EScenario, type E2ESourceSnapshot, type E2EWorkflowAdmissionRef, E2EWorkflowAdmissionRefSchema,
+} from "@agentx/contracts";
+import { decodeE2EApplicationExecutionAdmission } from "@agentx/verifier";
+import { buildFeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
+import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
+import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
+import { workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
+import { createDeveloperTaskBroker, MAYA, type Developer } from "./developer-task-broker.js";
+import { createRealCandidate } from "./e2e-application-candidate.js";
+import { call } from "./slack-broker.js";
+import { planAnswer, planDocument } from "./plan-documents.js";
+import type { binding} from "./e2e-application-plan-fixtures.js";
+import { PROFILE, ordersContractManifest, shaCanonical, snapshotOf, webApiRow } from "./e2e-application-plan-fixtures.js";
+import type { E2EApplicationReport } from "../../packages/verifier/src/application-report-schema.js";
+import { collectApplicationGroupEvidence, type ApplicationGroupEvidence, type ObservedApiOutcome } from "./e2e-application-evidence-fixture.js";
+
+/**
+ * A whole application round on the real broker, short of the worker: a project whose repository holds several API applications that carry the orders project
+ * contract, approved on the qualified profile; a v2 plan over all of them; the real dispatch of that plan on a real committed candidate (so the admission is the one the
+ * broker builds); and the callbacks the worker makes (group evidence, the aggregate, the result), with genuinely collected evidence. API applications, because API
+ * evidence can be collected for real without a browser; the broker's verification does not depend on the kind. A group holds at most three targets, so four
+ * applications give two groups of the same kind (three targets and one).
+ */
+export const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
+const CHUNK_BYTES = 64 * 1024;
+export const APPLICATION_NAMES = ["a", "b", "c", "d", "e"] as const;
+
+/** One health-check scenario per target; the observed outcome decides whether it holds. */
+export const healthScenario = (targetId: string, accountProfileId: string, index: number): E2EScenario => ({ scenarioId: `orders-health-${index}`, requirementId: `orders-api-${index}`,
+  requestedTargetIds: [targetId], required: true, accountProfileId, minimumEvidence: "runtime", requiredRealComponentIds: [],
+  steps: [{ kind: "request", requestId: "health", path: "/health", method: "GET", body: {} }], assertions: [{ kind: "http-status", path: "/health", method: "GET", equals: 200 }] });
+
+export function apiApplicationsSnapshot(count: number): { snapshot: E2ESourceSnapshot; tree: Record<string, string> } {
+  const manifest = JSON.parse(ordersContractManifest) as { name: string; agentx: { e2e: Record<string, unknown> } };
+  const tree: Record<string, string> = {};
+  for (const name of APPLICATION_NAMES.slice(0, count)) {
+    tree[`api-${name}/package.json`] = JSON.stringify({ ...manifest, name: `@acme/${name}`, dependencies: { express: "4.0.0" }, agentx: { e2e: { ...manifest.agentx.e2e, targetAccounts: [] } } });
+  }
+  return { snapshot: snapshotOf(tree), tree };
+}
+
+/** The parts of the broker harness a round's tests use, named here so this module's declared types do not depend on the harness's own (unexported) ones. */
+export interface RoundBrokerHarness {
+  db: { get(pk: string, sk: string): Record<string, unknown> | undefined; set(item: Record<string, unknown>): void; delete(pk: string, sk: string): void;
+    find(predicate: (item: Record<string, unknown>) => boolean): Array<Record<string, unknown>>; send: (command: { constructor: { name: string }; input?: unknown }) => Promise<unknown> };
+  s3: { objects: Map<string, string> };
+  brokerInput: unknown;
+  actions: unknown;
+  dev(who: Developer, method: string, path: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }>;
+}
+
+export type RoundOptions = {
+  /** How many API applications the repository holds, one target each (1 to 5). */
+  applications?: number;
+  /** Seeds the CHECKS dispatch with the compute warm-up already done (the default). */
+  seedReadiness?: boolean;
+};
+
+const READY_API = { kind: "api" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedSteps,
+  supportedAssertions: webApiRuntimeCapabilities("api", "a".repeat(64)).supportedAssertions };
+export const apiRowKey = e2eRegisteredRuntimeKey("catalog", PROFILE, "api");
+
+/**
+ * Plans, approves and dispatches one application round, and returns the handles a test needs. The CHECKS operation it starts is the real one: its admission, round and
+ * group run ids are the broker's own; `markRunning` is the only thing the missing worker would have done to it before it uploads.
+ */
+export async function startApplicationRound(options: RoundOptions = {}) {
+  const applications = options.applications ?? 1;
+  const { snapshot, tree } = apiApplicationsSnapshot(applications);
+  const capture = async () => snapshot;
+  const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
+  const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
+  const projectBinding = projectRow().runtimeBinding as typeof binding;
+  harness.db.set({ ...apiRowKey, ...webApiRow("api"), binding: projectBinding, bindingDigest: shaCanonical(projectBinding) });
+  const admin = { subject: "admin-subject", admin: true };
+  const proposalResponse = await call(harness.handler, { method: "POST", path: "/v1/admin/projects/setup-proposals", user: admin, body: { repositoryUrl: "https://github.com/example/demo.git", ref: "main" } });
+  if (proposalResponse.status !== 200) throw new Error(`setup proposal failed: ${JSON.stringify(proposalResponse.body)}`);
+  const proposalRef = String(proposalResponse.body.proposalRef);
+  const proposalSha256 = String(proposalResponse.body.proposalSha256);
+  const approval = await call(harness.handler, { method: "POST", path: "/v1/admin/projects/setup-approvals", user: admin, body: { projectName: "payments", proposalRef, proposalSha256, decision: "approve" } });
+  if (approval.status !== 200) throw new Error(`setup approval failed: ${JSON.stringify(approval.body)}`);
+  const definition = projectRow().definition as Record<string, unknown> & { revision: number };
+  const registration = await call(harness.handler, { method: "POST", path: "/v1/admin/projects", user: admin,
+    body: { definition: { ...definition, revision: definition.revision + 1, e2e: proposalResponse.body.policy }, runtimeBinding: projectRow().runtimeBinding, setupApproval: { proposalRef, proposalSha256, decision: "approve" } } });
+  if (registration.status !== 201) throw new Error(`project registration failed: ${JSON.stringify(registration.body)}`);
+  const policy = E2EPolicySchema.parse(proposalResponse.body.policy);
+
+  const start = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Check the orders services", client: "round-test", workflow: true, workflowPath: "QUICK" });
+  if (start.status !== 200) throw new Error(`task start failed: ${JSON.stringify(start.body)}`);
+  const taskId = String((start.body.task as { taskId: string }).taskId);
+  const taskKey = { pk: `DEVTASK#${taskId}`, sk: "META" };
+  const workspaceId = String((harness.db.get(taskKey.pk, taskKey.sk) as { workspaceId: string }).workspaceId);
+  const operationRows = (match: (row: Record<string, unknown>) => boolean) => harness.db.find((row) => row.pk === `WORKSPACE#${workspaceId}` && row.entityType === "OPERATION" && match(row));
+  const preparation = operationRows((row) => row.kind === "prepare")[0]!;
+  await harness.finish(workspaceId, String(preparation.id), "SUCCEEDED", { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: snapshot.commitSha }] } });
+  const planning = operationRows((row) => row.workflowMode === "PLAN")[0]!;
+
+  const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [READY_API] });
+  if (context.status !== "available") throw new Error(context.reason);
+  const targets = context.targets.filter((item) => item.kind === "api").sort((left, right) => left.targetId.localeCompare(right.targetId));
+  if (targets.length !== applications) throw new Error(`expected ${applications} api targets, found ${targets.length}`);
+  const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: targets.map((item) => item.targetId), portableOperationRefs: [], mockFixtureRefs: [],
+    accountContextRefs: targets.flatMap((target) => context.accountContextRefs.filter((ref) => ref.applicationId === target.applicationId && ref.profileId === target.accountProfileId)),
+    scenarios: targets.map((target, index) => healthScenario(target.targetId, target.accountProfileId, index)), semanticExportDeltas: [],
+    applicationRuntimeRefs: targets.flatMap((target) => context.runtimeRefs!.filter((ref) => ref.targetId === target.targetId).map((ref) => ({ ...ref, recipeDigest: ref.recipeDigest! }))),
+    runtimeAccountRefs: targets.flatMap((target) => context.runtimeAccountRefs!.filter((ref) => ref.applicationId === target.applicationId && ref.profileId === target.accountProfileId)),
+    unavailableTargetRefs: [] });
+  await harness.artifact(workspaceId, String(planning.id), "plan.md", planAnswer(planDocument({ title: "Check the orders services", claims: [{ id: "1", text: "The orders services answer their health checks." }], e2e: intent })));
+  await harness.finish(workspaceId, String(planning.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+
+  const workflowNow = () => (harness.db.get(taskKey.pk, taskKey.sk) as { workflow: { revision: number; stage: string; state: string; blockReason?: string; artifacts: Array<{ sha256: string }>;
+    candidate?: { digest: string }; e2e?: Record<string, unknown> } }).workflow;
+  const approved = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/workflow/decision`, { requestId: randomUUID(), expectedRevision: workflowNow().revision, decision: "APPROVE",
+    reason: "Approve the exact application intent", artifactDigest: workflowNow().artifacts.at(-1)!.sha256 });
+  if (approved.status !== 200) throw new Error(`plan approval failed: ${JSON.stringify(approved.body)}`);
+
+  // The candidate is a real commit whose tree holds the approved applications, exported the way the worker exports one at the end of an IMPLEMENT run.
+  const real = await createRealCandidate({ ...tree, "src/orders.js": "export const orders = [];\n" }, { repositoryId: "demo", baseCommitSha: snapshot.commitSha });
+  const task = harness.db.get(taskKey.pk, taskKey.sk)!;
+  const approvedWorkflow = WorkflowSnapshotSchema.parse(task.workflow);
+  const verifying = WorkflowSnapshotSchema.parse({ ...approvedWorkflow, revision: approvedWorkflow.revision + 1, stage: "VERIFY", state: "WAITING", candidate: real.source.candidate });
+  harness.db.set({ ...task, workflow: verifying });
+  const candidate = real.source.candidate;
+  const readyOperationId = randomUUID();
+  const dispatch = (workflowDispatchItem("state", taskId, verifying.revision, "CHECKS", candidate.digest, new Date().toISOString()) as { Put: { Item: Record<string, unknown> } }).Put.Item;
+  if (options.seedReadiness !== false) dispatch.readinessOperationId = readyOperationId;
+  harness.db.set(dispatch);
+  if (options.seedReadiness !== false) {
+    const marker = { purpose: "workflow-e2e-readiness", taskId, workflowRevision: verifying.revision, candidateDigest: candidate.digest, dispatchSk: dispatch.sk,
+      outboxId: workflowRequestId("agentx-workflow-e2e-readiness-outbox", taskId, verifying.revision, candidate.digest), readyGeneration: 2 };
+    harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${readyOperationId}`, entityType: "OPERATION", id: readyOperationId, workspaceId, kind: "resume", status: "SUCCEEDED", fence: 2,
+      requestId: readyOperationId, payloadHash: "a".repeat(64), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), workflowE2EReadiness: marker });
+  }
+  harness.db.set({ ...workspaceSessionKey(workspaceId), workspaceId, state: "READY", generation: 2 });
+  const creator = harness.db.get(`DEVELOPER#${MAYA.developerId}`, "META");
+  if (creator !== undefined) harness.db.set({ ...creator, entityType: "DEVELOPER" });
+  // The coding run that produced the candidate is over: its operation is done and the workspace is free for the CHECKS operation.
+  for (const operation of operationRows((row) => row.workflowMode === "IMPLEMENT")) harness.db.set({ ...operation, status: "SUCCEEDED" });
+  const { activeOperationId: _active, ...freed } = harness.db.get(`WORKSPACE#${workspaceId}`, "META")!;
+  void _active;
+  harness.db.set({ ...freed, status: "READY" });
+  const exportText = JSON.stringify(real.source);
+  const exportKey = `workflow-candidate-sources/sha256/${sha(exportText)}.json`;
+  harness.s3.objects.set(exportKey, exportText);
+  harness.s3.objects.set(real.stored.manifestRef.key, real.manifestBytes.toString("utf8"));
+  const exportOperationId = randomUUID();
+  const at = new Date(Date.now() + 1000).toISOString();
+  harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${exportOperationId}`, entityType: "OPERATION", id: exportOperationId, workspaceId, kind: "task", workflowMode: "IMPLEMENT", status: "SUCCEEDED",
+    fence: 1, requestId: randomUUID(), payloadHash: "a".repeat(64), createdAt: at, updatedAt: at,
+    candidateSourceRef: { key: exportKey, sha256: sha(exportText), byteLength: Buffer.byteLength(exportText), candidateDigest: candidate.digest }, candidateBuildSource: real.stored });
+  harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `CANDIDATE_EXPORT#${exportOperationId}`, entityType: "WORKFLOW_CANDIDATE_EXPORT", schemaVersion: 1, operationId: exportOperationId,
+    status: "COMPLETE", createdAt: at, buildSource: real.stored });
+
+  const runDispatch = async () => { await harness.handler({ source: "agentx.workflow-dispatch-recovery" }); };
+  await runDispatch();
+  const checksOperations = () => operationRows((row) => row.workflowMode === "CHECKS");
+  const checks = checksOperations();
+  if (checks.length !== 1) throw new Error(`the dispatch started ${checks.length} CHECKS operations: ${workflowNow().blockReason ?? workflowNow().state}`);
+  const operationId = String(checks[0]!.id);
+  const operationNow = () => harness.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`) as Record<string, unknown> & { status: string; fence: number; workflowE2EGroupEvidenceRefs?: unknown[];
+    workflowE2EGroupRunIds?: string[]; workflowE2EEvidenceRef?: { key: string; sha256: string; byteLength: number }; workflowE2EAdmission: E2EWorkflowAdmissionRef };
+  const admissionRef = E2EWorkflowAdmissionRefSchema.parse(operationNow().workflowE2EAdmission);
+  const admissionBytes = harness.s3.objects.get(admissionRef.admissionRef.key)!;
+  const admission: E2EApplicationExecutionAdmission = decodeE2EApplicationExecutionAdmission(admissionBytes);
+  /** What the worker's first callback does to the operation: it is running. */
+  const markRunning = () => harness.db.set({ ...operationNow(), status: "RUNNING" });
+
+  const evidenceCall = (body: unknown, who: { operationId?: string } = {}) => call(harness.handler, {
+    method: "POST", path: `/v1/internal/workspaces/${workspaceId}/operations/${who.operationId ?? operationId}/e2e-evidence`,
+    headers: { "x-agentx-callback-capability": capabilityFor(who.operationId ?? operationId) }, body });
+  const capabilityFor = (id: string) => String((harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === id)[0]!.invocation as { callbackCapability: string }).callbackCapability);
+
+  /** The worker's `workflowE2EEvidenceSink`: init, the chunks in order, finalize. `afterInit` runs between them (to move the clock, say). */
+  async function upload(object: unknown, input: { groupRunId?: string; afterInit?: () => void | Promise<void>; chunkBytes?: number } = {}) {
+    const bytes = Buffer.from(JSON.stringify(object), "utf8");
+    const digest = sha(bytes);
+    const chunkCount = Math.ceil(bytes.byteLength / CHUNK_BYTES);
+    const group = input.groupRunId === undefined ? {} : { groupRunId: input.groupRunId };
+    const init = await evidenceCall({ stage: "init", ...group, totalBytes: bytes.byteLength, chunkCount, sha256: digest });
+    if (init.status !== 200) return { stage: "init" as const, response: init, digest, bytes };
+    const uploadId = String((init.body as { uploadId: string }).uploadId);
+    await input.afterInit?.();
+    for (let index = 0; index < chunkCount; index += 1) {
+      const chunk = bytes.subarray(index * CHUNK_BYTES, Math.min((index + 1) * CHUNK_BYTES, bytes.byteLength));
+      const response = await evidenceCall({ stage: "chunk", ...group, uploadId, index, bytesBase64: chunk.toString("base64"), sha256: sha(chunk) });
+      if (response.status !== 200) return { stage: "chunk" as const, response, digest, bytes };
+    }
+    const finalized = await evidenceCall({ stage: "finalize", ...group, uploadId, sha256: digest });
+    return { stage: "finalize" as const, response: finalized, digest, bytes };
+  }
+  const groupEnvelope = (groupRun: Record<string, unknown>) => ({ schemaVersion: "workflow-e2e-group-evidence/v1", admissionSha256: admissionRef.admissionRef.sha256, taskId: admission.taskId,
+    operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision, candidateDigest: admission.candidateDigest,
+    round: admission.round, groupRun });
+  const aggregateEnvelope = (groupRuns: Record<string, unknown>[]) => ({ schemaVersion: "workflow-e2e-evidence/v1", admissionSha256: admissionRef.admissionRef.sha256, taskId: admission.taskId,
+    operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision, candidateDigest: admission.candidateDigest,
+    round: admission.round, payload: { kind: "application", groupRuns } });
+  /** The admission's groups, all of them application groups (the broker builds no other kind in an application round), with their shards. */
+  const applicationGroups = admission.groups.flatMap((group) => (group.protocol === "trusted-e2e-application/v1" ? [group] : []));
+  if (applicationGroups.length !== admission.groups.length) throw new Error("an application round holds only application groups");
+  const groupIds = applicationGroups.map((group) => group.outerBinding.groupId);
+  /** The genuinely collected evidence of one group. `observed` is per target of the group, in shard order. */
+  const collectGroup = (groupId: string, observed: ObservedApiOutcome | readonly ObservedApiOutcome[], reportEdit?: (report: E2EApplicationReport, shardIndex: number) => void): Promise<ApplicationGroupEvidence> =>
+    collectApplicationGroupEvidence({ admission, groupId, observed, ...(reportEdit === undefined ? {} : { reportEdit }) });
+
+  /** The worker's terminal result for the CHECKS operation: it ran, and it names the aggregate evidence it saved. */
+  const finishChecks = (aggregate?: { key: string; sha256: string }) => harness.finish(workspaceId, operationId, "SUCCEEDED", { result: {
+    status: "SUCCEEDED", workflowMode: "CHECKS", workflowCandidateRepositories: candidate.repositories, workflowCheckCandidateRepositories: candidate.repositories,
+    checks: { status: "not_verified", notVerifiedReason: "no_checks", source: "none", preambleVersion: "1", preambleSha256: "c".repeat(64), checks: [], extraTry: "not_needed", agentClaim: "none" },
+    ...(aggregate === undefined ? {} : { workflowE2EEvidenceRef: aggregate }) } });
+  const uploadKey = (groupRunId?: string) => ({ pk: `WORKSPACE#${workspaceId}`, sk: `WORKFLOW_E2E_UPLOAD#${operationId}${groupRunId === undefined ? "" : `#${groupRunId}`}` });
+  const uploadRow = (groupRunId: string) => harness.db.get(uploadKey(groupRunId).pk, uploadKey(groupRunId).sk);
+  /** Forgets an upload that was refused at its finalize (the worker uploads each object once; a test that tries several variants of one starts each afresh). */
+  const clearUpload = (groupRunId?: string) => harness.db.delete(uploadKey(groupRunId).pk, uploadKey(groupRunId).sk);
+
+  /** Marks the compute warm-up done for the task's current dispatch row, as it is for the first one by default (a retry writes a fresh row that would warm up again). */
+  const reseedReadiness = () => {
+    for (const row of harness.db.find((item) => item.pk === "WORKFLOW_DISPATCH" && item.taskId === taskId) as Array<Record<string, unknown> & { sk: string; workflowRevision: number }>) {
+      if (row.readinessOperationId !== undefined) continue;
+      const id = randomUUID();
+      harness.db.set({ ...row, readinessOperationId: id });
+      harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${id}`, entityType: "OPERATION", id, workspaceId, kind: "resume", status: "SUCCEEDED", fence: 2, requestId: id,
+        payloadHash: "a".repeat(64), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        workflowE2EReadiness: { purpose: "workflow-e2e-readiness", taskId, workflowRevision: row.workflowRevision, candidateDigest: candidate.digest, dispatchSk: row.sk,
+          outboxId: workflowRequestId("agentx-workflow-e2e-readiness-outbox", taskId, row.workflowRevision, candidate.digest), readyGeneration: 2 } });
+    }
+  };
+
+  return { reseedReadiness, harness: harness as unknown as RoundBrokerHarness, taskId, workspaceId, operationId, snapshot, policy, intent, targets, real, candidate, admission, admissionRef, admissionBytes, applicationGroups, groupIds, projectBinding,
+    workflowNow, taskNow: () => harness.db.get(taskKey.pk, taskKey.sk)!, operationNow, markRunning, upload, evidenceCall, groupEnvelope, aggregateEnvelope, collectGroup, finishChecks, uploadRow, clearUpload,
+    runDispatch, checksOperations, operationRows };
+}
+export type ApplicationRound = Awaited<ReturnType<typeof startApplicationRound>>;

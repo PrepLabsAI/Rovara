@@ -7,7 +7,7 @@ import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { E2EExecutorPlanSchema } from "@agentx/contracts";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
-import { createDockerApplicationHost, createProcessDockerCli, e2eRunNetworks, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
+import { createDockerApplicationHost, createProcessDockerCli, dockerOwnedCleanupReceipt, dockerOwnedResourceInventory, e2eRunNetworks, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
 import { executorContainerArgs } from "../../packages/verifier/src/host/executor-container.js";
 import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
 import { createOrdersExecutorPlan, type OrdersExecutorFixture } from "../support/e2e-orders-executor-fixture.js";
@@ -542,6 +542,20 @@ describe("docker application host", () => {
         expect(call.cleanup.network).toBe(`rovara-e2e-${s.runId}`);
         expect(call.cleanup.containers).toEqual(expect.arrayContaining([`rovara-app-${s.runId}`]));
       }
+    });
+
+    it("attests exactly the run's inventory as the containers it removed, so the cleanup receipt a broker derives from the run id is the one the host attests", async () => {
+      const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep });
+      fake.onExecutor = okOutput(s);
+      const result = await runWith(s);
+      expect(result.unavailableReason).toBeNull();
+      const { cleanup } = s.assemble.mock.calls[0]![0] as { cleanup: { removedAt: string; containers: string[]; network: string } };
+      // Not "contains the app": the whole list, so a run that left a build container, lost its executor or removed something that is not its own would differ from the derivation.
+      const inventory = dockerOwnedResourceInventory(s.runId);
+      expect([...cleanup.containers].sort()).toEqual([...inventory.containers].sort());
+      expect(cleanup.network).toBe(inventory.network);
+      const derived = JSON.parse(Buffer.from(dockerOwnedCleanupReceipt(s.runId, cleanup.removedAt).bytes).toString("utf8")) as { containers: string[]; network: string; removedAt: string };
+      expect(derived).toMatchObject({ containers: [...cleanup.containers].sort(), network: cleanup.network, removedAt: cleanup.removedAt });
     });
 
     it("never reads or returns the out directory when the executor exits 2, whatever it says", async () => {

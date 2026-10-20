@@ -22,7 +22,7 @@ const signer = localSigner();
 
 /**
  * Artifact storage for developer task tests (ruling F5): PutObject keeps the body by key, and
- * GetObject answers it, honoring a `bytes=0-N` range, as `{ Body: { transformToString } }`.
+ * GetObject answers it, honoring a `bytes=0-N` range, as `{ Body: { transformToString } }`; DeleteObject removes it.
  */
 export function memoryS3() {
   const objects = new Map<string, string>();
@@ -45,6 +45,7 @@ export function memoryS3() {
         transformToString: async (encoding = "utf8") => served.toString(encoding as BufferEncoding),
       } };
     }
+    if (command.constructor.name === "DeleteObjectCommand") { objects.delete(key); return {}; }
     throw new Error(`memoryS3 does not handle ${command.constructor.name}`);
   });
   return { send, objects };
