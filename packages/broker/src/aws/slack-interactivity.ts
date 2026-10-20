@@ -69,7 +69,7 @@ import {
   type HandedOffChatGptFinish,
 } from "./slack-chatgpt.js";
 import { chatPostEphemeral } from "./slack-web.js";
-import { WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
+import { PROJECT_TASKS_DISABLED_TEXT, WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { FEEDBACK_REVIEW_RETRY_ACTION, WORKFLOW_ACTION_IDS, answeredWorkflowCard, cleanLine, slackText, workflowModalCopy } from "../developer/workflow-messages.js";
 
 const EVENT_RETENTION_SECONDS = 14 * 24 * 60 * 60;
@@ -164,7 +164,7 @@ function authorizationErrorCode(error: unknown): string | undefined {
 }
 
 /** Broker answers that say "no" about this member and this task: retrying cannot change them. */
-const DEFINITE_ACCESS_REFUSALS: ReadonlySet<string> = new Set(["FORBIDDEN", "TASK_NOT_FOUND", "TASK_ACCESS_DENIED", "PROJECT_ACCESS_DENIED", "PROJECT_TASKS_DISABLED"]);
+const DEFINITE_ACCESS_REFUSALS: ReadonlySet<string> = new Set(["FORBIDDEN", "TASK_NOT_FOUND", "TASK_ACCESS_DENIED", "PROJECT_ACCESS_DENIED"]);
 
 interface HttpResponse { statusCode: number; headers: Record<string, string>; body: string }
 
@@ -1190,7 +1190,7 @@ export function workflowSlackHandlers(deps: {
         // says nothing about the member, so it is logged with its code and answered as a retryable failure.
         const code = authorizationErrorCode(error);
         console.log(JSON.stringify({ component: "slack-interactivity", event: "workflow.authorize_failed", taskId, action, code: code ?? "UNKNOWN", errorName: errorName(error) }));
-        throw new WorkflowInteractionRefusal(code !== undefined && DEFINITE_ACCESS_REFUSALS.has(code) ? legacyMessage : AUTHORIZATION_UNAVAILABLE_TEXT);
+        throw new WorkflowInteractionRefusal(code === "PROJECT_TASKS_DISABLED" ? PROJECT_TASKS_DISABLED_TEXT : code !== undefined && DEFINITE_ACCESS_REFUSALS.has(code) ? legacyMessage : AUTHORIZATION_UNAVAILABLE_TEXT);
       }
       return;
     }

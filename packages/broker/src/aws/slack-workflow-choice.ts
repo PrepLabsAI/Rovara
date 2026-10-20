@@ -18,7 +18,7 @@ import {
   type RequestSuggestion,
   type SlackThread,
 } from "@agentx/contracts";
-import { WORKFLOW_PATH_ANSWER_ACTION, WORKFLOW_PATH_FULL_ACTION, WORKFLOW_PATH_QUICK_ACTION } from "../developer/workflow-actions.js";
+import { PROJECT_TASKS_DISABLED_TEXT, WORKFLOW_PATH_ANSWER_ACTION, WORKFLOW_PATH_FULL_ACTION, WORKFLOW_PATH_QUICK_ACTION } from "../developer/workflow-actions.js";
 import { answeredWorkflowCard } from "../developer/workflow-messages.js";
 
 export type WorkflowPath = "QUICK" | "FULL";
@@ -135,7 +135,7 @@ export function workflowStartFailureNotice(code: string, reference: string): str
   if (code === "WORKSPACE_LIMIT") return "You've reached your limit of open AgentX tasks. Close one of your open tasks, or merge its pull request, then try again.";
   if (code === "WORKSPACE_BUSY") return "This thread already has a task. Start a new request in the channel.";
   if (code === "FORBIDDEN" || code === "CHANNEL_REQUIRED") return "This channel isn't connected to an AgentX project you can use. Ask an AgentX admin to check the channel.";
-  if (code === "PROJECT_TASKS_DISABLED") return "AgentX tasks aren't turned on for this project. Ask an AgentX admin to turn them on.";
+  if (code === "PROJECT_TASKS_DISABLED") return PROJECT_TASKS_DISABLED_TEXT;
   return `I couldn't start this task. Try again in a minute; if it keeps failing, give an AgentX admin this reference: ${reference}.`;
 }
 

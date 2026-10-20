@@ -17,6 +17,9 @@ export const WORKFLOW_ACTION_IDS: ReadonlySet<string> = new Set([
   WORKFLOW_PATH_QUICK_ACTION, WORKFLOW_PATH_FULL_ACTION, WORKFLOW_PATH_ANSWER_ACTION,
 ]);
 
+/** What a member hears when the project their task belongs to has AgentX tasks switched off. */
+export const PROJECT_TASKS_DISABLED_TEXT = "AgentX tasks aren't turned on for this project. Ask an AgentX admin to turn them on.";
+
 /** What a press on a workflow button (anything but an approval) hears when it is out of date, from the broker or from Slack's handler. */
 export const WORKFLOW_BUTTON_OUT_OF_DATE = "That button is out of date. Use the latest message in this thread.";
 
