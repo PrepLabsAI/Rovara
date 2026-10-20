@@ -120,6 +120,19 @@ describe("worker HTTP contract", () => {
       .resolves.toMatchObject({ invocationFeatures: ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan", "task.workflowE2EApplicationChecks"] });
   });
 
+  it("withholds a feature the executor reports as unavailable from /ping, with the reason, and lists it again once it is available", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-withheld-feature-"));
+    let withheld: Record<string, unknown> = { "task.workflowE2EApplicationChecks": { status: "unavailable", reason: "executor-image-not-on-host" } };
+    const state = createWorkerServerState(new OperationJournal(root), { execute: () => Promise.resolve(), withheldInvocationFeatures: async () => withheld });
+    const ping = async () => (await handleWorkerRequest(new Request("http://worker/ping"), state)).json() as Promise<{ invocationFeatures: string[]; invocationFeatureDiagnostics?: Record<string, unknown> }>;
+    const first = await ping();
+    expect(first.invocationFeatures).not.toContain("task.workflowE2EApplicationChecks");
+    expect(first.invocationFeatures).toContain("task.workflowE2EApplicationPlan");
+    expect(first.invocationFeatureDiagnostics).toMatchObject({ "task.workflowE2EApplicationChecks": { status: "unavailable", reason: "executor-image-not-on-host" } });
+    withheld = {};
+    expect((await ping()).invocationFeatures).toContain("task.workflowE2EApplicationChecks");
+  });
+
   // The journal reads SUCCEEDED a moment before the operation leaves the active set: the write lands,
   // then transition() returns, then executeInBackground clears it. The worker stays busy until the
   // operation is fully recorded, so a caller that saw SUCCEEDED in the journal must wait on /ping.

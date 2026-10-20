@@ -234,10 +234,10 @@ async function forWorker(
   if (carriesWorkflowDependencies && !features.includes("task.workflowDependencies")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "ordered work requires a compatible worker that advertises task.workflowDependencies");
   }
-  // A worker built before application CHECKS cannot run an application admission, and the admission's content decides what the round proves, so it is never
+  // A worker built before application CHECKS, or one without the executor image on its host (it then does not list the feature), cannot run an application admission, and the admission's content decides what the round proves, so it is never
   // sent one (and never a trimmed one): the attempt fails with this reason instead (Ruling BQ, mixed fleet).
   if (carriesApplicationAdmission && !features.includes("task.workflowE2EApplicationChecks")) {
-    throw agentXError("RUNTIME_UNAVAILABLE", "browser and API verification needs a worker that runs application admissions (it must list task.workflowE2EApplicationChecks); this worker predates it, so no application round was sent to it");
+    throw agentXError("RUNTIME_UNAVAILABLE", "browser and API verification needs a worker that runs application admissions (it must list task.workflowE2EApplicationChecks); this worker predates it or has no executor image on its host, so no application round was sent to it");
   }
   if (carriesProjectSetupSmoke && !features.includes("project.setupSmoke")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "project setup smoke requires a worker that implements project.setupSmoke");

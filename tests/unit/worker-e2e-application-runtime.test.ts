@@ -1,9 +1,9 @@
 import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/docker-application-host.js";
-import { createWorkflowE2EApplicationRuntime, workflowE2EApplicationHostDeps, workflowE2EApplicationRuntimeConfig } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
+import { createWorkflowE2EApplicationRuntime, workflowE2EApplicationChecksAvailability, workflowE2EApplicationHostDeps, workflowE2EApplicationRuntimeConfig } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 import { FakeDockerCli } from "../support/fake-docker-cli.js";
 
@@ -50,5 +50,36 @@ describe("worker application runtime configuration", () => {
     const deps = workflowE2EApplicationHostDeps(config, docker, now, hostile);
     expect(Object.keys(deps).sort()).toEqual(["admission", "buildImage", "candidateSourceDir", "docker", "executorImage", "groupId", "now", "runRoot"]);
     expect(deps).toMatchObject({ executorImage: image, buildImage: WEB_API_BUILD_IMAGE, runRoot: config.runRoot, docker, now, groupId: "group-1", candidateSourceDir: "/staged" });
+  });
+});
+
+describe("whether this worker can run application rounds at all", () => {
+  const image = "123456789012.dkr.ecr.us-east-1.amazonaws.com/rovara-executor@sha256:" + "a".repeat(64);
+  const docker = (code: number) => ({ run: vi.fn<(args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>>(async () => ({ code, stdout: "", stderr: "" })) });
+
+  it("is ready only when EXECUTOR_IMAGE is set and the host holds that image", async () => {
+    const cli = docker(0);
+    await expect(workflowE2EApplicationChecksAvailability({ EXECUTOR_IMAGE: image }, { platform: "linux", arch: "arm64", docker: cli })).resolves.toEqual({ status: "ready" });
+    expect(cli.run.mock.calls[0]?.[0]).toEqual(["image", "inspect", image]);
+  });
+
+  it("is unavailable, without touching docker, when EXECUTOR_IMAGE is not set to an image reference", async () => {
+    const cli = docker(0);
+    await expect(workflowE2EApplicationChecksAvailability({}, { platform: "linux", arch: "arm64", docker: cli })).resolves.toEqual({ status: "unavailable", reason: "executor-image-not-configured" });
+    await expect(workflowE2EApplicationChecksAvailability({ EXECUTOR_IMAGE: "--privileged" }, { platform: "linux", arch: "arm64", docker: cli })).resolves.toMatchObject({ status: "unavailable" });
+    expect(cli.run).not.toHaveBeenCalled();
+  });
+
+  it("is unavailable when the host does not hold the image, or docker cannot be asked", async () => {
+    await expect(workflowE2EApplicationChecksAvailability({ EXECUTOR_IMAGE: image }, { platform: "linux", arch: "arm64", docker: docker(1) }))
+      .resolves.toEqual({ status: "unavailable", reason: "executor-image-not-on-host" });
+    const broken = { run: vi.fn(async () => { throw new Error("docker.sock: no such file"); }) };
+    await expect(workflowE2EApplicationChecksAvailability({ EXECUTOR_IMAGE: image }, { platform: "linux", arch: "arm64", docker: broken }))
+      .resolves.toEqual({ status: "unavailable", reason: "executor-image-not-on-host" });
+  });
+
+  it("is unavailable on a host with no shared runtime directory", async () => {
+    await expect(workflowE2EApplicationChecksAvailability({ EXECUTOR_IMAGE: image }, { platform: "darwin", arch: "arm64", docker: docker(0) }))
+      .resolves.toEqual({ status: "unavailable", reason: "no-shared-runtime-directory" });
   });
 });

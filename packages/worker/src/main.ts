@@ -17,7 +17,7 @@ import { createDefaultProjectSetupExecutor, createReadinessGatedProjectSetupRunt
 import { postProjectSetupTerminalResult } from "./project-setup-callback.js";
 import { postWorkerTerminalResult } from "./terminal-callback.js";
 import { executeWorkerCancelInvocation } from "./cancel-invocation.js";
-import { createWorkflowE2EApplicationRuntime } from "./workflow-e2e-application-runtime.js";
+import { createWorkflowE2EApplicationRuntime, workflowE2EApplicationChecksAvailability } from "./workflow-e2e-application-runtime.js";
 
 const rootPath = process.env.AGENTX_WORKSPACE_ROOT ?? "/mnt/workspace";
 const port = Number.parseInt(process.env.PORT ?? "8080", 10);
@@ -45,6 +45,11 @@ const state = createWorkerServerState(
   {
     invocationFeatures: projectSetupRuntime.invocationFeatures,
     invocationFeatureDiagnostics: projectSetupRuntime.invocationFeatureDiagnostics,
+    // Application CHECKS are listed only while this worker can run them, so a worker without the executor image is refused the round at dispatch.
+    async withheldInvocationFeatures() {
+      const availability = await workflowE2EApplicationChecksAvailability(process.env);
+      return availability.status === "ready" ? {} : { "task.workflowE2EApplicationChecks": availability };
+    },
     async execute(invocation: WorkerInvocation): Promise<unknown> {
       if (invocation.kind === "project-setup-smoke") {
         return projectSetupRuntime.execute(invocation);

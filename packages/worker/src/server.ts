@@ -17,6 +17,11 @@ export interface WorkerExecutor {
   invocationFeatures?: readonly WorkerInvocationFeature[];
   /** Feature-specific optional runtime gates are reported independently of ordinary worker health. */
   invocationFeatureDiagnostics?: Readonly<Record<string, unknown>>;
+  /**
+   * Listed features this worker cannot use right now, asked on every /ping (for example application CHECKS while the executor image is missing): each is left out of
+   * the list the dispatcher reads, and its diagnostic says why. Features the executor does not name stay listed.
+   */
+  withheldInvocationFeatures?(): Promise<Readonly<Partial<Record<WorkerInvocationFeature, unknown>>>>;
 }
 
 export interface WorkerTerminalResult {
@@ -69,12 +74,14 @@ export function createWorkerServerState(
 export async function handleWorkerRequest(request: Request, state: WorkerServerState): Promise<Response> {
   const url = new URL(request.url);
   if (request.method === "GET" && url.pathname === "/ping") {
+    const withheld: Readonly<Record<string, unknown>> = await state.executor.withheldInvocationFeatures?.().catch(() => ({})) ?? {};
+    const diagnostics = { ...state.invocationFeatureDiagnostics, ...withheld };
     return response(200, {
       status: state.activeOperations.size === 0 ? "Healthy" : "HealthyBusy",
       activeOperations: state.activeOperations.size,
-      // Spec 053: the optional invocation fields this build parses; the dispatcher sends one only when listed.
-      [WORKER_PING_FEATURES_FIELD]: [...state.invocationFeatures],
-      ...(state.invocationFeatureDiagnostics === undefined ? {} : { invocationFeatureDiagnostics: state.invocationFeatureDiagnostics }),
+      // Spec 053: the optional invocation fields this build parses and can use now; the dispatcher sends one only when listed.
+      [WORKER_PING_FEATURES_FIELD]: state.invocationFeatures.filter((feature) => !Object.hasOwn(withheld, feature)),
+      ...(Object.keys(diagnostics).length === 0 ? {} : { invocationFeatureDiagnostics: diagnostics }),
     });
   }
   if (request.method === "POST" && url.pathname === "/invocations") {
