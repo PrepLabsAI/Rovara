@@ -122,6 +122,24 @@ place; this records what it is, so a change to any piece can be made deliberatel
   rejects such a release, so upgrade the CLI before installing or updating from a release newer than
   the one that first publishes the executor. Strictness is deliberate: an image key a CLI does not
   know must not be skipped silently.
+- **The executor image is smoke-tested under its production sandbox before it is published.** The `images` job
+  builds the executor for linux/arm64 into the runner's Docker (`--load`), runs `npx tsx scripts/executor-smoke.ts <tag>`,
+  and only then pushes that same loaded image (`docker push`), so the published bytes are the smoke-tested bytes; a
+  failing smoke test stops the job before anything is pushed. Before the build it installs and builds the repository
+  and applies the CI-only `kernel.apparmor_restrict_unprivileged_userns=0` sysctl (Ubuntu 24.04 runners block
+  unprivileged user namespaces for AppArmor-confined containers; production hosts on Amazon Linux 2023 do not).
+  These steps run before the AWS credentials are configured and only when `AGENTX_PUBLISH_EXECUTOR_IMAGE` is `true`.
+  The smoke command has one definition, `scripts/executor-smoke.ts`, shared by that job, the CI `linux-runtime` job and
+  `scripts/test-deploy.ts` (through `smokeTestExecutor` in `scripts/release-common.ts`): the image runs with the
+  executor container's sandbox and limit flags from `executorContainerArgs` in the verifier (the source the Docker
+  host builds its executor command from: pinned seccomp profile, every capability dropped, no-new-privileges, tini,
+  read-only root with a `/tmp` tmpfs, shared memory, 2 GiB, 1024 processes, 2 CPUs) plus no network. The profile
+  (`packages/verifier/assets/executor-seccomp.json`) is verified against its digest in contracts. The script imports
+  the verifier's built output, so run `npm run build` first. Chromium runs with its own sandbox and the check never
+  skips it. On a local Docker VM whose kernel restricts unprivileged user namespaces (colima's Ubuntu 24.04 VM) the
+  smoke test fails with a message that names the fix:
+  `colima ssh -- sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0` (temporary; it resets when the VM
+  restarts). Never work around it with `--no-sandbox`. The Docker VM also needs at least 2 CPUs for `--cpus 2`.
 - **The npm package.** `@preplabsai/rovara-code`, owned by the `preplabsai` npm organization
   (publishing needs an owner or developer role there; GitHub access does not grant it). Version
   0.1.0 was published by hand from the tag's commit, because npm trusted publishing can only be

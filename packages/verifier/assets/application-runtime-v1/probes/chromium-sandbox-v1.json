@@ -1,0 +1,1 @@
+{"schemaVersion":"e2e-application-runtime-probe/v1","probeId":"chromium-sandbox/v1","kind":"web","polarity":"positive","templateId":"chromium-sandbox/v1","requiredCapabilities":["web","chromium-sandbox"],"oracle":{"kind":"chromium-sandbox","requiresRendererSeccompFilter":true,"requiresRendererPidNamespace":true,"requiresRendererUserNamespace":true}}

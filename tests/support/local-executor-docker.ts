@@ -3,6 +3,7 @@ import { cp } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import type { InspectChromiumSandboxInput } from "../../packages/verifier/src/executor/chromium-sandbox.js";
 import { FakeDockerCli } from "./fake-docker-cli.js";
 
 async function freePort(): Promise<number> {
@@ -12,6 +13,16 @@ async function freePort(): Promise<number> {
     server.listen(0, "127.0.0.1", () => { const { port } = server.address() as { port: number }; server.close(() => resolve(port)); });
   });
 }
+
+/**
+ * Where the executor would read Chromium's renderers from `/proc`, this machine (macOS) has no such thing, and its own Chromium sandbox is a different one.
+ * The double answers with the facts a sandboxed Linux renderer shows, so a probe run here records an attestation of the right shape. It is never evidence that
+ * a sandbox is on: the real attestation is read in the Linux CI job (`tests/linux`), on a real kernel, and a Linux host here reads its own `/proc`.
+ */
+export const standInChromiumSandbox: ((input: InspectChromiumSandboxInput) => Promise<never>) | undefined = process.platform === "linux" ? undefined
+  : async (input) => ({ schemaVersion: "e2e-executor-chromium-sandbox/v1", runId: input.runId, groupId: input.groupId,
+    browser: { pid: input.browserPid, nsPidDepth: 1, seccompFilters: 1, uidMap: "0 0 4294967295" },
+    renderers: [{ pid: input.browserPid + 1, nsPidDepth: 2, seccompFilters: 2, uidMap: "0 1000 1" }] } as never);
 
 /**
  * A Docker double whose "executor container" is the real executor running on this machine: it starts the staged candidate app as a local
@@ -33,7 +44,10 @@ export class LocalExecutorDocker extends FakeDockerCli {
       const app = [...this.calls].reverse().find((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith("rovara-app-"))!;
       // The host ends the app container's arguments with the blanked environment, the image, then the recipe's program and arguments.
       const image = app.lastIndexOf("NODE_OPTIONS=") + 1;
-      const command = app.slice(image + 1);
+      // The app-host probe starts the app behind a guard that reads this container's route table and times out against the host firewall. This double has
+      // neither, so it starts the app itself, which is all the guard does once the host is walled off; the real guard runs only in the Linux CI job.
+      const started = app.slice(image + 1);
+      const command = started[1] === "--input-type=module" ? ["node", "server.mjs"] : started;
       const workDir = app.at(app.indexOf("-w") + 1)!.replace(/^\/app/, join(workspace, "app"));
       // The read-only owned mount is a directory inside the app, where the app expects it.
       await cp(join(workspace, "owned"), join(workspace, "app", ".owned"), { recursive: true });
@@ -52,7 +66,8 @@ export class LocalExecutorDocker extends FakeDockerCli {
       this.appOutput += `spawn ${command.join(" ")} in ${workDir} on ${port} with ${Object.keys(env).join(",")}\n`;
       this.children.push(server);
       try {
-        const result = await runE2EExecutor({ planPath: join(workspace, "plan.json"), outDir, signal: AbortSignal.timeout(240_000), localAppUpstream: `http://127.0.0.1:${port}` });
+        const result = await runE2EExecutor({ planPath: join(workspace, "plan.json"), outDir, signal: AbortSignal.timeout(240_000), localAppUpstream: `http://127.0.0.1:${port}`,
+          ...(standInChromiumSandbox ? { inspectChromiumSandbox: standInChromiumSandbox } : {}) });
         this.exitCodeOfExecutor(result.exitCode);
       } finally { server.kill("SIGKILL"); }
     };

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import YAML from "yaml";
@@ -37,10 +38,50 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     expect(job["runs-on"]).toBe("ubuntu-24.04-arm");
     expect(job.if).toBe("needs.scope.outputs.docs_only != 'true'");
     const run = job.steps.map((step) => step.run ?? "").join("\n");
-    expect(run.indexOf("iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP")).toBeGreaterThanOrEqual(0);
-    expect(run.indexOf("iptables")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci ."));
-    expect(run).toContain("docker run --rm --network none rovara-e2e-executor:ci node /opt/agentx/packages/verifier/dist/executor/smoke.js");
+    // The job installs the firewall by running the heredoc inside boot.sh as it is (never a copy of the rules), before anything builds or runs a container.
+    const firewall = job.steps.map((step) => step.run ?? "").find((text) => text.includes("<<'FIREWALL'"))!;
+    expect(firewall).toContain("packages/worker/ec2/boot.sh");
+    expect(firewall).toContain("sudo bash");
+    expect(firewall).not.toContain("iptables -I");
+    expect(run.indexOf("<<'FIREWALL'")).toBeGreaterThanOrEqual(0);
+    expect(run.indexOf("<<'FIREWALL'")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci ."));
+    // The smoke check is the shared definition in scripts/executor-smoke.ts (the one the release path and test-deploy use), never a copy of its flags: it runs after
+    // `npm ci` and `npm run build`, which the script needs, and before the Linux tests.
+    const smoke = run.split("\n").find((line) => line.includes("executor-smoke.ts"))!;
+    expect(smoke.trim()).toBe("npx tsx scripts/executor-smoke.ts rovara-e2e-executor:ci");
+    expect(run).not.toMatch(/executor\/smoke\.js|seccomp=|--cap-drop|--read-only/);
+    expect(run.indexOf("npm ci")).toBeLessThan(run.indexOf("executor-smoke.ts"));
+    expect(run.indexOf("npm run build")).toBeLessThan(run.indexOf("executor-smoke.ts"));
+    expect(run.indexOf("executor-smoke.ts")).toBeLessThan(run.indexOf("npx vitest run tests/linux"));
+    expect(run).not.toMatch(/seccomp=unconfined|--privileged|--cap-add|--no-sandbox/);
     expect(run).toContain("npx vitest run tests/linux");
+  });
+
+  it("smoke-tests the executor image from CI and from the release path through one definition, with the production sandbox flags", async () => {
+    const shared = readFileSync("scripts/executor-smoke.ts", "utf8");
+    // The smoke command takes its sandbox and limit flags from the verifier's executor definition (what the Docker host builds its executor command from) and
+    // checks the profile with the host's own verification; it adds only the network and the run-and-remove flags.
+    expect(shared).toContain("executorContainerArgs(verifyExecutorSeccompProfile(profilePath))");
+    expect(shared).toContain('"--network", "none"');
+    expect(shared).not.toMatch(/--cap-drop|seccomp=|--read-only/);
+    const container = readFileSync("packages/verifier/src/host/executor-container.ts", "utf8");
+    for (const flag of ["--init", "--cap-drop=ALL", "no-new-privileges", "seccomp=${seccompProfile}", "--read-only", "--tmpfs", "--memory", "--pids-limit", "--cpus"]) expect(container, flag).toContain(flag);
+    expect(readFileSync("packages/verifier/src/host/docker-application-host.ts", "utf8")).toContain("...executorContainerArgs(seccompProfile)");
+    // The release path (and so test-deploy, which takes smokeTestExecutor from it) builds its command from that definition and spells no flags of its own.
+    const release = readFileSync("scripts/release-common.ts", "utf8");
+    const body = release.slice(release.indexOf("export async function smokeTestExecutor"), release.indexOf("export async function smokeTestWorker"));
+    expect(body).toContain("executorSmokeDockerArgs(image)");
+    expect(body).not.toMatch(/--network|--cap-drop|seccomp|smoke\.js/);
+    expect(readFileSync("scripts/test-deploy.ts", "utf8")).toContain("smokeTest: smokeTestExecutor");
+  });
+
+  it("lets the Ubuntu runner create unprivileged user namespaces for Chromium's sandbox before it builds or runs a container, and says production does not need that", async () => {
+    const job = (await workflow()).jobs["linux-runtime"] as Job;
+    const step = job.steps.find((candidate) => (candidate.run ?? "").includes("apparmor_restrict_unprivileged_userns"))!;
+    expect(step.run).toContain("sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0");
+    expect(step.run).toContain("Amazon Linux 2023");
+    const run = job.steps.map((candidate) => candidate.run ?? "").join("\n");
+    expect(run.indexOf("apparmor_restrict_unprivileged_userns")).toBeLessThan(run.indexOf("docker build -f environments/e2e-executor/Dockerfile"));
   });
 
   it("gives every job but the manual live-AWS one a time limit, so a hung runner fails in minutes and not after six hours", async () => {

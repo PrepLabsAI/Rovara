@@ -30,6 +30,8 @@ describe("deriving a probe's observation from its retained evidence", () => {
     expect(facts["api-state-positive-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [] });
     expect(facts["api-egress-denial-v1"]).toEqual({ ...clean, collectorStatus: "FAILED", failedAssertionKinds: ["http-status"], blockedHosts: [] });
     expect(facts["build-imds-denial-v1"]).toEqual({ ...clean, collectorStatus: null, runUnavailableReason: "build-failed", buildExitCode: 7, failedAssertionKinds: [], blockedHosts: [] });
+    expect(facts["build-lateral-denial-v1"]).toEqual({ ...clean, collectorStatus: null, runUnavailableReason: "build-failed", buildExitCode: 7, failedAssertionKinds: [], blockedHosts: [] });
+    expect(facts["app-host-denial-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [] });
   });
 
   it("agrees with the observations the committed runs carry, and a record's claim must be exactly that", () => {

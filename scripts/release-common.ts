@@ -2,6 +2,7 @@
 import { spawnSync, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
 import { generateKeyPairSync, randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import { executorSmokeDockerArgs, explainExecutorSmokeFailure } from "./executor-smoke.js";
 
 const DEFAULT_REGION = "us-east-1";
 const DEFAULT_REPOSITORY = "agentx-worker-production";
@@ -315,12 +316,16 @@ export async function buildAndPushImage(
   return pushed;
 }
 
-/** The executor image's own smoke check (the one CI runs): its entrypoint's smoke module, with no network. */
+/**
+ * The executor image's own smoke check (the one CI runs, through the same definition in scripts/executor-smoke.ts): its smoke module, run as the worker's
+ * Docker host runs the executor (pinned seccomp profile, no capability, read-only, no network). Chromium's sandbox is never skipped; when it cannot start the
+ * error says how to fix the Docker VM.
+ */
 export async function smokeTestExecutor(runner: Runner, image: string): Promise<void> {
-  const result = runner.capture("docker", ["run", "--rm", "--network", "none", image, "node", "/opt/agentx/packages/verifier/dist/executor/smoke.js"], true);
+  const result = runner.capture("docker", executorSmokeDockerArgs(image), true);
   if (result.status !== 0) {
     process.stderr.write(result.stderr);
-    throw new Error("executor image smoke test failed");
+    throw new Error(explainExecutorSmokeFailure(`${result.stderr}${result.stdout}`) ?? "executor image smoke test failed");
   }
 }
 

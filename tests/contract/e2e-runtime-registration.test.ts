@@ -339,7 +339,7 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
 
     it("registers the untampered proposal the production runner's evidence produces", async () => {
       const t = await setup();
-      expect(t.proposal.probes.map((probe) => probe.evidence.kind)).toEqual(["collected", "collected", "collected", "collected", "collected", "unavailable"]);
+      expect(t.proposal.probes.map((probe) => probe.evidence.kind)).toEqual(["collected", "collected", "collected", "collected", "collected", "unavailable", "unavailable", "collected", "collected"]);
       await expect(registerRuntimeInstallation(t.deps, admin, t.request())).resolves.toMatchObject({ featureRevisions: { web: 1, api: 1 } });
     });
 

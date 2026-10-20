@@ -3,6 +3,8 @@
 # network; the entrypoint and the smoke check live in packages/verifier/src/executor.
 # It never holds credentials: the runtime starts it with every capability dropped and no AWS_*, AGENTX_*,
 # PI_*, GIT_* or token variables. The command is a default, so the CI smoke check can replace it.
+# Chromium runs with its own sandbox (no --no-sandbox), which needs the pinned seccomp profile
+# packages/verifier/assets/executor-seccomp.json: the runtime starts this image with it, and without it Chromium does not start.
 # Base images come from ECR Public by digest: CodeBuild's shared IPs hit Docker Hub pull limits.
 FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5 AS build
 

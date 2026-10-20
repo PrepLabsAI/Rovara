@@ -14,6 +14,12 @@ export const E2E_EXECUTOR_COMPILED_ORIGIN = "http://127.0.0.1:4317" as const;
 /** Upper bound for the application health wait, so a hung candidate cannot hold the runner for the whole round. */
 export const E2E_EXECUTOR_HEALTH_TIMEOUT_MAX_MS = 120_000;
 export const E2E_EXECUTOR_MAX_ACCOUNTS = 16;
+/**
+ * The seccomp profile the executor container (and only it) runs under: Docker's default profile plus the rules Chromium's own namespace sandbox needs
+ * (`unshare` and `clone` with namespace flags, `chroot`), shipped as `packages/verifier/assets/executor-seccomp.json`. The host refuses to start an
+ * executor under any other bytes; a test keeps this equal to the shipped file.
+ */
+export const E2E_EXECUTOR_SECCOMP_PROFILE_SHA256 = "a522ce160601c1b6f703dae74859e995020426454887630f6edec34ffb251f0e";
 
 /** One synthetic account the host seeded into the candidate. The password exists only in the read-only plan mount. */
 export const E2EExecutorAccountSchema = z.object({

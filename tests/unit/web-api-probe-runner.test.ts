@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, WebApiProbeObservationSchema, canonicalJson, webApiProbeRunId } from "../../packages/contracts/src/index.js";
-import { MAX_BLOCKED_REQUESTS_BYTES, createWebApiProbeRunner, readBlockedRequests } from "../../packages/verifier/src/host/web-api-probe-runner.js";
+import { MAX_BLOCKED_REQUESTS_BYTES, createWebApiProbeRunner, readBlockedRequests, readChromiumSandboxAttestation } from "../../packages/verifier/src/host/web-api-probe-runner.js";
 import { webApiBuildProbeCommand } from "../../packages/verifier/src/host/web-api-probe-plan.js";
 import { loadWebApiQualificationProbeAssets } from "../../packages/verifier/src/application-runtime-probes.js";
 import { installedWebApiQualificationAppRoot } from "../../packages/verifier/src/host/web-api-qualification-app.js";
@@ -32,7 +32,7 @@ describe("the production web/API probe runner", () => {
     const run = await runner("build-imds-denial-v1");
     expect(run.observation).toMatchObject({ collectorStatus: null, runUnavailableReason: "build-failed", buildExitCode: 7, attempts: 1, skipped: 0, flaky: 0 });
     expect(run.evidence).toMatchObject({ kind: "unavailable", reason: "build-failed", runId: webApiProbeRunId(challenge, "build-imds-denial-v1"),
-      build: { commandIndex: 1, exitCode: 7, command: webApiBuildProbeCommand() } });
+      build: { commandIndex: 1, exitCode: 7, command: webApiBuildProbeCommand("build-imds-denial-v1") } });
     expect(WebApiProbeObservationSchema.parse(run.observation)).toEqual(run.observation);
     expect(verifyWebApiProbeRecord({ challenge, probeId: "build-imds-denial-v1", observation: run.observation, evidence: run.evidence })).toEqual({ ok: true });
   });
@@ -56,6 +56,8 @@ describe("the production web/API probe runner", () => {
       // The staged copy of the app is gone; nothing is left in the run root.
       expect(await readdir(runRoot)).toEqual([]);
       expect(fake.calls.some((args) => args.includes(`rovara-e2e-${runId}`))).toBe(true);
+      // Both per-run networks were created and removed.
+      expect(fake.calls.filter((args) => args[0] === "network" && args[1] === "create").map((args) => args.at(-1)).sort()).toEqual([`rovara-e2e-${runId}`, `rovara-e2e-build-${runId}`].sort());
     }
   });
 
@@ -154,5 +156,16 @@ describe("the blocked-requests file the runner keeps", () => {
     await write(MAX_BLOCKED_REQUESTS_BYTES + 1);
     expect(await readBlockedRequests(dir)).toBeNull();
     expect(await readBlockedRequests(join(dir, "absent"))).toBeNull();
+  });
+
+  it("reads the executor's Chromium sandbox attestation only when it fits the evidence schema's base64 bound", async () => {
+    const dir = await temp();
+    const write = (size: number) => writeFile(join(dir, "chromium-sandbox.json"), Buffer.alloc(size, 97));
+    await write(49_152);
+    expect((await readChromiumSandboxAttestation(dir))?.byteLength).toBe(49_152);
+    expect(Math.ceil(49_152 / 3) * 4).toBeLessThanOrEqual(65_536);
+    await write(49_153);
+    expect(await readChromiumSandboxAttestation(dir)).toBeNull();
+    expect(await readChromiumSandboxAttestation(join(dir, "absent"))).toBeNull();
   });
 });

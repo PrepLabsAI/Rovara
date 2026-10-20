@@ -1,6 +1,7 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { E2ERunBindingSchema, WEB_API_CHALLENGE_LIFETIME_MS, WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_REQUIRED_PROBES, WebApiProbeEvidenceSchema, runtimeInstallChallengeDigest,
-  webApiProbeRunId } from "../../packages/contracts/src/index.js";
+import { E2ERunBindingSchema, WEB_API_CHALLENGE_LIFETIME_MS, WEB_API_NETWORK_POLICY, WEB_API_NETWORK_POLICY_DIGEST, WEB_API_PROBE_PROPOSAL_MAX_BYTES, WEB_API_REQUIRED_PROBES,
+  WebApiProbeEvidenceSchema, canonicalJson, runtimeInstallChallengeDigest, webApiProbeRunId } from "../../packages/contracts/src/index.js";
 import { webApiChallenge } from "../support/web-api-qualification.js";
 
 const now = Date.parse("2026-10-19T12:00:00.000Z");
@@ -33,7 +34,16 @@ describe("web/API probe run binding", () => {
     for (const probe of WEB_API_REQUIRED_PROBES) expect([probe.probeId, probe.bundleDigest]).toEqual([probe.probeId, probe.kind === "build" ? null : expect.stringMatching(/^[a-f0-9]{64}$/)]);
   });
 
-  it("gives a web/API challenge an hour, long enough for six container runs", () => {
+  it("requires the network wall probes, and a network policy digest that differs from the one runners had before the walls", () => {
+    expect(WEB_API_REQUIRED_PROBES.map((probe) => probe.probeId).slice(-4, -1)).toEqual(["build-imds-denial-v1", "build-lateral-denial-v1", "app-host-denial-v1"]);
+    expect(WEB_API_NETWORK_POLICY).toMatchObject({ schemaVersion: "e2e-web-api-network-policy/v2", hostAccess: "denied", privateRanges: "denied", buildNetwork: "per-run-internet-only" });
+    // The v1 policy (internal network, no egress, no metadata) as it was hashed before the walls: a runner registered with it must not match.
+    const v1 = { schemaVersion: "e2e-web-api-network-policy/v1", appNetwork: "per-run-internal", outsideEgress: "denied", instanceMetadata: "unreachable" };
+    expect(WEB_API_NETWORK_POLICY_DIGEST).not.toBe(createHash("sha256").update(canonicalJson(v1)).digest("hex"));
+    expect(WEB_API_NETWORK_POLICY_DIGEST).toBe(createHash("sha256").update(canonicalJson(WEB_API_NETWORK_POLICY)).digest("hex"));
+  });
+
+  it("gives a web/API challenge an hour, long enough for nine container runs", () => {
     expect(WEB_API_CHALLENGE_LIFETIME_MS).toBe(60 * 60_000);
   });
 

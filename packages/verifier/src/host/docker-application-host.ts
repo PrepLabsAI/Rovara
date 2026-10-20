@@ -8,6 +8,9 @@ import type { E2EActualApplicationRun } from "../application-collection.js";
 import type { E2EApplicationRuntimePorts } from "../application-runtime.js";
 import { validateE2EApplicationExecutionAdmission } from "../application-scenarios.js";
 import { createCredentialRedactor } from "../executor/redact.js";
+import { executorContainerArgs } from "./executor-container.js";
+import { verifyExecutorSeccompProfile } from "./executor-seccomp.js";
+import { readRegularFileTail } from "./regular-file.js";
 import { assembleDockerCollectionInputs, assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput, validateExecutorResult,
   type DockerCollectionInputs, type ExecutorOutputSnapshot, type ExecutorResultFile } from "./executor-readback.js";
 
@@ -21,6 +24,12 @@ export type { DockerCollectionInputs } from "./executor-readback.js";
 export type DockerCli = { run(args: string[], opts: { signal: AbortSignal; timeoutMs: number }): Promise<{ code: number; stdout: string; stderr: string }> };
 
 const OUTPUT_CAP_BYTES = 1024 * 1024;
+/**
+ * How much of the executor's own `executor.log` is kept in the diagnostics of a run that ended without a trustworthy result. The file is read with some margin
+ * and redacted whole before it is cut to this size, so a credential that straddles the cut cannot survive as a fragment.
+ */
+const EXECUTOR_OWN_LOG_BYTES = 32 * 1024;
+const EXECUTOR_OWN_LOG_READ_BYTES = 40 * 1024;
 const tailOf = (value: string, maxBytes: number): string => {
   const bytes = Buffer.from(value, "utf8");
   return bytes.byteLength <= maxBytes ? value : bytes.subarray(bytes.byteLength - maxBytes).toString("utf8");
@@ -50,6 +59,15 @@ export function createProcessDockerCli(binary = "docker"): DockerCli {
 export const ROVARA_RUN_LABEL = "rovara.run";
 export const ROVARA_CREATED_LABEL = "rovara.created";
 const SAFE_RUN_ID = /^[A-Za-z0-9-]{1,64}$/;
+/**
+ * The two per-run networks and their fixed Linux bridge names. The host firewall (`packages/worker/ec2/boot.sh`) walls bridges off by name:
+ * `rvb*` (builds: the internet, no host, no private ranges) and `rvi*` (app and executor: internal, no host). The suffix is 8 hex of the run id's
+ * digest, so the name is always valid and at most 11 of the 15 characters an interface name may have.
+ */
+export function e2eRunNetworks(runId: string): { internal: string; build: string; internalBridge: string; buildBridge: string } {
+  const suffix = createHash("sha256").update(runId).digest("hex").slice(0, 8);
+  return { internal: `rovara-e2e-${runId}`, build: `rovara-e2e-build-${runId}`, internalBridge: `rvi${suffix}`, buildBridge: `rvb${suffix}` };
+}
 const ADMIN_TIMEOUT_MS = 30_000;
 const MAX_TAIL_BYTES = 64 * 1024;
 const APP_PORT = 4317;
@@ -75,6 +93,11 @@ export type DockerApplicationHostDeps = Readonly<{
   buildImage: string;
   /** A directory on the Docker host at the same path inside the worker container; each run gets `<runRoot>/<runId>`. */
   runRoot: string;
+  /**
+   * The seccomp profile file the executor container runs under (the Docker CLI reads it here, in the worker container, and sends its content to the
+   * daemon). Default: the installed `executor-seccomp.json`. The host refuses to be built over any file whose digest is not the one pinned in contracts.
+   */
+  executorSeccompProfile?: string;
   now(): number;
   /** The admission the round was started from, and the one runnable application group this host owns. */
   admission: E2EApplicationExecutionAdmission;
@@ -156,8 +179,8 @@ function containerCwd(root: string, cwd: string): string {
 }
 
 /**
- * Builds the exact candidate in a build container, runs it on a per-run `--internal` network, runs the Rovara executor
- * against it, and removes everything the run created. One host owns one run (the group named in `deps`); concurrent rounds
+ * Builds the exact candidate in a build container on its own per-run bridge (internet only, firewalled from the host and private ranges), runs it
+ * on a per-run `--internal` network, runs the Rovara executor against it, and removes everything the run created. One host owns one run (the group named in `deps`); concurrent rounds
  * use one host each. Allocation prepares the run's network, workspace, seed and plan; execution builds, starts the app and
  * waits for the executor until the plan deadline; `close` removes every resource labeled `rovara.run=<runId>`.
  */
@@ -190,9 +213,10 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   });
   const portEnv = contract.service?.portEnv ?? "APP_PORT";
 
+  const seccompProfile = verifyExecutorSeccompProfile(deps.executorSeccompProfile);
   const { docker } = deps;
   const label = `${ROVARA_RUN_LABEL}=${runId}`;
-  const network = `rovara-e2e-${runId}`;
+  const { internal: network, build: buildNetwork, internalBridge, buildBridge } = e2eRunNetworks(runId);
   const appName = `rovara-app-${runId}`;
   const executorName = `rovara-executor-${runId}`;
   const workspace = join(deps.runRoot, runId);
@@ -223,11 +247,12 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
   }
 
-  /** Removes every container and the network labeled for this run; true only when none is left. */
+  /** Removes every container and both networks labeled for this run; true only when none is left. */
   async function removeOwned(): Promise<{ confirmed: boolean; containers: string[] }> {
     const listed = await admin(["ps", "-a", "--filter", `label=${label}`, "--format", "{{.Names}}"]);
     const containers = listed.stdout.split("\n").map((line) => line.trim()).filter(Boolean);
     if (containers.length > 0) await admin(["rm", "-f", ...containers]);
+    await admin(["network", "rm", buildNetwork]);
     await admin(["network", "rm", network]);
     await removeWorkspace();
     const containersLeft = await admin(["ps", "-a", "--filter", `label=${label}`, "--format", "{{.Names}}"]);
@@ -242,9 +267,10 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   /** "deadline" means the plan deadline, not the command, ended the build. */
   async function build(signal: AbortSignal): Promise<"ok" | "failed" | "deadline"> {
     const mounts = ["-v", `${deps.candidateSourceDir}:/src:ro`, "-v", `${dirs.app}:/out`];
-    const common = (name: string) => ["run", "--rm", "--name", name, "--pull=never", ...hardening(), ...limits("2g", "1024", "2"), "--user", "1000:1000", ...mounts];
+    const common = (name: string, on: string) => ["run", "--rm", "--name", name, "--pull=never", ...hardening(["--network", on]), ...limits("2g", "1024", "2"), "--user", "1000:1000", ...mounts];
     const copyTimeout = Math.min(BUILD_COPY_TIMEOUT_MS, left());
-    const copy = await docker.run([...common(`rovara-build-${runId}-0`), ...BLANKED_ENV, "--entrypoint", "cp", deps.buildImage, "-R", "--no-preserve=all", "/src/.", "/out/"],
+    // Copying the source needs no network at all.
+    const copy = await docker.run([...common(`rovara-build-${runId}-0`, "none"), ...BLANKED_ENV, "--entrypoint", "cp", deps.buildImage, "-R", "--no-preserve=all", "/src/.", "/out/"],
       { signal, timeoutMs: copyTimeout });
     appendBuildLog(`${copy.stdout}${copy.stderr}`);
     state.buildResult = Object.freeze({ commandIndex: 0, exitCode: ended(copy.code), command: null });
@@ -252,10 +278,11 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     let index = 0;
     for (const command of recipe.build) {
       index += 1;
-      // The build runs with registry egress only through the default bridge and holds no credential: HOME and the package cache sit in a tmpfs.
+      // The build reaches the internet (package registries) only through its own run bridge, which the host firewall keeps off the host and every
+      // private range, and it holds no credential: HOME and the package cache sit in a tmpfs.
       const env = ["-e", "HOME=/tmp/home", "-e", "npm_config_cache=/tmp/home/.npm", "-e", "CI=1", ...Object.entries(command.env).flatMap(([name, value]) => ["-e", `${name}=${value}`]), ...BLANKED_ENV];
       const timeoutMs = Math.min(command.timeoutMs, left());
-      const result = await docker.run([...common(`rovara-build-${runId}-${index}`), "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=1g", "-w", containerCwd("/out", command.cwd), ...env,
+      const result = await docker.run([...common(`rovara-build-${runId}-${index}`, buildNetwork), "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=1g", "-w", containerCwd("/out", command.cwd), ...env,
         deps.buildImage, command.program, ...command.args], { signal, timeoutMs });
       appendBuildLog(`${result.stdout}${result.stderr}`);
       state.buildResult = Object.freeze({ commandIndex: index, exitCode: ended(result.code), command: Object.freeze({ ...command }) });
@@ -294,6 +321,17 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     if (inspected.code !== 0) return { running: false, exitCode: null };
     const [status, code] = inspected.stdout.trim().split(/\s+/);
     return { running: status === "running" || status === "created", exitCode: code === undefined ? null : Number(code) };
+  }
+
+  /**
+   * The end of the executor's own log, redacted, or "" when it left none. Only called once the executor has stopped by itself: while its container may still
+   * run it could swap the file, so the read is also made on the open handle of a regular file (never a link or FIFO), bounded, and never waits.
+   */
+  async function readExecutorOwnLog(): Promise<string> {
+    try {
+      const raw = (await readRegularFileTail(join(dirs.out, "executor.log"), EXECUTOR_OWN_LOG_READ_BYTES)).toString("utf8");
+      return tailOf(state.redactor.text(redactText(raw)), EXECUTOR_OWN_LOG_BYTES);
+    } catch { return ""; }
   }
 
   async function execute(signal: AbortSignal): Promise<Outcome> {
@@ -336,8 +374,10 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const remaining = Math.max(1, deadlineAt - deps.now()) + graceMs;
     let appGone = false;
     const watching = new AbortController();
-    const executorRun = docker.run(["run", "--name", executorName, "--pull=never", ...hardening(["--network", network]), "--init", "--read-only", "--shm-size", "1g",
-      "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=512m", ...limits("2g", "1024", "2"), "-v", `${dirs.plan}:/run/rovara/plan.json:ro`, "-v", `${dirs.out}:/out`, ...BLANKED_ENV,
+    const executorRun = docker.run(["run", "--name", executorName, "--pull=never", "--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`, "--network", network,
+      // The executor's sandbox and limits are one shared definition (the image smoke test runs with the same). Only the executor leaves Docker's default seccomp
+      // profile, and only for the namespace syscalls Chromium's own sandbox needs; no capability is added.
+      ...executorContainerArgs(seccompProfile), "-v", `${dirs.plan}:/run/rovara/plan.json:ro`, "-v", `${dirs.out}:/out`, ...BLANKED_ENV,
       deps.executorImage], { signal: executorSignal, timeoutMs: remaining });
     const watch = (async () => {
       while (!watching.signal.aborted && !executorSignal.aborted) {
@@ -352,7 +392,13 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const executor = await executorRun;
     watching.abort();
     await watch.catch(() => undefined);
-    state.executorLogTail = redact(`${executor.stdout}${executor.stderr}`);
+    // `docker run` prints nothing of why the executor exited 2: that is in the executor's own log in the out directory. A code other than 0 or 1 is a run
+    // without a trustworthy result, so its log tail and the code itself are kept to explain it (a refused or failed `docker run` shows in stderr and the code).
+    // 124 and 130 mean the docker CLI was killed (the deadline, the caller) and its container may still be running, so nothing is read from the out directory then.
+    const settled = executor.code !== 124 && executor.code !== 130 && !signal.aborted && deps.now() < deadlineAt;
+    const ownLog = executor.code === 0 || executor.code === 1 || !settled ? "" : await readExecutorOwnLog();
+    state.executorLogTail = redact(`${executor.stdout}${executor.stderr}${ownLog === "" ? "" : `\n--- executor.log (end)\n${ownLog}`}${
+      executor.code === 0 || executor.code === 1 ? "" : `\n[docker run exited with code ${executor.code}]`}`);
     const logs = await admin(["logs", "--tail", "400", appName]);
     state.appLogTail = redact(`${logs.stdout}${logs.stderr}`);
 
@@ -408,7 +454,11 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       await writeFile(dirs.plan, JSON.stringify(plan), { mode: 0o644 });
       // The executor runs as an unprivileged user that must write its results here.
       await chmod(dirs.out, 0o777); await chmod(dirs.owned, 0o755);
-      const created = await docker.run(["network", "create", "--internal", "--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`, network], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+      const labels = ["--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`];
+      // Fixed bridge names let the host firewall tell build, app and executor traffic apart; the name of the network stays last.
+      const createdBuild = await docker.run(["network", "create", ...labels, "-o", `com.docker.network.bridge.name=${buildBridge}`, buildNetwork], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+      if (createdBuild.code !== 0) throw new Error(`could not create the run build network: ${redact(createdBuild.stderr)}`);
+      const created = await docker.run(["network", "create", "--internal", ...labels, "-o", `com.docker.network.bridge.name=${internalBridge}`, network], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
       if (created.code !== 0) throw new Error(`could not create the run network: ${redact(created.stderr)}`);
     } catch (error) {
       await removeOwned().catch(() => undefined);

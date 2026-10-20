@@ -1,12 +1,15 @@
 import { createHash } from "node:crypto";
 import { chmod, mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
-import { chmodSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { chmodSync, mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { E2EExecutorPlanSchema } from "@agentx/contracts";
 import { runIsolatedE2EApplication } from "../../packages/verifier/src/application-runtime.js";
-import { createDockerApplicationHost, createProcessDockerCli, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
+import { createDockerApplicationHost, createProcessDockerCli, e2eRunNetworks, sweepStaleRovaraRuns } from "../../packages/verifier/src/host/docker-application-host.js";
+import { executorContainerArgs } from "../../packages/verifier/src/host/executor-container.js";
+import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
 import { createOrdersExecutorPlan, type OrdersExecutorFixture } from "../support/e2e-orders-executor-fixture.js";
 import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.js";
 
@@ -66,12 +69,125 @@ describe("docker application host", () => {
         expect(args.some((value, index) => args[index - 1] === "-e" && value === `${name}=`), name).toBe(true);
       }
     }
-    expect(fake.call("network create")).toContain("--internal");
+    const creates = fake.calls.filter((args) => args[0] === "network" && args[1] === "create");
+    expect(creates.filter((args) => args.includes("--internal")).map((args) => args.at(-1))).toEqual([`rovara-e2e-${s.runId}`]);
     expect(fake.mountsFor("executor").find((mount) => mount.endsWith(":/run/rovara/plan.json:ro"))).toBeDefined();
     expect(fake.mountsFor("executor").find((mount) => mount.endsWith(":/out"))).toBeDefined();
     expect(fake.mountsFor("app").some((mount) => mount.endsWith(":/app:ro"))).toBe(true);
     expect(fake.mountsFor("app").some((mount) => mount.endsWith(":/app/.owned:ro"))).toBe(true);
     expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  });
+
+  it("runs the executor, and only the executor, under the pinned seccomp profile, with no capability added and nothing unconfined", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep }); fake.onExecutor = okOutput(s);
+    await runWith(s);
+    const securityOptions = (args: string[]) => args.filter((value, index) => args[index - 1] === "--security-opt");
+    expect(securityOptions(fake.argsFor("executor"))).toEqual(["no-new-privileges", `seccomp=${installedExecutorSeccompProfilePath()}`]);
+    expect(fake.argsFor("executor")).toContain("--cap-drop=ALL");
+    // The executor's sandbox and limit flags are the shared definition the image smoke test runs with, in order and unchanged.
+    const shared = executorContainerArgs(installedExecutorSeccompProfilePath());
+    const executorArgs = fake.argsFor("executor");
+    expect(executorArgs.slice(executorArgs.indexOf(shared[0]!), executorArgs.indexOf(shared[0]!) + shared.length)).toEqual(shared);
+    // No other container of the run (app, source copy, build commands, cleanup) leaves Docker's default profile.
+    const others = fake.calls.filter((args) => args[0] === "run" && !args[args.indexOf("--name") + 1]?.startsWith("rovara-executor-"));
+    expect(others.length).toBeGreaterThan(2);
+    for (const args of others) expect(args.join(" ")).not.toMatch(/seccomp/);
+    for (const args of fake.calls) expect(args.join(" ")).not.toMatch(/--privileged|--cap-add|seccomp=unconfined|apparmor=unconfined|--userns|--pid=host|--ipc=host/);
+  });
+
+  it("says why an executor that exited 2 did, from its own log and its exit code, since docker run prints nothing of it", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    fake.exitCodeOfExecutor(2);
+    fake.onExecutor = (outDir) => {
+      writeExecutorOutput(outDir, { exitCode: 2, reason: "chromium-unsandboxed", runId: s.runId, groupId: s.groupId });
+      writeFileSync(join(outDir, "executor.log"), "2026-10-19T00:00:00.000Z unavailable: chromium-unsandboxed: renderer-has-no-extra-seccomp-filter\n");
+    };
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBe("executor-failed");
+    const tail = s.host.readDiagnostics(s.runId).executorLogTail;
+    expect(tail).toContain("chromium-unsandboxed: renderer-has-no-extra-seccomp-filter");
+    expect(tail).toContain("docker run exited with code 2");
+  });
+
+  it("says why docker run itself failed to start the executor: its stderr and exit code", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    fake.exitCodeOfExecutor(126); fake.executorStdout = "docker: Error response from daemon: invalid seccomp profile";
+    await runWith(s);
+    const tail = s.host.readDiagnostics(s.runId).executorLogTail;
+    expect(tail).toContain("invalid seccomp profile");
+    expect(tail).toContain("docker run exited with code 126");
+  });
+
+  it("keeps a finished run's executor diagnostics free of credentials and bounded", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    fake.exitCodeOfExecutor(2);
+    let password = "";
+    fake.onExecutor = (outDir) => {
+      // The run's own synthetic credential, which only the plan mount holds.
+      password = (JSON.parse(readFileSync(join(dirname(outDir), "plan.json"), "utf8")) as { accounts: { password: string }[] }).accounts[0]!.password;
+      writeExecutorOutput(outDir, { exitCode: 2, reason: "internal-error", runId: s.runId, groupId: s.groupId });
+      writeFileSync(join(outDir, "executor.log"), `${"x".repeat(200_000)}\npassword ${password}\n`);
+    };
+    await runWith(s);
+    const tail = s.host.readDiagnostics(s.runId).executorLogTail;
+    expect(password.length).toBeGreaterThan(16);
+    expect(tail).not.toContain(password);
+    expect(Buffer.byteLength(tail)).toBeLessThanOrEqual(64 * 1024);
+    expect(tail).toContain("<account:");
+  });
+
+  it.each([124, 130])("reads nothing from the out directory when docker run was killed (exit %i): the container may still be running", async (code) => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    fake.exitCodeOfExecutor(code);
+    fake.onExecutor = (outDir) => { writeExecutorOutput(outDir, { exitCode: 2, reason: "internal-error", runId: s.runId, groupId: s.groupId }); writeFileSync(join(outDir, "executor.log"), "LOG-THAT-MUST-NOT-BE-READ\n"); };
+    await runWith(s);
+    expect(s.host.readDiagnostics(s.runId).executorLogTail).not.toContain("LOG-THAT-MUST-NOT-BE-READ");
+  });
+
+  it("never follows a symbolic link, and never waits on a FIFO, left in place of executor.log", async () => {
+    for (const kind of ["symlink", "fifo"] as const) {
+      const fake = new FakeDockerCli(); const s = await setup({ fake });
+      const secret = join(await temp("worker-file-"), "worker-secret.txt"); writeFileSync(secret, "WORKER-FILE-CONTENT\n");
+      fake.exitCodeOfExecutor(2);
+      fake.onExecutor = (outDir) => {
+        writeExecutorOutput(outDir, { exitCode: 2, reason: "internal-error", runId: s.runId, groupId: s.groupId });
+        if (kind === "symlink") symlinkSync(secret, join(outDir, "executor.log")); else execFileSync("mkfifo", [join(outDir, "executor.log")]);
+      };
+      const started = Date.now();
+      await runWith(s);
+      const tail = s.host.readDiagnostics(s.runId).executorLogTail;
+      expect(Date.now() - started, kind).toBeLessThan(10_000);
+      expect(tail, kind).not.toContain("WORKER-FILE-CONTENT");
+      expect(tail, kind).toContain("docker run exited with code 2");
+    }
+  });
+
+  it("redacts a credential that straddles the start of the kept window, before cutting", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake });
+    fake.exitCodeOfExecutor(2);
+    let password = "";
+    fake.onExecutor = (outDir) => {
+      password = (JSON.parse(readFileSync(join(dirname(outDir), "plan.json"), "utf8")) as { accounts: { password: string }[] }).accounts[0]!.password;
+      writeExecutorOutput(outDir, { exitCode: 2, reason: "internal-error", runId: s.runId, groupId: s.groupId });
+      // The kept window is the last 32 KiB: put the credential so that its second half is the first thing inside it.
+      const tail = `${"y".repeat(32 * 1024 - Math.floor(password.length / 2))}`;
+      writeFileSync(join(outDir, "executor.log"), `${"x".repeat(5_000)}${password}${tail}`);
+    };
+    await runWith(s);
+    const text = s.host.readDiagnostics(s.runId).executorLogTail;
+    expect(text).toContain("yyyy");
+    expect(text).not.toContain(password);
+    expect(text).not.toContain(password.slice(-10));
+    expect(text).not.toContain(password.slice(0, 10));
+  });
+
+  it("refuses to be built over a seccomp profile whose digest differs from the pin", async () => {
+    const fake = new FakeDockerCli(); const dir = await temp("seccomp-");
+    const profile = join(dir, "profile.json"); await writeFile(profile, "{}");
+    const fixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1" });
+    expect(() => createDockerApplicationHost({ docker: fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot: dir, now: () => Date.now(),
+      admission: fixture.plan.admission, groupId: fixture.plan.groupId, candidateSourceDir: dir, executorSeccompProfile: profile })).toThrow(/executor-seccomp-profile-digest-mismatch/);
+    expect(fake.calls).toEqual([]);
   });
 
   it("gives the build container the source read-only, no credentials and registry egress only, and runs each command with its own timeout", async () => {
@@ -83,7 +199,9 @@ describe("docker application host", () => {
       expect(args).toEqual(expect.arrayContaining(["--cap-drop=ALL", "--security-opt", "no-new-privileges", "--memory", "2g", "--memory-swap", "2g", "--pids-limit", "1024", "--cpus", "2"]));
       expect(args).toContain("NODE_OPTIONS=");
       expect(args).toContain("--pull=never");
-      expect(args).not.toContain("--network");
+      // Never the default bridge: the source copy has no network, every build command has the run's own build bridge.
+      const index = Number(args[args.indexOf("--name") + 1]!.split("-").at(-1));
+      expect(args[args.indexOf("--network") + 1]).toBe(index === 0 ? "none" : `rovara-e2e-build-${s.runId}`);
       expect(args.join(" ")).not.toMatch(/docker\.sock|AWS_|AGENTX_|PI_|GIT_|TOKEN|SECRET|(^| )-p /);
       expect(args.some((value) => value.endsWith(":/src:ro"))).toBe(true);
       expect(args.some((value) => value.endsWith(":/out") && args[args.indexOf(value) - 1] === "-v")).toBe(true);
@@ -92,6 +210,34 @@ describe("docker application host", () => {
     expect(fake.buildTimeouts().slice(1)).toEqual([45_000, 60_000]);
     // The app runs the built tree, and the network was created before anything used it.
     expect(fake.calls.findIndex((args) => args[0] === "network" && args[1] === "create")).toBeLessThan(fake.calls.indexOf(builds[0]!));
+  });
+
+  it("puts builds and the app on bridges with fixed names the host firewall keys on, labels both networks and removes both", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake, recipeBuild: buildStep }); fake.onExecutor = okOutput(s);
+    const signal = new AbortController().signal;
+    const lease = await s.host.allocate(s.input as never, signal);
+    const networks = e2eRunNetworks(s.runId);
+    // 8 hex of the run id's digest after a three-letter kind: valid Linux interface names (at most 15 characters), told apart by prefix.
+    expect(networks.buildBridge).toMatch(/^rvb[0-9a-f]{8}$/);
+    expect(networks.internalBridge).toMatch(/^rvi[0-9a-f]{8}$/);
+    expect(networks.buildBridge.slice(3)).toBe(networks.internalBridge.slice(3));
+    expect(e2eRunNetworks("another-run").buildBridge).not.toBe(networks.buildBridge);
+    const creates = fake.calls.filter((args) => args[0] === "network" && args[1] === "create");
+    expect(creates).toHaveLength(2);
+    const build = creates.find((args) => args.at(-1) === networks.build)!;
+    const internal = creates.find((args) => args.at(-1) === networks.internal)!;
+    expect(build).not.toContain("--internal");
+    expect(internal).toContain("--internal");
+    expect(build).toEqual(expect.arrayContaining(["-o", `com.docker.network.bridge.name=${networks.buildBridge}`, "--label", `rovara.run=${s.runId}`]));
+    expect(internal).toEqual(expect.arrayContaining(["-o", `com.docker.network.bridge.name=${networks.internalBridge}`, "--label", `rovara.run=${s.runId}`]));
+    // Both carry the creation time the stale-run sweep ages them by.
+    for (const args of creates) expect(args.some((value) => /^rovara\.created=\d+$/.test(value))).toBe(true);
+    await lease.execute(signal);
+    // App and executor share the internal network and nothing else; builds never see it.
+    for (const args of [fake.argsFor("app"), fake.argsFor("executor")]) expect(args.filter((value, index) => args[index - 1] === "--network")).toEqual([networks.internal]);
+    await expect(lease.close(signal)).resolves.toEqual({ confirmed: true });
+    expect(fake.networks()).toEqual([]);
+    expect(fake.calls.filter((args) => args[0] === "network" && args[1] === "rm").map((args) => args[2]).sort()).toEqual([networks.build, networks.internal].sort());
   });
 
   it("seeds synthetic credentials for the plan's account profiles and keeps them out of every diagnostic", async () => {
@@ -293,7 +439,8 @@ describe("docker application host", () => {
     const fake = new FakeDockerCli(); const s = await setup({ fake });
     const signal = new AbortController().signal;
     const lease = await s.host.allocate(s.input as never, signal);
-    expect(fake.networks()).toEqual([`rovara-e2e-${s.runId}`]);
+    // Both names, in sorted order whichever way the run id's first character sorts against "build-".
+    expect(fake.networks().sort()).toEqual([`rovara-e2e-${s.runId}`, `rovara-e2e-build-${s.runId}`].sort());
     await expect(lease.close(signal)).resolves.toEqual({ confirmed: true });
     const removals = () => fake.calls.filter((args) => args[0] === "rm" || (args[0] === "network" && args[1] === "rm")).length;
     const before = removals();
@@ -326,7 +473,8 @@ describe("docker application host", () => {
     const runRoot = await temp("sweep-root-"); await mkdir(join(runRoot, "old")); await mkdir(join(runRoot, "fresh"));
     expect(await sweepStaleRovaraRuns(fake, 3_600_000, { now: () => now, runRoot })).toBe(1);
     expect(fake.liveResources("rovara.run=old")).toEqual([]);
-    expect(fake.liveResources("rovara.run=fresh")).toHaveLength(2);
+    // The app container and both networks (internal and build) of the fresh run stay.
+    expect(fake.liveResources("rovara.run=fresh")).toHaveLength(3);
     expect(await readdir(runRoot)).toEqual(["fresh"]);
   });
 

@@ -128,15 +128,31 @@ jobs:
         with:
           node-version-file: .node-version
           cache: npm
-      - name: Drop traffic from containers to the metadata service
-        run: sudo iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP
+      # The very rules the EC2 worker installs at boot: the heredoc inside boot.sh, extracted and run unchanged, so CI and production cannot drift.
+      - name: Wall containers off from the host, private networks and the metadata service
+        run: |
+          sed -n "/<<'FIREWALL'/,/^FIREWALL\$/p" packages/worker/ec2/boot.sh | sed '1d;$d' > "$RUNNER_TEMP/container-firewall.sh"
+          test "$(wc -l < "$RUNNER_TEMP/container-firewall.sh")" -gt 5
+          sudo bash "$RUNNER_TEMP/container-firewall.sh"
+          sudo iptables -S DOCKER-USER
+          sudo iptables -S INPUT
+      # Chromium's own sandbox needs unprivileged user namespaces. Ubuntu 24.04 blocks them for AppArmor-confined processes such as Docker containers
+      # (kernel.apparmor_restrict_unprivileged_userns=1); this only turns that CI-runner restriction off. Production runners are Amazon Linux 2023,
+      # which has no such restriction (its kernel only needs user.max_user_namespaces > 0, the default, and the chromium-sandbox-v1 probe fails if not).
+      - name: Allow unprivileged user namespaces for Chromium's sandbox
+        run: |
+          # CI runner only: production runners (Amazon Linux 2023) have no AppArmor userns restriction.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "no AppArmor userns restriction on this kernel"
+          sysctl user.max_user_namespaces
       - name: Build the executor image
         run: docker build -f environments/e2e-executor/Dockerfile -t rovara-e2e-executor:ci .
-      - name: Smoke-test the executor image without a network
-        run: docker run --rm --network none rovara-e2e-executor:ci node /opt/agentx/packages/verifier/dist/executor/smoke.js
       - run: npm ci
       # The packages import each other through their built output.
       - run: npm run build
+      # The executor as the host runs it (the pinned seccomp profile, every capability dropped, read-only, no network), from the one definition the release path and
+      # test-deploy use too. The smoke check fails unless Chromium's renderer is sandboxed.
+      - name: Smoke-test the executor image without a network
+        run: npx tsx scripts/executor-smoke.ts rovara-e2e-executor:ci
       - name: Linux runtime tests
         env:
           ROVARA_DOCKER: "1"

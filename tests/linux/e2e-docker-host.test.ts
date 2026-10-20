@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
 const docker = async (...args: string[]) => (await execFileAsync("docker", args)).stdout.trim();
 
 // Real Docker and the real executor image, driven only through `createDockerApplicationHost`. It runs only in the CI
-// `linux-runtime` job (ubuntu-24.04-arm, ROVARA_DOCKER=1, ROVARA_EXECUTOR_IMAGE, with the DOCKER-USER metadata drop rule
+// `linux-runtime` job (ubuntu-24.04-arm, ROVARA_DOCKER=1, ROVARA_EXECUTOR_IMAGE, with the container firewall from boot.sh
 // applied); everywhere else it skips.
 describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1")("docker application host", () => {
   afterAll(removeProbeDirs, 120_000);
@@ -92,7 +92,7 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
   }, 300_000);
 
   it("cannot reach the instance metadata service from the build container", async () => {
-    // The host's own IMDS rule is the CI job's DOCKER-USER drop; the build container sits on the default bridge, so it is the one that matters.
+    // The IMDS drop is one of the CI job's container firewall rules (the ones boot.sh installs on a runner); the build container runs on its own rvb bridge.
     const reach = "fetch('http://169.254.169.254/latest/meta-data/').then(()=>process.exit(0),()=>process.exit(7))";
     const r = await runThroughHost({ probe: "web-csv-positive-v1", recipeBuild: [{ program: "node", args: ["-e", reach], cwd: ".", timeoutMs: 120_000, env: {} }] });
     expect(r.run.unavailableReason).toBe("build-failed");

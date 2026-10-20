@@ -101,10 +101,11 @@ describe("EC2 worker user data", () => {
     expect(worstCase.openRouterProviders).toHaveLength(512);
     expect(worstCase.anthropicSecretArn).toHaveLength(SECRET_ARN_MAX_LENGTH);
     const compressed = Buffer.from(ec2WorkerUserData(worstCase, bootScript), "base64").length;
-    // EC2 measures user data before base64 encoding; at least 2 KB of it stays free for boot changes. It was 4 KB until the opt-in
-    // TEST qualification hook (about 1.5 KB compressed) and the executor image setting were added: this worst case sets every value at
-    // its maximum at once, which no real worker's configuration does.
-    expect(compressed).toBeLessThanOrEqual(EC2_USER_DATA_MAX_BYTES - 2_048);
+    // EC2 measures user data before base64 encoding; at least 1.5 KB of it stays free for boot changes. It was 4 KB until the opt-in
+    // TEST qualification hook (about 1.5 KB compressed) and the executor image setting were added, then 2 KB until the container firewall
+    // rules (about 330 bytes compressed) landed: this worst case sets every value at its maximum at once, which no real worker's
+    // configuration does.
+    expect(compressed).toBeLessThanOrEqual(EC2_USER_DATA_MAX_BYTES - 1_536);
   });
 
   it("measures the limit on the compressed user data, not the script (#229)", () => {
@@ -157,22 +158,25 @@ describe("EC2 worker user data", () => {
     expect(bootScript.indexOf('pull_contained_image')).toBeLessThan(bootScript.indexOf('write_worker_unit "$region"'));
   });
 
-  it("keeps containers off the instance metadata service and pulls the executor image after the worker image", () => {
-    expect(bootScript).toContain("iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP");
-    // The rule is idempotent: a -C check comes first, and a failure to install it stops the boot.
-    expect(bootScript).toContain("iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER");
-    expect(bootScript).toContain('|| fail "could not block container access to the instance metadata service"');
+  it("walls untrusted containers off from the host and private networks and pulls the executor image after the worker image", () => {
+    // The rules live in one heredoc that CI extracts and runs as is (tests/contract/container-firewall.test.ts runs it against a fake iptables).
+    expect(bootScript).toContain("<<'FIREWALL'");
+    expect(bootScript).toContain('f() { local c=$1; shift; $c -C "$@" 2>/dev/null || $c -I "$@"; }');
+    expect(bootScript).toContain("f iptables DOCKER-USER -d 169.254.169.254/32 -j DROP");
+    // A failure to install the rules stops the boot.
+    expect(bootScript).toContain('|| fail "could not wall containers off from the host and private networks"');
     // DOCKER-USER exists only once the daemon is running.
-    expect(bootScript.indexOf("systemctl restart docker.service")).toBeLessThan(bootScript.indexOf("  block_container_metadata_access\n}\n"));
-    // The rule is also a oneshot unit, so it returns after a reboot (Docker rebuilds its chains) and lands before the worker starts.
-    expect(bootScript).toContain("readonly IMDS_DROP_UNIT=rovara-imds-drop.service");
+    expect(bootScript.indexOf("systemctl restart docker.service")).toBeLessThan(bootScript.indexOf("  wall_off_containers\n}\n"));
+    // The rules are also a oneshot unit, so they return after a reboot (Docker rebuilds its chains) and land before the worker starts.
+    expect(bootScript).toContain("readonly FIREWALL_UNIT=rovara-container-firewall.service");
     expect(bootScript).toContain("Type=oneshot");
     expect(bootScript).toContain("RemainAfterExit=yes");
-    expect(bootScript).toMatch(/\[Unit\][^]*?After=docker\.service\nBefore=\$WORKER_UNIT/);
-    expect(bootScript).toContain("ExecStart=/bin/bash /usr/local/libexec/rovara-imds-drop");
-    // A worker must not start unless the drop is in place: it requires and follows the drop unit.
-    expect(bootScript).toContain("Requires=docker.service $IMDS_DROP_UNIT\nAfter=docker.service $IMDS_DROP_UNIT network-online.target");
-    expect(bootScript).toContain('systemctl enable "$IMDS_DROP_UNIT" && bash /usr/local/libexec/rovara-imds-drop || fail');
+    expect(bootScript).toMatch(/\[Unit\][^]*?After=docker\.service network-online\.target systemd-resolved\.service\nWants=network-online\.target\nBefore=\$WORKER_UNIT/);
+    expect(bootScript).toContain("ExecStart=/bin/bash /usr/local/libexec/rovara-container-firewall");
+    // A worker must not start unless the rules are in place: it requires and follows the firewall unit.
+    expect(bootScript).toContain("Requires=docker.service $FIREWALL_UNIT\nAfter=docker.service $FIREWALL_UNIT network-online.target");
+    expect(bootScript).toContain('systemctl enable "$FIREWALL_UNIT" && bash /usr/local/libexec/rovara-container-firewall || fail');
+    expect(bootScript).not.toContain("rovara-imds-drop");
     expect(bootScript).toContain('docker pull "$EXECUTOR_IMAGE"');
     // Unset until the control plane sets it: the pull is skipped, never a boot failure.
     expect(bootScript).toContain('[[ -n "${EXECUTOR_IMAGE:-}" ]] || return 0');

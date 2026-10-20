@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -149,6 +150,22 @@ describe("file case ledger", () => {
       await expect(snapshotExecutorOutput(dir, result), name).rejects.toThrow(new RegExp(`${name} is not a real directory`));
     }
   });
+
+  it("refuses an evidence file swapped for a symbolic link or a FIFO, without following the link or waiting on the FIFO", async () => {
+    const result: ExecutorResultFile = { schemaVersion: "e2e-executor-result/v1", exitCode: 0, reason: null, startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
+      node: { version: "v22.23.2", execPath: "/usr/local/bin/node", platform: "linux", arch: "arm64" }, runId: resolved.binding.runId, groupId: resolved.binding.groupId, shards: [] };
+    for (const kind of ["symlink", "fifo"] as const) {
+      const dir = await root(); const elsewhere = await root();
+      const ledger = createFileCaseLedger(dir, plan);
+      await ledger.evidence.recordCaseEvidence({ caseId, kind: "download", bytes: Buffer.from("id\r\n"), mediaType: "text/csv" }, signal);
+      await expect(snapshotExecutorOutput(dir, result)).resolves.toBeDefined();
+      const [name] = await readdir(join(dir, "downloads"));
+      const file = join(dir, "downloads", name!);
+      await rm(file);
+      if (kind === "symlink") { await writeFile(join(elsewhere, "worker-file"), "id\r\n"); await symlink(join(elsewhere, "worker-file"), file); } else execFileSync("mkfifo", [file]);
+      await expect(snapshotExecutorOutput(dir, result), kind).rejects.toThrow(/is not a bounded regular file/);
+    }
+  }, 20_000);
 
   it("closes after the run deadline", async () => {
     const ledger = createFileCaseLedger(await root(), plan, { clock: () => new Date(resolved.deadlineAtMs + 1) });

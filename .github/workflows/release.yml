@@ -72,6 +72,17 @@ jobs:
           fi
       - uses: actions/checkout@v5
         with: { persist-credentials: false }
+      # The executor image is smoke-tested before it is pushed (scripts/executor-smoke.ts, the definition CI and test-deploy use), which needs the repository's
+      # dependencies and build. They run here, before any AWS credential exists in the environment, and only when the executor is published.
+      - if: vars.AGENTX_PUBLISH_EXECUTOR_IMAGE == 'true'
+        uses: actions/setup-node@v5
+        with: { node-version-file: .node-version, cache: npm }
+      - if: vars.AGENTX_PUBLISH_EXECUTOR_IMAGE == 'true'
+        run: npm ci && npm run build
+      # Chromium's own sandbox needs unprivileged user namespaces, which Ubuntu 24.04 blocks for AppArmor-confined containers on the runner (the same CI-only
+      # step as the linux-runtime job in ci.yml); production hosts (Amazon Linux 2023) have no such restriction.
+      - if: vars.AGENTX_PUBLISH_EXECUTOR_IMAGE == 'true'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || echo "no AppArmor userns restriction on this kernel"
       - uses: aws-actions/configure-aws-credentials@v5
         with: { role-to-assume: "${{ vars.AGENTX_PUBLISH_ROLE_ARN }}", aws-region: us-east-1 }
       - uses: aws-actions/amazon-ecr-login@v2
@@ -102,8 +113,20 @@ jobs:
             # (the tagged manifest plus attached provenance/SBOM attestations) instead of a single
             # linux/arm64 image manifest, and the digest this job would read back is the index's,
             # not the image's — the wrong thing to pin the release to.
-            docker buildx build --platform linux/arm64 --provenance=false --sbom=false --file "$dockerfile" --tag "$repo:$VERSION" --push --metadata-file "$RUNNER_TEMP/$image.json" .
-            digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/$image.json")
+            if [ "$image" = executor ]; then
+              # The executor is built into the local Docker, smoke-tested as the host runs it (Chromium's sandbox on), and that same loaded image is pushed, so the
+              # published bytes are the smoke-tested bytes. A failing smoke test stops the job before anything is pushed.
+              docker buildx build --platform linux/arm64 --provenance=false --sbom=false --file "$dockerfile" --tag "$repo:$VERSION" --load .
+              npx tsx scripts/executor-smoke.ts "$repo:$VERSION"
+              digest=$(docker push "$repo:$VERSION" | tee /dev/stderr | sed -n 's/^.*digest: \(sha256:[a-f0-9]\{64\}\).*$/\1/p' | tail -1)
+              if [ -z "$digest" ]; then
+                echo "::error::docker push of $repo:$VERSION reported no digest" >&2
+                exit 1
+              fi
+            else
+              docker buildx build --platform linux/arm64 --provenance=false --sbom=false --file "$dockerfile" --tag "$repo:$VERSION" --push --metadata-file "$RUNNER_TEMP/$image.json" .
+              digest=$(jq -r '."containerimage.digest"' "$RUNNER_TEMP/$image.json")
+            fi
             # Don't trust the local build metadata alone: read back what the registry actually
             # holds for this tag, and fail loudly if it's missing or doesn't match what was just
             # pushed, rather than shipping a release pinned to a digest nobody can pull.
