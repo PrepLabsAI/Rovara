@@ -36,6 +36,8 @@ export async function runGitWithCredential(input: {
   maxBuffer?: number;
   cwd?: string;
   run?: CredentialedGitRunner;
+  /** Extra variables for the Git process (such as GIT_OBJECT_DIRECTORY for a throwaway repository), under the hardening. */
+  environment?: Readonly<Record<string, string>>;
 }): Promise<{ stdout: string; stderr: string }> {
   assertNonForceGitArguments(input.args);
   const credential = input.credential ?? {};
@@ -49,7 +51,7 @@ export async function runGitWithCredential(input: {
     ? undefined
     : await mkdtemp(join(tmpdir(), "agentx-git-askpass-"));
   try {
-    const environment = await gitHardenedEnvironment(input.directory, {}, { network: true });
+    const environment = await gitHardenedEnvironment(input.directory, { ...input.environment }, { network: true });
     environment.GIT_TERMINAL_PROMPT = "0";
     if (askPassDirectory && username && password) {
       const askPassPath = join(askPassDirectory, "askpass.sh");
