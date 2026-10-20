@@ -53,7 +53,7 @@ export { verifyE2ECompiledFileInventory, expectedE2EConfigDigest } from "./ident
 export { E2EReportSchema, type E2EReport } from "./report-schema.js";
 export { E2E_REPORT_MAX_BYTES, E2E_APP_RPC_FRAME_MAX_BYTES, E2E_APP_LITERAL_MAX_BYTES, E2E_APP_LITERAL_MAX_DEPTH, E2E_COLLECTION_ORACLE_MAX_CARRIER_BYTES, e2ePrivateTransferMaxBytes, E2E_MODULE_EXPORT_INVENTORY_PROTOCOL, E2E_MODULE_EXPORT_PROJECTION_VERSION, parseE2EReport, qualifyE2EReport, createE2ECollectionOracleFromCompiledSuite, qualifyE2ECollection, projectE2EModuleExportNames, type E2EReportMapping, type E2EReportExpectation, type ParsedE2EReport, type E2ECollectionOracle, type E2ECollection, type E2EObservedReceipt, type E2ECaseObservation, type E2EStructuralQualification } from "./result-adapter.js";
 export { E2E_EXECUTOR_HOST_PROFILE_ID, E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_MODULE_PATH, E2E_EXECUTOR_HOST_ENTRY_SOURCE, E2E_EXECUTOR_HOST_DESCRIPTOR, verifyExecutorHostRegistration } from "./executor/host-registry.js";
-export { E2E_WEB_ENGINE_CAPABILITIES, E2E_EXECUTOR_LAUNCH_FACTORY_ID, webApiApplicationLaunchTarget } from "./web-api-launch-target.js";
+export { E2E_WEB_ENGINE_CAPABILITIES, E2E_EXECUTOR_LAUNCH_FACTORY_ID, webApiApplicationLaunchTarget, webEngineCapabilities } from "./web-api-launch-target.js";
 export type { E2EWebRuntimePorts } from "./web-runtime.js";
 export { createAPIApplicationCliHost } from "./api-runtime.js";
 export { installedE2EApplicationStateProbeAsset, e2eApplicationStateProbeManifestDigest } from "./application-state-probes.js";

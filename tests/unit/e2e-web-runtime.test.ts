@@ -39,14 +39,14 @@ describe("web application runtime", () => {
   it("constructs a lazy Chromium engine from the exact selected viewport without resolving its owned endpoint", () => {
     let called = false;
     const injected = { ...ports(), resolveOwnedCdpEndpoint: async () => { called = true; return "wss://not-used.invalid"; } };
-    const host = createWebApplicationCliHost({ launchContext: launch(), declaration, ports: injected });
+    const host = createWebApplicationCliHost({ launchContext: launch(), declaration, ports: injected, engineAdmission: { artifactCapabilities: ["screenshot", "video"], stateCapability: true } });
     expect(host.engine).toBeDefined();
     expect(host.profileId).toBe("web-profile");
     expect(called).toBe(false);
   });
 
   it("refuses Firefox instead of substituting Chromium", () => {
-    expect(() => createWebApplicationCliHost({ launchContext: launch("firefox"), declaration, ports: ports() })).toThrow(/Chromium/);
+    expect(() => createWebApplicationCliHost({ launchContext: launch("firefox"), declaration, ports: ports(), engineAdmission: { artifactCapabilities: ["screenshot", "video"], stateCapability: true } })).toThrow(/Chromium/);
   });
 
   it("uses actual downloaded CSV bytes for positive and negative execution outcomes", () => {

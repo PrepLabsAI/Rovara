@@ -188,7 +188,11 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         } finally { await session.detach().catch(() => undefined); }
       },
     });
-    const inner = createWebApplicationCliHost({ launchContext, declaration, ports });
+    // The engine is as capable as the admission says: its declared artifact and state capabilities, which the compiler validated against the admitted capture policy and runtime row.
+    const launchTarget = resolved.suite.runtimeAdmissionContext.launchTargets.find((item) => item.targetId === launchContext.selectedTarget.targetId);
+    if (!launchTarget) throw new Error("the admitted launch declaration has no entry for the selected web target");
+    const inner = createWebApplicationCliHost({ launchContext, declaration, ports,
+      engineAdmission: { artifactCapabilities: launchTarget.artifactCapabilities, stateCapability: launchTarget.stateCapability } });
     // The case adapter opens its own first page and its assertion steps; nothing may run before them.
     return inner;
   }

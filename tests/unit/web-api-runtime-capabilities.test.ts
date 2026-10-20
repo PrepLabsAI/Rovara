@@ -79,7 +79,8 @@ describe("registered engines against the engines the runtimes present", () => {
   it("registers the engine identity the web runtime actually constructs", () => {
     const host = createWebApplicationCliHost({ launchContext: context({ kind: "web", targetId: "web-target", applicationId: "app", runtimeProfileId: "p", accountProfileId: "o",
       browser: "chromium", viewport: { width: 1280, height: 720 } }, "p") as never, ports: { ...webPorts, resolveOwnedCdpEndpoint: async () => "wss://unused.invalid" },
-    declaration: { preparedEnvironmentDigest: sha64, target: { targetId: "web-target", app: { identity: "app" } }, originByApplicationId: [{ applicationId: "app", origin: "http://127.0.0.1:43123" }], cases: [] } });
+    declaration: { preparedEnvironmentDigest: sha64, target: { targetId: "web-target", app: { identity: "app" } }, originByApplicationId: [{ applicationId: "app", origin: "http://127.0.0.1:43123" }], cases: [] },
+    engineAdmission: { artifactCapabilities: ["screenshot", "video"], stateCapability: true } });
     expect(engineOf(host)).toMatchObject({ name: web.engine.name, version: web.engine.version, spiVersion: web.engine.spiVersion });
     expect("browsers" in web ? web.browsers : null).toEqual(["chromium"]);
   });
