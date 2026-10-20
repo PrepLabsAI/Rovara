@@ -1,47 +1,15 @@
-import { execFileSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2E_HARD_LIMITS, canonicalJson, type E2EApplicationBuildSourceManifest, type E2ESourceSnapshot } from "@agentx/contracts";
+import { E2E_HARD_LIMITS, canonicalJson } from "@agentx/contracts";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
-import { assessCandidateBuildSource, candidateBuildSourceAdmissionReference } from "../../packages/broker/src/aws/candidate-build-source.js";
+import { candidateBuildSourceAdmissionReference } from "../../packages/broker/src/aws/candidate-build-source.js";
 import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } from "../../packages/broker/src/e2e/application-admission.js";
 import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
-import { exportCandidateBuildSource } from "../../packages/worker/src/e2e-build-source-export.js";
-import { createProcessCandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
-import { readCommittedCandidateSourceExport } from "../../packages/worker/src/verification/candidate.js";
+import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { binding, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 
-const roots: string[] = [];
-afterEach(async () => { await Promise.all(roots.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
-async function temp(prefix: string) { const dir = await realpath(await mkdtemp(join(tmpdir(), prefix))); roots.push(dir); return dir; }
-const git = (cwd: string, ...args: string[]) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.test",
-  GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.test", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" } }).trim();
-
-/**
- * A real committed candidate, exported the way the worker exports one (the same code the live IMPLEMENT run uses) and stored the way the broker stores its
- * build source (the same assessment), so the admission is built from exactly the records Task 2.4b writes.
- */
-async function candidateOf(tree: Record<string, string>) {
-  const root = await temp("admission-candidate-");
-  git(root, "init", "-q");
-  for (const [path, content] of Object.entries(tree)) { await mkdir(dirname(join(root, path)), { recursive: true }); await writeFile(join(root, path), content); }
-  git(root, "add", "-A");
-  git(root, "commit", "-q", "-m", "candidate");
-  const identity = { repositoryId: "demo", commitSha: git(root, "rev-parse", "HEAD"), treeSha: git(root, "rev-parse", "HEAD^{tree}") };
-  const source = await readCommittedCandidateSourceExport([{ repositoryId: "demo", directory: root }], [identity]);
-  const built = await exportCandidateBuildSource({ git: createProcessCandidateGit(await temp("admission-scratch-")), repositoryRoot: root, candidate: source.candidate, signal: new AbortController().signal });
-  if (built.status !== "READY") throw new Error(built.reason);
-  const manifest: E2EApplicationBuildSourceManifest = built.manifest;
-  const stored = assessCandidateBuildSource({ manifestBytes: Buffer.from(JSON.stringify(manifest), "utf8"), committed: source });
-  if (stored.status !== "READY") throw new Error(stored.reason);
-  const repository = source.repositories[0]!;
-  const snapshot: E2ESourceSnapshot = { candidate: source.candidate, commitSha: identity.commitSha, treeSha: identity.treeSha, treeComplete: true, treePaths: repository.treePaths,
-    sources: repository.sources.map((item) => ({ path: item.path, sha256: item.sha256, kind: "blob" as const, bytes: Buffer.from(item.bytesBase64, "base64") })) };
-  return { snapshot, identity, source, manifest, stored, buildSource: { manifest, reference: candidateBuildSourceAdmissionReference(stored) } };
-}
+afterEach(disposeRealCandidates);
+const candidateOf = createRealCandidate;
 
 const ordersTree = { "package.json": ordersContractManifest, "src/orders.js": "export const orders = [];\n" };
 
@@ -158,7 +126,7 @@ describe("the application admission built for a single-kind round", () => {
 
   it("builds an api round from the api row alone", async () => {
     const fixture = webAndApiFixture();
-    const candidate = await candidateOf({ "package.json": ordersContractManifest, "api/package.json": fixture.snapshot.sources.find((item) => item.path === "api/package.json")!.bytes.toString("utf8") });
+    const candidate = await candidateOf({ "package.json": ordersContractManifest, "api/package.json": Buffer.from(fixture.snapshot.sources.find((item) => item.path === "api/package.json")!.bytes).toString("utf8") });
     const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4, roundId: randomUUID(),
       runId: randomUUID, intent: fixture.build({ web: false, api: true }), artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot,
       setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
@@ -186,7 +154,7 @@ describe("the application admission built for a single-kind round", () => {
 describe("the builder refuses with a specific reason, never a portable fallback", () => {
   it("refuses an intent whose executable targets span web and api (Ruling BF, defense in depth after approval)", async () => {
     const fixture = webAndApiFixture();
-    const candidate = await candidateOf({ "package.json": ordersContractManifest, "api/package.json": fixture.snapshot.sources.find((item) => item.path === "api/package.json")!.bytes.toString("utf8") });
+    const candidate = await candidateOf({ "package.json": ordersContractManifest, "api/package.json": Buffer.from(fixture.snapshot.sources.find((item) => item.path === "api/package.json")!.bytes).toString("utf8") });
     const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4, roundId: randomUUID(),
       runId: randomUUID, intent: fixture.build({ web: true, api: true }), artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot,
       setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
