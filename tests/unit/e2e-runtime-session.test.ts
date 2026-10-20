@@ -196,9 +196,14 @@ describe("private E2E worker session", () => {
     await chmod(directory, 0o700);
     const controller = new AbortController();
     const token = "d".repeat(64);
-    const session = await createE2EWorkerSession({ directory, capability: token, expectedByCase: new Map([["case", { payload: { caseId: "case" } }]]), handle: async (payload) => payload, signal: controller.signal, deadlineAt: Date.now() + 30 });
+    // The absolute deadline is 30 ms on a fake clock that the test moves: on the real clock it could pass before the session even finished starting, or after the check.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    let session!: Awaited<ReturnType<typeof createE2EWorkerSession>>;
     try {
-      await new Promise((resolve) => setTimeout(resolve, 40));
+      session = await createE2EWorkerSession({ directory, capability: token, expectedByCase: new Map([["case", { payload: { caseId: "case" } }]]), handle: async (payload) => payload, signal: controller.signal, deadlineAt: Date.now() + 30 });
+      await vi.advanceTimersByTimeAsync(30);
+    } finally { vi.useRealTimers(); }
+    try {
       expect(session.readback()).toMatchObject({ closed: true });
       await expect(parsed(session.socketPath, { schemaVersion: "trusted-worker-observation/v1", kind: "register", capability: token, workerId: "a".repeat(24) })).rejects.toThrow();
       expect(await session.close()).toBe(true);

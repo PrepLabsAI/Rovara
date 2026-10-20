@@ -19,6 +19,7 @@ import { chromium } from "playwright-core";
 import { launchLocalChromium } from "/opt/agentx/packages/verifier/dist/executor/local-browser.js";
 import { attestWhenSettled } from "/opt/agentx/packages/verifier/dist/executor/chromium-sandbox.js";
 const controller = new AbortController();
+const cleanupDiagnostics = [];
 let executablePath;
 if (process.env.SANDBOX_MODE === "no-sandbox") {
   // The only difference from production: the browser is started with --no-sandbox, as it was before this task.
@@ -27,20 +28,25 @@ if (process.env.SANDBOX_MODE === "no-sandbox") {
   chmodSync(executablePath, 0o755);
 }
 let result;
+let browser;
 try {
-  const browser = await launchLocalChromium({ downloadDir: "/tmp/downloads", signal: controller.signal, ...(executablePath ? { executablePath } : {}) });
+  browser = await launchLocalChromium({ downloadDir: "/tmp/downloads", signal: controller.signal, ...(executablePath ? { executablePath } : {}),
+    onCleanupDiagnostic: (message) => { cleanupDiagnostics.push(message); } });
   // The same settling look the executor takes, so a renderer still starting is waited for; a renderer that never shows a sandbox is reported as it is.
   const { attestation, verdict } = await attestWhenSettled({ cdpEndpoint: browser.cdpEndpoint, browserPid: browser.pid, runId: "7f1d1c6e-4f43-4d5c-9b8f-2a6f3c0a9d11", groupId: "linux-ci", signal: controller.signal }, { settleMs: 5000 });
   const status = readFileSync("/proc/self/status", "utf8");
   result = { launched: true, attestation, verdict, capEff: /CapEff:\\s*(\\w+)/.exec(status)?.[1], noNewPrivs: /NoNewPrivs:\\s*(\\d)/.exec(status)?.[1] };
-  await browser.close();
 } catch (error) {
   result = { launched: false, error: String(error instanceof Error ? error.message : error).slice(-800) };
 }
+// Closing the browser is cleanup: whatever it reports is a diagnostic next to the verdict above and never replaces it, so a profile directory that is
+// slow to go away cannot turn a sandboxed browser into "Chromium did not start with its sandbox on".
+try { await browser?.close(); } catch (error) { cleanupDiagnostics.push("close threw: " + String(error instanceof Error ? error.message : error)); }
+result.cleanupDiagnostics = cleanupDiagnostics;
 process.stdout.write("RESULT " + JSON.stringify(result) + "\\n");
 `;
 
-type Outcome = { launched: true; attestation: unknown; verdict: { sandboxed: boolean; reason?: string }; capEff: string; noNewPrivs: string } | { launched: false; error: string };
+type Outcome = ({ launched: true; attestation: unknown; verdict: { sandboxed: boolean; reason?: string }; capEff: string; noNewPrivs: string } | { launched: false; error: string }) & { cleanupDiagnostics: string[] };
 
 /** The production executor container's own hardening, with a seccomp option of the test's choosing. */
 async function inContainer(mode: "sandbox" | "no-sandbox", seccomp: "pinned" | "docker-default"): Promise<{ outcome: Outcome; raw: string }> {

@@ -76,7 +76,9 @@ async function writeJson(ports: E2EApiRuntimePorts, caseId: string, kind: "case-
 }
 
 export async function executeE2EAPIApplicationScenario(input: { caseId: string; scenario: E2EScenario; sessionRef: string; origin: string; ports: E2EApiRuntimePorts;
-  plan: Parameters<typeof createE2EApplicationAssertionObservationHeader>[0]["plan"]; binding: E2EApplicationObservationBinding; signal: AbortSignal }):
+  plan: Parameters<typeof createE2EApplicationAssertionObservationHeader>[0]["plan"]; binding: E2EApplicationObservationBinding; signal: AbortSignal;
+  /** Test seam: the clock and the pause between state polls. Production uses the wall clock; a test that bounds a poll in milliseconds supplies its own so no real time decides the verdict. */
+  clock?: Readonly<{ now(): number; sleep(milliseconds: number, signal: AbortSignal): Promise<void> }> }):
   Promise<{ steps: E2EApplicationCaseCapture["steps"]; assertions: E2EApplicationCaseCapture["assertions"];
     artifacts: E2EApplicationCaseCapture["artifacts"] }> {
   const responses = new Map<string, { response: E2EApiRuntimeResponse; bodyRef: Awaited<ReturnType<typeof recordE2EApplicationCliEvidence>>;
@@ -206,11 +208,13 @@ export async function executeE2EAPIApplicationScenario(input: { caseId: string; 
         throw new Error("protected state-probe schema asset is not bound to this exact assertion and proof bytes");
       }
       const samples: Array<{ observedAt: string; valueRef: Awaited<ReturnType<typeof recordE2EApplicationCliEvidence>>; disposition: "pending" | "ready" | "failed" }> = [];
-      const pollStartedAt = Date.now();
+      const now = (): number => (input.clock ? input.clock.now() : Date.now());
+      const sleep = (milliseconds: number, signal: AbortSignal): Promise<void> => (input.clock ? input.clock.sleep(milliseconds, signal) : waitForNextStatePoll(signal, milliseconds));
+      const pollStartedAt = now();
       const pollDeadline = pollStartedAt + assertion.pollTimeoutMs;
-      for (let attempt = 0; attempt < 100 && Date.now() <= pollDeadline; attempt += 1) {
+      for (let attempt = 0; attempt < 100 && now() <= pollDeadline; attempt += 1) {
         if (input.signal.aborted) throw input.signal.reason ?? new Error("API state polling was cancelled");
-        const remainingMs = pollDeadline - Date.now();
+        const remainingMs = pollDeadline - now();
         if (remainingMs <= 0) break;
         const requestDeadline = new AbortController();
         const requestTimer = setTimeout(() => requestDeadline.abort(new Error("API state request exceeded its remaining poll budget")), remainingMs);
@@ -220,10 +224,10 @@ export async function executeE2EAPIApplicationScenario(input: { caseId: string; 
             AbortSignal.any([input.signal, requestDeadline.signal]));
         } catch (error) {
           if (input.signal.aborted) throw input.signal.reason ?? error;
-          if (Date.now() >= pollDeadline) break;
+          if (now() >= pollDeadline) break;
           throw error;
         } finally { clearTimeout(requestTimer); }
-        const arrivedWithinBudget = Date.now() <= pollDeadline;
+        const arrivedWithinBudget = now() <= pollDeadline;
         if (response.origin !== input.origin || response.path !== "/api/orders/state" || response.method !== "GET"
           || response.body.byteLength > 1_048_576 || !Number.isInteger(response.status) || response.status < 100 || response.status > 599
           || !/^application\/json(?:\s*;|$)/i.test(response.contentType)
@@ -241,8 +245,8 @@ export async function executeE2EAPIApplicationScenario(input: { caseId: string; 
           : response.status === 429 || response.status === 503 ? "pending" : "failed";
         samples.push({ observedAt, valueRef: bodyRef, disposition });
         if (disposition === "ready" || disposition === "failed") break;
-        if (Date.now() >= pollDeadline || attempt === 99) break;
-        await waitForNextStatePoll(input.signal, Math.min(100, Math.max(1, pollDeadline - Date.now())));
+        if (now() >= pollDeadline || attempt === 99) break;
+        await sleep(Math.min(100, Math.max(1, pollDeadline - now())), input.signal);
       }
       if (samples.length === 0) throw new Error("API state probe deadline expired before an actual sample was read");
       proofBytes.set(protectedProof.ref.artifactId, protectedProof);

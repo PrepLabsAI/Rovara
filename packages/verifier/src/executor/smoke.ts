@@ -31,5 +31,8 @@ try {
 } finally {
   clearTimeout(timer);
   await browser?.close().catch(() => undefined);
-  await rm(downloads, { recursive: true, force: true });
+  // Cleanup never decides the smoke check: a directory that will not go away is a diagnostic, not a failed (or, worse, crashed) check.
+  await rm(downloads, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 }).catch((error: unknown) => {
+    process.stderr.write(`chromium smoke cleanup diagnostic: could not remove ${downloads}: ${error instanceof Error ? error.message : String(error)}\n`);
+  });
 }

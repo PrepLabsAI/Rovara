@@ -286,7 +286,7 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     const launches = createLaunchContexts(resolved);
     if (launches.length === 0) { await log("unavailable: no-shards"); reason = "no-shards"; return; }
     if (launches.some((launch) => launch.selectedTarget.kind === "web")) {
-      browser = await launchLocalChromium({ downloadDir: join(outDir, "downloads"), signal: input.signal,
+      browser = await launchLocalChromium({ downloadDir: join(outDir, "downloads"), signal: input.signal, onCleanupDiagnostic: log,
         ...(input.chromiumExecutable === undefined ? {} : { executablePath: input.chromiumExecutable }) });
       await log("chromium is listening on loopback");
       // Chromium's own sandbox is the second wall after the container: a hostile page has to escape it before it reaches this process and its result files.
