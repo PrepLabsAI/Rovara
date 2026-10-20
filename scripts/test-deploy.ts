@@ -401,27 +401,54 @@ export function assertOnlyExpectedChanges(changes: readonly ObservedChange[], ex
   // The code units whose own change is exactly the expected one: only their Arn re-evaluations may be accepted.
   const exactUnits = new Set<string>();
   const reevaluations: ObservedChange[] = [];
+  const unitChanges: ObservedChange[] = [];
   for (const change of changes) {
-    const label = labelOf(change);
     if (change.action !== expected.action || !matchesId(change.logicalId)) {
       if (expected.allowArnReevaluations === true && expected.action === "Modify" && change.action === "Modify") reevaluations.push(change);
-      else problems.push(label);
-      continue;
-    }
+      else problems.push(labelOf(change));
+    } else unitChanges.push(change);
+  }
+  // Pass 1: each code unit's own change. With Arn re-evaluations allowed, a unit may also carry Dynamic ResourceAttribute details
+  // (it reads another unit's Arn, as the Broker reads the sign-in function's); they are judged in pass 2, once it is known which
+  // units are changed only in Code.
+  const crossDetails = new Map<string, ObservedDetail[]>();
+  const baseClean = new Set<string>();
+  for (const change of unitChanges) {
+    const label = labelOf(change);
     const before = problems.length;
     if (change.replacement !== undefined && change.replacement !== "" && change.replacement !== "False") problems.push(`${label}: would replace the resource (Replacement ${change.replacement})`);
-    if (expected.allowedAttributes !== undefined) {
-      const attributes = change.attributes ?? [];
+    const attributes = change.attributes ?? [];
+    const details = change.details ?? [];
+    if (expected.allowArnReevaluations === true) {
+      const isOwn = (detail: ObservedDetail) => detail.evaluation === "Static" && detail.changeSource === "DirectModification";
+      const isCross = (detail: ObservedDetail) => detail.evaluation === "Dynamic" && detail.changeSource === "ResourceAttribute";
+      if (details.length === 0) problems.push(`${label}: its change details are not reported, so they cannot be checked`);
+      else if (details.some((detail) => !isOwn(detail) && !isCross(detail))) problems.push(`${label}: has a change that is not a Static DirectModification`);
+      else if (!details.some(isOwn)) problems.push(`${label}: has no Static DirectModification of its own, only re-evaluations`);
+      else if (expected.allowedAttributes !== undefined) {
+        // Only the unit's own (Static) details name what it changes; attributes and details are reported in the same order.
+        const own = attributes.length === details.length ? attributes.filter((_, index) => isOwn(details[index]!)) : attributes;
+        const extra = own.filter((attribute) => !(expected.allowedAttributes ?? []).includes(attribute));
+        if (own.length === 0) problems.push(`${label}: changed attributes are not reported, so they cannot be checked`);
+        else if (extra.length > 0) problems.push(`${label}: also changes ${extra.join(", ")}`);
+      }
+      crossDetails.set(change.logicalId, details.filter(isCross));
+    } else if (expected.allowedAttributes !== undefined) {
       const extra = attributes.filter((attribute) => !(expected.allowedAttributes ?? []).includes(attribute));
       if (attributes.length === 0) problems.push(`${label}: changed attributes are not reported, so they cannot be checked`);
       else if (extra.length > 0) problems.push(`${label}: also changes ${extra.join(", ")}`);
     }
-    if (expected.allowArnReevaluations === true) {
-      const details = change.details ?? [];
-      if (details.length === 0) problems.push(`${label}: its change details are not reported, so they cannot be checked`);
-      else if (details.some((detail) => detail.evaluation !== "Static" || detail.changeSource !== "DirectModification")) problems.push(`${label}: has a change that is not a Static DirectModification`);
-    }
-    if (problems.length === before) exactUnits.add(change.logicalId);
+    if (problems.length === before) baseClean.add(change.logicalId);
+  }
+  // Pass 2: a unit's re-evaluation of another unit's Arn is a no-op only when that other unit is in this change set and changed
+  // only in Code. A Static detail, any other cause, the unit's own Arn, or a unit that is not clean is refused.
+  for (const change of unitChanges) {
+    if (!baseClean.has(change.logicalId)) continue;
+    const label = labelOf(change);
+    const bad = (crossDetails.get(change.logicalId) ?? []).filter((detail) =>
+      !(detail.causingEntity !== undefined && [...baseClean].some((unit) => unit !== change.logicalId && detail.causingEntity === arnOf(unit))));
+    if (bad.length > 0) problems.push(`${label}: re-evaluates on ${bad.map((detail) => detail.causingEntity ?? "no entity").join(", ")}, which is not the Arn of another code unit changed only in Code`);
+    else exactUnits.add(change.logicalId);
   }
   const noOpReevaluations: string[] = [];
   for (const change of reevaluations) {
@@ -682,7 +709,7 @@ export function formatPlan(steps: readonly DeployStep[]): string {
           : `deployed template plus ${step.template.logicalIdPrefix}*${(step.template.parameterNames ?? []).length === 0 ? "" : ` and parameter ${(step.template.parameterNames ?? []).join(", ")}`} from a CDK synth of ${step.template.construct} (${[`identity=${step.template.identityMode}`, ...Object.entries(step.template.cdkContext).map(([key, value]) => `${key}=${value}`)].join(", ")})`;
         const allowed = [...(step.expect.logicalIds ?? []), ...(step.expect.logicalIdPrefixes ?? []).map((prefix) => `${prefix}*`)].join(", ");
         const reevaluations = step.expect.allowArnReevaluations === true
-          ? `, plus Modify entries accepted only as no-op re-evaluations caused by ${(step.expect.logicalIds ?? []).map(arnOf).join(", ")} (every detail Dynamic ResourceAttribute, never a replacement)`
+          ? `, plus Modify entries accepted only as no-op re-evaluations caused by ${(step.expect.logicalIds ?? []).map(arnOf).join(", ")} (every detail Dynamic ResourceAttribute, never a replacement; a code unit may carry such a detail only when another listed code unit's Arn causes it)`
           : "";
         return `${head} create change set on ${step.stack}: ${template}; ${step.parameters.length} parameters, ${changed.length === 0 ? "all UsePreviousValue" : `changing only ${changed.join(", ")}`}; abort unless the only changes are ${step.expect.action} ${allowed}${reevaluations}`;
       }

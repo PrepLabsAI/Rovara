@@ -10,9 +10,10 @@ skipLambdaBundling();
 type Resource = { Type: string; Properties?: { Code?: { ZipFile?: unknown; S3Bucket?: unknown } } };
 
 /** Every Lambda of the real TEST installation's control-plane stack that runs code built from this repository. */
-function repoBuiltLambdas(): string[] {
+function repoBuiltLambdas(context: Record<string, unknown> = { "agentx:e2eQualificationTransport": "enabled" }): string[] {
   const env = "agentxlivetest123";
-  const stack = buildAgentXApp({ agentxEnv: env }).node.children
+  // By default as TEST runs it: the standing qualification transport is lifted into the live stack, so it is synthesized here too.
+  const stack = buildAgentXApp({ agentxEnv: env, ...context }).node.children
     .filter((child): child is Stack => Stack.isStack(child))
     .find((candidate) => candidate.stackName === `agentx-${env}-control-plane`);
   if (stack === undefined) throw new Error(`expected the real ${env} control-plane stack`);
@@ -30,6 +31,10 @@ describe("test-deploy's control-plane code units", () => {
     const named = [...deployable, ...Object.keys(CONTROL_PLANE_LAMBDAS_NOT_DEPLOYED)].sort();
     expect(repoBuiltLambdas()).toEqual(named);
     expect(new Set(deployable).size).toBe(deployable.length);
+  });
+
+  it("also holds with the standing qualification transport on, as TEST runs it, and without it", () => {
+    expect(repoBuiltLambdas({})).toEqual(repoBuiltLambdas({ "agentx:e2eQualificationTransport": "enabled" }));
   });
 
   it("leaves out only a function a code-only change set cannot move, with the reason", () => {

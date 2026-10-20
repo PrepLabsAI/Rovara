@@ -1,5 +1,5 @@
 {
-  "_comment": "Derived from the deployed TEST control-plane template (get-template, Original) on 2026-10-20, not saved from a CreateChangeSet: every packaged control-plane Lambda changes only Code (Static, DirectModification), and every resource reading one of their Arn attributes is a Dynamic ResourceAttribute re-evaluation, as in control-plane-code-change-set.json.",
+  "_comment": "Derived from the deployed TEST control-plane template (get-template, Original) on 2026-10-20, not saved from a CreateChangeSet. Every packaged control-plane Lambda changes Code (Static, DirectModification); every resource reading one of their Arn attributes is a Dynamic ResourceAttribute re-evaluation; BrokerE1355FD6 also has an Environment detail (Dynamic ResourceAttribute) caused by DeveloperSignInFunction10B62B05.Arn, the only Lambda-to-Lambda Arn reference among the 11. Lambda::Permission entries use the real saved shape (Replacement Conditional, FunctionName RequiresRecreation Always, as in control-plane-code-change-set.json); other types use Replacement False / RequiresRecreation Never, which that saved change set shows for IAM policies, integrations and schedules, but the shape of the two Step Functions state machines (SessionsProvisioner, SessionsDeleter) is assumed, not observed.",
   "Changes": [
     {
       "Type": "Resource",
@@ -8,7 +8,7 @@
         "LogicalResourceId": "BrokerApiInvokeC6C766F0",
         "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-BrokerApiInvokeC6C766F0",
         "ResourceType": "AWS::Lambda::Permission",
-        "Replacement": "False",
+        "Replacement": "Conditional",
         "Scope": [
           "Properties"
         ],
@@ -17,7 +17,7 @@
             "Target": {
               "Attribute": "Properties",
               "Name": "FunctionName",
-              "RequiresRecreation": "Never"
+              "RequiresRecreation": "Always"
             },
             "Evaluation": "Dynamic",
             "ChangeSource": "ResourceAttribute",
@@ -46,6 +46,16 @@
             },
             "Evaluation": "Static",
             "ChangeSource": "DirectModification"
+          },
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Environment",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "DeveloperSignInFunction10B62B05.Arn"
           }
         ]
       }
@@ -141,7 +151,7 @@
         "LogicalResourceId": "DeveloperSignInFunctionApiInvoke4664A0AE",
         "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-DeveloperSignInFunctionApiInvoke4664A0AE",
         "ResourceType": "AWS::Lambda::Permission",
-        "Replacement": "False",
+        "Replacement": "Conditional",
         "Scope": [
           "Properties"
         ],
@@ -150,7 +160,7 @@
             "Target": {
               "Attribute": "Properties",
               "Name": "FunctionName",
-              "RequiresRecreation": "Never"
+              "RequiresRecreation": "Always"
             },
             "Evaluation": "Dynamic",
             "ChangeSource": "ResourceAttribute",
@@ -707,7 +717,7 @@
         "LogicalResourceId": "SlackIngressApiInvoke723D39D6",
         "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SlackIngressApiInvoke723D39D6",
         "ResourceType": "AWS::Lambda::Permission",
-        "Replacement": "False",
+        "Replacement": "Conditional",
         "Scope": [
           "Properties"
         ],
@@ -716,7 +726,7 @@
             "Target": {
               "Attribute": "Properties",
               "Name": "FunctionName",
-              "RequiresRecreation": "Never"
+              "RequiresRecreation": "Always"
             },
             "Evaluation": "Dynamic",
             "ChangeSource": "ResourceAttribute",
@@ -757,7 +767,7 @@
         "LogicalResourceId": "SlackIngressInteractivityInvokeEEF8EB87",
         "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SlackIngressInteractivityInvokeEEF8EB87",
         "ResourceType": "AWS::Lambda::Permission",
-        "Replacement": "False",
+        "Replacement": "Conditional",
         "Scope": [
           "Properties"
         ],
@@ -766,7 +776,7 @@
             "Target": {
               "Attribute": "Properties",
               "Name": "FunctionName",
-              "RequiresRecreation": "Never"
+              "RequiresRecreation": "Always"
             },
             "Evaluation": "Dynamic",
             "ChangeSource": "ResourceAttribute",

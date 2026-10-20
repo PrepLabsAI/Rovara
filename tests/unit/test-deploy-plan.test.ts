@@ -875,6 +875,75 @@ describe("assertOnlyExpectedChanges for every control-plane Lambda (change set d
     expect(() => assertOnlyExpectedChanges(observedChanges(replaced), all)).toThrow(/SessionsSteps3B98DD2B.*replace/);
   });
 
+  describe("a code unit that reads another code unit's Arn (Broker reads DeveloperSignIn's)", () => {
+    const environment = (changes: Change[]) => {
+      const detail = find(changes, "BrokerE1355FD6").Details?.find((candidate) => candidate.Target?.Name === "Environment");
+      if (detail === undefined) throw new Error("fixture has no Broker Environment detail");
+      return detail;
+    };
+
+    it("models the live shape: Broker's Code is Static and its Environment is a Dynamic re-evaluation caused by DeveloperSignIn's Arn", () => {
+      const detail = environment(fresh());
+      expect(detail).toMatchObject({ Evaluation: "Dynamic", ChangeSource: "ResourceAttribute", CausingEntity: "DeveloperSignInFunction10B62B05.Arn" });
+      expect(find(fresh(), "BrokerE1355FD6").Details).toHaveLength(2);
+    });
+
+    it("accepts it, and still accepts Broker's own Arn dependents", () => {
+      const result = assertOnlyExpectedChanges(observedChanges(fresh()), all);
+      expect(result.noOpReevaluations).toContain("BrokerIntegration");
+      expect(result.noOpReevaluations).not.toContain("BrokerE1355FD6");
+    });
+
+    it("refuses the same extra detail when it is Static", () => {
+      const changes = fresh();
+      environment(changes).Evaluation = "Static";
+      delete environment(changes).CausingEntity;
+      expect(() => assertOnlyExpectedChanges(observedChanges(changes), all)).toThrow(/BrokerE1355FD6/);
+      const direct = fresh();
+      environment(direct).ChangeSource = "DirectModification";
+      expect(() => assertOnlyExpectedChanges(observedChanges(direct), all)).toThrow(/BrokerE1355FD6/);
+    });
+
+    it("refuses it when the cause is not a code unit of this change set", () => {
+      const outside = fresh();
+      environment(outside).CausingEntity = "State.Arn";
+      expect(() => assertOnlyExpectedChanges(observedChanges(outside), all)).toThrow(/BrokerE1355FD6/);
+      // DeveloperSignIn is a real function, but not a unit of this run: Broker's dependence on it is not accepted.
+      expect(() => assertOnlyExpectedChanges(observedChanges(fresh()), expectation(ALL_IDS.filter((id) => id !== "DeveloperSignInFunction10B62B05")))).toThrow(/BrokerE1355FD6/);
+    });
+
+    it("refuses a cause that is another attribute of a unit, the unit itself, or no entity at all", () => {
+      for (const cause of ["DeveloperSignInFunction10B62B05.Version", "BrokerE1355FD6.Arn", "DeveloperSignInFunction10B62B05", undefined]) {
+        const changes = fresh();
+        if (cause === undefined) delete environment(changes).CausingEntity;
+        else environment(changes).CausingEntity = cause;
+        expect(() => assertOnlyExpectedChanges(observedChanges(changes), all), String(cause)).toThrow(/BrokerE1355FD6/);
+      }
+    });
+
+    it("refuses it when the unit that causes it is itself changed by more than its Code", () => {
+      const changes = fresh();
+      find(changes, "DeveloperSignInFunction10B62B05").Details?.push({ Target: { Attribute: "Properties", Name: "Environment", RequiresRecreation: "Never" }, Evaluation: "Static", ChangeSource: "DirectModification" });
+      expect(() => assertOnlyExpectedChanges(observedChanges(changes), all)).toThrow(/DeveloperSignInFunction10B62B05/);
+    });
+
+    it("refuses it when the unit would be replaced, and a Dynamic detail on a unit without a Code change", () => {
+      const replaced = fresh();
+      find(replaced, "BrokerE1355FD6").Replacement = "True";
+      expect(() => assertOnlyExpectedChanges(observedChanges(replaced), all)).toThrow(/BrokerE1355FD6.*replace/);
+      const noCode = fresh();
+      find(noCode, "BrokerE1355FD6").Details = [environment(noCode)];
+      expect(() => assertOnlyExpectedChanges(observedChanges(noCode), all)).toThrow(/BrokerE1355FD6/);
+    });
+
+    it("refuses a cycle of two units that each only re-evaluate on the other", () => {
+      const changes = fresh();
+      find(changes, "BrokerE1355FD6").Details = [environment(changes)];
+      find(changes, "DeveloperSignInFunction10B62B05").Details = [{ Target: { Attribute: "Properties", Name: "Environment", RequiresRecreation: "Never" }, Evaluation: "Dynamic", ChangeSource: "ResourceAttribute", CausingEntity: "BrokerE1355FD6.Arn" }];
+      expect(() => assertOnlyExpectedChanges(observedChanges(changes), all)).toThrow(/BrokerE1355FD6|DeveloperSignInFunction10B62B05/);
+    });
+  });
+
   it("refuses a dependent whose change is caused by something other than a code unit's Arn", () => {
     const changes = fresh();
     const detail = find(changes, "SlackIngressIntegration").Details?.[0];
