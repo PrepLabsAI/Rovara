@@ -77,10 +77,16 @@ describe.runIf(process.platform === "linux" && process.env.ROVARA_DOCKER === "1"
     expect(failed.qualification!.result!.cases[0]!.assertionReceipts.map((receipt) => [receipt.assertionIndex, receipt.status])).toEqual([[0, "failed"]]);
   }, 600_000);
 
-  it("never collects an API state that does not settle as PASS or FAILED", async () => {
+  it("collects an API state that stays on another value until the poll times out as FAILED, caused by the state assertion (Ruling W)", async () => {
+    // The fixture app keeps answering 200 with well-formed JSON of the approved shape and a different version: a definite mismatch, not an unavailable observation.
+    // A state that never settles because the app answers non-2xx or malformed JSON stays UNKNOWN; that is covered without Docker (tests/unit/e2e-api-state-timeout.test.ts),
+    // since the fixture app is byte-pinned to the installed qualification app and has no such defect.
     const r = await runProbe("api-state-positive-v1", { defect: "state-contract.json" });
+    expect(r.exitCode, JSON.stringify(r.host.readDiagnostics(r.fixture.plan.runId))).toBe(1);
     const collected = await collectLikeTheWorker(r);
-    expect(collected.qualification?.status ?? "UNKNOWN").toBe("UNKNOWN");
+    expect(collected.unavailableReason, collected.unavailableReason ?? "").toBeNull();
+    expect(collected.qualification?.status).toBe("FAILED");
+    expect(collected.qualification!.result!.cases[0]!.assertionReceipts.map((receipt) => [receipt.assertionIndex, receipt.status])).toEqual([[0, "failed"]]);
   }, 300_000);
 
   it("reports build-failed, with the build log, when a build command fails, and removes everything", async () => {

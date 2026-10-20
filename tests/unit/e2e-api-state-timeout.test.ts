@@ -90,7 +90,9 @@ describe("the API state poll records why it stopped (Ruling W)", () => {
     assertions: [{ kind: "state", probeId: "api-state-positive/v1", equals: expected, pollTimeoutMs }] });
 
   type Answer = { status: number; body: Uint8Array; contentType?: string };
-  async function poll(input: { pollTimeoutMs: number; answer: (index: number) => Answer; elapsedPerRequestMs?: number }) {
+  async function poll(input: { pollTimeoutMs: number; answer: (index: number) => Answer; elapsedPerRequestMs?: number;
+    /** From this poll on the request hangs until the poll's own budget timer aborts it; the clock is then past the budget, as it would be in real time. */
+    hangFrom?: number }) {
     // The poll budget is measured on this clock, which moves only when the code under test sleeps or a stand-in request takes time.
     let clockMs = 1_000_000;
     const clock = { now: () => clockMs, sleep: async (milliseconds: number) => { clockMs += milliseconds; } };
@@ -105,8 +107,13 @@ describe("the API state poll records why it stopped (Ruling W)", () => {
       originFor: () => origin, readApprovedJsonSchema: async () => { throw new Error("unused"); },
       readApprovedStateProbe: async ({ assertionIndex, probeId }) => { const proof = json("state-probe-schema", probeSchema);
         return { proof, assetBinding: { caseId, assertionIndex, kind: "state-probe", id: probeId, manifestDigest: sha, ref: proof.ref } }; },
-      request: async (request) => {
+      request: async (request, signal) => {
         polls += 1;
+        if (input.hangFrom !== undefined && polls >= input.hangFrom) {
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener("abort", () => { clockMs += 10_000; reject(new Error("the request was aborted at the end of the poll budget")); }, { once: true });
+          });
+        }
         clockMs += input.elapsedPerRequestMs ?? 0;
         const answer = input.answer(polls);
         return { requestId: `request-${polls}`, responseId: `response-${polls}`, method: request.method, path: request.path, status: answer.status, body: Buffer.from(answer.body),
@@ -135,6 +142,14 @@ describe("the API state poll records why it stopped (Ruling W)", () => {
     const { actual, samples } = await poll({ pollTimeoutMs: 1_000, elapsedPerRequestMs: 400, answer: () => different });
     expect(actual.assertions[0]?.outcome).toBe("failed");
     expect(samples.map((item) => item.disposition)).toEqual(["pending", "timed-out"]);
+  });
+
+  it("collects FAILED when the next request is still outstanding, and is aborted, at the end of the budget after a 2xx answer of another value", async () => {
+    // The first poll answers 200 with another value; the second never answers, and the poll's own budget timer aborts it (this waits for that one real timer).
+    const { actual, samples, polls } = await poll({ pollTimeoutMs: 300, hangFrom: 2, answer: () => different });
+    expect(polls).toBe(2);
+    expect(samples.map((item) => item.disposition)).toEqual(["timed-out"]);
+    expect(actual.assertions[0]).toMatchObject({ outcome: "failed", reason: "source-approved-value-mismatch" });
   });
 
   it("keeps a probe that answered 503 until the timeout unavailable", async () => {
