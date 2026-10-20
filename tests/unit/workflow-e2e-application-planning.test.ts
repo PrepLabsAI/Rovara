@@ -838,7 +838,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
    * Approves the v2 plan and puts the task where the broker dispatches its checks: VERIFY/WAITING on a candidate, with the dispatch row due, its compute
    * readiness operation done and the session READY. Nothing of the candidate export is needed: an application selection is checked before any source is read.
    */
-  async function atChecksDispatch(planned: Planned, options: { mutateTask?: (task: Record<string, unknown>) => Record<string, unknown> } = {}) {
+  async function atChecksDispatch(planned: Planned, options: { mutateTask?: (task: Record<string, unknown>) => Record<string, unknown>; seedReadiness?: boolean; attempts?: number } = {}) {
     expect((await decide(planned, "APPROVE")).status).toBe(200);
     const { harness, taskId, workspaceId } = planned;
     const key = { pk: `DEVTASK#${taskId}`, sk: "META" };
@@ -849,13 +849,17 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     harness.db.set(options.mutateTask === undefined ? { ...task, workflow: verifying } : options.mutateTask({ ...task, workflow: verifying }));
     const readyOperationId = randomUUID();
     const dispatch = (workflowDispatchItem("state", taskId, verifying.revision, "CHECKS", candidate.digest, new Date().toISOString()) as { Put: { Item: Record<string, unknown> } }).Put.Item;
-    dispatch.readinessOperationId = readyOperationId;
+    // By default the compute warm-up is already done; without it the broker would have to start one before it dispatches anything.
+    if (options.seedReadiness !== false) dispatch.readinessOperationId = readyOperationId;
+    if (options.attempts !== undefined) dispatch.attempts = options.attempts;
     harness.db.set(dispatch);
     const marker = { purpose: "workflow-e2e-readiness", taskId, workflowRevision: verifying.revision, candidateDigest: candidate.digest, dispatchSk: dispatch.sk,
       outboxId: workflowRequestId("agentx-workflow-e2e-readiness-outbox", taskId, verifying.revision, candidate.digest), readyGeneration: 2 };
-    harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${readyOperationId}`, entityType: "OPERATION", id: readyOperationId, workspaceId, kind: "resume",
-      status: "SUCCEEDED", fence: 2, requestId: readyOperationId, payloadHash: "a".repeat(64), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-      workflowE2EReadiness: marker });
+    if (options.seedReadiness !== false) {
+      harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${readyOperationId}`, entityType: "OPERATION", id: readyOperationId, workspaceId, kind: "resume",
+        status: "SUCCEEDED", fence: 2, requestId: readyOperationId, payloadHash: "a".repeat(64), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        workflowE2EReadiness: marker });
+    }
     harness.db.set({ ...workspaceSessionKey(workspaceId), workspaceId, state: "READY", generation: 2 });
     const creator = harness.db.get(`DEVELOPER#${MAYA.developerId}`, "META");
     if (creator !== undefined) harness.db.set({ ...creator, entityType: "DEVELOPER" });
@@ -864,7 +868,9 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     const taskNow = () => harness.db.get(key.pk, key.sk) as { workflow: { stage: string; state: string; blockReason?: string; revision: number } };
     const checksOperations = () => harness.db.find((row) => row.entityType === "OPERATION" && row.workspaceId === workspaceId && row.workflowMode === "CHECKS");
     const admissionObjects = () => [...harness.s3.objects.keys()].filter((name) => name.startsWith("workflow-e2e-admissions/"));
-    return { ...planned, runDispatch, taskNow, checksOperations, admissionObjects, dispatchRow: () => harness.db.get("WORKFLOW_DISPATCH", dispatchKey), taskKey: key };
+    const readinessOperations = () => harness.db.find((row) => row.entityType === "OPERATION" && row.workspaceId === workspaceId && row.workflowE2EReadiness !== undefined);
+    const workspaceNow = () => harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { status?: string; activeOperationId?: string } | undefined;
+    return { ...planned, runDispatch, taskNow, checksOperations, readinessOperations, workspaceNow, admissionObjects, dispatchRow: () => harness.db.get("WORKFLOW_DISPATCH", dispatchKey), taskKey: key };
   }
 
   /** The task is blocked for good, in plain words, and nothing was started or retried. */
@@ -887,7 +893,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
   });
 
   describe("the selection approved at plan APPROVE must still be the one dispatched (Ruling AL)", () => {
-    const refusalPrefix = "The approved application checks can no longer run as approved: ";
+    const refusalPrefix = "The approved application checks can no longer run as approved, and retrying will not help until the plan is approved again: ";
     const reasonOf = (text: string) => new RegExp(refusalPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + text, "s");
 
     it("passes the unchanged selection through the check (it is the only thing left standing between it and the round)", async () => {
@@ -975,6 +981,88 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
       try { await dispatched.runDispatch(); } finally { planned.harness.db.send = send; }
       expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
       expect(dispatched.dispatchRow()).toMatchObject({ attempts: 1, kind: "CHECKS" });
+      expect(dispatched.checksOperations()).toEqual([]);
+    });
+
+    it("refuses before warming the workspace, so a refused v2 task never wakes its compute (no readiness operation exists yet)", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atChecksDispatch(planned, { seedReadiness: false });
+      planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
+      const workspaceBefore = dispatched.workspaceNow();
+      await dispatched.runDispatch();
+      expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(dispatched.taskNow().workflow.blockReason).toMatch(reasonOf("the web runtime"));
+      expect(dispatched.readinessOperations(), "no warm-up operation was started").toEqual([]);
+      expect(dispatched.workspaceNow(), "the workspace was not touched").toEqual(workspaceBefore);
+      expect(dispatched.dispatchRow()).toBeUndefined();
+    });
+
+    it("also ends in the interim block before any warm-up when the selection is unchanged", async () => {
+      const dispatched = await atChecksDispatch(await plannedWithApplicationIntent(), { seedReadiness: false });
+      await dispatched.runDispatch();
+      expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(dispatched.taskNow().workflow.blockReason).toContain("cannot dispatch application rounds yet");
+      expect(dispatched.readinessOperations()).toEqual([]);
+    });
+
+    it("names the real remedy: the plan has to be approved again, retrying the checks will refuse again", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atChecksDispatch(planned);
+      planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
+      await dispatched.runDispatch();
+      expect(dispatched.taskNow().workflow.blockReason).toMatch(/retrying will not help until the plan is approved again/);
+    });
+
+    /** Fails the first transaction that deletes the dispatch row (the block write), and lets every later one through. */
+    function failFirstBlockWrite(harness: Harness) {
+      const send = harness.db.send.bind(harness.db);
+      let failed = 0;
+      harness.db.send = async (command) => {
+        const items = (command as { input?: { TransactItems?: Array<{ Delete?: { Key?: { pk?: string } } }> } }).input?.TransactItems;
+        if (failed === 0 && command.constructor.name === "TransactWriteCommand" && items?.some((item) => item.Delete?.Key?.pk === "WORKFLOW_DISPATCH")) {
+          failed += 1;
+          throw new Error("write failed");
+        }
+        return send(command);
+      };
+      return () => { harness.db.send = send; };
+    }
+
+    it("falls back to the bounded retry when the block cannot be written, and does not lose the task", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atChecksDispatch(planned);
+      planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
+      const restore = failFirstBlockWrite(planned.harness);
+      try { await dispatched.runDispatch(); } finally { restore(); }
+      expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+      expect(dispatched.dispatchRow()).toMatchObject({ attempts: 1, kind: "CHECKS" });
+      expect(dispatched.checksOperations()).toEqual([]);
+    });
+
+    it("ends with the refusal's own reason, not the generic one, when the block keeps failing until the retry budget is spent", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atChecksDispatch(planned, { attempts: 9 });
+      planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
+      const restore = failFirstBlockWrite(planned.harness);
+      try { await dispatched.runDispatch(); } finally { restore(); }
+      expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+      expect(dispatched.taskNow().workflow.blockReason).toMatch(reasonOf("the web runtime"));
+      expect(dispatched.taskNow().workflow.blockReason).not.toBe(WORKFLOW_BLOCK_REASONS.checksUnconfirmed);
+      expect(dispatched.dispatchRow()).toBeUndefined();
+    });
+
+    it("gives up on a selection that can never be read once the retry budget is spent, with the generic checks-unconfirmed reason", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atChecksDispatch(planned, { attempts: 9 });
+      const send = planned.harness.db.send.bind(planned.harness.db);
+      planned.harness.db.send = async (command) => {
+        const input = (command as { input?: { Key?: { pk?: string; sk?: string } } }).input;
+        if (command.constructor.name === "GetCommand" && input?.Key?.pk === webKey.pk && input.Key.sk === webKey.sk) throw new Error("throttled");
+        return send(command);
+      };
+      try { await dispatched.runDispatch(); } finally { planned.harness.db.send = send; }
+      expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.checksUnconfirmed });
+      expect(dispatched.dispatchRow()).toBeUndefined();
       expect(dispatched.checksOperations()).toEqual([]);
     });
   });

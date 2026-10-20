@@ -2,8 +2,9 @@ import { canonicalJson, type E2EApplicationSelectionRecord } from "@agentx/contr
 
 /**
  * A dispatch of an approved application round that must not happen, with the plain reason the owner sees. It is terminal for that dispatch: the
- * workflow is blocked with the reason (the owner can send the task back, retry the checks, or close it) and the dispatch is not retried.
- * A dispatch that merely could not read what it needs is not this: it fails like any other and is retried within its budget.
+ * workflow is blocked with the reason and the dispatch is not retried. Retrying the checks does not help when the selection changed: the runtime rows are
+ * compared exactly (Ruling AL), and a row that was only requalified is not the approved one, so the remedy is to approve the plan again against the rows that
+ * are there now. A dispatch that merely could not read what it needs is not this: it fails like any other and is retried within its budget.
  */
 export class ApplicationDispatchRefusal extends Error {}
 

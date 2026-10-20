@@ -9050,7 +9050,9 @@ function workflowDispatchBackoffMinutes(attempts: number): number {
  * plain reason in one transaction, so the owner sees Retry reviews (or Retry opening the pull request) instead of a task silently waiting. Both writes
  * hold only while the row still has the attempts this run read; a row someone else moved is left to them.
  */
-async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies, item: WorkflowDispatchRecord): Promise<void> {
+async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies, item: WorkflowDispatchRecord,
+  /** The plain reason to block with when this failure spends the budget, in place of the generic one for the kind of work (a deterministic refusal knows better). */
+  exhaustedReason?: string): Promise<void> {
   const previous = item.attempts ?? 0;
   const attempts = previous + 1;
   const now = new Date().toISOString();
@@ -9073,7 +9075,7 @@ async function recordWorkflowDispatchFailure(dependencies: AwsBrokerDependencies
     const deleteRow = { Delete: { TableName: dependencies.tableName, Key: key, ...sameRow } };
     // The stage and state the row was due in, and the plain reason the owner sees when AgentX gives up on it.
     const [stage, state, reason] = item.kind === "CHECKS"
-      ? ["VERIFY", "WAITING", WORKFLOW_BLOCK_REASONS.checksUnconfirmed] as const
+      ? ["VERIFY", "WAITING", exhaustedReason ?? WORKFLOW_BLOCK_REASONS.checksUnconfirmed] as const
       : item.kind === "REVIEW" ? ["REVIEW", "WAITING", WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE] as const
       : ["PULL_REQUEST", "READY", WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE] as const;
     // A fix AgentX gave up pushing: the task waits for the merge, blocked, naming the pull request.
@@ -9376,6 +9378,8 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     // A fix for the pull requests already open is pushed to them by the same start, which sees they exist.
     let outcome: "STARTED" | "DUPLICATE" | "STALE";
     if (item.kind === "CHECKS") {
+      // An approved application plan is checked, and refused, before any compute is woken for it.
+      await refuseApplicationRoundBeforeWarmUp(dependencies, task);
       const readiness = await ensureWorkflowE2EComputeReadiness(dependencies, routeDependencies, item);
       if (readiness.status === "WAITING") return "DISPATCHED";
       if (readiness.status === "STALE") {
@@ -9401,7 +9405,8 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
         console.log(JSON.stringify({ component: "broker", event: "workflow.application_dispatch_block_failed", taskId: item.taskId,
           error: blockError instanceof Error ? blockError.name : "unknown" }));
       }
-      await recordWorkflowDispatchFailure(dependencies, item);
+      // If the block keeps failing until the budget is spent, the task still ends with this reason, not the generic one.
+      await recordWorkflowDispatchFailure(dependencies, item, error.message);
       return "RETRY";
     }
     if (error instanceof E2EPortablePlanReferenceError) {
@@ -9458,7 +9463,14 @@ async function getWorkflowE2ECreatorIdentity(dependencies: AwsBrokerDependencies
 const APPLICATION_ROUND_NOT_DISPATCHABLE = "The approved browser and API checks could not be started: this AgentX version cannot dispatch application rounds yet. Nothing was run. Send the task back to coding or close it.";
 
 /**
- * Ruling AL, dispatch half: derives the approved application selection again from the approved setup and the runtime rows READY now, and refuses
+ * The block text for a selection that is no longer the approved one. The remedy comes first (the workflow keeps only the first 500 characters of a block reason):
+ * the runtime rows are compared exactly, and a row that was merely requalified is not the approved one, so retrying the checks refuses again until the plan is
+ * approved again against the rows that are there now.
+ */
+const APPLICATION_SELECTION_REFUSAL = "The approved application checks can no longer run as approved, and retrying will not help until the plan is approved again: ";
+
+/**
+ * Ruling AL, dispatch half: derives the approved application selection again from the approved setup and the runtime rows READY right now, and refuses
  * (a terminal ApplicationDispatchRefusal that blocks the workflow with its reason) when anything differs from what the Owner approved. A selection that
  * cannot be derived because something could not be read is a retryable RUNTIME_UNAVAILABLE instead. It never widens what was approved.
  */
@@ -9469,10 +9481,26 @@ async function requireApplicationSelectionStillCurrent(dependencies: AwsBrokerDe
   const current = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact);
   if (!current.ok) {
     if (current.kind === "unevaluable") throw agentXError("RUNTIME_UNAVAILABLE", `the approved application selection could not be checked at dispatch (${current.reason})`);
-    throw new ApplicationDispatchRefusal(`The approved application checks can no longer run as approved: ${current.reason}`);
+    throw new ApplicationDispatchRefusal(`${APPLICATION_SELECTION_REFUSAL}${current.reason}`);
   }
   const unchanged = applicationSelectionStillCurrent(recorded.data, current.selection);
-  if (!unchanged.ok) throw new ApplicationDispatchRefusal(`The approved application checks can no longer run as approved: ${unchanged.reason}`);
+  if (!unchanged.ok) throw new ApplicationDispatchRefusal(`${APPLICATION_SELECTION_REFUSAL}${unchanged.reason}`);
+}
+
+/**
+ * Refuses a task whose approved plan is an application plan before its workspace is warmed: the selection is checked (Ruling AL), and while application rounds
+ * cannot be dispatched the dispatch ends in its terminal block. Only a task that carries an application selection record is read here, so a portable task
+ * reads nothing extra; an application plan without its record is refused later, by `startWorkflowE2EChecksDispatch`.
+ */
+async function refuseApplicationRoundBeforeWarmUp(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord): Promise<void> {
+  const workflow = task.workflow;
+  if (workflow?.e2e?.applicationSelection === undefined) return;
+  const artifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
+  if (artifact === undefined || workflow.e2e.contractDigest !== artifact.sha256) return;
+  const approved = await loadWorkflowDocument((key, maxBytes) => readStoredText(dependencies.s3, dependencies.artifactBucketName, key, maxBytes), artifact, {});
+  if (approved?.format !== "structured" || approved.plan.e2e?.schemaVersion !== 2) return;
+  await requireApplicationSelectionStillCurrent(dependencies, task, approved.plan.e2e, artifact);
+  throw new ApplicationDispatchRefusal(APPLICATION_ROUND_NOT_DISPATCHABLE);
 }
 
 /** Creates the content-addressed admission and starts the separate current CHECKS operation. */
