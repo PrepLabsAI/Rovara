@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { canonicalJson, E2ETargetSchema, type E2ERuntimeCapabilityDescriptor, type E2ERuntimeReadinessInput } from "@agentx/contracts";
 import { E2ERuntimeCapabilityDescriptorSchema, e2eRuntimeCapabilityDigest } from "../../packages/contracts/src/index.js";
-import { e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness, readReadyE2ERuntimeProfiles } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
+import { e2eRegisteredRuntimeKey, projectE2ERuntimeReadiness, readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 
 const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
@@ -108,5 +108,35 @@ describe("READY profiles for setup proposals", () => {
       expect(await ask({})).toEqual([]);
       expect(warn).not.toHaveBeenCalled();
     } finally { warn.mockRestore(); }
+  });
+});
+
+describe("READY runtimes for a project's runtime binding at planning", () => {
+  const apiCapabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ ...Object.fromEntries(Object.entries(capabilities).filter(([name]) => name !== "browsers")),
+    kind: "api", supportedSteps: ["request"], supportedAssertions: ["http-status", "json"], protocols: ["http"] });
+  const apiProbeBase = { ...probeBase, capabilityDigest: e2eRuntimeCapabilityDigest(apiCapabilities) };
+  const rowFor = (kind: "web" | "api", overrides: Record<string, unknown> = {}) => ({
+    ...e2eRegisteredRuntimeKey(registration.runtimeCatalogId, registration.profileId, kind), ...registration,
+    capabilities: kind === "web" ? capabilities : apiCapabilities, capabilityDigest: e2eRuntimeCapabilityDigest(kind === "web" ? capabilities : apiCapabilities),
+    probeManifest: kind === "web" ? probe : { ...apiProbeBase, manifestDigest: sha(apiProbeBase) }, ...overrides });
+  const ask = (rows: Record<string, unknown>, projectBinding: typeof binding = binding) => readProjectReadyE2ERuntimes({
+    runtimeCatalogId: registration.runtimeCatalogId, profileId: registration.profileId, binding: projectBinding, now: Date.parse("2026-10-13T12:30:00.000Z"),
+    read: async (rowKey) => rows[rowKey.sk] });
+
+  it("returns each READY kind with the steps and assertions its own registered descriptor supports", async () => {
+    const rows = { "PROFILE#web-profile#web": rowFor("web"), "PROFILE#web-profile#api": rowFor("api") };
+    expect(await ask(rows)).toEqual([
+      { kind: "web", profileId: "web-profile", supportedSteps: ["navigate"], supportedAssertions: ["visible"] },
+      { kind: "api", profileId: "web-profile", supportedSteps: ["request"], supportedAssertions: ["http-status", "json"] },
+    ]);
+  });
+
+  it("drops a row bound to another runtime binding, an expired row and a row that holds the other kind's runtime", async () => {
+    const other = { ...binding, launchTemplateId: "lt-fedcba9876543210" };
+    const rows = { "PROFILE#web-profile#web": rowFor("web"), "PROFILE#web-profile#api": rowFor("api") };
+    expect(await ask(rows, other)).toEqual([]);
+    expect(await ask({ ...rows, "PROFILE#web-profile#web": rowFor("web", { expiresAt: "2026-10-13T12:20:00.000Z" }) })).toMatchObject([{ kind: "api" }]);
+    expect(await ask({ "PROFILE#web-profile#web": rowFor("web", { capabilities: apiCapabilities, capabilityDigest: e2eRuntimeCapabilityDigest(apiCapabilities) }) })).toEqual([]);
+    expect(await ask({})).toEqual([]);
   });
 });

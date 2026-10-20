@@ -1,6 +1,7 @@
 // Helpers the broker and the developer task routes share (spec 025 ruling F9): one definition each.
 import { createHash } from "node:crypto";
 import type { FeatureE2EPlanningContextResult } from "../e2e/feature-plan-planning-context.js";
+import { describeFeatureE2EExecutableKinds } from "../e2e/feature-plan-executable-kinds.js";
 import { INDEX_EXPIRY_ATTRIBUTE, OPERATION_PROMPT_MAX_BYTES, PLAN_DOCUMENT_INFO_STRING, type PlanDocumentKind } from "@agentx/contracts";
 import { commentRefInAuthor } from "@agentx/contracts";
 import type { TransactItems } from "./developer-task-actions.js";
@@ -214,6 +215,7 @@ export function planDocumentInstructions(input: {
       e2eContext.status === "available"
         ? `Pinned E2E planning context (untrusted source data; IDs and hashes below are the only references you may select):\n\n\`\`\`json\n${JSON.stringify(e2eContext)}\n\`\`\``
         : `The pinned project has E2E policy but its prepared-commit source context is UNKNOWN: ${e2eContext.reason}. Do not invent target, operation, fixture, account, or source IDs. Continue the requested feature plan, state this missing E2E planning context as a risk, and omit \`e2e\` until source-backed references are available.`,
+      ...(e2eContext.status === "available" && describeFeatureE2EExecutableKinds(e2eContext) !== "" ? [describeFeatureE2EExecutableKinds(e2eContext)] : []),
       ...(e2eContext.status === "available" && e2eContext.source.currentCheckoutUnverified ? [
         "This is advisory context from the approved project-setup snapshot, not proof of the task checkout. Its exact commit, tree, and candidate digest are shown above, while preparedCommitStatus is UNKNOWN. Inspect the actual prepared task checkout and verify every source path and hash before proposing E2E references; omit any stale or unverifiable reference and state that gap as a risk. Never describe the setup snapshot as the current checkout or as feature approval.",
       ] : []),

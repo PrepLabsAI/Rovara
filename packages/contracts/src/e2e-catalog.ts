@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import * as ts from "typescript";
 import {
-  E2EAppRecipeSchema, E2ERepositoryInspectionSchema, E2ESetupProposalSchema, type E2EAppRecipe, type E2ERepositoryInspection, type E2ESetupProposal,
+  E2EAppRecipeSchema, E2ERepositoryInspectionSchema, E2ESetupProposalSchema, type E2EAppRecipe, type E2ERepositoryInspection, type E2ESetupProposal, type E2ETarget,
 } from "./e2e.js";
 import { canonicalJson } from "./canonical-json.js";
 import { bindE2EApplicationAccountTargets, readE2EApplicationProjectContract, type E2EApplicationProjectContract } from "./e2e-application-accounts.js";
@@ -267,6 +267,21 @@ export type E2EReadyRuntimeProfile = Readonly<{ kind: "web" | "api"; profileId: 
 /** The runtime profile ids a setup proposal may name for web and API targets. */
 const QUALIFIED_RUNTIME_PROFILE_IDS: readonly string[] = [WEB_API_RUNTIME_PROFILE_ID];
 const unavailableRuntimeProfile = { web: "web-phase-unavailable", api: "api-phase-unavailable" } as const;
+
+/** Whether a runtime profile id is the placeholder discovery assigns (or the empty device choice), not an approved profile. */
+export function isE2EPlaceholderRuntimeProfileId(profileId: string): boolean {
+  return profileId.endsWith("-phase-unavailable") || profileId === "no-device-selected";
+}
+
+/**
+ * The target as source discovery derives it. A web or API target may carry the qualified runtime profile it was approved against, which is not
+ * derivable from source; this maps that one choice back to the discovery placeholder so an approved target compares equal to its source identity.
+ * Every other field, and every other profile id, is returned unchanged and so still mismatches.
+ */
+export function e2eTargetSourceIdentity<T extends E2ETarget>(target: T): T {
+  return (target.kind === "web" || target.kind === "api") && QUALIFIED_RUNTIME_PROFILE_IDS.includes(target.runtimeProfileId)
+    ? { ...target, runtimeProfileId: unavailableRuntimeProfile[target.kind] } : target;
+}
 
 /** The profile a target of this kind is proposed against; with several READY profiles of one kind the lexically first wins, so the choice is deterministic. */
 function readyProfileId(readyProfiles: readonly E2EReadyRuntimeProfile[], kind: "web" | "api"): string | undefined {

@@ -71,14 +71,12 @@ export function admitE2ERegisteredRuntime(recordInput: unknown, expected: Expect
   return runtime;
 }
 
-/**
- * The web/API kinds of `profileId` whose catalog row is READY and unexpired, for proposing targets against them. There is no project binding at
- * proposal time, so each row is admitted against its own stored binding and capability digest: that still re-parses the row, checks its key,
- * kind, state and validity window, but the project's binding is only matched later, at planning. A missing or unreadable row is simply not READY.
- */
-export async function readReadyE2ERuntimeProfiles(input: { runtimeCatalogId: string; profileId: string; now: number;
-  read: (key: { pk: string; sk: string }) => Promise<unknown> }): Promise<E2EReadyRuntimeProfile[]> {
-  const ready: E2EReadyRuntimeProfile[] = [];
+type RuntimeRowReader = (key: { pk: string; sk: string }) => Promise<unknown>;
+
+/** Reads the `#web` and `#api` rows of a profile and admits each; a throttled or failed read is logged and fails closed to "not READY". */
+async function readAdmittedWebApiRuntimes(input: { runtimeCatalogId: string; profileId: string; now: number; read: RuntimeRowReader;
+  binding?: Ec2RuntimeBinding }): Promise<Array<{ kind: "web" | "api"; runtime: E2ERegisteredRuntime }>> {
+  const admittedRows: Array<{ kind: "web" | "api"; runtime: E2ERegisteredRuntime }> = [];
   for (const kind of ["web", "api"] as const) {
     let row: unknown;
     try { row = await input.read(e2eRegisteredRuntimeKey(input.runtimeCatalogId, input.profileId, kind)); }
@@ -91,11 +89,35 @@ export async function readReadyE2ERuntimeProfiles(input: { runtimeCatalogId: str
     if (row === null || typeof row !== "object" || Array.isArray(row)) continue;
     const { binding, capabilityDigest } = row as { binding?: unknown; capabilityDigest?: unknown };
     if (typeof capabilityDigest !== "string") continue;
-    const admitted = admitE2ERegisteredRuntime(row, { runtimeCatalogId: input.runtimeCatalogId, profileId: input.profileId, binding: binding as Ec2RuntimeBinding,
-      capabilityDigest, now: input.now, kind });
-    if (admitted !== undefined) ready.push({ kind, profileId: input.profileId });
+    const runtime = admitE2ERegisteredRuntime(row, { runtimeCatalogId: input.runtimeCatalogId, profileId: input.profileId,
+      binding: input.binding ?? binding as Ec2RuntimeBinding, capabilityDigest, now: input.now, kind });
+    if (runtime !== undefined) admittedRows.push({ kind, runtime });
   }
-  return ready;
+  return admittedRows;
+}
+
+/**
+ * The web/API kinds of `profileId` whose catalog row is READY and unexpired, for proposing targets against them. There is no project binding at
+ * proposal time, so each row is admitted against its own stored binding and capability digest: that still re-parses the row, checks its key,
+ * kind, state and validity window, but the project's binding is only matched later, at planning. A missing or unreadable row is simply not READY.
+ */
+export async function readReadyE2ERuntimeProfiles(input: { runtimeCatalogId: string; profileId: string; now: number;
+  read: RuntimeRowReader }): Promise<E2EReadyRuntimeProfile[]> {
+  return (await readAdmittedWebApiRuntimes(input)).map(({ kind }) => ({ kind, profileId: input.profileId }));
+}
+
+/** A READY web or API runtime of the project's binding, with the step and assertion kinds its registered descriptor supports. */
+export type ReadyE2ERuntime = E2EReadyRuntimeProfile & Readonly<{ supportedSteps: readonly E2EStep["kind"][]; supportedAssertions: readonly E2EAssertion["kind"][] }>;
+
+/**
+ * The web/API kinds of `profileId` that are READY for this project's runtime binding right now (Ruling AL): each row is admitted against the
+ * project's own binding, so a row registered for another binding, an expired or parked row, or a row that holds the other kind's runtime is not
+ * READY. What a kind can execute is read from its registered descriptor, not from a list kept here.
+ */
+export async function readProjectReadyE2ERuntimes(input: { runtimeCatalogId: string; profileId: string; binding: Ec2RuntimeBinding; now: number;
+  read: RuntimeRowReader }): Promise<ReadyE2ERuntime[]> {
+  return (await readAdmittedWebApiRuntimes(input)).map(({ kind, runtime }) => ({ kind, profileId: input.profileId,
+    supportedSteps: [...runtime.capabilities.supportedSteps], supportedAssertions: [...runtime.capabilities.supportedAssertions] }));
 }
 
 type RuntimeReadinessInput = {

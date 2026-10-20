@@ -8,12 +8,14 @@ import { E2EExecutionPlanSchema, E2EPolicySchema, E2ERuntimeAvailabilitySchema, 
   E2EApiMockFixtureSchema, e2eExecutionPlanDigest, e2eScenarioBundleDigest, validateE2EScenarioBundleForPolicy,
   type E2EExpectedCase, type E2EExecutionPlan, type E2EMockSpec, type E2EScenario, type E2EScenarioBundle, type E2ESetupProposal } from "./e2e.js";
 import { e2eApplicationUpstreamTestIdFromIdentity, e2eCaseIdFromIdentity } from "./e2e-case-identity.js";
-import { inspectE2ERepository } from "./e2e-catalog.js";
+import { e2eTargetSourceIdentity, inspectE2ERepository, isE2EPlaceholderRuntimeProfileId } from "./e2e-catalog.js";
 import { verifyE2ESourceSnapshot } from "./e2e-source.js";
 import { E2EPortableApprovalBindingSchema, type E2EPortableApprovalBinding } from "./e2e-portable.js";
 import { E2ERegisteredRuntimeSchema, type E2ERegisteredRuntime } from "./e2e-runtime-registration.js";
-import { resolveE2ERuntimeReadiness } from "./e2e-runtime-capabilities.js";
+import { e2eRuntimeKindMatchesTarget, resolveE2ERuntimeReadiness } from "./e2e-runtime-capabilities.js";
 import { createE2EOpenApiFixtureDescriptor, validateE2EOpenApiFixtureResponse } from "./e2e-openapi-fixture.js";
+import { readE2EApplicationProjectContract } from "./e2e-application-accounts.js";
+import { WEB_API_RUNTIME_PROFILE_ID } from "./e2e-web-api-qualification.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const stableId = (prefix: string, value: unknown) => prefix + sha256(canonicalJson(value));
@@ -38,6 +40,11 @@ export type E2EApplicationPortableProjection = {
   executionPlan: E2EExecutionPlan;
   bundle: E2EScenarioBundle;
 };
+
+/** Why an agent-navigation scenario has no executable case yet: the qualified web/API runtime declares no `agent` step support. */
+export const AGENT_STEPS_UNAVAILABLE_REASON = "agent-steps-arrive-in-m1.4";
+/** Why a web/API target whose launch recipe is only inferred (no agentx.e2e project contract) has no executable case yet. */
+export const NEEDS_PROJECT_CONTRACT_REASON = "needs-project-contract";
 
 function same(left: unknown, right: unknown): boolean { return canonicalJson(left) === canonicalJson(right); }
 function operationStep(scenario: E2EScenario): { operationId: string; kind: "invoke-contract" | "inspect-contract" } | undefined {
@@ -123,11 +130,25 @@ function validateFullInput(input: E2EApplicationPlanSelectionInput): {
   const setupApplications = new Map(setupProposal.applications.map((application) => [application.applicationId, application]));
   const scenarioIds = new Set(intent.scenarios.map((scenario) => scenario.scenarioId));
   if (policy.baselineScenarioIds.some((id) => !scenarioIds.has(id))) throw new Error("complete approved baseline inventory is missing from application intent");
-  if (intent.requestedTargetIds.some((id) => !sourceTargets.has(id) || !policy.targets.some((target) => target.targetId === id && same(target, sourceTargets.get(id))))) {
+  // A web/API target approved against the qualified runtime profile is that same source identity; the profile itself is not derivable from source.
+  if (intent.requestedTargetIds.some((id) => !sourceTargets.has(id)
+    || !policy.targets.some((target) => target.targetId === id && same(e2eTargetSourceIdentity(target), sourceTargets.get(id))))) {
     throw new Error("application policy or intent contains a target that differs from protected source identity");
   }
-  for (const targetId of intent.requestedTargetIds) if (!same(sourceTargets.get(targetId), setupTargets.get(targetId))) {
-    throw new Error(`setup-approved target ${targetId} differs from current protected source identity`);
+  for (const targetId of intent.requestedTargetIds) {
+    const setupTarget = setupTargets.get(targetId);
+    if (setupTarget === undefined || !same(sourceTargets.get(targetId), e2eTargetSourceIdentity(setupTarget))) {
+      throw new Error(`setup-approved target ${targetId} differs from current protected source identity`);
+    }
+    if (policy.targets.find((target) => target.targetId === targetId)?.runtimeProfileId !== setupTarget.runtimeProfileId) {
+      throw new Error(`setup-approved target ${targetId} runtime profile differs from the pinned policy target`);
+    }
+  }
+  for (const ref of intent.applicationRuntimeRefs) {
+    const approvedProfileId = policy.targets.find((target) => target.targetId === ref.targetId)?.runtimeProfileId;
+    if (approvedProfileId !== undefined && !isE2EPlaceholderRuntimeProfileId(approvedProfileId) && ref.runtimeProfileId !== approvedProfileId) {
+      throw new Error(`application runtime profile for target ${ref.targetId} differs from the approved target runtime profile`);
+    }
   }
   const metadataRefs = (applicationId: string) => {
     const application = discovered.inspection.applications.find((item) => item.applicationId === applicationId);
@@ -235,6 +256,21 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
     effectiveTargets.push(...projection.executionPlan.effectiveTargets);
     mocks.push(...projection.executionPlan.mocks);
   }
+  // The launch recipe the Docker host can run is the one the project declares in its own contract (a recipe merely inferred from
+  // package.json has no service contract or accounts yet); such a target plans as unavailable rather than failing at the host.
+  const projectContractByApplication = new Map<string, boolean>();
+  const hasProjectContract = (applicationId: string): boolean => {
+    let declared = projectContractByApplication.get(applicationId);
+    if (declared === undefined) {
+      const recipe = discovered.inspection.applications.find((item) => item.applicationId === applicationId)?.recipe ?? null;
+      try {
+        const contract = readE2EApplicationProjectContract(input.sourceSnapshot, applicationId);
+        declared = contract !== null && recipe !== null && contract.recipe.recipeDigest === recipe.recipeDigest;
+      } catch { declared = false; }
+      projectContractByApplication.set(applicationId, declared);
+    }
+    return declared;
+  };
   const realCasesByTarget = new Map<string, E2EExpectedCase[]>();
   const realTargetProfiles = new Map<string, { target: (typeof policy.targets)[number]; ref: (typeof realRefs)[number]; groupKey: string }>();
   const portable = portablePairs(input);
@@ -255,8 +291,23 @@ export function selectE2EApplicationExecutionPlan(input: E2EApplicationPlanSelec
     }
     const availability = input.runtimeAvailability.filter((item) => item.targetId === targetId);
     const ref = realRefs.find((item) => item.targetId === targetId);
+    const policyTarget = policy.targets.find((item) => item.targetId === targetId)!;
+    // A profile registers one row per target kind (web and api), so the row is matched by profile and by the target's kind.
+    const runtime = ref === undefined ? undefined : input.registeredRuntimes.find((item) => item.profileId === ref.runtimeProfileId
+      && e2eRuntimeKindMatchesTarget({ ...policyTarget, runtimeProfileId: ref.runtimeProfileId }, item.capabilities));
+    // Agent navigation is executable only on a runtime whose registered descriptor declares it; the qualified web/API runtime does not until M1.4.
+    if (scenario.steps.some((step) => step.kind === "agent") && runtime?.capabilities.supportedSteps.includes("agent") !== true) {
+      unavailable.push({ criterionId, reason: AGENT_STEPS_UNAVAILABLE_REASON });
+      continue;
+    }
+    const gatedApplicationId = ref?.applicationId ?? intent.unavailableTargetRefs?.find((item) => item.targetId === targetId)?.applicationId;
+    if (gatedApplicationId !== undefined && (policyTarget.kind === "web" || policyTarget.kind === "api")
+      && (policyTarget.runtimeProfileId === WEB_API_RUNTIME_PROFILE_ID || ref?.runtimeProfileId === WEB_API_RUNTIME_PROFILE_ID)
+      && !hasProjectContract(gatedApplicationId)) {
+      unavailable.push({ criterionId, reason: NEEDS_PROJECT_CONTRACT_REASON });
+      continue;
+    }
     const account = input.runtimeAccountRefs.find((item) => item.applicationId === ref?.applicationId && item.profileId === ref?.accountProfileId);
-    const runtime = input.registeredRuntimes.find((item) => item.profileId === ref?.runtimeProfileId);
     const sourceApplication = input.applicationApprovalBinding?.applications.find((item) => item.applicationId === ref?.applicationId);
     const access = availability.find((item) => item.profileId === ref?.runtimeProfileId);
     const readiness = ref && runtime && access

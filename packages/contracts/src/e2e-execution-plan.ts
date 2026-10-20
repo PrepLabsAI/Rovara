@@ -12,7 +12,7 @@ import { createE2EOpenApiFixtureDescriptor, validateE2EOpenApiFixtureResponse } 
 import { E2EPortableApprovalBindingSchema, e2EDefaultSyntheticAccountDefinition, e2ePortableOperationDescriptorDigest, e2ePortableRegistrationKey, e2eSourceInterfaceAssertion, resolveE2EPortableRegistration, type E2EPortableApprovalBinding } from "./e2e-portable.js";
 import { E2E_CANDIDATE_ADAPTER_IDENTITY } from "./e2e-portable.js";
 import { e2eCaseIdFromIdentity, e2eUpstreamTestIdFromIdentity } from "./e2e-case-identity.js";
-import { inspectE2EPortableSource, inspectE2ERepository, type PortableOperation } from "./e2e-catalog.js";
+import { e2eTargetSourceIdentity, inspectE2EPortableSource, inspectE2ERepository, type PortableOperation } from "./e2e-catalog.js";
 
 export const PORTABLE_E2E_TEST_PATH = ".agentx/e2e/generated-contract.test.ts";
 type MockableComponent = { componentId: string; requestedTargetId: string; kind: "api"; sourceRefs: Array<{ path: string; sha256: string }>; fixture?: unknown; fixtureProfile?: "openapi-auto-witness/v1" };
@@ -80,7 +80,8 @@ export function selectE2EExecutionPlan(input: E2EPlanSelectionInput): E2EExecuti
   const discovered = inspectE2ERepository(input.sourceSnapshot, input.expectedCandidate);
   const inspection = discovered.inspection;
   const sourceTargets = new Map(inspection.proposedTargets.map((target) => [target.targetId, target]));
-  for (const target of policy.targets) if (canonicalJson(sourceTargets.get(target.targetId) ?? null) !== canonicalJson(target)) throw new Error("execution policy target differs from the source-derived target inventory");
+  // An approved web/API target may carry the qualified runtime profile it was proposed against; every other difference still mismatches.
+  for (const target of policy.targets) if (canonicalJson(sourceTargets.get(target.targetId) ?? null) !== canonicalJson(e2eTargetSourceIdentity(target))) throw new Error("execution policy target differs from the source-derived target inventory");
   const sourceOperations = discovered.portableOperations;
   const portableById = new Map(sourceOperations.map((operation) => [operation.operationId, operation]));
   const approvalBinding = input.portableApprovalBinding === undefined ? undefined : E2EPortableApprovalBindingSchema.parse(input.portableApprovalBinding);

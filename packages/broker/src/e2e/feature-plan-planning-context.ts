@@ -1,7 +1,8 @@
 import {
-  E2EApiMockFixtureSchema, canonicalJson, createE2EOpenApiFixtureDescriptor, inspectE2EPortableSource, inspectE2ERepository, redactSecrets,
-  verifyE2ESourceSnapshot, type E2EAppRecipe, type E2EPolicy, type E2ESourceSnapshot,
+  E2EApiMockFixtureSchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createE2EOpenApiFixtureDescriptor, inspectE2EPortableSource, inspectE2ERepository,
+  readE2EApplicationProjectContract, redactSecrets, verifyE2ESourceSnapshot, type E2EAppRecipe, type E2EPolicy, type E2ESourceSnapshot,
 } from "@agentx/contracts";
+import type { ReadyE2ERuntime } from "../aws/e2e-runtime-readiness.js";
 import { e2eApplicationMetadataSourceRefs } from "@agentx/contracts";
 import * as ts from "typescript";
 
@@ -23,6 +24,10 @@ export type FeatureE2EPlanningContext = {
   runtimeRefs?: Array<{ targetId: string; applicationId: string; recipeDigest: string | null; sourceRefs: Array<{ path: string; sha256: string }>;
     runtimeProfileId: string; accountProfileId: string }>;
   unavailableTargetRefs?: Array<{ targetId: string; applicationId: string; accountProfileId: string; sourceRefs: Array<{ path: string; sha256: string }> }>;
+  /** Why each unavailable target cannot run application scenarios now; kept apart from the refs, which the proposal copies back strictly. */
+  unavailableReasons?: Array<{ targetId: string; reason: FeatureE2EUnavailableReason }>;
+  /** The step and assertion kinds a READY runtime executes, once per target kind that has an executable target. */
+  executableKinds?: Array<{ kind: "web" | "api"; steps: string[]; assertions: string[] }>;
   portableOperations: Array<{ operationId: string; applicationId: string; requestedTargetIds: string[]; packageExportSubpath: string;
     moduleSpecifier: string; callableSelectors: Array<{ selector: { kind: "default" } | { kind: "named"; exportName: string }; firstInputParameter?: string }>;
     sourceRefs: Array<{ path: string; sha256: string }> }>;
@@ -32,6 +37,9 @@ export type FeatureE2EPlanningContext = {
     variants: Array<{ id: string; inputValue: string; status: number; response: unknown }> }>;
   accountContextRefs: Array<{ applicationId: string; profileId: string; sourcePath: string; sourceSha256: string }>;
 };
+
+/** Why a target is not executable for application scenarios: the placeholder profile, no launch recipe, only an inferred recipe, or a runtime that is not READY now. */
+export type FeatureE2EUnavailableReason = "runtime-unavailable" | "no-launch-recipe" | "needs-project-contract" | "runtime-not-ready";
 
 export type FeatureE2EPlanningContextResult = FeatureE2EPlanningContext | { status: "unknown"; reason: string };
 
@@ -86,6 +94,8 @@ function firstInputParameter(sourceText: string, path: string, selector: { kind:
 /** Builds prompt-only references from the exact source tree and policy pinned to the task. */
 export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ESourceSnapshot, identity: {
   origin?: FeatureE2EPlanningContext["source"]["origin"]; preparedCommitSha?: string | null;
+  /** The web/API runtimes READY for the project's runtime binding right now (see readProjectReadyE2ERuntimes); none when omitted. */
+  readyRuntimes?: readonly ReadyE2ERuntime[];
 } = {}): FeatureE2EPlanningContextResult {
   try {
     const sourceOrigin = identity.origin ?? "prepared-commit";
@@ -108,19 +118,43 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     if (targets.length === 0) return { status: "unknown", reason: "the pinned policy targets do not match any target discovered from the prepared source commit" };
 
     const selectedTargetIds = new Set(targets.map((target) => target.targetId));
+    // The runtime profile is the one the project's approved setup assigned (policy targets), not the discovery placeholder; the target is
+    // executable for application scenarios only while that profile's runtime is READY for the project now and its recipe is the project's own.
+    const readyRuntimes = identity.readyRuntimes ?? [];
+    const projectContractDigest = (applicationId: string): string | null => {
+      try { return readE2EApplicationProjectContract(snapshot, applicationId)?.recipe.recipeDigest ?? null; } catch { return null; }
+    };
+    const configuredTarget = (targetId: string) => policy.targets.find((item) => item.targetId === targetId)!;
+    const readyRuntimeFor = (target: (typeof targets)[number]): ReadyE2ERuntime | undefined => {
+      const profileId = configuredTarget(target.targetId).runtimeProfileId;
+      return target.kind === "web" || target.kind === "api" ? readyRuntimes.find((item) => item.kind === target.kind && item.profileId === profileId) : undefined;
+    };
+    const unavailableReason = (target: (typeof targets)[number]): FeatureE2EUnavailableReason | undefined => {
+      const profileId = configuredTarget(target.targetId).runtimeProfileId;
+      const application = applicationRefs.find((item) => item.applicationId === target.applicationId);
+      if (application === undefined || profileId.endsWith("-phase-unavailable") || profileId === "no-device-selected") return "runtime-unavailable";
+      if (application.recipe === null) return "no-launch-recipe";
+      if (profileId === WEB_API_RUNTIME_PROFILE_ID && projectContractDigest(target.applicationId) !== application.recipe.recipeDigest) return "needs-project-contract";
+      return readyRuntimeFor(target) === undefined ? (profileId === WEB_API_RUNTIME_PROFILE_ID ? "runtime-not-ready" : "runtime-unavailable") : undefined;
+    };
     const runtimeRefs = targets.flatMap((target) => {
-      const discoveredTarget = discovered.inspection.proposedTargets.find((item) => item.targetId === target.targetId);
       const applicationRef = applicationRefs.find((item) => item.applicationId === target.applicationId);
-      return discoveredTarget === undefined || applicationRef === undefined ? [] : [{ targetId: target.targetId,
+      return applicationRef === undefined ? [] : [{ targetId: target.targetId,
         applicationId: target.applicationId, recipeDigest: applicationRef.recipe?.recipeDigest ?? null,
-        sourceRefs: applicationRef.sourceRefs, runtimeProfileId: discoveredTarget.runtimeProfileId, accountProfileId: target.accountProfileId }];
+        sourceRefs: applicationRef.sourceRefs, runtimeProfileId: configuredTarget(target.targetId).runtimeProfileId, accountProfileId: target.accountProfileId }];
+    });
+    const unavailableReasons = targets.flatMap((target) => {
+      const reason = unavailableReason(target);
+      return reason === undefined ? [] : [{ targetId: target.targetId, reason }];
     });
     const unavailableTargetRefs = targets.flatMap((target) => {
-      const discoveredTarget = discovered.inspection.proposedTargets.find((item) => item.targetId === target.targetId);
       const applicationRef = applicationRefs.find((item) => item.applicationId === target.applicationId);
-      return discoveredTarget === undefined || applicationRef === undefined || (applicationRef.recipe !== null
-        && !discoveredTarget.runtimeProfileId.endsWith("-phase-unavailable") && discoveredTarget.runtimeProfileId !== "no-device-selected")
-        ? [] : [{ targetId: target.targetId, applicationId: target.applicationId, accountProfileId: target.accountProfileId, sourceRefs: applicationRef.sourceRefs }];
+      return applicationRef === undefined || !unavailableReasons.some((item) => item.targetId === target.targetId) ? []
+        : [{ targetId: target.targetId, applicationId: target.applicationId, accountProfileId: target.accountProfileId, sourceRefs: applicationRef.sourceRefs }];
+    });
+    const executableKinds = (["web", "api"] as const).flatMap((kind) => {
+      const ready = targets.filter((target) => target.kind === kind && unavailableReason(target) === undefined).map(readyRuntimeFor)[0];
+      return ready === undefined ? [] : [{ kind, steps: [...ready.supportedSteps], assertions: [...ready.supportedAssertions] }];
     });
     const portableOperations = discovered.portableOperations.flatMap((operation) => {
       const requestedTargetIds = operation.targetIds.filter((targetId) => selectedTargetIds.has(targetId));
@@ -188,7 +222,7 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       status: "available", source: { origin: sourceOrigin, commitSha: snapshot.commitSha, treeSha: snapshot.treeSha,
         candidateDigest: snapshot.candidate.digest, preparedCommitStatus: preparedCommitSha === null ? "UNKNOWN" : "MATCHED", preparedCommitSha,
         currentCheckoutUnverified: identity.origin === "approved-setup" },
-      baselineScenarioIds: policy.baselineScenarioIds, targets, applicationRefs, runtimeRefs, unavailableTargetRefs,
+      baselineScenarioIds: policy.baselineScenarioIds, targets, applicationRefs, runtimeRefs, unavailableTargetRefs, unavailableReasons, executableKinds,
       portableOperations, mockFixtures: mockFixtures.slice(0, 32), accountContextRefs,
     };
     if (Buffer.byteLength(canonicalJson(context), "utf8") > MAX_PLANNING_CONTEXT_BYTES) {
@@ -199,3 +233,5 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
     return { status: "unknown", reason: "the prepared source snapshot could not be independently inspected" };
   }
 }
+
+export { describeFeatureE2EExecutableKinds } from "./feature-plan-executable-kinds.js";

@@ -198,6 +198,23 @@ describe("source-bound portable feature plan binding", () => {
     expect(missingTargets).toMatchObject({ status: "unknown" });
   });
 
+  it("reads the approved target's runtime profile, and keeps a package with no launch recipe unavailable on a READY runtime", () => {
+    const approved: E2EPolicy = { ...policy, targets: [{ ...target, runtimeProfileId: "linux-arm64-web-api-v1" }] };
+    const readyRuntimes = [{ kind: "web" as const, profileId: "linux-arm64-web-api-v1", supportedSteps: ["navigate", "fill", "click", "choose-file"] as never,
+      supportedAssertions: ["text", "visible", "csv"] as never }];
+    const context = buildFeatureE2EPlanningContext(approved, snapshot, { readyRuntimes });
+    expect(context.status).toBe("available");
+    if (context.status !== "available") return;
+    expect(context.runtimeRefs).toMatchObject([{ targetId: "web-1", runtimeProfileId: "linux-arm64-web-api-v1" }]);
+    // ordinary-orders has no start script and declares no agentx.e2e contract, so discovery proposes no launch recipe for it.
+    expect(context.unavailableReasons).toEqual([{ targetId: "web-1", reason: "no-launch-recipe" }]);
+    expect(context.executableKinds).toEqual([]);
+    const placeholder = buildFeatureE2EPlanningContext(policy, snapshot, { readyRuntimes });
+    if (placeholder.status !== "available") return;
+    expect(placeholder.runtimeRefs).toMatchObject([{ runtimeProfileId: "web-phase-unavailable" }]);
+    expect(placeholder.unavailableReasons).toEqual([{ targetId: "web-1", reason: "runtime-unavailable" }]);
+  });
+
   it("binds an Owner-approved callable reference to the exact candidate package export and module bytes", () => {
     const binding = deriveE2EFeaturePortableApprovalBinding({ intent, snapshot, artifactId: "plan-artifact", artifactSha256: "b".repeat(64), planDigest: "c".repeat(64) });
     expect(binding.semanticApproval).toEqual({ artifactId: "plan-artifact", digest: "b".repeat(64) });

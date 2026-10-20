@@ -259,7 +259,7 @@ import { deriveProjectSetupSourceSmoke } from "../e2e/project-setup-source-smoke
 import { buildE2EFeatureRound, deriveE2EFeatureExecutionAdmission, E2EPortablePlanReferenceError } from "../e2e/feature-plan-intent.js";
 import { admitE2EFeatureVerifier, e2eFeatureVerifierKey, E2EFeatureVerifierRecordSchema, E2E_FEATURE_PROCESS_RESPONSE_SCOPE } from "./e2e-feature-verifier-catalog.js";
 import { issueRuntimeInstallChallenge, registerRuntimeInstallation, type RuntimeInstallationDependencies } from "./runtime-installation.js";
-import { readReadyE2ERuntimeProfiles } from "./e2e-runtime-readiness.js";
+import { readProjectReadyE2ERuntimes, readReadyE2ERuntimeProfiles, type ReadyE2ERuntime } from "./e2e-runtime-readiness.js";
 import { resolveWorkflowE2ECanonicalApproval, workflowE2ECurrentAuthorityMatches } from "./workflow-e2e-current-authority.js";
 import { createWorkflowE2EDisplayObject, readWorkflowE2ENotifierProjection } from "./workflow-e2e-notifier-projection.js";
 import {
@@ -4115,8 +4115,16 @@ async function codingPlanFeatureE2EContext(dependencies: AwsBrokerDependencies, 
       return { status: "unknown" as const, reason: "trusted source capture for the exact prepared commit failed" };
     }
   }
+  // Web/API runtimes are re-checked against the project's own runtime binding now, one catalog row per kind (Ruling AL).
+  let readyRuntimes: ReadyE2ERuntime[] = [];
+  if (dependencies.e2eFeatureRuntimeCatalogId !== undefined) {
+    try {
+      readyRuntimes = await readProjectReadyE2ERuntimes({ runtimeCatalogId: dependencies.e2eFeatureRuntimeCatalogId, profileId: WEB_API_RUNTIME_PROFILE_ID,
+        binding: parseRuntimeBinding(project.runtimeBinding), now: Date.now(), read: (key) => getItem<Record<string, unknown>>(dependencies, key) });
+    } catch { readyRuntimes = []; }
+  }
   return buildFeatureE2EPlanningContext(parsedPolicy.data, snapshot, { origin: sourceOrigin,
-    preparedCommitSha: prepared?.baseCommitSha ?? null });
+    preparedCommitSha: prepared?.baseCommitSha ?? null, readyRuntimes });
 }
 
 /** Whether the workspace belongs to a developer task with the gated workflow. */
