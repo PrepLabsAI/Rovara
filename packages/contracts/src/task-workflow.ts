@@ -102,6 +102,18 @@ export const WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON = "the final candid
 /** Why an AgentX worker refused, before running, to push a reviewed fix: it is too old to push exactly the reviewed tree. */
 export const WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED = "pushing a reviewed fix needs a worker that pushes exactly the reviewed tree";
 
+/**
+ * Whether a blocked verification is the block of an approved browser and API round that a retry can fix: the approved selection changed, the runtime was unusable until
+ * an administrator qualified it again, or the round was refused. One retry approves the plan again (Slack and the task page both offer it); a task whose block is
+ * anything else is retried through its checks instead.
+ */
+export function workflowApplicationRetryOffered(workflow: { stage: string; state: string; blockReason?: string | undefined;
+  e2e?: { required?: boolean | undefined; applicationSelection?: unknown } | undefined }): boolean {
+  return workflow.stage === "VERIFY" && workflow.state === "BLOCKED" && workflow.e2e?.required === true && workflow.e2e.applicationSelection !== undefined
+    && [WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX]
+      .some((prefix) => workflow.blockReason?.startsWith(prefix) === true);
+}
+
 /** Whether the owner may ask AgentX to open the draft pull request again: it is ready, or AgentX gave up on its own. */
 export function workflowPublicationRetryable(workflow: { stage: string; state: string; blockReason?: string | undefined }): boolean {
   return workflow.stage === "PULL_REQUEST"

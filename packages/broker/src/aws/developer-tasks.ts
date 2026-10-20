@@ -105,7 +105,7 @@ import {
   WORKFLOW_BLOCK_REASONS,
   WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
   WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
-  WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX,
+  workflowApplicationRetryOffered,
   e2eApplicationSelectionFingerprint,
   type E2EApplicationReapproval,
   WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
@@ -196,7 +196,7 @@ import { feedbackReviewNoticeId } from "../developer/notifications.js";
 import { feedbackNoticeToDecisionMeasure, feedbackRecommendationMeasure } from "../developer/feedback-review-measures.js";
 import { documentSummaryLines, isFeedbackReviewFailure, workflowDocumentName } from "../developer/workflow-messages.js";
 import type { TaskDocumentKind, TaskDocumentView, TaskFreshness } from "./task-web.js";
-import type { PageCommentInput, PageDecisionInput, PageSuggestionInput, TaskPageState } from "./task-web-api.js";
+import type { PageCommentInput, PageDecisionInput, PageRetryInput, PageSuggestionInput, TaskPageState } from "./task-web-api.js";
 import { pageCommentViews, type CommentViewContext, type PageCommentView } from "./plan-page/comments.js";
 import type { PlanAnchor } from "./plan-page/render-plan.js";
 import { can, pageAccess, resolveTaskAccess, type TaskAccess, type TaskAction } from "../developer/task-access.js";
@@ -2270,9 +2270,7 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       // selection digests), never overwritten.
       let reapproved: { selection: E2EApplicationSelectionRecord; conditions: TransactItems } | undefined;
       let reapproval: E2EApplicationReapproval | undefined;
-      const applicationBlock = [WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX]
-        .some((prefix) => workflow.blockReason?.startsWith(prefix) === true);
-      if (workflow.e2e.applicationSelection !== undefined && applicationBlock) {
+      if (workflow.e2e.applicationSelection !== undefined && workflowApplicationRetryOffered(workflow)) {
         const planArtifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
         const intent = (await approvedCodingPlan(deps, workflow)).e2eIntent;
         if (planArtifact === undefined || workflow.e2e.contractDigest !== planArtifact.sha256 || intent?.schemaVersion !== 2) {
@@ -3396,6 +3394,24 @@ export async function decideOnPage(deps: DeveloperTaskRouteDependencies, caller:
   return { revision: stored.Item?.workflow?.revision ?? input.expectedRevision };
 }
 
+/**
+ * The owner's retry of a blocked browser and API round, from the page: the very retry the Slack button makes (the plan is approved again against what is ready now, and
+ * the old and new selections are recorded). Only a block of an approved round that a retry can fix is retried here; any other block is the checks' own retry, in Slack.
+ * The same request again, once it was taken, answers as it did.
+ */
+export async function retryApplicationRoundOnPage(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: PageRetryInput): Promise<{ revision: number }> {
+  const access = await resolveTaskAccess(deps, caller, taskId);
+  if (!can(access.role, "retry")) throw Object.assign(agentXError("FORBIDDEN", "Only owners retry."), { pageReason: "owners_only" });
+  const workflow = access.task.workflow;
+  const taken = workflow?.verificationRetries?.some((retry) => retry.requestId === input.requestId) === true;
+  if (!taken && (workflow === undefined || access.task.closedAt !== undefined || !workflowApplicationRetryOffered(workflow) || workflow.revision !== input.expectedRevision)) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "This task changed. Refresh the page and try again.");
+  }
+  await retryTaskWorkflow(deps, caller, taskId, { requestId: input.requestId, expectedRevision: input.expectedRevision, instructions: "Retried the browser and API checks from the task page." });
+  const stored = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: taskKey(taskId), ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
+  return { revision: stored.Item?.workflow?.revision ?? input.expectedRevision };
+}
+
 /** Where the task stands now, for the open task page's "moved on" check: the same access rule as the page, two values only. */
 export async function getTaskFreshness(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskFreshness> {
   const { task } = await resolveTaskAccess(deps, caller, taskId);
@@ -3644,6 +3660,7 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     ...(acceptedFindings.length === 0 ? {} : { acceptedFindings }),
     ...(visibleWorkflowDependenciesProgress === undefined ? {} : { workflowDependenciesProgress: visibleWorkflowDependenciesProgress }),
     pullRequests: (workflow?.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state })),
+    ...(workflow !== undefined && task.closedAt === undefined && workflowApplicationRetryOffered(workflow) ? { applicationRetry: { canRetry: can(access.role, "retry") } } : {}),
     history, access: pageAccess(access), ...(capabilities.peopleRevision === undefined ? {} : { peopleRevision: capabilities.peopleRevision }), canManagePeople: capabilities.canManagePeople,
     canTakeOwnership: capabilities.canTakeOwnership, comments, suggestions: shownSuggestions, askAvailable: await commentAnswersAvailable(deps, task),
     ...await pageDecidingView(deps, { task, caller, comments, suggestions: shownSuggestions, citations, claimIds }),

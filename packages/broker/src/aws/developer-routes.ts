@@ -52,7 +52,7 @@ import type { ChatGptConnections } from "../chatgpt/connections.js";
 import type { DeveloperTaskRecord } from "../developer/task-records.js";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
 import {
-  createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, setPageSuggestion,
+  createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, retryApplicationRoundOnPage, setPageSuggestion,
   confirmTaskPeopleProposal, getTaskPeople, getTaskPeopleCapabilities, getTaskPeopleProposal, getTaskPeopleProposalMetadata, getTaskPersonPresentationName,
   proposeTaskOwnershipForPage, proposeTaskPeopleRoleForPage,
   getWorkflowFeedbackReview, routeDeveloperTaskRequest, submitWorkflowFeedbackDecision, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
@@ -842,6 +842,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
           deleteComment: (caller, taskId, input) => deletePageComment(routeDeps(caller), caller, taskId, input),
           setSuggestion: (caller, taskId, input) => setPageSuggestion(routeDeps(caller), caller, taskId, input),
           decide: (caller, taskId, input) => decideOnPage(routeDeps(caller), caller, taskId, input),
+          retryApplicationRound: (caller, taskId, input) => retryApplicationRoundOnPage(routeDeps(caller), caller, taskId, input),
           getPeople: (caller, taskId) => getTaskPeople(routeDeps(caller), caller, taskId),
           proposePeopleRole: (caller, taskId, input) => proposeTaskPeopleRoleForPage(routeDeps(caller), caller, taskId, input),
           proposeOwnership: (caller, taskId, input) => proposeTaskOwnershipForPage(routeDeps(caller), caller, taskId, input),

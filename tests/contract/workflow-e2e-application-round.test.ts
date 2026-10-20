@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES, E2EApplicationSelectionRecordSchema, E2EWorkflowEvidenceRefSchema, E2EWorkflowGroupEvidenceRefSchema, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, workflowSendBackOffered } from "@agentx/contracts";
 import { e2eApplicationPrivateTransferMaxBytes } from "@agentx/verifier";
 import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
-import { startTaskWorkflowPublicationFromSystem } from "../../packages/broker/src/aws/developer-tasks.js";
+import { getTaskDocumentView, retryApplicationRoundOnPage, startTaskWorkflowPublicationFromSystem } from "../../packages/broker/src/aws/developer-tasks.js";
 import { disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import type { E2EApplicationReport } from "../../packages/verifier/src/application-report-schema.js";
 import type { ApplicationGroupEvidence, ObservedApiOutcome } from "../support/e2e-application-evidence-fixture.js";
@@ -533,6 +533,53 @@ describe("current authority at verification (the runtime row, the creator, the s
     await round.runDispatch();
     expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "RUNNING" });
     expect(round.checksOperations()).toHaveLength(2);
+  });
+
+  describe("the task page's retry of a blocked round", () => {
+    const maya = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: MAYA.provider, name: MAYA.name };
+    const pageDeps = async (round: ApplicationRound) => {
+      const input = round.harness.brokerInput as { documentClient: never; tableName: string; developer: never };
+      const broker = await brokerModule();
+      return developerTaskRouteDependencies({ documentClient: input.documentClient, tableName: input.tableName, developer: input.developer, now: Date.now, tasks: round.harness.actions as never,
+        ...broker.workflowApplicationRouteDependencies(round.harness.brokerInput as never) }, maya);
+    };
+    const requalify = () => requalifiedDuringRound((row) => ({ ...row, generation: Number(row.generation) + 1, qualifiedAt: new Date(Date.now() - 1_000).toISOString() }));
+
+    it("is offered to the owner for a block a retry fixes, and one press approves the plan again exactly as the Slack retry does, once", async () => {
+      const round = await requalify();
+      const deps = await pageDeps(round);
+      expect((await getTaskDocumentView(deps, maya, round.taskId)).applicationRetry).toEqual({ canRetry: true });
+      const revision = round.workflowNow().revision;
+      const requestId = randomUUID();
+      expect(await retryApplicationRoundOnPage(deps, maya, round.taskId, { requestId, expectedRevision: revision })).toEqual({ revision: revision + 1 });
+      expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+      const e2e = round.workflowNow().e2e as { applicationSelection: unknown; applicationReapprovals?: Array<{ requestId: string; actorId: string; previous: { selectionDigest: string }; current: { selectionDigest: string } }> };
+      expect(E2EApplicationSelectionRecordSchema.parse(e2e.applicationSelection).runtimeRows[0]).toMatchObject({ generation: 5 });
+      expect(e2e.applicationReapprovals).toHaveLength(1);
+      expect(e2e.applicationReapprovals![0]).toMatchObject({ requestId });
+      expect(e2e.applicationReapprovals![0]!.actorId).toMatch(/^[a-f0-9]{64}$/);
+      expect(e2e.applicationReapprovals![0]!.current.selectionDigest).not.toBe(e2e.applicationReapprovals![0]!.previous.selectionDigest);
+      // The same press again is the same retry, not a second re-approval.
+      expect(await retryApplicationRoundOnPage(deps, maya, round.taskId, { requestId, expectedRevision: revision })).toEqual({ revision: revision + 1 });
+      expect((round.workflowNow().e2e as { applicationReapprovals?: unknown[] }).applicationReapprovals).toHaveLength(1);
+      expect((await getTaskDocumentView(deps, maya, round.taskId)).applicationRetry).toBeUndefined();
+    });
+
+    it("offers the runtime-unusable block too, and refuses a stale revision, another block and a task with no application block, changing nothing", async () => {
+      const unusable = await requalifiedDuringRound((row) => ({ ...row, state: "REVOKED" }));
+      expect(unusable.workflowNow().blockReason).toContain(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX);
+      expect((await getTaskDocumentView(await pageDeps(unusable), maya, unusable.taskId)).applicationRetry).toEqual({ canRetry: true });
+
+      const round = await requalify();
+      const deps = await pageDeps(round);
+      const before = round.workflowNow();
+      await expect(retryApplicationRoundOnPage(deps, maya, round.taskId, { requestId: randomUUID(), expectedRevision: before.revision - 1 })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      const task = round.taskNow() as { workflow: Record<string, unknown> };
+      round.harness.db.set({ ...task, workflow: { ...task.workflow, blockReason: "AgentX ran none of this task's checks on the final code." } });
+      expect((await getTaskDocumentView(deps, maya, round.taskId)).applicationRetry).toBeUndefined();
+      await expect(retryApplicationRoundOnPage(deps, maya, round.taskId, { requestId: randomUUID(), expectedRevision: before.revision })).rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+      expect(round.workflowNow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED", revision: before.revision });
+    });
   });
 
   it("asks for an administrator, not a retry, when no runtime of the admitted kind is ready any more", async () => {

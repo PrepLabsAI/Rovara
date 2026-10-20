@@ -5430,7 +5430,7 @@ export function isSlackWorkflowCloseEvent(event: unknown): event is SlackWorkflo
  * registered repository identity and the PR feedback refresh). The HTTP routes and every Slack workflow press build their
  * route dependencies from this one place, so a press can never reach a route whose check is not installed.
  */
-function workflowApplicationRouteDependencies(dependencies: AwsBrokerDependencies) {
+export function workflowApplicationRouteDependencies(dependencies: AwsBrokerDependencies) {
   return {
     workflowE2EPresentation: (input: { task: DeveloperTaskRecord; operations: readonly unknown[]; actor: "owner" | "viewer" }) => workflowE2EPresentation(dependencies, input.task, input.operations, input.actor),
     workflowE2EPublicationChecks: (input: { task: DeveloperTaskRecord; operations: readonly unknown[] }) => workflowE2EPublicationChecks(dependencies, input.task, input.operations),

@@ -18,7 +18,7 @@ import type { PlanAnchor } from "./plan-page/render-plan.js";
 import { CSRF_COOKIE, SESSION_COOKIE, csrfCookie, isCsrfToken, parseCookie, safeResponse, type WebResponse } from "./web-session.js";
 
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
-export const TASK_PAGE_API = new RegExp(`^/review/(${UUID})/task/api/(state|comments|comments/(${UUID})/(edit|delete)|suggestions|decision|people|people/role|people/take-ownership|people/requests/(${UUID})(/confirm)?)$`, "i");
+export const TASK_PAGE_API = new RegExp(`^/review/(${UUID})/task/api/(state|comments|comments/(${UUID})/(edit|delete)|suggestions|decision|retry|people|people/role|people/take-ownership|people/requests/(${UUID})(/confirm)?)$`, "i");
 /** Any path under the task page's API, known or not: it is the API's to answer, never the PR feedback page's. */
 export const TASK_PAGE_API_PREFIX = new RegExp(`^/review/(${UUID})/task/api(/|$)`, "i");
 
@@ -62,6 +62,10 @@ export const PageDecisionInputSchema = z.object({
 });
 export type PageDecisionInput = z.infer<typeof PageDecisionInputSchema>;
 
+/** The owner's retry of a blocked browser and API round, from the page: the same re-approval the Slack button makes. Nothing else rides along. */
+export const PageRetryInputSchema = z.object({ requestId: z.string().uuid(), expectedRevision: z.number().int().positive() }).strict();
+export type PageRetryInput = z.infer<typeof PageRetryInputSchema>;
+
 /** The text's length is checked by the comment store, so the page can say "Keep comments under 2,000 characters." */
 const CommentTextSchema = z.string().max(PAGE_API_BODY_MAX_BYTES);
 
@@ -94,6 +98,8 @@ export interface TaskWebApiDependencies {
   setSuggestion(caller: DeveloperCaller, taskId: string, input: PageSuggestionInput): Promise<unknown>;
   /** Must refuse a caller who may not decide with an error carrying `pageReason: "owners_only"`. */
   decide(caller: DeveloperCaller, taskId: string, input: PageDecisionInput): Promise<{ revision: number }>;
+  /** Retries a blocked application round (the owner only; any other block is refused) and answers the new revision. Without it, the retry path is not found. */
+  retryApplicationRound?(caller: DeveloperCaller, taskId: string, input: PageRetryInput): Promise<{ revision: number }>;
   getPeople?(caller: DeveloperCaller, taskId: string): Promise<TaskPeopleView>;
   proposePeopleRole?(caller: DeveloperCaller, taskId: string, input: TaskPeopleRoleRequest): Promise<TaskPeopleChangeResult>;
   proposeOwnership?(caller: DeveloperCaller, taskId: string, input: TaskPeopleTakeOwnershipRequest): Promise<TaskPeopleChangeResult>;
@@ -244,6 +250,12 @@ export function createTaskWebApi(deps: TaskWebApiDependencies): (request: Adapte
         if (!parsed.success) return invalid();
         await deps.setSuggestion(caller, taskId, parsed.data);
         return json(200, { ok: true });
+      }
+      if (endpoint === "retry") {
+        if (deps.retryApplicationRound === undefined) return json(404, { error: "not_found" });
+        const parsedRetry = PageRetryInputSchema.safeParse(value);
+        if (!parsedRetry.success) return invalid();
+        return json(200, await deps.retryApplicationRound(caller, taskId, parsedRetry.data));
       }
       const parsed = PageDecisionInputSchema.safeParse(value);
       if (!parsed.success) return invalid();
