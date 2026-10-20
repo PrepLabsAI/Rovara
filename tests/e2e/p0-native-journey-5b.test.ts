@@ -103,6 +103,18 @@ const gitBlob = (cwd: string, revision: string, path: string): Buffer | undefine
   return gitBytes(cwd, "show", `${revision}:${path}`);
 };
 
+/**
+ * The worker's candidate repository as production prepares it: a plain clone with a real `.git` directory (the worker refuses a
+ * `.git` file such as `git worktree add` leaves), on its own branch at the task's pinned base, committing as the fixture.
+ */
+const cloneWorkerRepository = (source: string, target: string, branch: string, commitSha: string): void => {
+  execFileSync("git", ["clone", "--quiet", "--no-checkout", source, target], { stdio: "ignore" });
+  gitConfig(target, "user.name", "P0 fixture");
+  gitConfig(target, "user.email", "p0-fixture@example.test");
+  execFileSync("git", ["-C", target, "checkout", "--quiet", "-b", branch, commitSha], { stdio: "ignore" });
+};
+const gitConfig = (cwd: string, key: string, value: string): void => { execFileSync("git", ["-C", cwd, "config", key, value], { stdio: "ignore" }); };
+
 describe("P0 normal project onboarding journey", () => {
   it("discovers and presents source-backed setup from ordinary addProject without injected setup authority", async () => {
     const evidenceRoot = process.env.CONTAINED_FOUNDATION_EVIDENCE_DIR;
@@ -873,8 +885,8 @@ describe("P0 normal project onboarding journey", () => {
     const workerWorkspace = join(root, "actual-worker-workspace");
     const workerRepository = join(workerWorkspace, "repo", "ordinary-orders");
     await mkdir(join(workerWorkspace, "repo"), { recursive: true });
-    git(repositoryRoot, "worktree", "add", "--quiet", "-b", `codex/p0-worker-${randomUUID()}`, workerRepository, commitSha);
-    git(workerRepository, "remote", "add", "origin", "https://github.com/acme/ordinary-orders.git");
+    cloneWorkerRepository(repositoryRoot, workerRepository, `codex/p0-worker-${randomUUID()}`, commitSha);
+    git(workerRepository, "remote", "set-url", "origin", "https://github.com/acme/ordinary-orders.git");
     await mkdir(join(workerWorkspace, ".agentx"), { recursive: true, mode: 0o700 });
     await writeFile(join(workerWorkspace, ".agentx", "preparation-manifest.json"), `${JSON.stringify({
       schemaVersion: 2, projectName: "ordinary-orders", projectRevision: implementInvocation.projectRevision,
@@ -2306,7 +2318,7 @@ describe("P0 normal project onboarding journey", () => {
     const browserWorkerRoot = join(root, "browser-required-worker-workspace");
     const browserWorkerRepository = join(browserWorkerRoot, "repo", "ordinary-orders");
     await mkdir(join(browserWorkerRoot, "repo"), { recursive: true });
-    git(repositoryRoot, "worktree", "add", "--quiet", "-b", `codex/p0-browser-worker-${randomUUID()}`, browserWorkerRepository, commitSha);
+    cloneWorkerRepository(repositoryRoot, browserWorkerRepository, `codex/p0-browser-worker-${randomUUID()}`, commitSha);
     git(browserWorkerRepository, "remote", "set-url", "origin", "https://github.com/acme/ordinary-orders.git");
     await mkdir(join(browserWorkerRoot, ".agentx"), { recursive: true, mode: 0o700 });
     await writeFile(join(browserWorkerRoot, ".agentx", "preparation-manifest.json"), `${JSON.stringify({ schemaVersion: 2,
