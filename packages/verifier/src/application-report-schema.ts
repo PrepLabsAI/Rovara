@@ -41,11 +41,14 @@ const failure = z.object({ url: z.string().url().max(8192).optional(), viewport:
   nodes: count.optional(), screen: text.optional(), screenshot: text.optional(), candidates: z.array(text).max(128).optional() }).strict();
 const skip = z.object({ cause: z.enum(["explicit", "filtered", "platform-unavailable", "capability-unavailable", "setup-failed", "serial-predecessor-failed", "hook-failed", "infrastructure-unavailable", "failure-limit"]),
   reason: text, relatedId: text.optional() }).strict();
-// The pinned runner names its app log levels debug, info, warning and error (a 4xx response is a warning); a click that gets HTTP 403 must not make the report unreadable.
+// The pinned runner (e2e 0.20.0 report-v1.schema.json, appLogLine) names exactly three app log levels, error, warning and info (a 4xx response is a warning; a click that
+// gets HTTP 403 must not make the report unreadable), and bounds the log to 300 lines of at most 300 characters each, stamped in millisecond UTC. The schema is that pin, no looser.
 // The pinned runner omits `appLog` when the attempt logged nothing, so an absent log is a quiet run, not a malformed report.
+const appLogLine = z.object({ source: z.enum(["console", "error", "network", "system"]), level: z.enum(["error", "warning", "info"]), text: z.string().max(300),
+  at: z.string().regex(/^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}Z$/), step: count.optional() }).strict();
 const attempt = E2EReportSchema.shape.run.shape.results.element.shape.attempts.element.extend({
   environment: z.record(z.string().max(256), z.string().max(2048)).optional(), artifacts: z.array(artifact).max(200), steps: z.array(step).max(256),
-  appLog: z.array(z.object({ source: z.enum(["console", "error", "network", "system"]), level: z.enum(["debug", "info", "warning", "error"]), text, at: text, step: count.optional() }).strict()).max(1000).optional(),
+  appLog: z.array(appLogLine).max(300).optional(),
   failure: failure.optional(), skip: skip.optional(),
 });
 const result = E2EReportSchema.shape.run.shape.results.element.extend({ attempts: z.array(attempt).max(3), skip: skip.optional() });

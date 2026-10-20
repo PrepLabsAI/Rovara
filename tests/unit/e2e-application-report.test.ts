@@ -72,16 +72,32 @@ describe("application report parser", () => {
     expect(module.E2EApplicationReportSchema.safeParse(invalidLog).success).toBe(false);
   });
 
-  it("reads the app log levels the pinned runner writes, 'warning' (an HTTP 4xx the page got) included", async () => {
+  it("reads exactly the app log levels the pinned runner writes (info, warning, error), 'warning' (an HTTP 4xx the page got) included", async () => {
     const module = await import("../../packages/verifier/src/application-report-schema.js");
-    for (const level of ["debug", "info", "warning", "error"]) {
+    const parsedWith = (appLog: unknown[]) => {
       const withLog = report();
-      Object.assign(withLog.run.results[0]!.attempts[0]!, { appLog: [{ source: "network", level, text: "GET http://127.0.0.1:4317/api/orders.csv 403 Forbidden", at }] });
-      expect(module.parseE2EApplicationReport(Buffer.from(JSON.stringify(withLog))).kind, level).toBe("parsed");
-    }
-    const unknown = report();
-    Object.assign(unknown.run.results[0]!.attempts[0]!, { appLog: [{ source: "network", level: "fatal", text: "x", at }] });
-    expect(module.parseE2EApplicationReport(Buffer.from(JSON.stringify(unknown))).kind).toBe("unavailable");
+      Object.assign(withLog.run.results[0]!.attempts[0]!, { appLog });
+      return module.parseE2EApplicationReport(Buffer.from(JSON.stringify(withLog))).kind;
+    };
+    const line = (extra: Record<string, unknown> = {}) => ({ source: "network", level: "warning", text: "GET http://127.0.0.1:4317/api/orders.csv 403 Forbidden", at, ...extra });
+    for (const level of ["info", "warning", "error"]) expect(parsedWith([line({ level })]), level).toBe("parsed");
+    // The pinned runner's report-v1 schema has no debug (or any other) level.
+    for (const level of ["debug", "fatal"]) expect(parsedWith([line({ level })]), level).toBe("unavailable");
+  });
+
+  it("holds the app log to the pinned runner's limits: 300 lines, 300 characters of text and a millisecond UTC timestamp", async () => {
+    const module = await import("../../packages/verifier/src/application-report-schema.js");
+    const parsedWith = (appLog: unknown[]) => {
+      const withLog = report();
+      Object.assign(withLog.run.results[0]!.attempts[0]!, { appLog });
+      return module.parseE2EApplicationReport(Buffer.from(JSON.stringify(withLog))).kind;
+    };
+    const line = (extra: Record<string, unknown> = {}) => ({ source: "console", level: "info", text: "x", at, ...extra });
+    expect(parsedWith(Array.from({ length: 300 }, () => line()))).toBe("parsed");
+    expect(parsedWith(Array.from({ length: 301 }, () => line()))).toBe("unavailable");
+    expect(parsedWith([line({ text: "x".repeat(300) })])).toBe("parsed");
+    expect(parsedWith([line({ text: "x".repeat(301) })])).toBe("unavailable");
+    expect(parsedWith([line({ at: "yesterday" })])).toBe("unavailable");
   });
 
   it("rejects invalid UTF-8 and report bytes over the application-specific hard bound", async () => {
