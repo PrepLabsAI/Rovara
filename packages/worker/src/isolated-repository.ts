@@ -1,10 +1,10 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readdir, readFile, rename, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { agentXError } from "@agentx/contracts";
-import { isRefusedForNetwork, isolatedGitEnvironment, networkRefusal } from "./git.js";
+import { assertNoEmbeddedRepositories, assertNoLfsFiles, isRefusedForNetwork, isolatedGitEnvironment, networkRefusal } from "./git.js";
 import { runGitWithCredential, type GitCredential } from "./git-auth.js";
 import {
   HEX40, isSafeRefName, readSmallFile, takeLock, verifyRefDirectories, withIsolatedGit,
@@ -139,8 +139,14 @@ async function applyRefsBack(git: IsolatedGit, before: RefState): Promise<void> 
 }
 
 async function copyIndexIn(git: IsolatedGit): Promise<Buffer | undefined> {
-  const bytes = await readSmallFile(join(git.layout.gitDirectory, "index"), INDEX_BYTES);
-  if (bytes !== undefined) await writeFile(git.workIndex, bytes, { mode: 0o600 });
+  const real = join(git.layout.gitDirectory, "index");
+  const bytes = await readSmallFile(real, INDEX_BYTES);
+  if (bytes === undefined) return undefined;
+  await writeFile(git.workIndex, bytes, { mode: 0o600 });
+  // The copy keeps the real index's modification time: Git decides which entries may be "racily clean" (same size, same second as the index) by comparing each
+  // entry's time with the index file's, so a copy stamped now would make a file edited in the second the index was written look unchanged.
+  const stamp = await stat(real);
+  await utimes(git.workIndex, stamp.atime, stamp.mtime);
   return bytes;
 }
 
@@ -162,6 +168,9 @@ async function persistIndex(git: IsolatedGit, original: Buffer | undefined): Pro
     await lock.handle.writeFile(next);
     await lock.handle.sync();
     await lock.handle.close();
+    // Stamped as the worker's copy is, for the same reason: the entries were checked against that time.
+    const stamp = await stat(git.workIndex);
+    await utimes(lock.path, stamp.atime, stamp.mtime);
     await rename(lock.path, real);
     renamed = true;
   } finally {
@@ -252,6 +261,61 @@ export async function withIsolatedRepository<T>(
     if (refsBefore !== undefined) await applyRefsBack(git, refsBefore);
     if (options.index === "persist") await persistIndex(git, indexBefore);
     return result;
+  });
+}
+
+/** What a Git command needs of the repository, judged from its subcommand: how it uses the work tree, the index and the object store. */
+const WORK_TREE_WRITERS = new Set(["checkout", "reset", "revert", "merge", "add", "read-tree", "checkout-index", "restore", "switch", "cherry-pick", "rm", "mv", "clean", "stash"]);
+const READS_INDEX = new Set([...WORK_TREE_WRITERS, "status", "diff", "diff-files", "diff-index", "ls-files", "write-tree", "commit"]);
+const READ_ONLY = new Set(["rev-parse", "cat-file", "merge-base", "rev-list", "status", "diff", "ls-tree", "for-each-ref", "branch", "log", "show", "ls-files", "diff-tree"]);
+
+/** The subcommand of `args`, past leading `-c key=value` pairs. */
+export function subcommandOf(args: readonly string[]): string {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (arg === "-c") { index += 1; continue; }
+    if (!arg.startsWith("-")) return arg;
+  }
+  return "";
+}
+
+export interface CommandOptions {
+  maxBuffer?: number;
+  timeout?: number;
+  signal?: AbortSignal;
+  input?: string | Buffer;
+  cwd?: "scratch" | "worktree";
+  /** Refs and index handling, when the subcommand's usual one is not what the call needs. */
+  refs?: boolean;
+  index?: "none" | "work" | "persist";
+  mode?: "read" | "write";
+}
+
+/**
+ * Runs one Git command for the workspace in a throwaway repository (see the note at the top of this file), as `git -C <directory> <args>` was run before: HEAD
+ * and the refs are copied in and what the command changed is applied back; the index is copied in for a command that reads it, and installed afterwards when the
+ * command writes the work tree. Failures are Git's own (an `execFile` error with its exit code), or an AgentXError when applying the result was refused.
+ */
+export async function runIsolatedGit(directory: string, args: readonly string[], options: CommandOptions = {}): Promise<string> {
+  const subcommand = subcommandOf(args);
+  const index = options.index ?? (WORK_TREE_WRITERS.has(subcommand) ? "persist" : READS_INDEX.has(subcommand) ? "work" : "none");
+  const mode = options.mode ?? (READ_ONLY.has(subcommand) ? "read" : "write");
+  return withIsolatedRepository(directory, mode, { refs: options.refs ?? true, ...(index === "none" ? {} : { index }) }, (repository) =>
+    repository.text(args, {
+      index: index === "none" ? "none" : "work",
+      maxBuffer: options.maxBuffer ?? 1024 * 1024,
+      ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+      ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+      ...(options.input === undefined ? {} : { input: options.input }),
+    }));
+}
+
+/** Refuses (CONFIG_INVALID) a workspace that has a nested repository checked out or Git LFS files, as the publishing and capturing paths always have. */
+export async function assertWorkspaceIsPlain(directory: string): Promise<void> {
+  await withIsolatedRepository(directory, "read", { index: "work" }, async (repository) => {
+    await assertNoEmbeddedRepositories(repository.layout.workTree, repository.env("work"), repository.location);
+    await assertNoLfsFiles(repository.layout.workTree, repository.env("work"), repository.location);
   });
 }
 

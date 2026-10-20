@@ -99,6 +99,12 @@ export type IsolatedRunOptions = {
    */
   index?: IndexKind;
   maxBuffer?: number;
+  timeout?: number;
+  signal?: AbortSignal;
+  /** Where the command starts: the private scratch directory (the default), or the work tree, for a command whose answer depends on it (`rev-parse --show-toplevel`). */
+  cwd?: "scratch" | "worktree";
+  /** Standard input for the command (a list of paths for `checkout-index --stdin`); the pipe is closed either way. */
+  input?: string | Buffer;
 };
 
 export interface IsolatedGit {
@@ -114,6 +120,8 @@ export interface IsolatedGit {
   /** The Git arguments that name the throwaway repository and the candidate's work tree, for helpers that spawn Git themselves. */
   readonly location: readonly string[];
   env(index?: IndexKind): NodeJS.ProcessEnv;
+  /** Everything a caller needs to spawn `git <args>` itself (to stream its output) the way `text` runs it. */
+  spawnSpec(args: readonly string[], index?: IndexKind): { args: string[]; env: NodeJS.ProcessEnv; cwd: string };
   text(args: readonly string[], options?: IsolatedRunOptions): Promise<string>;
   bytes(args: readonly string[], options?: IsolatedRunOptions): Promise<Buffer>;
   /** The commit HEAD names, read from the candidate's HEAD and refs files. */
@@ -154,10 +162,18 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
       ...(mode === "write" ? { GIT_OBJECT_DIRECTORY: layout.objects } : {}),
       ...(index === "none" ? {} : { GIT_INDEX_FILE: indexFiles[index] }),
     }, config);
-    const run = async (args: readonly string[], options: IsolatedRunOptions, encoding: "utf8" | "buffer") => (await execFile("git", [...location, ...args],
-      { cwd: scratch, env: env(options.index), encoding, maxBuffer: options.maxBuffer ?? SMALL_FILE_BYTES })).stdout;
+    const run = async (args: readonly string[], options: IsolatedRunOptions, encoding: "utf8" | "buffer") => {
+      const child = execFile("git", [...location, ...args],
+        { cwd: options.cwd === "worktree" ? layout.workTree : scratch, env: env(options.index), encoding, maxBuffer: options.maxBuffer ?? SMALL_FILE_BYTES, ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
+          ...(options.signal === undefined ? {} : { signal: options.signal }) });
+      // A command can exit before its standard input is written (every command but checkout-index ignores it); the pipe's EPIPE must not crash the worker.
+      child.child.stdin?.on("error", () => undefined);
+      child.child.stdin?.end(options.input);
+      return (await child).stdout;
+    };
     return await use({
       layout, scratch, temporaryIndex, workIndex, gitDir, location, env,
+      spawnSpec: (args, index = "none") => ({ args: [...location, ...args], env: env(index), cwd: scratch }),
       text: async (args, options = {}) => (await run(args, options, "utf8")) as string,
       bytes: async (args, options = {}) => (await run(args, options, "buffer")) as unknown as Buffer,
       headCommit: () => readHead(layout).then((head) => head.commit),
@@ -179,19 +195,27 @@ export async function snapshotTree(git: IsolatedGit, commit: string): Promise<st
   await git.text(["read-tree", commit]);
   const gitlinks = await assertNoEmbeddedRepositories(git.layout.workTree, git.env(), git.location);
   await assertNoLfsFiles(git.layout.workTree, git.env(), git.location);
+  await addWorkTree(git, "temporary", gitlinks);
+  return (await git.text(["write-tree"])).trim();
+}
+
+/**
+ * `git add --all` of the work tree into the index `index`, keeping Git away from every tracked gitlink in `gitlinks` (see snapshotTree). A gitlink whose path is
+ * no longer a directory is refused: its entry would otherwise stay in the tree while the work tree no longer has the submodule.
+ */
+export async function addWorkTree(git: IsolatedGit, index: IndexKind, gitlinks: readonly string[]): Promise<void> {
   for (const path of gitlinks) {
     const stat = await lstat(join(git.layout.workTree, path)).catch(() => undefined);
     if (stat === undefined || !stat.isDirectory()) {
       throw agentXError("CONFIG_INVALID", `the repository has a submodule at ${path} that is no longer a directory. AgentX tasks do not yet support changes to a project's submodules.`);
     }
   }
-  if (gitlinks.length === 0) await git.text(["add", "--all", "--", "."], { maxBuffer: 1024 * 1024 });
+  if (gitlinks.length === 0) await git.text(["add", "--all", "--", "."], { index, maxBuffer: 1024 * 1024 });
   else {
     const pathspecs = join(git.scratch, "pathspecs");
     await writeFile(pathspecs, [".", ...gitlinks.map((path) => `:(exclude,literal)${path}`)].map((entry) => `${entry}\0`).join(""), { mode: 0o600 });
-    await git.text(["add", "--all", `--pathspec-from-file=${pathspecs}`, "--pathspec-file-nul"], { maxBuffer: 1024 * 1024 });
+    await git.text(["add", "--all", `--pathspec-from-file=${pathspecs}`, "--pathspec-file-nul"], { index, maxBuffer: 1024 * 1024 });
   }
-  return (await git.text(["write-tree"])).trim();
 }
 
 /** Git's own rules for a ref name, applied strictly: anything unusual is refused rather than guessed at. */

@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   lstat,
@@ -12,7 +11,6 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
 import {
   StoredProjectDefinitionSchema,
   agentXError,
@@ -31,7 +29,8 @@ import { runCollected, type CollectedProcess } from "./collected-process.js";
 import { describeCommandFailure } from "./command-failure.js";
 import { DOCKER_DATA_DIRECTORY } from "./devcontainer-policy.js";
 import { evaluateReadiness, type CommandResult } from "./readiness.js";
-import { gitHardenedEnvironment, projectCommandEnvironment } from "./git.js";
+import { projectCommandEnvironment } from "./git.js";
+import { runIsolatedGit, withIsolatedRepository } from "./isolated-repository.js";
 import { CHECK_HISTORY_PATH, projectCheckKey, recordPreparedOutcomes } from "./verification/check-history.js";
 import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
 import type {
@@ -39,7 +38,6 @@ import type {
   RepositoryCredentialProvider,
 } from "./repository-credentials.js";
 
-const execFileAsync = promisify(execFile);
 const MANIFEST_PATH = ".agentx/preparation-manifest.json";
 const RUNTIME_BACKING_DIRECTORY = ".agentx-runtime";
 const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
@@ -352,26 +350,17 @@ async function cloneRepository(
     timeout: 300_000,
     maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
   });
-  const remote = await execFileAsync("git", ["-C", destination, "remote", "get-url", "origin"], {
-    timeout: 30_000,
-    maxBuffer: 4_096,
-    env: await gitHardenedEnvironment(destination),
-  });
-  assertCredentialFreeRemote(remote.stdout.trim());
+  // The clone above is the only thing that has touched `destination`: nothing else exists there yet (the caller clones only a path that was missing, and the
+  // agent and the project's commands start after every repository is prepared), so its config holds what `git clone` wrote. Read as a value, in the same
+  // way as every other read of a workspace repository's config.
+  const remote = await withIsolatedRepository(destination, "read", {}, (repository) => repository.remoteUrl("origin"));
+  assertCredentialFreeRemote(remote ?? "");
 }
 
 async function resolveDefaultBranch(directory: string, branch: string): Promise<string> {
   try {
-    const result = await execFileAsync(
-      "git",
-      ["-C", directory, "rev-parse", "--verify", `refs/remotes/origin/${branch}^{commit}`],
-      {
-        timeout: 30_000,
-        maxBuffer: 4_096,
-        env: await gitHardenedEnvironment(directory),
-      },
-    );
-    return result.stdout.trim();
+    const stdout = await runIsolatedGit(directory, ["rev-parse", "--verify", `refs/remotes/origin/${branch}^{commit}`], { timeout: 30_000, maxBuffer: 4_096 });
+    return stdout.trim();
   } catch {
     throw new Error(`repository default branch does not exist: ${branch}`);
   }
@@ -380,22 +369,14 @@ async function resolveDefaultBranch(directory: string, branch: string): Promise<
 async function checkoutResolvedCommit(directory: string, commit: string): Promise<void> {
   // A --no-checkout clone can report the requested commit from HEAD while its
   // working tree is still empty. Always materialize the resolved branch head.
-  await execFileAsync("git", ["-C", directory, "checkout", "--detach", "--force", commit], {
-    timeout: 120_000,
-    maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
-    env: await gitHardenedEnvironment(directory),
-  });
+  await runIsolatedGit(directory, ["checkout", "--detach", "--force", commit], { timeout: 120_000, maxBuffer: MAX_COMMAND_OUTPUT_BYTES });
   const resolved = await gitHead(directory);
   if (resolved !== commit) throw new Error("repository did not check out the resolved branch commit");
 }
 
 async function gitHead(directory: string): Promise<string> {
-  const result = await execFileAsync("git", ["-C", directory, "rev-parse", "HEAD"], {
-    timeout: 30_000,
-    maxBuffer: 4_096,
-    env: await gitHardenedEnvironment(directory),
-  });
-  return result.stdout.trim();
+  const stdout = await runIsolatedGit(directory, ["rev-parse", "HEAD"], { timeout: 30_000, maxBuffer: 4_096 });
+  return stdout.trim();
 }
 
 /** A project command (`setup` or `readiness`) on the host. Spec 051: `signal` stops it, as a check rerun needs. */
