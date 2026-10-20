@@ -1,7 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { readFile, realpath, stat } from "node:fs/promises";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
   PullRequestResultSchema,
@@ -17,6 +16,7 @@ import {
 } from "@agentx/contracts";
 import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME, assertNoEmbeddedRepositories, assertNoLfsFiles, gitHardenedEnvironment } from "./git.js";
 import { assertCredentialFreeRemote, pushCommitFromIsolatedRepository, runGitWithCredential, type CredentialedGitRunner } from "./git-auth.js";
+import { snapshotTree, withIsolatedGit } from "./isolated-git.js";
 import { stopWorkspaceProcesses } from "./workspace-processes.js";
 import { sweepWorkspaceContainers } from "./workspace-containers.js";
 import type { PullRequestSink } from "./callback-client.js";
@@ -396,24 +396,17 @@ async function prepareRevertCommit(input: {
   return commit;
 }
 
-/** The tree of HEAD plus every tracked and untracked change, staged in a throwaway index under the same hardened Git. */
-export async function temporaryIndexTree(git: { readonly directory: string; readonly env: NodeJS.ProcessEnv }): Promise<string> {
-  const temporary = await mkdtemp(join(tmpdir(), "agentx-publish-index-"));
-  const env = { ...git.env, GIT_INDEX_FILE: join(temporary, "index") };
-  const run = async (args: readonly string[]): Promise<string> => {
-    try {
-      return (await execFileAsync("git", ["-C", git.directory, ...args], { timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT, encoding: "utf8", env })).stdout;
-    } catch (error) {
-      const processError = error as Error & { stderr?: string };
-      throw agentXError("CONFIG_INVALID", sanitizeGitError(processError.stderr ?? processError.message));
-    }
-  };
+/**
+ * The tree of HEAD plus every tracked and untracked change, staged in a throwaway index. Git runs in a worker-owned throwaway repository that never sees the
+ * workspace's config (isolated-git.ts), the same way the verified candidate's tree is computed, so a filter the agent writes while this runs cannot execute and
+ * the tree compared to the checked candidate is the one that capture computes. `git.env` is not used: that environment is built from a one-time read of the config.
+ */
+export async function temporaryIndexTree(git: { readonly directory: string; readonly env?: NodeJS.ProcessEnv }): Promise<string> {
   try {
-    await run(["read-tree", "HEAD"]);
-    await run(["add", "--all", "--", "."]);
-    return (await run(["write-tree"])).trim();
-  } finally {
-    await rm(temporary, { recursive: true, force: true });
+    return await withIsolatedGit(git.directory, "write", async (isolated) => snapshotTree(isolated, await isolated.headCommit()));
+  } catch (error) {
+    if (error instanceof AgentXError) throw error;
+    throw agentXError("CONFIG_INVALID", sanitizeGitError(error instanceof Error ? error.message : "Git could not read the repository's files"));
   }
 }
 

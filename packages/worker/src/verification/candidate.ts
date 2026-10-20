@@ -1,13 +1,8 @@
 import { createHash } from "node:crypto";
-import { execFile as execFileCallback } from "node:child_process";
-import { open, readFile, rename, unlink, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { promisify } from "node:util";
 import { AgentXError, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, agentXError, createCandidateManifest, isSafeE2ESourcePath, type CandidateManifest } from "@agentx/contracts";
-import { assertNoEmbeddedRepositories, assertNoLfsFiles, gitHardenedEnvironment } from "../git.js";
-
-const execFile = promisify(execFileCallback);
+import { snapshotTree, withIsolatedGit, type IsolatedGit } from "../isolated-git.js";
 
 export interface CandidateRepositoryInput {
   repositoryId: string;
@@ -63,40 +58,43 @@ export async function readCommittedCandidateSourceExport(
       throw new Error("committed candidate source identity is invalid");
     }
     const directory = resolve(input.directory);
-    const env = await gitHardenedEnvironment(directory);
-    const commit = (await execFile("git", ["-C", directory, "rev-parse", "--verify", "HEAD^{commit}"], { env, encoding: "utf8" })).stdout.trim();
-    const tree = (await execFile("git", ["-C", directory, "rev-parse", "--verify", "HEAD^{tree}"], { env, encoding: "utf8" })).stdout.trim();
-    if (commit !== identity.commitSha || tree !== identity.treeSha || (input.baseCommitSha !== undefined && identity.baseCommitSha !== input.baseCommitSha)) {
-      throw new Error("committed source does not match the final candidate identity");
-    }
-    const listing = (await execFile("git", ["-C", directory, "ls-tree", "-rz", "-r", "--full-tree", commit], { env, encoding: "buffer" })).stdout as unknown as Buffer;
-    const treePaths: string[] = [];
-    const sources: CommittedCandidateSourceExport["repositories"][number]["sources"] = [];
-    for (const record of listing.toString("binary").split("\0").filter(Boolean)) {
-      const tab = record.indexOf("\t");
-      if (tab < 0) throw new Error("committed Git tree entry is malformed");
-      const metadata = record.slice(0, tab).split(" ");
-      const pathBytes = Buffer.from(record.slice(tab + 1), "binary");
-      const path = pathBytes.toString("utf8");
-      if (!Buffer.from(path, "utf8").equals(pathBytes) || path.length === 0 || path.length > 1024 || path.startsWith("/") || path.includes("\\") || path.includes("\0")) {
-        throw new Error("committed Git tree path is not safely representable");
+    // Git runs in a worker-owned throwaway repository that borrows only the candidate's objects (see isolated-git.ts), with no replace objects.
+    const { treePaths, sources } = await withIsolatedGit(directory, "read", async (git) => {
+      const commit = (await git.text(["rev-parse", "--verify", `${await git.headCommit()}^{commit}`], { index: "none" })).trim();
+      const tree = (await git.text(["rev-parse", "--verify", `${commit}^{tree}`], { index: "none" })).trim();
+      if (commit !== identity.commitSha || tree !== identity.treeSha || (input.baseCommitSha !== undefined && identity.baseCommitSha !== input.baseCommitSha)) {
+        throw new Error("committed source does not match the final candidate identity");
       }
-      treePaths.push(path);
-      // The complete tree inventory retains excluded paths, while only runner-safe regular blobs
-      // are materialized. In particular, never promote credential-like paths into callback bytes.
-      if (metadata[1] !== "blob" || (metadata[0] !== "100644" && metadata[0] !== "100755") || !isSafeE2ESourcePath(path)) continue;
-      if (sources.length >= MAX_CANDIDATE_SOURCE_COUNT) throw new Error("committed candidate has too many source blobs for the accepted snapshot bound");
-      const oid = metadata[2];
-      if (!oid || !/^[a-f0-9]{40,64}$/.test(oid)) throw new Error("committed Git blob identity is malformed");
-      const sizeText = (await execFile("git", ["-C", directory, "cat-file", "-s", oid], { env, encoding: "utf8" })).stdout.trim();
-      const byteLength = Number(sizeText);
-      if (!Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > MAX_CANDIDATE_SOURCE_FILE_BYTES) continue;
-      totalSourceBytes += byteLength;
-      if (totalSourceBytes > MAX_CANDIDATE_SOURCE_BYTES) throw new Error("committed candidate source exceeds the accepted aggregate byte bound");
-      const bytes = (await execFile("git", ["-C", directory, "cat-file", "blob", oid], { env, encoding: "buffer", maxBuffer: MAX_CANDIDATE_SOURCE_FILE_BYTES + 1 })).stdout as unknown as Buffer;
-      if (bytes.byteLength !== byteLength) throw new Error("committed Git blob size changed while reading");
-      sources.push({ path, sha256: createHash("sha256").update(bytes).digest("hex"), bytesBase64: bytes.toString("base64"), kind: "blob" });
-    }
+      const listing = await git.bytes(["ls-tree", "-rz", "-r", "--full-tree", commit], { index: "none" });
+      const treePaths: string[] = [];
+      const sources: CommittedCandidateSourceExport["repositories"][number]["sources"] = [];
+      for (const record of listing.toString("binary").split("\0").filter(Boolean)) {
+        const tab = record.indexOf("\t");
+        if (tab < 0) throw new Error("committed Git tree entry is malformed");
+        const metadata = record.slice(0, tab).split(" ");
+        const pathBytes = Buffer.from(record.slice(tab + 1), "binary");
+        const path = pathBytes.toString("utf8");
+        if (!Buffer.from(path, "utf8").equals(pathBytes) || path.length === 0 || path.length > 1024 || path.startsWith("/") || path.includes("\\") || path.includes("\0")) {
+          throw new Error("committed Git tree path is not safely representable");
+        }
+        treePaths.push(path);
+        // The complete tree inventory retains excluded paths, while only runner-safe regular blobs
+        // are materialized. In particular, never promote credential-like paths into callback bytes.
+        if (metadata[1] !== "blob" || (metadata[0] !== "100644" && metadata[0] !== "100755") || !isSafeE2ESourcePath(path)) continue;
+        if (sources.length >= MAX_CANDIDATE_SOURCE_COUNT) throw new Error("committed candidate has too many source blobs for the accepted snapshot bound");
+        const oid = metadata[2];
+        if (!oid || !/^[a-f0-9]{40,64}$/.test(oid)) throw new Error("committed Git blob identity is malformed");
+        const sizeText = (await git.text(["cat-file", "-s", oid], { index: "none" })).trim();
+        const byteLength = Number(sizeText);
+        if (!Number.isSafeInteger(byteLength) || byteLength < 0 || byteLength > MAX_CANDIDATE_SOURCE_FILE_BYTES) continue;
+        totalSourceBytes += byteLength;
+        if (totalSourceBytes > MAX_CANDIDATE_SOURCE_BYTES) throw new Error("committed candidate source exceeds the accepted aggregate byte bound");
+        const bytes = await git.bytes(["cat-file", "blob", oid], { index: "none", maxBuffer: MAX_CANDIDATE_SOURCE_FILE_BYTES + 1 });
+        if (bytes.byteLength !== byteLength) throw new Error("committed Git blob size changed while reading");
+        sources.push({ path, sha256: createHash("sha256").update(bytes).digest("hex"), bytesBase64: bytes.toString("base64"), kind: "blob" });
+      }
+      return { treePaths, sources };
+    });
     if (new Set(treePaths).size !== treePaths.length) throw new Error("committed Git tree contains duplicate paths");
     repositories.push({ repositoryId: input.repositoryId, commitSha: identity.commitSha, treeSha: identity.treeSha,
       ...(identity.baseCommitSha === undefined ? {} : { baseCommitSha: identity.baseCommitSha }), treeComplete: true, treePaths, sources });
@@ -108,6 +106,8 @@ export async function readCommittedCandidateSourceExport(
 /**
  * Captures the Git candidate without touching the worktree's real index. A temporary index starts
  * from HEAD, then stages the current tracked and untracked files solely to compute a tree object.
+ * Git never runs in the candidate repository itself (see isolated-git.ts); the tree and its blobs are written to the candidate's object
+ * directory, where the review diff reads them.
  */
 export async function readCandidateRepositories(
   inputs: readonly CandidateRepositoryInput[],
@@ -120,39 +120,30 @@ export async function readCandidateRepositories(
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,199}$/.test(input.repositoryId)
       || (input.baseCommitSha !== undefined && !/^[a-f0-9]{40}$/.test(input.baseCommitSha))) throw new Error("candidate repository identities are invalid");
     const directory = resolve(input.directory);
-    const temporary = await mkdtemp(join(tmpdir(), "agentx-candidate-index-"));
-    const indexPath = join(temporary, "index");
     try {
-      // One hardened environment per repository (see git.ts): every call below runs Git in the agent's repository.
-      const hardenedEnv = await gitHardenedEnvironment(directory);
-      const env = { ...hardenedEnv, GIT_INDEX_FILE: indexPath };
-      const { stdout: commitSha } = await execFile("git", ["-C", directory, "rev-parse", "--verify", "HEAD^{commit}"], { env, encoding: "utf8" });
-      await execFile("git", ["-C", directory, "read-tree", "HEAD"], { env, encoding: "utf8" });
-      await assertNoEmbeddedRepositories(directory, env);
-      await execFile("git", ["-C", directory, "add", "--all", "--", "."], { env, encoding: "utf8", maxBuffer: 1024 * 1024 });
-      const { stdout: treeSha } = await execFile("git", ["-C", directory, "write-tree"], { env, encoding: "utf8" });
-      const commit = commitSha.trim();
-      const tree = treeSha.trim();
-      if (!/^[a-f0-9]{40}$/.test(commit) || !/^[a-f0-9]{40}$/.test(tree)) throw new Error("invalid git object identity");
-      // Exit status 1: HEAD does not descend from the base (the agent rewrote history past it), which the owner is
-      // told in plain words. Any other failure (such as an unknown commit) leaves the candidate unreadable.
-      if (input.baseCommitSha !== undefined) {
-        await execFile("git", ["-C", directory, "merge-base", "--is-ancestor", input.baseCommitSha, commit], { env, encoding: "utf8" })
-          .catch((error: unknown) => {
-            if ((error as { code?: unknown }).code === 1) throw agentXError("CONFIG_INVALID", WORKFLOW_HISTORY_REWRITTEN_MESSAGE);
-            throw error;
-          });
-      }
+      const identity = await withIsolatedGit(directory, "write", async (git) => {
+        const commit = (await git.text(["rev-parse", "--verify", `${await git.headCommit()}^{commit}`], { index: "none" })).trim();
+        const tree = await snapshotTree(git, commit);
+        if (!/^[a-f0-9]{40}$/.test(commit) || !/^[a-f0-9]{40}$/.test(tree)) throw new Error("invalid git object identity");
+        // Exit status 1: HEAD does not descend from the base (the agent rewrote history past it), which the owner is
+        // told in plain words. Any other failure (such as an unknown commit) leaves the candidate unreadable.
+        if (input.baseCommitSha !== undefined) {
+          await git.text(["merge-base", "--is-ancestor", input.baseCommitSha, commit], { index: "none" })
+            .catch((error: unknown) => {
+              if ((error as { code?: unknown }).code === 1) throw agentXError("CONFIG_INVALID", WORKFLOW_HISTORY_REWRITTEN_MESSAGE);
+              throw error;
+            });
+        }
+        return { commit, tree };
+      });
       candidates.push({
-        repositoryId: input.repositoryId, commitSha: commit, treeSha: tree,
+        repositoryId: input.repositoryId, commitSha: identity.commit, treeSha: identity.tree,
         ...(input.baseCommitSha === undefined ? {} : { baseCommitSha: input.baseCommitSha }),
       });
     } catch (error) {
       // A refusal (such as a nested repository) says what the project must change; anything else is unreadable.
       if (error instanceof AgentXError) throw error;
       throw new Error(`candidate repository ${input.repositoryId} is not a readable Git worktree`, { cause: error });
-    } finally {
-      await rm(temporary, { recursive: true, force: true });
     }
   }
   return candidates;
@@ -163,6 +154,10 @@ export async function readCandidateRepositories(
  * To preserve user staging, the existing index must be either the old HEAD tree or the full candidate
  * tree; divergent/partially staged content is rejected before mutation. The commit is parented to the
  * current HEAD so prior model commits remain in history. This is local only: no checkout, push, or hooks.
+ *
+ * No Git process runs in the candidate repository (see isolated-git.ts). Git builds the tree and the commit in a throwaway repository whose object directory is
+ * the candidate's, so both objects land where the candidate repository reads them, and the only writes to the candidate's own files are HEAD (a lock file
+ * renamed over it, as Git does it) and the real index, which this function already replaced by the same lock-and-rename.
  */
 export async function commitCandidateWorktree(
   inputs: readonly CandidateRepositoryInput[],
@@ -174,137 +169,118 @@ export async function commitCandidateWorktree(
   for (const input of [...inputs].sort((left, right) => left.repositoryId.localeCompare(right.repositoryId))) {
     if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,199}$/.test(input.repositoryId)
       || (input.baseCommitSha !== undefined && !/^[a-f0-9]{40}$/.test(input.baseCommitSha))) throw new Error("candidate repository identities are invalid");
-    const directory = resolve(input.directory);
-    const temporary = await mkdtemp(join(tmpdir(), "agentx-commit-index-"));
-    const indexPath = join(temporary, "index");
     try {
-      const hardenedEnv = await gitHardenedEnvironment(directory);
-      const env = { ...hardenedEnv, GIT_INDEX_FILE: indexPath };
-      const run = async (args: readonly string[], commandEnv: NodeJS.ProcessEnv = env): Promise<string> =>
-        (await execFile("git", ["-C", directory, ...args], { env: commandEnv, encoding: "utf8", maxBuffer: 1024 * 1024 })).stdout.trim();
-      const indexPathFromGit = await run(["rev-parse", "--git-path", "index"], hardenedEnv);
-      const realIndex = resolve(directory, indexPathFromGit);
-      const lockPath = `${realIndex}.lock`;
-      const oldHead = await run(["rev-parse", "--verify", "HEAD^{commit}"]);
-      if (!/^[a-f0-9]{40}$/.test(oldHead)) throw new Error("candidate HEAD is invalid");
-      if (input.baseCommitSha !== undefined) {
-        await run(["merge-base", "--is-ancestor", input.baseCommitSha, oldHead]).catch((error: unknown) => {
-          if ((error as { code?: unknown }).code === 1) throw agentXError("CONFIG_INVALID", WORKFLOW_HISTORY_REWRITTEN_MESSAGE);
-          throw error;
-        });
-      }
-      await run(["read-tree", oldHead]);
-      await assertNoEmbeddedRepositories(directory, env);
-      await assertNoLfsFiles(directory, env);
-      await run(["add", "--all", "--", "."]);
-      const tree = await run(["write-tree"]);
-      if (!/^[a-f0-9]{40}$/.test(tree)) throw new Error("candidate tree is invalid");
-      const oldTree = await run(["rev-parse", `${oldHead}^{tree}`]);
-      const unmerged = await run(["ls-files", "--unmerged", "-z"], hardenedEnv);
-      if (unmerged !== "") throw agentXError("CONFIG_INVALID", "the repository index has unresolved entries; resolve them before the implementation can be saved");
-      const indexBefore = await readFile(realIndex).catch((error: unknown) => {
-        if ((error as { code?: unknown }).code === "ENOENT") return undefined;
-        throw error;
-      });
-      const indexMatches = async (revision: string): Promise<boolean> => {
-        try {
-          await run(["diff", "--cached", "--quiet", revision], hardenedEnv);
-          return true;
-        } catch (error) {
-          if ((error as { code?: unknown }).code === 1) return false;
-          throw error;
-        }
-      };
-      if (!(await indexMatches(oldHead)) && !(await indexMatches(tree))) {
-        throw agentXError("CONFIG_INVALID", "the staged files differ from the implementation snapshot; preserve or resolve those staged changes before continuing");
-      }
-      if (tree === oldTree) {
-        committed.push({ repositoryId: input.repositoryId, commitSha: oldHead, treeSha: oldTree,
-          ...(input.baseCommitSha === undefined ? {} : { baseCommitSha: input.baseCommitSha }) });
-        continue;
-      }
-      const commit = await run([
-        "-c", "user.name=AgentX", "-c", "user.email=agentx@localhost",
-        "commit-tree", tree, "-p", oldHead, "-m", "AgentX IMPLEMENT candidate snapshot",
-      ]);
-      if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("candidate commit is invalid");
-
-      const candidateIndex = await readFile(indexPath);
-      let lockCreated = false;
-      let refAdvanced = false;
-      let lockHandle: Awaited<ReturnType<typeof open>> | undefined;
-      try {
-        // Git's normal index.lock protocol prevents a concurrent index writer from being overwritten.
-        lockHandle = await open(lockPath, "wx", 0o600);
-        lockCreated = true;
-        await lockHandle.writeFile(candidateIndex);
-        await lockHandle.sync();
-        await lockHandle.close();
-        lockHandle = undefined;
-
-        // Refuse a changed worktree or real index before advancing the worker-owned HEAD.
-        const currentHead = await run(["rev-parse", "--verify", "HEAD^{commit}"]);
-        const currentIndex = await readFile(realIndex).catch((error: unknown) => {
-          if ((error as { code?: unknown }).code === "ENOENT") return undefined;
-          throw error;
-        });
-        if (currentHead !== oldHead || !sameOptionalBytes(indexBefore, currentIndex)) {
-          throw agentXError("OPERATION_INTERRUPTED", "the repository changed while AgentX was saving the implementation candidate");
-        }
-        await assertNoEmbeddedRepositories(directory, env);
-        await assertNoLfsFiles(directory, env);
-        await run(["read-tree", oldHead]);
-        await run(["add", "--all", "--", "."]);
-        if (await run(["write-tree"]) !== tree) {
-          throw agentXError("OPERATION_INTERRUPTED", "the repository files changed while AgentX was saving the implementation candidate");
-        }
-        await run(["update-ref", "HEAD", commit, oldHead], hardenedEnv);
-        refAdvanced = true;
-        await rename(lockPath, realIndex);
-        lockCreated = false;
-
-        const newHead = await run(["rev-parse", "--verify", "HEAD^{commit}"]);
-        const newTree = await run(["rev-parse", "--verify", "HEAD^{tree}"]);
-        const indexAfter = await readFile(realIndex).catch((error: unknown) => {
-          if ((error as { code?: unknown }).code === "ENOENT") return undefined;
-          throw error;
-        });
-        if (!sameOptionalBytes(candidateIndex, indexAfter)) {
-          throw agentXError("OPERATION_INTERRUPTED", "the repository index changed while AgentX was saving the implementation candidate");
-        }
-        const afterEnv = { ...(await gitHardenedEnvironment(directory)), GIT_INDEX_FILE: indexPath };
-        await run(["read-tree", newHead], afterEnv);
-        await assertNoEmbeddedRepositories(directory, afterEnv);
-        await assertNoLfsFiles(directory, afterEnv);
-        await run(["add", "--all", "--", "."], afterEnv);
-        const worktreeTreeAfter = await run(["write-tree"], afterEnv);
-        if (newHead !== commit || newTree !== tree) {
-          throw agentXError("OPERATION_INTERRUPTED", "the repository reference changed while AgentX was verifying its implementation snapshot");
-        }
-        if (!sameOptionalBytes(candidateIndex, indexAfter)) {
-          throw agentXError("OPERATION_INTERRUPTED", "the repository index changed while AgentX was verifying its implementation snapshot");
-        }
-        if (worktreeTreeAfter !== tree) {
-          throw agentXError("OPERATION_INTERRUPTED", "the repository changed while AgentX was verifying its implementation snapshot");
-        }
-        committed.push({ repositoryId: input.repositoryId, commitSha: newHead, treeSha: newTree,
-          ...(input.baseCommitSha === undefined ? {} : { baseCommitSha: input.baseCommitSha }) });
-      } catch (error) {
-        await lockHandle?.close().catch(() => undefined);
-        if (lockCreated) await unlink(lockPath).catch(() => undefined);
-        if (refAdvanced && error instanceof Error && !(error instanceof AgentXError)) {
-          throw agentXError("OPERATION_INTERRUPTED", "the candidate commit was saved but its index could not be synchronized; the workspace must be checked before retrying");
-        }
-        throw error;
-      }
+      committed.push(await withIsolatedGit(resolve(input.directory), "write", (git) => commitRepository(git, input)));
     } catch (error) {
       if (error instanceof AgentXError) throw error;
       throw new Error(`candidate repository ${input.repositoryId} could not be safely committed`, { cause: error });
-    } finally {
-      await rm(temporary, { recursive: true, force: true });
     }
   }
   return committed;
+}
+
+async function commitRepository(git: IsolatedGit, input: CandidateRepositoryInput): Promise<CandidateRepositoryIdentity> {
+  const identityOf = (commitSha: string, treeSha: string): CandidateRepositoryIdentity => ({ repositoryId: input.repositoryId, commitSha, treeSha,
+    ...(input.baseCommitSha === undefined ? {} : { baseCommitSha: input.baseCommitSha }) });
+  const realIndex = join(git.layout.gitDirectory, "index");
+  const lockPath = `${realIndex}.lock`;
+  const run = async (args: readonly string[], index: "temporary" | "real" | "none" = "temporary"): Promise<string> =>
+    (await git.text(args, { index, maxBuffer: 1024 * 1024 })).trim();
+  const commitOf = async (): Promise<string> => run(["rev-parse", "--verify", `${await git.headCommit()}^{commit}`], "none");
+  const oldHead = await commitOf();
+  if (!/^[a-f0-9]{40}$/.test(oldHead)) throw new Error("candidate HEAD is invalid");
+  if (input.baseCommitSha !== undefined) {
+    await run(["merge-base", "--is-ancestor", input.baseCommitSha, oldHead], "none").catch((error: unknown) => {
+      if ((error as { code?: unknown }).code === 1) throw agentXError("CONFIG_INVALID", WORKFLOW_HISTORY_REWRITTEN_MESSAGE);
+      throw error;
+    });
+  }
+  const tree = await snapshotTree(git, oldHead);
+  if (!/^[a-f0-9]{40}$/.test(tree)) throw new Error("candidate tree is invalid");
+  const oldTree = await run(["rev-parse", `${oldHead}^{tree}`], "none");
+  const unmerged = await run(["ls-files", "--unmerged", "-z"], "real");
+  if (unmerged !== "") throw agentXError("CONFIG_INVALID", "the repository index has unresolved entries; resolve them before the implementation can be saved");
+  const indexBefore = await readFile(realIndex).catch((error: unknown) => {
+    if ((error as { code?: unknown }).code === "ENOENT") return undefined;
+    throw error;
+  });
+  const indexMatches = async (revision: string): Promise<boolean> => {
+    try {
+      await run(["diff", "--cached", "--quiet", revision], "real");
+      return true;
+    } catch (error) {
+      if ((error as { code?: unknown }).code === 1) return false;
+      throw error;
+    }
+  };
+  if (!(await indexMatches(oldHead)) && !(await indexMatches(tree))) {
+    throw agentXError("CONFIG_INVALID", "the staged files differ from the implementation snapshot; preserve or resolve those staged changes before continuing");
+  }
+  if (tree === oldTree) return identityOf(oldHead, oldTree);
+  const commit = await run([
+    "-c", "user.name=AgentX", "-c", "user.email=agentx@localhost",
+    "commit-tree", tree, "-p", oldHead, "-m", "AgentX IMPLEMENT candidate snapshot",
+  ], "none");
+  if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("candidate commit is invalid");
+
+  const candidateIndex = await readFile(git.temporaryIndex);
+  let lockCreated = false;
+  let refAdvanced = false;
+  let lockHandle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    // Git's normal index.lock protocol prevents a concurrent index writer from being overwritten.
+    lockHandle = await open(lockPath, "wx", 0o600);
+    lockCreated = true;
+    await lockHandle.writeFile(candidateIndex);
+    await lockHandle.sync();
+    await lockHandle.close();
+    lockHandle = undefined;
+
+    // Refuse a changed worktree or real index before advancing the worker-owned HEAD.
+    const currentHead = await git.headCommit();
+    const currentIndex = await readFile(realIndex).catch((error: unknown) => {
+      if ((error as { code?: unknown }).code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (currentHead !== oldHead || !sameOptionalBytes(indexBefore, currentIndex)) {
+      throw agentXError("OPERATION_INTERRUPTED", "the repository changed while AgentX was saving the implementation candidate");
+    }
+    if (await snapshotTree(git, oldHead) !== tree) {
+      throw agentXError("OPERATION_INTERRUPTED", "the repository files changed while AgentX was saving the implementation candidate");
+    }
+    await git.advanceHead(oldHead, commit);
+    refAdvanced = true;
+    await rename(lockPath, realIndex);
+    lockCreated = false;
+
+    const newHead = await commitOf();
+    const newTree = await run(["rev-parse", "--verify", `${newHead}^{tree}`], "none");
+    const indexAfter = await readFile(realIndex).catch((error: unknown) => {
+      if ((error as { code?: unknown }).code === "ENOENT") return undefined;
+      throw error;
+    });
+    if (!sameOptionalBytes(candidateIndex, indexAfter)) {
+      throw agentXError("OPERATION_INTERRUPTED", "the repository index changed while AgentX was saving the implementation candidate");
+    }
+    const worktreeTreeAfter = await snapshotTree(git, newHead);
+    if (newHead !== commit || newTree !== tree) {
+      throw agentXError("OPERATION_INTERRUPTED", "the repository reference changed while AgentX was verifying its implementation snapshot");
+    }
+    if (!sameOptionalBytes(candidateIndex, indexAfter)) {
+      throw agentXError("OPERATION_INTERRUPTED", "the repository index changed while AgentX was verifying its implementation snapshot");
+    }
+    if (worktreeTreeAfter !== tree) {
+      throw agentXError("OPERATION_INTERRUPTED", "the repository changed while AgentX was verifying its implementation snapshot");
+    }
+    return identityOf(newHead, newTree);
+  } catch (error) {
+    await lockHandle?.close().catch(() => undefined);
+    if (lockCreated) await unlink(lockPath).catch(() => undefined);
+    if (refAdvanced && error instanceof Error && !(error instanceof AgentXError)) {
+      throw agentXError("OPERATION_INTERRUPTED", "the candidate commit was saved but its index could not be synchronized; the workspace must be checked before retrying");
+    }
+    throw error;
+  }
 }
 
 function sameOptionalBytes(left: Buffer | undefined, right: Buffer | undefined): boolean {
@@ -325,10 +301,9 @@ export async function candidateUnchangedSinceBase(
     const input = inputs.find((entry) => entry.repositoryId === candidate.repositoryId);
     if (candidate.baseCommitSha === undefined) return false;
     if (input === undefined) continue;
-    const directory = resolve(input.directory);
-    const env = await gitHardenedEnvironment(directory);
-    const { stdout } = await execFile("git", ["-C", directory, "rev-parse", "--verify", `${candidate.baseCommitSha}^{tree}`], { env, encoding: "utf8" });
-    if (stdout.trim() !== candidate.treeSha) return false;
+    const baseCommitSha = candidate.baseCommitSha;
+    const baseTree = await withIsolatedGit(resolve(input.directory), "read", async (git) => (await git.text(["rev-parse", "--verify", `${baseCommitSha}^{tree}`], { index: "none" })).trim());
+    if (baseTree !== candidate.treeSha) return false;
     compared += 1;
   }
   return compared > 0;
