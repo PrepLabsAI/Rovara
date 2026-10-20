@@ -65,6 +65,17 @@ function runProcess(executable: string, args: readonly string[], options: { cwd:
 const processRecord = (result: ProcessResult) => ({ status: result.status, signal: result.signal, startedAt: result.startedAt, finishedAt: result.finishedAt,
   timedOut: result.timedOut, aborted: result.aborted, outputExceeded: result.outputExceeded, stdoutSha256: sha(result.stdout), stderrSha256: sha(result.stderr),
   stdoutBytes: result.stdout.byteLength, stderrBytes: result.stderr.byteLength });
+/** How much of the CLI's stderr the executor's own log keeps when a shard's report cannot be read (the full stderr is also in the shard's run.stderr.txt, redacted). */
+const UNREADABLE_STDERR_HEAD_BYTES = 4 * 1024;
+/** The executor.log line for a shard whose report is unreadable: the parse reason and a bounded head of what the CLI wrote to stderr, cut on a character boundary. */
+export function reportUnreadableNote(shardId: string, reason: string, stderr: Uint8Array): string {
+  let end = Math.min(stderr.byteLength, UNREADABLE_STDERR_HEAD_BYTES);
+  // Back off a partial multi-byte sequence at the cut so no replacement character appears.
+  if (end < stderr.byteLength) while (end > 0 && (stderr[end]! & 0xc0) === 0x80) end -= 1;
+  const head = Buffer.from(stderr.subarray(0, end)).toString("utf8").trim();
+  const shown = head === "" ? "stderr was empty" : `stderr head (${end} of ${stderr.byteLength} bytes of stderr): ${head}`;
+  return `shard ${shardId}: report unreadable (${reason}); ${shown}`;
+}
 const cleanCompletion = (result: ProcessResult) => !result.signal && !result.timedOut && !result.aborted && !result.outputExceeded;
 
 function packageRootDir(): string { return fileURLToPath(new URL("../../../../", import.meta.url)); }
@@ -180,7 +191,10 @@ async function runShard(input: { resolved: ResolvedExecutorSuite; launch: E2EApp
     return { ...base, list: processRecord(list), run: record, upstreamRunId, reportBytes: null, failed: false, completed: false, reason: run.timedOut ? "deadline-exceeded" : run.aborted ? "cancelled" : "cli-run-interrupted" };
   }
   const parsed = parseE2EApplicationReport(run.stdout);
-  if (parsed.kind !== "parsed") return { ...base, list: processRecord(list), run: record, upstreamRunId, reportBytes: null, failed: false, completed: false, reason: "report-unreadable" };
+  if (parsed.kind !== "parsed") {
+    await input.log(reportUnreadableNote(shard.shardId, parsed.reason, run.stderr));
+    return { ...base, list: processRecord(list), run: record, upstreamRunId, reportBytes: null, failed: false, completed: false, reason: "report-unreadable" };
+  }
   const summary = parsed.report.run.summary;
   const statuses = parsed.report.run.results.map((result) => result.status);
   // A timed-out or interrupted case leaves no verdict, so the run is unavailable rather than failed.

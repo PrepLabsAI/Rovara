@@ -48,6 +48,26 @@ export function utf8Tail(text: string, maxBytes: number): string {
   return bytes.subarray(start).toString("utf8");
 }
 const tail = (text: string) => utf8Tail(text, DIAGNOSTIC_TAIL_BYTES);
+/** How much of each shard's raw report, and of how many shards, a group that never reached a qualification keeps (the head, base64). The executor already redacted it. */
+const SHARD_REPORT_DIAGNOSTIC_BYTES = 64 * 1024;
+const SHARD_REPORT_DIAGNOSTIC_SHARDS = 8;
+
+/**
+ * What a run that was read back but not qualified (the collector threw, or answered unavailable) keeps of each shard's raw report, so the reason it was refused can be
+ * read from the evidence instead of reproduced. Bounded per shard and in the number of shards; a shape that is not a run's readback keeps nothing.
+ */
+export function shardReportDiagnostics(actualRun: unknown): Array<{ shardId: string; byteLength: number; truncated: boolean; rawReportBase64: string }> {
+  const shards = typeof actualRun === "object" && actualRun !== null ? (actualRun as { shards?: unknown }).shards : undefined;
+  if (!Array.isArray(shards)) return [];
+  const kept: Array<{ shardId: string; byteLength: number; truncated: boolean; rawReportBase64: string }> = [];
+  for (const shard of shards.slice(0, SHARD_REPORT_DIAGNOSTIC_SHARDS) as unknown[]) {
+    const { shardId, rawReportBytes } = (shard ?? {}) as { shardId?: unknown; rawReportBytes?: unknown };
+    if (typeof shardId !== "string" || !(rawReportBytes instanceof Uint8Array)) continue;
+    const head = rawReportBytes.subarray(0, SHARD_REPORT_DIAGNOSTIC_BYTES);
+    kept.push({ shardId, byteLength: rawReportBytes.byteLength, truncated: rawReportBytes.byteLength > head.byteLength, rawReportBase64: Buffer.from(head).toString("base64") });
+  }
+  return kept;
+}
 
 /** The lifecycle input for one group, derived from what the admission already approved and nothing else. */
 function applicationRunInput(compiled: E2ECompiledApplicationSuite, binding: E2ERunBinding): E2ERunInput {
@@ -162,7 +182,8 @@ export async function executeWorkflowE2EApplicationChecks(input: {
       const unavailableReason = qualification === null ? reason ?? "application collection unavailable" : qualification.status === "UNKNOWN" ? qualification.reason : null;
       const diagnostics = qualification !== null ? null : (() => {
         const logs = host.readDiagnostics(binding.runId);
-        return { appLogTail: tail(logs.appLogTail), buildLogTail: tail(logs.buildLogTail), executorLogTail: tail(logs.executorLogTail) };
+        const shardReports = run.actualRun === null ? [] : shardReportDiagnostics(run.actualRun);
+        return { appLogTail: tail(logs.appLogTail), buildLogTail: tail(logs.buildLogTail), executorLogTail: tail(logs.executorLogTail), ...(shardReports.length === 0 ? {} : { shardReports }) };
       })();
       const groupRun: Record<string, unknown> = { kind: "application", group: validated.executionPlan.groups.find((item) => item.groupId === compiled.group.groupId), binding,
         collection: qualification ?? { status: "UNKNOWN", reason: unavailableReason }, unavailableReason,

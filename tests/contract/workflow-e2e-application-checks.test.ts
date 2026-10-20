@@ -23,7 +23,7 @@ const sha = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("he
 const assembledRun = { protocol: "e2e-actual-application-run/v1", cleanupConfirmed: true, cleanupServerListening: false, supervisorReadback: { marker: "assembled" } };
 const collectionInputs = { marker: "collection-inputs" };
 
-async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: FakeDockerCli } = {}) {
+async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: FakeDockerCli; assembled?: object } = {}) {
   const fake = options.fake ?? new FakeDockerCli();
   const fixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", taskId: TASK_ID, ...(options.deadlineMs === undefined ? {} : { deadlineMs: options.deadlineMs }) });
   const admission: E2EApplicationExecutionAdmission = fixture.plan.admission;
@@ -65,7 +65,7 @@ async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: Fa
   const hosts: DockerApplicationHost[] = [];
   const createHost = vi.fn((input: Parameters<WorkflowE2EApplicationRuntime["createHost"]>[0]) => {
     const host = createDockerApplicationHost({ ...input, docker: fake, executorImage: "rovara-executor:test", buildImage: "node:build-test", runRoot, now: () => Date.now(),
-      appPollMs: 10, deadlineGraceMs: 60, assemble: (() => assembledRun) as never, assembleCollectionInputs: (() => collectionInputs) as never });
+      appPollMs: 10, deadlineGraceMs: 60, assemble: (() => options.assembled ?? assembledRun) as never, assembleCollectionInputs: (() => collectionInputs) as never });
     const spied: DockerApplicationHost = { ...host, allocate: async (runInput, signal) => {
       calls.push("allocate");
       const lease = await host.allocate(runInput, signal);
@@ -216,6 +216,44 @@ describe("workflow E2E application rounds", () => {
     s.collect.mockReturnValueOnce({ collection: null, oracle: null, qualification: null, unavailableReason: "report digest does not match" });
     await s.run();
     expect(evidenceOf(s.saved, s.runId).groupRun).toMatchObject({ actual: null, collection: { status: "UNKNOWN", reason: "report digest does not match" } });
+  });
+
+  describe("evidence when a group ends without a qualification", () => {
+    const shardRun = (shardId: string, report: Buffer) => ({ shardId, launchId: randomUUID(), rawReportBytes: new Uint8Array(report), runStderrBytes: new Uint8Array(Buffer.from("stderr")) });
+    const diagnosticsOf = (s: Awaited<ReturnType<typeof setup>>) => evidenceOf(s.saved, s.runId).groupRun.diagnostics as { shardReports?: Array<{ shardId: string; byteLength: number; truncated: boolean; rawReportBase64: string }> };
+
+    it("keeps each shard's raw report, base64 and bounded, when the collector throws", async () => {
+      const first = Buffer.from(JSON.stringify({ run: { status: "passed" } }));
+      const second = Buffer.alloc(300_000, "r");
+      const s = await setup({ assembled: { ...assembledRun, shards: [shardRun("shard-a", first), shardRun("shard-b", second)] } });
+      s.fake.onExecutor = s.okOutput;
+      s.collect.mockImplementationOnce(() => { throw new Error("report digest does not match"); });
+      await s.run();
+      expect(evidenceOf(s.saved, s.runId).groupRun).toMatchObject({ actual: null, collection: { status: "UNKNOWN", reason: "report digest does not match" } });
+      const reports = diagnosticsOf(s).shardReports!;
+      expect(reports.map((report) => report.shardId)).toEqual(["shard-a", "shard-b"]);
+      expect(Buffer.from(reports[0]!.rawReportBase64, "base64").equals(first)).toBe(true);
+      expect(reports[0]).toMatchObject({ byteLength: first.byteLength, truncated: false });
+      // The report is kept as far as a bound, never whole: the head of the bytes, with its true length and that it was cut.
+      expect(reports[1]).toMatchObject({ byteLength: second.byteLength, truncated: true });
+      const kept = Buffer.from(reports[1]!.rawReportBase64, "base64");
+      expect(kept.byteLength).toBeLessThanOrEqual(64 * 1024);
+      expect(kept.byteLength).toBeGreaterThan(0);
+      expect(kept.equals(second.subarray(0, kept.byteLength))).toBe(true);
+    });
+
+    it("keeps them too when the collector answers unavailable, and keeps nothing for a group that was qualified", async () => {
+      const report = Buffer.from("raw-report");
+      const unavailable = await setup({ assembled: { ...assembledRun, shards: [shardRun("shard-a", report)] } });
+      unavailable.fake.onExecutor = unavailable.okOutput;
+      unavailable.collect.mockReturnValueOnce({ collection: null, oracle: null, qualification: null, unavailableReason: "report digest does not match" });
+      await unavailable.run();
+      expect(diagnosticsOf(unavailable).shardReports).toHaveLength(1);
+      const qualified = await setup({ assembled: { ...assembledRun, shards: [shardRun("shard-a", report)] } });
+      qualified.fake.onExecutor = qualified.okOutput;
+      await qualified.run();
+      expect(evidenceOf(qualified.saved, qualified.runId).groupRun.diagnostics).toBeNull();
+    });
   });
 
   it("never constructs the docker host for a portable admission", async () => {

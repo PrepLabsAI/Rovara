@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { E2E_EXECUTOR_HOST_DESCRIPTOR, E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_ENTRY_SOURCE, E2E_EXECUTOR_HOST_MODULE_PATH, E2E_EXECUTOR_HOST_PROFILE_ID, verifyExecutorHostRegistration } from "../../packages/verifier/src/executor/host-registry.js";
 import { spawn } from "node:child_process";
 import { startAppForwarder } from "../../packages/verifier/src/executor/app-forward.js";
-import { listOutputFiles, runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
+import { listOutputFiles, reportUnreadableNote, runE2EExecutor } from "../../packages/verifier/src/executor/run.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 import { fakeChromium } from "../support/fake-chromium.js";
 import { createServer } from "node:http";
@@ -94,6 +94,29 @@ describe("runE2EExecutor unavailable outcomes", () => {
     const everything = await allText(out);
     expect(everything).not.toContain(fixture.account.password);
     expect(everything).not.toContain(fixture.account.email);
+  });
+});
+
+describe("report-unreadable log note", () => {
+  it("names the shard and the parse reason and carries a bounded head of the CLI's stderr, so the log says what the CLI said", () => {
+    const note = reportUnreadableNote("shard-1", "application report is not bounded UTF-8 JSON", Buffer.from("Error: net::ERR_ABORTED\n    at click"));
+    expect(note).toContain("shard shard-1");
+    expect(note).toContain("application report is not bounded UTF-8 JSON");
+    expect(note).toContain("Error: net::ERR_ABORTED");
+    const long = reportUnreadableNote("shard-1", "r", Buffer.from(`HEAD${"x".repeat(100_000)}TAIL`));
+    expect(long).toContain("HEAD");
+    expect(long).not.toContain("TAIL");
+    expect(Buffer.byteLength(long)).toBeLessThan(8 * 1024);
+    expect(long).toContain("100008 bytes of stderr");
+  });
+
+  it("says so when the CLI wrote nothing to stderr", () => {
+    expect(reportUnreadableNote("shard-1", "r", Buffer.alloc(0))).toContain("stderr was empty");
+  });
+
+  it("never cuts a multi-byte character in half", () => {
+    const note = reportUnreadableNote("shard-1", "r", Buffer.from("é".repeat(4000)));
+    expect(note).not.toContain("\uFFFD");
   });
 });
 
