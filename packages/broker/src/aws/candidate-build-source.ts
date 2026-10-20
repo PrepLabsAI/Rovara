@@ -22,9 +22,13 @@ export const StoredCandidateBuildSourceSchema = z.discriminatedUnion("status", [
 ]);
 export type StoredCandidateBuildSource = z.infer<typeof StoredCandidateBuildSourceSchema>;
 
-/** The reference an application admission carries for a READY build source: the manifest's own location as the artifact id, the archive's identity as the content. */
-export function candidateBuildSourceReference(stored: Extract<StoredCandidateBuildSource, { status: "READY" }>): E2EApplicationBuildSourceRef {
-  return { artifactId: stored.manifestRef.key, sha256: stored.archiveSha256, byteLength: stored.archiveByteLength, manifestDigest: stored.manifestDigest };
+/**
+ * The reference an application admission carries for a READY build source. The archive itself is deliberately not stored (the worker re-stages the source
+ * from its own repository), so `artifactId` is an explicit "unstored archive" name that no reader can resolve to bytes, never the manifest's key; the
+ * archive's sha256 and size and the manifest's digest are the identities that matter. Where the manifest is stored is `manifestRef`.
+ */
+export function candidateBuildSourceAdmissionReference(stored: Extract<StoredCandidateBuildSource, { status: "READY" }>): E2EApplicationBuildSourceRef {
+  return { artifactId: `unstored-archive-sha256-${stored.archiveSha256}`, sha256: stored.archiveSha256, byteLength: stored.archiveByteLength, manifestDigest: stored.manifestDigest };
 }
 
 /** The upload requests that carry a build source manifest, after the candidate source export, on the candidate-build-source callback. */

@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { canonicalJson } from "../../packages/contracts/src/index.js";
 import { issueCapability } from "../../packages/broker/src/aws/cancellation.js";
-import { candidateBuildSourceReference, StoredCandidateBuildSourceSchema } from "../../packages/broker/src/aws/candidate-build-source.js";
+import { candidateBuildSourceAdmissionReference, StoredCandidateBuildSourceSchema } from "../../packages/broker/src/aws/candidate-build-source.js";
 import { validateE2EApplicationBuildSourceManifest } from "../../packages/verifier/src/application-build-source.js";
 import { createWorkerCallbackSinks } from "../../packages/worker/src/callback-client.js";
 import { exportCandidateBuildSource, type CandidateBuildSourceExport } from "../../packages/worker/src/e2e-build-source-export.js";
@@ -76,7 +76,7 @@ function harness() {
   const sinks = createWorkerCallbackSinks({ controlPlaneUrl: CONTROL_PLANE, invocation, fetchImplementation });
   const operation = () => broker.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`) as Record<string, unknown>;
   const exportRecord = () => broker.db.get(`WORKSPACE#${workspaceId}`, `CANDIDATE_EXPORT#${operationId}`) as Record<string, unknown> | undefined;
-  return { ...broker, objects, s3, send, sinks, operationId, operation, exportRecord, requests, putOperation };
+  return { ...broker, objects, s3, send, sinks, capability, operationId, operation, exportRecord, requests, putOperation };
 }
 
 /** Streams a manifest to the broker by hand, as a worker would, but for any bytes at all. */
@@ -118,8 +118,11 @@ describe("the broker validates and stores the exported build source manifest", (
     expect(h.objects.get(stored.status === "READY" ? stored.manifestRef.key : "")?.equals(manifestBytes)).toBe(true);
     // The reference an admission carries validates against the broker's own stored export.
     if (stored.status !== "READY") throw new Error("expected READY");
-    const reference = candidateBuildSourceReference(stored);
-    expect(reference).toEqual({ artifactId: stored.manifestRef.key, sha256: manifest.archive.sha256, byteLength: manifest.archive.byteLength, manifestDigest: manifest.manifestDigest });
+    const reference = candidateBuildSourceAdmissionReference(stored);
+    // The archive is not stored, so its reference must not look like a location that holds bytes, and must never be the manifest's own key.
+    expect(reference).toEqual({ artifactId: `unstored-archive-sha256-${manifest.archive.sha256}`, sha256: manifest.archive.sha256, byteLength: manifest.archive.byteLength, manifestDigest: manifest.manifestDigest });
+    expect(reference.artifactId).not.toBe(stored.manifestRef.key);
+    expect(reference.sha256).not.toBe(stored.manifestRef.sha256);
     const snapshot = { candidate: repo.source.candidate, commitSha: repo.identity.commitSha, treeSha: repo.identity.treeSha, treeComplete: true as const, treePaths: repo.source.repositories[0]!.treePaths,
       sources: repo.source.repositories[0]!.sources.map((source) => ({ path: source.path, sha256: source.sha256, kind: "blob" as const, bytes: Buffer.from(source.bytesBase64, "base64") })) };
     expect(validateE2EApplicationBuildSourceManifest({ manifest, reference, expectedCandidate: repo.source.candidate, inspectionSnapshot: snapshot }).manifestDigest).toBe(manifest.manifestDigest);
@@ -282,5 +285,146 @@ describe("the worker never lets the build source decide the portable export", ()
       "status", "totalBytes", "uploadId", "workspaceId"]);
     expect(canonicalJson(h.operation().candidateSourceRef)).toBe(canonicalJson({ key: `workflow-candidate-sources/sha256/${sha256(exportBytes)}.json`, sha256: sha256(exportBytes),
       byteLength: exportBytes.byteLength, candidateDigest: repo.source.candidate.digest }));
+  });
+});
+
+describe("fix round 1: observability, abandoned uploads and races", () => {
+  const unavailable = (reason: string) => ({ stage: "unavailable", schemaVersion: "workflow-candidate-build-source-unavailable/v1", reason });
+  const initBody = (bytes: Buffer) => ({ stage: "init", schemaVersion: "workflow-candidate-build-source-upload/v1", totalBytes: bytes.byteLength, chunkCount: Math.ceil(bytes.byteLength / 65536), sha256: sha256(bytes) });
+  const chunkBody = (uploadId: string, index: number, bytes: Buffer) => ({ stage: "chunk", schemaVersion: "workflow-candidate-build-source-chunk/v1", uploadId, index, bytesBase64: bytes.toString("base64"), sha256: sha256(bytes) });
+  const finalizeBody = (uploadId: string, bytes: Buffer) => ({ stage: "finalize", schemaVersion: "workflow-candidate-build-source-finalize/v1", uploadId, sha256: sha256(bytes) });
+  /** A manifest padded with whitespace to span several chunks: still the exact manifest to the schema. */
+  const spanning = (manifest: object, chunks: number) => { const text = JSON.stringify(manifest); return Buffer.from(text + " ".repeat(Math.max(0, chunks * 65536 - 100 - text.length)) + "\n", "utf8"); };
+  const stagingKeys = (h: ReturnType<typeof harness>) => [...h.objects.keys()].filter((key) => key.includes("staging"));
+
+  it("says why the build source was not delivered, with the error code, and still finishes the terminal result", async () => {
+    const repo = await candidateRepository({ "package.json": "{}" });
+    const log = vi.fn();
+    const terminal = vi.fn(async () => undefined);
+    const failure = Object.assign(new Error("RUNTIME_UNAVAILABLE: worker callback candidate-build-source failed with HTTP 404"), { code: "RUNTIME_UNAVAILABLE" });
+    await postWorkerTerminalResult({ candidateSourceExportSink: async () => undefined, candidateBuildSourceSink: async () => { throw failure; }, terminalSink: terminal },
+      { operationId: "op-1", status: "SUCCEEDED", result: { conversationId: "c", workflowCandidateSourceExport: repo.source, workflowCandidateBuildSource: repo.buildSource } } as never,
+      { kind: "task", payload: { workflowMode: "IMPLEMENT" } } as never, log);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledWith({ component: "worker", level: "warn", event: "candidate-build-source.delivery_failed", operationId: "op-1", errorCode: "RUNTIME_UNAVAILABLE",
+      errorMessage: "RUNTIME_UNAVAILABLE: worker callback candidate-build-source failed with HTTP 404" });
+    expect(terminal).toHaveBeenCalledTimes(1);
+    // A failure without a code is still told apart from "no build source sent", and a delivered one says nothing.
+    const quiet = vi.fn();
+    await postWorkerTerminalResult({ candidateSourceExportSink: async () => undefined, candidateBuildSourceSink: async () => { throw new Error("socket hang up"); }, terminalSink: terminal },
+      { operationId: "op-2", status: "SUCCEEDED", result: { workflowCandidateSourceExport: repo.source, workflowCandidateBuildSource: repo.buildSource } } as never, { kind: "task", payload: { workflowMode: "IMPLEMENT" } } as never, quiet);
+    expect(quiet).toHaveBeenCalledWith(expect.objectContaining({ operationId: "op-2", errorCode: "UNKNOWN", errorMessage: "socket hang up" }));
+    const none = vi.fn();
+    await postWorkerTerminalResult({ candidateSourceExportSink: async () => undefined, candidateBuildSourceSink: async () => undefined, terminalSink: terminal },
+      { operationId: "op-3", status: "SUCCEEDED", result: { workflowCandidateSourceExport: repo.source, workflowCandidateBuildSource: repo.buildSource } } as never, { kind: "task", payload: { workflowMode: "IMPLEMENT" } } as never, none);
+    expect(none).not.toHaveBeenCalled();
+  });
+
+  it("closes an open upload and deletes its staged chunks when the worker then reports it has no manifest", async () => {
+    const repo = await candidateRepository({ "package.json": "{}" });
+    const h = harness();
+    await h.sinks.candidateSourceExportSink(repo.source);
+    const bytes = spanning(readyOf(repo.buildSource), 2);
+    const init = await h.send("candidate-build-source", initBody(bytes));
+    const uploadId = init.body.uploadId as string;
+    expect((await h.send("candidate-build-source", chunkBody(uploadId, 0, bytes.subarray(0, 65536)))).status).toBe(200);
+    expect(stagingKeys(h)).toHaveLength(1);
+    const answer = await h.send("candidate-build-source", unavailable("the worker gave up"));
+    expect(answer.body).toMatchObject({ accepted: false });
+    expect(h.db.get(`WORKSPACE#${workspaceId}`, `CANDIDATE_BUILD_SOURCE#${h.operationId}`)).toMatchObject({ status: "ABORTED" });
+    expect(stagingKeys(h)).toEqual([]);
+    expect(h.operation().candidateBuildSource).toMatchObject({ status: "REFUSED", reason: expect.stringContaining("the worker gave up") as string });
+    // The abandoned upload cannot be resumed: a late chunk or finalize is a 409, and the recorded refusal stands.
+    const recorded = structuredClone(h.operation().candidateBuildSource);
+    expect((await h.send("candidate-build-source", chunkBody(uploadId, 1, bytes.subarray(65536)))).status).toBe(409);
+    expect((await h.send("candidate-build-source", finalizeBody(uploadId, bytes))).status).toBe(409);
+    expect(h.operation().candidateBuildSource).toEqual(recorded);
+  });
+
+  it("answers two concurrent finalizes of one upload with one record and a duplicate, never an unmapped error", async () => {
+    const repo = await candidateRepository({ "package.json": "{}" });
+    const h = harness();
+    await h.sinks.candidateSourceExportSink(repo.source);
+    const bytes = Buffer.from(JSON.stringify(readyOf(repo.buildSource)), "utf8");
+    const init = await h.send("candidate-build-source", initBody(bytes));
+    const uploadId = init.body.uploadId as string;
+    await h.send("candidate-build-source", chunkBody(uploadId, 0, bytes.subarray(0, 65536)));
+    for (let index = 1; index * 65536 < bytes.byteLength; index += 1) await h.send("candidate-build-source", chunkBody(uploadId, index, bytes.subarray(index * 65536, (index + 1) * 65536)));
+    // Both finalizes read the open upload before either writes: the second one's transaction is cancelled by the first.
+    let writes = 0;
+    const original = h.db.send.bind(h.db) as (command: { constructor: { name: string } }) => Promise<unknown>;
+    let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+    (h.db as unknown as { send: unknown }).send = async (command: { constructor: { name: string } }) => {
+      if (command.constructor.name === "TransactWriteCommand") { writes += 1; if (writes === 1) await gate; else release(); }
+      return original(command);
+    };
+    const [first, second] = await Promise.all([h.send("candidate-build-source", finalizeBody(uploadId, bytes)), h.send("candidate-build-source", finalizeBody(uploadId, bytes))]);
+    expect([first.status, second.status]).toEqual([200, 200]);
+    expect([first.body, second.body].filter((body) => body.duplicate === true)).toHaveLength(1);
+    expect(h.operation().candidateBuildSource).toMatchObject({ status: "READY" });
+  });
+
+  it("answers a finalize that loses a race with an unavailable report as a 409, keeping what was recorded first", async () => {
+    const repo = await candidateRepository({ "package.json": "{}" });
+    const h = harness();
+    await h.sinks.candidateSourceExportSink(repo.source);
+    const bytes = Buffer.from(JSON.stringify(readyOf(repo.buildSource)), "utf8");
+    const uploadId = (await h.send("candidate-build-source", initBody(bytes))).body.uploadId as string;
+    for (let index = 0; index * 65536 < bytes.byteLength; index += 1) await h.send("candidate-build-source", chunkBody(uploadId, index, bytes.subarray(index * 65536, (index + 1) * 65536)));
+    const original = h.db.send.bind(h.db) as (command: { constructor: { name: string } }) => Promise<unknown>;
+    let raced = false;
+    (h.db as unknown as { send: unknown }).send = async (command: { constructor: { name: string } }) => {
+      if (command.constructor.name === "TransactWriteCommand" && !raced) {
+        raced = true;
+        h.db.set({ ...h.operation(), candidateBuildSource: { status: "REFUSED", reason: "the worker could not export a build source manifest: raced", candidateDigest: repo.source.candidate.digest } });
+      }
+      return original(command);
+    };
+    const answer = await h.send("candidate-build-source", finalizeBody(uploadId, bytes));
+    expect(answer.status).toBe(409);
+    expect(h.operation().candidateBuildSource).toMatchObject({ status: "REFUSED", reason: expect.stringContaining("raced") as string });
+  });
+
+  it("refuses a chunk replayed with different bytes, an out-of-order chunk, and another operation's capability", async () => {
+    const repo = await candidateRepository({ "package.json": "{}" });
+    const h = harness();
+    await h.sinks.candidateSourceExportSink(repo.source);
+    const bytes = spanning(readyOf(repo.buildSource), 3);
+    const uploadId = (await h.send("candidate-build-source", initBody(bytes))).body.uploadId as string;
+    const chunk = (index: number) => bytes.subarray(index * 65536, Math.min((index + 1) * 65536, bytes.byteLength));
+    // Out of order: chunk 1 before chunk 0.
+    expect((await h.send("candidate-build-source", chunkBody(uploadId, 1, chunk(1)))).status).toBe(400);
+    expect((await h.send("candidate-build-source", chunkBody(uploadId, 0, chunk(0)))).status).toBe(200);
+    // A replay of chunk 0 is accepted as a duplicate only with the same bytes.
+    expect((await h.send("candidate-build-source", chunkBody(uploadId, 0, chunk(0)))).body).toMatchObject({ duplicate: true });
+    const different = Buffer.from(chunk(0)); different[different.byteLength - 1] = different[different.byteLength - 1] === 0x20 ? 0x0a : 0x20;
+    expect((await h.send("candidate-build-source", chunkBody(uploadId, 0, different))).status).toBe(409);
+    // A chunk of the wrong size or digest is refused.
+    expect((await h.send("candidate-build-source", { ...chunkBody(uploadId, 1, chunk(1)), sha256: "0".repeat(64) })).status).toBe(400);
+    // The capability of this operation does not open another operation's route.
+    const other = randomUUID();
+    h.putOperation();
+    const crossed = await h.handler({ version: "2.0", rawPath: `/v1/internal/workspaces/${workspaceId}/operations/${other}/candidate-build-source`, rawQueryString: "",
+      headers: { "x-agentx-callback-capability": h.capability }, body: JSON.stringify(unavailable("crossed")), requestContext: { requestId: randomUUID(), http: { method: "POST" } } });
+    expect(crossed.statusCode).toBe(409);
+    expect((JSON.parse(crossed.body) as { error: { code: string } }).error.code).toBe("CALLBACK_FORBIDDEN");
+    expect(h.operation().candidateBuildSource).toBeUndefined();
+  });
+
+  it("compares an already stored manifest object by its bytes, not by a lossy text decode", async () => {
+    const repo = await candidateRepository({ "package.json": "{}", "\uFFFD.txt": "x" });
+    const h = harness();
+    await h.sinks.candidateSourceExportSink(repo.source);
+    const bytes = Buffer.from(JSON.stringify(readyOf(repo.buildSource)), "utf8");
+    const replacement = Buffer.from("\uFFFD", "utf8");
+    const at = bytes.indexOf(replacement);
+    expect(at).toBeGreaterThan(0);
+    // The same text once decoded as UTF-8, but not the same bytes: a lone 0xFF where the manifest has U+FFFD.
+    const lookalike = Buffer.concat([bytes.subarray(0, at), Buffer.from([0xff]), bytes.subarray(at + replacement.byteLength)]);
+    expect(lookalike.toString("utf8")).toBe(bytes.toString("utf8"));
+    h.objects.set(`workflow-candidate-build-sources/sha256/${sha256(bytes)}.json`, lookalike);
+    const answer = await uploadManifest(h, bytes);
+    expect(answer.status).toBe(503);
+    expect(h.operation().candidateBuildSource).toBeUndefined();
   });
 });

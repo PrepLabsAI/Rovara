@@ -8,7 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createCandidateManifest, type E2ESourceSnapshot } from "@agentx/contracts";
 import { validateE2EApplicationBuildSourceManifest } from "../../packages/verifier/src/application-build-source.js";
 import { createProcessCandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
-import { MAX_BUILD_SOURCE_MANIFEST_BYTES, exportCandidateBuildSource } from "../../packages/worker/src/e2e-build-source-export.js";
+import { MAX_BUILD_SOURCE_MANIFEST_BYTES, exportCandidateBuildSource, exportCandidateBuildSourceInScratch } from "../../packages/worker/src/e2e-build-source-export.js";
 import { readCommittedCandidateSourceExport } from "../../packages/worker/src/verification/candidate.js";
 
 const roots: string[] = [];
@@ -196,5 +196,32 @@ describe("the worker refuses, with a reason, what the build source cannot hold",
     const controller = new AbortController();
     controller.abort(new Error("cancelled"));
     await expect(exported(repo, { signal: controller.signal })).rejects.toThrow("cancelled");
+  });
+});
+
+describe("the scratch space for the throwaway repository never decides the export", () => {
+  it("reports a scratch directory that cannot be made as an unavailable build source, not a failure", async () => {
+    const repo = await repository({ "a.js": "a" });
+    const result = await exportCandidateBuildSourceInScratch({ repositoryRoot: repo.root, candidate: repo.candidate, signal: signal(),
+      makeScratch: async () => { throw new Error("ENOSPC: no space left on device"); } });
+    expect(result).toMatchObject({ status: "UNAVAILABLE", reason: (expect.stringMatching(/ENOSPC/) as string) });
+  });
+
+  it("computes the manifest in a scratch directory it removes afterwards", async () => {
+    const repo = await repository({ "a.js": "a" });
+    const parent = await temp("scratch-parent-");
+    let made = "";
+    const result = await exportCandidateBuildSourceInScratch({ repositoryRoot: repo.root, candidate: repo.candidate, signal: signal(),
+      makeScratch: async () => { made = await mkdtemp(join(parent, "s-")); return made; } });
+    expect(result.status).toBe("READY");
+    expect(made).not.toBe("");
+    expect(await readdir(parent)).toEqual([]);
+  });
+
+  it("still lets the operation's cancellation through", async () => {
+    const repo = await repository({ "a.js": "a" });
+    const controller = new AbortController();
+    controller.abort(new Error("cancelled"));
+    await expect(exportCandidateBuildSourceInScratch({ repositoryRoot: repo.root, candidate: repo.candidate, signal: controller.signal })).rejects.toThrow("cancelled");
   });
 });

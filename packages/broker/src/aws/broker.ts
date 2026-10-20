@@ -6004,20 +6004,33 @@ async function handleWorkflowCandidateBuildSource(dependencies: AwsBrokerDepende
   if (sourceRef === undefined) throw agentXError("STALE_FENCE", "the candidate build source follows a finalized candidate source export");
   const exportKey = { pk: `WORKSPACE#${operation.workspaceId}`, sk: `CANDIDATE_EXPORT#${operation.id}` };
   const uploadKey = { pk: `WORKSPACE#${operation.workspaceId}`, sk: `CANDIDATE_BUILD_SOURCE#${operation.id}` };
-  const record = async (stored: StoredCandidateBuildSource, upload?: { uploadId: string; sha256: string }): Promise<unknown> => {
-    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      ...(upload === undefined ? [] : [{ Update: { TableName: dependencies.tableName, Key: uploadKey, UpdateExpression: "SET #status = :complete, buildSource = :stored",
-        ConditionExpression: "#status = :open AND uploadId = :uploadId AND sha256 = :sha256 AND operationId = :operationId AND fence = :fence",
-        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":complete": "COMPLETE", ":open": "OPEN", ":stored": stored, ":uploadId": upload.uploadId,
-          ":sha256": upload.sha256, ":operationId": operation.id, ":fence": operation.fence } } }]),
-      { Update: { TableName: dependencies.tableName, Key: exportKey, UpdateExpression: "SET buildSource = :stored",
-        ConditionExpression: "entityType = :entity AND #status = :complete AND operationId = :operationId AND fence = :fence AND attribute_not_exists(buildSource)",
-        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":stored": stored, ":entity": "WORKFLOW_CANDIDATE_EXPORT", ":complete": "COMPLETE",
-          ":operationId": operation.id, ":fence": operation.fence } } },
-      { Update: { TableName: dependencies.tableName, Key: operationKey(operation.workspaceId, operation.id), UpdateExpression: "SET candidateBuildSource = :stored",
-        ConditionExpression: "#status = :running AND fence = :fence AND workflowMode = :mode AND attribute_exists(candidateSourceRef) AND attribute_not_exists(candidateBuildSource)",
-        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":stored": stored, ":running": "RUNNING", ":fence": operation.fence, ":mode": "IMPLEMENT" } } },
-    ] }));
+  /**
+   * Records `stored` once. `upload` closes the upload row too: COMPLETE for the upload that carried the manifest, ABORTED for one the worker abandoned by
+   * reporting it has no manifest. Losing a race (another finalize, or an unavailable report, recorded first) is answered from what won, never as an error.
+   */
+  const record = async (stored: StoredCandidateBuildSource, upload?: { uploadId: string; sha256: string; closing: "COMPLETE" | "ABORTED" }): Promise<unknown> => {
+    try {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+        ...(upload === undefined ? [] : [{ Update: { TableName: dependencies.tableName, Key: uploadKey, UpdateExpression: upload.closing === "COMPLETE" ? "SET #status = :closing, buildSource = :stored" : "SET #status = :closing",
+          ConditionExpression: "#status = :open AND uploadId = :uploadId AND sha256 = :sha256 AND operationId = :operationId AND fence = :fence",
+          ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":closing": upload.closing, ":open": "OPEN", ...(upload.closing === "COMPLETE" ? { ":stored": stored } : {}),
+            ":uploadId": upload.uploadId, ":sha256": upload.sha256, ":operationId": operation.id, ":fence": operation.fence } } }]),
+        { Update: { TableName: dependencies.tableName, Key: exportKey, UpdateExpression: "SET buildSource = :stored",
+          ConditionExpression: "entityType = :entity AND #status = :complete AND operationId = :operationId AND fence = :fence AND attribute_not_exists(buildSource)",
+          ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":stored": stored, ":entity": "WORKFLOW_CANDIDATE_EXPORT", ":complete": "COMPLETE",
+            ":operationId": operation.id, ":fence": operation.fence } } },
+        { Update: { TableName: dependencies.tableName, Key: operationKey(operation.workspaceId, operation.id), UpdateExpression: "SET candidateBuildSource = :stored",
+          ConditionExpression: "#status = :running AND fence = :fence AND workflowMode = :mode AND attribute_exists(candidateSourceRef) AND attribute_not_exists(candidateBuildSource)",
+          ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":stored": stored, ":running": "RUNNING", ":fence": operation.fence, ":mode": "IMPLEMENT" } } },
+      ] }));
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      const current = await getItem<OperationRecord>(dependencies, operationKey(operation.workspaceId, operation.id));
+      const winner = StoredCandidateBuildSourceSchema.safeParse(current?.candidateBuildSource);
+      if (!winner.success) throw agentXError("STALE_FENCE", "candidate build source can no longer be recorded for this operation");
+      if (canonicalJson(winner.data) !== canonicalJson(stored)) throw agentXError("CALLBACK_FORBIDDEN", "this implementation already recorded a different build source");
+      return { accepted: stored.status === "READY", buildSource: stored, duplicate: true };
+    }
     return { accepted: stored.status === "READY", buildSource: stored };
   };
   const alreadyRecorded = StoredCandidateBuildSourceSchema.safeParse(operation.candidateBuildSource);
@@ -6026,6 +6039,15 @@ async function handleWorkflowCandidateBuildSource(dependencies: AwsBrokerDepende
     if (alreadyRecorded.success) {
       if (canonicalJson(alreadyRecorded.data) !== canonicalJson(stored)) throw agentXError("CALLBACK_FORBIDDEN", "this implementation already recorded a different build source");
       return { accepted: false, buildSource: stored, duplicate: true };
+    }
+    // An upload the worker started and then abandoned is closed with the answer, and what it staged is deleted.
+    const abandoned = await getItem<Record<string, unknown>>(dependencies, uploadKey);
+    if (abandoned?.entityType === "WORKFLOW_CANDIDATE_BUILD_SOURCE" && abandoned.status === "OPEN" && typeof abandoned.uploadId === "string" && typeof abandoned.sha256 === "string") {
+      const answer = await record(stored, { uploadId: abandoned.uploadId, sha256: abandoned.sha256, closing: "ABORTED" });
+      for (let index = 0; index < Number(abandoned.chunkCount); index += 1) {
+        await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: `workflow-candidate-build-source-staging/${operation.workspaceId}/${operation.id}/${abandoned.uploadId}/${index}.chunk` }));
+      }
+      return answer;
     }
     return record(stored);
   }
@@ -6095,12 +6117,13 @@ async function handleWorkflowCandidateBuildSource(dependencies: AwsBrokerDepende
     } catch (error) {
       const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
       if (status !== 412 && (error as { name?: unknown } | undefined)?.name !== "PreconditionFailed") throw error;
-      if (await readStoredText(dependencies.s3, dependencies.artifactBucketName, stored.manifestRef.key, E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES) !== bytes.toString("utf8")) {
+      const existing = await readStoredBytes(dependencies, stored.manifestRef.key, E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES);
+      if (existing === undefined || !existing.equals(bytes)) {
         throw agentXError("RUNTIME_UNAVAILABLE", "existing candidate build source object does not match its content address");
       }
     }
   }
-  const answer = await record(stored, { uploadId: body.uploadId, sha256: body.sha256 });
+  const answer = await record(stored, { uploadId: body.uploadId, sha256: body.sha256, closing: "COMPLETE" });
   for (let index = 0; index < Number(upload.chunkCount); index += 1) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: stagingKey(index) }));
   return answer;
 }
@@ -6442,6 +6465,14 @@ async function handleProjectSetupEvidenceFinalize(dependencies: AwsBrokerDepende
       ":completedAt": new Date().toISOString(), ":operationId": authorized.claims.operationId, ":fence": authorized.claims.fence } }));
   for (const chunkKey of chunkKeys) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: chunkKey }));
   return { evidenceRef: { key: evidenceKey, sha256: body.sha256 } };
+}
+
+/** An object's exact bytes, at most `maxBytes` of them; undefined when it cannot be read. */
+async function readStoredBytes(dependencies: AwsBrokerDependencies, key: string, maxBytes: number): Promise<Buffer | undefined> {
+  try {
+    const response = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: key, Range: `bytes=0-${maxBytes - 1}` })) as { Body?: { transformToByteArray(): Promise<Uint8Array> } };
+    return response.Body ? Buffer.from(await response.Body.transformToByteArray()) : undefined;
+  } catch { return undefined; }
 }
 
 async function readSetupChunk(dependencies: AwsBrokerDependencies, key: string): Promise<Buffer | undefined> {

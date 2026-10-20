@@ -1,7 +1,10 @@
 import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { E2EApplicationBuildSourceManifestSchema, E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES, canonicalJson, type CandidateManifest, type E2EApplicationBuildSourceManifest } from "@agentx/contracts";
 import { encodeE2EApplicationBuildSourceArchive } from "@agentx/verifier";
-import { BuildSourceCapError, type CandidateBuildSourceGit } from "./e2e-candidate-source.js";
+import { BuildSourceCapError, createProcessCandidateGit, type CandidateBuildSourceGit } from "./e2e-candidate-source.js";
 
 /** A candidate whose manifest would be larger is refused, never trimmed (the bound is shared with the broker, which refuses to store a larger one). */
 export const MAX_BUILD_SOURCE_MANIFEST_BYTES = E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES;
@@ -52,6 +55,25 @@ export async function exportCandidateBuildSource(input: { git: CandidateBuildSou
     if (input.signal.aborted) throw input.signal.reason instanceof Error ? input.signal.reason : error;
     if (error instanceof BuildSourceCapError) return unavailable(error.message);
     return unavailable(`the build source could not be computed: ${error instanceof Error ? error.message : "unknown failure"}`);
+  }
+}
+
+/**
+ * `exportCandidateBuildSource` with its own scratch directory for the throwaway repository, made and removed here. A scratch directory that cannot be made
+ * is a reason like any other (the build source is then unavailable); it never fails the run that is exporting its candidate. Only cancellation throws.
+ */
+export async function exportCandidateBuildSourceInScratch(input: { repositoryRoot: string; candidate: CandidateManifest; signal: AbortSignal;
+  maxManifestBytes?: number; makeScratch?: () => Promise<string> }): Promise<CandidateBuildSourceExport> {
+  let scratch: string | undefined;
+  try {
+    scratch = await (input.makeScratch ?? (() => mkdtemp(join(tmpdir(), "agentx-build-source-"))))();
+    return await exportCandidateBuildSource({ git: createProcessCandidateGit(scratch), repositoryRoot: input.repositoryRoot, candidate: input.candidate, signal: input.signal,
+      ...(input.maxManifestBytes === undefined ? {} : { maxManifestBytes: input.maxManifestBytes }) });
+  } catch (error) {
+    if (input.signal.aborted) throw input.signal.reason instanceof Error ? input.signal.reason : error;
+    return unavailable(`the build source could not be computed: ${error instanceof Error ? error.message : "unknown failure"}`);
+  } finally {
+    if (scratch !== undefined) await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
   }
 }
 

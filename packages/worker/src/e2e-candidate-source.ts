@@ -247,7 +247,7 @@ export function createProcessCandidateGit(scratchRoot: string): CandidateGit & C
           const header = newline < 0 ? [] : blobs.subarray(offset, newline).toString("utf8").split(" ");
           const size = Number(header[2]);
           if (header[0] !== file.sha || header[1] !== "blob" || !Number.isSafeInteger(size) || size < 0 || size > REGULAR_FILE_CAP_BYTES) throw new Error(`candidate blob for ${file.path} is missing or too large`);
-          const bytes = Buffer.from(blobs.subarray(newline + 1, newline + 1 + size));
+          const bytes = blobs.subarray(newline + 1, newline + 1 + size);
           if (bytes.byteLength !== size || blobs[newline + 1 + size] !== 0x0a) throw new Error(`candidate blob for ${file.path} is truncated`);
           // The object database answered for this id; the id is recomputed so a substituted answer cannot pass.
           const blobId = createHash("sha1").update(Buffer.concat([Buffer.from(`blob ${size}\0`), bytes])).digest("hex");

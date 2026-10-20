@@ -9,6 +9,7 @@ export async function postWorkerTerminalResult(
   callbacks: Pick<CallbackSinks, "candidateSourceExportSink" | "terminalSink"> & Partial<Pick<CallbackSinks, "candidateBuildSourceSink">>,
   result: WorkerTerminalResult,
   invocation: WorkerInvocation,
+  log: (event: Record<string, unknown>) => void = (event) => console.log(JSON.stringify(event)),
 ): Promise<void> {
   const reported = result.result !== null && typeof result.result === "object" && !Array.isArray(result.result)
     ? result.result as Record<string, unknown> : undefined;
@@ -23,7 +24,12 @@ export async function postWorkerTerminalResult(
     const buildSource = reported.workflowCandidateBuildSource;
     if (buildSource !== undefined && callbacks.candidateBuildSourceSink !== undefined) {
       try { await callbacks.candidateBuildSourceSink(buildSource as Parameters<CallbackSinks["candidateBuildSourceSink"]>[0]); }
-      catch { /* a missing build source is a later, explained refusal, never a failed export */ }
+      catch (error) {
+        // Not delivering it never fails the export, but the cause is on record so a broker failure or a deploy skew is not mistaken for an old worker.
+        const code = error instanceof Error ? (error as { code?: unknown }).code : undefined;
+        log({ component: "worker", level: "warn", event: "candidate-build-source.delivery_failed", operationId: result.operationId,
+          errorCode: typeof code === "string" ? code : "UNKNOWN", errorMessage: (error instanceof Error ? error.message : "unknown failure").slice(0, 300) });
+      }
     }
     const { workflowCandidateSourceExport: _sourceExport, workflowCandidateBuildSource: _buildSource, ...terminalResult } = reported;
     void _sourceExport; void _buildSource;
