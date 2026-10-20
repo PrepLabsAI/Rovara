@@ -1,6 +1,7 @@
 // Spec 025 FR-016 to FR-021: the developer task routes. Every task has its own workspace, reached
 // through the existing handlers (DeveloperTaskActions) with the task's owner key. Nothing here
 // reads the deployment mode (FR-024).
+import { WORKFLOW_ACTIONABLE_REFUSALS } from "../developer/workflow-actions.js";
 import { createHash, randomUUID } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
@@ -1861,13 +1862,13 @@ export async function decideTaskWorkflow(
   const correction = task.e2ePlanCorrection;
   if (request.decision === "APPROVE" && documentType === "plan" && correction !== undefined) {
     if (workflow.candidate?.digest !== correction.candidateDigest) {
-      throw agentXError("CONFIG_INVALID", "the candidate changed after this plan's source reference was rejected; refresh the plan before approval");
+      throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.correctionStale);
     }
     if (decided?.sha256 === correction.artifactSha256) {
-      throw agentXError("CONFIG_INVALID", "this plan was returned because its E2E source reference failed protected-candidate validation; request changes and submit a corrected plan before approval");
+      throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.correctionUnchanged);
     }
     if (correction.requiredE2E && !(loaded?.format === "structured" && loaded.plan.e2e !== undefined)) {
-      throw agentXError("CONFIG_INVALID", "the corrected plan must retain the required feature E2E intent before approval");
+      throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.correctionLostIntent);
     }
   }
   const decisions = loaded?.format === "structured"
@@ -1931,9 +1932,9 @@ export async function decideTaskWorkflow(
   let next = transition(decisionRequest, decisions, workBreakdownDigest);
   if (request.decision === "APPROVE" && documentType === "plan" && !(loaded?.format === "structured" && loaded.plan.e2e !== undefined)) {
     const pinnedProject = await deps.actions.projectRevision(task.project, task.startingRevision);
-    if (pinnedProject === undefined) throw agentXError("CONFIG_INVALID", "the pinned project revision is unavailable; refresh the plan before approving it");
+    if (pinnedProject === undefined) throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.pinnedProjectUnavailable);
     if (pinnedProject.definition.e2e !== undefined && E2EPolicySchema.parse(pinnedProject.definition.e2e).baselineScenarioIds.length > 0) {
-      throw agentXError("CONFIG_INVALID", "the approved plan must include the canonical E2E intent required by the pinned project baseline");
+      throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.baselineIntentMissing);
     }
   }
   // A required feature-E2E obligation begins only when the Owner approves the canonical plan bytes that contain it.
@@ -1950,7 +1951,7 @@ export async function decideTaskWorkflow(
     let applicationSelection: E2EApplicationSelectionRecord | undefined;
     if (intent.schemaVersion === 2) {
       if (deps.validateWorkflowE2EApplicationPlan === undefined) {
-        throw agentXError("RUNTIME_UNAVAILABLE", "application E2E plans cannot be approved here: the check against the approved setup and the ready runtimes is not installed");
+        throw agentXError("RUNTIME_UNAVAILABLE", WORKFLOW_ACTIONABLE_REFUSALS.applicationApprovalNotInstalled);
       }
       const validated = await deps.validateWorkflowE2EApplicationPlan({ task, intent, artifact: { id: decided!.id, sha256: decided!.sha256 } });
       applicationSelection = validated.selection;
@@ -2225,12 +2226,12 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
     // approved plan proposed.
     const selectedProposedIds = request.selectedProposedCheckIds ?? keptProposedIds(policy);
     if (selectedProposedIds.some((id) => !policy.proposed.some((check) => check.id === id))) {
-      throw agentXError("CONFIG_INVALID", "keep only checks the approved plan proposed");
+      throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.retryOnlyProposedChecks);
     }
     const selected = workflowSelectedChecks({ ...policy, selectedOptionalIds, selectedProposedIds });
     // An application round's retry re-admits the approved browser and API checks; it runs no project check, so a task that has none can still retry it.
     const readmitsApplicationRound = workflow.e2e?.required === true && workflow.e2e.applicationSelection !== undefined;
-    if (selected.length === 0 && !readmitsApplicationRound) throw agentXError("CONFIG_INVALID", "keep at least one check before retrying verification, or close the task");
+    if (selected.length === 0 && !readmitsApplicationRound) throw agentXError("CONFIG_INVALID", WORKFLOW_ACTIONABLE_REFUSALS.retryNeedsOneCheck);
     await actionableWorkspace(deps, task);
     const receivedAt = iso(deps);
     const { blockReason: _previousBlockReason, ...unblocked } = workflow;
