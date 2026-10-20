@@ -301,41 +301,49 @@ const withProposedCallable = (intent: E2EApplicationPlanIntent, fixture: ReturnT
       moduleSpecifier: "./src/index.mjs", callableSelector: { kind: "named", exportName: "renderOrders" } }] };
 };
 
-describe("a mixed v2 intent (Ruling AV): application scenarios are derived, portable ones follow the v1 portable rules", () => {
-  it("approves a plan that also proposes a new callable, which the v1 approval path accepts without source binding", () => {
+describe("a v2 intent with portable criteria is refused at approval (Ruling BE, supersedes the acceptance half of Ruling AV)", () => {
+  const BE_REASON = "put portable checks in a schemaVersion 1 plan or drop them";
+
+  it("refuses a plan that also proposes a portable scenario, naming the remedy", () => {
     const result = evaluate({ snapshot: mixedSnapshot, mutateIntent: withProposedCallable });
-    expect(result.ok, refusal(result)).toBe(true);
+    expect(result.ok).toBe(false);
+    expect(refusal(result)).toContain(BE_REASON);
+    expect(refusal(result)).toContain("render-orders");
   });
 
-  it("derives the selection and binding from the application scenarios only, so portable criteria never wait in unavailableCriteria", () => {
-    const mixed = evaluate({ snapshot: mixedSnapshot, mutateIntent: withProposedCallable });
-    const alone = evaluate({ snapshot: mixedSnapshot });
-    expect(mixed.ok && alone.ok).toBe(true);
-    if (!mixed.ok || !alone.ok) return;
-    expect(mixed.selection.unavailableCriteria).toEqual([]);
-    expect(mixed.selection.executableTargetIds).toEqual(["web-1"]);
-    // The binding and plan are those of the application part, whatever portable scenarios sit beside it ...
-    expect(mixed.selection.applicationApprovalBindingDigest).toBe(alone.selection.applicationApprovalBindingDigest);
-    expect(mixed.selection.applicationExecutionPlanDigest).toBe(alone.selection.applicationExecutionPlanDigest);
-    // ... while the intent digest identifies the whole canonical intent.
-    expect(mixed.selection.intentDigest).not.toBe(alone.selection.intentDigest);
-    const fixture = planFixture({ snapshot: mixedSnapshot });
-    expect(mixed.selection.intentDigest).toBe(shaCanonical(E2EApplicationPlanIntentSchema.parse(withProposedCallable(fixture.intent, fixture))));
-  });
-
-  it("accepts a pinned baseline scenario that is a portable one", () => {
+  it("refuses it whether or not the portable scenario is a pinned baseline scenario", () => {
     const result = evaluate({ snapshot: mixedSnapshot, mutateIntent: withProposedCallable, policyBaselineIds: ["export-csv", "render-orders"] });
-    expect(result.ok, refusal(result)).toBe(true);
+    expect(refusal(result)).toContain(BE_REASON);
+  });
+
+  it("approves the same plan without the portable scenario, with the same selection a v2-only plan always had", () => {
+    const alone = evaluate({ snapshot: mixedSnapshot });
+    expect(alone.ok, refusal(alone)).toBe(true);
+    if (!alone.ok) return;
+    expect(alone.selection).toMatchObject({ executableTargetIds: ["web-1"], unavailableCriteria: [] });
   });
 
   it("still refuses a pinned baseline scenario the plan omits entirely", () => {
-    expect(refusal(evaluate({ snapshot: mixedSnapshot, mutateIntent: withProposedCallable, policyBaselineIds: ["export-csv", "pinned-elsewhere"] }))).toMatch(/baseline.*pinned-elsewhere/i);
+    expect(refusal(evaluate({ policyBaselineIds: ["export-csv", "pinned-elsewhere"] }))).toMatch(/baseline.*pinned-elsewhere/i);
   });
 
   it("refuses a version 2 intent with no application scenario, since a portable-only plan is a version 1 plan", () => {
     const result = evaluate({ snapshot: mixedSnapshot, mutateIntent: (intent, fixture) => ({ ...withProposedCallable(intent, fixture),
       scenarios: [portableScenario(portableOperationId(".", fixture.application.applicationId))], applicationRuntimeRefs: [], runtimeAccountRefs: [], unavailableTargetRefs: [] }) });
     expect(refusal(result)).toMatch(/no application scenario.*schemaVersion 1/i);
+  });
+
+  it("tells the planner so in the version 2 prompt, and says nothing of it in a prompt that does not ask for version 2", () => {
+    const readyWeb = [{ kind: "web" as const, profileId: PROFILE, supportedSteps: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedSteps,
+      supportedAssertions: webApiRuntimeCapabilities("web", "a".repeat(64)).supportedAssertions }];
+    const setup = approvedSetup(contractSnapshot, [{ kind: "web", profileId: PROFILE }], ["web-1"]);
+    const context = buildFeatureE2EPlanningContext(setup.policy, contractSnapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: readyWeb });
+    if (context.status !== "available") throw new Error(context.reason);
+    const v2 = planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context });
+    expect(v2).toContain("Application E2E plan guidance (schemaVersion 2):");
+    expect(v2).toContain(BE_REASON);
+    expect(v2).toMatch(/portable/i);
+    expect(planDocumentInstructions({ kind: "plan", path: "FULL", e2ePlanningContext: context, applicationPlans: false })).not.toContain(BE_REASON);
   });
 });
 
@@ -375,6 +383,61 @@ describe("approval refusals the first round left untested", () => {
     expect(reason).toMatch(/scenario export-csv on target web-1: application runtime is not ready: /);
     expect(reason).not.toMatch(/is not READY now/);
     expect(reason).not.toMatch(/READY for this project's runtime binding/);
+  });
+});
+
+describe("one runtime kind per application plan (Ruling BF)", () => {
+  const BF_REASON = "one runtime kind per plan in M1.2";
+  const apiScenario: E2EScenario = { scenarioId: "orders-health", requirementId: "orders-api", requestedTargetIds: [], required: true, accountProfileId: "synthetic", minimumEvidence: "runtime",
+    requiredRealComponentIds: [], steps: [{ kind: "request", requestId: "health", path: "/health", method: "GET", body: {} }], assertions: [{ kind: "http-status", path: "/health", method: "GET", equals: 200 }] };
+  /** A repository with a web application and an API application that both carry the orders project contract, both approved on the qualified profile. */
+  function bothKinds() {
+    const manifest = JSON.parse(ordersContractManifest) as { name: string; agentx: { e2e: Record<string, unknown> } };
+    const snapshot = snapshotOf({ "package.json": ordersContractManifest,
+      "api/package.json": JSON.stringify({ ...manifest, name: "@acme/orders-api", dependencies: { express: "4.0.0" }, agentx: { e2e: { ...manifest.agentx.e2e, targetAccounts: [] } } }) });
+    const setup = approvedSetup(snapshot, [{ kind: "web", profileId: PROFILE }, { kind: "api", profileId: PROFILE }]);
+    const web = setup.proposal.targets.find((item) => item.targetId === "web-1")!;
+    const api = setup.proposal.targets.find((item) => item.kind === "api")!;
+    const ref = (target: typeof web) => {
+      const application = setup.inspection.applications.find((item) => item.applicationId === target.applicationId)!;
+      const sourceRefs = e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths);
+      return { application, sourceRefs, runtime: { targetId: target.targetId, applicationId: application.applicationId, recipeDigest: application.recipe!.recipeDigest, sourceRefs,
+        runtimeProfileId: target.runtimeProfileId, accountProfileId: target.accountProfileId },
+      account: deriveE2ESyntheticRuntimeAccountRef({ applicationId: application.applicationId, accountProfileId: target.accountProfileId, recipeDigest: application.recipe!.recipeDigest }) };
+    };
+    const policy = { ...setup.policy, baselineScenarioIds: [csvScenario.scenarioId, apiScenario.scenarioId] };
+    const scenarios = [{ ...csvScenario, requestedTargetIds: [web.targetId], accountProfileId: web.accountProfileId }, { ...apiScenario, requestedTargetIds: [api.targetId], accountProfileId: api.accountProfileId }];
+    const build = (executable: { web: boolean; api: boolean }) => {
+      const refs = { web: ref(web), api: ref(api) };
+      return E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [web.targetId, api.targetId], portableOperationRefs: [], mockFixtureRefs: [],
+        accountContextRefs: (["web", "api"] as const).map((kind) => ({ applicationId: refs[kind].application.applicationId, profileId: (kind === "web" ? web : api).accountProfileId,
+          sourcePath: refs[kind].sourceRefs[0]!.path, sourceSha256: refs[kind].sourceRefs[0]!.sha256 })),
+        scenarios, semanticExportDeltas: [],
+        applicationRuntimeRefs: (["web", "api"] as const).filter((kind) => executable[kind]).map((kind) => refs[kind].runtime),
+        runtimeAccountRefs: (["web", "api"] as const).filter((kind) => executable[kind]).map((kind) => refs[kind].account),
+        unavailableTargetRefs: (["web", "api"] as const).filter((kind) => !executable[kind]).map((kind) => ({ targetId: (kind === "web" ? web : api).targetId,
+          applicationId: refs[kind].application.applicationId, accountProfileId: (kind === "web" ? web : api).accountProfileId, sourceRefs: refs[kind].sourceRefs })) });
+    };
+    const run = (intent: E2EApplicationPlanIntent) => evaluateApplicationPlanApproval({ intent, taskId: TASK_ID, artifact: APPROVED_ARTIFACT, snapshot, setupProposal: setup.proposal,
+      setupApproval: setup.setupApproval, policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: NOW });
+    return { snapshot, setup, policy, build, run, web, api };
+  }
+
+  it("refuses an intent whose executable targets span web and api, saying why", () => {
+    const fixture = bothKinds();
+    const result = fixture.run(fixture.build({ web: true, api: true }));
+    expect(result.ok).toBe(false);
+    expect(result.ok ? "" : result.reason).toContain(BF_REASON);
+  });
+
+  it("approves either kind alone, with the other target listed as unavailable", () => {
+    const fixture = bothKinds();
+    const webOnly = fixture.run(fixture.build({ web: true, api: false }));
+    expect(webOnly.ok, webOnly.ok ? "" : webOnly.reason).toBe(true);
+    if (webOnly.ok) expect(webOnly.selection).toMatchObject({ executableTargetIds: [fixture.web.targetId], runtimeRows: [{ kind: "web" }] });
+    const apiOnly = fixture.run(fixture.build({ web: false, api: true }));
+    expect(apiOnly.ok, apiOnly.ok ? "" : apiOnly.reason).toBe(true);
+    if (apiOnly.ok) expect(apiOnly.selection).toMatchObject({ executableTargetIds: [fixture.api.targetId], runtimeRows: [{ kind: "api" }] });
   });
 });
 

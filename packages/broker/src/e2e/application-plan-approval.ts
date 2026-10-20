@@ -9,6 +9,10 @@ import { deriveE2EApplicationFeatureExecutionSelection } from "./application-fea
 
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 const REASON_MAX_CHARS = 600;
+/** What the Owner and the planner are told to do with portable criteria in a version 2 plan (Ruling BE). */
+export const BE_REMEDY = "put portable checks in a schemaVersion 1 plan or drop them";
+/** Why a version 2 plan may not run web and API targets together (Ruling BF). */
+export const BF_REASON = "one runtime kind per plan in M1.2";
 const BLOCKED_LISTED = 5;
 
 /** A refusal reason a person can read: one line of at most REASON_MAX_CHARS, with no control characters (planner-written IDs reach it). */
@@ -54,15 +58,19 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
     if (!parsed.success) return refuse(`the application intent is not valid: ${parsed.error.issues[0]?.message ?? "unreadable"}`);
     const fullIntent = parsed.data;
     const policy = E2EPolicySchema.parse(input.policy);
-    // Ruling AV: the selection and binding are derived from the application scenarios only. Portable scenarios of a mixed intent follow the same
-    // rules as a v1 plan (no source binding at approval, so a callable the plan proposes as future code is accepted) and never wait as unavailable.
-    // As operationStep does: a portable scenario is exactly one portable step. One that goes on to application steps stays in the application part and is refused.
+    // As operationStep does: a portable scenario is exactly one portable step. One that goes on to application steps is refused as a mix.
     const isPortable = (scenario: E2EApplicationPlanIntent["scenarios"][number]) => scenario.steps.length === 1
       && (scenario.steps[0]?.kind === "invoke-contract" || scenario.steps[0]?.kind === "inspect-contract");
     const mixed = fullIntent.scenarios.find((scenario) => !isPortable(scenario) && scenario.steps.some((step) => step.kind === "invoke-contract" || step.kind === "inspect-contract"));
     if (mixed !== undefined) return refuse(`scenario ${mixed.scenarioId} cannot mix portable and application steps`);
     const applicationScenarios = fullIntent.scenarios.filter((scenario) => !isPortable(scenario));
     if (applicationScenarios.length === 0) return refuse("the plan has no application scenario, so it is a portable plan: use schemaVersion 1");
+    // Ruling BE: one CHECKS operation carries one admission, and an application admission runs no portable child group, so a version 2 plan carries no
+    // portable criteria in M1.2 (mixed rounds wait for M1.3). Nothing is dropped silently: the plan is refused and the owner asks for the plan to be corrected.
+    const portableScenarios = fullIntent.scenarios.filter((scenario) => isPortable(scenario));
+    if (portableScenarios.length > 0) {
+      return refuse(`scenario ${portableScenarios.map((scenario) => scenario.scenarioId).join(", ")} is a portable check, and a plan with application scenarios runs only application scenarios in M1.2: ${BE_REMEDY}`);
+    }
     const scenarioIds = new Set(fullIntent.scenarios.map((scenario) => scenario.scenarioId));
     const omitted = policy.baselineScenarioIds.filter((id) => !scenarioIds.has(id));
     if (omitted.length > 0) return refuse(`the plan omits baseline scenarios pinned by the approved setup: ${omitted.join(", ")}`);
@@ -75,6 +83,13 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
     const applicationPolicy = { ...policy, baselineScenarioIds: policy.baselineScenarioIds.filter((id) => applicationScenarioIds.has(id)) };
     const bindingDigest = sha256(canonicalJson(Ec2RuntimeBindingSchema.parse(input.runtimeBinding)));
     const discovered = inspectE2ERepository(input.snapshot, input.snapshot.candidate);
+    // Ruling BF: an application round carries exactly one runtime kind (the verifier keys its runtime bindings by profile, so a web row and an api row of
+    // one profile cannot be admitted together). Kind-aware rounds wait for M1.3.
+    const executableKinds = [...new Set(intent.applicationRuntimeRefs.flatMap((ref) => {
+      const target = policy.targets.find((item) => item.targetId === ref.targetId);
+      return target === undefined ? [] : [target.kind];
+    }))].sort();
+    if (executableKinds.length > 1) return refuse(`the plan's executable targets span ${executableKinds.join(" and ")}: ${BF_REASON}`);
     const availability: E2ERuntimeAvailability[] = [];
     const usedRows: Array<{ kind: "web" | "api"; row: E2ERegisteredRuntime }> = [];
     for (const ref of intent.applicationRuntimeRefs) {

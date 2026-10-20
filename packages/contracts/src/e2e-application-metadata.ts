@@ -6,7 +6,9 @@ const applicationIdentityName = /(?:^|\/)(?:AndroidManifest\.xml|Info\.plist|[^/
 const buildMetadataName = /(?:^|\/)(?:build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|gradle\.properties|Podfile|project\.yml|Package\.swift|Cargo\.toml|go\.mod)$/i;
 
 /** An application with neither a source-owned package.json nor a native project identity file: its identity cannot be established, which is not a malformed source. */
-export class E2EApplicationIdentityMissingError extends Error {}
+export class E2EApplicationIdentityMissingError extends Error {
+  override name = "E2EApplicationIdentityMissingError";
+}
 
 export function e2eApplicationMetadataSourcePaths(appSourcePaths: readonly string[], sourcePaths: readonly string[], applicationId: string): string[] {
   const packagePaths = appSourcePaths.filter((path) => /(^|\/)package\.json$/i.test(path));
