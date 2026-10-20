@@ -4,14 +4,14 @@ import {
   e2eAppBuildManifestDigest, e2eApplicationLockfileRefs, e2ePolicyDigest, validateE2EAppBuildBinding,
   type E2EApplicationBuildSourceManifest, type E2EApplicationBuildSourceRef, type E2EApplicationExecutionAdmission, type E2EApplicationGroupAdmission,
   type E2EApplicationLaunchTarget, type E2EApplicationPlanIntent, type E2EAppArtifactRef, type E2EAppBuildManifest, type E2ERegisteredRuntime, type E2ERound,
-  type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
+  type E2EApplicationSelectionRecord, type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
 } from "@agentx/contracts";
 import {
   DEFAULT_DEADLINE_GRACE_MS, E2E_EXECUTOR_HOST_DESCRIPTOR, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, compileE2EApplicationScenarios, decodeE2EApplicationExecutionAdmission,
   encodeE2EApplicationExecutionAdmission, validateE2EApplicationBuildSourceManifest, validateE2EApplicationExecutionAdmission, webApiApplicationLaunchTarget,
   type E2EApplicationCompilationContext,
 } from "@agentx/verifier";
-import { applicationRoundRefusal } from "./application-dispatch-check.js";
+import { ApplicationPlanDefect, applicationRoundRefusal, applicationRuntimeRefusal } from "./application-dispatch-check.js";
 import { BF_REASON, evaluateApplicationPlanApproval } from "./application-plan-approval.js";
 
 const sha256 = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
@@ -36,6 +36,8 @@ export type ApplicationAdmissionInput = Readonly<{
   runtimeCatalogId: string; runtimeBinding: Ec2RuntimeBinding;
   /** The candidate's exported build source: the manifest and the reference an admission carries (`candidateBuildSourceAdmissionReference`). */
   buildSource: { manifest: E2EApplicationBuildSourceManifest; reference: E2EApplicationBuildSourceRef };
+  /** What the Owner approved (`workflow.e2e.applicationSelection`): the selection derived here for the candidate must agree with it on targets, runtime rows and intent. */
+  recordedSelection: E2EApplicationSelectionRecord;
   /** The plan identity of this round (its approved graph run, revision and actor), not the approval-time one. */
   planDigest: string;
   now: number;
@@ -69,23 +71,30 @@ const failure = (error: unknown) => (error instanceof Error ? error.message : "u
 export function buildApplicationExecutionAdmission(input: ApplicationAdmissionInput): ApplicationAdmission {
   const policy = (() => { try { return E2EPolicySchema.parse(input.policy); } catch (error) { throw refusal(`the pinned project policy is not valid: ${failure(error)}`); } })();
   const refs = input.intent.applicationRuntimeRefs;
-  if (refs.length === 0) throw refusal("the approved plan has no target that can run application scenarios, so there is nothing to run");
+  if (refs.length === 0) throw new ApplicationPlanDefect("the approved plan has no target that can run application scenarios, so there is nothing to run");
 
   // Ruling BF: one runtime kind per round. The row of that kind alone is passed on (a profile registers a web row and an api row, which the verifier cannot tell apart).
   const kinds = [...new Set(refs.map((ref) => policy.targets.find((target) => target.targetId === ref.targetId)?.kind))];
-  if (kinds.some((kind) => kind !== "web" && kind !== "api")) throw refusal("a target of the approved plan is not in the project policy or is not a web or API target");
-  if (kinds.length > 1) throw refusal(`the plan's executable targets span ${kinds.join(" and ")}: ${BF_REASON}`);
+  if (kinds.some((kind) => kind !== "web" && kind !== "api")) throw new ApplicationPlanDefect("a target of the approved plan is not in the project policy or is not a web or API target");
+  if (kinds.length > 1) throw new ApplicationPlanDefect(`the plan's executable targets span ${kinds.join(" and ")}: ${BF_REASON}`);
   const kind = kinds[0] as "web" | "api";
   const rows = input.registeredRuntimes.filter((row) => row.capabilities.kind === kind);
 
   const evaluation = evaluateApplicationPlanApproval({ intent: input.intent, taskId: input.taskId, artifact: input.artifact, snapshot: input.snapshot, setupProposal: input.setupProposal,
     setupApproval: input.setupApproval, policy, registeredRuntimes: rows, runtimeCatalogId: input.runtimeCatalogId, runtimeBinding: input.runtimeBinding, now: input.now,
     planDigest: input.planDigest });
-  if (!evaluation.ok) throw refusal(evaluation.reason);
+  if (!evaluation.ok) throw evaluation.scope === "runtime" ? applicationRuntimeRefusal(evaluation.reason) : evaluation.scope === "plan" ? new ApplicationPlanDefect(evaluation.reason) : refusal(evaluation.reason);
+  // The selection derived here, for the candidate and this round, must be the one the Owner approved on what decides what runs: the targets, the runtime rows and the intent.
+  const approved = input.recordedSelection;
+  const derived = evaluation.selection;
+  const differs = canonicalJson([...derived.executableTargetIds].sort()) !== canonicalJson([...approved.executableTargetIds].sort()) ? "the executable targets"
+    : canonicalJson(derived.runtimeRows) !== canonicalJson(approved.runtimeRows) ? "the runtime rows"
+      : derived.intentDigest !== approved.intentDigest ? "the plan intent" : undefined;
+  if (differs !== undefined) throw refusal(`the selection derived for this candidate differs from the one that was approved in ${differs}`);
   const { derivation } = evaluation;
   const selection = derivation.selectionInput;
   // Ruling BE: an application round carries no portable child group.
-  if (derivation.portableProjection !== null || derivation.portableApprovalBinding !== null) throw refusal("the approved plan carries portable checks, which an application round does not run");
+  if (derivation.portableProjection !== null || derivation.portableApprovalBinding !== null) throw new ApplicationPlanDefect("the approved plan carries portable checks, which an application round does not run");
   const approval = derivation.applicationApprovalBinding;
   if (approval === null) throw refusal("the approved plan has no application approval binding");
   const plan = derivation.plan;
@@ -102,11 +111,11 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   });
   const profileIds = [...new Set(runnableTargets.map((target) => target.runtimeProfileId))].sort();
   for (const profileId of profileIds) {
-    if (profileId !== E2E_EXECUTOR_HOST_PROFILE_ID) throw refusal(`no installed browser and API host is registered for runtime profile ${profileId}`);
+    if (profileId !== E2E_EXECUTOR_HOST_PROFILE_ID) throw applicationRuntimeRefusal(`no installed browser and API host is registered for runtime profile ${profileId}`);
   }
   const runtimeFor = (profileId: string): E2ERegisteredRuntime => {
     const row = selection.registeredRuntimes.find((item) => item.profileId === profileId);
-    if (row === undefined) throw refusal(`no ${kind} runtime of profile ${profileId} is READY`);
+    if (row === undefined) throw applicationRuntimeRefusal(`no ${kind} runtime of profile ${profileId} is READY`);
     return row;
   };
 
@@ -127,12 +136,12 @@ export function buildApplicationExecutionAdmission(input: ApplicationAdmissionIn
   const admittedAt = new Date(admittedAtMs).toISOString();
   const spanMs = Math.min(policy.limits.runTimeoutMs, E2E_HARD_LIMITS.runTimeoutMs);
   // The run is torn down at its deadline plus the host's grace; the stale-run sweep must never reach a live run.
-  if (spanMs + DEFAULT_DEADLINE_GRACE_MS >= STALE_RUN_SWEEP_AGE_MS) throw refusal("the round's allowed run time is not shorter than the stale-run sweep");
+  if (spanMs + DEFAULT_DEADLINE_GRACE_MS >= STALE_RUN_SWEEP_AGE_MS) throw applicationRuntimeRefusal("the round's allowed run time is not shorter than the stale-run sweep");
   const deadlineAt = new Date(admittedAtMs + spanMs).toISOString();
   // A runtime that stops being READY mid-round would leave a finished run unverifiable, so a round does not start on one that expires before it could end.
   for (const profileId of profileIds) {
     const row = runtimeFor(profileId);
-    if (Date.parse(row.expiresAt) < Date.parse(deadlineAt)) throw refusal(`the ${kind} runtime of profile ${profileId} expires at ${row.expiresAt}, before this round could end at ${deadlineAt}; it has to be qualified again first`);
+    if (Date.parse(row.expiresAt) < Date.parse(deadlineAt)) throw applicationRuntimeRefusal(`the ${kind} runtime of profile ${profileId} expires at ${row.expiresAt}, before this round could end at ${deadlineAt}`);
   }
 
   // One build identity per application: the candidate, the approved recipe and lockfiles, the exported source and the installed toolchain. The output digest names

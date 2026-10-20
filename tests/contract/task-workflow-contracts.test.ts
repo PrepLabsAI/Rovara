@@ -874,6 +874,23 @@ describe("sending blocked work back to coding (Task 16)", () => {
     expect(workflowContracts.workflowSendBackOffered(notRequired)).toBe(false);
   });
 
+  it("never offers Send Back for a block that only a runtime change or approving the plan again can fix, even for a task with no checks (Fix round 1, I2)", () => {
+    const base = { ...ready(), stage: "VERIFY" as const, state: "BLOCKED" as const, reviews: [],
+      e2e: { contractDigest: "a".repeat(64), policyDigest: "b".repeat(64), bundleDigest: "c".repeat(64), executionPlanDigest: "d".repeat(64), required: true, currentGroupRunIds: [], resultRefs: [] } };
+    for (const prefix of [workflowContracts.WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, workflowContracts.WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX]) {
+      const withChecks = WorkflowSnapshotSchema.parse({ ...base, blockReason: `${prefix}the web runtime expires first` });
+      expect(workflowContracts.workflowSendBackOffered(withChecks)).toBe(false);
+      // A task with no check at all is "review only", for which coding again is otherwise always offered; these blocks are the exception.
+      const reviewOnly = WorkflowSnapshotSchema.parse({ ...base, checkPolicy: { required: [], optional: [], selectedOptionalIds: [], proposed: [] }, blockReason: `${prefix}the web runtime expires first` });
+      expect(workflowContracts.workflowSendBackOffered(reviewOnly)).toBe(false);
+      expect(workflowContracts.sendBackProblems(reviewOnly)).toEqual([]);
+    }
+    // The administrator's remedy is stated before the reason, so it survives the workflow's 500 character block reason.
+    expect(workflowContracts.WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX).toMatch(/administrator must qualify the runtime again.*retry the checks/i);
+    expect(workflowContracts.WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX).not.toMatch(/send the task back/i);
+    expect(workflowContracts.WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX).toMatch(/request changes/i);
+  });
+
   it("offers Send Back from a broker-bound current E2E failure even when ordinary checks passed", () => {
     const roundId = "11111111-1111-4111-8111-111111111111";
     const runId = "22222222-2222-4222-8222-222222222222";

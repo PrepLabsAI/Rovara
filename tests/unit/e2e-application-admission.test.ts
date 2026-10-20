@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
-import { E2E_HARD_LIMITS, canonicalJson } from "@agentx/contracts";
+import { E2E_HARD_LIMITS, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson } from "@agentx/contracts";
 import { E2E_EXECUTOR_HOST_ENTRY_POINT_ID, E2E_EXECUTOR_HOST_PROFILE_ID, STALE_RUN_SWEEP_AGE_MS, decodeE2EApplicationExecutionAdmission, validateE2EApplicationExecutionAdmission } from "@agentx/verifier";
 import { candidateBuildSourceAdmissionReference } from "../../packages/broker/src/aws/candidate-build-source.js";
 import { buildApplicationExecutionAdmission, type ApplicationAdmissionInput } from "../../packages/broker/src/e2e/application-admission.js";
 import { ApplicationDispatchRefusal } from "../../packages/broker/src/e2e/application-dispatch-check.js";
+import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { createRealCandidate, disposeRealCandidates } from "../support/e2e-application-candidate.js";
 import { binding, ordersContractManifest, planFixture, shaCanonical, webAndApiFixture, webApiRow } from "../support/e2e-application-plan-fixtures.js";
 
@@ -13,13 +14,29 @@ const candidateOf = createRealCandidate;
 
 const ordersTree = { "package.json": ordersContractManifest, "src/orders.js": "export const orders = [];\n" };
 
+/** The selection the Owner approved: derived against the approved setup snapshot, as plan APPROVE records it. */
+function approvedSelection(fx: ReturnType<typeof planFixture>, rows = [webApiRow("web")], snapshot = fx.snapshot, intent = fx.intent) {
+  const result = evaluateApplicationPlanApproval({ intent, taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot,
+    setupProposal: fx.setup.proposal, setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: rows, runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now() });
+  if (!result.ok) throw new Error(result.reason);
+  return result.selection;
+}
+
+function webAndApiSelection(fixture: ReturnType<typeof webAndApiFixture>) {
+  const result = evaluateApplicationPlanApproval({ intent: fixture.build({ web: false, api: true }), taskId: "11111111-1111-4111-8111-111111111111", artifact: { id: "feature-plan", sha256: "1".repeat(64) },
+    snapshot: fixture.snapshot, setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy,
+    registeredRuntimes: [webApiRow("api")], runtimeCatalogId: "catalog", runtimeBinding: binding, now: Date.now() });
+  if (!result.ok) throw new Error(result.reason);
+  return result.selection;
+}
+
 async function inputs(overrides: Partial<ApplicationAdmissionInput> = {}, tree: Record<string, string> = ordersTree) {
   const fx = planFixture({});
   const candidate = await candidateOf(tree);
   const base: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 3, workflowRevision: 7, roundId: randomUUID(),
     runId: randomUUID, intent: fx.intent, artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot, setupProposal: fx.setup.proposal,
     setupApproval: fx.setup.setupApproval, policy: fx.policy, registeredRuntimes: [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: binding,
-    buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now() };
+    buildSource: candidate.buildSource, planDigest: "c".repeat(64), now: Date.now(), recordedSelection: approvedSelection(fx) };
   return { fx, candidate, input: { ...base, ...overrides } };
 }
 const refusalOf = (build: () => unknown): string => {
@@ -130,7 +147,7 @@ describe("the application admission built for a single-kind round", () => {
     const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4, roundId: randomUUID(),
       runId: randomUUID, intent: fixture.build({ web: false, api: true }), artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot,
       setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
-      runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now() };
+      runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), recordedSelection: webAndApiSelection(fixture) };
     const built = buildApplicationExecutionAdmission(input);
     expect(built.kind).toBe("api");
     const decoded = decodeE2EApplicationExecutionAdmission(built.bytes);
@@ -158,7 +175,7 @@ describe("the builder refuses with a specific reason, never a portable fallback"
     const input: ApplicationAdmissionInput = { taskId: "11111111-1111-4111-8111-111111111111", operationId: randomUUID(), operationFence: 2, workflowRevision: 4, roundId: randomUUID(),
       runId: randomUUID, intent: fixture.build({ web: true, api: true }), artifact: { id: "feature-plan", sha256: "1".repeat(64) }, snapshot: candidate.snapshot,
       setupProposal: fixture.setup.proposal, setupApproval: fixture.setup.setupApproval, policy: fixture.policy, registeredRuntimes: [webApiRow("web"), webApiRow("api")],
-      runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now() };
+      runtimeCatalogId: "catalog", runtimeBinding: binding, buildSource: candidate.buildSource, planDigest: "d".repeat(64), now: Date.now(), recordedSelection: webAndApiSelection(fixture) };
     expect(refusalOf(() => buildApplicationExecutionAdmission(input))).toContain("one runtime kind per plan in M1.2");
   });
 
@@ -196,13 +213,50 @@ describe("the builder refuses with a specific reason, never a portable fallback"
     expect(refusalOf(() => buildApplicationExecutionAdmission(input))).toMatch(/web runtime.*READY/i);
   });
 
-  it("refuses a runtime row that would expire before the round could end, saying it has to be qualified again", async () => {
+  it("refuses a runtime row that would expire before the round could end", async () => {
     const soon = webApiRow("web", { expiresAt: new Date(Date.now() + 30_000).toISOString() });
-    const { input } = await inputs({ registeredRuntimes: [soon] });
-    expect(refusalOf(() => buildApplicationExecutionAdmission(input))).toMatch(/web runtime of profile linux-arm64-web-api-v1 expires at .* before this round could end.*qualified again/);
+    const { input } = await inputs({ registeredRuntimes: [soon], recordedSelection: approvedSelection(planFixture({}), [soon]) });
+    expect(refusalOf(() => buildApplicationExecutionAdmission(input))).toMatch(/web runtime of profile linux-arm64-web-api-v1 expires at .* before this round could end/);
     // A row that outlives the round's deadline is fine.
     const later = webApiRow("web", { expiresAt: new Date(Date.now() + 3_600_000).toISOString() });
-    expect(() => buildApplicationExecutionAdmission({ ...input, registeredRuntimes: [later] })).not.toThrow();
+    expect(() => buildApplicationExecutionAdmission({ ...input, registeredRuntimes: [later], recordedSelection: approvedSelection(planFixture({}), [later]) })).not.toThrow();
+  });
+
+  describe("compares the selection it derived for the candidate with the one the Owner approved (Fix round 1, M5)", () => {
+    it("builds when they agree", async () => {
+      const { input } = await inputs();
+      expect(() => buildApplicationExecutionAdmission(input)).not.toThrow();
+    });
+
+    const edits: Array<[string, (record: ReturnType<typeof approvedSelection>) => ReturnType<typeof approvedSelection>, RegExp]> = [
+      ["other executable targets", (record) => ({ ...record, executableTargetIds: ["web-1", "web-9"] }), /executable targets/],
+      ["another runtime row", (record) => ({ ...record, runtimeRows: record.runtimeRows.map((row) => ({ ...row, generation: row.generation + 1 })) }), /runtime row/],
+      ["another intent", (record) => ({ ...record, intentDigest: "9".repeat(64) }), /intent/],
+    ];
+    for (const [name, edit, reason] of edits) {
+      it(`blocks on ${name}`, async () => {
+        const { input } = await inputs();
+        const message = refusalOf(() => buildApplicationExecutionAdmission({ ...input, recordedSelection: edit(input.recordedSelection) }));
+        expect(message).toMatch(/differs from the one that was approved/);
+        expect(message).toMatch(reason);
+      });
+    }
+  });
+
+  it("states the right remedy for each refusal: the runtime's state asks for an administrator and retry, the candidate's problems for sending it back", async () => {
+    const soon = webApiRow("web", { expiresAt: new Date(Date.now() + 30_000).toISOString() });
+    const { input: expiringInput } = await inputs({ registeredRuntimes: [soon], recordedSelection: approvedSelection(planFixture({}), [soon]) });
+    const expiring = refusalOf(() => buildApplicationExecutionAdmission(expiringInput));
+    expect(expiring).toContain(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX);
+    expect(expiring).not.toMatch(/send the task back/i);
+    const { input } = await inputs({ registeredRuntimes: [webApiRow("api")] });
+    const noRow = refusalOf(() => buildApplicationExecutionAdmission(input));
+    expect(noRow).toContain(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX);
+    expect(noRow).not.toMatch(/send the task back/i);
+    const other = await candidateOf({ ...ordersTree, "src/extra.js": "export const extra = 1;\n" });
+    const candidateProblem = refusalOf(() => buildApplicationExecutionAdmission({ ...input, registeredRuntimes: [webApiRow("web")], buildSource: other.buildSource }));
+    expect(candidateProblem).toContain(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX);
+    expect(candidateProblem).toMatch(/Send the task back to coding/);
   });
 
   it("refuses a runtime profile with no installed CLI host", async () => {

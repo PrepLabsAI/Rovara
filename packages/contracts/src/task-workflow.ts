@@ -42,6 +42,14 @@ export const WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE = "AgentX couldn't open the pu
  * the approved one (a runtime row or the approved setup changed) is fixed by approving the plan again against what is ready now, which retrying the checks does.
  */
 export const WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX = "The approved browser and API checks could not be started: ";
+/**
+ * A runtime-state refusal: the registered runtime cannot carry the round now (no READY row of the plan's kind, a row that expires before the round could end, no installed
+ * host). Only an administrator qualifying the runtime again fixes it, and then one retry approves the plan again and dispatches. The remedy comes first (the block reason
+ * keeps its first 500 characters); send-back to coding is never offered for it.
+ */
+export const WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX = "The approved browser and API checks cannot run on the runtime as it is now. An administrator must qualify the runtime again, then retry the checks to approve the plan again. Why: ";
+/** The approved plan itself can no longer be approved (portable criteria, web and API together): the task goes back to plan review, where Request changes is the way on. */
+export const WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX = "The approved browser and API plan can no longer run as written. Request changes and submit a corrected plan before coding resumes. Why: ";
 export const WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX = "The approved browser and API checks can no longer run as approved. Retry the checks to approve the plan again against what is ready now. What changed: ";
 
 export const WORKFLOW_BLOCK_REASONS = {
@@ -1747,6 +1755,8 @@ export function workflowSendBackOffered(workflow: {
   if (workflow.stage === "VERIFY") {
     // Review only: a rerun of the agent's own tests regressed, and no result was recorded for it.
     if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.regressionFound) return true;
+    // Blocks that only an administrator qualifying the runtime, or approving the plan again, can fix: new code cannot, even for a task with no checks.
+    if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true || workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true) return false;
     // A required browser and API round that could not be admitted from this candidate (its build source or inputs are unusable): only new code can fix that.
     if (workflow.e2e?.required === true && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX) === true) return true;
     // Review only: there is no check to retry, so coding again is the way on, except from rewritten history.

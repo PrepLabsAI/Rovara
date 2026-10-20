@@ -193,7 +193,21 @@ export const E2EApplicationSelectionRecordSchema = z.object({
   evaluatedAt: id(40),
 }).strict();
 export type E2EApplicationSelectionRecord = z.infer<typeof E2EApplicationSelectionRecordSchema>;
-export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentRoundId: z.string().uuid().optional(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64), qualifiedRound: E2EQualifiedRoundSchema.optional(), failedRound: E2EFailedRoundSchema.optional(), displayRef: E2EWorkflowDisplayRefSchema.optional(), applicationSelection: E2EApplicationSelectionRecordSchema.optional() }).strict();
+/** What identifies an approved application selection, for the audit of a re-approval: the whole record's digest, the intent, the executable targets and the runtime rows. */
+const E2EApplicationSelectionFingerprintSchema = z.object({ selectionDigest: digest, intentDigest: digest, executableTargetIds: z.array(id(80)).max(12), runtimeRowsDigest: digest }).strict();
+export type E2EApplicationSelectionFingerprint = z.infer<typeof E2EApplicationSelectionFingerprintSchema>;
+export function e2eApplicationSelectionFingerprint(record: E2EApplicationSelectionRecord): E2EApplicationSelectionFingerprint {
+  const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
+  return { selectionDigest: sha(record), intentDigest: record.intentDigest, executableTargetIds: [...record.executableTargetIds], runtimeRowsDigest: sha(record.runtimeRows) };
+}
+/**
+ * The owner's re-approval of an application plan against the runtime rows READY now (a retry after the approved selection changed): who, why, when, and the selection
+ * it replaced and the one it recorded. Appended, never overwritten, so what the owner authorized can always be reconstructed.
+ */
+export const E2EApplicationReapprovalSchema = z.object({ requestId: id(120), actorId: id(200), reason: id(500), at: id(40),
+  previous: E2EApplicationSelectionFingerprintSchema, current: E2EApplicationSelectionFingerprintSchema }).strict();
+export type E2EApplicationReapproval = z.infer<typeof E2EApplicationReapprovalSchema>;
+export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, policyDigest: digest, bundleDigest: digest, executionPlanDigest: digest, required: z.boolean(), currentRoundId: z.string().uuid().optional(), currentGroupRunIds: z.array(z.string().uuid()).max(12), resultRefs: z.array(id(200)).max(64), qualifiedRound: E2EQualifiedRoundSchema.optional(), failedRound: E2EFailedRoundSchema.optional(), displayRef: E2EWorkflowDisplayRefSchema.optional(), applicationSelection: E2EApplicationSelectionRecordSchema.optional(), applicationReapprovals: z.array(E2EApplicationReapprovalSchema).max(20).optional() }).strict();
 export type E2EWorkflowProgress = z.infer<typeof E2EWorkflowProgressSchema>;
 export type E2EQualifiedRound = z.infer<typeof E2EQualifiedRoundSchema>;
 

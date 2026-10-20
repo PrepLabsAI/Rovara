@@ -273,14 +273,14 @@ import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
   type CallbackClaims, type OperationRecord,
 } from "./cancellation.js";
-import { aiToolTurn, completedTurn, developerFooter, E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
+import { aiToolTurn, completedTurn, developerFooter, E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON, isE2EPlanCorrectionBlockReason, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, type WorkflowE2EReadinessMarker, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../e2e/feature-plan-planning-context.js";
 import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.js";
-import { evaluateApplicationPlanApproval } from "../e2e/application-plan-approval.js";
+import { evaluateApplicationPlanApproval, type ApplicationRefusalScope } from "../e2e/application-plan-approval.js";
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
-import { ApplicationDispatchRefusal, applicationRoundRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
+import { ApplicationDispatchRefusal, ApplicationPlanDefect, applicationRoundRefusal, applicationRuntimeRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { buildApplicationExecutionAdmission } from "../e2e/application-admission.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
@@ -4120,7 +4120,7 @@ type ApplicationSelectionNow =
     inputs: { policy: E2EPolicy; setup: { snapshot: E2ESourceSnapshot; setupProposal: E2ESetupProposal; setupApproval: PlanApprovalRef }; rows: E2ERegisteredRuntime[];
       runtimeCatalogId: string; runtimeBinding: ReturnType<typeof parseRuntimeBinding> } }
   /** `unevaluable`: something it needs could not be read (try again later). `refused`: it read everything and the plan cannot run as approved. */
-  | { ok: false; kind: "unevaluable" | "refused"; reason: string };
+  | { ok: false; kind: "unevaluable" | "refused"; reason: string; scope?: ApplicationRefusalScope };
 
 /**
  * Derives the selection of a schema-v2 application intent against the task's pinned project (its own revision and runtime binding, never the latest),
@@ -4152,7 +4152,7 @@ async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBroke
   const evaluation = evaluateApplicationPlanApproval({ intent, taskId: task.taskId, artifact, snapshot: setup.snapshot, setupProposal: setup.setupProposal,
     setupApproval: setup.setupApproval, policy: policy.data, registeredRuntimes: rows, runtimeCatalogId: catalogId,
     runtimeBinding: parseRuntimeBinding(project.runtimeBinding), now });
-  if (!evaluation.ok) return { ok: false, kind: "refused", reason: evaluation.reason };
+  if (!evaluation.ok) return { ok: false, kind: "refused", reason: evaluation.reason, ...(evaluation.scope === undefined ? {} : { scope: evaluation.scope }) };
   // The rows this derivation was made from must still be exactly those when the transaction commits.
   const conditions: TransactItems = evaluation.selection.runtimeRows.map((row) => ({ ConditionCheck: { TableName: dependencies.tableName,
     Key: e2eRegisteredRuntimeKey(row.runtimeCatalogId, row.profileId, row.kind),
@@ -9262,7 +9262,7 @@ type AccessPausedWorkflowDispatch = WorkflowDispatchRecord & { taskAccessPausedA
 
 /** A deterministic source-reference mismatch returns the same owner-approved candidate to plan review. */
 async function returnWorkflowToCorrectE2EPlan(dependencies: AwsBrokerDependencies, item: WorkflowDispatchRecord,
-  error: E2EPortablePlanReferenceError): Promise<boolean> {
+  correction: { reasonCode: string; /** Why, when it is not the portable reference text. */ blockReason?: string }): Promise<boolean> {
   if (item.kind !== "CHECKS") return false;
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(item.taskId));
   const workflow = task?.workflow;
@@ -9282,7 +9282,7 @@ async function returnWorkflowToCorrectE2EPlan(dependencies: AwsBrokerDependencie
   void _feedbackDispatchApproval; void _outcome;
   const now = new Date().toISOString();
   const next = WorkflowSnapshotSchema.parse({ ...retained, revision: workflow.revision + 1, stage: "PLAN_REVIEW", state: "WAITING",
-    updatedAt: now, blockReason: E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON });
+    updatedAt: now, blockReason: correction.blockReason ?? E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON });
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Delete: { TableName: dependencies.tableName, Key: { pk: item.pk, sk: item.sk },
@@ -9295,13 +9295,13 @@ async function returnWorkflowToCorrectE2EPlan(dependencies: AwsBrokerDependencie
         ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :verify AND workflow.#state = :waiting AND workflow.e2e.required = :required AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
         ExpressionAttributeNames: { "#stage": "stage", "#state": "state" }, ExpressionAttributeValues: {
           ":workflow": next, ":correction": { artifactId: artifact.id, artifactSha256: artifact.sha256,
-            candidateDigest: item.candidateDigest, reasonCode: error.reasonCode, requiredE2E: true }, ":now": now,
+            candidateDigest: item.candidateDigest, reasonCode: correction.reasonCode, requiredE2E: true }, ":now": now,
           ":revision": item.workflowRevision, ":verify": "VERIFY", ":waiting": "WAITING", ":required": true,
           ":candidate": item.candidateDigest,
         } } },
     ] }));
     console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_plan_reference_rejected", taskId: item.taskId,
-      reasonCode: error.reasonCode, artifactId: artifact.id }));
+      reasonCode: correction.reasonCode, artifactId: artifact.id }));
     return true;
   } catch (caught) {
     if (isConditional(caught)) return false;
@@ -9548,6 +9548,14 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     await remove();
     return outcome === "STALE" ? "STALE" : "DISPATCHED";
   } catch (error) {
+    if (error instanceof ApplicationPlanDefect) {
+      // The approved plan can no longer run as written, which only a corrected plan fixes: the task goes back to plan review, where Request changes is the way on.
+      try {
+        if (await returnWorkflowToCorrectE2EPlan(dependencies, item, { reasonCode: "application-plan-not-approvable", blockReason: error.message })) return "STALE";
+      } catch (recoveryError) {
+        console.log(JSON.stringify({ component: "broker", event: "workflow.application_plan_return_failed", taskId: item.taskId, error: recoveryError instanceof Error ? recoveryError.name : "unknown" }));
+      }
+    }
     if (error instanceof ApplicationDispatchRefusal) {
       // Deterministic for this approval and these rows: the workflow says why it stopped, the row is removed, and nothing is retried.
       try {
@@ -9564,7 +9572,7 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     }
     if (error instanceof E2EPortablePlanReferenceError) {
       try {
-        if (await returnWorkflowToCorrectE2EPlan(dependencies, item, error)) return "STALE";
+        if (await returnWorkflowToCorrectE2EPlan(dependencies, item, { reasonCode: error.reasonCode })) return "STALE";
       } catch (recoveryError) {
         console.log(JSON.stringify({ component: "broker", event: "workflow.e2e_plan_correction_failed", taskId: item.taskId,
           error: recoveryError instanceof Error ? recoveryError.name : "unknown" }));
@@ -9626,6 +9634,9 @@ async function requireApplicationSelectionStillCurrent(dependencies: AwsBrokerDe
   const current = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact);
   if (!current.ok) {
     if (current.kind === "unevaluable") throw agentXError("RUNTIME_UNAVAILABLE", `the approved application selection could not be checked at dispatch (${current.reason})`);
+    // A plan that can never run as written goes back to planning; a runtime that cannot carry it asks for an administrator; any other change asks for the plan to be approved again.
+    if (current.scope === "plan") throw new ApplicationPlanDefect(current.reason);
+    if (current.scope === "runtime") throw applicationRuntimeRefusal(current.reason);
     throw new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX}${current.reason}`);
   }
   const unchanged = applicationSelectionStillCurrent(recorded.data, current.selection);
@@ -9760,7 +9771,8 @@ async function startApplicationE2EChecksDispatch(
   const built = buildApplicationExecutionAdmission({ taskId: task.taskId, operationId, operationFence: workspace.fence + 1, workflowRevision: workflow.revision + 1, roundId: randomUUID(),
     runId: randomUUID, intent, artifact, snapshot, setupProposal: current.inputs.setup.setupProposal, setupApproval: current.inputs.setup.setupApproval, policy: current.inputs.policy,
     registeredRuntimes: current.inputs.rows, runtimeCatalogId: current.inputs.runtimeCatalogId, runtimeBinding: current.inputs.runtimeBinding,
-    buildSource: { manifest, reference: candidateBuildSourceAdmissionReference(stored) }, planDigest, now: Date.now() });
+    buildSource: { manifest, reference: candidateBuildSourceAdmissionReference(stored) }, planDigest, now: Date.now(),
+    recordedSelection: E2EApplicationSelectionRecordSchema.parse(workflow.e2e?.applicationSelection) });
   const admissionRef = E2EWorkflowAdmissionRefSchema.parse({ schemaVersion: 1, taskId: task.taskId, workflowRevision: workflow.revision + 1, candidateDigest: candidate.digest,
     roundId: built.roundId, groupRunIds: built.groupRunIds, admissionRef: { key: `workflow-e2e-admissions/sha256/${built.sha256}.json`, sha256: built.sha256, byteLength: built.bytes.byteLength } });
   await storeWorkflowE2EAdmission(dependencies, { key: admissionRef.admissionRef.key, sha256: built.sha256, bytes: built.bytes, taskId: task.taskId, candidateDigest: candidate.digest });
@@ -10725,7 +10737,7 @@ async function storePlanAnswer(
       format: "structured",
     },
   });
-  if (next.blockReason === E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON) {
+  if (isE2EPlanCorrectionBlockReason(next.blockReason)) {
     const { blockReason: _priorE2EPlanReferenceFailure, ...withoutPriorPlanFailure } = next;
     void _priorE2EPlanReferenceFailure;
     next = WorkflowSnapshotSchema.parse(withoutPriorPlanFailure);

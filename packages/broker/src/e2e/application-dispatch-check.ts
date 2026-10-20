@@ -1,4 +1,4 @@
-import { WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, canonicalJson, type E2EApplicationSelectionRecord } from "@agentx/contracts";
+import { WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, canonicalJson, type E2EApplicationSelectionRecord } from "@agentx/contracts";
 
 /**
  * A dispatch of an approved application round that must not happen, with the plain reason the owner sees. It is terminal for that dispatch: the
@@ -9,6 +9,26 @@ import { WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX, canonicalJson, type E2EAppli
 export class ApplicationDispatchRefusal extends Error {}
 
 const ROUND_REFUSAL_REASON_MAX_CHARS = 380;
+const shortLine = (reason: string, max: number) => {
+  const line = reason.replace(/\p{Cc}+/gu, " ").replace(/\s+/gu, " ").trim();
+  return line.length > max ? `${line.slice(0, max - 3)}...` : line;
+};
+
+/**
+ * The plan itself can no longer be run as written (portable criteria, web and API targets together, a target with no source-owned identity), which only a corrected plan
+ * fixes. Dispatch sends the task back to plan review (Request changes is the owner's way on) instead of blocking it where nothing the owner can press would help.
+ */
+export class ApplicationPlanDefect extends ApplicationDispatchRefusal {
+  constructor(readonly reason: string) { super(`${WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX}${shortLine(reason, 330)}`); }
+}
+
+/**
+ * A refusal caused by the registered runtime's state (no READY row of the plan's kind, a row that expires before the round could end, no installed host). No code change
+ * fixes it: the block text asks for an administrator to qualify the runtime again and then for a retry, which approves the plan again against the new row.
+ */
+export function applicationRuntimeRefusal(reason: string): ApplicationDispatchRefusal {
+  return new ApplicationDispatchRefusal(`${WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX}${shortLine(reason, 250)}`);
+}
 /**
  * A refusal to dispatch an application round whose inputs are not usable (the candidate's build source, its manifest, the runtime inputs or the plan itself). The
  * block text begins with `WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX`, so the owner is offered the action that fixes it (sending the task back to coding), and ends with

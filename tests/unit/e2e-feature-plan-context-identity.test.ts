@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { buildFeatureE2EPlanningContext, describeFeatureE2EExecutableKinds } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
 import { evaluateApplicationPlanApproval } from "../../packages/broker/src/e2e/application-plan-approval.js";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
+import { webApiRow } from "../support/e2e-application-plan-fixtures.js";
 
 const sha = (value: Buffer) => createHash("sha256").update(value).digest("hex");
 const candidate = createCandidateManifest([{ repositoryId: "ordinary-orders", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
@@ -119,11 +120,16 @@ describe("a qualified-profile policy with an identity-less target beside a ready
         accountProfileId: target.accountProfileId }],
       runtimeAccountRefs: [{ applicationId: application.applicationId, profileId: target.accountProfileId, revision: 1, definitionDigest: "3".repeat(64) }], unavailableTargetRefs: [] });
     const result = evaluateApplicationPlanApproval({ intent, taskId: "task-1", artifact: { id: "plan", sha256: "1".repeat(64) }, snapshot, setupProposal: setup,
-      setupApproval: { artifactId: "setup", digest: "2".repeat(64) }, policy, registeredRuntimes: [], runtimeCatalogId: "catalog",
+      setupApproval: { artifactId: "setup", digest: "2".repeat(64) }, policy, registeredRuntimes: [webApiRow("api")], runtimeCatalogId: "catalog",
       runtimeBinding: { deploymentMode: "ec2-ebs", launchTemplateId: "lt-0123456789abcdef", subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef" }], volumeSizeGiB: 32, volumeType: "gp3" },
       now: Date.now() });
     expect(result.ok).toBe(false);
-    expect(result.ok ? "approved" : result.reason).not.toBe("approved");
+    // With a READY api row the refusal cannot be the runtime's: it is the target's own missing identity.
+    expect(result.ok).toBe(false);
+    const reason = result.ok ? "approved" : result.reason;
+    expect(reason).toMatch(/no-source-identity/);
+    expect(reason).not.toMatch(/READY/);
+    expect(!result.ok && result.scope).toBe("plan");
   });
 
   it("carries its name, so a log or stack says what failed", () => {

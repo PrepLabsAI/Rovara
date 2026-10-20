@@ -11,6 +11,7 @@ import {
   PullRequestResultSchema,
   TURN_TEXT_LIMIT,
   UNKNOWN_CLIENT_NAME,
+  WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX,
   aiToolTurnRecordKeys,
   capText,
   lastAssistantResponse,
@@ -31,6 +32,11 @@ import {
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import type { ShareDecision } from "./share.js";
+
+/** Whether a block reason is one of the two that send a task back to plan review for a corrected E2E plan: a source reference that does not match the candidate, or an application plan that can no longer run as written. */
+export function isE2EPlanCorrectionBlockReason(blockReason: string | undefined): boolean {
+  return blockReason !== undefined && (blockReason === E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON || blockReason.startsWith(WORKFLOW_APPLICATION_PLAN_NOT_APPROVABLE_PREFIX));
+}
 
 export const E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON = "The approved feature E2E plan references a source operation that does not match the protected candidate. Request changes and submit a corrected E2E plan before coding resumes.";
 

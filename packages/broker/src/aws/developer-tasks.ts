@@ -104,6 +104,10 @@ import {
   WORKFLOW_PLAN_MAX_BYTES,
   WORKFLOW_BLOCK_REASONS,
   WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX,
+  WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX,
+  WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX,
+  e2eApplicationSelectionFingerprint,
+  type E2EApplicationReapproval,
   WORKFLOW_MISSING_COMMITTED_SOURCE_EXPORT_REASON,
   canonicalPlanJson,
   canonicalJson,
@@ -156,7 +160,7 @@ import {
   byCreated,
   deriveTaskStatus,
   developerTaskIdentity,
-  E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON,
+  isE2EPlanCorrectionBlockReason,
   inertName,
   partyOfTask,
   recentTaskEvents,
@@ -2254,11 +2258,16 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       void _currentRoundId;
       void _currentGroupRunIds;
       void _displayRef;
-      // A block that says the approved selection changed (a runtime row was requalified, say) is fixed by approving the same plan again against what is ready now.
-      // The owner's retry is that action: the plan's own canonical intent is derived again exactly as plan approval derives it, and the new selection is recorded.
-      // The dispatch comparison stays byte-exact; nothing is loosened, and a plan that cannot be approved now is refused here with the reason, changing nothing.
+      // The owner's retry after a block of an application round re-approves the plan: whether the approved selection changed (a runtime row was requalified), the
+      // runtime was unusable until an administrator qualified it again, or the round was refused, one retry once the cause is fixed derives the plan's own canonical
+      // v2 intent again exactly as plan approval does and records the new selection. The dispatch comparison stays byte-exact; nothing is loosened, and a plan that
+      // cannot be approved now is refused here with the reason, changing nothing. Every re-approval is appended to `applicationReapprovals` (actor, reason, old and new
+      // selection digests), never overwritten.
       let reapproved: { selection: E2EApplicationSelectionRecord; conditions: TransactItems } | undefined;
-      if (workflow.e2e.applicationSelection !== undefined && workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true) {
+      let reapproval: E2EApplicationReapproval | undefined;
+      const applicationBlock = [WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX, WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX, WORKFLOW_APPLICATION_ROUND_REFUSED_PREFIX]
+        .some((prefix) => workflow.blockReason?.startsWith(prefix) === true);
+      if (workflow.e2e.applicationSelection !== undefined && applicationBlock) {
         const planArtifact = workflow.artifacts.filter((entry) => entry.type === "plan").at(-1);
         const intent = (await approvedCodingPlan(deps, workflow)).e2eIntent;
         if (planArtifact === undefined || workflow.e2e.contractDigest !== planArtifact.sha256 || intent?.schemaVersion !== 2) {
@@ -2268,6 +2277,8 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
           throw agentXError("RUNTIME_UNAVAILABLE", "the plan cannot be approved again here: the check against the approved setup and the ready runtimes is not installed");
         }
         reapproved = await deps.validateWorkflowE2EApplicationPlan({ task, intent, artifact: { id: planArtifact.id, sha256: planArtifact.sha256 } });
+        reapproval = { requestId: request.requestId, actorId: access.actorId, reason: request.instructions.slice(0, 500), at: receivedAt,
+          previous: e2eApplicationSelectionFingerprint(workflow.e2e.applicationSelection), current: e2eApplicationSelectionFingerprint(reapproved.selection) };
       }
       const next = WorkflowSnapshotSchema.parse({
         ...retryBase,
@@ -2275,7 +2286,9 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
         stage: "VERIFY",
         state: "WAITING",
         checkPolicy: { ...policy, selectedOptionalIds, selectedProposedIds },
-        e2e: { ...unqualifiedE2E, currentGroupRunIds: [], ...(reapproved === undefined ? {} : { applicationSelection: reapproved.selection }) },
+        e2e: { ...unqualifiedE2E, currentGroupRunIds: [],
+          ...(reapproved === undefined || reapproval === undefined ? {} : { applicationSelection: reapproved.selection,
+            applicationReapprovals: [...(workflow.e2e.applicationReapprovals ?? []), reapproval].slice(-20) }) },
         verificationRetries: [...(workflow.verificationRetries ?? []), {
           requestId: request.requestId, actorId: access.actorId, selectedOptionalCheckIds: selectedOptionalIds,
           selectedProposedCheckIds: selectedProposedIds, at: receivedAt,
@@ -2295,7 +2308,9 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
           putNew(turnTable(deps), aiToolTurn({
             party: partyOfTaskActor(task, caller), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
             receivedAt, finishedAt: iso(deps), request: request.instructions,
-            response: "The owner authorized a fresh verification round. AgentX is rechecking the current approved source and runtime before dispatch.",
+            response: reapproval === undefined
+              ? "The owner authorized a fresh verification round. AgentX is rechecking the current approved source and runtime before dispatch."
+              : `The owner approved the plan again against the runtime that is ready now (selection ${reapproval.previous.selectionDigest} replaced by ${reapproval.current.selectionDigest}). AgentX is rechecking the current approved source and runtime before dispatch.`,
           })),
           workflowDispatchItem(deps.tableName, taskId, next.revision, "CHECKS", workflow.candidate.digest, receivedAt),
           // The rows the new approval was derived from must still be exactly those when it commits.
@@ -3076,7 +3091,7 @@ export function taskPageUrl(issuer: string, taskId: string): string {
 }
 
 /** Where a workflow task stands and what happens next, in the words the task page shows. */
-function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: boolean, owner: boolean, publication: "failed" | "retrying" | undefined = undefined): { status: string; nextStep: string } {
+export function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: boolean, owner: boolean, publication: "failed" | "retrying" | undefined = undefined): { status: string; nextStep: string } {
   if (closed || workflow?.stage === "CLOSED") return { status: "Closed", nextStep: "Nothing; this task is closed." };
   if (workflow === undefined) return { status: "In progress", nextStep: "Follow the task where it was started." };
   const name = workflowDocumentName(workflow);
@@ -3090,7 +3105,7 @@ function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: boolean, 
     case "PLAN/BLOCKED": return { status: `Stopped while writing the ${name}`, nextStep: `Retry planning or close the task ${inSlack}.` };
     // A teammate reading the page is not the one who approves.
     case "PLAN_REVIEW/WAITING":
-      if (workflow.blockReason === E2E_PLAN_REFERENCE_INVALID_BLOCK_REASON) return owner
+      if (isE2EPlanCorrectionBlockReason(workflow.blockReason)) return owner
         ? { status: "The E2E plan needs correction", nextStep: `Request changes to submit a corrected E2E plan, or close the task ${inSlack}.` }
         : { status: "The E2E plan needs correction", nextStep: `The task owner must request changes and submit a corrected E2E plan, or close the task ${inSlack}.` };
       return owner
@@ -3107,7 +3122,16 @@ function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: boolean, 
       ? { status: "Preparing the checks", nextStep: "The checks start when workspace compute is ready." }
       : { status: "Preparing the checks", nextStep: "The approved checks start shortly." };
     case "VERIFY/READY": case "VERIFY/RUNNING": return { status: "Running the checks", nextStep: "The code and security reviews start when the checks pass." };
-    case "VERIFY/BLOCKED": return { status: "The checks didn't pass or couldn't run", nextStep: `Send it back to coding, retry the checks, or close the task ${inSlack}.` };
+    case "VERIFY/BLOCKED": {
+      // A block of a browser and API round names its own way on: new code does not fix a runtime that needs qualifying or a selection that needs approving again.
+      if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_RUNTIME_UNUSABLE_PREFIX) === true) {
+        return { status: "The browser and API checks can't run on the runtime as it is now", nextStep: `An administrator must qualify the runtime again; then retry the checks, or close the task ${inSlack}.` };
+      }
+      if (workflow.blockReason?.startsWith(WORKFLOW_APPLICATION_SELECTION_CHANGED_PREFIX) === true) {
+        return { status: "The approved browser and API checks no longer match the runtime", nextStep: `Retry the checks to approve the plan again against what is ready now, or close the task ${inSlack}.` };
+      }
+      return { status: "The checks didn't pass or couldn't run", nextStep: `Send it back to coding, retry the checks, or close the task ${inSlack}.` };
+    }
     case "REVIEW/READY": case "REVIEW/WAITING": case "REVIEW/RUNNING": return { status: "Code and security reviews are running", nextStep: "A draft pull request opens when both pass." };
     case "REVIEW/BLOCKED": return { status: "The reviews found problems or couldn't finish", nextStep: `Send it back to coding, retry the reviews, or close the task ${inSlack}.` };
     // The last try to open it failed: said until the next try's result, so the page never says "opening" over a failure.
