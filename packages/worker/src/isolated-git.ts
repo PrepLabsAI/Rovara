@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { agentXError } from "@agentx/contracts";
-import { candidateWriteStep, commitLock, kindIn, lockIn, openDirectory, readFileIn, releaseLock, workTreeByDescriptor, type DirectoryLock, type HeldDirectory } from "./candidate-fs.js";
+import { candidateWriteStep, kindIn, openDirectory, readFileIn, workTreeByDescriptor, type HeldDirectory } from "./candidate-fs.js";
 import { assertNoEmbeddedRepositories, assertNoLfsFiles, isolatedGitEnvironment } from "./git.js";
 
 const execFile = promisify(execFileCallback);
@@ -131,8 +131,6 @@ export interface IsolatedGit {
   bytes(args: readonly string[], options?: IsolatedRunOptions): Promise<Buffer>;
   /** The commit HEAD names, read from the candidate's HEAD and refs files. */
   headCommit(): Promise<string>;
-  /** Moves what HEAD names (the branch it points at, or HEAD itself when detached) from `expected` to `next`, under Git's own lock file protocol. */
-  advanceHead(expected: string, next: string): Promise<void>;
   /** Copies the objects Git created in the throwaway repository into the candidate's object directory. Idempotent; a `"write"` session also does it when `use` returns. */
   exportObjects(): Promise<void>;
 }
@@ -192,7 +190,6 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
       text: async (args, options = {}) => (await run(args, options, "utf8")) as string,
       bytes: async (args, options = {}) => (await run(args, options, "buffer")) as unknown as Buffer,
       headCommit: () => readHead(layout).then((head) => head.commit),
-      advanceHead: (expected, next) => advanceHead(layout, expected, next),
     });
     if (mode === "write") await exportObjects();
     return result;
@@ -338,37 +335,6 @@ async function readHeadHeld(git: HeldDirectory, parent?: { directory: HeldDirect
 export async function readHead(layout: CandidateLayout): Promise<Head & { commit: string }> {
   const git = await openDirectory(layout.gitDirectory);
   try { return await readHeadHeld(git); } finally { await git.close(); }
-}
-
-/**
- * Moves HEAD's commit from `expected` to `next` the way `git update-ref HEAD <next> <expected>` does, minus the reflog (no entry is written): the ref file is
- * created exclusively as `<name>.lock` (another Git holding that lock refuses us, as it would refuse itself), HEAD's own lock is held too when HEAD names a
- * branch, so a concurrent checkout cannot move HEAD underneath, the commit it holds is checked to still be `expected`, and the lock is renamed over the ref.
- * Every directory down to the ref is opened once, without following a symlink, and every operation goes through those descriptors (candidate-fs.ts). No Git
- * process runs in the candidate's repository, so no config or hook of it can.
- */
-async function advanceHead(layout: CandidateLayout, expected: string, next: string): Promise<void> {
-  if (!HEX40.test(expected) || !HEX40.test(next)) throw new Error("candidate commit is invalid");
-  const git = await openDirectory(layout.gitDirectory);
-  const held: DirectoryLock[] = [];
-  let parent: Awaited<ReturnType<typeof openRefParent>>;
-  try {
-    const head = await readHeadHeld(git);
-    if (head.kind === "branch") parent = await openRefParent(git, head.ref, true);
-    const headLock = await lockIn(git, "HEAD");
-    held.push(headLock);
-    const targetLock = head.kind === "detached" ? headLock : await lockIn(parent!.directory, parent!.leaf);
-    if (targetLock !== headLock) held.push(targetLock);
-    const locked = await readHeadHeld(git, parent);
-    if (locked.commit !== expected || locked.kind !== head.kind || (locked.kind === "branch" && head.kind === "branch" && locked.ref !== head.ref)) {
-      throw new Error("candidate HEAD moved while it was being updated");
-    }
-    await commitLock(targetLock, `${next}\n`);
-  } finally {
-    for (const lock of held) await releaseLock(lock);
-    await parent?.close();
-    await git.close();
-  }
 }
 
 export { openRefParent, readHeadHeld };
