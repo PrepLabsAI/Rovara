@@ -4725,6 +4725,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "Environment": {
           "Variables": {
             "AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID": "agentx-staging-project-setup-runtime-v1",
+            "ARTIFACT_BUCKET_NAME": {
+              "Ref": "Artifacts82DD59A1",
+            },
             "DELETER_ARN": {
               "Ref": "SessionsDeleterB48741EA",
             },
@@ -4966,6 +4969,24 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   ],
                 },
               ],
+            },
+            {
+              "Action": "s3:GetObject",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/workflow-e2e-admissions/*",
+                  ],
+                ],
+              },
             },
             {
               "Action": "kms:Sign",

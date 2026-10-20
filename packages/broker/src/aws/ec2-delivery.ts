@@ -7,6 +7,7 @@ import {
   workerInvokeTokenPayload,
   workflowPublicationContext,
   workflowPublicationContextDigest,
+  type E2EWorkflowAdmissionRef,
   type Ec2RuntimeBinding,
   type WorkerInvocation,
 } from "@agentx/contracts";
@@ -50,6 +51,12 @@ export interface Ec2DeliveryDependencies {
    * A failure fails the attempt (the run must not go out with the record still saying 2).
    */
   applicationPlanNotNegotiated: (record: Ec2OutboxRecord) => Promise<void>;
+  /**
+   * The schemaVersion of the admission a CHECKS invocation's reference names, read from the stored object and held to the reference's content address; undefined when it
+   * cannot be read. With it, the dispatcher does not trust the reference's `kind` alone: a reference whose kind disagrees with its admission is refused before delivery.
+   * Without it (a deployment that cannot read admissions) only the kind decides, and the worker still cross-checks.
+   */
+  workflowE2EAdmissionSchemaVersion?: (reference: E2EWorkflowAdmissionRef) => Promise<string | undefined>;
   /** Rechecks fresh PEOPLE authority after compute is ready, immediately before signing and POST. */
   guardTaskDispatch?: (record: Ec2OutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
   /** Loads and validates the durable internal readiness marker before any session provisioning. */
@@ -88,6 +95,7 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     const workflowE2EReadiness = storedReadiness === "READINESS";
     if (workflowE2EReadiness && await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
     if (invocation.kind === "project-setup-smoke" && await guardCurrentAuthority() === "PARKED") return "WAITING_FOR_TASK_ACCESS";
+    await checkAdmissionKind(invocation, dependencies.workflowE2EAdmissionSchemaVersion);
     let binding: Ec2RuntimeBinding | undefined;
     let session: { ready: true; generation: number; privateIp: string } | { ready: false; generation: number; state: string };
     if (invocation.kind === "project-setup-smoke") {
@@ -158,6 +166,27 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     }
     return "DELIVERED";
   };
+}
+
+const APPLICATION_ADMISSION_SCHEMA = "workflow-e2e-application-admission/v1";
+const PORTABLE_ADMISSION_SCHEMA = "workflow-e2e-admission/v1";
+
+/**
+ * The reference's `kind` decides which worker may receive an application round, so it is checked against the admission it names before any compute is started: a reference
+ * without `kind` that names an application admission would bypass the gate, and one marked application that names a portable admission is a broker defect. Both are refused.
+ */
+async function checkAdmissionKind(invocation: WorkerInvocation, read: Ec2DeliveryDependencies["workflowE2EAdmissionSchemaVersion"]): Promise<void> {
+  if (read === undefined || invocation.kind !== "task" || invocation.payload.workflowE2EAdmission === undefined) return;
+  const reference = invocation.payload.workflowE2EAdmission;
+  let schemaVersion: string | undefined;
+  try { schemaVersion = await read(reference); } catch { schemaVersion = undefined; }
+  if (schemaVersion === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "could not read the E2E admission to check its kind against the reference; no round was sent");
+  if (schemaVersion !== APPLICATION_ADMISSION_SCHEMA && schemaVersion !== PORTABLE_ADMISSION_SCHEMA) {
+    throw agentXError("CONFIG_INVALID", "the E2E admission is of a kind this dispatcher does not know; no round was sent");
+  }
+  if ((schemaVersion === APPLICATION_ADMISSION_SCHEMA) !== (reference.kind === "application")) {
+    throw agentXError("CONFIG_INVALID", "the E2E admission reference's kind does not match the admission it names; no round was sent");
+  }
 }
 
 /**

@@ -285,11 +285,14 @@ export class ControlPlaneStack extends Stack {
         STATE_TABLE_NAME: state.tableName,
         AGENTX_PROJECT_SETUP_RUNTIME_CATALOG_ID: projectSetupRuntimeCatalogId,
         MAX_DISPATCH_ATTEMPTS: String(MAX_DISPATCH_ATTEMPTS),
+        ARTIFACT_BUCKET_NAME: artifacts.bucketName,
       },
       Duration.seconds(60),
     );
     dispatchQueue.grantConsumeMessages(dispatcher);
     state.grantReadWriteData(dispatcher);
+    // The dispatcher holds a CHECKS reference's kind to the admission it names; it reads only the immutable admission objects.
+    dispatcher.addToRolePolicy(new iam.PolicyStatement({ actions: ["s3:GetObject"], resources: [artifacts.arnForObjects("workflow-e2e-admissions/*")] }));
     // EC2 workers (#76): the idle reaper and reconciler find sessions by state through this sparse index.
     state.addGlobalSecondaryIndex({
       indexName: WORKSPACE_SESSION_STATE_INDEX.name,
