@@ -1,7 +1,7 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type { ProjectDefinition } from "@agentx/contracts";
@@ -12,6 +12,7 @@ import { allowGitFileTransportForTests } from "../../packages/worker/src/git.js"
 import { maintainPullRequest } from "../../packages/worker/src/maintain-pull-request.js";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { publishWorkspace } from "../../packages/worker/src/publish.js";
+import { candidateChanges, candidateDiff } from "../../packages/worker/src/verification/diff.js";
 import { gitOriginalCode } from "../../packages/worker/src/verification/original-code.js";
 import { installGitShim, type GitShim } from "../support/git-shim.js";
 import { commitAs, createPrFixture, git, type FixtureMode, type FixtureOptions, type PrFixture } from "../support/pr-fixture.js";
@@ -22,6 +23,7 @@ import { commitAs, createPrFixture, git, type FixtureMode, type FixtureOptions, 
 const execFileAsync = promisify(execFileCallback);
 const directories: string[] = [];
 let disallowFileTransport: () => void = () => undefined;
+const sources = new URL("../../packages/worker/src/", import.meta.url).pathname;
 
 beforeEach(async () => {
   disallowFileTransport = allowGitFileTransportForTests();
@@ -258,5 +260,59 @@ describe("class A: preparation checks the resolved commit out", () => {
     });
     expect(await markersIn(root)).toEqual([]);
     expect(await readFile(join(destination, "README.md"), "utf8")).toBe("# demo\n");
+  });
+});
+
+describe("class B: tree-only reads", () => {
+  it("run in a throwaway repository, not in the workspace repository (candidateDiff, candidateChanges)", async () => {
+    const box = await simpleWorkspace();
+    await writeFile(join(box.directory, "tracked.txt"), "2\n", "utf8");
+    await git(box.directory, ["add", "."]);
+    const tree = (await git(box.directory, ["write-tree"])).trim();
+    const shim = await withShim(box.root, box.directory);
+    await shim.clear();
+    const diff = await candidateDiff({ directory: box.directory, baseCommitSha: box.commit, treeSha: tree, maxBytes: 1_000_000 });
+    expect(diff.text).toContain("+2");
+    expect(await candidateChanges({ directory: box.directory, baseCommitSha: box.commit, treeSha: tree })).toHaveLength(1);
+    const calls = await shim.invocations();
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    const own = join(box.directory, ".git");
+    for (const call of calls) {
+      expect(call.args, call.args.join(" ")).not.toContain("-C");
+      expect(call.cwd, call.args.join(" ")).not.toBe(box.directory);
+      expect(call.args.some((arg) => arg.startsWith("--git-dir=") && arg !== `--git-dir=${own}`) || call.args[0] === "init", call.args.join(" ")).toBe(true);
+    }
+  });
+});
+
+describe("no worker module starts Git in a workspace repository's own git directory", () => {
+  async function workerSources(directory = sources): Promise<string[]> {
+    const found: string[] = [];
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) found.push(...await workerSources(path));
+      else if (entry.name.endsWith(".ts")) found.push(path);
+    }
+    return found;
+  }
+
+  it("uses `-C <directory>` only where the repository is not a workspace's (the config probe in git.ts, the SWE-bench harness)", async () => {
+    const offenders: string[] = [];
+    for (const path of await workerSources()) {
+      const name = relative(sources, path);
+      if (name === "git.ts" || name.startsWith("swebench/")) continue;
+      if ((await readFile(path, "utf8")).includes('"-C"')) offenders.push(name);
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("passes no workspace directory to gitHardenedEnvironment, which reads a config once: only git-auth.ts, for worker-owned repositories", async () => {
+    const offenders: string[] = [];
+    for (const path of await workerSources()) {
+      const name = relative(sources, path);
+      if (name === "git.ts" || name === "git-auth.ts") continue;
+      if ((await readFile(path, "utf8")).includes("gitHardenedEnvironment(")) offenders.push(name);
+    }
+    expect(offenders).toEqual([]);
   });
 });
