@@ -1709,6 +1709,11 @@ async function channelDriver(deps: DeveloperTaskRouteDependencies, task: Develop
   return `task ${task.taskId} is running a request from ${who} in its shared Slack thread${waiting}; wait with agentx_wait_for_task, stop it with agentx_cancel_task, or make the thread view only with agentx_share_task`;
 }
 
+/** The reasons of the caller's own extra items when only they cancelled an acceptance (the workspace was free), else undefined. */
+function extraItemsCancelled(error: unknown): string[] | undefined {
+  return error instanceof AgentXError && error.code === "CONFIG_INVALID" ? (error as { extraCancellation?: string[] }).extraCancellation : undefined;
+}
+
 /** The existing handlers' busy answers, in the developer's words (FR-049's TASK_BUSY). */
 function busy(error: unknown, taskId: string): never {
   if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || error.code === "WORKSPACE_NOT_READY")) {
@@ -2730,7 +2735,8 @@ async function startAcceptedPublication(deps: DeveloperTaskRouteDependencies, ta
       { ...(deps.issuer === undefined ? {} : { taskPageUrl: taskPageUrl(deps.issuer, taskId) }) });
     await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName, Key: { pk: WORKFLOW_DISPATCH_PK, sk: `${taskId}#${ready.revision}` } }));
   } catch (error) {
-    log(deps, { event: "developer.task_publication_start_deferred", taskId, error: error instanceof Error ? error.name : "unknown" });
+    log(deps, { event: "developer.task_publication_start_deferred", taskId, error: error instanceof Error ? error.name : "unknown",
+      ...(error instanceof AgentXError ? { code: error.code } : {}) });
   }
 }
 
@@ -3976,6 +3982,10 @@ export async function startTaskWorkflowPublicationFromSystem(
   if (attempt > 1 && !ownerRetry) return "STALE";
   const requestId = workflowRequestId("agentx-auto-publish", taskId, expected.workflowRevision, expected.candidateDigest, repository.repositoryId, attempt);
   const approvedPlan = await approvedPlanForPullRequest(deps, workflow);
+  // The catalog guard below needs the project's latest-revision pointer. A catalog row written before the pointer existed
+  // is repaired from the revision history first (CONFIG_INVALID naming the project when that is not possible). A required
+  // E2E task carries the same guard in its current-authority checks, which repair it where they are built.
+  if (workflow.e2e?.required !== true) await deps.actions.ensureProjectCatalogPointer(task.project);
   const publication = await workflowPublicationAuthority(deps, task, workflow, approvedPlan, workflow.revision + (ownerRetry ? 1 : 0));
   if (publication === undefined) return "STALE";
   const title = `AgentX: ${inertTaskTitle(task.title)}`.slice(0, 256);
@@ -3998,6 +4008,10 @@ export async function startTaskWorkflowPublicationFromSystem(
       : { ConditionCheck: { TableName: deps.tableName, Key: taskKey(taskId), ...unchanged, ExpressionAttributeValues: at } };
   // The base the task's code was reviewed against is the published commit's parent, which the broker checks on GitHub.
   const baseCommitSha = (workflow.reviewBase ?? task.preparedBase)?.find((entry) => entry.repositoryId === repository.repositoryId)?.baseCommitSha;
+  // What each extra item below checks, in the same order, for naming the one a cancelled acceptance failed on.
+  const extraItemLabels = ["the task", ...currentE2EChecks.map(() => "the current E2E authority"),
+    ...publication.conditions.map(() => `project ${task.project}'s catalog pointer`), "the turn record",
+    ...(dispatchAccess === undefined ? [] : ["the task's people access"])];
   let accepted: Awaited<ReturnType<DeveloperTaskActions["acceptPullRequest"]>>;
   try {
     accepted = await deps.actions.acceptPullRequest(developerTaskIdentity(task), task.workspaceId, {
@@ -4021,9 +4035,15 @@ export async function startTaskWorkflowPublicationFromSystem(
       admittedWorkflowAuthorityDigest: publication.authority.workflowAuthorityDigest } });
   } catch (error) {
     // The task moved on (or closed) between the read and the commit: nothing was started, and nothing is due.
-    if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY") {
+    const failedExtras = extraItemsCancelled(error);
+    if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || failedExtras !== undefined)) {
       const fresh = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
       if (fresh === undefined || fresh.closedAt !== undefined || fresh.workflow?.revision !== workflow.revision || fresh.workflow.state !== workflow.state) return "STALE";
+    }
+    // The workspace was free; one of the publication's own conditions failed. Say which, never "busy".
+    if (failedExtras !== undefined) {
+      const names = failedExtras.flatMap((code, index) => code === "ConditionalCheckFailed" ? [extraItemLabels[index] ?? `item ${index}`] : []);
+      throw agentXError("CONFIG_INVALID", `AgentX could not start opening the pull request because ${names.join(" and ")} changed while it was starting; try again`);
     }
     throw error;
   }
@@ -4114,7 +4134,7 @@ async function startTaskWorkflowPullRequestUpdate(
       return block("HEAD_MOVED");
     }
     // The task moved on (or closed) between the read and the commit: nothing was started, and nothing is due.
-    if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY") {
+    if (error instanceof AgentXError && (error.code === "WORKSPACE_BUSY" || extraItemsCancelled(error) !== undefined)) {
       const fresh = await get<DeveloperTaskRecord>(deps, taskKey(task.taskId));
       if (fresh === undefined || fresh.closedAt !== undefined || fresh.workflow?.revision !== workflow.revision || fresh.workflow.state !== workflow.state) return "STALE";
     }

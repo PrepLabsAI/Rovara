@@ -635,6 +635,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
       if (error instanceof AgentXError && error.code === "NOT_FOUND") return undefined;
       throw error;
     }),
+    ensureProjectCatalogPointer: (name) => ensureProjectCatalogPointer(dependencies, name),
     preparation: (identity, project, requestId) => newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId),
     workspace: (id) => requireWorkspace(dependencies, id),
     operations: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
@@ -1760,62 +1761,8 @@ async function registerProject(
     };
   };
   const key = projectKey(definition.name, definition.revision);
-  const readCatalogSnapshot = async (): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number }> => {
-    const catalog = await getItem<{ entityType?: string; name?: string; latestRevision?: number }>(dependencies, projectCatalogKey(definition.name));
-    if (catalog !== undefined && (catalog.entityType !== "PROJECT_CATALOG" || catalog.name !== definition.name
-      || (catalog.latestRevision !== undefined && (!Number.isSafeInteger(catalog.latestRevision) || catalog.latestRevision < 1)))) {
-      throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is unavailable or invalid");
-    }
-    let newestRevision = 0;
-    try {
-      const newest = await requireLatestProject(dependencies, definition.name);
-      newestRevision = newest.definition.revision;
-      if (newest.definition.name !== definition.name || !Number.isSafeInteger(newestRevision) || newestRevision < 1) {
-        throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is invalid");
-      }
-    } catch (error) {
-      if (!(error instanceof AgentXError) || error.code !== "NOT_FOUND") throw error;
-    }
-    if (catalog?.latestRevision !== undefined && catalog.latestRevision > newestRevision) {
-      throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is ahead of registered revision history");
-    }
-    return { catalog, newestRevision };
-  };
-  const repairCatalogPointerFromHistory = async (): Promise<void> => {
-    // This is an index-only repair after the immutable revision has already been
-    // authenticated. It never rewrites project, membership, approval, or setup rows.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      const snapshot = await readCatalogSnapshot();
-      const targetRevision = snapshot.newestRevision;
-      if (targetRevision < 1) throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is unavailable");
-      if (snapshot.catalog?.latestRevision === targetRevision) return;
-      const key = projectCatalogKey(definition.name);
-      try {
-        await dependencies.documentClient.send(new UpdateCommand({
-          TableName: dependencies.tableName,
-          Key: key,
-          UpdateExpression: "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
-          ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)"
-            : snapshot.catalog.latestRevision === undefined
-              ? "entityType = :entity AND #name = :name AND attribute_not_exists(latestRevision)"
-              : "entityType = :entity AND #name = :name AND latestRevision = :observed AND latestRevision < :revision",
-          ExpressionAttributeNames: { "#name": "name" },
-          ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":revision": targetRevision,
-            ":now": new Date().toISOString(),
-            ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
-        }));
-        return;
-      } catch (error) {
-        if (!isConditional(error)) throw error;
-        if (attempt === 2) throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer could not be reconciled with immutable revision history");
-        const refreshed = await readCatalogSnapshot();
-        if (refreshed.newestRevision <= snapshot.newestRevision
-          && (refreshed.catalog?.latestRevision ?? 0) <= (snapshot.catalog?.latestRevision ?? 0)) {
-          throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer changed without revision history advancing");
-        }
-      }
-    }
-  };
+  const readCatalogSnapshot = () => readProjectCatalogSnapshot(dependencies, definition.name);
+  const repairCatalogPointerFromHistory = () => repairProjectCatalogPointerFromHistory(dependencies, definition.name);
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
     // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
@@ -1890,6 +1837,83 @@ async function registerProject(
     }
   }
   throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration exceeded its bounded catalog retries");
+}
+
+async function readProjectCatalogSnapshot(dependencies: AwsBrokerDependencies, projectName: string): Promise<{ catalog: { entityType?: string; name?: string; latestRevision?: number } | undefined; newestRevision: number }> {
+  const catalog = await getItem<{ entityType?: string; name?: string; latestRevision?: number }>(dependencies, projectCatalogKey(projectName));
+  if (catalog !== undefined && (catalog.entityType !== "PROJECT_CATALOG" || catalog.name !== projectName
+    || (catalog.latestRevision !== undefined && (!Number.isSafeInteger(catalog.latestRevision) || catalog.latestRevision < 1)))) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is unavailable or invalid");
+  }
+  let newestRevision = 0;
+  try {
+    const newest = await requireLatestProject(dependencies, projectName);
+    newestRevision = newest.definition.revision;
+    if (newest.definition.name !== projectName || !Number.isSafeInteger(newestRevision) || newestRevision < 1) {
+      throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is invalid");
+    }
+  } catch (error) {
+    if (!(error instanceof AgentXError) || error.code !== "NOT_FOUND") throw error;
+  }
+  if (catalog?.latestRevision !== undefined && catalog.latestRevision > newestRevision) {
+    throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog is ahead of registered revision history");
+  }
+  return { catalog, newestRevision };
+}
+
+async function repairProjectCatalogPointerFromHistory(dependencies: AwsBrokerDependencies, projectName: string): Promise<void> {
+  // This is an index-only repair after the immutable revision has already been
+  // authenticated. It never rewrites project, membership, approval, or setup rows.
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const snapshot = await readProjectCatalogSnapshot(dependencies, projectName);
+    const targetRevision = snapshot.newestRevision;
+    if (targetRevision < 1) throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revision history is unavailable");
+    if (snapshot.catalog?.latestRevision === targetRevision) return;
+    const key = projectCatalogKey(projectName);
+    try {
+      await dependencies.documentClient.send(new UpdateCommand({
+        TableName: dependencies.tableName,
+        Key: key,
+        UpdateExpression: "SET entityType = :entity, #name = :name, latestRevision = :revision, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+        ConditionExpression: snapshot.catalog === undefined ? "attribute_not_exists(pk)"
+          : snapshot.catalog.latestRevision === undefined
+            ? "entityType = :entity AND #name = :name AND attribute_not_exists(latestRevision)"
+            : "entityType = :entity AND #name = :name AND latestRevision = :observed AND latestRevision < :revision",
+        ExpressionAttributeNames: { "#name": "name" },
+        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": projectName, ":revision": targetRevision,
+          ":now": new Date().toISOString(),
+          ...(snapshot.catalog?.latestRevision === undefined ? {} : { ":observed": snapshot.catalog.latestRevision }) },
+      }));
+      return;
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      if (attempt === 2) throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer could not be reconciled with immutable revision history");
+      const refreshed = await readProjectCatalogSnapshot(dependencies, projectName);
+      if (refreshed.newestRevision <= snapshot.newestRevision
+        && (refreshed.catalog?.latestRevision ?? 0) <= (snapshot.catalog?.latestRevision ?? 0)) {
+        throw agentXError("PROJECT_REVISION_MISMATCH", "project catalog pointer changed without revision history advancing");
+      }
+    }
+  }
+}
+
+
+/**
+ * Publication authority guards the project's catalog row with `latestRevision = :latest`. Rows written before the
+ * catalog pointer existed have no `latestRevision`, and the guard can never hold for them. Before such a guard is
+ * built, the pointer is repaired from the immutable revision history by the same index-only repair registration
+ * uses (conditional on the attribute still being absent). A project whose history is missing or ambiguous is refused
+ * by name with CONFIG_INVALID, never as a busy workspace. A catalog row that already has its pointer is left alone.
+ */
+async function ensureProjectCatalogPointer(dependencies: AwsBrokerDependencies, projectName: string): Promise<void> {
+  const catalog = await getItem<{ latestRevision?: unknown }>(dependencies, projectCatalogKey(projectName));
+  if (catalog?.latestRevision !== undefined) return;
+  try {
+    await repairProjectCatalogPointerFromHistory(dependencies, projectName);
+  } catch (error) {
+    if (!(error instanceof AgentXError) || error.code !== "PROJECT_REVISION_MISMATCH") throw error;
+    throw agentXError("CONFIG_INVALID", `project ${projectName} has no latest-revision pointer and it cannot be repaired from its revision history (${error.message.replace(/^PROJECT_REVISION_MISMATCH: /u, "")}); an administrator must register its latest revision again`);
+  }
 }
 
 async function createProjectSetupAdmissionRows(
@@ -4278,6 +4302,32 @@ async function acceptTask(
   return { operation: publicOperation(operation), duplicate: false };
 }
 
+/** The four items every accepted request writes first: the workspace claim, the operation, its outbox row and the idempotency record. */
+const ACCEPTANCE_OWN_ITEMS = ["workspace", "operation", "outbox", "idempotency"] as const;
+
+/**
+ * A cancelled acceptance transaction, read item by item and logged (item names and DynamoDB reason codes only). When
+ * the four own items held and only the caller's extra items failed their conditions, the workspace was not the
+ * conflict: the refusal is CONFIG_INVALID naming the extra items, not WORKSPACE_BUSY. `extraCancellation` keeps each
+ * extra item's reason in the order the caller built them, so the caller can name which one it was.
+ */
+function acceptancePullRequestCancellation(error: unknown, context: { workspaceId: string; requestId: string; action: string }): AgentXError {
+  const reasons = (error as { CancellationReasons?: Array<{ Code?: string }> }).CancellationReasons ?? [];
+  const codes = reasons.map((reason) => reason.Code ?? "None");
+  console.log(JSON.stringify({ component: "broker", event: "pull_request.acceptance_cancelled", action: context.action,
+    workspaceId: context.workspaceId, requestId: context.requestId,
+    items: codes.map((code, index) => ({ item: index < ACCEPTANCE_OWN_ITEMS.length ? ACCEPTANCE_OWN_ITEMS[index] : `extra-${index - ACCEPTANCE_OWN_ITEMS.length}`, code })) }));
+  const extraCancellation = codes.slice(ACCEPTANCE_OWN_ITEMS.length);
+  const ownItemsHeld = codes.length > ACCEPTANCE_OWN_ITEMS.length
+    && codes.slice(0, ACCEPTANCE_OWN_ITEMS.length).every((code) => code !== "ConditionalCheckFailed");
+  const failedExtras = extraCancellation.flatMap((code, index) => code === "ConditionalCheckFailed" ? [index] : []);
+  if (ownItemsHeld && failedExtras.length > 0) {
+    return Object.assign(agentXError("CONFIG_INVALID",
+      `the records this request depends on changed while it was being accepted (extra item${failedExtras.length === 1 ? "" : "s"} ${failedExtras.join(", ")} failed its condition); the workspace itself was free`), { extraCancellation });
+  }
+  return Object.assign(agentXError("WORKSPACE_BUSY", "workspace already has an active writer"), { extraCancellation });
+}
+
 async function acceptPullRequest(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
@@ -4454,7 +4504,7 @@ async function acceptPullRequest(
           duplicate: true,
         };
       }
-      throw agentXError("WORKSPACE_BUSY", "workspace already has an active writer");
+      throw acceptancePullRequestCancellation(error, { workspaceId, requestId: request.requestId, action: "publish" });
     }
     throw error;
   }
@@ -4751,7 +4801,7 @@ async function acceptPullRequestLifecycle(
     // The workflow's push, as its publication: a concurrent start of the same request is a duplicate, anything else busy.
     if (candidate === undefined || !isConditional(error)) throw error;
     const concurrent = await getItem<{ operationId: string; payloadHash: string }>(dependencies, idempotencyKey);
-    if (concurrent === undefined) throw agentXError("WORKSPACE_BUSY", "workspace already has an active writer");
+    if (concurrent === undefined) throw acceptancePullRequestCancellation(error, { workspaceId, requestId: request.requestId, action: request.action });
     if (concurrent.payloadHash !== requestHash) throw agentXError("IDEMPOTENCY_CONFLICT", "request ID was reused with another payload");
     return { operation: publicOperation(await requireOperation(dependencies, workspaceId, concurrent.operationId)), duplicate: true };
   }
@@ -6610,7 +6660,7 @@ async function verifyProjectSetupSmokeEvidence(
   }
 }
 
-interface WorkflowE2EVerificationDiagnostic {
+export interface WorkflowE2EVerificationDiagnostic {
   reason?: string;
   /** Exact authority rows validated for this result, carried into the same task-state transaction. */
   authorityChecks?: Array<Record<string, unknown>>;
@@ -6836,8 +6886,8 @@ async function verifyWorkflowE2EEvidence(
   } catch { return unavailable("verification-exception"); }
 }
 
-/** Rebuilds the admitted feature context from current canonical approval, project policy, source and runtime rows. */
-async function workflowE2ECurrentAuthorityIsValid(
+/** Rebuilds the admitted feature context from current canonical approval, project policy, source and runtime rows. Exported for the contract tests. */
+export async function workflowE2ECurrentAuthorityIsValid(
   dependencies: AwsBrokerDependencies,
   task: DeveloperTaskRecord,
   candidate: ReturnType<typeof CandidateManifestSchema.parse>,
@@ -6868,6 +6918,15 @@ async function workflowE2ECurrentAuthorityIsValid(
     const project = await requireProject(dependencies, task.project, task.startingRevision);
     const latestProject = await requireLatestProject(dependencies, task.project);
     if (latestProject.setupApproval === undefined) return reject("current-project-setup-approval-unavailable");
+    // A catalog row written before the latest-revision pointer existed is repaired from the revision history first;
+    // the strict comparison below and the condition check in the transaction then stay exact.
+    stage = "project-catalog-pointer";
+    try {
+      await ensureProjectCatalogPointer(dependencies, task.project);
+    } catch (error) {
+      if (error instanceof AgentXError && error.code === "CONFIG_INVALID") return reject(`config-invalid-project-catalog-pointer-unrepairable:${task.project}`);
+      throw error;
+    }
     const catalogKey = projectCatalogKey(task.project);
     const projectCatalog = await getItem<Record<string, unknown>>(dependencies, catalogKey);
     if (projectCatalog?.entityType !== "PROJECT_CATALOG" || projectCatalog.name !== task.project
