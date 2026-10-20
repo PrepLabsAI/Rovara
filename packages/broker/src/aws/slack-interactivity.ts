@@ -163,6 +163,9 @@ function authorizationErrorCode(error: unknown): string | undefined {
   return typeof code === "string" && code.length > 0 ? code : undefined;
 }
 
+/** Broker answers that say "no" about this member and this task: retrying cannot change them. */
+const DEFINITE_ACCESS_REFUSALS: ReadonlySet<string> = new Set(["FORBIDDEN", "TASK_NOT_FOUND", "TASK_ACCESS_DENIED", "PROJECT_ACCESS_DENIED", "PROJECT_TASKS_DISABLED"]);
+
 interface HttpResponse { statusCode: number; headers: Record<string, string>; body: string }
 
 function respond(statusCode: number, body: unknown): HttpResponse {
@@ -1183,11 +1186,11 @@ export function workflowSlackHandlers(deps: {
     action: "decide" | "retry" | "publish" | "feedback" | "close" | "control", legacyMessage: string, mention = true): Promise<void> => {
     if (deps.authorize !== undefined) {
       try { await deps.authorize(taskId, userId, thread, action); } catch (error) {
-        // Only a definite "not yours" or "no such task" answer is the owner's message; anything else (a broker fault, a timeout, a malformed reply)
+        // Only a definite "not yours", "no such task" or "no access" answer is the owner's message; anything else (a broker fault, a timeout, a malformed reply)
         // says nothing about the member, so it is logged with its code and answered as a retryable failure.
         const code = authorizationErrorCode(error);
         console.log(JSON.stringify({ component: "slack-interactivity", event: "workflow.authorize_failed", taskId, action, code: code ?? "UNKNOWN", errorName: errorName(error) }));
-        throw new WorkflowInteractionRefusal(code === "FORBIDDEN" || code === "TASK_NOT_FOUND" ? legacyMessage : AUTHORIZATION_UNAVAILABLE_TEXT);
+        throw new WorkflowInteractionRefusal(code !== undefined && DEFINITE_ACCESS_REFUSALS.has(code) ? legacyMessage : AUTHORIZATION_UNAVAILABLE_TEXT);
       }
       return;
     }
