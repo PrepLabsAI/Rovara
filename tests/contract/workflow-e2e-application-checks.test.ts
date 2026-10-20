@@ -7,7 +7,7 @@ import { E2E_HARD_LIMITS, WorkerInvocationSchema, type E2EApplicationExecutionAd
 import { createDockerApplicationHost, DEFAULT_DEADLINE_GRACE_MS, STALE_RUN_SWEEP_AGE_MS, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e-checks.js";
-import { createEvidenceBudget } from "../../packages/worker/src/workflow-e2e-application-checks.js";
+import { DIAGNOSTICS_NOTICE, createEvidenceBudget } from "../../packages/worker/src/workflow-e2e-application-checks.js";
 import { E2E_APPLICATION_AGGREGATE_EVIDENCE_MAX_BYTES, E2E_APPLICATION_GROUP_EVIDENCE_MAX_BYTES } from "@agentx/contracts";
 import type { CandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
 import type { WorkflowE2EApplicationRuntime } from "../../packages/worker/src/workflow-e2e-application-checks.js";
@@ -222,7 +222,7 @@ describe("workflow E2E application rounds", () => {
 
   describe("evidence when a group ends without a qualification", () => {
     const shardRun = (shardId: string, report: Buffer) => ({ shardId, launchId: randomUUID(), rawReportBytes: new Uint8Array(report), runStderrBytes: new Uint8Array(Buffer.from("stderr")) });
-    const diagnosticsOf = (s: Awaited<ReturnType<typeof setup>>) => evidenceOf(s.saved, s.runId).groupRun.diagnostics as { shardReports?: Array<{ shardId: string; byteLength: number; truncated: boolean; rawReportBase64: string }> };
+    const diagnosticsOf = (s: Awaited<ReturnType<typeof setup>>) => evidenceOf(s.saved, s.runId).groupRun.diagnostics as { notice?: string; shardReports?: Array<{ shardId: string; byteLength: number; truncated: boolean; rawReportBase64: string }> };
 
     it("keeps each shard's raw report, base64 and bounded, when the collector throws", async () => {
       const first = Buffer.from(JSON.stringify({ run: { status: "passed" } }));
@@ -242,6 +242,19 @@ describe("workflow E2E application rounds", () => {
       expect(kept.byteLength).toBeLessThanOrEqual(64 * 1024);
       expect(kept.byteLength).toBeGreaterThan(0);
       expect(kept.equals(second.subarray(0, kept.byteLength))).toBe(true);
+    });
+
+    it("labels the diagnostics as the application's own output, for operators only, and keeps at most eight shards", async () => {
+      const shards = Array.from({ length: 10 }, (_, index) => shardRun(`shard-${index}`, Buffer.from(`report-${index}`)));
+      const s = await setup({ assembled: { ...assembledRun, shards } });
+      s.fake.onExecutor = s.okOutput;
+      s.collect.mockImplementationOnce(() => { throw new Error("report digest does not match"); });
+      await s.run();
+      const diagnostics = diagnosticsOf(s);
+      expect(diagnostics.notice).toBe(DIAGNOSTICS_NOTICE);
+      expect(DIAGNOSTICS_NOTICE).toMatch(/application's own output/);
+      expect(DIAGNOSTICS_NOTICE).toMatch(/operator/);
+      expect(diagnostics.shardReports).toHaveLength(8);
     });
 
     it("keeps them too when the collector answers unavailable, and keeps nothing for a group that was qualified", async () => {
