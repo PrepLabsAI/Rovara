@@ -29,6 +29,11 @@ export interface DeveloperTaskActions {
   latestProject(projectName: string): Promise<RegisteredProjectRecord | undefined>;
   /** One registered revision of a project, or undefined when it does not exist. Unchecked: callers must load the owned task and check project access first. */
   projectRevision(projectName: string, revision: number): Promise<RegisteredProjectRecord | undefined>;
+  /**
+   * Makes sure the project's catalog row carries its latest-revision pointer, repairing a row written before the pointer
+   * existed from the revision history (index only). CONFIG_INVALID, naming the project, when it cannot be repaired.
+   */
+  ensureProjectCatalogPointer(projectName: string): Promise<void>;
   preparation(identity: AuthenticatedIdentity, project: RegisteredProjectRecord, requestId: string): Promise<{ workspace: WorkspaceInstance; operationId: string; items: TransactItems }>;
   /** Unchecked: callers must load the owned task and check project access first. */
   workspace(workspaceId: string): Promise<WorkspaceInstance>;

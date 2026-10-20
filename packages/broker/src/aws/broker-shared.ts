@@ -11,6 +11,12 @@ export function hashJson(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
+/**
+ * What an owner hears when a project's catalog pointer cannot be repaired from its revision history (an administrator
+ * must register the project again). Written for Slack and the task page; the project and the reason go to the broker log.
+ */
+export const PROJECT_RECORD_NEEDS_ADMIN = "This project's settings record needs an administrator to register it again.";
+
 /** A single write's or a transaction's condition failed (DynamoDB). */
 export function isConditional(error: unknown): boolean {
   return error instanceof Error && ["ConditionalCheckFailedException", "TransactionCanceledException"].includes(error.name);
