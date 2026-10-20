@@ -282,7 +282,11 @@ describe("a refs/replace entry cannot change what the worker reads or exports", 
 
 describe("honest repositories give the same trees, commits and exports as plain git", () => {
   async function plainTree(directory: string, root: string): Promise<string> {
-    const env = { ...process.env, GIT_INDEX_FILE: join(root, `reference-index-${randomUUID()}`) };
+    // The reference runs under the same config isolation as the worker: a runner's own global or system config (git-lfs filters, autocrlf, excludes) must not decide the expected tree.
+    const rest: NodeJS.ProcessEnv = { ...process.env };
+    delete rest.HOME;
+    delete rest.XDG_CONFIG_HOME;
+    const env = { ...rest, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_INDEX_FILE: join(root, `reference-index-${randomUUID()}`) };
     await execFile("git", ["-C", directory, "read-tree", "HEAD"], { env });
     await execFile("git", ["-C", directory, "add", "--all", "--", "."], { env });
     return hex((await execFile("git", ["-C", directory, "write-tree"], { env, encoding: "utf8" })).stdout);
@@ -342,6 +346,37 @@ describe("honest repositories give the same trees, commits and exports as plain 
     expect(refusal).toMatchObject({ code: "CONFIG_INVALID" });
     expect((refusal as Error).message).toMatch(/Git LFS repositories are not supported/);
     await expect(temporaryIndexTree({ directory: box.directory })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+  });
+
+  it("never runs a filter that the runner's global or system config defines (git-lfs installed globally), while capturing and computing the publication tree", async () => {
+    const { temporaryIndexTree } = await import("../../packages/worker/src/publish.js");
+    const box = await sandbox();
+    const globalConfig = join(box.root, "global-gitconfig");
+    const globalAttributes = join(box.root, "global-gitattributes");
+    const home = join(box.root, "home");
+    await mkdir(join(home, ".config", "git"), { recursive: true });
+    const touch = (name: string): string => `sh -c 'touch ${join(box.markers, name)}; cat'`;
+    const config = `[filter "lfs"]\n\tclean = "${touch("global-lfs-clean")}"\n\tsmudge = "${touch("global-lfs-smudge")}"\n\trequired = true\n[filter "marker"]\n\tclean = "${touch("global-marker-clean")}"\n\tsmudge = "${touch("global-marker-smudge")}"\n\trequired = true\n[core]\n\tattributesFile = ${globalAttributes}\n\tautocrlf = true\n`;
+    await writeFile(globalConfig, config);
+    await writeFile(globalAttributes, "* filter=marker\n*.bin filter=lfs diff=lfs merge=lfs -text\n");
+    await writeFile(join(box.directory, "big.bin"), "not really large\n");
+    await writeFile(join(home, ".gitconfig"), config);
+    await writeFile(join(home, ".config", "git", "config"), config);
+    await writeFile(join(box.directory, "tracked.txt"), "changed\n");
+    await writeFile(join(box.directory, "fresh.txt"), "fresh\n");
+    const expected = await plainTree(box.directory, box.root);
+    // Control: with that config in force, plain git does run the filter, so the test can tell.
+    const env = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), GIT_CONFIG_GLOBAL: globalConfig, GIT_INDEX_FILE: join(box.root, "control-index") };
+    await execFile("git", ["-C", box.directory, "read-tree", "HEAD"], { env });
+    await execFile("git", ["-C", box.directory, "add", "--all", "--", "."], { env });
+    expect(await fired(box)).toContain("global-marker-clean");
+    for (const name of await fired(box)) await rm(join(box.markers, name));
+    // The worker, under the same environment, runs none of it and computes the isolated tree.
+    Object.assign(process.env, { HOME: home, XDG_CONFIG_HOME: join(home, ".config"), GIT_CONFIG_GLOBAL: globalConfig });
+    const [captured] = await readCandidateRepositories(inputOf(box));
+    expect(captured?.treeSha).toBe(expected);
+    expect(await temporaryIndexTree({ directory: box.directory })).toBe(expected);
+    expect(await fired(box)).toEqual([]);
   });
 
   it("captures a detached HEAD and a branch kept only in packed-refs, and writes no ref or index", async () => {
