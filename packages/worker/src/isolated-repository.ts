@@ -352,7 +352,7 @@ export async function runIsolatedGit(directory: string, args: readonly string[],
 /** Refuses (CONFIG_INVALID) a workspace that has a nested repository checked out or Git LFS files, as the publishing and capturing paths always have. */
 export async function assertWorkspaceIsPlain(directory: string): Promise<void> {
   await withIsolatedRepository(directory, "read", { index: "work" }, async (repository) => {
-    await assertNoEmbeddedRepositories(repository.layout.workTree, repository.env("work"), repository.location);
-    await assertNoLfsFiles(repository.layout.workTree, repository.env("work"), repository.location);
+    await assertNoEmbeddedRepositories(repository.layout.workTree, repository.env("work"), repository.location, repository.workTreeCwd);
+    await assertNoLfsFiles(repository.layout.workTree, repository.env("work"), repository.location, repository.workTreeCwd);
   });
 }

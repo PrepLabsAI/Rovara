@@ -10,7 +10,7 @@ const execFile = promisify(execFileCallback);
  * candidate repository's own config immediately before the command named by SHIM_ON runs: the moment an agent's background process would pick, after the worker
  * read the config and before git does. It does not depend on how the worker implements the call.
  *
- * Environment it reads: SHIM_LOG, SHIM_REAL_GIT, SHIM_CANDIDATE (the repository directory), SHIM_ON (a git subcommand), SHIM_CONFIG_SET (lines of `key=value`), SHIM_RESTORE (when set, the settings are removed again once the command ends, so the planted window is that one call).
+ * Environment it reads: SHIM_LOG, SHIM_REAL_GIT, SHIM_CANDIDATE (the repository directory), SHIM_ON (a git subcommand), SHIM_CONFIG_SET (lines of `key=value`), SHIM_RESTORE (when set, the settings are removed again once the command ends, so the planted window is that one call), SHIM_SWAP (`path=target`: swap the directory at `path` for a symlink to `target` as the command starts).
  */
 const SCRIPT = `#!/bin/sh
 { printf 'BEGIN\\n'; printf 'CWD\\t%s\\n' "$PWD"; printf 'GIT_DIR\\t%s\\n' "\${GIT_DIR-}"; printf 'ASKPASS\\t%s\\n' "\${GIT_ASKPASS:+yes}"; for a in "$@"; do printf 'ARG\\t%s\\n' "$a"; done; } >> "$SHIM_LOG"
@@ -19,6 +19,10 @@ if [ -n "\${SHIM_ON-}" ]; then
   for a in "$@"; do
     if [ "$a" = "$SHIM_ON" ]; then
       MATCHED=yes
+      # SHIM_SWAP="<path>=<target>": the directory at <path> is renamed away and replaced by a symlink to <target>, once, as an agent's process would do it.
+      if [ -n "\${SHIM_SWAP-}" ] && [ ! -e "\${SHIM_SWAP%%=*}.moved" ]; then
+        mv "\${SHIM_SWAP%%=*}" "\${SHIM_SWAP%%=*}.moved" && ln -s "\${SHIM_SWAP#*=}" "\${SHIM_SWAP%%=*}"
+      fi
       printf '%s\\n' "$SHIM_CONFIG_SET" | while IFS='=' read -r key value; do
         if [ -n "$key" ]; then "$SHIM_REAL_GIT" config --file "$SHIM_CANDIDATE/.git/config" "$key" "$value"; fi
       done

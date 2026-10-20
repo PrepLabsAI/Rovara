@@ -245,9 +245,10 @@ export async function assertNoEmbeddedRepositories(
   directory: string,
   env: NodeJS.ProcessEnv,
   location: readonly string[],
+  cwd?: string,
 ): Promise<readonly string[]> {
   const gitlinks = await new Promise<string[]>((resolvePaths, reject) => {
-    const child = spawn("git", [...location, "ls-files", "--stage", "-z"], { env, stdio: ["ignore", "pipe", "ignore"] });
+    const child = spawn("git", [...location, "ls-files", "--stage", "-z"], { env, stdio: ["ignore", "pipe", "ignore"], ...(cwd === undefined ? {} : { cwd }) });
     const found: string[] = [];
     let rest = "";
     child.stdout.setEncoding("utf8");
@@ -279,13 +280,13 @@ export async function assertNoEmbeddedRepositories(
  * `filter=lfs`. AgentX's Git runs no hooks, so Git LFS's pre-push hook would never upload the
  * objects and a pull request would hold only pointers. Run it before staging for a push.
  */
-export async function assertNoLfsFiles(directory: string, env: NodeJS.ProcessEnv, location: readonly string[]): Promise<void> {
+export async function assertNoLfsFiles(directory: string, env: NodeJS.ProcessEnv, location: readonly string[], cwd?: string): Promise<void> {
   let found: boolean;
   try {
     const { stdout } = await execFile(
       "git",
       [...location, "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", ":(attr:filter=lfs)"],
-      { env, encoding: "utf8", maxBuffer: 1024 * 1024 },
+      { env, encoding: "utf8", maxBuffer: 1024 * 1024, ...(cwd === undefined ? {} : { cwd }) },
     );
     found = stdout !== "";
   } catch (error) {

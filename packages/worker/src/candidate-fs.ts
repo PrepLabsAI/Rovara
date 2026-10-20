@@ -13,6 +13,14 @@ const OPEN_DIRECTORY = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_
 const NAME = /^[^/\0]+$/u;
 const DESCRIPTOR_PATHS = process.platform === "linux";
 
+/**
+ * Whether Git is given the work tree as the directory it starts in, held open by descriptor (Linux), instead of as a path. `AGENTX_WORKTREE_BY_PATH=1` turns it
+ * off, for tests that show what the by-path variant does under a swap.
+ */
+export function workTreeByDescriptor(): boolean {
+  return DESCRIPTOR_PATHS && process.env.AGENTX_WORKTREE_BY_PATH !== "1";
+}
+
 /** For tests: called with the name of a step of a write, between its checks and its effect. */
 let hook: ((step: string) => Promise<void>) | undefined;
 export function setCandidateWriteHookForTests(next: ((step: string) => Promise<void>) | undefined): void {
@@ -30,6 +38,8 @@ function plainName(name: string): string {
 export interface HeldDirectory {
   /** The path the directory was opened as, for messages. */
   readonly path: string;
+  /** `/proc/self/fd/<n>`: a path that names this very directory, valid while it is held (Linux only). A child started with it as its working directory starts in it. */
+  readonly descriptorPath: string | undefined;
   /** A path for `name` inside this very directory (not whatever the directory's path leads to later). */
   entry(name: string): string;
   /** A held directory for the subdirectory `name` (never through a symlink), made first when `create` is set; `undefined` when it is missing and `create` is not. */
@@ -55,6 +65,7 @@ function held(handle: Awaited<ReturnType<typeof open>>, path: string): HeldDirec
   const base = `/proc/self/fd/${handle.fd}`;
   return {
     path,
+    descriptorPath: base,
     entry: (name) => `${base}/${plainName(name)}`,
     subdirectory: async (name, create) => {
       const childPath = join(path, name);
@@ -74,6 +85,7 @@ function held(handle: Awaited<ReturnType<typeof open>>, path: string): HeldDirec
 function checked(path: string): HeldDirectory {
   return {
     path,
+    descriptorPath: undefined,
     entry: (name) => join(path, plainName(name)),
     subdirectory: async (name, create) => {
       const childPath = join(path, plainName(name));
