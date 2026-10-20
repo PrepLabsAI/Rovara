@@ -121,6 +121,7 @@ describe("PEOPLE and ChatGPT task identity parity", () => {
       return ["task.workflowMode", "task.workflowBase", "model.chatgpt"];
     });
     const pausedDelivery = createEc2Delivery({
+      applicationPlanNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "127.0.0.1" }) },
       binding: async () => binding,
       sign,
@@ -150,6 +151,7 @@ describe("PEOPLE and ChatGPT task identity parity", () => {
 
     const workerFeatures = vi.fn(async () => ["task.workflowMode", "task.workflowBase", "model.chatgpt"]);
     const delivered = createEc2Delivery({
+      applicationPlanNotNegotiated: async () => undefined,
       sessions: { ensureSession: async () => ({ ready: true, generation: 1, privateIp: "127.0.0.1" }) },
       binding: async () => binding,
       sign,

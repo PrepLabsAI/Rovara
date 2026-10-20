@@ -49,7 +49,7 @@ export interface Ec2DeliveryDependencies {
    * "task.workflowE2EApplicationPlan": the operation record must stop saying the version was offered, so the broker refuses a v2 plan it uploads.
    * A failure fails the attempt (the run must not go out with the record still saying 2).
    */
-  applicationPlanNotNegotiated?: (record: Ec2OutboxRecord) => Promise<void>;
+  applicationPlanNotNegotiated: (record: Ec2OutboxRecord) => Promise<void>;
   /** Rechecks fresh PEOPLE authority after compute is ready, immediately before signing and POST. */
   guardTaskDispatch?: (record: Ec2OutboxRecord, context?: { remainingTimeMs: () => number }) => Promise<"ALLOWED" | "PARKED">;
   /** Loads and validates the durable internal readiness marker before any session provisioning. */
