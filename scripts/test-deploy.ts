@@ -26,6 +26,7 @@ import {
   ExecuteChangeSetCommand,
   GetTemplateCommand,
   type Change,
+  type DescribeChangeSetCommandOutput,
   type Stack,
 } from "@aws-sdk/client-cloudformation";
 import { GetFunctionConfigurationCommand, LambdaClient } from "@aws-sdk/client-lambda";
@@ -735,6 +736,8 @@ interface ApplyContext {
   lambda: LambdaClient;
   outputs: Map<string, Record<string, string>>;
   built: boolean;
+  /** Where the build writes its zips and where the described change sets are kept. */
+  outputDir: string;
 }
 
 const SETTLED_STACK_STATUSES: ReadonlySet<string> = new Set(["CREATE_COMPLETE", "UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE", "IMPORT_COMPLETE"]);
@@ -784,6 +787,20 @@ async function describeStackSdk(context: ApplyContext, stackName: string): Promi
   const stack = (await context.cloudFormation.send(new DescribeStacksCommand({ StackName: stackName }))).Stacks?.[0];
   if (stack === undefined) throw new Error(`stack ${stackName} does not exist`);
   return stack;
+}
+
+/**
+ * Saves the change set as described, every page of its changes, before anything executes it: CloudFormation removes an executed change set, so this file is the
+ * only record a fixture can later be refreshed from (B13). A change set holds resource changes and parameter keys, no secret (NoEcho values come back masked). Returns the path.
+ */
+export function saveDescribedChangeSet(directory: string, described: Partial<DescribeChangeSetCommandOutput>, changes: readonly Change[]): string {
+  mkdirSync(directory, { recursive: true });
+  const name = `${described.StackName ?? "stack"}-${described.ChangeSetName ?? "change-set"}`.replace(/[^A-Za-z0-9._-]/g, "_");
+  const path = join(directory, `change-set-${name}.json`);
+  // The first page of changes, the paging token and the SDK metadata are not part of the record; `changes` holds every page.
+  const header = Object.fromEntries(Object.entries(described).filter(([key]) => key !== "$metadata" && key !== "Changes" && key !== "NextToken"));
+  writeFileSync(path, `${JSON.stringify({ ...header, Changes: changes }, null, 2)}\n`);
+  return path;
 }
 
 export function observedChanges(changes: readonly Change[]): ObservedChange[] {
@@ -885,6 +902,7 @@ async function createChangeSet(context: ApplyContext, step: Extract<DeployStep, 
     changes.push(...(page.Changes ?? []));
     token = page.NextToken;
   }
+  console.log(`change set ${changeSetName} saved to ${saveDescribedChangeSet(context.outputDir, described, changes)}`);
   const observed = observedChanges(changes);
   console.log(`change set ${changeSetName}:\n${observed.map((change) => `  ${change.action} ${change.logicalId} ${change.type ?? ""} ${(change.attributes ?? []).join(",")}`).join("\n")}`);
   try {
@@ -1014,7 +1032,8 @@ export async function main(argv: readonly string[]): Promise<void> {
   };
   // The identity stack exists only for a Cognito environment; the engine's synth context differs for an own-OIDC one.
   const identityMode = stackExists(runner, args.region, environmentStackName(args.env, "identity")) ? "cognito" : "oidc";
-  const steps = planTestDeploy({ env: args.env, only: args.only, artifacts: { revision, outputDir: join(tmpdir(), `test-deploy-${revision.slice(0, 12)}`) }, previous, identityMode });
+  const outputDir = join(tmpdir(), `test-deploy-${revision.slice(0, 12)}`);
+  const steps = planTestDeploy({ env: args.env, only: args.only, artifacts: { revision, outputDir }, previous, identityMode });
   console.log(`TEST deploy plan for ${args.env} (${args.region}), revision ${revision}\n${formatPlan(steps)}`);
   if (!args.apply) {
     console.log("\nDry run: nothing was changed. Add --apply to run this plan.");
@@ -1025,7 +1044,7 @@ export async function main(argv: readonly string[]): Promise<void> {
     runner, options, region: args.region, env: args.env, revision,
     cloudFormation: new CloudFormationClient({ region: args.region, profile: args.profile }),
     lambda: new LambdaClient({ region: args.region, profile: args.profile }),
-    outputs: new Map(), built: false,
+    outputs: new Map(), built: false, outputDir,
   };
   for (const step of steps) await applyStep(context, step);
   console.log("\nTEST deploy complete.");
