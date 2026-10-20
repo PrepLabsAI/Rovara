@@ -1,7 +1,5 @@
-import { execFile } from "node:child_process";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
 import {
   AgentXError,
   PullRequestLifecycleResultSchema,
@@ -10,8 +8,9 @@ import {
   type WorkerInvocation,
   type PullRequestLifecycleResult,
 } from "@agentx/contracts";
-import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME, assertNoEmbeddedRepositories, assertNoLfsFiles, gitHardenedEnvironment } from "./git.js";
-import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
+import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME } from "./git.js";
+import { assertCredentialFreeRemote, type GitCredential } from "./git-auth.js";
+import { assertWorkspaceIsPlain, runIsolatedGit, withIsolatedRepository } from "./isolated-repository.js";
 import type { PullRequestUpdateSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
@@ -22,7 +21,6 @@ import { storedCommandOutput } from "./command-failure.js";
 import type { PreparationManifest } from "./prepare.js";
 import type { DevcontainerCli } from "./devcontainer.js";
 
-const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 1_048_576;
 type MaintainInvocation = Extract<WorkerInvocation, { kind: "maintain" }>;
 
@@ -72,10 +70,10 @@ export async function maintainPullRequest(options: {
   const credential = await options.credentialProvider(repository);
   await credentialedGit(repositoryPath, [
     // From the registered URL, never the remote's name, so a repository remote setting cannot redirect it.
-    "-C", repositoryPath, "fetch", "--no-tags", repository.url,
+    "fetch", "--no-tags", repository.url,
     `refs/heads/${invocation.payload.headBranch}:refs/remotes/origin/${invocation.payload.headBranch}`,
     `refs/heads/${invocation.payload.baseBranch}:refs/remotes/origin/${invocation.payload.baseBranch}`,
-  ], credential, "Git fetch failed");
+  ], credential, "Git fetch failed", { mode: "write", refs: true });
   const remoteHead = (await git(repositoryPath, ["rev-parse", `refs/remotes/origin/${invocation.payload.headBranch}^{commit}`])).trim();
   if (remoteHead !== invocation.payload.expectedHeadCommit) {
     throw agentXError("STALE_FENCE", "pull request head changed since AgentX last observed it");
@@ -111,9 +109,7 @@ export async function maintainPullRequest(options: {
       throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
     }
     try {
-      const env = await gitHardenedEnvironment(repositoryPath);
-      await assertNoEmbeddedRepositories(repositoryPath, env);
-      await assertNoLfsFiles(repositoryPath, env);
+      await assertWorkspaceIsPlain(repositoryPath);
     } catch (error) {
       if (error instanceof AgentXError) throw error;
       throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
@@ -124,7 +120,7 @@ export async function maintainPullRequest(options: {
       workspaceTree = (await git(repositoryPath, ["write-tree"])).trim();
     } else {
       // In a temporary index, as the reviewed tree was computed, so the real index is untouched.
-      workspaceTree = await temporaryIndexTree({ directory: repositoryPath, env: await gitHardenedEnvironment(repositoryPath) });
+      workspaceTree = await temporaryIndexTree({ directory: repositoryPath });
       if (workspaceTree !== reviewedTree) throw agentXError("CONFIG_INVALID", WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE);
     }
     const publishedTree = (await git(repositoryPath, ["rev-parse", `${remoteHead}^{tree}`])).trim();
@@ -186,7 +182,9 @@ export async function maintainPullRequest(options: {
         "merge", "--no-edit", "--no-ff", remoteBase,
       ]);
     } catch {
-      await git(repositoryPath, ["merge", "--abort"]).catch(() => undefined);
+      // The merge ran in a throwaway repository, so no MERGE_HEAD exists for `merge --abort`: the workspace was clean before it (checked above), so putting it back
+      // on the pull request head, with the index the failed merge left, removes everything the merge wrote.
+      await git(repositoryPath, ["reset", "--hard", remoteHead]).catch(() => undefined);
       throw agentXError("CONFIG_INVALID", "pull request branch conflicts with the latest base");
     }
     commit = (await git(repositoryPath, ["rev-parse", "HEAD"])).trim();
@@ -259,25 +257,35 @@ async function validateCandidate(
  */
 async function push(directory: string, url: string, branch: string, credential: Awaited<ReturnType<RepositoryCredentialProvider>>) {
   assertCredentialFreeRemote(url);
-  await credentialedGit(directory, ["-C", directory, "push", "--porcelain", url, `HEAD:refs/heads/${branch}`], credential, "Git push failed");
-  await git(directory, ["update-ref", `refs/remotes/origin/${branch}`, "HEAD"]);
+  await credentialedGit(directory, ["push", "--porcelain", url, `HEAD:refs/heads/${branch}`], credential, "Git push failed",
+    { mode: "read", refs: true, after: ["update-ref", `refs/remotes/origin/${branch}`, "HEAD"] });
 }
 
 /** The commit a branch of the registered URL points at, or undefined when the branch does not exist. */
 async function remoteBranchHead(directory: string, url: string, branch: string, credential: Awaited<ReturnType<RepositoryCredentialProvider>>): Promise<string | undefined> {
   assertCredentialFreeRemote(url);
-  const listed = await credentialedGit(directory, ["-C", directory, "ls-remote", url, `refs/heads/${branch}`], credential, "Git ls-remote failed");
+  const listed = await credentialedGit(directory, ["ls-remote", url, `refs/heads/${branch}`], credential, "Git ls-remote failed", { mode: "read" });
   return listed.split("\n").map((line) => line.split("\t")).find(([, ref]) => ref === `refs/heads/${branch}`)?.[0];
 }
 
+/**
+ * A credentialed command run in a throwaway repository (isolated-repository.ts), never in the workspace repository: the token reaches no Git process whose
+ * config the agent controls, whenever the agent wrote it. `after` runs in the same session, so refs it writes are applied to the workspace with the command's.
+ */
 async function credentialedGit(
   directory: string,
   args: string[],
-  credential: Awaited<ReturnType<RepositoryCredentialProvider>>,
+  credential: GitCredential,
   fallback: string,
+  options: { mode: "read" | "write"; refs?: boolean; after?: readonly string[] },
 ): Promise<string> {
   try {
-    return (await runGitWithCredential({ directory, args, credential, timeout: 300_000, maxBuffer: MAX_GIT_OUTPUT })).stdout;
+    return await withIsolatedRepository(directory, options.mode, { refs: options.refs === true }, async (repository) => {
+      await repository.assertNetworkSafe();
+      const stdout = await repository.credentialed(args, credential, { timeout: 300_000, maxBuffer: MAX_GIT_OUTPUT });
+      if (options.after !== undefined) await repository.text(options.after, { index: "none" });
+      return stdout;
+    });
   } catch (error) {
     // A refusal of the repository's own config is the project's to fix, not a runtime failure.
     if (error instanceof AgentXError) throw error;
@@ -287,9 +295,7 @@ async function credentialedGit(
 
 async function isAncestor(directory: string, ancestor: string, descendant: string): Promise<boolean> {
   try {
-    await execFileAsync("git", ["-C", directory, "merge-base", "--is-ancestor", ancestor, descendant], {
-      timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT, env: await gitHardenedEnvironment(directory),
-    });
+    await runIsolatedGit(directory, ["merge-base", "--is-ancestor", ancestor, descendant], { timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT });
     return true;
   } catch (error) {
     const exitCode = (error as { code?: unknown }).code;
@@ -328,16 +334,21 @@ async function loadManifest(rootPath: string, invocation: MaintainInvocation): P
 }
 
 /**
- * Git under a hardened environment computed for each call: readiness checks (project code) run between these calls
- * and could change the repository's config, so an environment computed before them would be stale.
+ * Git for the workspace repository, each command in a throwaway repository that never reads the workspace's config, hooks or attributes files (see
+ * isolated-repository.ts): readiness checks (project code) and the agent's own processes can write those at any moment, so a read of them made before a call
+ * would not hold during it.
  */
 async function git(directory: string, args: readonly string[]): Promise<string> {
   try {
-    const result = await execFileAsync("git", ["-C", directory, ...args], {
-      timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT, encoding: "utf8", env: await gitHardenedEnvironment(directory),
-    });
-    return result.stdout;
+    // `remote get-url` reads one value of the repository's config, from a private copy of the file; nothing in it is run.
+    if (args.length === 3 && args[0] === "remote" && args[1] === "get-url") {
+      const url = await withIsolatedRepository(directory, "read", {}, (repository) => repository.remoteUrl(args[2]));
+      if (url === undefined) throw new Error(`No such remote '${args[2]}'`);
+      return `${url}\n`;
+    }
+    return await runIsolatedGit(directory, args, { timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT });
   } catch (error) {
+    if (error instanceof AgentXError) throw error;
     const processError = error as Error & { stderr?: string };
     throw agentXError("CONFIG_INVALID", sanitize(processError.stderr ?? processError.message));
   }

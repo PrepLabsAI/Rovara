@@ -1,18 +1,16 @@
-import { execFile } from "node:child_process";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
 import {
   WorkspaceClosePreflightResultSchema,
+  AgentXError,
   agentXError,
   type WorkspaceClosePreflightResult,
   type WorkspaceCloseReason,
 } from "@agentx/contracts";
-import { gitHardenedEnvironment } from "./git.js";
+import { runIsolatedGit } from "./isolated-repository.js";
 import type { PreparationManifest } from "./prepare.js";
 import { storedCommandOutput } from "./command-failure.js";
 
-const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 1_048_576;
 
 export async function inspectWorkspaceForClose(rootPathValue: string): Promise<WorkspaceClosePreflightResult> {
@@ -52,14 +50,10 @@ export async function inspectWorkspaceForClose(rootPathValue: string): Promise<W
 
 async function git(directory: string, args: readonly string[]): Promise<string> {
   try {
-    const result = await execFileAsync("git", ["-C", directory, ...args], {
-      timeout: 120_000,
-      maxBuffer: MAX_GIT_OUTPUT,
-      encoding: "utf8",
-      env: await gitHardenedEnvironment(directory),
-    });
-    return result.stdout;
+    // In a throwaway repository that never reads the workspace repository's config (isolated-repository.ts).
+    return await runIsolatedGit(directory, args, { timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT });
   } catch (error) {
+    if (error instanceof AgentXError) throw error;
     const processError = error as Error & { stderr?: string };
     // Redacted before it is cut to its last 16 KiB, where Git says what failed (#170).
     throw agentXError("CONFIG_INVALID", storedCommandOutput(processError.stderr ?? processError.message, 16_384));
