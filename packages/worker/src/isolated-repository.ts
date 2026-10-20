@@ -1,6 +1,5 @@
 import { execFile as execFileCallback } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, readdir, readFile, stat, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { agentXError } from "@agentx/contracts";
@@ -207,8 +206,8 @@ async function configCopy(git: IsolatedGit): Promise<string | undefined> {
 }
 
 /**
- * isolated-git.ts's throwaway repository plus, as asked, the candidate's refs and index (see the note at the top of this file). On a failure of `use`, nothing is
- * applied back (files the command already wrote to the work tree stay, as they would after a failed Git command).
+ * isolated-git.ts's throwaway repository plus, as asked, the candidate's refs and index (see the note at the top of this file). On a failure of `use`, no ref or
+ * HEAD is applied back; the index is, when it was asked to persist, because the files the command already wrote stay (as after a failed Git command).
  */
 export async function withIsolatedRepository<T>(
   directory: string,
@@ -254,7 +253,15 @@ export async function withIsolatedRepository<T>(
         }
       },
     };
-    const result = await use(repository);
+    let result: T;
+    try {
+      result = await use(repository);
+    } catch (error) {
+      // A command that writes the work tree and fails part-way (a merge that conflicts) has already written files: the index it left goes back with them, so the
+      // files and the index agree and the cleanup the caller runs (`reset --hard`) can undo it. Refs and HEAD are not applied.
+      if (options.index === "persist") await persistIndex(git, indexBefore).catch(() => undefined);
+      throw error;
+    }
     if (refsBefore !== undefined) await applyRefsBack(git, refsBefore);
     if (options.index === "persist") await persistIndex(git, indexBefore);
     return result;
@@ -314,16 +321,4 @@ export async function assertWorkspaceIsPlain(directory: string): Promise<void> {
     await assertNoEmbeddedRepositories(repository.layout.workTree, repository.env("work"), repository.location);
     await assertNoLfsFiles(repository.layout.workTree, repository.env("work"), repository.location);
   });
-}
-
-/** A directory-less throwaway repository for a network call that needs no candidate at all (ls-remote). */
-export async function withScratchRepository<T>(use: (directory: string, environment: Record<string, string>) => Promise<T>): Promise<T> {
-  const scratch = await mkdtemp(join(tmpdir(), "agentx-scratch-git-"));
-  try {
-    const gitDir = join(scratch, "scratch.git");
-    await execFile("git", ["init", "--bare", "--quiet", "--template=", gitDir], { cwd: scratch, env: isolatedGitEnvironment(scratch) });
-    return await use(gitDir, {});
-  } finally {
-    await rm(scratch, { recursive: true, force: true });
-  }
 }

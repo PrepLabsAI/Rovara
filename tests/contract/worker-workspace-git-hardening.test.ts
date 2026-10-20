@@ -232,6 +232,49 @@ describe("class A: maintenance writes the workspace", () => {
   });
 });
 
+describe("a command that fails part-way leaves the workspace as it was", () => {
+  it("restores the files and the index after a sync's merge conflicts (nothing from the merge stays)", async () => {
+    const fixture = await createPrFixture("maintain", { register: (directory) => directories.push(directory),
+      seedFiles: { "lines.txt": "1\n2\n3\n" }, headEdits: { "lines.txt": "ONE\n2\n3\n" } });
+    await writeFile(join(fixture.seed, "lines.txt"), "UNO\n2\n3\n", "utf8");
+    await writeFile(join(fixture.seed, "BASE-ONLY.md"), "arrived with the base\n", "utf8");
+    await git(fixture.seed, ["add", "."]);
+    await commitAs(fixture.seed, "base change");
+    await git(fixture.seed, ["push", "origin", "main"]);
+    const invocation = { ...fixture.maintainInvocation, payload: { ...fixture.maintainInvocation.payload, action: "sync" as const } };
+    await expect(maintainPullRequest({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}),
+      pullRequestUpdateSink: vi.fn() })).rejects.toThrow(/conflicts with the latest base/);
+    expect(await git(fixture.checkout, ["status", "--porcelain", "--untracked-files=all"])).toBe("");
+    expect(await readFile(join(fixture.checkout, "lines.txt"), "utf8")).toBe("ONE\n2\n3\n");
+    expect((await git(fixture.checkout, ["rev-parse", "HEAD"])).trim()).toBe(fixture.pullRequestHead);
+  });
+});
+
+describe("a revert that conflicts leaves the workspace on the latest base", () => {
+  it("restores the files and the index after the merged commit cannot be reverted cleanly", async () => {
+    const fixture = await createPrFixture("publish", { register: (directory) => directories.push(directory), seedFiles: { "lines.txt": "1\n2\n3\n" } });
+    await writeFile(join(fixture.seed, "lines.txt"), "ONE\n2\n3\n", "utf8");
+    await git(fixture.seed, ["add", "lines.txt"]);
+    await commitAs(fixture.seed, "the merged change");
+    const revertCommit = (await git(fixture.seed, ["rev-parse", "HEAD"])).trim();
+    await writeFile(join(fixture.seed, "lines.txt"), "UNO\n2\n3\n", "utf8");
+    await writeFile(join(fixture.seed, "LATER.md"), "later\n", "utf8");
+    await git(fixture.seed, ["add", "."]);
+    await commitAs(fixture.seed, "a later change on the same line");
+    await git(fixture.seed, ["push", "origin", "main"]);
+    const latest = (await git(fixture.seed, ["rev-parse", "HEAD"])).trim();
+    await expect(publishWorkspace({
+      rootPath: fixture.root, credentialProvider: async () => ({}),
+      invocation: { ...fixture.publishInvocation, payload: { ...fixture.publishInvocation.payload, mode: "revert", targetPullRequestNumber: 5, revertCommit } },
+      pullRequestSink: async () => ({ number: 12, url: "https://github.com/example/demo/pull/12", reconciled: false }),
+      stopWorkspaceProcesses: async () => ({ stopped: 0 }), sweepWorkspaceContainers: async () => ({ removed: 0 }),
+    })).rejects.toThrow(/cannot be reverted cleanly/);
+    expect(await git(fixture.checkout, ["status", "--porcelain", "--untracked-files=all"])).toBe("");
+    expect(await readFile(join(fixture.checkout, "lines.txt"), "utf8")).toBe("UNO\n2\n3\n");
+    expect((await git(fixture.checkout, ["rev-parse", "HEAD"])).trim()).toBe(latest);
+  });
+});
+
 describe("class A: preparation checks the resolved commit out", () => {
   it("runs no smudge filter planted right before the `git checkout --detach --force` that fills a fresh clone", async () => {
     const root = await realpath(await mkdtemp(join(tmpdir(), "agentx-prep-")));

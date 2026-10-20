@@ -182,7 +182,9 @@ export async function maintainPullRequest(options: {
         "merge", "--no-edit", "--no-ff", remoteBase,
       ]);
     } catch {
-      await git(repositoryPath, ["merge", "--abort"]).catch(() => undefined);
+      // The merge ran in a throwaway repository, so no MERGE_HEAD exists for `merge --abort`: the workspace was clean before it (checked above), so putting it back
+      // on the pull request head, with the index the failed merge left, removes everything the merge wrote.
+      await git(repositoryPath, ["reset", "--hard", remoteHead]).catch(() => undefined);
       throw agentXError("CONFIG_INVALID", "pull request branch conflicts with the latest base");
     }
     commit = (await git(repositoryPath, ["rev-parse", "HEAD"])).trim();
