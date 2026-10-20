@@ -1,6 +1,6 @@
 import {
   E2EApiMockFixtureSchema, canonicalJson, createE2EOpenApiFixtureDescriptor, e2eApplicationRecipeIsProjectContract, inspectE2EPortableSource,
-  inspectE2ERepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId, redactSecrets, verifyE2ESourceSnapshot, type E2EAppRecipe, type E2EPolicy, type E2ESourceSnapshot,
+  deriveE2ESyntheticRuntimeAccountRef, inspectE2ERepository, isE2EPlaceholderRuntimeProfileId, isE2EQualifiedRuntimeProfileId, redactSecrets, verifyE2ESourceSnapshot, type E2EAppRecipe, type E2EPolicy, type E2ESourceSnapshot,
 } from "@agentx/contracts";
 import type { ReadyE2ERuntime } from "../aws/e2e-runtime-readiness.js";
 import { e2eApplicationMetadataSourceRefs } from "@agentx/contracts";
@@ -28,6 +28,8 @@ export type FeatureE2EPlanningContext = {
   unavailableReasons?: Array<{ targetId: string; reason: FeatureE2EUnavailableReason }>;
   /** The step and assertion kinds a READY runtime executes, once per target kind that has an executable target. */
   executableKinds?: Array<{ kind: "web" | "api"; steps: string[]; assertions: string[] }>;
+  /** The account reference of each executable target's synthetic account, which the plan copies into `runtimeAccountRefs` and approval recomputes. */
+  runtimeAccountRefs?: Array<{ applicationId: string; profileId: string; revision: number; definitionDigest: string }>;
   portableOperations: Array<{ operationId: string; applicationId: string; requestedTargetIds: string[]; packageExportSubpath: string;
     moduleSpecifier: string; callableSelectors: Array<{ selector: { kind: "default" } | { kind: "named"; exportName: string }; firstInputParameter?: string }>;
     sourceRefs: Array<{ path: string; sha256: string }> }>;
@@ -153,6 +155,9 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
       const ready = targets.filter((target) => target.kind === kind && unavailableReason(target) === undefined).map(readyRuntimeFor)[0];
       return ready === undefined ? [] : [{ kind, steps: ready.supportedSteps.filter((step) => step !== "agent"), assertions: [...ready.supportedAssertions] }];
     });
+    const runtimeAccountRefs = runtimeRefs.flatMap((ref) => unavailableReasons.some((item) => item.targetId === ref.targetId) || ref.recipeDigest === null ? []
+      : [deriveE2ESyntheticRuntimeAccountRef({ applicationId: ref.applicationId, accountProfileId: ref.accountProfileId, recipeDigest: ref.recipeDigest })])
+      .filter((ref, index, refs) => refs.findIndex((item) => item.applicationId === ref.applicationId && item.profileId === ref.profileId) === index);
     const portableOperations = discovered.portableOperations.flatMap((operation) => {
       const requestedTargetIds = operation.targetIds.filter((targetId) => selectedTargetIds.has(targetId));
       if (requestedTargetIds.length === 0) return [];
@@ -221,7 +226,7 @@ export function buildFeatureE2EPlanningContext(policy: E2EPolicy, snapshot: E2ES
         currentCheckoutUnverified: identity.origin === "approved-setup" },
       baselineScenarioIds: policy.baselineScenarioIds, targets, applicationRefs, runtimeRefs, unavailableTargetRefs,
       // Ruling AQ: a policy with no target on a qualified profile (every P0 project) keeps the pre-2.2 context and prompt exactly.
-      ...(targets.some((target) => isE2EQualifiedRuntimeProfileId(configuredTarget(target.targetId).runtimeProfileId)) ? { unavailableReasons, executableKinds } : {}),
+      ...(targets.some((target) => isE2EQualifiedRuntimeProfileId(configuredTarget(target.targetId).runtimeProfileId)) ? { unavailableReasons, executableKinds, runtimeAccountRefs } : {}),
       portableOperations, mockFixtures: mockFixtures.slice(0, 32), accountContextRefs,
     };
     if (Buffer.byteLength(canonicalJson(context), "utf8") > MAX_PLANNING_CONTEXT_BYTES) {

@@ -270,6 +270,7 @@ import { aiToolTurn, completedTurn, developerFooter, E2E_PLAN_REFERENCE_INVALID_
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, type WorkflowE2EReadinessMarker, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../e2e/feature-plan-planning-context.js";
+import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
@@ -3998,6 +3999,8 @@ async function taskOperationParts(
       ...(input.workflowMode === "PLAN" && input.workflowPhase !== undefined ? { workflowPhase: input.workflowPhase } : {}),
       // Every planning step asks for a structured plan, so the worker checks the answer and asks once more when it is unreadable.
       ...(input.workflowMode === "PLAN" ? { planFormat: "structured" as const } : {}),
+      // The prompt asks for the v2 application intent exactly when the context offers executable kinds; the worker is asked to parse it only then.
+      ...(input.workflowMode === "PLAN" && offersApplicationE2EPlan(e2ePlanningContext) ? { workflowE2EPlanVersion: 2 as const } : {}),
       ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
       ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
       ...(input.workflowE2EAdmission === undefined ? {} : { workflowE2EAdmission: input.workflowE2EAdmission }),

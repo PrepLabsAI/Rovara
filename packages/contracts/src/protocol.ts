@@ -16,7 +16,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase", "publish.mode", "publish.contextDigest", "task.workflowReviewChecks", "task.structuredPlans", "task.workflowReviewPlan", "task.workflowPullRequestUpdate", "task.codeAnchors", "task.workflowReviewFeedback", "task.workflowReviewNote", "model.chatgpt", "task.workflowDependencies", "task.workflowE2EAdmission", "task.workflowE2EApplicationPlan"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number] | "project.setupSmoke";
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -128,6 +128,12 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * and ask once more when it cannot be read. Sent only to a worker whose /ping lists "task.structuredPlans".
          */
         planFormat: z.literal("structured").optional(),
+        /**
+         * Opt-in to the schema-v2 application E2E plan: the planner may propose it and the worker's plan parser accepts it. Sent only to a
+         * worker whose /ping lists "task.workflowE2EApplicationPlan"; an older one is sent the portable-only prompt, without this field.
+         * Absent means the portable schemaVersion 1 intent only.
+         */
+        workflowE2EPlanVersion: z.literal(2).optional(),
         workflowFeedbackReview: z.object({ taskId: z.string().uuid(), workflowRevision: z.number().int().positive(), candidateDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
         workflowFeedbackApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
         /** Server-assigned immutable native E2E round; the worker must reload it through its signed callback capability. */
@@ -182,6 +188,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         }
         if (payload.planFormat !== undefined && payload.workflowMode !== "PLAN") {
           context.addIssue({ code: "custom", path: ["planFormat"], message: "the plan format requires planning mode" });
+        }
+        if (payload.workflowE2EPlanVersion !== undefined && (payload.workflowMode !== "PLAN" || payload.planFormat !== "structured")) {
+          context.addIssue({ code: "custom", path: ["workflowE2EPlanVersion"], message: "the application E2E plan version requires a structured planning run" });
         }
         if (payload.workflowReviewChecks !== undefined && payload.workflowMode !== "REVIEW") {
           context.addIssue({ code: "custom", path: ["workflowReviewChecks"], message: "the checks reviewers are told about require review mode" });

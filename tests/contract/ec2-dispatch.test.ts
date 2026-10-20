@@ -5,6 +5,7 @@ import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWor
 import { guardTaskDispatch as coreGuardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
 import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
+import type { FeatureE2EPlanningContext } from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
 import type { DurableOutboxRecord, Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import { appendOperationEvent } from "../../packages/broker/src/aws/operation-events.js";
 import { SessionManager, workspaceBinding } from "../../packages/broker/src/aws/sessions.js";
@@ -418,6 +419,60 @@ describe("ec2-ebs delivery", () => {
         event: "dispatch.structured_plans_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
       }));
       log.mockRestore();
+    });
+
+    it("hands a version 2 application plan only to a worker that lists task.workflowE2EApplicationPlan; an older worker gets the portable-only prompt", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const context: FeatureE2EPlanningContext = { status: "available",
+        source: { origin: "approved-setup", commitSha: "a".repeat(40), treeSha: "b".repeat(40), candidateDigest: "c".repeat(64),
+          preparedCommitStatus: "UNKNOWN", preparedCommitSha: null, currentCheckoutUnverified: true },
+        baselineScenarioIds: [], targets: [{ targetId: "web-1", applicationId: "orders", kind: "web", accountProfileId: "synthetic" }],
+        runtimeRefs: [], unavailableTargetRefs: [], unavailableReasons: [], runtimeAccountRefs: [], portableOperations: [], mockFixtures: [], accountContextRefs: [],
+        executableKinds: [{ kind: "web", steps: ["navigate", "click"], assertions: ["visible"] }] };
+      const asked = planDocumentInstructions({ kind: "plan", path: "QUICK", e2ePlanningContext: context });
+      const portable = planDocumentInstructions({ kind: "plan", path: "QUICK", e2ePlanningContext: context, applicationPlans: false });
+      const wrap = (instructions: string) => `Planning phase only.\n\n${instructions}\n\nRequest:\nadd it`;
+      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", workflowE2EPlanVersion: 2, prompt: wrap(asked) });
+      const capable = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans", "task.workflowE2EApplicationPlan"] });
+      expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(capable.post)).toMatchObject({ workflowE2EPlanVersion: 2, prompt: wrap(asked) });
+      const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post)).not.toHaveProperty("workflowE2EPlanVersion");
+      expect(postedPayload(older.post).prompt).toBe(wrap(portable));
+      expect(postedPayload(older.post)).toMatchObject({ workflowMode: "PLAN", planFormat: "structured" });
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.application_plan_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
+    it("sends an ordinary portable structured plan unchanged to a worker without the application plan feature", async () => {
+      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured" });
+      const older = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] });
+      expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post)).toMatchObject({ workflowMode: "PLAN", planFormat: "structured" });
+      expect(postedPayload(older.post)).not.toHaveProperty("workflowE2EPlanVersion");
+    });
+
+    it("never hands a version 2 intent in the reviewers' approved plan to a worker that cannot parse it", async () => {
+      const sha256 = "a".repeat(64);
+      const v1 = { schemaVersion: 1, requestedTargetIds: ["web-1"], accountContextRefs: [], scenarios: [], semanticExportDeltas: [] };
+      const v2 = { ...v1, schemaVersion: 2, applicationRuntimeRefs: [], runtimeAccountRefs: [] };
+      const review = (e2eIntent: unknown) => taskRecord({ workflowMode: "REVIEW", workflowReviewPlan: { markdown: "Plan", sha256, e2eIntent } });
+      const features = ["task.workflowMode", "task.workflowReview", "task.workflowReviewPlan"];
+      const older = delivery({ workerFeatures: async () => features });
+      const withV2 = review(v2);
+      expect(await older.deliver(withV2, withV2.invocation)).toBe("DELIVERED");
+      expect(postedPayload(older.post).workflowReviewPlan).toEqual({ markdown: "Plan", sha256 });
+      const capable = delivery({ workerFeatures: async () => [...features, "task.workflowE2EApplicationPlan"] });
+      expect(await capable.deliver(withV2, withV2.invocation)).toBe("DELIVERED");
+      expect((postedPayload(capable.post).workflowReviewPlan as { e2eIntent: unknown }).e2eIntent).toEqual(v2);
+      // A v1 intent is carried exactly as before, whatever the worker advertises.
+      const withV1 = review(v1);
+      const olderV1 = delivery({ workerFeatures: async () => features });
+      expect(await olderV1.deliver(withV1, withV1.invocation)).toBe("DELIVERED");
+      expect((postedPayload(olderV1.post).workflowReviewPlan as { e2eIntent: unknown }).e2eIntent).toEqual(v1);
     });
 
     it("asks a planning run for anchor lines only on a worker that lists task.codeAnchors; an older worker is sent the prompt without them", async () => {

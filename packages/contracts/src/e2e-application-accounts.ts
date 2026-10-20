@@ -142,6 +142,15 @@ export function deriveE2EApplicationRuntimeAccountRef(definitionInput: E2EApplic
   return E2ERuntimeAccountRefSchema.parse({ applicationId: definition.applicationId, profileId: definition.profileId, revision: definition.revision,
     definitionDigest: e2eApplicationAccountDefinitionDigest(definition) });
 }
+/**
+ * The account identity of a synthetic application account: one the host generates per run from the project's own recipe (Ruling C), so no
+ * registered definition exists to read a revision or digest from. It is derived from the recipe alone, so the planning context can show it to
+ * the planner and approval can recompute it; a different value in a plan is a claim about an account that does not exist.
+ */
+export function deriveE2ESyntheticRuntimeAccountRef(input: { applicationId: string; accountProfileId: string; recipeDigest: string }): E2ERuntimeAccountRef {
+  return E2ERuntimeAccountRefSchema.parse({ applicationId: input.applicationId, profileId: input.accountProfileId, revision: 1,
+    definitionDigest: sha({ schemaVersion: "e2e-synthetic-account/v1", applicationId: input.applicationId, profileId: input.accountProfileId, recipeDigest: input.recipeDigest }) });
+}
 export function validateE2EApplicationAccountBinding(input: { contract: E2EApplicationProjectContract; definition: E2EApplicationAccountDefinition;
   expectedRef: E2ERuntimeAccountRef; now: string }): E2ERuntimeAccountRef {
   const contract = E2EApplicationProjectContractSchema.parse(input.contract);

@@ -10,7 +10,7 @@ import {
   type Ec2RuntimeBinding,
   type WorkerInvocation,
 } from "@agentx/contracts";
-import { asksForCodeAnchors, withoutCodeAnchorText } from "./broker-shared.js";
+import { asksForApplicationPlan, asksForCodeAnchors, withoutApplicationPlanText, withoutCodeAnchorText } from "./broker-shared.js";
 import type { Ec2OutboxRecord } from "./lambda.js";
 import type { SessionManager } from "./sessions.js";
 
@@ -180,6 +180,8 @@ async function forWorker(
   const carriesWorkflowBase = invocation.kind === "task" && invocation.payload.workflowBase !== undefined;
   const carriesStructuredPlans = invocation.kind === "task" && (invocation.payload.workflowPhase !== undefined || invocation.payload.planFormat !== undefined);
   const carriesCodeAnchors = invocation.kind === "task" && asksForCodeAnchors(invocation.payload.prompt);
+  const carriesApplicationPlans = invocation.kind === "task" && (invocation.payload.workflowE2EPlanVersion !== undefined || asksForApplicationPlan(invocation.payload.prompt)
+    || invocation.payload.workflowReviewPlan?.e2eIntent?.schemaVersion === 2);
   const carriesReportChecks = invocation.kind === "publish" && invocation.payload.reportChecks !== undefined;
   const carriesCandidateTree = invocation.kind === "publish" && invocation.payload.candidateTreeSha !== undefined;
   const carriesPublicationMode = invocation.kind === "publish" && invocation.payload.publicationMode !== undefined;
@@ -188,7 +190,7 @@ async function forWorker(
   const carriesPullRequestUpdate = invocation.kind === "maintain" && invocation.payload.workflowCandidateTreeSha !== undefined;
   const carriesChatGpt = invocation.kind === "task" && invocation.payload.chatgpt !== undefined;
   const carriesProjectSetupSmoke = invocation.kind === "project-setup-smoke";
-  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesReportChecks && !carriesCandidateTree && !carriesPublicationMode && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
+  if (requestedThinkingLevel === undefined && !carriesChatGpt && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesApplicationPlans && !carriesReportChecks && !carriesCandidateTree && !carriesPublicationMode && !carriesPublishBase && !carriesPullRequestUpdate && !carriesWorkflowDependencies && !carriesProjectSetupSmoke) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -336,11 +338,21 @@ async function forWorker(
       workspaceId: invocation.workspaceId,
     }));
   }
-  const sent = withoutCodeAnchors(withNote, features);
-  if (sent !== withNote) {
+  const anchored = withoutCodeAnchors(withNote, features);
+  if (anchored !== withNote) {
     console.log(JSON.stringify({
       component: "dispatcher",
       event: "dispatch.code_anchors_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
+  const sent = withoutApplicationPlans(anchored, features);
+  if (sent !== anchored) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.application_plan_omitted",
       reason,
       operationId: invocation.operationId,
       workspaceId: invocation.workspaceId,
@@ -353,6 +365,33 @@ async function forWorker(
 function withoutCodeAnchors(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
   if (invocation.kind !== "task" || !asksForCodeAnchors(invocation.payload.prompt) || features.includes("task.codeAnchors")) return invocation;
   return { ...invocation, payload: { ...invocation.payload, prompt: withoutCodeAnchorText(invocation.payload.prompt) } };
+}
+
+/**
+ * A worker that does not list "task.workflowE2EApplicationPlan" parses only the portable schemaVersion 1 intent, so it is never handed a version 2
+ * one: a planning run is sent the portable-only prompt without the plan version, and a review's approved plan without its (version 2) E2E intent.
+ * The edit is deterministic, so a retry sends what the first attempt did.
+ */
+function withoutApplicationPlans(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || features.includes("task.workflowE2EApplicationPlan")) return invocation;
+  const payload = { ...invocation.payload };
+  let changed = false;
+  if (payload.workflowE2EPlanVersion !== undefined) {
+    delete payload.workflowE2EPlanVersion;
+    changed = true;
+  }
+  const prompt = withoutApplicationPlanText(payload.prompt);
+  if (prompt !== payload.prompt) {
+    payload.prompt = prompt;
+    changed = true;
+  }
+  if (payload.workflowReviewPlan?.e2eIntent?.schemaVersion === 2) {
+    const { e2eIntent: _applicationIntent, ...plan } = payload.workflowReviewPlan;
+    void _applicationIntent;
+    payload.workflowReviewPlan = plan;
+    changed = true;
+  }
+  return changed ? { ...invocation, payload } : invocation;
 }
 
 /** A planning run without the kind and format of plan it writes, for a worker that does not parse them; it plans without checking the answer's format. */

@@ -1,4 +1,4 @@
-import type { FeatureE2EPlanningContext } from "./feature-plan-planning-context.js";
+import type { FeatureE2EPlanningContext, FeatureE2EPlanningContextResult } from "./feature-plan-planning-context.js";
 
 /**
  * Prompt text naming which step and assertion kinds the planner may use for the executable targets (empty when none is executable).
@@ -14,4 +14,13 @@ export function describeFeatureE2EExecutableKinds(context: Pick<FeatureE2EPlanni
     ...kinds.map((item) => `- ${item.kind} targets (${executable(item.kind).join(", ")}): steps ${item.steps.filter((step) => step !== "agent").join(", ")}; assertions ${item.assertions.join(", ")}.`),
     "Do not use `agent` steps; they stay unavailable. A target in unavailableTargetRefs cannot run application scenarios (unavailableReasons says why): list it there instead of proposing executable scenarios for it.",
   ].join("\n");
+}
+
+/**
+ * Whether a planning context offers executable kinds, so the planner is asked for the v2 application intent (and the worker is negotiated to
+ * parse it). The kinds are present only for a policy with a target on a qualified runtime profile (Ruling AQ) and listed only for a target whose
+ * runtime is READY now, so a P0 or portable-only context never asks for v2.
+ */
+export function offersApplicationE2EPlan(context: FeatureE2EPlanningContextResult | undefined): boolean {
+  return context?.status === "available" && (context.executableKinds?.length ?? 0) > 0;
 }

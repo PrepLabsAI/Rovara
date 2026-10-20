@@ -656,8 +656,15 @@ export async function runTaskInvocation(
         // an anchor line the workspace does not have; a citation whose lines are merely off is corrected in the answer.
         if (plan && invocation.payload.planFormat === "structured") {
           const kind = planDocumentKind(invocation.payload.workflowPhase);
+          // A version 2 application intent is read only when the broker negotiated it; otherwise it is a problem to fix, like any unreadable plan.
+          const readPlan = (answer: string): ReturnType<typeof parsePlanDocument> => {
+            const parsed = parsePlanDocument(answer, { kind });
+            return parsed.ok && parsed.plan.e2e?.schemaVersion === 2 && invocation.payload.workflowE2EPlanVersion !== 2
+              ? { ok: false, errors: ["the plan: e2e schemaVersion 2 was not offered for this planning step; use the schemaVersion 1 portable intent, or leave e2e out"] }
+              : parsed;
+          };
           const checkCitations = async (answer: string) => {
-            const read = parsePlanDocument(answer, { kind });
+            const read = readPlan(answer);
             if (!read.ok) return { read, issues: [] as string[], answer };
             const checked = await checkCodeCitations(read.plan, canonicalRoot, manifest.repositories);
             if (sameCitedRanges(read.plan, checked.plan)) return { read, issues: checked.issues, answer };

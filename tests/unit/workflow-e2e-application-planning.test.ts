@@ -259,8 +259,8 @@ describe("planning context for a qualified web target", () => {
 // The ordinary feature PLAN, end to end through the broker: an approved setup whose web target was proposed against the READY profile,
 // planned against the project's current runtime catalog rows (Ruling AL: web and api rows, matched to the project's runtime binding).
 describe("ordinary feature PLAN with an approved qualified web target", () => {
-  async function plannedPrompt(rows: Record<"web" | "api", Record<string, unknown> | undefined>,
-    afterApproval?: (harness: Awaited<ReturnType<typeof createDeveloperTaskBroker>>) => void): Promise<string> {
+  async function plannedInvocation(rows: Record<"web" | "api", Record<string, unknown> | undefined>,
+    afterApproval?: (harness: Awaited<ReturnType<typeof createDeveloperTaskBroker>>) => void): Promise<{ prompt: string; workflowE2EPlanVersion?: number }> {
     const snapshot = contractSnapshot;
     const capture = vi.fn(async () => snapshot);
     const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog" } });
@@ -291,11 +291,16 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     const preparation = harness.db.find((row) => row.pk === `WORKSPACE#${task.workspaceId}` && row.entityType === "OPERATION" && row.kind === "prepare")[0]!;
     await harness.finish(task.workspaceId, String(preparation.id), "SUCCEEDED", { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: snapshot.commitSha }] } });
     const planning = harness.db.find((row) => row.pk === `WORKSPACE#${task.workspaceId}` && row.entityType === "OPERATION" && row.workflowMode === "PLAN")[0]!;
-    return (harness.db.find((row) => row.entityType === "OUTBOX" && row.operationId === planning.id)[0]!.invocation as { payload: { prompt: string } }).payload.prompt;
+    return (harness.db.find((row) => row.entityType === "OUTBOX" && row.operationId === planning.id)[0]!.invocation as { payload: { prompt: string; workflowE2EPlanVersion?: number } }).payload;
   }
+  const plannedPrompt = async (...args: Parameters<typeof plannedInvocation>) => (await plannedInvocation(...args)).prompt;
 
-  it("tells the planner the executable kinds when the project's current web row is READY", async () => {
-    const prompt = await plannedPrompt({ web: webApiRow("web"), api: webApiRow("api") });
+  it("tells the planner the executable kinds and asks for the v2 application intent when the project's current web row is READY", async () => {
+    const { prompt, workflowE2EPlanVersion } = await plannedInvocation({ web: webApiRow("web"), api: webApiRow("api") });
+    expect(workflowE2EPlanVersion).toBe(2);
+    expect(prompt).toContain("e2e?: WorkflowFeatureE2EIntent;");
+    expect(prompt).toContain("Application E2E plan guidance (schemaVersion 2):");
+    expect(prompt).toContain('"runtimeAccountRefs":[{"applicationId":');
     expect(prompt).toContain(`"runtimeProfileId":"${PROFILE}"`);
     expect(prompt).toContain("navigate, fill, click, choose-file");
     expect(prompt).toContain("text, visible, csv");
@@ -305,7 +310,10 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
   it("lists the web target as unavailable when its row is gone at planning time", async () => {
     // The proposal needs a READY row; the row then disappears before the task plans, so planning re-checks and finds it not ready.
     const key = e2eRegisteredRuntimeKey("catalog", PROFILE, "web");
-    const prompt = await plannedPrompt({ web: webApiRow("web"), api: undefined }, (harness) => harness.db.delete(key.pk, key.sk));
+    const { prompt, workflowE2EPlanVersion } = await plannedInvocation({ web: webApiRow("web"), api: undefined }, (harness) => harness.db.delete(key.pk, key.sk));
+    expect(workflowE2EPlanVersion).toBeUndefined();
+    expect(prompt).not.toContain("Application E2E plan guidance");
+    expect(prompt).toContain("e2e?: E2EFeaturePlanIntent;");
     expect(prompt).toContain('{"targetId":"web-1","reason":"runtime-not-ready"}');
     expect(prompt).not.toContain("navigate, fill, click, choose-file");
   });
