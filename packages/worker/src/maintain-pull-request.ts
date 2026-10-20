@@ -1,7 +1,5 @@
-import { execFile } from "node:child_process";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { promisify } from "node:util";
 import {
   AgentXError,
   PullRequestLifecycleResultSchema,
@@ -10,9 +8,9 @@ import {
   type WorkerInvocation,
   type PullRequestLifecycleResult,
 } from "@agentx/contracts";
-import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME, assertNoEmbeddedRepositories, assertNoLfsFiles, gitHardenedEnvironment } from "./git.js";
+import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME } from "./git.js";
 import { assertCredentialFreeRemote, type GitCredential } from "./git-auth.js";
-import { withIsolatedRepository } from "./isolated-repository.js";
+import { assertWorkspaceIsPlain, runIsolatedGit, withIsolatedRepository } from "./isolated-repository.js";
 import type { PullRequestUpdateSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
@@ -23,7 +21,6 @@ import { storedCommandOutput } from "./command-failure.js";
 import type { PreparationManifest } from "./prepare.js";
 import type { DevcontainerCli } from "./devcontainer.js";
 
-const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 1_048_576;
 type MaintainInvocation = Extract<WorkerInvocation, { kind: "maintain" }>;
 
@@ -112,9 +109,7 @@ export async function maintainPullRequest(options: {
       throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
     }
     try {
-      const env = await gitHardenedEnvironment(repositoryPath);
-      await assertNoEmbeddedRepositories(repositoryPath, env);
-      await assertNoLfsFiles(repositoryPath, env);
+      await assertWorkspaceIsPlain(repositoryPath);
     } catch (error) {
       if (error instanceof AgentXError) throw error;
       throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
@@ -298,9 +293,7 @@ async function credentialedGit(
 
 async function isAncestor(directory: string, ancestor: string, descendant: string): Promise<boolean> {
   try {
-    await execFileAsync("git", ["-C", directory, "merge-base", "--is-ancestor", ancestor, descendant], {
-      timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT, env: await gitHardenedEnvironment(directory),
-    });
+    await runIsolatedGit(directory, ["merge-base", "--is-ancestor", ancestor, descendant], { timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT });
     return true;
   } catch (error) {
     const exitCode = (error as { code?: unknown }).code;
@@ -339,16 +332,21 @@ async function loadManifest(rootPath: string, invocation: MaintainInvocation): P
 }
 
 /**
- * Git under a hardened environment computed for each call: readiness checks (project code) run between these calls
- * and could change the repository's config, so an environment computed before them would be stale.
+ * Git for the workspace repository, each command in a throwaway repository that never reads the workspace's config, hooks or attributes files (see
+ * isolated-repository.ts): readiness checks (project code) and the agent's own processes can write those at any moment, so a read of them made before a call
+ * would not hold during it.
  */
 async function git(directory: string, args: readonly string[]): Promise<string> {
   try {
-    const result = await execFileAsync("git", ["-C", directory, ...args], {
-      timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT, encoding: "utf8", env: await gitHardenedEnvironment(directory),
-    });
-    return result.stdout;
+    // `remote get-url` reads one value of the repository's config, from a private copy of the file; nothing in it is run.
+    if (args.length === 3 && args[0] === "remote" && args[1] === "get-url") {
+      const url = await withIsolatedRepository(directory, "read", {}, (repository) => repository.remoteUrl(args[2]));
+      if (url === undefined) throw new Error(`No such remote '${args[2]}'`);
+      return `${url}\n`;
+    }
+    return await runIsolatedGit(directory, args, { timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT });
   } catch (error) {
+    if (error instanceof AgentXError) throw error;
     const processError = error as Error & { stderr?: string };
     throw agentXError("CONFIG_INVALID", sanitize(processError.stderr ?? processError.message));
   }
