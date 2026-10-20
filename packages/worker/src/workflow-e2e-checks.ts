@@ -33,7 +33,7 @@ export async function executeWorkflowE2EChecks(input: {
    * without one still runs portable rounds.
    */
   application?: WorkflowE2EApplicationRuntime | (() => WorkflowE2EApplicationRuntime);
-  /** The local directory of the candidate repository with this id, for `git archive`; an application admission falls back to `sourceRoot`. */
+  /** The local directory of the candidate repository with this id, for `git archive`. An application admission needs it; there is no fallback to `sourceRoot`. */
   candidateRepositoryRoot?: (repositoryId: string) => string | undefined;
 }): Promise<{ evidenceRef: { key: string; sha256: string }; candidateDigest: string; roundId: string; processStatus: "SUCCEEDED" | "FAILED" }> {
   const { invocation } = input;
@@ -68,7 +68,7 @@ export async function executeWorkflowE2EChecks(input: {
         if (application === undefined) throw new Error("native E2E application admission needs a configured Docker application runtime");
         return application;
       },
-      candidateRepositoryRoot: input.candidateRepositoryRoot ?? (() => undefined), fallbackRepositoryRoot: input.sourceRoot,
+      candidateRepositoryRoot: input.candidateRepositoryRoot ?? (() => undefined),
       saveEvidence: input.saveEvidence, ...(input.deadlineAt === undefined ? {} : { deadlineAt: input.deadlineAt }),
       ...(input.signal === undefined ? {} : { signal: input.signal }), throwIfCancelled });
   }

@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { canonicalJson, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
+import { E2E_HARD_LIMITS, canonicalJson, type E2EApplicationBuildSourceManifest, type E2EApplicationExecutionAdmission, type E2ERunBinding, type E2ERunInput, type E2EWorkflowAdmissionRef,
   type WorkerInvocation } from "@agentx/contracts";
 import { collectE2EApplicationRun, decodeE2EApplicationExecutionAdmission, e2eApplicationPrivateTransferMaxBytes, runIsolatedE2EApplication,
   validateE2EApplicationExecutionAdmission, type DockerApplicationHost, type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { runWithConcurrency } from "./bounded-concurrency.js";
-import { createProcessCandidateGit, stageCandidateSource, type ApprovedBuildSource, type CandidateGit } from "./e2e-candidate-source.js";
+import { admittedRepositoryOf, assertBuildSourceBelongsToCandidate, createProcessCandidateGit, stageCandidateSource, type CandidateGit } from "./e2e-candidate-source.js";
 
 const sha = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const MAX_CONCURRENT_APPLICATION_GROUPS = 2;
@@ -27,7 +27,15 @@ export type WorkflowE2EApplicationRuntime = Readonly<{
   collect?: typeof collectE2EApplicationRun;
 }>;
 
-const tail = (text: string) => (Buffer.byteLength(text) <= DIAGNOSTIC_TAIL_BYTES ? text : Buffer.from(text).subarray(-DIAGNOSTIC_TAIL_BYTES).toString("utf8"));
+/** The last `maxBytes` bytes of `text`, starting on a character boundary so no sequence is split into replacement characters. */
+export function utf8Tail(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.byteLength <= maxBytes) return text;
+  let start = bytes.byteLength - maxBytes;
+  while (start < bytes.byteLength && (bytes[start]! & 0xc0) === 0x80) start += 1;
+  return bytes.subarray(start).toString("utf8");
+}
+const tail = (text: string) => utf8Tail(text, DIAGNOSTIC_TAIL_BYTES);
 
 /** The lifecycle input for one group, derived from what the admission already approved and nothing else. */
 function applicationRunInput(compiled: E2ECompiledApplicationSuite, binding: E2ERunBinding): E2ERunInput {
@@ -60,7 +68,7 @@ function applicationRunInput(compiled: E2ECompiledApplicationSuite, binding: E2E
 export async function executeWorkflowE2EApplicationChecks(input: {
   invocation: Extract<WorkerInvocation, { kind: "task" }>; reference: E2EWorkflowAdmissionRef; admissionBytes: Buffer;
   runtime: () => WorkflowE2EApplicationRuntime;
-  candidateRepositoryRoot: (repositoryId: string) => string | undefined; fallbackRepositoryRoot: string;
+  candidateRepositoryRoot: (repositoryId: string) => string | undefined;
   saveEvidence: (bytes: Uint8Array, sha256: string, maxBytes: number, groupRunId?: string) => Promise<{ key: string; sha256: string }>;
   deadlineAt?: number; signal?: AbortSignal; throwIfCancelled: () => void;
 }): Promise<{ evidenceRef: { key: string; sha256: string }; candidateDigest: string; roundId: string; processStatus: "SUCCEEDED" | "FAILED" }> {
@@ -82,6 +90,8 @@ export async function executeWorkflowE2EApplicationChecks(input: {
   const round = admission.round;
   const deadline = Date.parse(round.deadlineAt);
   if (!Number.isFinite(deadline) || deadline <= Date.now() || (input.deadlineAt !== undefined && deadline > input.deadlineAt)) throw new Error("native E2E round deadline is invalid or expired");
+  // The round schema bounds the run from its admittedAt; this bounds it from now, so no admission can keep a run alive past the hard limit (and the stale-run sweep age).
+  if (deadline - Date.now() > E2E_HARD_LIMITS.runTimeoutMs) throw new Error("native E2E round deadline is further away than the hard run limit");
   const runtime = input.runtime();
   input.throwIfCancelled();
 
@@ -96,12 +106,15 @@ export async function executeWorkflowE2EApplicationChecks(input: {
   };
   const stagedSource = join(resolve(runtime.runRoot), `candidate-${round.roundId}`);
   try {
-    const repositoryId = admission.sourceSnapshot.candidate.repositories[0]?.repositoryId;
-    const manifests = new Map<string, ApprovedBuildSource>();
+    const admitted = { repositoryId: admittedRepositoryOf(admission.sourceSnapshot.candidate, admission.candidateCommitSha, admission.candidateTreeSha),
+      commitSha: admission.candidateCommitSha, treeSha: admission.candidateTreeSha };
+    const repositoryRoot = input.candidateRepositoryRoot(admitted.repositoryId);
+    if (repositoryRoot === undefined) throw new Error("native E2E application candidate repository is not on this worker");
+    const manifests = new Map<string, E2EApplicationBuildSourceManifest>();
     for (const suite of validated.applicationSuites) for (const application of suite.applicationBindings.values()) manifests.set(application.buildSource.manifest.manifestDigest, application.buildSource.manifest);
+    assertBuildSourceBelongsToCandidate([...manifests.values()], admitted);
     await mkdir(resolve(runtime.runRoot), { recursive: true, mode: 0o700 });
-    await stageCandidateSource({ git: runtime.git ?? createProcessCandidateGit(),
-      repositoryRoot: (repositoryId === undefined ? undefined : input.candidateRepositoryRoot(repositoryId)) ?? input.fallbackRepositoryRoot,
+    await stageCandidateSource({ git: runtime.git ?? createProcessCandidateGit(), repositoryRoot,
       commitSha: admission.candidateCommitSha, treeSha: admission.candidateTreeSha, destination: stagedSource, manifests: [...manifests.values()], signal: controller.signal });
     input.throwIfCancelled();
 

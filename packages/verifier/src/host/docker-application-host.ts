@@ -73,6 +73,8 @@ export function e2eRunNetworks(runId: string): { internal: string; build: string
  * strictly below it, or a run still inside its own deadline could be swept away by a sibling run's allocation.
  */
 export const STALE_RUN_SWEEP_AGE_MS = 3_600_000;
+/** How long past the plan deadline the host waits for the executor to exit by itself before killing it, unless told otherwise. */
+export const DEFAULT_DEADLINE_GRACE_MS = 15_000;
 /** The pinned Node base image that builds a web/API candidate and runs it. */
 export const WEB_API_BUILD_IMAGE = "public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5";
 const ADMIN_TIMEOUT_MS = 30_000;
@@ -229,7 +231,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const workspace = join(deps.runRoot, runId);
   const dirs = { app: join(workspace, "app"), owned: join(workspace, "owned"), out: join(workspace, "out"), plan: join(workspace, "plan.json") };
   const pollMs = deps.appPollMs ?? 1_000;
-  const graceMs = deps.deadlineGraceMs ?? 15_000;
+  const graceMs = deps.deadlineGraceMs ?? DEFAULT_DEADLINE_GRACE_MS;
   const assemble = deps.assemble ?? assembleExecutorActualRun;
   const deadlineAt = Date.parse(binding.deadlineAt);
 

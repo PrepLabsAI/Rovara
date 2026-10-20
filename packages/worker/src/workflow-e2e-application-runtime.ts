@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { WEB_API_BUILD_IMAGE, containedRuntimeProfileForHost, createDockerApplicationHost, createProcessDockerCli, type DockerCli } from "@agentx/verifier";
+import { WEB_API_BUILD_IMAGE, containedRuntimeProfileForHost, createDockerApplicationHost, createProcessDockerCli, type DockerApplicationHostDeps, type DockerCli } from "@agentx/verifier";
 import type { WorkflowE2EApplicationRuntime } from "./workflow-e2e-application-checks.js";
 
 /** What the worker's own configuration gives the Docker application host; nothing here comes from an invocation. */
@@ -19,6 +19,16 @@ export function workflowE2EApplicationRuntimeConfig(environment: NodeJS.ProcessE
   return { executorImage, buildImage: WEB_API_BUILD_IMAGE, runRoot: join(scratch, "web-api-runs") };
 }
 
+/**
+ * The host's dependencies: the worker's configuration, plus exactly the three things a group supplies. The keys are picked one by one, so nothing a caller
+ * adds (another image, run root, Docker, seccomp profile or hook) can reach the host.
+ */
+export function workflowE2EApplicationHostDeps(config: WorkflowE2EApplicationRuntimeConfig, docker: DockerCli, now: () => number,
+  input: Parameters<WorkflowE2EApplicationRuntime["createHost"]>[0]): DockerApplicationHostDeps {
+  return { docker, executorImage: config.executorImage, buildImage: config.buildImage, runRoot: config.runRoot, now,
+    admission: input.admission, groupId: input.groupId, candidateSourceDir: input.candidateSourceDir };
+}
+
 /** The production Docker application runtime: one Docker application host per group, on the real Docker CLI. */
 export function createWorkflowE2EApplicationRuntime(environment: NodeJS.ProcessEnv = process.env,
   options: { platform?: string; arch?: string; docker?: DockerCli; now?: () => number } = {}): WorkflowE2EApplicationRuntime {
@@ -26,5 +36,5 @@ export function createWorkflowE2EApplicationRuntime(environment: NodeJS.ProcessE
   const docker = options.docker ?? createProcessDockerCli();
   const now = options.now ?? (() => Date.now());
   return Object.freeze({ runRoot: config.runRoot,
-    createHost: (input) => createDockerApplicationHost({ docker, executorImage: config.executorImage, buildImage: config.buildImage, runRoot: config.runRoot, now, ...input }) });
+    createHost: (input) => createDockerApplicationHost(workflowE2EApplicationHostDeps(config, docker, now, input)) });
 }

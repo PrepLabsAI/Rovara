@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { E2E_HARD_LIMITS, WorkerInvocationSchema, type E2EApplicationExecutionAdmission } from "@agentx/contracts";
-import { createDockerApplicationHost, STALE_RUN_SWEEP_AGE_MS, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
+import { createDockerApplicationHost, DEFAULT_DEADLINE_GRACE_MS, STALE_RUN_SWEEP_AGE_MS, type DockerApplicationHost } from "../../packages/verifier/src/host/docker-application-host.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
 import { executeWorkflowE2EChecks } from "../../packages/worker/src/workflow-e2e-checks.js";
 import type { CandidateGit } from "../../packages/worker/src/e2e-candidate-source.js";
@@ -78,8 +78,8 @@ async function setup(options: { deadlineMs?: number; treeSha?: string; fake?: Fa
   const collect = vi.fn<(input: unknown) => Collected>(() => ({ collection: { marker: "wire-collection" }, oracle: {}, unavailableReason: null,
     qualification: { status: "PASS", reason: "all cases passed", runId: null, rawReportSha256: null, result: null } }));
   const application = { runRoot, createHost, git, collect } as unknown as WorkflowE2EApplicationRuntime;
-  const run = (extra: { signal?: AbortSignal; deadlineAt?: number; application?: WorkflowE2EApplicationRuntime | (() => WorkflowE2EApplicationRuntime) } = {}) => executeWorkflowE2EChecks({
-    invocation, readAdmission, saveEvidence, sourceRoot: "/workspace/runtime", evidenceRoot, candidateRepositoryRoot: () => repositoryRoot,
+  const run = (extra: { signal?: AbortSignal; deadlineAt?: number; candidateRepositoryRoot?: (repositoryId: string) => string | undefined; application?: WorkflowE2EApplicationRuntime | (() => WorkflowE2EApplicationRuntime) } = {}) => executeWorkflowE2EChecks({
+    invocation, readAdmission, saveEvidence, sourceRoot: "/workspace/runtime", evidenceRoot, candidateRepositoryRoot: extra.candidateRepositoryRoot ?? (() => repositoryRoot),
     application: extra.application ?? application, ...(extra.signal === undefined ? {} : { signal: extra.signal }),
     ...(extra.deadlineAt === undefined ? {} : { deadlineAt: extra.deadlineAt }),
   });
@@ -158,7 +158,7 @@ describe("workflow E2E application rounds", () => {
     expect(group.groupRun).toMatchObject({ kind: "application", unavailableReason: "deadline-exceeded", actual: null,
       collection: { status: "UNKNOWN", reason: "deadline-exceeded" } });
     expect(JSON.stringify(group)).not.toContain("\"PASS\"");
-    expect(evidenceOf(s.saved).payload.groupRuns[0].collection.status).toBe("UNKNOWN");
+    expect(evidenceOf(s.saved).payload.groupRuns[0]?.collection.status).toBe("UNKNOWN");
     expect(result.processStatus).toBe("FAILED");
     expect(s.fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
   }, 20_000);
@@ -237,8 +237,44 @@ describe("workflow E2E application rounds", () => {
       expect(Date.parse(binding.deadlineAt) - Date.parse(binding.admittedAt)).toBeLessThan(STALE_RUN_SWEEP_AGE_MS);
     }
     // No admissible round can outlive the sweep: the hard run limit, plus the host's grace past a deadline, is itself below the sweep age.
-    const hostGraceMs = 15_000;
-    expect(E2E_HARD_LIMITS.runTimeoutMs + hostGraceMs).toBeLessThan(STALE_RUN_SWEEP_AGE_MS);
+    expect(E2E_HARD_LIMITS.runTimeoutMs + DEFAULT_DEADLINE_GRACE_MS).toBeLessThan(STALE_RUN_SWEEP_AGE_MS);
     expect(s.admission.policy.limits.runTimeoutMs).toBeLessThanOrEqual(E2E_HARD_LIMITS.runTimeoutMs);
+  });
+
+  it("refuses, instead of using the worker's own directory, when the admitted repository is not on this worker", async () => {
+    const s = await setup();
+    const asked: string[] = [];
+    await expect(s.run({ candidateRepositoryRoot: (repositoryId) => { asked.push(repositoryId); return undefined; } })).rejects.toThrow("native E2E application candidate repository is not on this worker");
+    expect(asked).toEqual([s.admission.sourceSnapshot.candidate.repositories[0]!.repositoryId]);
+    expect(s.treeOf).not.toHaveBeenCalled();
+    expect(s.createHost).not.toHaveBeenCalled();
+    expect(s.fake.calls).toEqual([]);
+    // Nor does a worker that offers no repository lookup at all fall back to its runtime root.
+    await expect(executeWorkflowE2EChecks({ invocation: s.invocation, readAdmission: s.readAdmission, saveEvidence: s.saveEvidence, sourceRoot: "/workspace/runtime",
+      evidenceRoot: "/evidence", application: { runRoot: s.runRoot, createHost: s.createHost, git: { treeOf: s.treeOf, archiveInto: s.archiveInto } },
+    })).rejects.toThrow("candidate repository is not on this worker");
+    expect(s.treeOf).not.toHaveBeenCalled();
+  });
+
+  it("retries a round whose staging directory a crash left behind", async () => {
+    const s = await setup();
+    s.fake.onExecutor = s.okOutput;
+    const leftover = join(s.runRoot, `candidate-${s.admission.round.roundId}`);
+    await mkdir(join(leftover, "src"), { recursive: true });
+    await writeFile(join(leftover, "src", "stale.js"), "from the crashed attempt");
+    await s.run();
+    expect(s.calls).toEqual(["allocate", "execute", "close"]);
+    expect(await readdir(s.runRoot)).toEqual([]);
+  });
+
+  it("refuses a round whose deadline is further away than the hard run limit, whatever its admittedAt says", async () => {
+    const s = await setup();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.parse(s.admission.round.admittedAt) - E2E_HARD_LIMITS.runTimeoutMs);
+      await expect(s.run()).rejects.toThrow(/hard run limit/);
+    } finally { vi.useRealTimers(); }
+    expect(s.treeOf).not.toHaveBeenCalled();
+    expect(s.createHost).not.toHaveBeenCalled();
   });
 });

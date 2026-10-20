@@ -1,7 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, readdir, readFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { chmod, lstat, mkdir, readdir, readFile, realpath, rm } from "node:fs/promises";
+import { basename, dirname, join, sep } from "node:path";
 
 const SHA1 = /^[a-f0-9]{40}$/;
 const GIT_OUTPUT_CAP_BYTES = 4096;
@@ -22,7 +22,20 @@ export type ApprovedBuildSource = {
   omissions: ReadonlyArray<{ path: string }>;
 };
 
-const gitEnvironment = (): NodeJS.ProcessEnv => ({ PATH: process.env.PATH ?? "/usr/bin:/bin", ...(process.env.HOME === undefined ? {} : { HOME: process.env.HOME }), LC_ALL: "C" });
+/**
+ * Everything git and tar get from this process. The candidate's own code can write into its repository, so git is told to trust nothing but the
+ * objects named by id: no replace refs, no system or global config, no home directory, and none of this worker's credentials.
+ */
+export function candidateGitEnvironment(): Record<string, string> {
+  return { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", GIT_NO_REPLACE_OBJECTS: "1", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_ATTR_NOSYSTEM: "1", GIT_TERMINAL_PROMPT: "0" };
+}
+/**
+ * Repository-local attribute files cannot be switched off by environment, so the global one is pinned empty and `enforceApprovedBuildSource` holds the content.
+ * `safe.directory` is set on the command line (a protected place) for the worker's own repository path only: with no home or global config, git would
+ * otherwise refuse a repository whose owner is not the worker's user.
+ */
+const gitFlags = (repositoryRoot: string): string[] => ["-c", "core.attributesFile=/dev/null", "-c", `safe.directory=${repositoryRoot}`];
 const NOT_A_SHA = "candidate commit is not a full lowercase hex object id";
 const tailOf = (text: string): string => (text.length <= STDERR_TAIL_BYTES ? text : text.slice(text.length - STDERR_TAIL_BYTES)).trim();
 
@@ -30,7 +43,7 @@ export function createProcessCandidateGit(): CandidateGit {
   return {
     treeOf: (repositoryRoot, commitSha, signal) => new Promise<string>((resolve, reject) => {
       if (!SHA1.test(commitSha)) { reject(new Error(NOT_A_SHA)); return; }
-      execFile("git", ["-C", repositoryRoot, "rev-parse", `${commitSha}^{tree}`], { env: gitEnvironment(), maxBuffer: GIT_OUTPUT_CAP_BYTES, signal, encoding: "utf8" }, (error, stdout, stderr) => {
+      execFile("git", [...gitFlags(repositoryRoot), "-C", repositoryRoot, "rev-parse", `${commitSha}^{tree}`], { env: candidateGitEnvironment(), maxBuffer: GIT_OUTPUT_CAP_BYTES, signal, encoding: "utf8" }, (error, stdout, stderr) => {
         if (error) { reject(new Error(`could not read the candidate tree: ${tailOf(stderr) || error.message}`)); return; }
         const tree = stdout.trim();
         if (!SHA1.test(tree)) { reject(new Error("git did not answer with a tree id")); return; }
@@ -40,9 +53,9 @@ export function createProcessCandidateGit(): CandidateGit {
     archiveInto: (repositoryRoot, commitSha, destination, signal) => new Promise<void>((resolve, reject) => {
       if (!SHA1.test(commitSha)) { reject(new Error(NOT_A_SHA)); return; }
       if (signal.aborted) { reject(signal.reason instanceof Error ? signal.reason : new Error("candidate extraction was cancelled")); return; }
-      const archive = spawn("git", ["-C", repositoryRoot, "archive", "--format=tar", commitSha], { env: gitEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
+      const archive = spawn("git", [...gitFlags(repositoryRoot), "-C", repositoryRoot, "archive", "--format=tar", commitSha], { env: candidateGitEnvironment(), stdio: ["ignore", "pipe", "pipe"] });
       // -p keeps the archive's modes whatever this process's umask is: the build container's unprivileged user must be able to read the tree.
-      const extract = spawn("tar", ["-x", "-p", "-f", "-", "-C", destination, "--no-same-owner"], { env: gitEnvironment(), stdio: ["pipe", "ignore", "pipe"] });
+      const extract = spawn("tar", ["-x", "-p", "-f", "-", "-C", destination, "--no-same-owner"], { env: candidateGitEnvironment(), stdio: ["pipe", "ignore", "pipe"] });
       let archiveStderr = ""; let extractStderr = "";
       let archiveCode: number | null | undefined; let extractCode: number | null | undefined;
       let settled = false;
@@ -75,11 +88,52 @@ export function createProcessCandidateGit(): CandidateGit {
 const MISMATCH = "staged candidate source differs from the approved build source";
 
 /**
+ * Removes `relativePath` under `root` without ever following a symlink: every folder on the way must be a real directory (a symlink or file there is
+ * refused, never walked through), the leaf is unlinked or removed as it is, and a missing path is already removed. Nothing outside `root` can be touched.
+ */
+export async function removeWithoutFollowing(root: string, relativePath: string): Promise<void> {
+  const parts = relativePath.split("/");
+  if (relativePath.startsWith("/") || parts.some((part) => part === "" || part === "." || part === "..")) throw new Error(`${MISMATCH}: unsafe path to remove`);
+  const realRoot = await realpath(root);
+  let current = realRoot;
+  for (const [index, part] of parts.entries()) {
+    const next = join(current, part);
+    let stat;
+    try { stat = await lstat(next); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return; throw error; }
+    if (index === parts.length - 1) { await rm(next, { recursive: true, force: true }); return; }
+    if (!stat.isDirectory()) throw new Error(`${MISMATCH}: ${relativePath} passes through a symlink or file`);
+    const real = await realpath(next);
+    if (real !== next || !(real + sep).startsWith(realRoot + sep)) throw new Error(`${MISMATCH}: ${relativePath} leaves the staging directory`);
+    current = next;
+  }
+}
+
+/** The one repository the admission's candidate holds, and only when it is the exact admitted commit and tree. */
+export function admittedRepositoryOf(candidate: { repositories: ReadonlyArray<{ repositoryId: string; commitSha: string; treeSha: string }> }, commitSha: string, treeSha: string): string {
+  const [repository] = candidate.repositories;
+  if (candidate.repositories.length !== 1 || repository === undefined) throw new Error("native E2E application candidate repository is ambiguous: the admission must name exactly one");
+  if (repository.commitSha !== commitSha || repository.treeSha !== treeSha) throw new Error("native E2E application candidate repository is not the admitted commit and tree");
+  return repository.repositoryId;
+}
+
+/** Every approved build source manifest must describe the admitted candidate's repository, commit and tree, not another one. */
+export function assertBuildSourceBelongsToCandidate(manifests: ReadonlyArray<{ repository: { repositoryId: string; commitSha: string; treeSha: string } }>,
+  admitted: { repositoryId: string; commitSha: string; treeSha: string }): void {
+  for (const manifest of manifests) {
+    const { repositoryId, commitSha, treeSha } = manifest.repository;
+    if (repositoryId !== admitted.repositoryId || commitSha !== admitted.commitSha || treeSha !== admitted.treeSha) {
+      throw new Error("an approved build source does not belong to the admitted candidate commit and tree");
+    }
+  }
+}
+
+/**
  * Makes the staged directory exactly the approved build source: the manifest's explicit omissions (symlinks, submodules, blocked paths) are removed, and every
  * file left must be a regular file the manifest lists, byte-identical and with the same executable bit. Anything else, or anything missing, refuses the tree.
  */
 export async function enforceApprovedBuildSource(directory: string, manifest: ApprovedBuildSource): Promise<void> {
-  for (const omission of manifest.omissions) await rm(join(directory, omission.path), { recursive: true, force: true });
+  for (const omission of manifest.omissions) await removeWithoutFollowing(directory, omission.path);
   const expected = new Map(manifest.files.map((file) => [file.path, file]));
   const seen = new Set<string>();
   const walk = async (relative: string): Promise<void> => {
@@ -108,6 +162,9 @@ export async function stageCandidateSource(input: { git: CandidateGit; repositor
   manifests: readonly ApprovedBuildSource[]; signal: AbortSignal }): Promise<void> {
   const tree = await input.git.treeOf(input.repositoryRoot, input.commitSha, input.signal);
   if (tree !== input.treeSha) throw new Error("candidate tree does not match admission");
+  // A directory a crashed attempt of this round left behind is removed (never followed), then the stage is rebuilt from the commit.
+  await mkdir(dirname(input.destination), { recursive: true, mode: 0o700 });
+  await removeWithoutFollowing(dirname(input.destination), basename(input.destination));
   await mkdir(input.destination, { mode: 0o755 });
   try {
     await input.git.archiveInto(input.repositoryRoot, input.commitSha, input.destination, input.signal);
@@ -115,7 +172,7 @@ export async function stageCandidateSource(input: { git: CandidateGit; repositor
     await chmod(input.destination, 0o755);
     for (const manifest of input.manifests) await enforceApprovedBuildSource(input.destination, manifest);
   } catch (error) {
-    await rm(input.destination, { recursive: true, force: true });
+    await removeWithoutFollowing(dirname(input.destination), basename(input.destination)).catch(() => undefined);
     throw error;
   }
 }

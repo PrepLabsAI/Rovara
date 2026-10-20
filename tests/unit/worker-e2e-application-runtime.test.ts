@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { WEB_API_BUILD_IMAGE } from "../../packages/verifier/src/host/docker-application-host.js";
-import { createWorkflowE2EApplicationRuntime, workflowE2EApplicationRuntimeConfig } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
+import { createWorkflowE2EApplicationRuntime, workflowE2EApplicationHostDeps, workflowE2EApplicationRuntimeConfig } from "../../packages/worker/src/workflow-e2e-application-runtime.js";
 import { createOrdersExecutorPlan } from "../support/e2e-orders-executor-fixture.js";
 import { FakeDockerCli } from "../support/fake-docker-cli.js";
 
@@ -39,5 +39,16 @@ describe("worker application runtime configuration", () => {
     expect(first).not.toBe(second);
     expect(docker.calls).toEqual([]);
     expect(() => runtime.createHost({ admission: fixture.plan.admission, groupId: "not-a-group", candidateSourceDir: source })).toThrow(/not a runnable application group/);
+  });
+
+  it("takes only the admission, group and staged source from the caller, never the image, run root or docker", () => {
+    const config = { executorImage: image, buildImage: WEB_API_BUILD_IMAGE, runRoot: "/mnt/agentx-runtime/candidates/web-api-runs" };
+    const docker = new FakeDockerCli();
+    const now = () => 1;
+    const hostile = { admission: { marker: "admission" }, groupId: "group-1", candidateSourceDir: "/staged", executorImage: "evil:latest", buildImage: "evil:build",
+      runRoot: "/tmp/elsewhere", docker: "not-docker", now: () => 2, assemble: "x", onRunOutput: "x", executorSeccompProfile: "/tmp/open.json" } as never;
+    const deps = workflowE2EApplicationHostDeps(config, docker, now, hostile);
+    expect(Object.keys(deps).sort()).toEqual(["admission", "buildImage", "candidateSourceDir", "docker", "executorImage", "groupId", "now", "runRoot"]);
+    expect(deps).toMatchObject({ executorImage: image, buildImage: WEB_API_BUILD_IMAGE, runRoot: config.runRoot, docker, now, groupId: "group-1", candidateSourceDir: "/staged" });
   });
 });
