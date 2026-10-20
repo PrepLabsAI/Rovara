@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { WorkerInvocationSchema, agentXError, taskGraphDigest, workflowPublicationContext, workflowPublicationContextDigest, workspaceSessionKey, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
+import { WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, agentXError, taskGraphDigest, workflowPublicationContext, workflowPublicationContextDigest, workspaceSessionKey, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { createDispatcherHandler, createWorkflowE2EReadinessCompleter, createWorkflowE2EReadinessValidator, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
 import { guardTaskDispatch as coreGuardTaskDispatch } from "../../packages/broker/src/aws/task-dispatch-access.js";
 import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
@@ -32,11 +32,11 @@ function recordFor(workspaceId = randomUUID(), fence = 2): Ec2OutboxRecord {
   return { id: randomUUID(), entityType: "OUTBOX", status: "QUEUED", operationId, workspaceId, deploymentMode: "ec2-ebs" as const, invocation };
 }
 
-function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}) {
+function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}, without: ReadonlyArray<keyof Ec2DeliveryDependencies> = []) {
   const post = vi.fn<Ec2DeliveryDependencies["post"]>(async () => ({ status: 200, body: "{\"accepted\":true}" }));
   const progress = vi.fn<Ec2DeliveryDependencies["progress"]>(async () => undefined);
   const applicationPlanNotNegotiated = vi.fn<NonNullable<Ec2DeliveryDependencies["applicationPlanNotNegotiated"]>>(async () => undefined);
-  const deliver = createEc2Delivery({
+  const dependencies: Ec2DeliveryDependencies = {
     sessions: { ensureSession: async () => ({ ready: true, generation: 3, privateIp: "10.42.128.10" }) },
     binding: async () => binding,
     sign: kmsSign,
@@ -45,7 +45,9 @@ function delivery(overrides: Partial<Ec2DeliveryDependencies> = {}) {
     applicationPlanNotNegotiated,
     now: () => NOW,
     ...overrides,
-  });
+  };
+  for (const key of without) delete dependencies[key];
+  const deliver = createEc2Delivery(dependencies);
   return { deliver, post, progress, applicationPlanNotNegotiated };
 }
 
@@ -451,6 +453,57 @@ describe("ec2-ebs delivery", () => {
         event: "dispatch.application_plan_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
       }));
       log.mockRestore();
+    });
+
+    describe("application E2E admissions (Ruling BQ, mixed fleet)", () => {
+      const admission = (extra: Record<string, unknown> = {}) => ({ schemaVersion: 1, taskId: randomUUID(), workflowRevision: 3, candidateDigest: "a".repeat(64), roundId: randomUUID(), groupRunIds: [randomUUID()],
+        admissionRef: { key: `workflow-e2e-admissions/sha256/${"b".repeat(64)}.json`, sha256: "b".repeat(64), byteLength: 100 }, ...extra });
+      const checks = (ref: unknown) => taskRecord({ workflowMode: "CHECKS", readiness: [], workflowE2EAdmission: ref });
+      const checksFeatures = ["task.workflowMode", "task.workflowChecks", "task.readiness", "task.workflowE2EAdmission"];
+
+      it("never sends an application admission to a worker that does not list task.workflowE2EApplicationChecks, and says why", async () => {
+        const record = checks(admission({ kind: "application" }));
+        const older = delivery({ workerFeatures: async () => checksFeatures });
+        await expect(older.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringContaining("task.workflowE2EApplicationChecks") });
+        expect(older.post).not.toHaveBeenCalled();
+      });
+
+      it("fails closed for an application admission when the worker cannot be asked which features it lists", async () => {
+        const record = checks(admission({ kind: "application" }));
+        const unprobed = delivery();
+        await expect(unprobed.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+        expect(unprobed.post).not.toHaveBeenCalled();
+        const failing = delivery({ workerFeatures: async () => { throw new Error("ping down"); } });
+        await expect(failing.deliver(record, record.invocation)).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+        expect(failing.post).not.toHaveBeenCalled();
+      });
+
+      it("hands an application admission, unchanged, to a worker that lists the feature", async () => {
+        const ref = admission({ kind: "application" });
+        const record = checks(ref);
+        const capable = delivery({ workerFeatures: async () => [...checksFeatures, "task.workflowE2EApplicationChecks"] });
+        expect(await capable.deliver(record, record.invocation)).toBe("DELIVERED");
+        expect(postedPayload(capable.post).workflowE2EAdmission).toEqual(ref);
+      });
+
+      it("still hands a portable admission to a worker that predates application CHECKS", async () => {
+        const ref = admission();
+        const record = checks(ref);
+        const older = delivery({ workerFeatures: async () => checksFeatures });
+        expect(await older.deliver(record, record.invocation)).toBe("DELIVERED");
+        expect(postedPayload(older.post).workflowE2EAdmission).toEqual(ref);
+      });
+
+      it("is advertised by the worker's own /ping feature list", () => {
+        expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowE2EApplicationChecks");
+      });
+    });
+
+    it("refuses to downgrade a version 2 application plan when no applicationPlanNotNegotiated recorder is wired, instead of posting a run the operation record still calls version 2 (2.2b N4)", async () => {
+      const record = taskRecord({ workflowMode: "PLAN", planFormat: "structured", workflowE2EPlanVersion: 2 });
+      const unwired = delivery({ workerFeatures: async () => ["task.workflowMode", "task.structuredPlans"] }, ["applicationPlanNotNegotiated"]);
+      await expect(unwired.deliver(record, record.invocation)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+      expect(unwired.post).not.toHaveBeenCalled();
     });
 
     it("sends an ordinary portable structured plan unchanged to a worker without the application plan feature", async () => {

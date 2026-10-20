@@ -211,9 +211,13 @@ export const E2EWorkflowProgressSchema = z.object({ contractDigest: digest, poli
 export type E2EWorkflowProgress = z.infer<typeof E2EWorkflowProgressSchema>;
 export type E2EQualifiedRound = z.infer<typeof E2EQualifiedRoundSchema>;
 
-/** Server-assigned admission object reference for a separate native CHECKS operation. */
+/**
+ * Server-assigned admission object reference for a separate native CHECKS operation. `kind` is "application" for a browser or API round (and absent for a
+ * portable one): the dispatcher reads it, with no access to the stored admission, to hand such a round only to a worker that lists
+ * "task.workflowE2EApplicationChecks" (Ruling BQ, mixed fleet).
+ */
 export const E2EWorkflowAdmissionRefSchema = z.object({
-  schemaVersion: z.literal(1), taskId: z.string().uuid(), workflowRevision: positiveInt,
+  schemaVersion: z.literal(1), kind: z.literal("application").optional(), taskId: z.string().uuid(), workflowRevision: positiveInt,
   candidateDigest: digest, roundId: z.string().uuid(), groupRunIds: z.array(z.string().uuid()).min(1).max(4).refine((values) => new Set(values).size === values.length), admissionRef: z.object({
     key: z.string().regex(/^workflow-e2e-admissions\/sha256\/[a-f0-9]{64}\.json$/), sha256: digest,
     byteLength: positiveInt.max(24 * 1024 * 1024),

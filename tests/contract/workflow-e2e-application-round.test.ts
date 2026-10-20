@@ -67,6 +67,14 @@ const blockedWith = (round: ApplicationRound, reason: RegExp) => {
 };
 
 describe("uploading the evidence of an application round: group lookup, sizing and the broker's receipt", () => {
+  it("marks the admission reference it hands the dispatcher as an application admission, so a worker that predates application CHECKS is never sent it (Ruling BQ)", async () => {
+    const round = await startApplicationRound();
+    expect(round.admissionRef.kind).toBe("application");
+    expect(round.operationNow().workflowE2EAdmission.kind).toBe("application");
+    const [outbox] = round.harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === round.operationId) as Array<{ invocation: { payload: { workflowE2EAdmission: { kind?: string } } } }>;
+    expect(outbox!.invocation.payload.workflowE2EAdmission.kind).toBe("application");
+  });
+
   it("accepts a group's evidence against the admission's own application groups and records the broker's receipt of it", async () => {
     const round = await startApplicationRound();
     round.markRunning();
