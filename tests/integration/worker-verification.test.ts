@@ -255,6 +255,13 @@ describe("verification-only retries", () => {
     expect(run.result?.workflowCandidateSourceExport?.repositories[0]?.commitSha).toBe(checkedHead);
     expect(run.result?.workflowCandidateSourceExport?.repositories[0]?.treePaths).toContain("untracked-source.mjs");
     expect(run.result?.workflowCandidateSourceExport?.repositories[0]?.treePaths).toContain("notes.md");
+    // The build source manifest describes that exact export: same commit and tree, and every tree path exactly once.
+    const buildSource = run.result?.workflowCandidateBuildSource;
+    expect(buildSource, JSON.stringify(buildSource)).toMatchObject({ status: "READY", manifest: { sourceState: "committed-tree", repository: { commitSha: checkedHead, treeSha: checkedTree },
+      candidateDigest: run.result?.workflowCandidateSourceExport?.candidate.digest } });
+    if (buildSource?.status === "READY") {
+      expect(buildSource.manifest.treeEntries.map((entry) => entry.path).sort()).toEqual([...run.result!.workflowCandidateSourceExport!.repositories[0]!.treePaths].sort());
+    }
     expect(execFileSync("git", ["-C", repository, "diff", "--cached", "--quiet", "HEAD"], { encoding: "utf8" })).toBe("");
     expect(execFileSync("git", ["-C", repository, "status", "--porcelain"], { encoding: "utf8" }).trim()).toBe("");
     expect(await readFile(indexPath)).not.toEqual(originalIndex);
@@ -380,6 +387,7 @@ describe("verification-only retries", () => {
     expect(result.workflowCheckCandidateRepositories).toEqual(result.workflowCandidateRepositories);
     expect(result.workflowCandidateSourceExport?.repositories[0]?.commitSha).toBe(checkedHead);
     expect(result.workflowCandidateSourceExport?.repositories[0]?.treePaths).toContain("retained-untracked.mjs");
+    expect(result.workflowCandidateBuildSource).toMatchObject({ status: "READY", manifest: { repository: { commitSha: checkedHead } } });
   });
 
   it("does not bind selected checks when a check mutates the finalized candidate", async () => {
@@ -398,6 +406,7 @@ describe("verification-only retries", () => {
     expect(run.result?.checks).toMatchObject({ status: "not_verified", notVerifiedReason: "error" });
     expect(run.result?.workflowCheckCandidateRepositories).toBeUndefined();
     expect(run.result?.workflowCandidateSourceExport).toBeUndefined();
+    expect(run.result?.workflowCandidateBuildSource).toBeUndefined();
   });
 
   it("names the code a coding run whose checks were stopped finished on, so a review-only task can go on to review", async () => {

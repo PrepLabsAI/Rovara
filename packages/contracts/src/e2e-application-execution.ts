@@ -19,6 +19,12 @@ const sha1 = z.string().regex(/^[a-f0-9]{40}$/);
 const id = (max: number) => z.string().trim().min(1).max(max);
 const sourcePath = z.string().min(1).max(1024).refine(isSafeE2ESourcePath, "source path is not allowed by the existing safe-source policy");
 
+/**
+ * The most a build source manifest may weigh when it is exported for a candidate. The manifest travels inside the application admission (whose own object is
+ * bounded at 24 MiB), so it gets a third of that; the worker refuses a candidate whose manifest would be larger and the broker refuses to store one.
+ */
+export const E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
+
 export const E2EApplicationBuildSourceRefSchema = z.object({ artifactId: id(200), sha256, byteLength: z.number().int().positive().max(112 * 1024 * 1024), manifestDigest: sha256 }).strict();
 export type E2EApplicationBuildSourceRef = z.infer<typeof E2EApplicationBuildSourceRefSchema>;
 

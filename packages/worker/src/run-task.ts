@@ -1,5 +1,6 @@
-import { readFile, realpath } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { mkdtemp, readFile, realpath, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, WorkItemProgressV1Schema, WorkflowDependencyResultSchema, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, parsePlanDocument, redactText, reportStatus, taskGraphDigest, taskGraphOrder, validateTaskGraph, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkItemProgressV1, type WorkflowDependencyResult, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation, type E2EWorkflowAdmissionRef } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
@@ -29,6 +30,8 @@ import { WorkerOperationCancelledError, type WorkerCancellationController } from
 import type { FeedbackApprovalAuthorizer, FeedbackBundleReader } from "./callback-client.js";
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
 import { candidateUnchangedSinceBase, commitCandidateWorktree, readCandidateRepositories, readCommittedCandidateSourceExport, type CandidateRepositoryInput, type CommittedCandidateSourceExport } from "./verification/candidate.js";
+import { exportCandidateBuildSource, type CandidateBuildSourceExport } from "./e2e-build-source-export.js";
+import { createProcessCandidateGit } from "./e2e-candidate-source.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
@@ -55,6 +58,8 @@ export interface TaskInvocationResult {
   workflowCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
   /** Fixed worker export, uploaded on its separate capability before the model-visible terminal result. */
   workflowCandidateSourceExport?: CommittedCandidateSourceExport;
+  /** The build source manifest of that export (or why there is none), uploaded on its own request after the export and stripped from the terminal result. */
+  workflowCandidateBuildSource?: CandidateBuildSourceExport;
   /** Repository identities captured when the final successful check round ended. */
   workflowCheckCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
   workflowReviews?: WorkflowReviewReport[];
@@ -783,6 +788,23 @@ export async function runTaskInvocation(
           // The broker keeps required E2E verification UNKNOWN when this first-party export is absent.
         }
       }
+      // The application build source is computed from the exact committed export, through the safe git path. It never decides the export: a candidate the
+      // build source cannot hold still exports, and the reason travels so application dispatch can refuse with it.
+      let workflowCandidateBuildSource: CandidateBuildSourceExport | undefined;
+      if (workflowCandidateSourceExport !== undefined) {
+        const exportedRepository = workflowCandidateSourceExport.repositories[0];
+        const scratch = await mkdtemp(join(tmpdir(), "agentx-build-source-"));
+        try {
+          workflowCandidateBuildSource = await exportCandidateBuildSource({ git: createProcessCandidateGit(scratch), signal: verificationStop.signal,
+            repositoryRoot: workflowRepositories.find((repository) => repository.repositoryId === exportedRepository?.repositoryId)?.directory ?? scratch,
+            candidate: workflowCandidateSourceExport.candidate });
+        } catch (error) {
+          // Only the operation's own cancellation reaches here; anything else is already a refusal the exporter reports.
+          if (verificationStop.signal.aborted) throw error;
+        } finally {
+          await rm(scratch, { recursive: true, force: true });
+        }
+      }
       // A coding run that left the code as the task started has nothing to check or publish: the owner is told so.
       if (workflowCandidateRepositories !== undefined && await candidateUnchangedSinceBase(workflowRepositories, workflowCandidateRepositories)) {
         throw agentXError("CONFIG_INVALID", WORKFLOW_NO_CODE_CHANGE_MESSAGE);
@@ -820,6 +842,7 @@ export async function runTaskInvocation(
         conversationId, reopened: registered !== undefined, checks,
         ...(workflowCandidateRepositories === undefined ? {} : { workflowCandidateRepositories }),
         ...(workflowCandidateSourceExport === undefined ? {} : { workflowCandidateSourceExport }),
+        ...(workflowCandidateBuildSource === undefined ? {} : { workflowCandidateBuildSource }),
         ...(workflowDependenciesResult === undefined ? {} : { workflowDependenciesResult }),
         ...(workflowCandidateRepositories === undefined || reportedChecksCandidate === undefined ? {} : { workflowCheckCandidateRepositories: reportedChecksCandidate }),
       };

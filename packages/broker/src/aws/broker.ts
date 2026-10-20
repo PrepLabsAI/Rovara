@@ -215,6 +215,7 @@ import {
   type E2EApplicationPlanIntent,
   type E2EApplicationSelectionRecord,
   E2EApplicationSelectionRecordSchema,
+  E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES,
   type E2ERegisteredRuntime,
   ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey,
@@ -289,6 +290,7 @@ import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThr
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, confirmTaskPeopleProposal, currentWorkflowPublicationAuthorityForTask, enqueueFinishedTaskRelease, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getTaskPeople, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowE2EChecksFromSystem, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, systemTaskDispatchAccessFence, submitSlackTaskOwnership, submitSlackTaskPeopleRole, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { createDeveloperApiConfiguration } from "./workflow-dependencies-configuration.js";
+import { CandidateBuildSourceBodySchema, StoredCandidateBuildSourceSchema, assessCandidateBuildSource, type StoredCandidateBuildSource } from "./candidate-build-source.js";
 import { mergeRecoveryItem, runDueWorkflowMergeRecovery, type GithubMergeReadBudget, type MergeRecoveryResult } from "./workflow-merge-recovery.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
@@ -1008,7 +1010,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json(await handleProjectSetupEvidenceFinalize(dependencies, request, setupArtifact[1]), request.requestId);
       }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|e2e-admission|e2e-evidence|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|candidate-export|candidate-build-source|e2e-admission|e2e-evidence|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild|chatgpt-token|chatgpt-status)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -5816,6 +5818,12 @@ async function handleCallback(
     }
     return json(await handleWorkflowCandidateExport(dependencies, operation, body), request.requestId);
   }
+  if (action === "candidate-build-source") {
+    if (operation.kind !== "task" || operation.workflowMode !== "IMPLEMENT" || operation.status !== "RUNNING") {
+      throw agentXError("CALLBACK_FORBIDDEN", "candidate build source export is limited to the current implementation operation");
+    }
+    return json(await handleWorkflowCandidateBuildSource(dependencies, operation, body), request.requestId);
+  }
   if (action === "e2e-admission") {
     if (operation.kind !== "task" || operation.workflowMode !== "CHECKS" || operation.status !== "RUNNING" || operation.workflowE2EAdmission === undefined) {
       throw agentXError("CALLBACK_FORBIDDEN", "E2E admission reads require the active server-assigned CHECKS operation");
@@ -5982,6 +5990,119 @@ async function handleWorkflowCandidateExport(dependencies: AwsBrokerDependencies
   ] }));
   for (const chunkKey of chunkKeys) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: chunkKey }));
   return { sourceRef };
+}
+
+/**
+ * Receives the build source manifest a worker computed for the candidate it just exported (Task 2.4b). It only ever follows a finalized candidate source
+ * export, is judged against that stored export, and records either the validated manifest's location and digest or the reason there is none, on the export
+ * record (`buildSource`) and on the IMPLEMENT operation (`candidateBuildSource`). A refusal is a successful answer, never an error: the portable export and
+ * the terminal result do not depend on this, and an application round later refuses with the recorded reason.
+ */
+async function handleWorkflowCandidateBuildSource(dependencies: AwsBrokerDependencies, operation: OperationRecord, rawBody: unknown): Promise<unknown> {
+  const body = CandidateBuildSourceBodySchema.parse(rawBody);
+  const sourceRef = operation.candidateSourceRef;
+  if (sourceRef === undefined) throw agentXError("STALE_FENCE", "the candidate build source follows a finalized candidate source export");
+  const exportKey = { pk: `WORKSPACE#${operation.workspaceId}`, sk: `CANDIDATE_EXPORT#${operation.id}` };
+  const uploadKey = { pk: `WORKSPACE#${operation.workspaceId}`, sk: `CANDIDATE_BUILD_SOURCE#${operation.id}` };
+  const record = async (stored: StoredCandidateBuildSource, upload?: { uploadId: string; sha256: string }): Promise<unknown> => {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+      ...(upload === undefined ? [] : [{ Update: { TableName: dependencies.tableName, Key: uploadKey, UpdateExpression: "SET #status = :complete, buildSource = :stored",
+        ConditionExpression: "#status = :open AND uploadId = :uploadId AND sha256 = :sha256 AND operationId = :operationId AND fence = :fence",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":complete": "COMPLETE", ":open": "OPEN", ":stored": stored, ":uploadId": upload.uploadId,
+          ":sha256": upload.sha256, ":operationId": operation.id, ":fence": operation.fence } } }]),
+      { Update: { TableName: dependencies.tableName, Key: exportKey, UpdateExpression: "SET buildSource = :stored",
+        ConditionExpression: "entityType = :entity AND #status = :complete AND operationId = :operationId AND fence = :fence AND attribute_not_exists(buildSource)",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":stored": stored, ":entity": "WORKFLOW_CANDIDATE_EXPORT", ":complete": "COMPLETE",
+          ":operationId": operation.id, ":fence": operation.fence } } },
+      { Update: { TableName: dependencies.tableName, Key: operationKey(operation.workspaceId, operation.id), UpdateExpression: "SET candidateBuildSource = :stored",
+        ConditionExpression: "#status = :running AND fence = :fence AND workflowMode = :mode AND attribute_exists(candidateSourceRef) AND attribute_not_exists(candidateBuildSource)",
+        ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":stored": stored, ":running": "RUNNING", ":fence": operation.fence, ":mode": "IMPLEMENT" } } },
+    ] }));
+    return { accepted: stored.status === "READY", buildSource: stored };
+  };
+  const alreadyRecorded = StoredCandidateBuildSourceSchema.safeParse(operation.candidateBuildSource);
+  if (body.stage === "unavailable") {
+    const stored: StoredCandidateBuildSource = { status: "REFUSED", reason: `the worker could not export a build source manifest: ${body.reason}`.slice(0, 600), candidateDigest: sourceRef.candidateDigest };
+    if (alreadyRecorded.success) {
+      if (canonicalJson(alreadyRecorded.data) !== canonicalJson(stored)) throw agentXError("CALLBACK_FORBIDDEN", "this implementation already recorded a different build source");
+      return { accepted: false, buildSource: stored, duplicate: true };
+    }
+    return record(stored);
+  }
+  const upload = await getItem<Record<string, unknown>>(dependencies, uploadKey);
+  if (body.stage === "init") {
+    if (body.chunkCount !== Math.ceil(body.totalBytes / WORKFLOW_CANDIDATE_CHUNK_BYTES)) throw agentXError("CONFIG_INVALID", "candidate build source chunk count does not match its total");
+    if (upload) {
+      if (upload.entityType !== "WORKFLOW_CANDIDATE_BUILD_SOURCE" || upload.status !== "OPEN" || upload.operationId !== operation.id || upload.fence !== operation.fence
+        || upload.totalBytes !== body.totalBytes || upload.chunkCount !== body.chunkCount || upload.sha256 !== body.sha256 || typeof upload.uploadId !== "string") {
+        throw agentXError("CALLBACK_FORBIDDEN", "implementation already owns a different candidate build source upload");
+      }
+      return { uploadId: upload.uploadId, chunkBytes: WORKFLOW_CANDIDATE_CHUNK_BYTES, totalBytes: body.totalBytes, chunkCount: body.chunkCount };
+    }
+    if (alreadyRecorded.success) throw agentXError("CALLBACK_FORBIDDEN", "this implementation already recorded its build source");
+    const uploadId = randomUUID();
+    await dependencies.documentClient.send(new PutCommand({ TableName: dependencies.tableName, Item: { ...uploadKey, entityType: "WORKFLOW_CANDIDATE_BUILD_SOURCE", schemaVersion: 1,
+      workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, uploadId, totalBytes: body.totalBytes, chunkCount: body.chunkCount,
+      sha256: body.sha256, nextChunkIndex: 0, status: "OPEN", createdAt: new Date().toISOString() }, ConditionExpression: "attribute_not_exists(pk) AND attribute_not_exists(sk)" }));
+    return { uploadId, chunkBytes: WORKFLOW_CANDIDATE_CHUNK_BYTES, totalBytes: body.totalBytes, chunkCount: body.chunkCount };
+  }
+  if (!upload || upload.entityType !== "WORKFLOW_CANDIDATE_BUILD_SOURCE" || upload.operationId !== operation.id || upload.fence !== operation.fence) {
+    throw agentXError("STALE_FENCE", "candidate build source upload is not current");
+  }
+  if (body.stage === "finalize" && upload.status === "COMPLETE" && upload.uploadId === body.uploadId && upload.sha256 === body.sha256 && alreadyRecorded.success) {
+    return { accepted: alreadyRecorded.data.status === "READY", buildSource: alreadyRecorded.data, duplicate: true };
+  }
+  if (upload.status !== "OPEN") throw agentXError("STALE_FENCE", "candidate build source upload is no longer open");
+  const stagingKey = (index: number) => `workflow-candidate-build-source-staging/${operation.workspaceId}/${operation.id}/${String(upload.uploadId)}/${index}.chunk`;
+  if (body.stage === "chunk") {
+    if (upload.uploadId !== body.uploadId || !Number.isSafeInteger(body.index) || body.index >= Number(upload.chunkCount)) throw agentXError("CALLBACK_FORBIDDEN", "candidate build source chunk is outside its owned upload");
+    const bytes = Buffer.from(body.bytesBase64, "base64");
+    const expected = body.index === Number(upload.chunkCount) - 1 ? Number(upload.totalBytes) - body.index * WORKFLOW_CANDIDATE_CHUNK_BYTES : WORKFLOW_CANDIDATE_CHUNK_BYTES;
+    if (bytes.byteLength !== expected || bytes.toString("base64") !== body.bytesBase64 || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "candidate build source chunk bytes or digest are invalid");
+    const nextIndex = Number(upload.nextChunkIndex);
+    if (body.index > nextIndex) throw agentXError("CONFIG_INVALID", "candidate build source chunks must arrive in order");
+    if (body.index < nextIndex) {
+      const prior = await readSetupChunk(dependencies, stagingKey(body.index));
+      if (!prior?.equals(bytes)) throw agentXError("CALLBACK_FORBIDDEN", "replayed candidate build source chunk differs from its owned bytes");
+      return { accepted: true, index: body.index, duplicate: true };
+    }
+    await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: stagingKey(body.index), Body: bytes,
+      ContentType: "application/octet-stream", Metadata: { sha256: body.sha256, upload: body.uploadId, index: String(body.index) }, IfNoneMatch: "*" }));
+    await dependencies.documentClient.send(new UpdateCommand({ TableName: dependencies.tableName, Key: uploadKey, UpdateExpression: "SET nextChunkIndex = :next",
+      ConditionExpression: "#status = :open AND nextChunkIndex = :index AND operationId = :operationId AND fence = :fence",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":next": body.index + 1, ":open": "OPEN", ":index": body.index,
+        ":operationId": operation.id, ":fence": operation.fence } }));
+    return { accepted: true, index: body.index, duplicate: false };
+  }
+  if (upload.uploadId !== body.uploadId || upload.sha256 !== body.sha256 || Number(upload.nextChunkIndex) !== Number(upload.chunkCount)) {
+    throw agentXError("STALE_FENCE", "candidate build source upload is incomplete or changed");
+  }
+  const chunks: Buffer[] = [];
+  for (let index = 0; index < Number(upload.chunkCount); index += 1) {
+    const chunk = await readSetupChunk(dependencies, stagingKey(index));
+    if (!chunk) throw agentXError("RUNTIME_UNAVAILABLE", "an owned candidate build source chunk is missing");
+    chunks.push(chunk);
+  }
+  const bytes = Buffer.concat(chunks);
+  if (bytes.byteLength !== Number(upload.totalBytes) || createHash("sha256").update(bytes).digest("hex") !== body.sha256) throw agentXError("CONFIG_INVALID", "candidate build source bytes do not match their stored digest");
+  const committed = await readStoredCandidateSourceExport(dependencies, sourceRef);
+  if (committed === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the committed candidate source export is unavailable to check its build source against");
+  const stored = assessCandidateBuildSource({ manifestBytes: bytes, committed });
+  if (stored.status === "READY") {
+    try {
+      await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: stored.manifestRef.key, Body: bytes, ContentType: "application/json",
+        Metadata: { sha256: stored.manifestRef.sha256, candidate: stored.candidateDigest, operation: operation.id }, IfNoneMatch: "*" }));
+    } catch (error) {
+      const status = error && typeof error === "object" ? (error as { $metadata?: { httpStatusCode?: unknown } }).$metadata?.httpStatusCode : undefined;
+      if (status !== 412 && (error as { name?: unknown } | undefined)?.name !== "PreconditionFailed") throw error;
+      if (await readStoredText(dependencies.s3, dependencies.artifactBucketName, stored.manifestRef.key, E2E_APPLICATION_BUILD_SOURCE_MANIFEST_MAX_BYTES) !== bytes.toString("utf8")) {
+        throw agentXError("RUNTIME_UNAVAILABLE", "existing candidate build source object does not match its content address");
+      }
+    }
+  }
+  const answer = await record(stored, { uploadId: body.uploadId, sha256: body.sha256 });
+  for (let index = 0; index < Number(upload.chunkCount); index += 1) await dependencies.s3.send(new DeleteObjectCommand({ Bucket: dependencies.artifactBucketName, Key: stagingKey(index) }));
+  return answer;
 }
 
 const WORKFLOW_E2E_TRANSFER_CHUNK_BYTES = 64 * 1024;
@@ -9827,22 +9948,30 @@ async function completedPullRequestUpdateItems(
     ? [workflowDispatchItem(dependencies.tableName, task.taskId, next.revision, "UPDATE", next.candidate.digest, now)] : [])];
 }
 
+async function readStoredCandidateSourceExport(
+  dependencies: AwsBrokerDependencies,
+  reference: NonNullable<OperationRecord["candidateSourceRef"]>,
+): Promise<z.infer<ReturnType<typeof workflowCandidateSourceExportSchema>> | undefined> {
+  if (reference.byteLength <= 0 || reference.byteLength > MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES || !/^[a-f0-9]{64}$/.test(reference.sha256)) return undefined;
+  const text = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.key, MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES);
+  if (text === undefined) return undefined;
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.byteLength !== reference.byteLength || createHash("sha256").update(bytes).digest("hex") !== reference.sha256) return undefined;
+  const parsed = workflowCandidateSourceExportSchema().safeParse(JSON.parse(text) as unknown);
+  return parsed.success ? parsed.data : undefined;
+}
+
 async function loadWorkflowCandidateSourceExport(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
   expectedCandidate: ReturnType<typeof createCandidateManifest>,
 ): Promise<z.infer<ReturnType<typeof workflowCandidateSourceExportSchema>> | undefined> {
   const reference = operation.candidateSourceRef;
-  if (!reference || reference.candidateDigest !== expectedCandidate.digest || reference.byteLength <= 0
-    || reference.byteLength > MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES || !/^[a-f0-9]{64}$/.test(reference.sha256)) return undefined;
-  const text = await readStoredText(dependencies.s3, dependencies.artifactBucketName, reference.key, MAX_WORKFLOW_CANDIDATE_EXPORT_BYTES);
-  if (text === undefined) return undefined;
-  const bytes = Buffer.from(text, "utf8");
-  if (bytes.byteLength !== reference.byteLength || createHash("sha256").update(bytes).digest("hex") !== reference.sha256) return undefined;
-  const parsed = workflowCandidateSourceExportSchema().safeParse(JSON.parse(text) as unknown);
-  if (!parsed.success || parsed.data.candidate.digest !== expectedCandidate.digest
-    || canonicalJson(parsed.data.candidate) !== canonicalJson(expectedCandidate)) return undefined;
-  return parsed.data;
+  if (!reference || reference.candidateDigest !== expectedCandidate.digest) return undefined;
+  const parsed = await readStoredCandidateSourceExport(dependencies, reference);
+  if (parsed === undefined || parsed.candidate.digest !== expectedCandidate.digest
+    || canonicalJson(parsed.candidate) !== canonicalJson(expectedCandidate)) return undefined;
+  return parsed;
 }
 
 async function completedWorkflowItems(

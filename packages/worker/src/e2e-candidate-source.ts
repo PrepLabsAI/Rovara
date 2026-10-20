@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join, sep } from "node:path";
+import { isSafeE2ESourcePath } from "@agentx/contracts";
 
 const SHA1 = /^[a-f0-9]{40}$/;
 const STDERR_TAIL_BYTES = 2048;
@@ -25,6 +26,28 @@ export type CandidateGit = {
    */
   materializeInto(repositoryRoot: string, commitSha: string, destination: string, signal: AbortSignal): Promise<ReadonlyArray<SkippedTreeEntry>>;
 };
+
+/** How the worker reads the committed candidate to describe its build source, through the same throwaway repository as CandidateGit. */
+export type CandidateBuildSourceGit = {
+  /**
+   * The complete committed tree of `commitSha` and the exact blob bytes of every regular file the build source permits (a 100644 or 100755 file at a path
+   * the safe-source policy allows), read through the same throwaway repository. Blocked paths, symlinks and submodules appear only in `entries`; their
+   * bytes are never read. Throws a BuildSourceCapError when a bound is exceeded.
+   */
+  buildSourceOf(repositoryRoot: string, commitSha: string, signal: AbortSignal): Promise<CandidateBuildSourceListing>;
+};
+
+/** One entry of the committed tree, exactly as git lists it. */
+export type CandidateTreeEntry = { path: string; mode: string; objectId: string };
+
+/** A regular, runner-safe file of the committed tree with its bytes, as the build source manifest records it. */
+export type CandidateBuildSourceFile = { path: string; mode: "100644" | "100755"; gitBlobId: string; sha256: string; byteLength: number; bytes: Buffer };
+
+/** The committed tree of a candidate: the complete inventory, and the bytes of exactly the files the build source permits. */
+export type CandidateBuildSourceListing = { treeSha: string; entries: ReadonlyArray<CandidateTreeEntry>; files: ReadonlyArray<CandidateBuildSourceFile> };
+
+/** A build source bound that was exceeded. The message is the reason the owner is shown; nothing is ever truncated to fit. */
+export class BuildSourceCapError extends Error {}
 
 /** The part of an approved build source manifest the worker enforces on what it staged. */
 export type ApprovedBuildSource = {
@@ -106,6 +129,31 @@ async function withBorrowedObjects<T>(scratchRoot: string, repositoryRoot: strin
 const FILE_MODES = new Set(["100644", "100755"]);
 const SKIPPED_MODES = new Set(["120000", "160000"]);
 
+const TREE_RECORD = /^(\d{6}) (blob|commit) ([0-9a-f]{40})\t(.+)$/s;
+const UTF8 = new TextDecoder("utf-8", { fatal: true });
+type ListedEntry = { mode: string; type: string; sha: string; path: string };
+
+/** `ls-tree -r -z` of the commit's tree in the throwaway repository: every entry, in git's order, within the entry bound. */
+async function listCommitTree(gitDir: string, commitSha: string, signal: AbortSignal): Promise<ListedEntry[]> {
+  const listing = await runGit([`--git-dir=${gitDir}`, "ls-tree", "-r", "-z", "--full-tree", `${commitSha}^{tree}`], { cwd: dirname(gitDir), signal, maxBytes: TREE_LISTING_CAP_BYTES });
+  const entries: ListedEntry[] = [];
+  let start = 0;
+  while (start < listing.byteLength) {
+    let end = listing.indexOf(0, start);
+    if (end < 0) end = listing.byteLength;
+    let record: string;
+    try { record = UTF8.decode(listing.subarray(start, end)); } catch { throw new Error("candidate tree has a path that is not valid UTF-8"); }
+    start = end + 1;
+    if (record === "") continue;
+    if (entries.length >= MAX_TREE_ENTRIES) throw new BuildSourceCapError("candidate tree has more entries than the build source allows");
+    const match = TREE_RECORD.exec(record);
+    if (!match) throw new Error("git listed a tree entry in an unexpected form");
+    const [, mode, type, sha, path] = match as unknown as [string, string, string, string, string];
+    entries.push({ mode, type, sha, path });
+  }
+  return entries;
+}
+
 /** Writes `bytes` at `relativePath` under `root`: folders are created or must be real directories, the file is created exclusively, and nothing is followed. */
 async function writeFileConfined(root: string, relativePath: string, bytes: Buffer, executable: boolean): Promise<void> {
   const parts = relativePath.split("/");
@@ -123,7 +171,7 @@ async function writeFileConfined(root: string, relativePath: string, bytes: Buff
   await chmod(target, executable ? 0o755 : 0o644);
 }
 
-export function createProcessCandidateGit(scratchRoot: string): CandidateGit {
+export function createProcessCandidateGit(scratchRoot: string): CandidateGit & CandidateBuildSourceGit {
   return {
     treeOf: async (repositoryRoot, commitSha, signal) => {
       if (!SHA1.test(commitSha)) throw new Error(NOT_A_SHA);
@@ -137,15 +185,9 @@ export function createProcessCandidateGit(scratchRoot: string): CandidateGit {
       if (!SHA1.test(commitSha)) throw new Error(NOT_A_SHA);
       return withBorrowedObjects(scratchRoot, repositoryRoot, signal, async (gitDir) => {
         const cwd = dirname(gitDir);
-        const listing = await runGit([`--git-dir=${gitDir}`, "ls-tree", "-r", "-z", "--full-tree", `${commitSha}^{tree}`], { cwd, signal, maxBytes: TREE_LISTING_CAP_BYTES });
-        const records = listing.toString("utf8").split("\0").filter((record) => record !== "");
-        if (records.length > MAX_TREE_ENTRIES) throw new Error("candidate tree has more entries than the build source allows");
         const files: Array<{ path: string; mode: string; sha: string }> = [];
         const skipped: SkippedTreeEntry[] = [];
-        for (const record of records) {
-          const match = /^(\d{6}) (blob|commit) ([0-9a-f]{40})\t(.+)$/s.exec(record);
-          if (!match) throw new Error("git listed a tree entry in an unexpected form");
-          const [, mode, type, sha, path] = match as unknown as [string, string, string, string, string];
+        for (const { mode, type, sha, path } of await listCommitTree(gitDir, commitSha, signal)) {
           if (SKIPPED_MODES.has(mode)) skipped.push({ path, mode });
           else if (FILE_MODES.has(mode) && type === "blob") files.push({ path, mode, sha });
           else throw new Error(`candidate tree entry ${path} has a mode the build source cannot hold`);
@@ -167,6 +209,53 @@ export function createProcessCandidateGit(scratchRoot: string): CandidateGit {
           offset = newline + 2 + size;
         }
         return skipped;
+      });
+    },
+    buildSourceOf: async (repositoryRoot, commitSha, signal) => {
+      if (!SHA1.test(commitSha)) throw new Error(NOT_A_SHA);
+      return withBorrowedObjects(scratchRoot, repositoryRoot, signal, async (gitDir) => {
+        const cwd = dirname(gitDir);
+        const treeSha = (await runGit([`--git-dir=${gitDir}`, "rev-parse", `${commitSha}^{tree}`], { cwd, signal, maxBytes: 4096 })).toString("utf8").trim();
+        if (!SHA1.test(treeSha)) throw new Error("git did not answer with a tree id");
+        const entries: CandidateTreeEntry[] = [];
+        const permitted: Array<{ path: string; mode: "100644" | "100755"; sha: string }> = [];
+        for (const { mode, type, sha, path } of await listCommitTree(gitDir, commitSha, signal)) {
+          if (!SKIPPED_MODES.has(mode) && !(FILE_MODES.has(mode) && type === "blob")) throw new Error(`candidate tree entry ${path} has a mode the build source cannot hold`);
+          entries.push({ path, mode, objectId: sha });
+          // The same rule the admission validator and the staging enforcement hold the tree to: only a regular file at a safe path is permitted.
+          if (FILE_MODES.has(mode) && isSafeE2ESourcePath(path)) permitted.push({ path, mode: mode as "100644" | "100755", sha });
+        }
+        if (permitted.length > MAX_FILES) throw new BuildSourceCapError("candidate tree has more files than the build source allows");
+        if (permitted.length === 0) return { treeSha, entries, files: [] };
+        // Sizes first, so a file over its cap is refused by name before any bytes are read.
+        const input = Buffer.from(`${permitted.map((file) => file.sha).join("\n")}\n`);
+        const sizes = (await runGit([`--git-dir=${gitDir}`, "cat-file", "--batch-check"], { cwd, signal, maxBytes: permitted.length * 128 + 4096, input })).toString("utf8").split("\n");
+        let totalBytes = 0;
+        for (const [index, file] of permitted.entries()) {
+          const header = (sizes[index] ?? "").split(" ");
+          const size = Number(header[2]);
+          if (header[0] !== file.sha || header[1] !== "blob" || !Number.isSafeInteger(size) || size < 0) throw new Error(`candidate blob for ${file.path} is missing`);
+          if (size > REGULAR_FILE_CAP_BYTES) throw new BuildSourceCapError(`candidate file ${file.path} is ${size} bytes, over the ${REGULAR_FILE_CAP_BYTES / (1024 * 1024)} MiB build source file limit`);
+          totalBytes += size;
+          if (totalBytes > MAX_TOTAL_FILE_BYTES) throw new BuildSourceCapError(`candidate files total more than the ${MAX_TOTAL_FILE_BYTES / (1024 * 1024)} MiB build source limit`);
+        }
+        const blobs = await runGit([`--git-dir=${gitDir}`, "cat-file", "--batch"], { cwd, signal, maxBytes: BLOB_STREAM_CAP_BYTES, input });
+        const files: CandidateBuildSourceFile[] = [];
+        let offset = 0;
+        for (const file of permitted) {
+          const newline = blobs.indexOf(0x0a, offset);
+          const header = newline < 0 ? [] : blobs.subarray(offset, newline).toString("utf8").split(" ");
+          const size = Number(header[2]);
+          if (header[0] !== file.sha || header[1] !== "blob" || !Number.isSafeInteger(size) || size < 0 || size > REGULAR_FILE_CAP_BYTES) throw new Error(`candidate blob for ${file.path} is missing or too large`);
+          const bytes = Buffer.from(blobs.subarray(newline + 1, newline + 1 + size));
+          if (bytes.byteLength !== size || blobs[newline + 1 + size] !== 0x0a) throw new Error(`candidate blob for ${file.path} is truncated`);
+          // The object database answered for this id; the id is recomputed so a substituted answer cannot pass.
+          const blobId = createHash("sha1").update(Buffer.concat([Buffer.from(`blob ${size}\0`), bytes])).digest("hex");
+          if (blobId !== file.sha) throw new Error(`candidate blob for ${file.path} does not match its git object id`);
+          files.push({ path: file.path, mode: file.mode, gitBlobId: file.sha, sha256: createHash("sha256").update(bytes).digest("hex"), byteLength: size, bytes });
+          offset = newline + 2 + size;
+        }
+        return { treeSha, entries, files };
       });
     },
   };

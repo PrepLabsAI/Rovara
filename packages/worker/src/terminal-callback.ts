@@ -6,7 +6,7 @@ type CallbackSinks = ReturnType<typeof createWorkerCallbackSinks>;
 
 /** Keep committed source bytes on their private capability and out of the ordinary/model result callback. */
 export async function postWorkerTerminalResult(
-  callbacks: Pick<CallbackSinks, "candidateSourceExportSink" | "terminalSink">,
+  callbacks: Pick<CallbackSinks, "candidateSourceExportSink" | "terminalSink"> & Partial<Pick<CallbackSinks, "candidateBuildSourceSink">>,
   result: WorkerTerminalResult,
   invocation: WorkerInvocation,
 ): Promise<void> {
@@ -18,8 +18,15 @@ export async function postWorkerTerminalResult(
       throw new Error("committed candidate source export is limited to implementation tasks");
     }
     await callbacks.candidateSourceExportSink(sourceExport as Parameters<CallbackSinks["candidateSourceExportSink"]>[0]);
-    const { workflowCandidateSourceExport: _sourceExport, ...terminalResult } = reported;
-    void _sourceExport;
+    // The build source follows the export on its own request. It only ever informs application dispatch, so no failure to deliver it may fail the
+    // portable export or the terminal result: without it the broker refuses an application round with a reason.
+    const buildSource = reported.workflowCandidateBuildSource;
+    if (buildSource !== undefined && callbacks.candidateBuildSourceSink !== undefined) {
+      try { await callbacks.candidateBuildSourceSink(buildSource as Parameters<CallbackSinks["candidateBuildSourceSink"]>[0]); }
+      catch { /* a missing build source is a later, explained refusal, never a failed export */ }
+    }
+    const { workflowCandidateSourceExport: _sourceExport, workflowCandidateBuildSource: _buildSource, ...terminalResult } = reported;
+    void _sourceExport; void _buildSource;
     await callbacks.terminalSink({ ...result, result: terminalResult });
     return;
   }
