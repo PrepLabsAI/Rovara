@@ -36,7 +36,7 @@ export async function readCandidateRepositories(
     try {
       const identity = await withIsolatedGit(directory, "write", async (git) => {
         const commit = (await git.text(["rev-parse", "--verify", `${await git.headCommit()}^{commit}`], { index: "none" })).trim();
-        const tree = await snapshotTree(git, commit);
+        const tree = await snapshotTree(git, commit, { refuseLfs: false });
         if (!/^[a-f0-9]{40}$/.test(commit) || !/^[a-f0-9]{40}$/.test(tree)) throw new Error("invalid git object identity");
         // Exit status 1: HEAD does not descend from the base (the agent rewrote history past it), which the owner is
         // told in plain words. Any other failure (such as an unknown commit) leaves the candidate unreadable.

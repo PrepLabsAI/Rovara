@@ -204,15 +204,16 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
 
 /**
  * The tree of `commit` plus the work tree as it is now, computed in `git`'s temporary index (never the candidate's real one): `read-tree`, then `add --all`, then
- * `write-tree`, with the nested-repository and Git LFS refusals in between. Git runs in the throwaway repository, so no filter, driver or hook of the candidate's
+ * `write-tree`, with the nested-repository refusal (and the Git LFS one, unless `refuseLfs` is false) in between. Git runs in the throwaway repository, so no filter, driver or hook of the candidate's
  * config exists for it to run. A nested repository's own config is out of that protection, so Git is kept away from every tracked gitlink: a gitlink path is
  * excluded from `add` (its entry stays as `commit` has it), because Git asks a checked-out submodule for its status by running Git inside it, under its config,
  * and a nested repository can appear at that path between the check for one and `add`. Needs Git 2.25 or later (`--pathspec-from-file`).
  */
-export async function snapshotTree(git: IsolatedGit, commit: string): Promise<string> {
+export async function snapshotTree(git: IsolatedGit, commit: string, options: { readonly refuseLfs?: boolean } = {}): Promise<string> {
   await git.text(["read-tree", commit]);
   const gitlinks = await assertNoEmbeddedRepositories(git.layout.workTree, git.env(), git.location, git.workTreeCwd);
-  await assertNoLfsFiles(git.layout.workTree, git.env(), git.location, git.workTreeCwd);
+  // Capture does not refuse Git LFS files (`refuseLfs: false`), as it never did; publication and the checks before it do.
+  if (options.refuseLfs !== false) await assertNoLfsFiles(git.layout.workTree, git.env(), git.location, git.workTreeCwd);
   await addWorkTree(git, "temporary", gitlinks);
   return (await git.text(["write-tree"])).trim();
 }

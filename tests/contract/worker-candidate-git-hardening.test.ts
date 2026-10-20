@@ -329,6 +329,21 @@ describe("honest repositories give the same trees, commits and exports as plain 
     });
   }
 
+  it("still captures a repository whose files carry Git LFS attributes, as the worker did before; publication's own check still refuses it", async () => {
+    const { temporaryIndexTree } = await import("../../packages/worker/src/publish.js");
+    const { assertWorkspaceIsPlain } = await import("../../packages/worker/src/isolated-repository.js");
+    const box = await sandbox();
+    await writeFile(join(box.directory, ".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n");
+    await writeFile(join(box.directory, "big.bin"), "not really large\n");
+    const [captured] = await readCandidateRepositories(inputOf(box));
+    expect(captured?.treeSha).toBe(await plainTree(box.directory, box.root));
+    expect(await fired(box)).toEqual([]);
+    const refusal = await assertWorkspaceIsPlain(box.directory).then(() => undefined, (error: unknown) => error);
+    expect(refusal).toMatchObject({ code: "CONFIG_INVALID" });
+    expect((refusal as Error).message).toMatch(/Git LFS repositories are not supported/);
+    await expect(temporaryIndexTree({ directory: box.directory })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+  });
+
   it("captures a detached HEAD and a branch kept only in packed-refs, and writes no ref or index", async () => {
     for (const mode of ["detached", "packed"] as const) {
       const box = await sandbox();
