@@ -32,7 +32,7 @@ export type { E2EApplicationReport, ParsedE2EApplicationReport } from "./applica
 export { E2EApplicationProducerSchema, E2EApplicationProofBytesSchema, E2EApplicationSupervisorReadbackSchema,
   E2EApplicationOwnedSubjectSchema, E2EApplicationCaseCaptureSchema, readE2EApplicationSupervisorProof,
   E2EApplicationCollectionSchema, E2EApplicationCollectionOracleSchema, E2EApplicationGroupResultEnvelopeSchema,
-  e2eApplicationPrivateTransferMaxBytes, createE2EApplicationCollectionOracleFromCompiledSuite,
+  e2eApplicationPrivateTransferMaxBytes, e2eApplicationAggregateRunUsage, createE2EApplicationCollectionOracleFromCompiledSuite,
   qualifyE2EApplicationCollection, mapE2EApplicationGroupResult } from "./application-result-adapter.js";
 export type { E2EApplicationProducer, E2EApplicationProofBytes, E2EApplicationSupervisorReadback, E2EApplicationOwnedSubject, E2EApplicationCaseCapture,
   E2EApplicationMockConsumption, E2EApplicationCollection, E2EApplicationCollectionOracle, E2EApplicationGroupResultEnvelope } from "./application-result-adapter.js";
@@ -58,7 +58,7 @@ export { createAPIApplicationCliHost } from "./api-runtime.js";
 export type { E2EApiRuntimePorts, E2EApiRuntimeResponse } from "./api-runtime.js";
 export { prepareE2EApplicationEnvironment, sealE2EApplicationEnvironment } from "./application-services.js";
 export type { E2EApplicationPreparationInputs, E2EApplicationEnvironmentPorts } from "./application-services.js";
-export { createDockerApplicationHost, createProcessDockerCli, sweepStaleRovaraRuns, dockerOwnedResourceInventory, dockerOwnedResourceInventoryDigest,
+export { createDockerApplicationHost, createProcessDockerCli, sweepStaleRovaraRuns, dockerOwnedResourceInventory, dockerOwnedResourceInventoryDigest, dockerOwnedCleanupReceipt,
   e2eRunNetworks, ROVARA_RUN_LABEL, ROVARA_CREATED_LABEL, STALE_RUN_SWEEP_AGE_MS, DEFAULT_DEADLINE_GRACE_MS, WEB_API_BUILD_IMAGE } from "./host/docker-application-host.js";
 export type { DockerCli, DockerApplicationHost, DockerApplicationHostDeps, DockerApplicationUnavailableReason, DockerBuildResult } from "./host/docker-application-host.js";
 export { executorContainerArgs } from "./host/executor-container.js";

@@ -3,9 +3,8 @@ import { describe, expect, it } from "vitest";
 import { combineE2EVerdicts, type E2EVerdict } from "../../packages/broker/src/e2e/verdict.js";
 import { verifyApplicationE2EEvidence, type ApplicationEvidenceInput } from "../../packages/broker/src/e2e/application-evidence.js";
 import { encodeE2EApplicationExecutionAdmission } from "../../packages/verifier/src/application-scenarios.js";
-import { aggregateEvidenceEnvelope, createApplicationEvidenceFixture, groupEvidenceEnvelope, type ApplicationEvidenceFixture,
-  type ObservedApiOutcome } from "../support/e2e-application-evidence-fixture.js";
-import type { E2EApplicationReport } from "../../packages/verifier/src/application-report-schema.js";
+import { aggregateEvidenceEnvelope, createApplicationEvidenceFixture, groupEvidenceEnvelope, type ApplicationEvidenceFixture } from "../support/e2e-application-evidence-fixture.js";
+import { createPortableApplicationChildFixture } from "../support/e2e-application-fixture.js";
 
 // The broker's side of an application round: it never reads the worker's verdict, but recompiles, recollects and requalifies from the uploaded
 // raw evidence. Every group here is genuinely collected by the real collector from a real probe admission.
@@ -15,8 +14,7 @@ const PASSING = { probe: "api-egress-denial-v1", observed: { kind: "http-status"
 const FAILING = { probe: "api-status-mismatch-v1", observed: { kind: "http-status", status: 200 } } as const;
 
 type Round = Awaited<ReturnType<typeof roundOf>>;
-async function roundOf(options: { probe: Parameters<typeof createApplicationEvidenceFixture>[0]["probe"]; observed: ObservedApiOutcome;
-  reportEdit?: (report: E2EApplicationReport) => void }) {
+async function roundOf(options: Parameters<typeof createApplicationEvidenceFixture>[0]) {
   const fixture: ApplicationEvidenceFixture = await createApplicationEvidenceFixture(options);
   const admissionBytes = Buffer.from(encodeE2EApplicationExecutionAdmission(fixture.admission), "utf8");
   const admissionSha256 = sha(admissionBytes);
@@ -27,17 +25,18 @@ async function roundOf(options: { probe: Parameters<typeof createApplicationEvid
   const input = (overrides: Partial<ApplicationEvidenceInput> = {}): ApplicationEvidenceInput => ({ admissionBytes, subject,
     aggregate: aggregateEvidenceEnvelope({ admission, admissionSha256, groupRuns: [groupRun] }),
     groupEvidence: new Map([[fixture.runId, groupEvidenceEnvelope({ admission, admissionSha256, groupRun })]]),
-    receivedNotAfter: new Date(Date.now() + 60_000).toISOString(), terminalStatus: "SUCCEEDED", ...overrides });
+    receivedAt: new Map([[fixture.runId, actualOf(groupRun).collection.receivedAt]]), terminalStatus: "SUCCEEDED", ...overrides });
   return { fixture, admission, admissionBytes, admissionSha256, subject, groupRun, input };
 }
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
-const withGroupRun = (round: Round, edit: (groupRun: Record<string, unknown>) => void, options: { aggregate?: boolean } = {}): ApplicationEvidenceInput => {
+const withGroupRun = (round: Round, edit: (groupRun: Record<string, unknown>) => void, options: { aggregate?: boolean; receivedAt?: ReadonlyMap<string, string> } = {}): ApplicationEvidenceInput => {
   const groupRun = clone(round.groupRun);
   edit(groupRun);
   return round.input({ groupEvidence: new Map([[round.fixture.runId, groupEvidenceEnvelope({ admission: round.admission, admissionSha256: round.admissionSha256, groupRun })]]),
-    aggregate: options.aggregate === false ? undefined : aggregateEvidenceEnvelope({ admission: round.admission, admissionSha256: round.admissionSha256, groupRuns: [groupRun] }) });
+    aggregate: options.aggregate === false ? undefined : aggregateEvidenceEnvelope({ admission: round.admission, admissionSha256: round.admissionSha256, groupRuns: [groupRun] }),
+    ...(options.receivedAt === undefined ? { receivedAt: new Map([[round.fixture.runId, actualOf(round.groupRun).collection.receivedAt]]) } : { receivedAt: options.receivedAt }) });
 };
-const actualOf = (groupRun: Record<string, unknown>) => groupRun.actual as { collection: { shards: Array<{ rawReport: { sha256: string; bytesBase64: string } }>; receivedAt: string } };
+function actualOf(groupRun: Record<string, unknown>) { return groupRun.actual as { collection: { shards: Array<{ rawReport: { sha256: string; bytesBase64: string } }>; receivedAt: string }; collectionInputs: Record<string, unknown> }; }
 
 describe("verifying an application round's evidence", () => {
   it("passes a round whose every group the broker re-collects as passing, and promotes its own projection", async () => {
@@ -173,6 +172,25 @@ describe("verifying an application round's evidence", () => {
     expect(verifyApplicationE2EEvidence(round.input({ aggregate: { ...aggregate, payload: { kind: "application", groupRuns: [round.groupRun, round.groupRun] } } })).verdict).toBe("UNKNOWN");
   });
 
+  it("refuses a group result whose group is not the admitted plan's group, even when the aggregate agrees with it", async () => {
+    const round = await roundOf(PASSING);
+    const result = verifyApplicationE2EEvidence(withGroupRun(round, (groupRun) => { groupRun.group = { ...(groupRun.group as Record<string, unknown>), mode: "hybrid" }; }));
+    expect(result.verdict).toBe("UNKNOWN");
+    expect(result.reason).toMatch(/not the admitted application group run/u);
+  });
+
+  it("refuses an admission that carries a portable projection and portable child groups, which Ruling BA verifies from their own admission", async () => {
+    const portable = createPortableApplicationChildFixture();
+    expect(portable.admission.portableProjection).not.toBeNull();
+    const admissionBytes = Buffer.from(encodeE2EApplicationExecutionAdmission(portable.admission), "utf8");
+    const admission = portable.admission;
+    const subject = { taskId: admission.taskId, operationId: admission.operationId, operationFence: admission.operationFence, workflowRevision: admission.workflowRevision,
+      candidateDigest: admission.candidateDigest, roundId: admission.round.roundId, groupRunIds: admission.groups.map((group) => group.outerBinding.runId), admissionSha256: sha(admissionBytes) };
+    const result = verifyApplicationE2EEvidence({ admissionBytes, subject, aggregate: undefined, groupEvidence: new Map(), receivedAt: new Map(), terminalStatus: "SUCCEEDED" });
+    expect(result.verdict).toBe("UNKNOWN");
+    expect(result.reason).toMatch(/not application groups/u);
+  });
+
   it("needs a successful terminal operation, a clean lifecycle and a receipt inside the round to pass", async () => {
     const round = await roundOf(PASSING);
     expect(verifyApplicationE2EEvidence(round.input({ terminalStatus: "FAILED" })).verdict).toBe("UNKNOWN");
@@ -188,10 +206,6 @@ describe("verifying an application round's evidence", () => {
       expect(result.verdict, label).toBe("UNKNOWN");
       expect(result.results[0]?.status, label).toBe("unavailable");
     }
-    // Received after the broker's own receipt, or before the round was admitted: not this round's evidence.
-    const collectedAt = Date.parse(actualOf(round.groupRun).collection.receivedAt);
-    expect(verifyApplicationE2EEvidence(round.input({ receivedNotAfter: new Date(collectedAt - 1).toISOString() })).verdict).toBe("UNKNOWN");
-    expect(verifyApplicationE2EEvidence(round.input({ receivedNotAfter: new Date(collectedAt).toISOString() })).verdict).toBe("PASS");
   });
 
   it("is UNKNOWN for a group with no readback, whatever the worker reports it as", async () => {
@@ -216,6 +230,112 @@ describe("verifying an application round's evidence", () => {
     const result = verifyApplicationE2EEvidence(edited);
     expect(result.verdict).toBe("UNKNOWN");
     expect(result.groups[0]?.reason).toMatch(/inventory/u);
+  });
+});
+
+describe("the oracle's expectations are the broker's, never the worker's (Ruling BH)", () => {
+  const envOf = (round: Round) => (round.fixture.compiled.runtimeBindings.get(round.fixture.compiled.group.runtimeProfileId)!).runnerEnvironment as Record<string, unknown>;
+  const reasonOfGroup = (result: ReturnType<typeof verifyApplicationE2EEvidence>) => result.groups[0]?.reason ?? result.reason;
+  const inputsOf = (groupRun: Record<string, unknown>) => actualOf(groupRun).collectionInputs;
+
+  it("is UNKNOWN when the runner honestly reports another environment than the admitted runtime's, even if report and readback agree with each other", async () => {
+    const baseline = await roundOf(PASSING);
+    const other = await roundOf({ ...PASSING, environment: { ...envOf(baseline), os: "linux 9.9.9" } });
+    expect(other.fixture.collected.qualification?.status, "the worker's own collection accepts its self-consistent environment").toBe("PASS");
+    const result = verifyApplicationE2EEvidence(other.input());
+    expect(result.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(result)).toMatch(/not the admitted runtime's environment/u);
+  });
+
+  it("is UNKNOWN when the runner honestly reports other limits than the configured ones", async () => {
+    const other = await roundOf({ ...PASSING, limits: { maxAgentContextBytes: 1, maxLedgerBytes: 1, maxObservationBytes: 1, maxEventsPerStep: 1, maxModelTokensPerCall: 1 } });
+    expect(other.fixture.collected.qualification?.status).toBe("PASS");
+    const result = verifyApplicationE2EEvidence(other.input());
+    expect(result.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(result)).toMatch(/limits/u);
+  });
+
+  it("takes usage from the raw reports, and refuses a readback whose usage says otherwise", async () => {
+    const round = await roundOf(PASSING);
+    const result = verifyApplicationE2EEvidence(withGroupRun(round, (groupRun) => { (inputsOf(groupRun).usage as Record<string, number>).modelTokens = 5; }));
+    expect(result.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(result)).toMatch(/usage/u);
+  });
+
+  it("refuses model receipts for a run that never had a model route", async () => {
+    const round = await roundOf(PASSING);
+    const result = verifyApplicationE2EEvidence(withGroupRun(round, (groupRun) => { inputsOf(groupRun).governedModelReceipts = [{ caseId: "x", declaredStepIndex: 0, requestId: "r", receiptId: "m" }]; }));
+    expect(result.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(result)).toMatch(/model receipt/u);
+  });
+
+  it("derives the supervisor receipts it expects from the run id and the close time", async () => {
+    const round = await roundOf(PASSING);
+    const swapped = verifyApplicationE2EEvidence(withGroupRun(round, (groupRun) => { inputsOf(groupRun).expectedSupervisorReceiptRefs = []; }));
+    expect(swapped.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(swapped)).toMatch(/supervisor receipt/u);
+    // A close time that is not the one the cleanup receipt was attested at derives other receipts.
+    const moved = verifyApplicationE2EEvidence(withGroupRun(round, (groupRun) => {
+      inputsOf(groupRun).ownedClosedAt = new Date(Date.parse(String(inputsOf(groupRun).ownedClosedAt)) + 1).toISOString();
+    }));
+    expect(moved.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(moved)).toMatch(/supervisor receipt/u);
+  });
+
+  it("bounds the close time by the round and by the broker's receipt", async () => {
+    const round = await roundOf(PASSING);
+    const closedAt = Date.parse(String(inputsOf(round.groupRun).ownedClosedAt));
+    const beforeClose = verifyApplicationE2EEvidence(round.input({ receivedAt: new Map([[round.fixture.runId, new Date(closedAt - 1).toISOString()]]) }));
+    expect(beforeClose.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(beforeClose)).toMatch(/close time is not between/u);
+    // A receipt before the round was even admitted is refused for that reason, not only because it precedes the close.
+    const beforeAdmission = verifyApplicationE2EEvidence(round.input({ receivedAt: new Map([[round.fixture.runId, new Date(Date.parse(round.admission.round.admittedAt) - 1).toISOString()]]) }));
+    expect(beforeAdmission.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(beforeAdmission)).toMatch(/not received between the round's admission and/u);
+    // A close time the worker claims after the broker's receipt (or before the admission) cannot be real.
+    const afterReceipt = verifyApplicationE2EEvidence(withGroupRun(round, (groupRun) => { inputsOf(groupRun).ownedClosedAt = new Date(Date.parse(actualOf(round.groupRun).collection.receivedAt) + 1_000).toISOString(); }));
+    expect(afterReceipt.verdict).toBe("UNKNOWN");
+  });
+
+  it("refuses observation bindings and assertion assets that are not the admitted ones", async () => {
+    const round = await roundOf(PASSING);
+    const account = verifyApplicationE2EEvidence(withGroupRun(round, (groupRun) => {
+      ((inputsOf(groupRun).observationBindings as Array<{ accountRef: { revision: number } }>)[0]!).accountRef.revision = 99;
+    }));
+    expect(account.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(account)).toMatch(/observation binding/u);
+    const state = await roundOf({ probe: "api-state-positive-v1", observed: { kind: "state", finalValue: { orders: "ready", version: 1 }, disposition: "ready" } });
+    expect(verifyApplicationE2EEvidence(state.input()).verdict).toBe("PASS");
+    const assets = verifyApplicationE2EEvidence(withGroupRun(state, (groupRun) => { inputsOf(groupRun).assertionAssets = []; }));
+    expect(assets.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(assets)).toMatch(/assertion assets/u);
+  });
+
+  it("uses the broker's own receipt time and ignores the one the worker wrote into its collection", async () => {
+    const round = await roundOf(PASSING);
+    const closedAt = Date.parse(String(inputsOf(round.groupRun).ownedClosedAt));
+    const inWindow = new Map([[round.fixture.runId, new Date(closedAt + 1_000).toISOString()]]);
+    const outsideWindow = new Map([[round.fixture.runId, new Date(closedAt + 60_000).toISOString()]]);
+    // Whatever the worker claims, a receipt inside the post-close window passes ...
+    for (const claimed of [new Date(closedAt + 90_000).toISOString(), new Date(closedAt - 90_000).toISOString(), "not a time"]) {
+      expect(verifyApplicationE2EEvidence(withGroupRun(round, (groupRun) => { actualOf(groupRun).collection.receivedAt = claimed; }, { receivedAt: inWindow })).verdict, claimed).toBe("PASS");
+    }
+    // ... and a broker receipt outside it fails even though the worker's own claim fits.
+    const late = verifyApplicationE2EEvidence(round.input({ receivedAt: outsideWindow }));
+    expect(late.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(late)).toMatch(/post-close/u);
+    // No receipt time from the broker means no verdict at all.
+    const missing = verifyApplicationE2EEvidence(round.input({ receivedAt: new Map() }));
+    expect(missing.verdict).toBe("UNKNOWN");
+    expect(reasonOfGroup(missing)).toMatch(/receipt time/u);
+  });
+
+  it("bounds what the worker's unavailable reason can put in front of the owner", async () => {
+    const round = await roundOf(PASSING);
+    const result = verifyApplicationE2EEvidence(withGroupRun(round, (groupRun) => { groupRun.actual = null; groupRun.unavailableReason = "x".repeat(5_000); }));
+    expect(result.verdict).toBe("UNKNOWN");
+    expect(result.groups[0]!.reason.length).toBeLessThanOrEqual(300);
+    expect(result.groups[0]!.reason).toMatch(/^x+$/u);
   });
 });
 

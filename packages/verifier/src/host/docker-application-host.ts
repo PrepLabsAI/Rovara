@@ -14,7 +14,7 @@ import { readRegularFileTail } from "./regular-file.js";
 import { assembleDockerCollectionInputs, assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput, validateExecutorResult,
   type DockerCollectionInputs, type ExecutorOutputSnapshot, type ExecutorResultFile } from "./executor-readback.js";
 
-export { dockerOwnedResourceInventory, dockerOwnedResourceInventoryDigest } from "./executor-readback.js";
+export { dockerOwnedResourceInventory, dockerOwnedResourceInventoryDigest, dockerOwnedCleanupReceipt } from "./executor-readback.js";
 export type { DockerCollectionInputs } from "./executor-readback.js";
 
 /**

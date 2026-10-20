@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import process from "node:process";
 import { canonicalJson, type E2EApplicationExecutionAdmission, type E2ERound, type E2ERunBinding } from "@agentx/contracts";
 import { collectE2EApplicationRun } from "../../packages/verifier/src/application-collection.js";
-import { dockerOwnedResourceInventoryDigest } from "../../packages/verifier/src/host/executor-readback.js";
+import { dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest } from "../../packages/verifier/src/host/executor-readback.js";
 import { E2EApplicationCaseCaptureSchema, E2EApplicationObservationBindingSchema, type E2EApplicationCollectionResult } from "../../packages/verifier/src/application-result-adapter.js";
 import { expectedE2EApplicationReporterDigest } from "../../packages/verifier/src/application-runtime-assets.js";
 import { validateE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite, type ValidatedE2EApplicationAdmission } from "../../packages/verifier/src/application-scenarios.js";
@@ -21,7 +21,8 @@ const uuidA = "11111111-1111-4111-8111-111111111111";
 const upstreamRunId = "a0000000-0000-7000-8000-000000000011";
 const pinnedToolchain = { execPath: process.execPath, version: process.version as "v22.23.2",
   platform: process.platform as "darwin" | "linux" | "win32", arch: process.arch as "arm64" | "x64" };
-const ENVIRONMENT = { ci: true, trustNoticeShown: false, os: "linux 6.8.0", arch: "x64", runtime: "node v22.23.2" };
+/** The runner limits every application run is configured with. */
+export const RUNNER_LIMITS = { maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 };
 const STATE_PROBE_SCHEMA = { type: "object", required: ["orders", "version"], properties: { orders: { type: "string" }, version: { type: "integer" } }, additionalProperties: false };
 
 /** What the one API case observed. */
@@ -44,7 +45,9 @@ export type ApplicationEvidenceFixture = Readonly<{
  */
 export async function createApplicationEvidenceFixture(options: { probe: OrdersProbeName; observed: ObservedApiOutcome; taskId?: string;
   /** Rewrites the runner's raw report before it is serialized (for example to make the scenario skipped). */
-  reportEdit?: (report: E2EApplicationReport) => void }): Promise<ApplicationEvidenceFixture> {
+  reportEdit?: (report: E2EApplicationReport) => void;
+  /** What the runner reports as its environment and limits (self-consistently, in the report and in the readback). Default: the admitted runtime's own, and the runner's configured limits. */
+  environment?: Record<string, unknown>; limits?: Record<string, number> }): Promise<ApplicationEvidenceFixture> {
   const probe = createOrdersExecutorPlan({ probe: options.probe, taskId: options.taskId ?? "44444444-4444-4444-8444-444444444444" });
   const admission: E2EApplicationExecutionAdmission = probe.plan.admission;
   const validated = validateE2EApplicationExecutionAdmission(admission);
@@ -65,6 +68,8 @@ export async function createApplicationEvidenceFixture(options: { probe: OrdersP
   const applicationBinding = compiled.applicationBindings.get(app.applicationId)!;
   const runtime = compiled.runtimeBindings.get(app.runtimeProfileId)!;
   const origin = compiled.originByApplicationId[0]!.origin;
+  const ENVIRONMENT = (options.environment ?? runtime.runnerEnvironment) as { ci: boolean; trustNoticeShown: boolean; os: string; arch: string; runtime: string };
+  const LIMITS = options.limits ?? RUNNER_LIMITS;
   const accountRef = compiled.runtimeAdmissionContext.selectionInput.runtimeAccountRefs[0]!;
   const bindingDigest = sha(canonicalJson(binding));
   const producer = { producerId: "installed-api", receiptId: "supervisor-receipt", lifecycleId: "owned-api-lifecycle", operationId: binding.operationId,
@@ -105,6 +110,13 @@ export async function createApplicationEvidenceFixture(options: { probe: OrdersP
   }
 
   const stepKind = step.kind;
+  const identitySourceReceipt = frame("identity-source-receipt", { schemaVersion: "conformance-account-source/v1", source: "offline fixture only" });
+  const subjectIdentitySourceReceipt = frame("subject-identity-source-receipt", { schemaVersion: "conformance-subject-source/v1", source: "offline fixture only" });
+  const identityReceipt = frame("identity-receipt", { schemaVersion: "e2e-application-account-identity/v1", caseId: expected.caseId, bindingDigest, upstreamRunId,
+    lifecycleId: producer.lifecycleId, producer, observedAt: processStarted, sourceReceiptRef: identitySourceReceipt.ref, accountRef, sessionRef: "api-session-1",
+    accountIdDigest: sha("account") });
+  const subjectIdentityReceipt = frame("subject-identity-receipt", { schemaVersion: "e2e-application-subject-identity/v1", caseId: expected.caseId, bindingDigest, upstreamRunId,
+    lifecycleId: producer.lifecycleId, producer, observedAt: processStarted, sourceReceiptRef: subjectIdentitySourceReceipt.ref, subject });
   const capture = E2EApplicationCaseCaptureSchema.parse({ schemaVersion: "e2e-application-case-capture/v1", caseId: expected.caseId, upstreamRunId, shardId: shard.shardId,
     roundId: binding.roundId, runId: binding.runId, groupId: binding.groupId, candidateDigest: binding.candidateDigest, applicationId: app.applicationId,
     buildManifestDigest: applicationBinding.build.manifestDigest, runtimeManifestDigest: runtime.manifestDigest, executionDescriptorDigest: expected.executionDescriptorDigest,
@@ -117,29 +129,22 @@ export async function createApplicationEvidenceFixture(options: { probe: OrdersP
       reason: assertionPassed ? "observed value matches the approved assertion" : "observed value differs from the approved assertion", producer }],
     terminal: assertionPassed ? { kind: "completed" as const, lastDeclaredStepIndex: 0, failedAssertionIndex: null, at: reportFinished, reason: "complete" }
       : { kind: "assertion-failed" as const, lastDeclaredStepIndex: 0, failedAssertionIndex: 0, at: reportFinished, reason: "approved assertion observed a failure" },
-    modelReceipts: [], artifacts: [],
+    modelReceipts: [], artifacts: [identityReceipt.ref, subjectIdentityReceipt.ref].sort((left, right) => left.artifactId.localeCompare(right.artifactId)),
     coverage: { observedScope: "runtime", subject: "candidate", executedCandidateParts: [app.applicationId], realComponentIds: [], mockedComponentIds: [], observedMockedComponentIds: [],
       unexercisedBehaviors: assertionPassed ? [] : [expected.assertionDigests[0]!] },
     cleanup: "confirmed" });
   const captureFrame = frame("case-capture", capture);
+  // As the host does after close: the owned-cleanup receipt is the one supervisor receipt it attests, and the cleanup frame names it.
+  const cleanupReceipt = dockerOwnedCleanupReceipt(binding.runId, processFinished);
   const cleanupFrame = frame("owned-cleanup", { schemaVersion: "e2e-application-owned-cleanup/v1", context, phase: "after-owned-close", cleanup: "confirmed", confirmed: true,
-    serverListening: false, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId), ownedCleanupReceiptRefs: [] });
-  const sourceReceipt = frame("source-ingress-receipt", { schemaVersion: "test-source-ingress/v1", source: "offline-conformance" });
-  const identitySourceReceipt = frame("identity-source-receipt", { schemaVersion: "conformance-account-source/v1", source: "offline fixture only" });
-  const subjectIdentitySourceReceipt = frame("subject-identity-source-receipt", { schemaVersion: "conformance-subject-source/v1", source: "offline fixture only" });
-  const identityReceipt = frame("identity-receipt", { schemaVersion: "e2e-application-account-identity/v1", caseId: expected.caseId, bindingDigest, upstreamRunId,
-    lifecycleId: producer.lifecycleId, producer, observedAt: processStarted, sourceReceiptRef: identitySourceReceipt.ref, accountRef, sessionRef: "api-session-1",
-    accountIdDigest: sha("account") });
-  const subjectIdentityReceipt = frame("subject-identity-receipt", { schemaVersion: "e2e-application-subject-identity/v1", caseId: expected.caseId, bindingDigest, upstreamRunId,
-    lifecycleId: producer.lifecycleId, producer, observedAt: processStarted, sourceReceiptRef: subjectIdentitySourceReceipt.ref, subject });
-  const expectedSupervisorRefs = [identityReceipt.ref, identitySourceReceipt.ref, subjectIdentityReceipt.ref, subjectIdentitySourceReceipt.ref, sourceReceipt.ref]
-    .sort((left, right) => left.artifactId.localeCompare(right.artifactId));
+    serverListening: false, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId), ownedCleanupReceiptRefs: [cleanupReceipt.ref] });
+  const expectedSupervisorRefs = [cleanupReceipt.ref];
   const launches = [{ shardId: shard.shardId, launchId: uuidA, upstreamRunId }];
   const receipt = frame("supervisor-top-receipt", { schemaVersion: "e2e-application-supervisor-receipt/v1", context, launches,
     caseCaptures: [{ caseId: expected.caseId, shardId: shard.shardId, ref: captureFrame.ref }], cleanupRef: cleanupFrame.ref,
     additionalSupervisorReceiptRefs: expectedSupervisorRefs, mockConsumptions: [] });
   const readback = { schemaVersion: "e2e-application-supervisor-readback/v1" as const, receipt,
-    evidence: [captureFrame, cleanupFrame, sourceReceipt, observationFrame, identityReceipt, identitySourceReceipt, subjectIdentityReceipt, subjectIdentitySourceReceipt, ...supportingEvidence]
+    evidence: [captureFrame, cleanupFrame, cleanupReceipt, observationFrame, identityReceipt, identitySourceReceipt, subjectIdentityReceipt, subjectIdentitySourceReceipt, ...supportingEvidence]
       .sort((left, right) => left.ref.artifactId.localeCompare(right.ref.artifactId)) };
 
   const publicList = { pairs: [{ id: tuple.upstreamResultId, file: ".agentx/e2e/generated-application.test.ts", title: tuple.title, titlePath: [tuple.title], kind: "test",
@@ -159,7 +164,7 @@ export async function createApplicationEvidenceFixture(options: { probe: OrdersP
         steps: [{ id: "assertion-step", index: 0, kind: "assertion", api: `assert.${assertion.kind}`, label: "approved assertion", source: tuple.source,
           status, startedAt: reportStarted, durationMs: 1, events: [], artifacts: [] }] }] }],
     errors: [], summary: { discovered: 1, selected: 1, executed: 1, passed: assertionPassed ? 1 : 0, failed: assertionPassed ? 0 : 1, interrupted: 0, flaky: 0, skipped: 0 },
-    limits: { maxAgentContextBytes: 1024, maxLedgerBytes: 1024, maxObservationBytes: 1024, maxEventsPerStep: 1000, maxModelTokensPerCall: 1024 },
+    limits: LIMITS,
     usage: { discoveredResults: 1, maxAgentContextBytes: 0, maxLedgerBytes: 0, maxObservationBytes: 0, artifactBytes: 0, downloads: 0, events: 0, modelTokens: 0,
       maxModelCallsInStep: 0, maxActionStepsInStep: 0 } } };
   options.reportEdit?.(report);

@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { canonicalJson, e2ePlanHasCompleteRequiredCriteria, type E2EExecutionPlan, type E2ERound, type E2EQualifiedResult } from "@agentx/contracts";
-import { createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedResourceInventoryDigest,
-  qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "@agentx/verifier";
+import { createE2EApplicationCollectionOracleFromCompiledSuite, decodeE2EApplicationExecutionAdmission, dockerOwnedCleanupReceipt, dockerOwnedResourceInventoryDigest,
+  e2eApplicationAggregateRunUsage, parseE2EApplicationReport, qualifyE2EApplicationCollection, validateE2EApplicationExecutionAdmission,
+  type E2ECompiledApplicationSuite } from "@agentx/verifier";
 import { combineE2EVerdicts, type E2EVerdict } from "./verdict.js";
 
 /** What the broker itself knows about the CHECKS operation and the admission it signed. None of it comes from the worker. */
@@ -18,8 +19,11 @@ export type ApplicationEvidenceInput = Readonly<{
   aggregate: unknown;
   /** The parsed per-group `workflow-e2e-group-evidence/v1` envelopes the broker accepted, by group run id (their content addresses already checked). */
   groupEvidence: ReadonlyMap<string, unknown>;
-  /** The last instant the worker's evidence can have been received: the broker's receipt of the terminal result, or now while the round is open. */
-  receivedNotAfter: string;
+  /**
+   * The broker's own receipt time of each group's accepted evidence, by group run id (for example when its upload was started and accepted). The collector
+   * judges the post-close harvest window against it, never against the receipt time the worker wrote into its own collection, which is ignored.
+   */
+  receivedAt: ReadonlyMap<string, string>;
   /** How the CHECKS operation ended, as recorded or as it is being recorded. Only a SUCCEEDED operation can be PASS. */
   terminalStatus: "SUCCEEDED" | "FAILED" | undefined;
 }>;
@@ -59,11 +63,12 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
     if (sha256(input.admissionBytes) !== input.subject.admissionSha256) refuse("the stored admission does not match its content address");
     const admission = decodeE2EApplicationExecutionAdmission(input.admissionBytes);
     const subject = input.subject;
+    // Run ids are unique within a round (the round schema refuses a repeat when the admission decodes), so equal sets are equal lists.
     const runIds = admission.groups.map((group) => group.outerBinding.runId);
     if (admission.taskId !== subject.taskId || admission.operationId !== subject.operationId || admission.operationFence !== subject.operationFence
       || admission.workflowRevision !== subject.workflowRevision || admission.candidateDigest !== subject.candidateDigest
       || admission.round.roundId !== subject.roundId || admission.round.groupBindings.length !== admission.groups.length
-      || new Set(runIds).size !== runIds.length || !same([...runIds].sort(), [...subject.groupRunIds].sort())) {
+      || !same([...runIds].sort(), [...subject.groupRunIds].sort())) {
       refuse("the admission does not match the signed CHECKS operation, candidate, round or group runs");
     }
     const validated = validateE2EApplicationExecutionAdmission(admission);
@@ -93,7 +98,7 @@ export function verifyApplicationE2EEvidence(input: ApplicationEvidenceInput): A
       }
       const groupRun = readGroupEnvelope(envelope, admission, subject, planGroup, binding);
       if (aggregateRuns !== undefined && !same(aggregateRuns.get(binding.runId), groupRun)) refuse("the aggregate differs from a group result accepted on its own");
-      const verified = requalifyGroup({ suite, groupRun, binding, round: admission.round, receivedNotAfter: input.receivedNotAfter });
+      const verified = requalifyGroup({ suite, groupRun, binding, round: admission.round, receivedAt: input.receivedAt.get(binding.runId) });
       groups.push({ runId: binding.runId, groupId: binding.groupId, verdict: verified.verdict, reason: verified.reason });
       if (verified.result !== undefined) results.push(verified.result);
     }
@@ -147,32 +152,62 @@ function readGroupEnvelope(envelope: unknown, admission: ReturnType<typeof decod
 
 type Requalified = { verdict: E2EVerdict; reason: string; result?: E2EQualifiedResult };
 
-/** Recollects one group from its uploaded raw evidence. The group run's own `collection` and `unavailableReason` are claims and are never read as a verdict. */
-function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: Json; binding: ApplicationEvidenceBinding; round: E2ERound; receivedNotAfter: string }): Requalified {
+/** The limits every application run's runner is configured with (the pinned runner's own, as the broker pins them for portable runs too). */
+const APPLICATION_RUNNER_LIMITS = Object.freeze({ maxAgentContextBytes: 16_384, maxLedgerBytes: 8_192, maxObservationBytes: 262_144, maxEventsPerStep: 1_000, maxModelTokensPerCall: 64_000 });
+const OWNER_REASON_MAX_CHARS = 300;
+
+/**
+ * Recollects one group from its uploaded raw evidence. The group run's own `collection` and `unavailableReason` are claims and are never read as a verdict.
+ *
+ * Everything the qualifier compares the worker's report against is the broker's own: the runner environment is the admitted runtime's, the limits are the
+ * runner's configured ones, usage is aggregated from the raw reports, the supervisor receipt is derived from the run id and the close time, no model receipt
+ * can exist, and the receipt time is the broker's. The worker's readback supplies only what the broker cannot know (the observation bindings and assertion
+ * assets, which the oracle checks against the admitted account, artifact, origin and assertions, and the close time, which is bounded and tied to its receipt);
+ * anything it supplies that should equal an expected value must equal it, or the group is UNKNOWN.
+ */
+function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: Json; binding: ApplicationEvidenceBinding; round: E2ERound; receivedAt: string | undefined }): Requalified {
   const { suite, groupRun, binding, round } = input;
   const actual = groupRun.actual;
   if (actual === null || actual === undefined) {
-    return { verdict: "UNKNOWN", reason: typeof groupRun.unavailableReason === "string" && groupRun.unavailableReason !== "" ? groupRun.unavailableReason : "the group produced no readback" };
+    return { verdict: "UNKNOWN", reason: typeof groupRun.unavailableReason === "string" && groupRun.unavailableReason !== "" ? groupRun.unavailableReason.slice(0, OWNER_REASON_MAX_CHARS) : "the group produced no readback" };
   }
+  const unknown = (reason: string): Requalified => ({ verdict: "UNKNOWN", reason });
   try {
-    if (!isObject(actual) || !isObject(actual.collectionInputs) || !isObject(actual.collection)) return { verdict: "UNKNOWN", reason: "the group's uploaded readback is malformed" };
+    if (!isObject(actual) || !isObject(actual.collectionInputs) || !isObject(actual.collection)) return unknown("the group's uploaded readback is malformed");
     const inputs = actual.collectionInputs;
-    // The inventory digest is a pure function of the run id, so it is derived here and never taken from the worker.
-    if (inputs.ownedResourceInventoryDigest !== dockerOwnedResourceInventoryDigest(binding.runId)) {
-      return { verdict: "UNKNOWN", reason: "the group's owned-resource inventory is not the one its run id derives" };
-    }
-    const oracle = createE2EApplicationCollectionOracleFromCompiledSuite({ compiled: suite, binding, round, environment: inputs.environment as never, usage: inputs.usage as never,
-      limits: inputs.limits as never, expectedSupervisorReceiptRefs: inputs.expectedSupervisorReceiptRefs as never, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId),
-      observationBindings: inputs.observationBindings as never, assertionAssets: inputs.assertionAssets as never, governedModelReceipts: inputs.governedModelReceipts as never,
-      ownedClosedAt: inputs.ownedClosedAt as never });
     const collection = actual.collection;
-    const receivedAt = typeof collection.receivedAt === "string" ? Date.parse(collection.receivedAt) : Number.NaN;
-    if (!Number.isFinite(receivedAt) || receivedAt < Date.parse(round.admittedAt) || receivedAt > Date.parse(input.receivedNotAfter)) {
-      return { verdict: "UNKNOWN", reason: "the group's evidence was not received between the round's admission and the broker's receipt" };
+    const receivedAt = input.receivedAt === undefined ? Number.NaN : Date.parse(input.receivedAt);
+    if (!Number.isFinite(receivedAt)) return unknown("the broker has no receipt time for this group's evidence");
+    if (receivedAt < Date.parse(round.admittedAt)) return unknown("the group's evidence was not received between the round's admission and the broker's receipt");
+    // The inventory digest is a pure function of the run id.
+    const inventoryDigest = dockerOwnedResourceInventoryDigest(binding.runId);
+    if (inputs.ownedResourceInventoryDigest !== inventoryDigest) return unknown("the group's owned-resource inventory is not the one its run id derives");
+    const runtime = suite.runtimeBindings.get(suite.group.runtimeProfileId);
+    if (runtime === undefined || !same(inputs.environment, runtime.runnerEnvironment)) return unknown("the runner's environment is not the admitted runtime's environment");
+    if (!same(inputs.limits, APPLICATION_RUNNER_LIMITS)) return unknown("the runner's limits are not the configured limits");
+    if (!Array.isArray(inputs.governedModelReceipts) || inputs.governedModelReceipts.length !== 0) return unknown("a run with no model route cannot carry model receipts");
+    const shards = Array.isArray(collection.shards) ? collection.shards as unknown[] : [];
+    const usageRows = shards.map((shard) => {
+      const rawReport = isObject(shard) && isObject(shard.rawReport) && typeof shard.rawReport.bytesBase64 === "string" ? shard.rawReport.bytesBase64 : undefined;
+      const parsed = rawReport === undefined ? undefined : parseE2EApplicationReport(Buffer.from(rawReport, "base64"));
+      return parsed?.kind === "parsed" ? parsed.report.run.usage as Readonly<Record<string, number>> : undefined;
+    });
+    const usage = usageRows.length === 0 || usageRows.some((row) => row === undefined) ? null : e2eApplicationAggregateRunUsage(usageRows as Readonly<Record<string, number>>[]);
+    if (usage === null) return unknown("the runner's usage cannot be derived from its raw reports");
+    if (!same(inputs.usage, usage)) return unknown("the readback's usage is not the usage of the runner's raw reports");
+    const closedAt = typeof inputs.ownedClosedAt === "string" ? Date.parse(inputs.ownedClosedAt) : Number.NaN;
+    if (!Number.isFinite(closedAt) || new Date(closedAt).toISOString() !== inputs.ownedClosedAt || closedAt < Date.parse(round.admittedAt) || closedAt > receivedAt) {
+      return unknown("the group's close time is not between the round's admission and the broker's receipt");
     }
-    const qualification = qualifyE2EApplicationCollection(oracle, collection as never);
+    // The one supervisor receipt the host attests is derived from the run id and the close time.
+    const expectedSupervisorReceiptRefs = [dockerOwnedCleanupReceipt(binding.runId, inputs.ownedClosedAt).ref];
+    if (!same(inputs.expectedSupervisorReceiptRefs, expectedSupervisorReceiptRefs)) return unknown("the supervisor receipt is not the one derived from the run id and the close time");
+    const oracle = createE2EApplicationCollectionOracleFromCompiledSuite({ compiled: suite, binding, round, environment: runtime.runnerEnvironment, usage, limits: APPLICATION_RUNNER_LIMITS,
+      expectedSupervisorReceiptRefs, ownedResourceInventoryDigest: inventoryDigest, observationBindings: inputs.observationBindings as never,
+      assertionAssets: inputs.assertionAssets as never, governedModelReceipts: [], ownedClosedAt: inputs.ownedClosedAt });
+    const qualification = qualifyE2EApplicationCollection(oracle, { ...collection, receivedAt: new Date(receivedAt).toISOString() } as never);
     const promoted = qualification.result === null ? undefined : { ...qualification.result, producer: "broker-independent-e2e-verifier", qualification: "trusted" as const };
-    if (qualification.status !== "PASS") return { verdict: qualification.status, reason: qualification.reason, ...(promoted === undefined ? {} : { result: promoted }) };
+    if (qualification.status !== "PASS") return { verdict: qualification.status, reason: qualification.reason.slice(0, OWNER_REASON_MAX_CHARS), ...(promoted === undefined ? {} : { result: promoted }) };
     // A pass also needs the host's own lifecycle to say the run ended cleanly: confirmed cleanup, no timeout or abort, a zero exit code, and no unavailable reason.
     const lifecycle = isObject(groupRun.lifecycle) ? groupRun.lifecycle : undefined;
     const processResult = isObject(lifecycle?.process) ? lifecycle.process : undefined;
@@ -182,7 +217,7 @@ function requalifyGroup(input: { suite: E2ECompiledApplicationSuite; groupRun: J
     }
     return { verdict: "PASS", reason: qualification.reason, ...(promoted === undefined ? {} : { result: promoted }) };
   } catch (error) {
-    return { verdict: "UNKNOWN", reason: error instanceof Error && error.message !== "" ? error.message.slice(0, 300) : "the group's evidence could not be requalified" };
+    return unknown(error instanceof Error && error.message !== "" ? error.message.slice(0, OWNER_REASON_MAX_CHARS) : "the group's evidence could not be requalified");
   }
 }
 type ApplicationEvidenceBinding = Parameters<typeof createE2EApplicationCollectionOracleFromCompiledSuite>[0]["binding"];
