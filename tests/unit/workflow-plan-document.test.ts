@@ -1,5 +1,6 @@
 // Structured plan documents: the planner's `agentx-plan` block, read all at once with plain-English errors.
 /* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call, @typescript-eslint/no-unsafe-assignment -- the tests edit parsed JSON drafts into invalid shapes */
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   PLAN_CLAIMS_MAX, PLAN_DECISIONS_MAX, WORKFLOW_BLOCK_REASONS, WorkflowArtifactSchema, canonicalPlanJson, diffPlanDocuments, lastFencedBlock, parsePlanDocument,
@@ -665,5 +666,73 @@ describe("planClaimCount", () => {
   it("counts nested claims", () => {
     expect(planClaimCount(planDocument())).toBe(3);
     expect(planClaimCount(planDocument({ claims: [{ id: "1", text: "A.", children: [{ id: "1.1", text: "B.", children: [{ id: "1.1.1", text: "C." }] }] }], decisions: [] }))).toBe(3);
+  });
+});
+
+describe("the plan's e2e intent versions", () => {
+  const sha = (value: string) => createHash("sha256").update(value).digest("hex");
+  const scenario = (targetId: string) => ({ scenarioId: "s1", requirementId: "r1", requestedTargetIds: [targetId], required: true, accountProfileId: "synthetic",
+    minimumEvidence: "runtime" as const, requiredRealComponentIds: [] as string[], steps: [{ kind: "navigate" as const, path: "/" }],
+    assertions: [{ kind: "visible" as const, testId: "home", equals: true }] });
+  const accountContext = { applicationId: "orders", profileId: "synthetic", sourcePath: "package.json", sourceSha256: "a".repeat(64) };
+  const v1 = { schemaVersion: 1 as const, requestedTargetIds: ["web-1"], portableOperationRefs: [], mockFixtureRefs: [],
+    accountContextRefs: [accountContext], scenarios: [scenario("web-1")], semanticExportDeltas: [] };
+  const sourceRefs = [{ path: "package.json", sha256: "b".repeat(64) }];
+  const v2 = { schemaVersion: 2 as const, requestedTargetIds: ["web-1"], portableOperationRefs: [], mockFixtureRefs: [],
+    accountContextRefs: [accountContext], scenarios: [scenario("web-1")], semanticExportDeltas: [],
+    applicationRuntimeRefs: [{ targetId: "web-1", applicationId: "orders", recipeDigest: "c".repeat(64), sourceRefs, runtimeProfileId: "linux-arm64-web-api-v1", accountProfileId: "synthetic" }],
+    runtimeAccountRefs: [{ applicationId: "orders", profileId: "synthetic", revision: 1, definitionDigest: "d".repeat(64) }],
+    unavailableTargetRefs: [] };
+  const render = (e2e: PlanDocument["e2e"]) => planDocumentMarkdown({ ...planDocument(), e2e }, { kind: "plan", version: 1, sha256: "c".repeat(64) });
+  const withE2E = (e2e: unknown) => answerOf((plan) => { plan["e2e"] = e2e; });
+
+  it("keeps the v1 portable intent's markdown and canonical bytes exactly as before", () => {
+    const plan = { ...planDocument(), e2e: v1 };
+    expect(parsePlanDocument(planAnswer(plan), { kind: "plan" })).toEqual({ ok: true, plan });
+    // Hashes computed from the code before the v2 intent existed; a v1 plan must keep its approval digest.
+    expect(sha(render(v1))).toBe("65a2f6091da61b4e9e96545f9a4c6c740c2b438d5d3bb6f09cd731d67e881962");
+    expect(sha(canonicalPlanJson(plan))).toBe("2297ad85d703e5d3a1987bffe3eae3346e62d06634fd8c6744d5e1fe07f2df2c");
+    expect(render(v1)).not.toContain("Application runtime references");
+  });
+
+  it("round-trips a v2 application intent without converting it to v1, and renders it deterministically", () => {
+    const plan = { ...planDocument(), e2e: v2 };
+    const parsed = parsePlanDocument(planAnswer(plan), { kind: "plan" });
+    expect(parsed).toEqual({ ok: true, plan });
+    expect(parsed.ok && readCanonicalPlan(canonicalPlanJson(parsed.plan))?.e2e).toEqual(v2);
+    const markdown = render(v2);
+    expect(markdown).toBe(render(JSON.parse(JSON.stringify(v2)) as typeof v2));
+    expect(markdown).toContain("- Application runtime references: `");
+    expect(markdown).toContain("- Runtime account references: `");
+    expect(markdown).toContain('"runtimeProfileId":"linux-arm64-web-api-v1"');
+    expect(markdown).not.toContain("Required but currently unavailable targets");
+    // The v1 lines come first and are the same as for a v1 intent.
+    expect(markdown.split("\n").filter((entry) => entry.startsWith("- Scenario"))).toEqual(render(v1).split("\n").filter((entry) => entry.startsWith("- Scenario")));
+  });
+
+  it("renders the unavailable targets of a v2 intent", () => {
+    const unavailable = { schemaVersion: 2 as const, ...{ ...v2, applicationRuntimeRefs: [], runtimeAccountRefs: [],
+      unavailableTargetRefs: [{ targetId: "web-1", applicationId: "orders", accountProfileId: "synthetic", sourceRefs }] } };
+    expect(parsePlanDocument(planAnswer({ ...planDocument(), e2e: unavailable }), { kind: "plan" }).ok).toBe(true);
+    expect(render(unavailable)).toContain("- Required but currently unavailable targets: `");
+  });
+
+  it("chooses the schema by the explicit version and never by shape", () => {
+    // v2-only members under the v1 version, and v1 members under the v2 version, are refused instead of being reinterpreted.
+    expect(errorsOf(withE2E({ ...v1, applicationRuntimeRefs: v2.applicationRuntimeRefs }), "plan")).toEqual([expect.stringMatching(/e2e has an unknown property "applicationRuntimeRefs"/)]);
+    const { applicationRuntimeRefs: _refs, runtimeAccountRefs: _accounts, unavailableTargetRefs: _unavailable, ...v1Shape } = v2;
+    void _refs; void _accounts; void _unavailable;
+    expect(errorsOf(withE2E({ ...v1Shape, schemaVersion: 2 }), "plan")).toEqual([expect.stringMatching(/e2e applicationRuntimeRefs is missing/), expect.stringMatching(/e2e runtimeAccountRefs is missing/)]);
+    expect(errorsOf(withE2E({ ...v2, schemaVersion: 1 }), "plan")).toEqual([expect.stringMatching(/e2e has an unknown property "applicationRuntimeRefs"/)]);
+  });
+
+  it("refuses an unknown or missing e2e version with a message that names the supported versions", () => {
+    for (const bad of [{ ...v2, schemaVersion: 3 }, { ...v1, schemaVersion: "2" }, (({ schemaVersion: _version, ...rest }) => { void _version; return rest; })(v2)]) {
+      expect(errorsOf(withE2E(bad), "plan")).toEqual(["the plan: e2e schemaVersion must be 1 (portable intent) or 2 (application intent)"]);
+    }
+  });
+
+  it("keeps the e2e intent out of requirements and design for both versions", () => {
+    expect(errorsOf(withE2E(v2), "design")).toEqual(["the plan: E2E intent belongs only in the coding plan"]);
   });
 });

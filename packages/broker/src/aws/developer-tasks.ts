@@ -130,7 +130,7 @@ import {
   WORKFLOW_REGRESSION_INSTRUCTION,
   type WorkflowSendBackProblem,
   type WorkflowDependencyInvocation,
-  type E2EFeaturePlanIntent,
+  type WorkflowFeatureE2EIntent,
   type E2EWorkflowAdmissionRef,
   workflowDependencyAttemptTerminalProgress,
   WorkflowResolveFindingsInputSchema,
@@ -2427,7 +2427,7 @@ async function loadCommittedSourceRecovery(
 }
 
 /** The owner-approved coding plan, read back and checked against the digest the approval recorded. */
-async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<{ text: string; sha256: string; e2eIntent?: E2EFeaturePlanIntent }> {
+async function approvedCodingPlan(deps: DeveloperTaskRouteDependencies, workflow: WorkflowSnapshot): Promise<{ text: string; sha256: string; e2eIntent?: WorkflowFeatureE2EIntent }> {
   const plan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
   if (plan === undefined) throw agentXError("WORKSPACE_NOT_READY", "the approved coding plan is missing");
   // A structured plan is given as its Markdown copy, with the owner's answers and the comments they sent with the approval.

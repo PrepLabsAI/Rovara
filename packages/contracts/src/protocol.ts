@@ -3,7 +3,8 @@ import { WORKFLOW_PLAN_MAX_BYTES, WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckPro
 import { ProjectCommandSchema, StoredProjectDefinitionSchema } from "./project.js";
 import { ModelSelectionSchema, type ModelSelection } from "./models.js";
 import { WorkflowDependencyInvocationSchema } from "./workflow-dependencies.js";
-import { E2EFeaturePlanIntentSchema, E2EWorkflowAdmissionRefSchema } from "./e2e.js";
+import { E2EFeaturePlanIntentAnySchema } from "./e2e-application.js";
+import { E2EWorkflowAdmissionRefSchema } from "./e2e.js";
 import { DEVELOPER_INSTRUCTIONS_MAX_BYTES } from "./developer-tasks.js";
 
 export const AGENTX_PROTOCOL_VERSION = 1 as const;
@@ -49,7 +50,7 @@ export const WorkflowReviewPlanSchema = z.object({
   markdown: z.string().min(1).refine((value) => new TextEncoder().encode(value).byteLength <= WORKFLOW_PLAN_MAX_BYTES, `plan exceeds ${WORKFLOW_PLAN_MAX_BYTES} UTF-8 bytes`),
   sha256: z.string().regex(/^[a-f0-9]{64}$/),
   /** Structured E2E intent reloaded from the exact Owner-approved canonical plan artifact. */
-  e2eIntent: E2EFeaturePlanIntentSchema.optional(),
+  e2eIntent: E2EFeaturePlanIntentAnySchema.optional(),
 }).strict();
 export type WorkflowReviewPlan = z.infer<typeof WorkflowReviewPlanSchema>;
 
