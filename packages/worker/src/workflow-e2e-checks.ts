@@ -63,7 +63,7 @@ export async function executeWorkflowE2EChecks(input: {
    * without one still runs portable rounds.
    */
   application?: WorkflowE2EApplicationRuntime | (() => WorkflowE2EApplicationRuntime);
-  /** The local directory of the candidate repository with this id, for `git archive`. An application admission needs it; there is no fallback to `sourceRoot`. */
+  /** The local directory of the candidate repository with this id, to stage the candidate commit from (`git ls-tree` and `git cat-file`). An application admission needs it; there is no fallback to `sourceRoot`. */
   candidateRepositoryRoot?: (repositoryId: string) => string | undefined;
 }): Promise<{ evidenceRef: { key: string; sha256: string }; candidateDigest: string; roundId: string; processStatus: "SUCCEEDED" | "FAILED" }> {
   const { invocation } = input;

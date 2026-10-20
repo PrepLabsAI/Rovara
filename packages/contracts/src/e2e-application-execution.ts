@@ -196,7 +196,7 @@ export const E2ECreatorAuthoritySchema = z.discriminatedUnion("kind", [
 export type E2ECreatorAuthority = z.infer<typeof E2ECreatorAuthoritySchema>;
 export const E2EApplicationExecutionAdmissionSchema = z.object({ schemaVersion: z.literal("workflow-e2e-application-admission/v1"),
   taskId: id(120), operationId: id(120), operationFence: z.number().int().positive(), workflowRevision: z.number().int().positive(), candidateDigest: sha256,
-  /** The exact commit and tree the worker builds from (`git archive <candidateCommitSha>`); the tree is checked against the repository before any build. */
+  /** The exact commit and tree the worker builds from (staged from that commit's tree with `git ls-tree` and `git cat-file`); the tree is checked against the repository before any build. */
   candidateCommitSha: sha1, candidateTreeSha: sha1,
   sourceSnapshot: sourceSnapshotWireSchema, intent: E2EApplicationPlanIntentSchema, intentDigest: sha256,
   selectionInput: applicationSelectionInputSchema, applicationApprovalBinding: E2EApplicationApprovalBindingSchema.nullable(), applicationBindings: z.array(applicationMapEntrySchema).max(12),

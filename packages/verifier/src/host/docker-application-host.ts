@@ -111,7 +111,7 @@ export type DockerApplicationHostDeps = Readonly<{
   /** The admission the round was started from, and the one runnable application group this host owns. */
   admission: E2EApplicationExecutionAdmission;
   groupId: string;
-  /** An already-extracted tree of the exact candidate commit (`git archive`); never written to. */
+  /** An already-staged tree of the exact candidate commit (the worker writes its blobs from `git ls-tree` and `git cat-file` over a throwaway repository, never `git archive` or a checkout); never written to. */
   candidateSourceDir: string;
   /** How long to wait before pulling a missing image again after a failed pull. Default 2000. */
   imagePullRetryMs?: number;
