@@ -228,6 +228,7 @@ export const TASK_PAGE_DECIDING_COPY = {
   needOne: "Include at least one comment or write a note.",
   retrying: "Retrying…",
   retried: "Retried. AgentX is checking the plan against the runtime again.",
+  retryOwnerOnly: "Only the task owner can retry these checks.",
   sending: "Sending…",
   sent: "Sent. AgentX is on the next step.",
   changed: "This task changed. Refresh the page and try again.",
@@ -447,7 +448,7 @@ function call(method,path,body,retried){
       if(method==="POST"&&answer.status===403&&answer.body.error==="request_refused"&&!retried){
         return readState().then(function(state){return state&&requestGeneration===accessGeneration&&canPost(path,body)?call(method,path,body,true):{status:403,body:{error:"request_refused"}};});
       }
-      if(peoplePath(path)&&((answer.status===403&&answer.body.error!=="request_refused")||answer.status===404)&&!retried){
+      if((peoplePath(path)||path==="retry")&&((answer.status===403&&answer.body.error!=="request_refused")||answer.status===404)&&!retried){
         return readState().then(function(){return answer;});
       }
       if((answer.status===403&&answer.body.error!=="request_refused")||answer.status===404)stopAccess(false);
@@ -1220,6 +1221,8 @@ if(retryButton&&canRetry){
     var status=el("retry-status");if(status)status.textContent=COPY.retrying;
     var generation=accessGeneration;
     call("POST","retry",{requestId:retryId,expectedRevision:revision}).then(function(answer){
+      /* The owner's refusal: not a lost task, so the page stays and says so, whatever else the state read just changed. */
+      if(answer.status===403&&answer.body.error!=="request_refused"){canRetry=false;retryButton.hidden=true;retryFail(COPY.retryOwnerOnly);return;}
       if(generation!==accessGeneration){retrying=false;return;}
       if(answer.status===200){if(status)status.textContent=COPY.retried;location.reload();return;}
       if(answer.status===409)retryId=null;
