@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
-  deriveE2ESyntheticRuntimeAccountRef,
+  WORKFLOW_BLOCK_REASONS, readCanonicalPlan, deriveE2ESyntheticRuntimeAccountRef, portableOperationId, type E2EApplicationPlanIntent,
   e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup, selectE2EApplicationExecutionPlan,
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
@@ -14,6 +14,9 @@ import { buildFeatureE2EPlanningContext, describeFeatureE2EExecutableKinds }
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
 import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
+import { portableFeatureIntentOf } from "../../packages/broker/src/e2e/portable-feature-intent.js";
+import { decideTaskWorkflow } from "../../packages/broker/src/aws/developer-tasks.js";
+import { developerTaskRouteDependencies } from "../../packages/broker/src/aws/developer-routes.js";
 import { createDeveloperTaskBroker, MAYA } from "../support/developer-task-broker.js";
 import { call, SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
@@ -197,11 +200,13 @@ const APPROVED_ARTIFACT = { id: "feature-plan", sha256: "1".repeat(64) };
 const APPROVED_REF = { artifactId: APPROVED_ARTIFACT.id, digest: APPROVED_ARTIFACT.sha256 };
 
 /** The approval evaluation of the same fixture the selection facade tests use, with the rows the broker would have admitted. */
-function evaluate(input: PlanInput & { runtimeBinding?: typeof binding; artifact?: typeof APPROVED_ARTIFACT; policyBaselineIds?: string[]; setupSnapshot?: E2ESourceSnapshot }) {
+function evaluate(input: PlanInput & { runtimeBinding?: typeof binding; artifact?: typeof APPROVED_ARTIFACT; policyBaselineIds?: string[]; setupSnapshot?: E2ESourceSnapshot;
+  mutateIntent?: (intent: E2EApplicationPlanIntent, fixture: ReturnType<typeof planFixture>) => unknown; mutatePolicy?: (policy: ReturnType<typeof planFixture>["policy"]) => ReturnType<typeof planFixture>["policy"] }) {
   const fx = planFixture(input);
-  return evaluateApplicationPlanApproval({ intent: fx.intent, taskId: TASK_ID, artifact: input.artifact ?? APPROVED_ARTIFACT,
+  const policy = { ...fx.policy, baselineScenarioIds: input.policyBaselineIds ?? fx.policy.baselineScenarioIds };
+  return evaluateApplicationPlanApproval({ intent: input.mutateIntent === undefined ? fx.intent : E2EApplicationPlanIntentSchema.parse(input.mutateIntent(fx.intent, fx)), taskId: TASK_ID, artifact: input.artifact ?? APPROVED_ARTIFACT,
     snapshot: input.setupSnapshot ?? fx.snapshot, setupProposal: fx.setup.proposal, setupApproval: fx.setup.setupApproval,
-    policy: { ...fx.policy, baselineScenarioIds: input.policyBaselineIds ?? fx.policy.baselineScenarioIds },
+    policy: input.mutatePolicy === undefined ? policy : input.mutatePolicy(policy),
     registeredRuntimes: input.registeredRuntimes ?? [webApiRow("web")], runtimeCatalogId: "catalog", runtimeBinding: input.runtimeBinding ?? binding, now: NOW });
 }
 const refusal = (result: ReturnType<typeof evaluate>) => (result.ok ? "approved" : result.reason);
@@ -216,7 +221,7 @@ describe("approving a plan that carries an application intent", () => {
     expect(record).toMatchObject({ schemaVersion: "e2e-application-selection/v1", semanticApproval: APPROVED_REF, setupApproval: fx.setup.setupApproval,
       executableTargetIds: ["web-1"], unavailableCriteria: [], evaluatedAt: new Date(NOW).toISOString() });
     expect(record.intentDigest).toBe(shaCanonical(fx.intent));
-    for (const field of ["planDigest", "applicationApprovalBindingDigest", "executionPlanDigest", "bundleDigest"] as const) expect(record[field]).toMatch(/^[a-f0-9]{64}$/);
+    for (const field of ["planDigest", "applicationApprovalBindingDigest", "applicationExecutionPlanDigest", "applicationBundleDigest"] as const) expect(record[field]).toMatch(/^[a-f0-9]{64}$/);
     expect(record.runtimeRows).toEqual([{ kind: "web", profileId: PROFILE, runtimeCatalogId: "catalog", catalogRevision: 3, generation: 4,
       bindingDigest: shaCanonical(binding), capabilityDigest: webApiRow("web").capabilityDigest, expiresAt: webApiRow("web").expiresAt }]);
     // The same approval is the same record, and a different artifact is a different binding.
@@ -276,6 +281,103 @@ describe("approving a plan that carries an application intent", () => {
       expect(reason).toContain("export-csv");
       expect(reason).toContain("web-1");
     });
+  });
+});
+
+// ---- Fix round 1 ----
+
+const mixedPackage = { ...(JSON.parse(ordersContractManifest) as Record<string, unknown>), exports: { ".": "./src/index.mjs" } };
+/** The orders contract app that also exports a portable module with one callable, so discovery offers a portable operation beside the web target. */
+const mixedSnapshot = snapshotOf({ "package.json": JSON.stringify(mixedPackage), "src/index.mjs": "export function priceRows(input) { return { rows: input.rows }; }\n" });
+const portableScenario = (operationId: string): E2EScenario => ({ scenarioId: "render-orders", requirementId: "render-orders", requestedTargetIds: ["web-1"], required: true,
+  accountProfileId: "synthetic", minimumEvidence: "mock-contract", requiredRealComponentIds: [],
+  steps: [{ kind: "invoke-contract", operationId, input: { mode: "success" } }], assertions: [{ kind: "state", probeId: "result", equals: "Sample order", pollTimeoutMs: 1000 }] });
+/** Adds a portable scenario that calls a callable the setup snapshot does not export yet (the prompt lets the planner propose it as future code). */
+const withProposedCallable = (intent: E2EApplicationPlanIntent, fixture: ReturnType<typeof planFixture>) => {
+  const operationId = portableOperationId(".", fixture.application.applicationId);
+  return { ...intent, scenarios: [...intent.scenarios, portableScenario(operationId)],
+    portableOperationRefs: [{ operationId, applicationId: fixture.application.applicationId, requestedTargetIds: ["web-1"], packageExportSubpath: ".",
+      moduleSpecifier: "./src/index.mjs", callableSelector: { kind: "named", exportName: "renderOrders" } }] };
+};
+
+describe("a mixed v2 intent (Ruling AV): application scenarios are derived, portable ones follow the v1 portable rules", () => {
+  it("approves a plan that also proposes a new callable, which the v1 approval path accepts without source binding", () => {
+    const result = evaluate({ snapshot: mixedSnapshot, mutateIntent: withProposedCallable });
+    expect(result.ok, refusal(result)).toBe(true);
+  });
+
+  it("derives the selection and binding from the application scenarios only, so portable criteria never wait in unavailableCriteria", () => {
+    const mixed = evaluate({ snapshot: mixedSnapshot, mutateIntent: withProposedCallable });
+    const alone = evaluate({ snapshot: mixedSnapshot });
+    expect(mixed.ok && alone.ok).toBe(true);
+    if (!mixed.ok || !alone.ok) return;
+    expect(mixed.selection.unavailableCriteria).toEqual([]);
+    expect(mixed.selection.executableTargetIds).toEqual(["web-1"]);
+    // The binding and plan are those of the application part, whatever portable scenarios sit beside it ...
+    expect(mixed.selection.applicationApprovalBindingDigest).toBe(alone.selection.applicationApprovalBindingDigest);
+    expect(mixed.selection.applicationExecutionPlanDigest).toBe(alone.selection.applicationExecutionPlanDigest);
+    // ... while the intent digest identifies the whole canonical intent.
+    expect(mixed.selection.intentDigest).not.toBe(alone.selection.intentDigest);
+    const fixture = planFixture({ snapshot: mixedSnapshot });
+    expect(mixed.selection.intentDigest).toBe(shaCanonical(E2EApplicationPlanIntentSchema.parse(withProposedCallable(fixture.intent, fixture))));
+  });
+
+  it("accepts a pinned baseline scenario that is a portable one", () => {
+    const result = evaluate({ snapshot: mixedSnapshot, mutateIntent: withProposedCallable, policyBaselineIds: ["export-csv", "render-orders"] });
+    expect(result.ok, refusal(result)).toBe(true);
+  });
+
+  it("still refuses a pinned baseline scenario the plan omits entirely", () => {
+    expect(refusal(evaluate({ snapshot: mixedSnapshot, mutateIntent: withProposedCallable, policyBaselineIds: ["export-csv", "pinned-elsewhere"] }))).toMatch(/baseline.*pinned-elsewhere/i);
+  });
+
+  it("refuses a version 2 intent with no application scenario, since a portable-only plan is a version 1 plan", () => {
+    const result = evaluate({ snapshot: mixedSnapshot, mutateIntent: (intent, fixture) => ({ ...withProposedCallable(intent, fixture),
+      scenarios: [portableScenario(portableOperationId(".", fixture.application.applicationId))], applicationRuntimeRefs: [], runtimeAccountRefs: [], unavailableTargetRefs: [] }) });
+    expect(refusal(result)).toMatch(/no application scenario.*schemaVersion 1/i);
+  });
+});
+
+describe("approval refusals the first round left untested", () => {
+  it("refuses a target that is not in the pinned policy", () => {
+    expect(refusal(evaluate({ mutatePolicy: (policy) => ({ ...policy, targets: policy.targets.filter((item) => item.targetId !== "web-1") }) })))
+      .toMatch(/target web-1 is not in the pinned project policy/);
+  });
+
+  it("refuses a target that is not a web or API target", () => {
+    expect(refusal(evaluate({ mutatePolicy: (policy) => ({ ...policy, targets: policy.targets.map((item) => item.targetId === "web-1"
+      ? { targetId: "web-1", applicationId: item.applicationId, runtimeProfileId: item.runtimeProfileId, accountProfileId: item.accountProfileId,
+        kind: "mobile" as const, os: "android" as const, appId: "com.example.orders", deviceProfileId: "pixel" } : item) }) })))
+      .toMatch(/target web-1 is a mobile target; only web and API targets/);
+  });
+
+  it("refuses a target approved on a profile that is not qualified even when the plan names that same profile", () => {
+    expect(refusal(evaluate({ setupReady: [], planRuntimeProfileId: "web-phase-unavailable" })))
+      .toMatch(/approved on runtime profile web-phase-unavailable, which cannot run application scenarios/);
+  });
+
+  it("names the specific refusal when the descriptor lacks a step, not the row-not-READY one", () => {
+    const reason = refusal(evaluate({ registeredRuntimes: [webApiRow("web", {}, (value) => ({ ...value, supportedSteps: value.supportedSteps.filter((step) => step !== "click") }))] }));
+    expect(reason).toMatch(/scenario export-csv on target web-1: application runtime is not ready: /);
+    expect(reason).not.toMatch(/is not READY now/);
+    expect(reason).not.toMatch(/READY for this project's runtime binding/);
+  });
+});
+
+describe("the synthetic account is authorized only by the approved project contract (Ruling AT)", () => {
+  const withProfileScope = (scope: "synthetic-test" | "external-test") => {
+    const manifest = JSON.parse(ordersContractManifest) as { agentx: { e2e: { accountProfiles: Array<{ profileId: string; scope: string }> } } };
+    manifest.agentx.e2e.accountProfiles = manifest.agentx.e2e.accountProfiles.map((profile) => profile.profileId === "synthetic" ? { ...profile, scope } : profile);
+    return snapshotOf({ "package.json": JSON.stringify(manifest) });
+  };
+
+  it("approves when the contract declares the account as a synthetic test account", () => {
+    expect(evaluate({ snapshot: withProfileScope("synthetic-test") }).ok).toBe(true);
+  });
+
+  it("refuses a synthetic reference for an account the contract declares as an external account", () => {
+    expect(refusal(evaluate({ snapshot: withProfileScope("external-test") })))
+      .toMatch(/account profile synthetic.*not declared as a synthetic test account by the application's project contract/);
   });
 });
 
@@ -632,6 +734,55 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
       } finally { planned.harness.db.send = send; }
     });
   });
+  // ---- Fix round 1 ----
+
+  it("never approves a v2 plan on a broker that has no application plan validation installed", async () => {
+    const planned = await plannedWithApplicationIntent();
+    const input = planned.harness.brokerInput as unknown as { documentClient: never; tableName: string; developer: never };
+    const caller = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: MAYA.provider, name: MAYA.name };
+    const bare = developerTaskRouteDependencies({ documentClient: input.documentClient, tableName: input.tableName, developer: input.developer, now: Date.now,
+      tasks: planned.harness.actions }, caller);
+    const before = workflowOf(planned);
+    const operationsBefore = operationIds(planned);
+    await expect(decideTaskWorkflow(bare, caller, planned.taskId, { requestId: randomUUID(), expectedRevision: before.revision, decision: "APPROVE", reason: "Approve",
+      artifactDigest: before.artifacts.at(-1)!.sha256 })).rejects.toThrow(/cannot be approved here.*not installed/);
+    expect(workflowOf(planned)).toEqual(before);
+    expect(operationIds(planned)).toEqual(operationsBefore);
+  });
+
+  it("refuses to store a v2 plan uploaded by a planning run that did not negotiate workflowE2EPlanVersion 2 (Ruling AW)", async () => {
+    // The row is gone at planning time, so the planner is sent the portable prompt and no plan version.
+    const started = await startPlanning({ web: webApiRow("web"), api: undefined }, (harness) => harness.db.delete(webKey.pk, webKey.sk));
+    expect(started.payload.workflowE2EPlanVersion).toBeUndefined();
+    const { harness, workspaceId, planningId, snapshot, policy } = started;
+    const context = buildFeatureE2EPlanningContext(policy, snapshot, { origin: "approved-setup", preparedCommitSha: null, readyRuntimes: [] });
+    if (context.status !== "available") throw new Error(context.reason);
+    const target = context.targets.find((item) => item.targetId === "web-1")!;
+    const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [], mockFixtureRefs: [],
+      accountContextRefs: context.accountContextRefs.filter((ref) => ref.applicationId === target.applicationId && ref.profileId === target.accountProfileId),
+      scenarios: [{ ...csvScenario, requestedTargetIds: [target.targetId], accountProfileId: target.accountProfileId }], semanticExportDeltas: [],
+      applicationRuntimeRefs: [], runtimeAccountRefs: [], unavailableTargetRefs: context.unavailableTargetRefs!.filter((ref) => ref.targetId === target.targetId) });
+    await harness.artifact(workspaceId, planningId, "plan.md", planAnswer(planDocument({ title: "Export CSV", claims: [{ id: "1", text: "Orders can be exported." }], e2e: intent })));
+    await harness.finish(workspaceId, planningId, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    const task = harness.db.get(`DEVTASK#${started.taskId}`, "META") as { workflow: { state: string; blockReason?: string; artifacts: unknown[] }; planUnreadable?: { errors: string[] } };
+    expect(task.workflow).toMatchObject({ state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.planUnreadable });
+    expect(task.workflow.artifacts).toEqual([]);
+    expect(task.planUnreadable?.errors.join(" ")).toMatch(/schemaVersion 2 was not offered for this planning step/);
+  });
+
+  it("fails closed at portable dispatch and verification: a v2-approved plan has no portable intent to run", async () => {
+    const planned = await plannedWithApplicationIntent();
+    expect((await decide(planned, "APPROVE")).status).toBe(200);
+    const artifact = workflowOf(planned).artifacts.at(-1)!;
+    const approved = readCanonicalPlan(planned.harness.s3.objects.get(artifact.objectKey)!);
+    expect(approved?.e2e?.schemaVersion).toBe(2);
+    // Both portable paths (startWorkflowE2EChecksDispatch and verifyWorkflowE2EEvidence) read the canonical intent through this one guard.
+    expect(portableFeatureIntentOf(approved!)).toEqual({ ok: false, reason: "application-e2e-intent-needs-application-verification" });
+    expect(portableFeatureIntentOf({ ...approved!, e2e: undefined })).toEqual({ ok: false, reason: "canonical-e2e-intent-missing" });
+    const v1 = { schemaVersion: 1 as const, requestedTargetIds: ["web-1"], accountContextRefs: [], scenarios: [], semanticExportDeltas: [] };
+    expect(portableFeatureIntentOf({ ...approved!, e2e: v1 })).toEqual({ ok: true, intent: v1 });
+  });
+
 });
 
 // Not here: the candidate-export / VERIFY flow. Task 2.4 dispatches an application round from the approved plan and re-derives the selection at

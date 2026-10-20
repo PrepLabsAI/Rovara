@@ -52,6 +52,8 @@ export interface OperationRecord extends Operation {
   workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } | undefined;
   /** A PR feedback review started by a broker that gives the critic only the owner's notes for its round (absent: an earlier release's run). */
   feedbackNotesScoped?: true;
+  /** A planning run that was asked for the schema-v2 application plan (absent: it was not, so a v2 plan from it is refused). */
+  workflowE2EPlanVersion?: 2;
   publication?: {
     repository: string;
     repositoryUrl: string;

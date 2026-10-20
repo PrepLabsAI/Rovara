@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2EPolicySchema, Ec2RuntimeBindingSchema, canonicalJson,
-  deriveE2ESyntheticRuntimeAccountRef, e2eRuntimeKindMatchesTarget, inspectE2ERepository, isE2EQualifiedRuntimeProfileId,
+  deriveE2ESyntheticRuntimeAccountRef, e2eRuntimeKindMatchesTarget, inspectE2ERepository, isE2EQualifiedRuntimeProfileId, readE2EApplicationProjectContract,
   type E2EApplicationPlanIntent, type E2EApplicationSelectionRecord, type E2ERegisteredRuntime, type E2ERuntimeAvailability,
   type E2ESetupProposal, type E2ESourceSnapshot, type Ec2RuntimeBinding, type PlanApprovalRef,
 } from "@agentx/contracts";
@@ -52,8 +52,23 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
   try {
     const parsed = E2EApplicationPlanIntentSchema.safeParse(input.intent);
     if (!parsed.success) return refuse(`the application intent is not valid: ${parsed.error.issues[0]?.message ?? "unreadable"}`);
-    const intent = parsed.data;
+    const fullIntent = parsed.data;
     const policy = E2EPolicySchema.parse(input.policy);
+    // Ruling AV: the selection and binding are derived from the application scenarios only. Portable scenarios of a mixed intent follow the same
+    // rules as a v1 plan (no source binding at approval, so a callable the plan proposes as future code is accepted) and never wait as unavailable.
+    const isPortable = (scenario: E2EApplicationPlanIntent["scenarios"][number]) => scenario.steps[0]?.kind === "invoke-contract" || scenario.steps[0]?.kind === "inspect-contract";
+    const applicationScenarios = fullIntent.scenarios.filter((scenario) => !isPortable(scenario));
+    if (applicationScenarios.length === 0) return refuse("the plan has no application scenario, so it is a portable plan: use schemaVersion 1");
+    const scenarioIds = new Set(fullIntent.scenarios.map((scenario) => scenario.scenarioId));
+    const omitted = policy.baselineScenarioIds.filter((id) => !scenarioIds.has(id));
+    if (omitted.length > 0) return refuse(`the plan omits baseline scenarios pinned by the approved setup: ${omitted.join(", ")}`);
+    const applicationTargetIds = new Set(applicationScenarios.flatMap((scenario) => scenario.requestedTargetIds));
+    const applicationScenarioIds = new Set(applicationScenarios.map((scenario) => scenario.scenarioId));
+    const intent = E2EApplicationPlanIntentSchema.parse({ ...fullIntent,
+      requestedTargetIds: fullIntent.requestedTargetIds.filter((targetId) => applicationTargetIds.has(targetId)),
+      portableOperationRefs: [], semanticExportDeltas: [], scenarios: applicationScenarios,
+      mockFixtureRefs: (fullIntent.mockFixtureRefs ?? []).filter((ref) => applicationTargetIds.has(ref.requestedTargetId)) });
+    const applicationPolicy = { ...policy, baselineScenarioIds: policy.baselineScenarioIds.filter((id) => applicationScenarioIds.has(id)) };
     const bindingDigest = sha256(canonicalJson(Ec2RuntimeBindingSchema.parse(input.runtimeBinding)));
     const discovered = inspectE2ERepository(input.snapshot, input.snapshot.candidate);
     const availability: E2ERuntimeAvailability[] = [];
@@ -68,6 +83,11 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
       if (ref.runtimeProfileId !== target.runtimeProfileId) return refuse(`the plan runs target ${ref.targetId} on runtime profile ${ref.runtimeProfileId}, not the runtime profile ${target.runtimeProfileId} it was approved on`);
       const application = discovered.inspection.applications.find((item) => item.applicationId === ref.applicationId);
       if (application?.recipe === undefined || application.recipe === null) return refuse(`application ${ref.applicationId} has no launch recipe in the approved source`);
+      // The synthetic account authorizes nothing beyond what the approved project contract declares: its profile must be a declared synthetic test account.
+      const contract = readE2EApplicationProjectContract(input.snapshot, ref.applicationId);
+      if (contract !== null && contract.accountProfiles.find((profile) => profile.profileId === ref.accountProfileId)?.scope !== "synthetic-test") {
+        return refuse(`account profile ${ref.accountProfileId} is not declared as a synthetic test account by the application's project contract`);
+      }
       const account = intent.runtimeAccountRefs.find((item) => item.applicationId === ref.applicationId && item.profileId === ref.accountProfileId);
       const synthetic = deriveE2ESyntheticRuntimeAccountRef({ applicationId: ref.applicationId, accountProfileId: ref.accountProfileId, recipeDigest: application.recipe.recipeDigest });
       if (account === undefined || canonicalJson(account) !== canonicalJson(synthetic)) {
@@ -89,7 +109,7 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
     const semanticApproval = { artifactId: input.artifact.id, digest: input.artifact.sha256 };
     const selection = deriveE2EApplicationFeatureExecutionSelection({ intent, snapshot: input.snapshot, artifactId: semanticApproval.artifactId,
       artifactSha256: semanticApproval.digest, planDigest, approvedSemanticApproval: semanticApproval, setupProposal: input.setupProposal,
-      setupApproval: input.setupApproval, policy, registeredRuntimes: input.registeredRuntimes, runtimeAvailability: availability,
+      setupApproval: input.setupApproval, policy: applicationPolicy, registeredRuntimes: input.registeredRuntimes, runtimeAvailability: availability,
       runtimeAccountRefs: intent.runtimeAccountRefs, runtimeCatalogId: input.runtimeCatalogId, runtimeBinding: input.runtimeBinding, featureVerifier: null, now: input.now });
     // A criterion on a target the plan called executable that the selection could not make executable is a refusal; the rest wait as UNKNOWN.
     const executableTargetIds = [...new Set(intent.applicationRuntimeRefs.map((ref) => ref.targetId))].sort();
@@ -104,9 +124,9 @@ export function evaluateApplicationPlanApproval(input: ApplicationPlanApprovalIn
       return refuse(`the plan lists targets as executable whose scenarios cannot run now (${blocked.slice(0, BLOCKED_LISTED).join("; ")}${more})`);
     }
     return { ok: true, selection: E2EApplicationSelectionRecordSchema.parse({
-      schemaVersion: "e2e-application-selection/v1", intentDigest: selection.intentDigest, planDigest, semanticApproval, setupApproval: input.setupApproval,
-      applicationApprovalBindingDigest: selection.applicationApprovalBinding?.bindingDigest ?? null, executionPlanDigest: selection.plan.digest,
-      bundleDigest: selection.bundle.bundleDigest, executableTargetIds,
+      schemaVersion: "e2e-application-selection/v1", intentDigest: sha256(canonicalJson(fullIntent)), planDigest, semanticApproval, setupApproval: input.setupApproval,
+      applicationApprovalBindingDigest: selection.applicationApprovalBinding?.bindingDigest ?? null, applicationExecutionPlanDigest: selection.plan.digest,
+      applicationBundleDigest: selection.bundle.bundleDigest, executableTargetIds,
       unavailableCriteria: selection.plan.unavailableCriteria.map((item) => ({ criterionId: item.criterionId, reason: item.reason })),
       runtimeRows: usedRows.map(({ kind, row }) => ({ kind, profileId: row.profileId, runtimeCatalogId: row.runtimeCatalogId, catalogRevision: row.catalogRevision,
         generation: row.generation, bindingDigest: row.bindingDigest, capabilityDigest: row.capabilityDigest, expiresAt: row.expiresAt })),

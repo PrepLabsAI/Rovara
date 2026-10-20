@@ -171,6 +171,7 @@ export type E2EWorkflowDisplayRef = z.infer<typeof E2EWorkflowDisplayRefSchema>;
  */
 export const E2EApplicationSelectionRecordSchema = z.object({
   schemaVersion: z.literal("e2e-application-selection/v1"),
+  /** sha256 of the whole canonical intent, portable scenarios included (the facade digests only the application part). */
   intentDigest: digest,
   /** The approval-time plan identity the selection was derived under (the canonical artifact; not the dispatch-time plan digest). */
   planDigest: digest,
@@ -178,8 +179,13 @@ export const E2EApplicationSelectionRecordSchema = z.object({
   setupApproval: z.object({ artifactId: id(120), digest }).strict(),
   /** The application approval binding of the executable subset; null when no target can run application scenarios yet. */
   applicationApprovalBindingDigest: digest.nullable(),
-  executionPlanDigest: digest,
-  bundleDigest: digest,
+  /**
+   * The application execution plan and scenario bundle derived at approval from the application scenarios only (template `trusted-e2e-application/v1`,
+   * under `planDigest`). They are not `workflow.e2e.executionPlanDigest`/`bundleDigest`, which identify the approved intent and its portable bundle
+   * (`trusted-e2e/v1`) exactly as for a v1 plan. Dispatch derives its own plan, so these identify what the Owner approved and are never compared with it.
+   */
+  applicationExecutionPlanDigest: digest,
+  applicationBundleDigest: digest,
   executableTargetIds: z.array(id(80)).max(12),
   unavailableCriteria: z.array(z.object({ criterionId: id(120), reason: id(500) }).strict()).max(64),
   runtimeRows: z.array(z.object({ kind: z.enum(["web", "api"]), profileId: id(120), runtimeCatalogId: id(120), catalogRevision: positiveInt, generation: positiveInt,

@@ -277,6 +277,7 @@ import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord
 import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from "../e2e/feature-plan-planning-context.js";
 import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.js";
 import { evaluateApplicationPlanApproval } from "../e2e/application-plan-approval.js";
+import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
@@ -3969,6 +3970,8 @@ async function taskOperationParts(
   const e2ePlanningContext = codingPlan && input.workflowMode === "PLAN" && input.legacyTask !== true
     ? await codingPlanFeatureE2EContext(dependencies, workspace.id)
     : undefined;
+  // Recorded so the broker can refuse a v2 plan from a run that was never asked for one (Ruling AW).
+  if (input.workflowMode === "PLAN" && offersApplicationE2EPlan(e2ePlanningContext)) operation.workflowE2EPlanVersion = 2;
   const documentInstructions = planDocumentInstructions({ kind: planKind, path: input.workflowPhase === undefined ? "QUICK" : "FULL", anchors: true,
     ...(workBreakdownContext === undefined ? {} : { workBreakdownContext }),
     ...(e2ePlanningContext === undefined ? {} : { e2ePlanningContext }),
@@ -6951,10 +6954,10 @@ async function workflowE2ECurrentAuthorityIsValid(
         decisions: Array<{ decision: string; actorId: string; artifactDigest?: string; workBreakdownDigest?: string; workflowRevision: number }> },
       artifact, plan: approved.plan });
     if (canonicalApproval === undefined) return reject("canonical-artifact-or-owner-decision-mismatch");
-    const e2eIntent = approved.plan.e2e;
-    if (e2eIntent === undefined) return reject("canonical-e2e-intent-missing");
     // Application (v2) intents are verified by the application verification path (Task 2.4); this portable verifier never reads one.
-    if (e2eIntent.schemaVersion !== 1) return reject("application-e2e-intent-needs-application-verification");
+    const portableIntent = portableFeatureIntentOf(approved.plan);
+    if (!portableIntent.ok) return reject(portableIntent.reason);
+    const e2eIntent = portableIntent.intent;
     stage = "project-record";
     const project = await requireProject(dependencies, task.project, task.startingRevision);
     const latestProject = await requireLatestProject(dependencies, task.project);
@@ -9449,10 +9452,13 @@ async function startWorkflowE2EChecksDispatch(
   if (canonicalApproval === undefined) {
     throw agentXError("RUNTIME_UNAVAILABLE", "the canonical Owner-approved E2E intent is unavailable or stale");
   }
-  const e2eIntent = approved.plan.e2e;
-  if (e2eIntent === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the canonical E2E intent is unavailable");
   // Application (v2) intents are dispatched by the application round path (Task 2.4); the portable dispatch never reads one.
-  if (e2eIntent.schemaVersion !== 1) throw agentXError("RUNTIME_UNAVAILABLE", "application E2E intents are not dispatched by the portable feature checks");
+  const portableIntent = portableFeatureIntentOf(approved.plan);
+  if (!portableIntent.ok) {
+    throw agentXError("RUNTIME_UNAVAILABLE", portableIntent.reason === "canonical-e2e-intent-missing"
+      ? "the canonical E2E intent is unavailable" : "application E2E intents are not dispatched by the portable feature checks");
+  }
+  const e2eIntent = portableIntent.intent;
   const sourceOperations = (await queryAllItems(dependencies, `WORKSPACE#${task.workspaceId}`, "OPERATION#"))
     .filter((item) => item.entityType === "OPERATION" && item.kind === "task" && item.workflowMode === "IMPLEMENT")
     .map((item) => item as unknown as OperationRecord)
@@ -10215,7 +10221,7 @@ async function completedWorkflowItems(
     if (artifact === undefined) {
       next = blockWorkflow(task.workflow, WORKFLOW_BLOCK_REASONS.planNotSaved, now);
     } else {
-      const stored = await storePlanAnswer(dependencies, task as DeveloperTaskRecord & { workflow: WorkflowSnapshot }, artifact, now);
+      const stored = await storePlanAnswer(dependencies, task as DeveloperTaskRecord & { workflow: WorkflowSnapshot }, artifact, now, operation.workflowE2EPlanVersion === 2);
       next = stored.next;
       planUnreadable = stored.planUnreadable;
       evidenceJob = stored.evidenceJob;
@@ -10307,6 +10313,8 @@ async function storePlanAnswer(
   task: DeveloperTaskRecord & { workflow: WorkflowSnapshot },
   artifact: Record<string, unknown>,
   now: string,
+  /** Whether this planning run was asked for (and its worker parses) the schema-v2 application plan. */
+  applicationPlanNegotiated: boolean,
 ): Promise<{ next: WorkflowSnapshot; planUnreadable: NonNullable<DeveloperTaskRecord["planUnreadable"]> | null; evidenceJob?: { artifactId: string; artifactSha256: string }; inlineEvidence?: Omit<InlineEvidence, "taskId">; plannerReplies?: PlannerReplies }> {
   const workflow = task.workflow;
   const unreadable = (errors: string[]) => {
@@ -10344,6 +10352,10 @@ async function storePlanAnswer(
     } } : {}),
   });
   if (!parsed.ok) return unreadable(parsed.errors);
+  // Defense in depth with the worker's own check: a version 2 intent is stored only from a run that negotiated it.
+  if (parsed.plan.e2e?.schemaVersion === 2 && !applicationPlanNegotiated) {
+    return unreadable(["the plan: e2e schemaVersion 2 was not offered for this planning step; use the schemaVersion 1 portable intent, or leave e2e out"]);
+  }
   if (parsed.plan.workBreakdown !== undefined) {
     if (project.definition.repositories.length !== 1) return unreadable(["ordered work is available only for a task pinned to one registered repository"]);
     const graphValidation = validateTaskGraph(parsed.plan.workBreakdown, { taskId: task.taskId, repositoryId: project.definition.repositories[0]!.name });
