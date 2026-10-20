@@ -115,7 +115,7 @@ async function restore(directory: string, agentTree: string): Promise<void> {
 async function workingTree(directory: string): Promise<string> {
   // In a throwaway repository that never reads the workspace repository's config (isolated-repository.ts), on a copy of the repository's index.
   return withIsolatedRepository(directory, "write", { index: "work" }, async (repository) => {
-    const gitlinks = await assertNoEmbeddedRepositories(repository.layout.workTree, repository.env("work"), repository.location);
+    const gitlinks = await assertNoEmbeddedRepositories(repository.layout.workTree, repository.env("work"), repository.location, repository.workTreeCwd);
     await addWorkTree(repository, "work", gitlinks);
     return (await repository.text(["write-tree"], { index: "work", maxBuffer: MAX_GIT_OUTPUT_BYTES })).trim();
   });

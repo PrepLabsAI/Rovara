@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { agentXError } from "@agentx/contracts";
-import { candidateWriteStep, commitLock, kindIn, lockIn, openDirectory, readFileIn, releaseLock, type DirectoryLock, type HeldDirectory } from "./candidate-fs.js";
+import { candidateWriteStep, commitLock, kindIn, lockIn, openDirectory, readFileIn, releaseLock, workTreeByDescriptor, type DirectoryLock, type HeldDirectory } from "./candidate-fs.js";
 import { assertNoEmbeddedRepositories, assertNoLfsFiles, isolatedGitEnvironment } from "./git.js";
 
 const execFile = promisify(execFileCallback);
@@ -120,8 +120,10 @@ export interface IsolatedGit {
   readonly workIndex: string;
   /** The throwaway repository's own git directory. */
   readonly gitDir: string;
-  /** The Git arguments that name the throwaway repository and the candidate's work tree, for helpers that spawn Git themselves. */
+  /** The Git arguments that name the throwaway repository and, where Git is not started in the work tree, the work tree, for helpers that spawn Git themselves. */
   readonly location: readonly string[];
+  /** The working directory a helper that spawns Git itself must give it: the held work tree on Linux (see withIsolatedGit), else the scratch directory. */
+  readonly workTreeCwd: string;
   env(index?: IndexKind): NodeJS.ProcessEnv;
   /** Everything a caller needs to spawn `git <args>` itself (to stream its output) the way `text` runs it. */
   spawnSpec(args: readonly string[], index?: IndexKind): { args: string[]; env: NodeJS.ProcessEnv; cwd: string };
@@ -145,6 +147,7 @@ export interface IsolatedGit {
 export async function withIsolatedGit<T>(directory: string, mode: "read" | "write", use: (git: IsolatedGit) => Promise<T>): Promise<T> {
   const layout = await candidateLayout(directory);
   const scratch = await mkdtemp(join(tmpdir(), "agentx-candidate-git-"));
+  let workTreeHeld: HeldDirectory | undefined;
   try {
     const gitDir = join(scratch, "worker.git");
     const initEnv = isolatedGitEnvironment(layout.workTree);
@@ -157,18 +160,25 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
       const bytes = await readSmallFile(join(layout.gitDirectory, "info", name), SMALL_FILE_BYTES).catch(() => undefined);
       if (bytes !== undefined) await writeFile(join(gitDir, "info", name), bytes, { mode: 0o600 });
     }
+    // On Linux the work tree is held open and Git is started in it, with no `--work-tree` path: `git` then takes its working directory as the work tree. A path
+    // swapped for a symlink afterwards cannot redirect what Git reads or writes, because Git's working directory is the directory that was opened, not a path.
+    workTreeHeld = workTreeByDescriptor() ? await openDirectory(layout.workTree) : undefined;
+    // Git reads `core.bare` from the repository's own config file while it sets itself up (a setting from the environment comes too late), so the throwaway
+    // repository, whose config is the worker's, is made non-bare for it to take its working directory as the work tree.
+    if (workTreeHeld !== undefined) await execFile("git", [`--git-dir=${gitDir}`, "config", "core.bare", "false"], { cwd: scratch, env: initEnv });
     const config = await candidateConfigValues(layout, scratch, gitDir);
     const temporaryIndex = join(scratch, "index");
     const workIndex = join(scratch, "work-index");
     const realIndex = join(layout.gitDirectory, "index");
-    const location = [`--git-dir=${gitDir}`, `--work-tree=${layout.workTree}`] as const;
+    const location = workTreeHeld === undefined ? [`--git-dir=${gitDir}`, `--work-tree=${layout.workTree}`] as const : [`--git-dir=${gitDir}`] as const;
+    const workTreeCwd = workTreeHeld?.descriptorPath ?? scratch;
     const indexFiles = { temporary: temporaryIndex, real: realIndex, work: workIndex } as const;
     const env = (index: IndexKind = "temporary"): NodeJS.ProcessEnv => isolatedGitEnvironment(layout.workTree, {
       ...(index === "none" ? {} : { GIT_INDEX_FILE: indexFiles[index] }),
     }, config);
     const run = async (args: readonly string[], options: IsolatedRunOptions, encoding: "utf8" | "buffer") => {
       const child = execFile("git", [...location, ...args],
-        { cwd: options.cwd === "worktree" ? layout.workTree : scratch, env: env(options.index), encoding, maxBuffer: options.maxBuffer ?? SMALL_FILE_BYTES, ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
+        { cwd: workTreeHeld?.descriptorPath ?? (options.cwd === "worktree" ? layout.workTree : scratch), env: env(options.index), encoding, maxBuffer: options.maxBuffer ?? SMALL_FILE_BYTES, ...(options.timeout === undefined ? {} : { timeout: options.timeout }),
           ...(options.signal === undefined ? {} : { signal: options.signal }) });
       // A command can exit before its standard input is written (every command but checkout-index ignores it); the pipe's EPIPE must not crash the worker.
       child.child.stdin?.on("error", () => undefined);
@@ -177,8 +187,8 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
     };
     const exportObjects = () => copyObjectsOut(join(gitDir, "objects"), layout);
     const result = await use({
-      layout, scratch, temporaryIndex, workIndex, gitDir, location, env, exportObjects,
-      spawnSpec: (args, index = "none") => ({ args: [...location, ...args], env: env(index), cwd: scratch }),
+      layout, scratch, temporaryIndex, workIndex, gitDir, location, workTreeCwd, env, exportObjects,
+      spawnSpec: (args, index = "none") => ({ args: [...location, ...args], env: env(index), cwd: workTreeCwd }),
       text: async (args, options = {}) => (await run(args, options, "utf8")) as string,
       bytes: async (args, options = {}) => (await run(args, options, "buffer")) as unknown as Buffer,
       headCommit: () => readHead(layout).then((head) => head.commit),
@@ -187,6 +197,7 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
     if (mode === "write") await exportObjects();
     return result;
   } finally {
+    await workTreeHeld?.close();
     await rm(scratch, { recursive: true, force: true });
   }
 }
@@ -200,8 +211,8 @@ export async function withIsolatedGit<T>(directory: string, mode: "read" | "writ
  */
 export async function snapshotTree(git: IsolatedGit, commit: string): Promise<string> {
   await git.text(["read-tree", commit]);
-  const gitlinks = await assertNoEmbeddedRepositories(git.layout.workTree, git.env(), git.location);
-  await assertNoLfsFiles(git.layout.workTree, git.env(), git.location);
+  const gitlinks = await assertNoEmbeddedRepositories(git.layout.workTree, git.env(), git.location, git.workTreeCwd);
+  await assertNoLfsFiles(git.layout.workTree, git.env(), git.location, git.workTreeCwd);
   await addWorkTree(git, "temporary", gitlinks);
   return (await git.text(["write-tree"])).trim();
 }
