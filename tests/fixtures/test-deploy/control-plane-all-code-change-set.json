@@ -1,0 +1,904 @@
+{
+  "_comment": "Derived from the deployed TEST control-plane template (get-template, Original) on 2026-10-20, not saved from a CreateChangeSet: every packaged control-plane Lambda changes only Code (Static, DirectModification), and every resource reading one of their Arn attributes is a Dynamic ResourceAttribute re-evaluation, as in control-plane-code-change-set.json.",
+  "Changes": [
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "BrokerApiInvokeC6C766F0",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-BrokerApiInvokeC6C766F0",
+        "ResourceType": "AWS::Lambda::Permission",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "FunctionName",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "BrokerE1355FD6.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "BrokerE1355FD6",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-BrokerE1355FD6",
+        "ResourceType": "AWS::Lambda::Function",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Code",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Static",
+            "ChangeSource": "DirectModification"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "BrokerIntegration",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-BrokerIntegration",
+        "ResourceType": "AWS::ApiGatewayV2::Integration",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "IntegrationUri",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "BrokerE1355FD6.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "BrokerServiceRoleDefaultPolicyDDFD9E7E",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-BrokerServiceRoleDefaultPolicyDDFD9E7E",
+        "ResourceType": "AWS::IAM::Policy",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "PolicyDocument",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "DeveloperSignInFunction10B62B05.Arn"
+          },
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "PolicyDocument",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "PlanEvidence3615C4CB.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "DeveloperSignInFunction10B62B05",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-DeveloperSignInFunction10B62B05",
+        "ResourceType": "AWS::Lambda::Function",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Code",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Static",
+            "ChangeSource": "DirectModification"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "DeveloperSignInFunctionApiInvoke4664A0AE",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-DeveloperSignInFunctionApiInvoke4664A0AE",
+        "ResourceType": "AWS::Lambda::Permission",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "FunctionName",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "DeveloperSignInFunction10B62B05.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "DeveloperSignInIntegration50CD0372",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-DeveloperSignInIntegration50CD0372",
+        "ResourceType": "AWS::ApiGatewayV2::Integration",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "IntegrationUri",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "DeveloperSignInFunction10B62B05.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "DeveloperTaskNotifierFunction551419CC",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-DeveloperTaskNotifierFunction551419CC",
+        "ResourceType": "AWS::Lambda::Function",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Code",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Static",
+            "ChangeSource": "DirectModification"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "DispatcherD4A12972",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-DispatcherD4A12972",
+        "ResourceType": "AWS::Lambda::Function",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Code",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Static",
+            "ChangeSource": "DirectModification"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "EvalBatchTickA4585B04",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-EvalBatchTickA4585B04",
+        "ResourceType": "AWS::Lambda::Function",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Code",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Static",
+            "ChangeSource": "DirectModification"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "EvalBatchTickScheduleDB13DEE4",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-EvalBatchTickScheduleDB13DEE4",
+        "ResourceType": "AWS::Scheduler::Schedule",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Target",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "EvalBatchTickA4585B04.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "GithubWebhookRecoveryRoleDefaultPolicyDC13C89E",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-GithubWebhookRecoveryRoleDefaultPolicyDC13C89E",
+        "ResourceType": "AWS::IAM::Policy",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "PolicyDocument",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "BrokerE1355FD6.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "GithubWebhookRecoverySchedule",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-GithubWebhookRecoverySchedule",
+        "ResourceType": "AWS::Scheduler::Schedule",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Target",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "BrokerE1355FD6.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "OutboxPublisherD572F72E",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-OutboxPublisherD572F72E",
+        "ResourceType": "AWS::Lambda::Function",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Code",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Static",
+            "ChangeSource": "DirectModification"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "PlanEvidence3615C4CB",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-PlanEvidence3615C4CB",
+        "ResourceType": "AWS::Lambda::Function",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Code",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Static",
+            "ChangeSource": "DirectModification"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SchedulerRoleForTarget490aa1DefaultPolicyAA16505F",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SchedulerRoleForTarget490aa1DefaultPolicyAA16505F",
+        "ResourceType": "AWS::IAM::Policy",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "PolicyDocument",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "EvalBatchTickA4585B04.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SchedulerRoleForTarget9cef70DefaultPolicyAB2709AD",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SchedulerRoleForTarget9cef70DefaultPolicyAB2709AD",
+        "ResourceType": "AWS::IAM::Policy",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "PolicyDocument",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "SessionsReaper8FEF958E.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SchedulerRoleForTargetd4b209DefaultPolicy53402DEC",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SchedulerRoleForTargetd4b209DefaultPolicy53402DEC",
+        "ResourceType": "AWS::IAM::Policy",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "PolicyDocument",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "SessionsReconciler4316A0A2.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SessionsDeleterB48741EA",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SessionsDeleterB48741EA",
+        "ResourceType": "AWS::StepFunctions::StateMachine",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "DefinitionString",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "SessionsSteps3B98DD2B.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SessionsDeleterRoleDefaultPolicyFB89AE1E",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SessionsDeleterRoleDefaultPolicyFB89AE1E",
+        "ResourceType": "AWS::IAM::Policy",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "PolicyDocument",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "SessionsSteps3B98DD2B.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SessionsProvisioner9C44055B",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SessionsProvisioner9C44055B",
+        "ResourceType": "AWS::StepFunctions::StateMachine",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "DefinitionString",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "SessionsSteps3B98DD2B.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SessionsProvisionerRoleDefaultPolicyDF8FD11A",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SessionsProvisionerRoleDefaultPolicyDF8FD11A",
+        "ResourceType": "AWS::IAM::Policy",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "PolicyDocument",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "SessionsSteps3B98DD2B.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SessionsReaper8FEF958E",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SessionsReaper8FEF958E",
+        "ResourceType": "AWS::Lambda::Function",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Code",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Static",
+            "ChangeSource": "DirectModification"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SessionsReaperSchedule31A10B36",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SessionsReaperSchedule31A10B36",
+        "ResourceType": "AWS::Scheduler::Schedule",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Target",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "SessionsReaper8FEF958E.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SessionsReconciler4316A0A2",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SessionsReconciler4316A0A2",
+        "ResourceType": "AWS::Lambda::Function",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Code",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Static",
+            "ChangeSource": "DirectModification"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SessionsReconcilerScheduleAF7EF1B8",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SessionsReconcilerScheduleAF7EF1B8",
+        "ResourceType": "AWS::Scheduler::Schedule",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Target",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "SessionsReconciler4316A0A2.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SessionsSteps3B98DD2B",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SessionsSteps3B98DD2B",
+        "ResourceType": "AWS::Lambda::Function",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Code",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Static",
+            "ChangeSource": "DirectModification"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SlackIngress5C88FFA0",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SlackIngress5C88FFA0",
+        "ResourceType": "AWS::Lambda::Function",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Code",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Static",
+            "ChangeSource": "DirectModification"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SlackIngressApiInvoke723D39D6",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SlackIngressApiInvoke723D39D6",
+        "ResourceType": "AWS::Lambda::Permission",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "FunctionName",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "SlackIngress5C88FFA0.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SlackIngressIntegration",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SlackIngressIntegration",
+        "ResourceType": "AWS::ApiGatewayV2::Integration",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "IntegrationUri",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "SlackIngress5C88FFA0.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SlackIngressInteractivityInvokeEEF8EB87",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SlackIngressInteractivityInvokeEEF8EB87",
+        "ResourceType": "AWS::Lambda::Permission",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "FunctionName",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "SlackIngress5C88FFA0.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SlackIngressSelfInvokeB586B3A0",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SlackIngressSelfInvokeB586B3A0",
+        "ResourceType": "AWS::IAM::Policy",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "PolicyDocument",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "SlackIngress5C88FFA0.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "SlackIngressServiceRoleDefaultPolicy6F2F26FC",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-SlackIngressServiceRoleDefaultPolicy6F2F26FC",
+        "ResourceType": "AWS::IAM::Policy",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "PolicyDocument",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "BrokerE1355FD6.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "WorkflowDispatchRecoveryRoleDefaultPolicy083213B6",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-WorkflowDispatchRecoveryRoleDefaultPolicy083213B6",
+        "ResourceType": "AWS::IAM::Policy",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "PolicyDocument",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "BrokerE1355FD6.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "WorkflowDispatchRecoverySchedule",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-WorkflowDispatchRecoverySchedule",
+        "ResourceType": "AWS::Scheduler::Schedule",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Target",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "BrokerE1355FD6.Arn"
+          }
+        ]
+      }
+    },
+    {
+      "Type": "Resource",
+      "ResourceChange": {
+        "Action": "Modify",
+        "LogicalResourceId": "WorkflowMergeRecoverySchedule",
+        "PhysicalResourceId": "agentx-agentxlivetest123-control-plane-WorkflowMergeRecoverySchedule",
+        "ResourceType": "AWS::Scheduler::Schedule",
+        "Replacement": "False",
+        "Scope": [
+          "Properties"
+        ],
+        "Details": [
+          {
+            "Target": {
+              "Attribute": "Properties",
+              "Name": "Target",
+              "RequiresRecreation": "Never"
+            },
+            "Evaluation": "Dynamic",
+            "ChangeSource": "ResourceAttribute",
+            "CausingEntity": "BrokerE1355FD6.Arn"
+          }
+        ]
+      }
+    }
+  ]
+}
