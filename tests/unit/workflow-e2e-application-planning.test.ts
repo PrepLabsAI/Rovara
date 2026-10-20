@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 import {
   E2EApplicationPlanIntentSchema, E2EApplicationSelectionRecordSchema, E2ERegisteredRuntimeSchema, E2EPolicySchema, WEB_API_RUNTIME_PROFILE_ID, canonicalJson, createCandidateManifest,
-  WORKFLOW_BLOCK_REASONS, readCanonicalPlan, deriveE2ESyntheticRuntimeAccountRef, portableOperationId, type E2EApplicationPlanIntent,
+  WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, workflowRequestId, workspaceSessionKey, readCanonicalPlan, deriveE2ESyntheticRuntimeAccountRef, portableOperationId, type E2EApplicationPlanIntent,
   e2eApplicationMetadataSourceRefs, e2eRuntimeCapabilityDigest, inspectE2ERepository, proposeE2ESetup, selectE2EApplicationExecutionPlan,
   type E2EPolicy, type E2EScenario, type E2ESourceSnapshot,
 } from "@agentx/contracts";
@@ -13,7 +13,7 @@ import { buildFeatureE2EPlanningContext, describeFeatureE2EExecutableKinds }
   from "../../packages/broker/src/e2e/feature-plan-planning-context.js";
 import { e2eRegisteredRuntimeKey } from "../../packages/broker/src/aws/e2e-runtime-readiness.js";
 import { webApiRuntimeCapabilities } from "../../packages/broker/src/aws/e2e-feature-verifier-catalog.js";
-import { planDocumentInstructions } from "../../packages/broker/src/aws/broker-shared.js";
+import { planDocumentInstructions, workflowDispatchItem } from "../../packages/broker/src/aws/broker-shared.js";
 import { portableFeatureIntentOf } from "../../packages/broker/src/e2e/portable-feature-intent.js";
 import { createApplicationPlanNegotiationRecorder } from "../../packages/broker/src/aws/dispatcher.js";
 import { decideTaskWorkflow } from "../../packages/broker/src/aws/developer-tasks.js";
@@ -482,7 +482,7 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
   async function startPlanning(rows: Rows, afterApproval?: (harness: Harness) => void, viaSlack = false) {
     const snapshot = contractSnapshot;
     const capture = vi.fn(async () => snapshot);
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog" } });
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { projectSetupSource: { capture }, e2eFeatureRuntimeCatalogId: "catalog", projectSetupRuntimeCatalogId: "setup-catalog" } });
     const projectRow = () => harness.db.find((row) => row.entityType === "PROJECT" && (row.definition as { name?: string } | undefined)?.name === "payments")[0]!;
     const projectBinding = projectRow().runtimeBinding as typeof binding;
     for (const kind of ["web", "api"] as const) {
@@ -832,8 +832,151 @@ describe("ordinary feature PLAN with an approved qualified web target", () => {
     expect(workflowOf(planned).artifacts).toHaveLength(1);
   });
 
-});
+  // ---- Dispatch of an approved application plan (Task 2.4: Ruling AL, Ruling AX, the 2.2b carry) ----
 
-// Not here: the candidate-export / VERIFY flow. Task 2.4 dispatches an application round from the approved plan and re-derives the selection at
-// dispatch (Ruling AL) with evaluateApplicationPlanApproval, reading `workflow.e2e.applicationSelection` (see E2EApplicationSelectionRecordSchema);
-// its tests belong in tests/contract/workflow-e2e-application-gating.test.ts.
+  /**
+   * Approves the v2 plan and puts the task where the broker dispatches its checks: VERIFY/WAITING on a candidate, with the dispatch row due, its compute
+   * readiness operation done and the session READY. Nothing of the candidate export is needed: an application selection is checked before any source is read.
+   */
+  async function atChecksDispatch(planned: Planned, options: { mutateTask?: (task: Record<string, unknown>) => Record<string, unknown> } = {}) {
+    expect((await decide(planned, "APPROVE")).status).toBe(200);
+    const { harness, taskId, workspaceId } = planned;
+    const key = { pk: `DEVTASK#${taskId}`, sk: "META" };
+    const task = harness.db.get(key.pk, key.sk)!;
+    const approved = WorkflowSnapshotSchema.parse(task.workflow);
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "d".repeat(40), treeSha: "e".repeat(40), baseCommitSha: planned.snapshot.commitSha }]);
+    const verifying = WorkflowSnapshotSchema.parse({ ...approved, revision: approved.revision + 1, stage: "VERIFY", state: "WAITING", candidate });
+    harness.db.set(options.mutateTask === undefined ? { ...task, workflow: verifying } : options.mutateTask({ ...task, workflow: verifying }));
+    const readyOperationId = randomUUID();
+    const dispatch = (workflowDispatchItem("state", taskId, verifying.revision, "CHECKS", candidate.digest, new Date().toISOString()) as { Put: { Item: Record<string, unknown> } }).Put.Item;
+    dispatch.readinessOperationId = readyOperationId;
+    harness.db.set(dispatch);
+    const marker = { purpose: "workflow-e2e-readiness", taskId, workflowRevision: verifying.revision, candidateDigest: candidate.digest, dispatchSk: dispatch.sk,
+      outboxId: workflowRequestId("agentx-workflow-e2e-readiness-outbox", taskId, verifying.revision, candidate.digest), readyGeneration: 2 };
+    harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${readyOperationId}`, entityType: "OPERATION", id: readyOperationId, workspaceId, kind: "resume",
+      status: "SUCCEEDED", fence: 2, requestId: readyOperationId, payloadHash: "a".repeat(64), createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      workflowE2EReadiness: marker });
+    harness.db.set({ ...workspaceSessionKey(workspaceId), workspaceId, state: "READY", generation: 2 });
+    const creator = harness.db.get(`DEVELOPER#${MAYA.developerId}`, "META");
+    if (creator !== undefined) harness.db.set({ ...creator, entityType: "DEVELOPER" });
+    const dispatchKey = String(dispatch.sk);
+    const runDispatch = async () => { await harness.handler({ source: "agentx.workflow-dispatch-recovery" }); };
+    const taskNow = () => harness.db.get(key.pk, key.sk) as { workflow: { stage: string; state: string; blockReason?: string; revision: number } };
+    const checksOperations = () => harness.db.find((row) => row.entityType === "OPERATION" && row.workspaceId === workspaceId && row.workflowMode === "CHECKS");
+    const admissionObjects = () => [...harness.s3.objects.keys()].filter((name) => name.startsWith("workflow-e2e-admissions/"));
+    return { ...planned, runDispatch, taskNow, checksOperations, admissionObjects, dispatchRow: () => harness.db.get("WORKFLOW_DISPATCH", dispatchKey), taskKey: key };
+  }
+
+  /** The task is blocked for good, in plain words, and nothing was started or retried. */
+  async function expectBlockedAtDispatch(dispatched: Awaited<ReturnType<typeof atChecksDispatch>>, reason: RegExp) {
+    await dispatched.runDispatch();
+    expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    expect(dispatched.taskNow().workflow.blockReason).toMatch(reason);
+    expect(dispatched.dispatchRow()).toBeUndefined();
+    expect(dispatched.checksOperations()).toEqual([]);
+    expect(dispatched.admissionObjects()).toEqual([]);
+    // Run again: a removed row stays removed, so the task is never re-driven.
+    await dispatched.runDispatch();
+    expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+  }
+
+  it("blocks a v2-approved task at CHECKS dispatch instead of running it as a portable round or looping on the portable refusal (Ruling AX, the 2.2b carry)", async () => {
+    const dispatched = await atChecksDispatch(await plannedWithApplicationIntent());
+    expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+    await expectBlockedAtDispatch(dispatched, /cannot dispatch application rounds yet.*Nothing was run/s);
+  });
+
+  describe("the selection approved at plan APPROVE must still be the one dispatched (Ruling AL)", () => {
+    const refusalPrefix = "The approved application checks can no longer run as approved: ";
+    const reasonOf = (text: string) => new RegExp(refusalPrefix.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + text, "s");
+
+    it("passes the unchanged selection through the check (it is the only thing left standing between it and the round)", async () => {
+      const dispatched = await atChecksDispatch(await plannedWithApplicationIntent());
+      await dispatched.runDispatch();
+      // Not the "no longer run as approved" refusal: the selection derived again equals the recorded one.
+      expect(dispatched.taskNow().workflow.blockReason).not.toContain(refusalPrefix);
+      expect(dispatched.taskNow().workflow.blockReason).toContain("cannot dispatch application rounds yet");
+    });
+
+    it("refuses when the runtime row was replaced by a new generation", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atChecksDispatch(planned);
+      planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, generation: 5 });
+      await expectBlockedAtDispatch(dispatched, reasonOf("the web runtime linux-arm64-web-api-v1 \\(generation 5.*is not the approved web runtime.*generation 4"));
+    });
+
+    it("refuses when the row's expiry or capabilities moved, since a changed row is not the approved one", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atChecksDispatch(planned);
+      const saved = planned.harness.db.get(webKey.pk, webKey.sk)!;
+      planned.harness.db.set({ ...saved, expiresAt: new Date(Date.parse(String(saved.expiresAt)) + 60_000).toISOString() });
+      await expectBlockedAtDispatch(dispatched, reasonOf("the web runtime .* is not the approved web runtime"));
+    });
+
+    it("refuses when the row is no longer READY, saying the runtime is not ready", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atChecksDispatch(planned);
+      planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, state: "REVOKED" });
+      await expectBlockedAtDispatch(dispatched, reasonOf(".*web runtime of profile linux-arm64-web-api-v1"));
+    });
+
+    it("refuses when the row expired", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atChecksDispatch(planned);
+      planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, expiresAt: new Date(Date.now() - 1_000).toISOString() });
+      await expectBlockedAtDispatch(dispatched, reasonOf(".*web runtime of profile linux-arm64-web-api-v1"));
+    });
+
+    it("refuses when the row's runtime binding moved", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atChecksDispatch(planned);
+      const other = { ...planned.projectBinding, launchTemplateId: "lt-fedcba9876543210" };
+      planned.harness.db.set({ ...planned.harness.db.get(webKey.pk, webKey.sk)!, binding: other, bindingDigest: shaCanonical(other) });
+      await expectBlockedAtDispatch(dispatched, reasonOf(".*web runtime of profile linux-arm64-web-api-v1"));
+    });
+
+    it("refuses a selection that is not the recorded one: another intent, other targets, other approvals, or no record at all", async () => {
+      const recordOf = (task: Record<string, unknown>) => (task.workflow as { e2e: { applicationSelection: Record<string, unknown> } }).e2e.applicationSelection;
+      const tampered = (edit: (record: Record<string, unknown>) => void) => (task: Record<string, unknown>) => {
+        const copy = structuredClone(task);
+        edit(recordOf(copy));
+        return copy;
+      };
+      const cases: Array<[string, (task: Record<string, unknown>) => Record<string, unknown>, RegExp]> = [
+        ["another intent", tampered((record) => { record.intentDigest = "9".repeat(64); }), reasonOf("the approved plan's E2E intent")],
+        ["other targets", tampered((record) => { record.executableTargetIds = ["web-1", "web-2"]; }), reasonOf("the targets that can run application scenarios")],
+        ["another setup approval", tampered((record) => { record.setupApproval = { artifactId: "setup-elsewhere", digest: "8".repeat(64) }; }), reasonOf("the setup approval")],
+        ["another plan approval", tampered((record) => { record.semanticApproval = { artifactId: "plan-elsewhere", digest: "7".repeat(64) }; }), reasonOf("the plan approval")],
+        ["another application binding", tampered((record) => { record.applicationApprovalBindingDigest = "6".repeat(64); }), reasonOf("the approved applications' source")],
+        ["a row that was not part of the approval", tampered((record) => { record.runtimeRows = []; }), reasonOf("the web runtime .* was not part of the approval")],
+        ["an approved row that is not there now", tampered((record) => { (record.runtimeRows as unknown[]).push({ ...(record.runtimeRows as Array<Record<string, unknown>>)[0]!, kind: "api" }); }), reasonOf("the approved api runtime")],
+        ["no record", (task) => { const copy = structuredClone(task); delete (copy.workflow as { e2e: Record<string, unknown> }).e2e.applicationSelection; return copy; },
+          /no recorded application selection/],
+      ];
+      for (const [label, mutateTask, reason] of cases) {
+        const dispatched = await atChecksDispatch(await plannedWithApplicationIntent(), { mutateTask });
+        await dispatched.runDispatch();
+        expect(dispatched.taskNow().workflow, label).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+        expect(dispatched.taskNow().workflow.blockReason, label).toMatch(reason);
+        expect(dispatched.checksOperations(), label).toEqual([]);
+        expect(dispatched.dispatchRow(), label).toBeUndefined();
+      }
+    });
+
+    it("retries within its budget, and does not block, when the selection cannot be read now", async () => {
+      const planned = await plannedWithApplicationIntent();
+      const dispatched = await atChecksDispatch(planned);
+      const send = planned.harness.db.send.bind(planned.harness.db);
+      planned.harness.db.send = async (command) => {
+        const input = (command as { input?: { Key?: { pk?: string; sk?: string } } }).input;
+        if (command.constructor.name === "GetCommand" && input?.Key?.pk === webKey.pk && input.Key.sk === webKey.sk) throw new Error("throttled");
+        return send(command);
+      };
+      try { await dispatched.runDispatch(); } finally { planned.harness.db.send = send; }
+      expect(dispatched.taskNow().workflow).toMatchObject({ stage: "VERIFY", state: "WAITING" });
+      expect(dispatched.dispatchRow()).toMatchObject({ attempts: 1, kind: "CHECKS" });
+      expect(dispatched.checksOperations()).toEqual([]);
+    });
+  });
+
+});

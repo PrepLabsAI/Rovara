@@ -214,6 +214,7 @@ import {
   type PlanApprovalRef,
   type E2EApplicationPlanIntent,
   type E2EApplicationSelectionRecord,
+  E2EApplicationSelectionRecordSchema,
   type E2ERegisteredRuntime,
   ProjectSetupExecutionSchema, ProjectSetupOperationSchema, ProjectSetupSessionSchema, ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema,
   projectSetupExecutionKey, projectSetupOperationKey, projectSetupSessionKey,
@@ -278,6 +279,7 @@ import { buildFeatureE2EPlanningContext, isExactFeatureE2ESourceSnapshot } from 
 import { offersApplicationE2EPlan } from "../e2e/feature-plan-executable-kinds.js";
 import { evaluateApplicationPlanApproval } from "../e2e/application-plan-approval.js";
 import { portableFeatureIntentOf } from "../e2e/portable-feature-intent.js";
+import { ApplicationDispatchRefusal, applicationSelectionStillCurrent } from "../e2e/application-dispatch-check.js";
 import { developerIdForSlackUser } from "./admin-actions.js";
 import { chatGptOwner, chatGptTaskSelection } from "../chatgpt/task-model.js";
 import { answerSlackChatGpt, isSlackChatGptCommandEvent, isSlackChatGptFinishEvent } from "./slack-chatgpt.js";
@@ -4108,49 +4110,67 @@ async function readApprovedSetupSource(dependencies: AwsBrokerDependencies, proj
   }
 }
 
+/** What deriving a task's application selection against the approved setup and the runtime rows READY right now came to. */
+type ApplicationSelectionNow =
+  | { ok: true; selection: E2EApplicationSelectionRecord; conditions: TransactItems }
+  /** `unevaluable`: something it needs could not be read (try again later). `refused`: it read everything and the plan cannot run as approved. */
+  | { ok: false; kind: "unevaluable" | "refused"; reason: string };
+
 /**
- * Plan approval for a schema-v2 application intent: derives the selection against the task's pinned project (its own revision and runtime
- * binding, never the latest), the approved setup snapshot, and the runtime rows READY right now (Ruling AL; not cached from planning). Returns the
- * selection to record and conditions that keep each row as read until the approval commits, or throws: CONFIG_INVALID when the plan cannot be
- * approved, RUNTIME_UNAVAILABLE when it cannot be evaluated (a missing snapshot or an unreadable row). Either way nothing is approved.
+ * Derives the selection of a schema-v2 application intent against the task's pinned project (its own revision and runtime binding, never the latest),
+ * the approved setup snapshot, and the runtime rows READY right now (Ruling AL; not cached from planning). The conditions keep each row as read until
+ * the transaction that uses the derivation commits. Plan approval records the result; dispatch derives it again and compares it with what was recorded.
  */
-async function validateWorkflowE2EApplicationPlan(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, intent: E2EApplicationPlanIntent,
-  artifact: { id: string; sha256: string }): Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems }> {
-  const unevaluable = (reason: string) => agentXError("RUNTIME_UNAVAILABLE",
-    `the application E2E plan could not be checked for approval (${reason}); nothing was approved. Keep this plan and approve it again once it can be checked, or request changes`);
+async function evaluateWorkflowE2EApplicationSelectionNow(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, intent: E2EApplicationPlanIntent,
+  artifact: { id: string; sha256: string }): Promise<ApplicationSelectionNow> {
+  const unevaluable = (reason: string): ApplicationSelectionNow => ({ ok: false, kind: "unevaluable", reason });
   const catalogId = dependencies.e2eFeatureRuntimeCatalogId;
-  if (catalogId === undefined) throw unevaluable("no runtime catalog is configured");
+  if (catalogId === undefined) return unevaluable("no runtime catalog is configured");
   let project: RegisteredProjectRecord;
   try { project = await requireProject(dependencies, task.project, task.startingRevision); }
-  catch { throw unevaluable("the pinned project revision is unavailable"); }
+  catch { return unevaluable("the pinned project revision is unavailable"); }
   const policy = E2EPolicySchema.safeParse(project.definition.e2e);
-  if (!policy.success) throw unevaluable("the pinned project has no valid E2E policy");
-  if (project.definition.repositories.length !== 1) throw unevaluable("application planning needs exactly one pinned repository");
+  if (!policy.success) return unevaluable("the pinned project has no valid E2E policy");
+  if (project.definition.repositories.length !== 1) return unevaluable("application planning needs exactly one pinned repository");
   const repository = project.definition.repositories[0]!;
   const repositoryParts = /^https:\/\/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i.exec(repository.url);
   const setup = await readApprovedSetupSource(dependencies, project, policy.data, repository,
     repositoryParts?.[1] && repositoryParts[2] ? `${repositoryParts[1]}/${repositoryParts[2]}` : undefined);
-  if (!setup.ok) throw unevaluable(setup.reason);
+  if (!setup.ok) return unevaluable(setup.reason);
   const now = Date.now();
   let rows: E2ERegisteredRuntime[];
   try {
     rows = await readProjectAdmittedE2ERuntimes({ runtimeCatalogId: catalogId, profileId: WEB_API_RUNTIME_PROFILE_ID, binding: parseRuntimeBinding(project.runtimeBinding), now,
       read: (key) => getItem<Record<string, unknown>>(dependencies, key) });
-  } catch { throw unevaluable("the runtime catalog could not be read"); }
+  } catch { return unevaluable("the runtime catalog could not be read"); }
   const evaluation = evaluateApplicationPlanApproval({ intent, taskId: task.taskId, artifact, snapshot: setup.snapshot, setupProposal: setup.setupProposal,
     setupApproval: setup.setupApproval, policy: policy.data, registeredRuntimes: rows, runtimeCatalogId: catalogId,
     runtimeBinding: parseRuntimeBinding(project.runtimeBinding), now });
-  if (!evaluation.ok) {
-    throw agentXError("CONFIG_INVALID", `the application E2E plan cannot be approved: ${evaluation.reason}. Request changes to correct the plan, or approve it again once the runtime is ready`);
-  }
-  // The rows this approval was derived from must still be exactly those when the approval commits.
+  if (!evaluation.ok) return { ok: false, kind: "refused", reason: evaluation.reason };
+  // The rows this derivation was made from must still be exactly those when the transaction commits.
   const conditions: TransactItems = evaluation.selection.runtimeRows.map((row) => ({ ConditionCheck: { TableName: dependencies.tableName,
     Key: e2eRegisteredRuntimeKey(row.runtimeCatalogId, row.profileId, row.kind),
     ConditionExpression: "entityType = :entity AND #state = :ready AND runtimeCatalogId = :catalog AND catalogRevision = :revision AND generation = :generation AND bindingDigest = :binding AND capabilityDigest = :capability AND expiresAt = :expires",
     ExpressionAttributeNames: { "#state": "state" },
     ExpressionAttributeValues: { ":entity": "E2E_FEATURE_VERIFIER", ":ready": "READY", ":catalog": row.runtimeCatalogId, ":revision": row.catalogRevision,
       ":generation": row.generation, ":binding": row.bindingDigest, ":capability": row.capabilityDigest, ":expires": row.expiresAt } } }));
-  return { selection: evaluation.selection, conditions };
+  return { ok: true, selection: evaluation.selection, conditions };
+}
+
+/**
+ * Plan approval for a schema-v2 application intent: the selection to record and conditions that keep each row as read until the approval commits, or
+ * a throw: CONFIG_INVALID when the plan cannot be approved, RUNTIME_UNAVAILABLE when it cannot be evaluated (a missing snapshot or an unreadable row).
+ * Either way nothing is approved.
+ */
+async function validateWorkflowE2EApplicationPlan(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, intent: E2EApplicationPlanIntent,
+  artifact: { id: string; sha256: string }): Promise<{ selection: E2EApplicationSelectionRecord; conditions: TransactItems }> {
+  const derived = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact);
+  if (derived.ok) return { selection: derived.selection, conditions: derived.conditions };
+  if (derived.kind === "unevaluable") {
+    throw agentXError("RUNTIME_UNAVAILABLE",
+      `the application E2E plan could not be checked for approval (${derived.reason}); nothing was approved. Keep this plan and approve it again once it can be checked, or request changes`);
+  }
+  throw agentXError("CONFIG_INVALID", `the application E2E plan cannot be approved: ${derived.reason}. Request changes to correct the plan, or approve it again once the runtime is ready`);
 }
 
 /** Supplies source-backed feature-plan references only from the task's pinned project and immutable prepared commit. */
@@ -9371,6 +9391,19 @@ async function runWorkflowDispatch(dependencies: AwsBrokerDependencies, item: Ac
     await remove();
     return outcome === "STALE" ? "STALE" : "DISPATCHED";
   } catch (error) {
+    if (error instanceof ApplicationDispatchRefusal) {
+      // Deterministic for this approval and these rows: the workflow says why it stopped, the row is removed, and nothing is retried.
+      try {
+        await blockWorkflowE2EReadiness(dependencies, item, error.message);
+        console.log(JSON.stringify({ component: "broker", event: "workflow.application_dispatch_refused", taskId: item.taskId }));
+        return "STALE";
+      } catch (blockError) {
+        console.log(JSON.stringify({ component: "broker", event: "workflow.application_dispatch_block_failed", taskId: item.taskId,
+          error: blockError instanceof Error ? blockError.name : "unknown" }));
+      }
+      await recordWorkflowDispatchFailure(dependencies, item);
+      return "RETRY";
+    }
     if (error instanceof E2EPortablePlanReferenceError) {
       try {
         if (await returnWorkflowToCorrectE2EPlan(dependencies, item, error)) return "STALE";
@@ -9421,6 +9454,27 @@ async function getWorkflowE2ECreatorIdentity(dependencies: AwsBrokerDependencies
   return response.Item?.entityType === "DEVELOPER" ? response.Item : undefined;
 }
 
+/** What an owner is told when an approved application round reaches dispatch on a broker that cannot yet build its admission. Nothing ran. */
+const APPLICATION_ROUND_NOT_DISPATCHABLE = "The approved browser and API checks could not be started: this AgentX version cannot dispatch application rounds yet. Nothing was run. Send the task back to coding or close it.";
+
+/**
+ * Ruling AL, dispatch half: derives the approved application selection again from the approved setup and the runtime rows READY now, and refuses
+ * (a terminal ApplicationDispatchRefusal that blocks the workflow with its reason) when anything differs from what the Owner approved. A selection that
+ * cannot be derived because something could not be read is a retryable RUNTIME_UNAVAILABLE instead. It never widens what was approved.
+ */
+async function requireApplicationSelectionStillCurrent(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, intent: E2EApplicationPlanIntent,
+  artifact: { id: string; sha256: string }): Promise<void> {
+  const recorded = E2EApplicationSelectionRecordSchema.safeParse(task.workflow?.e2e?.applicationSelection);
+  if (!recorded.success) throw new ApplicationDispatchRefusal("The approved application checks could not be started: the approved plan has no recorded application selection.");
+  const current = await evaluateWorkflowE2EApplicationSelectionNow(dependencies, task, intent, artifact);
+  if (!current.ok) {
+    if (current.kind === "unevaluable") throw agentXError("RUNTIME_UNAVAILABLE", `the approved application selection could not be checked at dispatch (${current.reason})`);
+    throw new ApplicationDispatchRefusal(`The approved application checks can no longer run as approved: ${current.reason}`);
+  }
+  const unchanged = applicationSelectionStillCurrent(recorded.data, current.selection);
+  if (!unchanged.ok) throw new ApplicationDispatchRefusal(`The approved application checks can no longer run as approved: ${unchanged.reason}`);
+}
+
 /** Creates the content-addressed admission and starts the separate current CHECKS operation. */
 async function startWorkflowE2EChecksDispatch(
   dependencies: AwsBrokerDependencies,
@@ -9452,7 +9506,11 @@ async function startWorkflowE2EChecksDispatch(
   if (canonicalApproval === undefined) {
     throw agentXError("RUNTIME_UNAVAILABLE", "the canonical Owner-approved E2E intent is unavailable or stale");
   }
-  // Application (v2) intents are dispatched by the application round path (Task 2.4); the portable dispatch never reads one.
+  // An application (v2) intent is never dispatched through the portable path below. Its approved selection must still be exactly what runs now.
+  if (approved.plan.e2e?.schemaVersion === 2) {
+    await requireApplicationSelectionStillCurrent(dependencies, task, approved.plan.e2e, artifact);
+    throw new ApplicationDispatchRefusal(APPLICATION_ROUND_NOT_DISPATCHABLE);
+  }
   const portableIntent = portableFeatureIntentOf(approved.plan);
   if (!portableIntent.ok) {
     throw agentXError("RUNTIME_UNAVAILABLE", portableIntent.reason === "canonical-e2e-intent-missing"
