@@ -487,6 +487,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--subnets <pairs>", "availabilityZone=subnetId pairs, comma-separated (ec2-ebs), the foundation's Ec2WorkerSubnets")
     .option("--volume-size-gib <size>", "workspace volume size in GiB (ec2-ebs)", "20")
     .option("--volume-type <type>", "workspace volume type (ec2-ebs)", "gp3")
+    .option("--take-ownership", "register a revision of an existing project you do not administer, becoming its administrator; needs --ownership-reason and is recorded")
+    .option("--ownership-reason <why>", "why you are taking the project over (with --take-ownership); recorded with your identity and the time")
     .action(async (options: {
       file: string;
       deploymentMode: string;
@@ -494,8 +496,16 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       subnets?: string;
       volumeSizeGib: string;
       volumeType: string;
+      takeOwnership?: boolean;
+      ownershipReason?: string;
     }, command: Command) => {
       const globals = globalOptions(command);
+      if (options.takeOwnership === true && (options.ownershipReason === undefined || options.ownershipReason.trim() === "")) {
+        throw agentXError("CONFIG_INVALID", "--take-ownership needs --ownership-reason <why>; the takeover is recorded with who took the project over, when, and why");
+      }
+      if (options.takeOwnership !== true && options.ownershipReason !== undefined) {
+        throw agentXError("CONFIG_INVALID", "--ownership-reason only goes with --take-ownership; add it only if you mean to take the project over");
+      }
       const deploymentMode = WorkspaceDeploymentModeSchema.parse(options.deploymentMode);
       const runtimeBinding = cliRuntimeBinding(deploymentMode, options);
       const definition = await projectFromFile(options.file, globals.allowLoopback);
@@ -505,7 +515,11 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         accessToken,
         definition,
         runtimeBinding,
+        ...(options.takeOwnership === true ? { takeOwnership: { reason: options.ownershipReason! } } : {}),
       }, services.fetchImplementation);
+      if ((result as { ownershipTakenOver?: unknown } | undefined)?.ownershipTakenOver === true) {
+        services.stderr.write(`Warning: you took over project ${definition.name}: you are now one of its administrators, and the takeover is recorded with your identity, the time and your reason.\n`);
+      }
       try {
         const enrollment = await recordRegisteredLoopEnrollment({
           home, env: globals.env, controlPlaneUrl: settings.controlPlaneUrl, definition, response: result,

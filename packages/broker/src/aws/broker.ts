@@ -1663,7 +1663,7 @@ function gitHubContext(identity: AuthenticatedIdentity, workspace: WorkspaceInst
 }
 
 /** The registration request's parse, shared by registerProject and a change plan (spec 025 C4). */
-function parseRegistrationInput(value: unknown): { definition: ProjectDefinition; runtimeBinding: ReturnType<typeof parseRuntimeBinding>; wantsPreflight: boolean; setupApproval?: { proposalRef: string; proposalSha256: string; decision: "approve" | "decline" } } {
+function parseRegistrationInput(value: unknown): { definition: ProjectDefinition; runtimeBinding: ReturnType<typeof parseRuntimeBinding>; wantsPreflight: boolean; setupApproval?: { proposalRef: string; proposalSha256: string; decision: "approve" | "decline" }; takeover?: { reason: string } } {
   const input = object(value, "project registration");
   const retired = legacyProjectFields(input.definition);
   if (retired.length > 0) {
@@ -1674,9 +1674,23 @@ function parseRegistrationInput(value: unknown): { definition: ProjectDefinition
   const setupApproval = input.setupApproval === undefined ? undefined : z.object({
     proposalRef: z.string().min(1).max(512), proposalSha256: z.string().regex(/^[a-f0-9]{64}$/), decision: z.enum(["approve", "decline"]),
   }).strict().parse(input.setupApproval);
+  // Task AUTH1: taking over a project is an explicit request with a reason, never implied by a reason alone and never by anything but the boolean `true`.
+  if (input.takeOwnership !== undefined && typeof input.takeOwnership !== "boolean") {
+    throw agentXError("CONFIG_INVALID", "takeOwnership must be true or false");
+  }
+  let takeover: { reason: string } | undefined;
+  if (input.takeOwnership === true) {
+    const reason = typeof input.takeOwnershipReason === "string" ? input.takeOwnershipReason.trim() : "";
+    if (reason === "" || reason.length > TAKEOVER_REASON_MAX) {
+      throw agentXError("CONFIG_INVALID", `taking over a project needs a takeOwnershipReason of 1 to ${TAKEOVER_REASON_MAX} characters, recorded with who took it over and when`);
+    }
+    takeover = { reason };
+  }
   // Preflight contacts the vendor, so it runs only when the caller asks; older clients never do.
-  return { definition, runtimeBinding, wantsPreflight: input.preflight === true, ...(setupApproval === undefined ? {} : { setupApproval }) };
+  return { definition, runtimeBinding, wantsPreflight: input.preflight === true, ...(setupApproval === undefined ? {} : { setupApproval }), ...(takeover === undefined ? {} : { takeover }) };
 }
+
+const TAKEOVER_REASON_MAX = 500;
 
 /** Registration's refusals and preflight, for a new revision; registerProject and a change plan share them. */
 async function registrationChecks(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, definition: ProjectDefinition, wantsPreflight: boolean): Promise<PreflightOutcome | undefined> {
@@ -1707,9 +1721,10 @@ async function registerProject(
   checked?: { preflight?: PreflightOutcome },
 ): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
-  const { definition, runtimeBinding, wantsPreflight, setupApproval } = parseRegistrationInput(value);
+  const { definition, runtimeBinding, wantsPreflight, setupApproval, takeover } = parseRegistrationInput(value);
   let setupRuntimeAdmission: ReturnType<typeof admitProjectSetupRuntime>;
   let setupExecutionCreated = false;
+  let ownershipTakenOver = false;
   let setupApprovalBinding: RegisteredProjectRecord["setupApproval"];
   let setupApprovedAt = "";
   if (definition.e2e !== undefined || setupApproval !== undefined) {
@@ -1755,7 +1770,20 @@ async function registerProject(
       tools: { maximum: budget.maximum, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT },
       ...(warnings.length ? { warnings } : {}), ...(preflight ? { preflight: preflight.report } : {}),
       ...(setupApprovalBinding?.decision === "approve" ? { setupRuntime: setupExecutionCreated ? "QUEUED" : "UNAVAILABLE" } : {}),
+      ...(ownershipTakenOver ? { ownershipTakenOver: true } : {}),
     };
+  };
+  /**
+   * Task AUTH1 (finding N2b): who may store this revision. The first revision of a project makes its registrant the administrator; a later revision needs the
+   * registrant to administer the project already; an instance administrator who does not can take it over only by asking explicitly, with a reason.
+   * Judged against the project as it is now, and again on every attempt, so a registrant who lost a race for the first revision is refused on the next one.
+   */
+  const judgeAuthority = async (newestRevision: number): Promise<"first" | "administrator" | "takeover"> => {
+    if (newestRevision === 0) return "first";
+    const authority = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${identity.ownerKey}`, sk: `PROJECT#${definition.name}` });
+    if (authority?.role === "administrator") return "administrator";
+    if (takeover !== undefined) return "takeover";
+    throw agentXError("FORBIDDEN", `only an administrator of project ${definition.name} can register a new revision of it. An instance administrator who is not one can take the project over by asking explicitly: send takeOwnership: true with a takeOwnershipReason (agentx admin project register --take-ownership --ownership-reason <why>); the takeover is recorded`);
   };
   const key = projectKey(definition.name, definition.revision);
   const readCatalogSnapshot = () => readProjectCatalogSnapshot(dependencies, definition.name);
@@ -1772,6 +1800,8 @@ async function registerProject(
       ?? (wantsPreflight ? await preflightConnectors(connectors(), definition, identity.ownerKey) : undefined);
     return respond(withoutKeys(existing), true, preflight);
   }
+  // Refused before any vendor is contacted for a registrant who may not store this revision; the commit judges it again.
+  await judgeAuthority((await readCatalogSnapshot()).newestRevision);
   const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight);
   const now = new Date().toISOString();
   const record: RegisteredProjectRecord = {
@@ -1784,6 +1814,7 @@ async function registerProject(
     ...(setupApprovalBinding === undefined ? {} : { setupApproval: setupApprovalBinding }),
   };
   const membership = membershipRecord(identity.ownerKey, definition.name, "administrator");
+  const membershipKey = { pk: membership.pk, sk: membership.sk };
   const setupAdmissionRows = setupRuntimeAdmission && setupApprovalBinding?.decision === "approve" && definition.e2e !== undefined
     ? await createProjectSetupAdmissionRows(dependencies, identity, record, setupApprovalBinding, setupRuntimeAdmission)
     : undefined;
@@ -1813,19 +1844,25 @@ async function registerProject(
     const snapshot = await readCatalogSnapshot();
     const latestRevision = Math.max(definition.revision, snapshot.newestRevision);
     const updateCatalog = snapshot.catalog?.latestRevision !== latestRevision;
-    // An existing project's accounts change only at the hand of one of its administrators (the first registration makes the registrant one). Judged against the project as
-    // it is on this attempt: an administrator who raced a first registration and lost finds the project there on the next one.
-    if (registerAccounts && snapshot.newestRevision > 0) {
-      const authority = await getItem<{ role?: unknown }>(dependencies, { pk: `MEMBER#${identity.ownerKey}`, sk: `PROJECT#${definition.name}` });
-      if (authority?.role !== "administrator") throw agentXError("FORBIDDEN", `only an administrator of project ${definition.name} can register a setup that changes its test accounts`);
-    }
+    // An existing project changes (its test accounts included) only at the hand of one of its administrators, or of an instance administrator who takes it over explicitly.
+    // Judged against the project as it is on this attempt: an administrator who raced a first registration and lost finds the project there on the next one.
+    const authority = await judgeAuthority(snapshot.newestRevision);
     const accounts = await planAccounts();
     // One transaction holds at most 100 items; the project revision, its membership, the catalog and the setup admission take the rest.
     if (accounts.items.length > 60) throw agentXError("CONFIG_INVALID", "the setup declares more synthetic test accounts than one registration can store");
     try {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Put: { TableName: dependencies.tableName, Item: record, ConditionExpression: "attribute_not_exists(pk)" } },
-      { Put: { TableName: dependencies.tableName, Item: membership } },
+      // A first registration and a takeover write the registrant's administrator membership; an administrator's own is left as it is (its grant is not reissued)
+      // but must still hold when the revision commits.
+      ...(authority === "administrator"
+        ? [{ ConditionCheck: { TableName: dependencies.tableName, Key: membershipKey, ConditionExpression: "#role = :administrator",
+          ExpressionAttributeNames: { "#role": "role" }, ExpressionAttributeValues: { ":administrator": "administrator" } } }]
+        : [{ Put: { TableName: dependencies.tableName, Item: membership } }]),
+      ...(authority === "takeover" && takeover !== undefined ? [{ Put: { TableName: dependencies.tableName, ConditionExpression: "attribute_not_exists(pk)", Item: {
+        pk: `PROJECT_TAKEOVER#${definition.name}`, sk: `AT#${now}#${randomUUID()}`, entityType: "PROJECT_OWNERSHIP_TAKEOVER",
+        projectName: definition.name, revision: definition.revision, takenBy: identity.ownerKey, subject: identity.subject, reason: takeover.reason, at: now,
+      } } }] : []),
       // Spec 025 A3: the admin project list reads this row instead of scanning the table.
       ...(updateCatalog ? [{ Update: {
         TableName: dependencies.tableName,
@@ -1841,6 +1878,10 @@ async function registerProject(
       ...(setupAdmissionRows?.transactionItems ?? []),
       ...accounts.items,
       ] }));
+      if (authority === "takeover") {
+        ownershipTakenOver = true;
+        console.log(JSON.stringify({ component: "broker", event: "project.ownership_taken_over", project: definition.name, revision: definition.revision, takenBy: identity.ownerKey }));
+      }
       return respond(withoutKeys(record), false, preflight);
     } catch (error) {
       if (!isConditional(error)) throw error;
@@ -1860,7 +1901,9 @@ async function registerProject(
         || (refreshed.catalog?.latestRevision ?? 0) > (snapshot.catalog?.latestRevision ?? 0);
       // Another registration may have moved an account under this one: plan again (a stale setup is refused then) rather than give up.
       const accountsMoved = accountSetup !== undefined && (await planAccounts()).planKey !== accounts.planKey;
-      if ((!advanced && !accountsMoved) || attempt + 1 === maxRegistrationAttempts) {
+      // The registrant's standing may have changed under this attempt (the membership removed or downgraded outside the API, the project registered by a rival): refused here, not as a catalog conflict.
+      const authorityMoved = (await judgeAuthority(refreshed.newestRevision)) !== authority;
+      if ((!advanced && !accountsMoved && !authorityMoved) || attempt + 1 === maxRegistrationAttempts) {
         throw agentXError("PROJECT_REVISION_MISMATCH", "project revision registration could not commit against the current catalog");
       }
     }

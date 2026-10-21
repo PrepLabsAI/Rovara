@@ -80,6 +80,48 @@ describe("project registration from the command line", () => {
   });
 });
 
+describe("taking a project over from the command line (Task AUTH1)", () => {
+  const registered = { project: { definition: { name: "payments" } }, duplicate: false, preflight: { connectors: [] } };
+
+  it("sends no takeover unless asked", async () => {
+    const context = await administratorContext("agentx-cli-register-no-takeover-");
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json(registered, { status: 201 }));
+    expect((await runRegister(context, fetchImplementation)).exitCode).toBe(0);
+    const body = JSON.parse(String(fetchImplementation.mock.calls[0]![1]?.body as string)) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("takeOwnership");
+    expect(body).not.toHaveProperty("takeOwnershipReason");
+  });
+
+  it("sends --take-ownership with its reason and says the takeover was recorded", async () => {
+    const context = await administratorContext("agentx-cli-register-takeover-");
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ ...registered, ownershipTakenOver: true }, { status: 201 }));
+    const { exitCode, stderr } = await runRegister(context, fetchImplementation, ["--take-ownership", "--ownership-reason", "  the owner left  "]);
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(String(fetchImplementation.mock.calls[0]![1]?.body as string))).toMatchObject({ takeOwnership: true, takeOwnershipReason: "the owner left" });
+    expect(stderr).toContain("you took over project payments");
+  });
+
+  it("refuses --take-ownership without a reason, and a reason without --take-ownership, before contacting the control plane", async () => {
+    const context = await administratorContext("agentx-cli-register-takeover-refused-");
+    const fetchImplementation = vi.fn<typeof fetch>();
+    for (const extra of [["--take-ownership"], ["--take-ownership", "--ownership-reason", "  "], ["--ownership-reason", "because"]]) {
+      const { exitCode, stderr } = await runRegister(context, fetchImplementation, extra);
+      expect(exitCode).not.toBe(0);
+      expect(stderr).toContain("--ownership-reason");
+    }
+    expect(fetchImplementation).not.toHaveBeenCalled();
+  });
+
+  it("passes the control plane's refusal on, which names the takeover option", async () => {
+    const context = await administratorContext("agentx-cli-register-takeover-hint-");
+    const message = "only an administrator of project payments can register a new revision of it. An instance administrator who is not one can take the project over by asking explicitly: send takeOwnership: true";
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ error: { code: "FORBIDDEN", message } }, { status: 403 }));
+    const { exitCode, stderr } = await runRegister(context, fetchImplementation);
+    expect(exitCode).not.toBe(0);
+    expect(stderr).toContain("takeOwnership: true");
+  });
+});
+
 describe("project registration without connectors", () => {
   it("does not mention connector checks when the definition has no integrations", async () => {
     const context = await administratorContext("agentx-cli-register-plain-");
@@ -168,7 +210,7 @@ async function administratorContext(prefix: string): Promise<{ globals: string[]
   return { tokens, home: directory, projectFile, globals: ["--config-dir", directory, "--deployment-file", deploymentFile, "--allow-loopback"] };
 }
 
-async function runRegister(context: Awaited<ReturnType<typeof administratorContext>>, fetchImplementation: typeof fetch) {
+async function runRegister(context: Awaited<ReturnType<typeof administratorContext>>, fetchImplementation: typeof fetch, extraArguments: string[] = []) {
   let stdout = "";
   let stderr = "";
   const exitCode = await executeCli([
@@ -179,6 +221,7 @@ async function runRegister(context: Awaited<ReturnType<typeof administratorConte
     "--deployment-mode", "ec2-ebs",
     "--launch-template-id", "lt-0123456789abcdef0",
     "--subnets", "us-east-1a=subnet-0123456789abcdef0",
+    ...extraArguments,
   ], {
     fetchImplementation,
     tokenStore: context.tokens,

@@ -76,6 +76,14 @@ Project revisions and runtime bindings are immutable. Increment the YAML `revisi
 registering a changed repository, setup or readiness definition. The channel binding names
 only the project, so a newly registered revision reaches every new thread without binding again.
 
+The first registration of a project name makes its registrant the project's administrator. A later
+revision must come from an administrator of that project: an instance administrator who is not one
+is refused with 403. To take a project over on purpose, add `--take-ownership --ownership-reason "<why>"`
+to `agentx admin project register`. The reason is required, you become one of the project's
+administrators, and the control plane records who took it over, which project, when and why (a
+`PROJECT_OWNERSHIP_TAKEOVER` row under `PROJECT_TAKEOVER#<project>` in the main table). The
+takeover is never implied: without the flag, no reason or role gets an instance administrator in.
+
 For a private GitHub repository, set its `credentialRef` to the GitHub App credential reference
 configured on the control plane (the maintainers' deployment uses `github-agentx-sdlc`; in an
 installed environment, `project add` fills in its own). The YAML still contains no private key or
