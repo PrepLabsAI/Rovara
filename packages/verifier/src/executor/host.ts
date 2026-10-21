@@ -159,7 +159,10 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
         await route.abort("blockedbyclient");
       });
     };
+    // Screenshots and traces of failed cases follow the admitted capture policy and nothing else; with both off the case adapter is given no capture port at all.
+    const screenshots = ledger.capture.enabled("screenshot");
     const ports: E2EWebRuntimePorts = Object.freeze({ ...shared,
+      ...(screenshots ? { capture: { screenshots, record: (item: { caseId: string; kind: "screenshot"; bytes: Uint8Array }) => ledger.capture.record(item) } } : {}),
       resolveOwnedCdpEndpoint: async () => {
         if (!context.cdpEndpoint) throw new Error("the executor launched no browser for this shard");
         return context.cdpEndpoint;
@@ -175,6 +178,8 @@ export function createE2EApplicationCliHost(input: { launchContext: E2EApplicati
       },
       applyToOwnedBrowserContext: async (sessionRef: string, browserContext: BrowserContext) => {
         const cookie = store.cookieFor(sessionRef);
+        // Only when screenshots are taken: the cookie is then a secret the captures are scanned for. It is redacted wherever it appears as text and never refuses evidence.
+        if (screenshots) ledger.registerSessionSecret(cookie.value);
         await browserContext.addCookies([{ name: cookie.name, value: cookie.value, url: cookie.origin, httpOnly: true, sameSite: "Strict" }]);
         await guard(browserContext);
         const page = browserContext.pages()[0];

@@ -423,7 +423,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       if (result === null) return { kind: "unavailable", reason: "executor-result-mismatch" };
       try { validateExecutorResult(result, binding); } catch { return { kind: "unavailable", reason: "executor-result-mismatch" }; }
       try {
-        const snapshot = await snapshotExecutorOutput(dirs.out, result);
+        // The host's own credential predicate (base64 and base64url at any alignment included) keeps a capture that carries a run credential out of the operator's evidence.
+        const snapshot = await snapshotExecutorOutput(dirs.out, result, { containsCredential: (bytes) => state.redactor.contains(bytes) });
         // A run that was stopped (the deadline or the caller) while the output was being read has no result, and nothing is handed out.
         if (signal.aborted) return { kind: "unavailable", reason: stopReason() };
         await deps.onRunOutput?.({ outDir: dirs.out, accountProfileIds: profileIds, containsCredential: (bytes) => state.redactor.contains(bytes) });

@@ -6,6 +6,7 @@ import { collectE2EApplicationRun as collect, encodeE2EApplicationSupervisorRead
 import type { E2EApplicationCaseCapture, E2EApplicationSupervisorReadback } from "./application-result-adapter.js";
 import { validateE2ECompiledApplicationAdmission, type E2ECompiledApplicationSuite } from "./application-scenarios.js";
 import type { E2EApplicationCollectionResult } from "./application-result-adapter.js";
+import type { ExecutorOutputEvidence } from "./host/executor-readback.js";
 
 function encoded(bytes: Uint8Array) {
   if (!(bytes instanceof Uint8Array) || bytes.byteLength > 4_194_304) throw new Error("application CLI output bytes exceed the pinned per-stream bound");
@@ -25,7 +26,9 @@ export type E2EActualApplicationRun = Readonly<{ protocol: "e2e-actual-applicati
   shards: readonly E2EActualApplicationShard[]; applicationCaptures: readonly E2EApplicationCaseCapture[]; supervisorReceiptRefs: readonly E2EApplicationEvidenceRef[];
   declaredMockComponentIds: readonly string[]; selected: number; filtered: number;
   supervisorReadback: E2EApplicationSupervisorReadback | null;
-  cleanupConfirmed: boolean | null; cleanupServerListening: boolean | null; evidenceDirectory: string }>;
+  cleanupConfirmed: boolean | null; cleanupServerListening: boolean | null; evidenceDirectory: string;
+  /** The executor's log head and the screenshots and traces of failed cases, for the operator's evidence. The collector never reads it and no result depends on it. */
+  executorEvidence?: ExecutorOutputEvidence }>;
 
 /** Converts real supervisor readback bytes to the private strict collection wire format. */
 export function collectE2EApplicationRun(input: { actual: E2EActualApplicationRun; compiled: E2ECompiledApplicationSuite;

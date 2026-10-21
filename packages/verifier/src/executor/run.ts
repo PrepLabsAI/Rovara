@@ -15,6 +15,7 @@ import { verifyExecutorHostRegistration } from "./host-registry.js";
 import { startAppForwarder, type AppForwarder } from "./app-forward.js";
 import { attestWhenSettled, type inspectChromiumSandbox, type InspectChromiumSandboxInput } from "./chromium-sandbox.js";
 import { launchLocalChromium, type LocalChromium } from "./local-browser.js";
+import { CAPTURE_ARTIFACTS_FILE, CAPTURE_DIR, admittedCapturePolicy, finalizeCaptureArtifacts } from "./capture.js";
 import { createCredentialRedactor, type CredentialRedactor } from "./redact.js";
 import { createLaunchContexts, resolveE2EExecutorSuite, type ResolvedExecutorSuite } from "./suite.js";
 
@@ -258,6 +259,20 @@ export async function runE2EExecutor(input: E2EExecutorRunInput): Promise<{ exit
     await writeFile(join(outDir, "blocked-requests.json"), `${JSON.stringify({ schemaVersion: "e2e-executor-blocked-requests/v1",
       runId: resolved?.binding.runId ?? null, groupId: resolved?.suite.group.groupId ?? null,
       shards: shards.map((item) => ({ shardId: item.shardId, upstreamRunId: item.upstreamRunId })), blocked }, null, 2)}\n`);
+    // Screenshots and traces of failed cases are settled against the group's budget and credential scan before the last scan below. This is capture bookkeeping only:
+    // a drop is recorded in artifacts.json, and nothing it does can change the exit code or the reason.
+    if (resolved) {
+      try {
+        const admitted = resolved.suite.runtimeAdmissionContext.selectionInput.policy.capture;
+        await finalizeCaptureArtifacts({ outDir, redactor, policy: admittedCapturePolicy(admitted),
+          caseIds: resolved.suite.expectedCases.map((item) => item.caseId) });
+      } catch (error) {
+        // Nothing unlisted may stay behind: with no trustworthy listing, no capture is kept.
+        await rm(join(outDir, CAPTURE_DIR), { recursive: true, force: true }).catch(() => undefined);
+        await rm(join(outDir, CAPTURE_ARTIFACTS_FILE), { force: true }).catch(() => undefined);
+        await appendFile(logPath, `${new Date().toISOString()} captures were dropped: ${redactor.text(error instanceof Error ? error.message : "unreadable")}\n`).catch(() => undefined);
+      }
+    }
     // Last line of defense: nothing under the out directory may carry an account credential.
     // The scan fails closed: a file it cannot read in full, or a tree it cannot walk in full, leaves no trustworthy result.
     const failScan = async (why: string) => {

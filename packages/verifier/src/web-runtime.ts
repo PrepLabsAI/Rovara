@@ -27,7 +27,36 @@ import type { E2ECompiledApplicationSuite } from "./application-scenarios.js";
 const sha = (value: Uint8Array | string) => createHash("sha256").update(value).digest("hex");
 const utc = () => new Date().toISOString();
 
+/**
+ * Screenshots of failed cases (owner decision D3). Supplied only by the executor host, from the capture policy the admission approved (Ruling BZ), and only when screenshots
+ * are approved. There is no trace capture (Ruling CJ). Capture is best effort and never changes what a case reports.
+ */
+export type E2EWebCapturePorts = Readonly<{
+  screenshots: boolean;
+  /** Stores one capture of one case under the executor's budget and credential scan. */
+  record(input: { caseId: string; kind: "screenshot"; bytes: Uint8Array }): Promise<unknown>;
+}>;
+/** What the case adapter made of the case, for capture: a failed assertion is FAILED, a case that could not be observed is UNKNOWN. */
+export type WebCaseCaptureOutcome = "passed" | "failed" | "unknown";
+const SCREENSHOT_QUALITY = 70;
+const SCREENSHOT_TIMEOUT_MS = 5_000;
+
+/**
+ * Takes the screenshot a FAILED or UNKNOWN case earns; a PASS case gets none. Best effort: a page that crashed or a recorder that refuses is absorbed, so capture can
+ * never turn a case into a failure or change its verdict.
+ */
+export async function finishWebCaseCapture(input: { capture: E2EWebCapturePorts | undefined; caseId: string; outcome: WebCaseCaptureOutcome; page: Pick<Page, "screenshot"> | null }): Promise<void> {
+  const { capture, caseId, outcome, page } = input;
+  if (!capture?.screenshots || outcome === "passed" || !page) return;
+  try {
+    const bytes = await page.screenshot({ type: "jpeg", quality: SCREENSHOT_QUALITY, timeout: SCREENSHOT_TIMEOUT_MS });
+    if (bytes.byteLength > 0) await capture.record({ caseId, kind: "screenshot", bytes: Uint8Array.from(bytes) });
+  } catch { /* a page that cannot be photographed leaves no screenshot */ }
+}
+
 export type E2EWebRuntimePorts = Readonly<{
+  /** Screenshots of failed cases; absent when the admission approves none. */
+  capture?: E2EWebCapturePorts;
   casePlans: E2EApplicationCliCasePlanReader;
   caseObservations: E2EApplicationProtectedCaseObservationReader;
   evidence: E2EApplicationCliEvidenceWriter;
@@ -397,6 +426,9 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
       let caseFailed = false;
       let caseError: unknown;
       let sessionClosed: boolean;
+      // For capture only: the live page once the case has one, and what the case turned out to be.
+      let ownedPage = null as Page | null;
+      let captureOutcome: WebCaseCaptureOutcome = "unknown";
       try {
         const chain = await runInsideAssertionSteps(fixtures[ASSERTION_FIXTURE], scenario.assertions.length, async () => {
         // The fresh attempt context has no page, and the case needs a live one before approved authentication can be applied. The one
@@ -407,6 +439,7 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
         const context = surface.context();
         const page = surface.page();
         await ports.applyToOwnedBrowserContext(session.sessionRef, context, operationSignal);
+        ownedPage = page;
         const protectedObservation = await readValidatedE2EApplicationCaseObservation({ reader: ports.caseObservations,
           launchContext, plan, ownedClientRef: session.sessionRef, expectedSubjectKind: "browser", signal: operationSignal });
         if (protectedObservation.binding.sessionRef !== session.sessionRef || protectedObservation.binding.accountIdDigest !== session.accountIdDigest
@@ -436,12 +469,15 @@ export function createWebApplicationCliHost(input: { launchContext: E2EApplicati
         });
         if (chain.outcome === null) throw chain.error;
         const { failedIndex, unavailableIndex } = chain.outcome;
+        captureOutcome = failedIndex >= 0 ? "failed" : unavailableIndex >= 0 ? "unknown" : "passed";
         if (failedIndex >= 0) throw new Error(`web assertion ${failedIndex} failed against the actual owned browser observation`);
         if (unavailableIndex >= 0) throw new Error(`web assertion ${unavailableIndex} is unavailable on the installed fixed browser surface`);
       } catch (error) {
         caseFailed = true;
         caseError = error;
       } finally {
+        // Before the session closes, while the page is still the case's own; best effort, so it can change neither the verdict nor the cleanup below.
+        await finishWebCaseCapture({ capture: ports.capture, caseId, outcome: captureOutcome, page: ownedPage });
         try { sessionClosed = (await ports.closeCaseSession(session.sessionRef, AbortSignal.timeout(5_000))).confirmed; }
         catch { sessionClosed = false; }
       }
