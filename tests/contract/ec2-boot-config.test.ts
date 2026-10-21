@@ -344,7 +344,7 @@ describe("the opt-in TEST qualification hook", () => {
 
   /** Runs the hook script against fake aws, docker, curl, chown and timeout commands that record every call. */
   const hookArgs = ["us-east-1", qualification.bucket, qualification.roleId, instanceId, qualification.profile, executorImage];
-  type HookOptions = { args?: string[]; challenge?: "present" | "missing"; qualifier?: number; failureFile?: string; staleFailure?: string; link?: boolean; proposalBytes?: number; ping?: "up" | "down"; pingBody?: string; wait?: number; executor?: "present" | "missing" | "pullable" };
+  type HookOptions = { args?: string[]; challenge?: "present" | "missing"; qualifier?: number; failureFile?: string; padBytes?: number; staleFailure?: string; link?: boolean; proposalBytes?: number; ping?: "up" | "down"; pingBody?: string; wait?: number; executor?: "present" | "missing" | "pullable" };
   function runHook(options: HookOptions = {}) {
     const dir = mkdtempSync(join(tmpdir(), "boot-hook-run-"));
     const bin = join(dir, "bin");
@@ -376,15 +376,19 @@ esac
 out=; failure=; while (($#)); do [[ "$1" == --out ]] && out=$2; [[ "$1" == --failure-out ]] && failure=$2; shift; done
 if [[ "$FAKE_QUALIFIER" != 0 ]]; then
   if [[ -n "$failure" && -n "\${FAKE_FAILURE_FILE:-}" ]]; then
-    if [[ "\${FAKE_LINK:-}" == 1 ]]; then printf '%s' "$FAKE_FAILURE_FILE" >"${evidence}/target"; ln -s target "${evidence}/$(basename "$failure")"
-    else printf '%s' "$FAKE_FAILURE_FILE" >"${evidence}/$(basename "$failure")"; fi
+    # A large file is built here, not passed in: Linux refuses a single environment string of 128 KiB or more (E2BIG), which macOS does not.
+    body=$FAKE_FAILURE_FILE; [[ -n "\${FAKE_FAILURE_PAD:-}" ]] && body=\${body/__PAD__/$(head -c "$FAKE_FAILURE_PAD" /dev/zero | tr '\\0' 'y')}
+    if [[ "\${FAKE_LINK:-}" == 1 ]]; then printf '%s' "$body" >"${evidence}/target"; ln -s target "${evidence}/$(basename "$failure")"
+    else printf '%s' "$body" >"${evidence}/$(basename "$failure")"; fi
   fi
   exit "$FAKE_QUALIFIER"
 fi
 if [[ "\${FAKE_LINK:-}" == 1 ]]; then head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/target"; ln -s target "${evidence}/$(basename "$out")"
 else head -c "$FAKE_PROPOSAL_BYTES" /dev/zero | tr '\\0' 'x' >"${evidence}/$(basename "$out")"; fi`);
     // macOS dd has no iflag=nofollow: the shim refuses a symlink the way GNU dd does, and runs the plain copy otherwise.
-    fake("dd", `a=(); link=; for x in "$@"; do if [[ "$x" == iflag=nofollow ]]; then nf=1; continue; fi; [[ "$x" == if=* && -L "\${x#if=}" ]] && link=1; a+=("$x"); done
+    // GNU dd (Linux, as on the runner) is used as it is, so the real iflag=nofollow is what the test exercises there.
+    fake("dd", `if /bin/dd iflag=nofollow if=/dev/null of=/dev/null count=0 2>/dev/null; then exec /bin/dd "$@"; fi
+a=(); link=; for x in "$@"; do if [[ "$x" == iflag=nofollow ]]; then nf=1; continue; fi; [[ "$x" == if=* && -L "\${x#if=}" ]] && link=1; a+=("$x"); done
 [[ -n "$nf" ]] || { echo "dd without iflag=nofollow" >&2; exit 9; }
 [[ -z "$link" ]] || exit 1
 exec /bin/dd "\${a[@]}"`);
@@ -397,7 +401,7 @@ exec /bin/dd "\${a[@]}"`);
     const result = spawnSync("bash", ["-c", qualificationScript, "bash", ...(options.args ?? hookArgs)], {
       encoding: "utf8",
       env: {
-        ...(options.failureFile === undefined ? {} : { FAKE_FAILURE_FILE: options.failureFile }),
+        ...(options.failureFile === undefined ? {} : { FAKE_FAILURE_FILE: options.failureFile }), ...(options.padBytes === undefined ? {} : { FAKE_FAILURE_PAD: String(options.padBytes) }),
         PATH: `${bin}:${process.env.PATH ?? ""}`, AGENTX_HOST_ROOT: hostRoot, TMPDIR: dir,
         AGENTX_E2E_QUALIFICATION_POLL_SECONDS: "0", AGENTX_E2E_QUALIFICATION_HEALTHY_WAIT_SECONDS: String(options.wait ?? 1), AGENTX_E2E_QUALIFICATION_CHALLENGE_WAIT_SECONDS: String(options.wait ?? 1),
         FAKE_CHALLENGE: options.challenge ?? "present", FAKE_QUALIFIER: String(options.qualifier ?? 0), FAKE_PROPOSAL_BYTES: String(options.proposalBytes ?? 64), FAKE_PING: options.ping ?? "up", FAKE_PING_BODY: options.pingBody ?? "",
@@ -637,7 +641,7 @@ exec /bin/dd "\${a[@]}"`);
       // A code with a part longer than 48 characters is not a code the hook keeps.
       expect(failureOf({ failureFile: file({ stage: "qualification-rejected", reasons: [`${"a".repeat(49)}:b`, "ok:fine"], summary: [] }) }).status.failure!.codes).toEqual(["qualification-rejected", "ok:fine"]);
       // Only the first 16 KB of the file is read.
-      const huge = failureOf({ failureFile: `{"pad":"${"y".repeat(200_000)}","reasons":["probe-wrong-cause:late"],"stage":"qualification-rejected"}` }).status.failure!;
+      const huge = failureOf({ padBytes: 200_000, failureFile: `{"pad":"__PAD__","reasons":["probe-wrong-cause:late"],"stage":"qualification-rejected"}` }).status.failure!;
       expect(huge).toEqual({ codes: [] });
     });
   });
