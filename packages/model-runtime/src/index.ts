@@ -1,8 +1,14 @@
 import { MissingProviderSecret, defaultBedrockModel, type ModelRole } from "./config.js";
 import { openRouterRouting, readProviderKey, requireKeyedModel } from "./config.js";
+import { TRANSPORTS, requestCompat } from "./transport.js";
 export { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel } from "./config.js";
+// The governed e2e model route (M1.4): its own surface, never reached through the coding-task fallback above.
+export * from "./e2e-route.js";
+export { createE2EProviderInvoke } from "./e2e-provider-invoke.js";
+export type { E2EProviderInvoke, E2EProviderInvokeDependencies } from "./e2e-provider-invoke.js";
+export * from "./e2e-environment-guard.js";
 import { CHATGPT_PLAN_LIMIT_ERROR, KEYED_MODEL_PROVIDERS, agentXError, isKeyedModelProvider, type KeyedModelProvider, type ModelIdentifier } from "@agentx/contracts";
-import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type AnthropicMessagesCompat, type OpenAICompletionsCompat, type OpenAIResponsesCompat } from "@earendil-works/pi-ai";
+import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
 import { streamSimple as anthropicMessagesStream } from "@earendil-works/pi-ai/api/anthropic-messages";
 import { streamSimple as openAIResponsesStream } from "@earendil-works/pi-ai/api/openai-responses";
@@ -66,13 +72,6 @@ export async function createModelRuntimeWithFallback<T extends ModelIdentifier>(
   }
 }
 
-/** How each keyed provider reaches its API through Pi. OpenRouter adds its routing policy. */
-const TRANSPORTS = {
-  openrouter: { api: "openai-completions", baseUrl: "https://openrouter.ai/api/v1" },
-  anthropic: { api: "anthropic-messages", baseUrl: "https://api.anthropic.com" },
-  openai: { api: "openai-responses", baseUrl: "https://api.openai.com/v1" },
-} as const satisfies Record<KeyedModelProvider, { api: Api; baseUrl: string }>;
-
 /**
  * Construct fresh credentials per session so secrets never enter Pi's file-backed auth store. The
  * key goes into an in-memory store, never into ANTHROPIC_API_KEY, OPENAI_API_KEY or any other
@@ -100,24 +99,6 @@ export async function createConfiguredModelRuntime(selected: ModelIdentifier & {
   try { await runtime.setRuntimeApiKey(provider, key); }
   catch { throw agentXError("RUNTIME_UNAVAILABLE", `${label} credentials could not be initialized`); }
   return runtime;
-}
-
-/**
- * The request each provider gets on Pi 1.0 (spec 050 Ruling 7). Pi records prompt changes as
- * mid-conversation system messages, which a model would receive after the old prompt; without them Pi
- * collapses the transcript into one leading, current prompt, as 0.85.1 sent (a resumed Slack turn
- * changes the orchestrator's cwd every turn). OpenRouter also sends no x-session-id header, as on
- * 0.85.1. Anthropic's catalog lists server-side fallback models for some Claude models; AgentX never
- * lets another model answer for the one requested, so they are dropped (spec 054 FR-003).
- */
-function requestCompat(provider: KeyedModelProvider, compat: unknown) {
-  if (provider === "openrouter") return { ...(compat as OpenAICompletionsCompat | undefined), sendSessionAffinityHeaders: false, supportsMidConvoSystemMessages: false };
-  if (provider === "anthropic") {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the server-side fallbacks
-    const { allowedFallbackModels: _fallbacks, ...rest } = (compat ?? {}) as AnthropicMessagesCompat;
-    return { ...rest, supportsMidConvoSystemMessages: false };
-  }
-  return { ...(compat as OpenAIResponsesCompat | undefined), supportsMidConvoSystemMessages: false };
 }
 
 function upstreamStream(provider: KeyedModelProvider, model: Model<Api>, context: TranscriptContext, options: SimpleStreamOptions, routing: Record<string, unknown> | undefined): AssistantMessageEventStream {
