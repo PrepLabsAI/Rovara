@@ -3,6 +3,8 @@ import { lstat, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { z } from "zod";
 import { E2EApplicationEvidenceRefSchema, ProjectSetupRunnerToolchainSchema, canonicalJson, type E2EApplicationEvidenceRef, type E2ERunBinding } from "@agentx/contracts";
+import { bindMockLedgers, type CaseWindow, type ParsedMockLedger } from "./mock-ledger.js";
+import { buildMockProofs } from "./mock-proofs.js";
 import type { E2EActualApplicationRun, E2EActualApplicationShard } from "../application-collection.js";
 import { compareE2EApplicationPublicList } from "../application-identity.js";
 import { parseE2EApplicationReport } from "../application-report-schema.js";
@@ -34,13 +36,19 @@ export const ExecutorResultFileSchema = z.object({
 export type ExecutorResultFile = z.infer<typeof ExecutorResultFileSchema>;
 
 type OutputEvidence = Readonly<{ ref: E2EApplicationEvidenceRef; bytes: Uint8Array; kind: string }>;
+/** One action of one case as the executor's ledger recorded it: when it began and, if it did, when it finished. */
+export type ExecutorActionWindow = Readonly<{ caseId: string; actionIndex: number; beganAt: string; finishedAt: string | null }>;
 type ShardFiles = Readonly<{ list: Uint8Array; listStderr: Uint8Array; report: Uint8Array; runStderr: Uint8Array; runStart: Uint8Array }>;
 /** Everything the host takes out of the executor's out directory, read once, before the directory is removed. */
 export type ExecutorOutputSnapshot = Readonly<{ result: ExecutorResultFile; shardFiles: ReadonlyMap<string, ShardFiles>; evidence: readonly OutputEvidence[];
   /** The protected facts the ledger persisted for the collector's oracle: one observation binding per case, one binding per approved assertion asset. */
   observationBindings: readonly E2EApplicationObservationBinding[]; assertionAssets: readonly E2EApplicationAssertionAssetBinding[];
   /** The merged report for a single-shard run, kept so the host can hand it to the lifecycle as the raw report. */
-  reportBytes: Uint8Array | null }>;
+  reportBytes: Uint8Array | null;
+  /** The executor's action windows, which bind a mock ledger line to the case that was running when it was recorded. */
+  actionWindows?: readonly ExecutorActionWindow[];
+  /** The ledgers of the run's mocks and sinkhole, read by the host after it stopped them; absent for a run that had none. */
+  mockLedgers?: readonly ParsedMockLedger[] }>;
 
 /** A regular, non-link file below `root`, read in full and never past the bound. */
 async function readRegular(root: string, relativePath: string, budget: { total: number }): Promise<Uint8Array> {
@@ -61,6 +69,10 @@ async function readRegular(root: string, relativePath: string, budget: { total: 
 
 const MAX_BINDING_FILES = 64;
 const MAX_ASSET_FILES = 128;
+const actionWindowSchema = z.object({ schemaVersion: z.literal("e2e-executor-action-window/v1"), state: z.enum(["open", "finished"]), actionId: z.string().max(200),
+  caseId: z.string().min(1).max(160), actionIndex: z.number().int().min(0).max(99), actionDigest: z.string().regex(/^[a-f0-9]{64}$/),
+  beganAt: z.string().datetime(), finishedAt: z.string().datetime().optional() }).strict();
+const MAX_WINDOW_FILES = 2_048;
 const bindingFileSchema = z.object({ schemaVersion: z.string(), caseId: z.string().min(1).max(160), sha256: z.string().regex(/^[a-f0-9]{64}$/), binding: z.unknown() }).strict();
 
 /** The executor's result must describe a finished run of exactly this group before anything else in its out directory is trusted. */
@@ -136,6 +148,20 @@ export async function snapshotExecutorOutput(outDir: string, result: ExecutorRes
     (value) => E2EApplicationAssertionAssetBindingSchema.parse(value));
   return Object.freeze({ result, shardFiles, evidence: Object.freeze(evidence), observationBindings: Object.freeze(observationBindings),
     assertionAssets: Object.freeze(assertionAssets), reportBytes });
+}
+
+/** The executor's action windows, read once the executor is done: they bind a mock ledger line to the case that was running when it was recorded. */
+export async function readExecutorActionWindows(outDir: string): Promise<readonly ExecutorActionWindow[]> {
+  const budget = { total: 0 };
+  await requireRealDirectory(join(outDir, "observations"), "observations");
+  const windowNames = (await readdir(join(outDir, "observations"))).filter((name) => /^action-[A-Za-z0-9._-]+-\d{1,2}\.json$/.test(name)).sort();
+  if (windowNames.length > MAX_WINDOW_FILES) throw new Error("executor output holds more action windows than the host reads");
+  const actionWindows: ExecutorActionWindow[] = [];
+  for (const name of windowNames) {
+    const row = actionWindowSchema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(await readRegular(outDir, `observations/${name}`, budget))));
+    actionWindows.push(Object.freeze({ caseId: row.caseId, actionIndex: row.actionIndex, beganAt: row.beganAt, finishedAt: row.state === "finished" ? row.finishedAt ?? null : null }));
+  }
+  return Object.freeze(actionWindows);
 }
 
 /** The identity of what the host owns for one run, so a collector can recompute it without asking the host. */
@@ -239,13 +265,33 @@ export function assembleExecutorActualRun(input: { snapshot: ExecutorOutputSnaps
   // The runtime writes each case capture with cleanup "pending": only the host can say the run's resources are gone. Once cleanup is
   // confirmed it re-seals each capture under the same artifact id, so the closure binds the new bytes.
   const sealedCaptures = new Map<string, OutputEvidence>();
-  const captures = snapshot.evidence.filter((item) => item.kind === "case-capture").map((item) => {
-    const original = E2EApplicationCaseCaptureSchema.parse(JSON.parse(decode(item.bytes)));
+  const originalCaptures = snapshot.evidence.filter((item) => item.kind === "case-capture").map((item) => ({ item, original: E2EApplicationCaseCaptureSchema.parse(JSON.parse(decode(item.bytes))) }));
+  const launches = result.shards.map((row) => ({ shardId: row.shardId, launchId: row.launchId, upstreamRunId: row.upstreamRunId ?? "" }))
+    .sort((a, b) => compare(a.shardId, b.shardId));
+  // What the mocks recorded belongs to the case that was running at the time: the span from the case's first action to its end (its terminal moment, since a call an action started
+  // can land after the action itself returned). A call that fits no case is never ignored (see `bindMockLedgers`).
+  const caseWindows: CaseWindow[] = originalCaptures.flatMap(({ original }) => {
+    const own = (snapshot.actionWindows ?? []).filter((window) => window.caseId === original.caseId);
+    if (own.length === 0) return [];
+    const ends = [...own.map((window) => Date.parse(window.finishedAt ?? result.finishedAt)), Date.parse(original.terminal.at)];
+    return [{ caseId: original.caseId, startMs: Math.min(...own.map((window) => Date.parse(window.beganAt))), endMs: Math.max(...ends) }];
+  });
+  const mockProofs = buildMockProofs({ runId: binding.runId, mockManifestDigest: binding.mockManifestDigest, lifecycleId, context, producer, proof,
+    cases: originalCaptures.map(({ original }) => ({ caseId: original.caseId, shardId: original.shardId, upstreamRunId: launches.find((launch) => launch.shardId === original.shardId)?.upstreamRunId ?? "" })),
+    bound: bindMockLedgers({ ledgers: snapshot.mockLedgers ?? [], windows: caseWindows, caseIds: originalCaptures.map(({ original }) => original.caseId), fallbackAt: observedAt }) });
+  const declaredMocksOf = (caseId: string) => {
+    const targetId = compiled.expectedCases.find((expected) => expected.caseId === caseId)?.targetId;
+    return [...new Set(compiled.group.mocks.filter((mock) => mock.requestedTargetId === targetId && mock.effectiveTargetId === targetId && mock.kind === "api" && mock.apiFixture !== undefined)
+      .map((mock) => mock.componentId))].sort();
+  };
+  const captures = originalCaptures.map(({ item, original }) => {
     // The in-run frame names the compiled test and the scenario's component list as coverage; the collector derives coverage from the
     // observations themselves and rejects anything else, so the sealed frame states it that way: the application ran, and the
-    // behaviors not exercised are the assertions that did not pass.
+    // behaviors not exercised are the assertions that did not pass. The mocks the case declared are the approved mocks of its target, and the ones it
+    // observed are those its application really called, from the ledgers of the mocks themselves.
     const coverage = { ...original.coverage, executedCandidateParts: original.coverage.observedScope === "source" ? [] : [original.applicationId],
-      unexercisedBehaviors: original.assertions.filter((assertion) => assertion.outcome !== "passed").map((assertion) => assertion.digest) };
+      unexercisedBehaviors: original.assertions.filter((assertion) => assertion.outcome !== "passed").map((assertion) => assertion.digest),
+      mockedComponentIds: declaredMocksOf(original.caseId), observedMockedComponentIds: [...(mockProofs.observedComponentsByCase.get(original.caseId) ?? [])] };
     // The sealed frame is a new artifact and lists the executor's original capture among its artifacts, so the original bytes stay in the
     // closure and an auditor can compare the two: only `cleanup` and `coverage` differ.
     const capture = E2EApplicationCaseCaptureSchema.parse({ ...original, coverage, cleanup: "confirmed", artifacts: [...original.artifacts, item.ref] });
@@ -258,14 +304,13 @@ export function assembleExecutorActualRun(input: { snapshot: ExecutorOutputSnaps
   const cleanupFrame = proof({ schemaVersion: "e2e-application-owned-cleanup/v1", context, phase: "after-owned-close", cleanup: "confirmed", confirmed: true,
     serverListening: false, ownedResourceInventoryDigest: dockerOwnedResourceInventoryDigest(binding.runId), ownedCleanupReceiptRefs: [cleanupReceipt.ref] },
   "application/json", `rovara-cleanup-frame-${binding.runId}`);
-  const launches = result.shards.map((row) => ({ shardId: row.shardId, launchId: row.launchId, upstreamRunId: row.upstreamRunId ?? "" }))
-    .sort((a, b) => compare(a.shardId, b.shardId));
   const receiptFrame = proof({ schemaVersion: "e2e-application-supervisor-receipt/v1", context, launches,
     caseCaptures: captures.map(({ capture, item }) => ({ caseId: capture.caseId, shardId: capture.shardId, ref: item.ref })).sort((a, b) => compare(a.caseId, b.caseId)),
-    mockConsumptions: [], cleanupRef: cleanupFrame.ref, additionalSupervisorReceiptRefs: [cleanupReceipt.ref] },
+    mockConsumptions: mockProofs.consumptionEntries, ...(mockProofs.unmockedEntries.length > 0 ? { unmockedCalls: mockProofs.unmockedEntries } : {}),
+    cleanupRef: cleanupFrame.ref, additionalSupervisorReceiptRefs: [cleanupReceipt.ref] },
   "application/json", `rovara-supervisor-receipt-${binding.runId}`);
 
-  const evidence: E2EApplicationProofBytes[] = [...snapshot.evidence.map(({ ref, bytes }) => ({ ref, bytes })), ...[...sealedCaptures.values()].map(({ ref, bytes }) => ({ ref, bytes })), cleanupReceipt, cleanupFrame]
+  const evidence: E2EApplicationProofBytes[] = [...snapshot.evidence.map(({ ref, bytes }) => ({ ref, bytes })), ...[...sealedCaptures.values()].map(({ ref, bytes }) => ({ ref, bytes })), ...mockProofs.frames, cleanupReceipt, cleanupFrame]
     .sort((a, b) => compare(a.ref.artifactId, b.ref.artifactId));
   const supervisorReceiptRefs = [receiptFrame.ref, cleanupReceipt.ref].sort((a, b) => compare(a.artifactId, b.artifactId));
   return Object.freeze({ protocol: "e2e-actual-application-run/v1" as const, runnerToolchain: toolchain, shards: Object.freeze(shards),

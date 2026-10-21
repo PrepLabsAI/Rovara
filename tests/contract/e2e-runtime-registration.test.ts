@@ -279,7 +279,7 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
   it("registers nothing for a tampered probe asset digest", async () => {
     const t = await setup();
     const tampered = structuredClone(t.proposal);
-    tampered.probes[5]!.assetDigest = "f".repeat(64);
+    tampered.probes[WEB_API_REQUIRED_PROBES.findIndex((probe) => probe.probeId === "build-imds-denial-v1")]!.assetDigest = "f".repeat(64);
     await expect(registerRuntimeInstallation(t.deps, admin, { proposal: tampered, proposalSha256: "a".repeat(64) })).rejects.toThrow(/probe-asset-digest-mismatch:build-imds-denial-v1/);
     expect(t.transactions).toHaveLength(0);
   });
@@ -339,7 +339,7 @@ describe("web/API runtime registration (linux-arm64-web-api-v1)", () => {
 
     it("registers the untampered proposal the production runner's evidence produces", async () => {
       const t = await setup();
-      expect(t.proposal.probes.map((probe) => probe.evidence.kind)).toEqual(["collected", "collected", "collected", "collected", "collected", "unavailable", "unavailable", "collected", "collected"]);
+      expect(t.proposal.probes.map((probe) => probe.evidence.kind)).toEqual(["collected", "collected", "collected", "collected", "collected", "collected", "collected", "unavailable", "unavailable", "collected", "collected"]);
       await expect(registerRuntimeInstallation(t.deps, admin, t.request())).resolves.toMatchObject({ featureRevisions: { web: 1, api: 1 } });
     });
 

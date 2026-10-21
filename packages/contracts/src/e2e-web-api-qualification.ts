@@ -4,7 +4,7 @@ import { canonicalJson } from "./canonical-json.js";
 import { RuntimeInstallChallengeSchema, RuntimeInstallManifestSchema, runtimeInstallChallengeDigest, type RuntimeInstallChallenge } from "./runtime-installation.js";
 import { ProjectSetupRunnerEnvironmentSchema, ProjectSetupRunnerToolchainSchema } from "./session.js";
 
-/** How long a web/API challenge lives: nine probe runs, including two builds, take far longer than the five minutes a P0 challenge gets. */
+/** How long a web/API challenge lives: eleven probe runs, including two builds, take far longer than the five minutes a P0 challenge gets. */
 export const WEB_API_CHALLENGE_LIFETIME_MS = 60 * 60_000;
 
 /** The web/API application runtime profile and the one scope its qualification proves. */
@@ -17,7 +17,9 @@ export const WEB_API_IMDS_DENIAL_EXIT_CODE = 7 as const;
 type ExpectedFailureCause =
   | Readonly<{ kind: "assertion"; assertionKind: "csv" | "http-status" }>
   | Readonly<{ kind: "blocked-host"; host: string }>
-  | Readonly<{ kind: "build-failed" }>;
+  | Readonly<{ kind: "build-failed" }>
+  /** The case is UNKNOWN because the app called an origin no approved mock matched: here, exactly one call, to the sinkhole. */
+  | Readonly<{ kind: "unmocked-external-call" }>;
 type RequiredProbe = Readonly<{ probeId: string; /** sha256 of the installed probe asset file; a test keeps it equal to the shipped bytes. */ assetDigest: string; kind: "web" | "api" | "build"; expectedOutcome: "PASS" | "EXPECTED_FAILURE"; cause: ExpectedFailureCause | null;
   /** sha256 of the canonical scenario the probe runs through the real collector; null for the build probe. A test recomputes it from the production plan builder. */
   scenarioDigest: string | null;
@@ -26,7 +28,9 @@ type RequiredProbe = Readonly<{ probeId: string; /** sha256 of the installed pro
   /** sha256 of the canonical build command the probe runs; null unless the probe is a build probe. A test recomputes it from the installed probe asset. */
   buildCommandDigest: string | null;
   /** True when the probe's retained evidence must carry the executor's Chromium sandbox attestation, and the registrar re-judges it. */
-  chromiumSandbox?: true }>;
+  chromiumSandbox?: true;
+  /** Present on the probes that exercise an external-origin mock: the observation then also carries the mock consumptions and unmocked calls the collector derived. */
+  mock?: true }>;
 
 /** Where each probe's asset sits in the installed-runtime manifest, which therefore proves the installed bytes. */
 export const webApiProbeAssetManifestPath = (probeId: string) => `packages/verifier/assets/application-runtime-v1/probes/${probeId}.json`;
@@ -39,6 +43,10 @@ const requiredProbes: RequiredProbe[] = [
   { probeId: "api-state-positive-v1", assetDigest: "5fa681bbcf60bdcbee9804d8bfe9bbd56c60d6a35925b5f9e929c42d9773cbc7", kind: "api", expectedOutcome: "PASS", cause: null, bundleDigest: "033b193aaa1ab0ed459770bf2a91141b33b5c247d6e23ec713630a0f95b74dc4", scenarioDigest: "fd333864038602a5788fbca3324f27f3e2d38cee12b4c8de3b5a0385fc4097dc", buildCommandDigest: null },
   // The app, not the browser, makes this request, so the executor cannot record the blocked host; the dependency check fails instead.
   { probeId: "api-egress-denial-v1", assetDigest: "ccfebb5c1e33d3f5a5d80d99cb51d42b29f2c6bd02ad76f81a746684276ade47", kind: "api", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "assertion", assertionKind: "http-status" }, bundleDigest: "da196373fe0a42577122bf6f37f90371195fc631dda6cb2bf31279d68f261f71", scenarioDigest: "f44a7c49ba550068840d67e45a431575751e83bd254bbd2c53b9159ab7696975", buildCommandDigest: null },
+  // M1.3: the app reads its inventory from an approved in-network mock of the declared origin. The probe passes only when the collector shows exactly one `success` consumption and no unmocked call.
+  { probeId: "web-mock-origin-v1", assetDigest: "2db0bc780233991363864e2005919346c67e5dab966653dd1c81846032757d59", kind: "web", expectedOutcome: "PASS", cause: null, bundleDigest: "730b2a838689d74e7afba14485abdce51e63ad32e7266efb48e73fd62d6a7640", scenarioDigest: "3d0ed85074fc791112186c4624deb2a15f16ba8eda23c1ad9caad96261095cf9", buildCommandDigest: null, mock: true },
+  // M1.3: the app calls its inventory origin, which has no approved mock, so the call lands in the sinkhole. The case is UNKNOWN (never PASS, never FAILED) with exactly one recorded sinkhole call.
+  { probeId: "web-unmocked-call-v1", assetDigest: "2e575d450f022985921b166df12a9c585bdf64d4abe97cd7260c3e95b78acbcf", kind: "web", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "unmocked-external-call" }, bundleDigest: "730b2a838689d74e7afba14485abdce51e63ad32e7266efb48e73fd62d6a7640", scenarioDigest: "3d0ed85074fc791112186c4624deb2a15f16ba8eda23c1ad9caad96261095cf9", buildCommandDigest: null, mock: true },
   { probeId: "build-imds-denial-v1", assetDigest: "c6494ae44cf33f9824944dfe6606d82ac6c3a0240e355508d03785361adc23ac", kind: "build", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "build-failed" }, bundleDigest: null, scenarioDigest: null, buildCommandDigest: "e8c2c552f1e011563ceeb18fc08bc03dd5e51a142a2e1e6e9327d8422ac4f6cd" },
   // The build container may reach the internet and nothing else: the gateway (the host) and a private address both time out, which a firewall DROP does and a missing rule does not.
   { probeId: "build-lateral-denial-v1", assetDigest: "6dea07ac3b128be2226c988534c1c5fbb6715939dc77dbd8302156307c33a755", kind: "build", expectedOutcome: "EXPECTED_FAILURE", cause: { kind: "build-failed" }, bundleDigest: null, scenarioDigest: null, buildCommandDigest: "03b9465809bcef8d6bfeb409a89e68b618275e1ed3a19201018e9f9cd9e74c9e" },
@@ -57,7 +65,7 @@ const digest = z.string().regex(/^[a-f0-9]{64}$/);
 /** Where the qualification app (the fixture every probe runs against) sits in the installed-runtime manifest, which therefore proves its installed bytes. */
 export const WEB_API_QUALIFICATION_APP_MANIFEST_PREFIX = "packages/verifier/assets/qualification-app/" as const;
 /** The digest of the installed qualification app tree; a test keeps it equal to the shipped files. */
-export const WEB_API_QUALIFICATION_APP_TREE_DIGEST = "ccb78d0bfa3dbbab5b19f6c2c5c2a496977c022e3d2397b15bcf73c127edad14";
+export const WEB_API_QUALIFICATION_APP_TREE_DIGEST = "2937d3e8e5a0cdec55c2e9bffd69ec943edf6dcee6970ad37a54be409155a26d";
 /** The digest of a file tree given as app-relative paths and file digests, independent of listing order. */
 export function webApiQualificationAppTreeDigest(files: readonly Readonly<{ path: string; sha256: string }>[]): string {
   const sorted = files.map((file) => ({ path: file.path, sha256: file.sha256 })).sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0));
@@ -74,6 +82,10 @@ export const WebApiProbeObservationSchema = z.object({
   /** The hosts the executor recorded as blocked in blocked-requests.json. */
   blockedHosts: z.array(z.string().min(1).max(253)).max(64),
   buildExitCode: z.number().int().min(0).max(255).nullable(),
+  /** Only on the probes that pin `mock`: how many times each fixture variant was served to the app, as the collector verified them. */
+  mockConsumptions: z.object({ success: z.number().int().min(0).max(1000), refusal: z.number().int().min(0).max(1000), invalidData: z.number().int().min(0).max(1000) }).strict().optional(),
+  /** Only on the probes that pin `mock`: the calls no approved mock matched, split into calls to the sinkhole (no mock exists for the origin) and calls a mock refused. */
+  unmockedCalls: z.object({ sinkhole: z.number().int().min(0).max(100_000), mocked: z.number().int().min(0).max(100_000) }).strict().optional(),
   attempts: z.number().int().min(1).max(100),
   skipped: z.number().int().min(0).max(1000),
   flaky: z.number().int().min(0).max(1000),
@@ -138,10 +150,22 @@ export function evaluateWebApiProbeObservation(probeId: string, observationInput
   if (observation.flaky > 0) return { ok: false, reason: `probe-flaky:${probeId}` };
   if (observation.attempts !== 1) return { ok: false, reason: `probe-retried:${probeId}` };
   const passed = observation.collectorStatus === "PASS" && observation.runUnavailableReason === null;
-  if (probe.expectedOutcome === "PASS") return passed ? { ok: true } : { ok: false, reason: `positive-probe-failed:${probeId}` };
+  const consumptions = observation.mockConsumptions; const unmocked = observation.unmockedCalls;
+  const noConsumption = consumptions !== undefined && consumptions.success === 0 && consumptions.refusal === 0 && consumptions.invalidData === 0;
+  if (probe.expectedOutcome === "PASS") {
+    // A mock probe passes only on exactly one `success` consumption and not one call that no mock matched.
+    const mocked = probe.mock !== true || (consumptions !== undefined && consumptions.success === 1 && consumptions.refusal === 0 && consumptions.invalidData === 0
+      && unmocked !== undefined && unmocked.sinkhole === 0 && unmocked.mocked === 0);
+    return passed && mocked ? { ok: true } : { ok: false, reason: `positive-probe-failed:${probeId}` };
+  }
   if (passed) return { ok: false, reason: `negative-probe-passed:${probeId}` };
   const cause = probe.cause!;
   const wrongCause = { ok: false as const, reason: `probe-wrong-cause:${probeId}` };
+  if (cause.kind === "unmocked-external-call") {
+    // UNKNOWN, with the run itself available, one call recorded in the sinkhole and nothing else served or refused. A failed assertion is not the cause the probe pins.
+    return observation.collectorStatus === "UNKNOWN" && observation.runUnavailableReason === null
+      && unmocked !== undefined && unmocked.sinkhole === 1 && unmocked.mocked === 0 && noConsumption ? { ok: true } : wrongCause;
+  }
   if (cause.kind === "assertion") {
     return observation.collectorStatus === "FAILED" && observation.runUnavailableReason === null
       && sameList(observation.failedAssertionKinds, [cause.assertionKind]) ? { ok: true } : wrongCause;

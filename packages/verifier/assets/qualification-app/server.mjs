@@ -9,6 +9,7 @@ const sha = (value) => createHash("sha256").update(value, "utf8").digest();
 const json = (status, value, headers = {}) => ({ status, headers: { "content-type": "application/json; charset=utf-8", ...headers }, body: JSON.stringify(value) });
 const csvCell = (value) => { const text = String(value); return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text; };
 const csv = (rows) => ["id,customer,total,state", ...rows.map((row) => [row.id, row.customer, row.total, row.state].map(csvCell).join(","))].join("\r\n") + "\r\n";
+const csvWithInventory = (rows) => ["id,customer,total,state,inventory", ...rows.map((row) => [row.id, row.customer, row.total, row.state, row.inventory].map(csvCell).join(","))].join("\r\n") + "\r\n";
 const cookieValue = (header, name) => String(header ?? "").split(";").map((part) => part.trim()).find((part) => part.startsWith(`${name}=`))?.slice(name.length + 1) ?? null;
 
 function validDefect(value) {
@@ -19,9 +20,11 @@ function validDefect(value) {
     "viewer-access/v1": ["defectId", "mutation"],
     "state-contract/v1": ["defectId", "mutation", "version"],
     "dependency-route/v1": ["defectId", "mutation", "path"],
+    "swallow-dependency/v1": ["defectId", "mutation"],
   };
   const expectedMutation = { "extra-order/v1": "append-order", "viewer-access/v1": "allow-viewer-export",
-    "state-contract/v1": "change-state-version", "dependency-route/v1": "request-wrong-health-path" };
+    "state-contract/v1": "change-state-version", "dependency-route/v1": "request-wrong-health-path",
+    "swallow-dependency/v1": "ignore-dependency-failure" };
   if (!allowed[value.defectId] || expectedMutation[value.defectId] !== value.mutation
     || Object.keys(value).some((key) => !allowed[value.defectId].includes(key))) throw new Error("fixture defect is not in the fixed causal defect registry");
   if (value.defectId === "extra-order/v1" && (!value.order || value.order.id !== "a3" || value.order.tenantId !== "tenant-a" || value.order.state !== "ready")) throw new Error("extra-order defect does not bind the fixed out-of-range row");
@@ -110,6 +113,18 @@ export function createOrdersApplication({ seed, orders, defect: rawDefect = null
       if (defect?.defectId === "extra-order/v1") rows = [...rows, defect.order];
       return { status: 200, headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="orders.csv"' }, body: csv(rows) };
     }
+    if (method === "GET" && url.pathname === "/api/orders-inventory.csv") {
+      const account = accountFor(request);
+      if (!account) return json(401, { error: "authentication required" });
+      if (account.role !== "owner") return json(403, { error: "owner role required" });
+      // One call to the external inventory origin per order; an order the service refuses is shown as unavailable.
+      const rows = [];
+      for (const order of orders.orders.filter((item) => item.tenantId === account.tenantId)) {
+        const result = await fetchDependency("inventory-v1", `/v1/stock?orderId=${encodeURIComponent(order.id)}`, request);
+        rows.push({ ...order, inventory: result.status === 200 && typeof result.body?.status === "string" ? result.body.status : "unavailable" });
+      }
+      return { status: 200, headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": 'attachment; filename="orders-inventory.csv"' }, body: csvWithInventory(rows) };
+    }
     if (method === "GET" && url.pathname === "/api/orders/state") {
       const account = accountFor(request);
       if (!account) return json(401, { error: "authentication required" });
@@ -124,12 +139,18 @@ export function createOrdersApplication({ seed, orders, defect: rawDefect = null
       if (tenantPath[1] !== account.tenantId) return json(403, { error: "tenant access refused" });
       return json(200, { orders: orders.orders.filter((item) => item.tenantId === account.tenantId).map(({ id, customer, total, state }) => ({ id, customer, total, state })) });
     }
-    if (method === "GET" && url.pathname === "/api/inventory/status") {
+    if (method === "GET" && (url.pathname === "/api/inventory/status" || url.pathname === "/inventory")) {
       const account = accountFor(request);
       if (!account) return json(401, { error: "authentication required" });
-      const path = defect?.defectId === "dependency-route/v1" ? defect.path : "/health";
+      // The inventory service is an external origin: the approved mock answers `GET /v1/stock?orderId=a1` with the order's stock status.
+      const path = defect?.defectId === "dependency-route/v1" ? defect.path : "/v1/stock?orderId=a1";
       const result = await fetchDependency("inventory-v1", path, request);
-      return result.status === 200 ? json(200, result.body) : json(502, { error: "inventory dependency unavailable" });
+      // The seeded defect hides a failed dependency behind a plausible answer, so the page looks right while the call it made was never approved.
+      const stock = result.status === 200 ? result.body : defect?.defectId === "swallow-dependency/v1" ? { status: "in-stock" } : null;
+      if (url.pathname === "/api/inventory/status") return stock === null ? json(502, { error: "inventory dependency unavailable" }) : json(200, stock);
+      // The page is a navigation of its own, so the browser has the answer when the click that asked for it returns.
+      const shown = stock === null ? "unavailable" : String(stock.status ?? "unavailable").replace(/[^A-Za-z0-9 _-]/g, "");
+      return { status: 200, headers: { "content-type": "text/html; charset=utf-8" }, body: `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Inventory</title></head><body><main><h1>Inventory</h1><p data-testid="inventory-status">${shown}</p></main></body></html>` };
     }
     return json(404, { error: "not found" });
   }
@@ -149,8 +170,10 @@ export function startOrdersServer() {
   const defect = readOptionalJson(process.env.ORDERS_TEST_DEFECT_FILE);
   const app = createOrdersApplication({ seed, orders: fixtureOrders, defect,
     fetchDependency: async (originRef, path) => {
-      if (originRef !== "inventory-v1" || path !== "/health" || !process.env.INVENTORY_ORIGIN) return { status: 503, body: {} };
-      const response = await fetch(new URL(path, process.env.INVENTORY_ORIGIN));
+      // `INVENTORY_ORIGIN` is set by the host to this run's own mock (or sinkhole); `FIXTURE_INVENTORY_ORIGIN` lets an egress test aim the app at an outside host.
+      const origin = process.env.FIXTURE_INVENTORY_ORIGIN ?? process.env.INVENTORY_ORIGIN;
+      if (originRef !== "inventory-v1" || !path.startsWith("/") || !origin) return { status: 503, body: {} };
+      const response = await fetch(new URL(path, origin), { signal: AbortSignal.timeout(5_000) });
       let body = {}; try { body = await response.json(); } catch { /* malformed dependency remains unavailable */ }
       return { status: response.status, body };
     },

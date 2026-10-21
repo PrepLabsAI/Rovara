@@ -32,6 +32,22 @@ describe("deriving a probe's observation from its retained evidence", () => {
     expect(facts["build-imds-denial-v1"]).toEqual({ ...clean, collectorStatus: null, runUnavailableReason: "build-failed", buildExitCode: 7, failedAssertionKinds: [], blockedHosts: [] });
     expect(facts["build-lateral-denial-v1"]).toEqual({ ...clean, collectorStatus: null, runUnavailableReason: "build-failed", buildExitCode: 7, failedAssertionKinds: [], blockedHosts: [] });
     expect(facts["app-host-denial-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [] });
+    // The mock probes also carry what the verified mock evidence shows; no other probe does, so their recorded observations stay as they were.
+    expect(facts["web-mock-origin-v1"]).toEqual({ ...clean, collectorStatus: "PASS", failedAssertionKinds: [], blockedHosts: [],
+      mockConsumptions: { success: 1, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 0, mocked: 0 } });
+    expect(facts["web-unmocked-call-v1"]).toEqual({ ...clean, collectorStatus: "UNKNOWN", failedAssertionKinds: [], blockedHosts: [],
+      mockConsumptions: { success: 0, refusal: 0, invalidData: 0 }, unmockedCalls: { sinkhole: 1, mocked: 0 } });
+    for (const probe of WEB_API_REQUIRED_PROBES.filter((item) => item.mock !== true)) expect(Object.keys(facts[probe.probeId]!)).not.toContain("mockConsumptions");
+  });
+
+  it("derives the facts of the mock probes from the retained bytes alone, so a record can claim nothing else", () => {
+    for (const probeId of ["web-mock-origin-v1", "web-unmocked-call-v1"]) {
+      const run = fixtureProbeRuns()[probeId]!;
+      expect(verifyWebApiProbeRecord({ challenge, probeId, observation: run.observation, evidence: run.evidence })).toEqual({ ok: true });
+      for (const lie of [{ mockConsumptions: { success: 2, refusal: 0, invalidData: 0 } }, { unmockedCalls: { sinkhole: 5, mocked: 0 } }, { collectorStatus: "FAILED" as const }]) {
+        expect(verifyWebApiProbeRecord({ challenge, probeId, observation: { ...run.observation, ...lie }, evidence: run.evidence })).toEqual({ ok: false, reason: `probe-evidence-mismatch:${probeId}` });
+      }
+    }
   });
 
   it("agrees with the observations the committed runs carry, and a record's claim must be exactly that", () => {

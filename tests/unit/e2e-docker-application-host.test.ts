@@ -12,6 +12,7 @@ import { executorContainerArgs } from "../../packages/verifier/src/host/executor
 import { installedExecutorSeccompProfilePath } from "../../packages/verifier/src/host/executor-seccomp.js";
 import { createOrdersExecutorPlan, type OrdersExecutorFixture } from "../support/e2e-orders-executor-fixture.js";
 import { FakeDockerCli, writeExecutorOutput } from "../support/fake-docker-cli.js";
+import { MOCK_UNMOCKED_RESPONSE_DIGEST, mockRequestDigest, mockResponseDigest } from "../../packages/verifier/src/executor/mock-server.js";
 
 const roots: string[] = [];
 afterEach(async () => { await Promise.all(roots.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -22,9 +23,9 @@ const sentinel = { protocol: "e2e-actual-application-run/v1", cleanupConfirmed: 
 type Setup = Awaited<ReturnType<typeof setup>>;
 
 async function setup(options: { fake: FakeDockerCli; imagePullRetryMs?: number; deadlineMs?: number; recipeBuild?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeBuild"];
-  recipeStart?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeStart"]; runRoot?: string; role?: "owner" | "viewer";
+  recipeStart?: Parameters<typeof createOrdersExecutorPlan>[0]["recipeStart"]; runRoot?: string; role?: "owner" | "viewer"; probe?: Parameters<typeof createOrdersExecutorPlan>[0]["probe"]; mock?: boolean;
   onRunOutput?: NonNullable<Parameters<typeof createDockerApplicationHost>[0]["onRunOutput"]> }) {
-  const fixture: OrdersExecutorFixture = createOrdersExecutorPlan({ probe: "web-csv-positive-v1", ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}),
+  const fixture: OrdersExecutorFixture = createOrdersExecutorPlan({ probe: options.probe ?? "web-csv-positive-v1", ...(options.mock ? { mock: true } : {}), ...(options.deadlineMs ? { deadlineMs: options.deadlineMs } : {}),
     ...(options.recipeBuild ? { recipeBuild: options.recipeBuild } : {}), ...(options.recipeStart ? { recipeStart: options.recipeStart } : {}), ...(options.role ? { role: options.role } : {}) });
   const source = await temp("candidate-source-"); await writeFile(join(source, "package.json"), "{}");
   const runRoot = options.runRoot ?? await temp("run-root-");
@@ -57,7 +58,8 @@ describe("docker application host", () => {
     expect(result.unavailableReason).toBeNull();
     for (const args of [fake.argsFor("app"), fake.argsFor("executor")]) {
       expect(args).toEqual(expect.arrayContaining(["--network", `rovara-e2e-${s.runId}`, "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--label", `rovara.run=${s.runId}`]));
-      expect(args.join(" ")).not.toMatch(/docker\.sock|AWS_|AGENTX_|PI_|GIT_|TOKEN|SECRET|(^| )-p /);
+      // Variable names are matched at the start of an argument: a declared origin's own name (`ORDERS_API_ORIGIN`) legitimately contains `PI_`.
+      expect(args.join(" ")).not.toMatch(/docker\.sock|(^| )(AWS_|AGENTX_|PI_|GIT_)|TOKEN|SECRET|(^| )-p /);
     }
     expect(fake.argsFor("app")).toEqual(expect.arrayContaining(["--read-only", "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", "--network-alias", "app", "APP_PORT=4317",
       "--memory", "1g", "--memory-swap", "1g", "--pids-limit", "512", "--cpus", "1", "--pull=never"]));
@@ -710,5 +712,153 @@ describe("process docker cli", () => {
     const result = await createProcessDockerCli("/nonexistent/docker").run(["ps"], { signal: signal(), timeoutMs: 1_000 });
     expect(result.code).toBe(127);
     expect(result.stderr).toMatch(/could not run/);
+  });
+});
+
+describe("docker application host: approved external-origin mocks and the sinkhole", () => {
+  const mockedPlan = (fake: FakeDockerCli, extra: Partial<Parameters<typeof setup>[0]> = {}) => setup({ fake, probe: "web-inventory-status-v1", mock: true, ...extra });
+  const envOf = (args: string[]): Record<string, string> => Object.fromEntries(args.flatMap((value, index) => (args[index - 1] === "-e"
+    ? [[value.slice(0, value.indexOf("=")), value.slice(value.indexOf("=") + 1)] as [string, string]] : [])));
+  const lastEnv = (args: string[], name: string) => args.filter((value, index) => args[index - 1] === "-e" && value.startsWith(`${name}=`)).at(-1)?.slice(name.length + 1);
+  const mountsOf = (args: string[]) => args.flatMap((value, index) => (args[index - 1] === "-v" ? [value] : []));
+  const ledgerLine = (variantId: "success" | "refusal" | "invalid-data" | null, ms: number, path = "/v1/stock") => {
+    const variant = { success: { inputValue: "a1", status: 200, body: { status: "in-stock" } }, refusal: { inputValue: "a2", status: 404, body: { error: "unknown order" } },
+      "invalid-data": { inputValue: "b1", status: 200, body: { status: 7 } } };
+    const chosen = variantId === null ? null : variant[variantId];
+    const request = { method: "GET", path, inputValue: chosen?.inputValue ?? null };
+    return { requestId: `req-${ms}`, ...request, variantId, status: chosen?.status ?? 599, requestSha256: mockRequestDigest(request),
+      responseSha256: chosen === null ? MOCK_UNMOCKED_RESPONSE_DIGEST : mockResponseDigest({ status: chosen.status, body: chosen.body }), observedAt: new Date(Date.parse("2026-10-20T12:00:00.000Z") + ms).toISOString() };
+  };
+
+  it("runs one mock container per approved origin on the run's internal network only, hardened, with nothing but its fixture path in its environment", async () => {
+    const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
+    expect((await runWith(s)).unavailableReason).toBeNull();
+    const args = fake.mockArgsFor("inventory-v1");
+    expect(args).toEqual(expect.arrayContaining(["--name", `rovara-mock-${s.runId}-inventory-v1`, "--network", `rovara-e2e-${s.runId}`, "--network-alias", "mock-inventory-v1",
+      "--cap-drop=ALL", "--security-opt", "no-new-privileges", "--read-only", "--user", "node", "--pull=never", "--label", `rovara.run=${s.runId}`,
+      "--memory", "128m", "--memory-swap", "128m", "--pids-limit", "64", "--cpus", "0.5"]));
+    // The run's one internal bridge (rvi...) is the only network, never the build network, never the default bridge.
+    expect(args.filter((value, index) => args[index - 1] === "--network")).toEqual([`rovara-e2e-${s.runId}`]);
+    const internal = fake.calls.find((call) => call[0] === "network" && call[1] === "create" && call.includes("--internal"))!;
+    expect(internal.some((value) => /^com\.docker\.network\.bridge\.name=rvi[a-f0-9]{8}$/.test(value))).toBe(true);
+    expect(internal.at(-1)).toBe(`rovara-e2e-${s.runId}`);
+    // No secrets, no socket, no published port, no profile of its own, nothing that widens the sandbox.
+    expect(args.join(" ")).not.toMatch(/docker\.sock|seccomp|AWS_|AGENTX_|PI_|GIT_|TOKEN|SECRET|--privileged|--cap-add|unconfined|(^| )-p |rovara-e2e-build|--add-host|--dns/);
+    expect(envOf(args)).toEqual({ ROVARA_MOCK_FIXTURE: "/mock/fixture.json" });
+    expect(args.slice(args.indexOf("rovara-executor:test"))).toEqual(["rovara-executor:test", "node", "/opt/agentx/packages/verifier/dist/executor/entry.js", "--mock", "/mock/fixture.json", "--origin", "inventory-v1"]);
+    const mounts = mountsOf(args);
+    expect(mounts).toHaveLength(2);
+    expect(mounts.some((mount) => mount.endsWith(":/mock:ro"))).toBe(true);
+    expect(mounts.some((mount) => mount.endsWith(":/out/mock"))).toBe(true);
+    // The mock sees neither the plan, nor the executor's out directory, nor the app, nor the owned seed.
+    for (const mount of mounts) expect(mount).not.toMatch(/plan\.json|\/app|\/owned|:\/out$|:\/out:/);
+  });
+
+  it("keeps the executor's out directory apart from the mock ledgers, so nothing the executor holds can edit what the mocks recorded", async () => {
+    const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
+    await runWith(s);
+    const ledgerMount = mountsOf(fake.mockArgsFor("inventory-v1")).find((mount) => mount.endsWith(":/out/mock"))!.replace(/:\/out\/mock$/, "");
+    const outMount = fake.mountsFor("executor").find((mount) => mount.endsWith(":/out"))!.replace(/:\/out$/, "");
+    expect(ledgerMount).not.toBe(outMount);
+    expect(ledgerMount.startsWith(`${outMount}/`)).toBe(false);
+    expect(fake.mountsFor("executor").some((mount) => mount.includes("mock"))).toBe(false);
+    expect(fake.mountsFor("app").some((mount) => mount.includes("mock"))).toBe(false);
+  });
+
+  it("starts one sinkhole per run with no fixture and no environment, and points every declared origin that has no approved mock at it", async () => {
+    const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
+    await runWith(s);
+    expect(fake.mockOrigins().sort()).toEqual(["inventory-v1", "unbound"]);
+    const sink = fake.mockArgsFor("unbound");
+    expect(sink).toEqual(expect.arrayContaining(["--name", `rovara-mock-${s.runId}-unbound`, "--network", `rovara-e2e-${s.runId}`, "--network-alias", "mock-unbound", "--read-only", "--cap-drop=ALL", "--user", "node"]));
+    expect(envOf(sink)).toEqual({});
+    expect(mountsOf(sink).some((mount) => mount.endsWith(":/mock:ro"))).toBe(false);
+    expect(sink.slice(sink.indexOf("rovara-executor:test"))).toEqual(["rovara-executor:test", "node", "/opt/agentx/packages/verifier/dist/executor/entry.js", "--mock", "--origin", "unbound"]);
+    const app = fake.argsFor("app");
+    expect(lastEnv(app, "INVENTORY_ORIGIN")).toBe("http://mock-inventory-v1:8080");
+    expect(lastEnv(app, "ORDERS_API_ORIGIN")).toBe("http://mock-unbound:8080");
+  });
+
+  it("points every declared origin at the sinkhole when no mock is approved, and never leaves one unset", async () => {
+    const fake = new FakeDockerCli(); const s = await setup({ fake }); fake.onExecutor = okOutput(s);
+    await runWith(s);
+    expect(fake.mockOrigins()).toEqual(["unbound"]);
+    const app = fake.argsFor("app");
+    expect(lastEnv(app, "INVENTORY_ORIGIN")).toBe("http://mock-unbound:8080");
+    expect(lastEnv(app, "ORDERS_API_ORIGIN")).toBe("http://mock-unbound:8080");
+  });
+
+  it("never lets a recipe variable, or the candidate, point a declared origin at a host that is not one of the run's own mocks", async () => {
+    const fake = new FakeDockerCli(); const s = await mockedPlan(fake, { recipeStart: { env: { INVENTORY_ORIGIN: "https://inventory.example.com", ORDERS_API_ORIGIN: "http://169.254.169.254" } } });
+    fake.onExecutor = okOutput(s);
+    await runWith(s);
+    const app = fake.argsFor("app");
+    for (const name of ["INVENTORY_ORIGIN", "ORDERS_API_ORIGIN"]) {
+      const value = lastEnv(app, name)!;
+      expect(new URL(value).hostname, name).toMatch(/^mock-[A-Za-z0-9-]+$/);
+      expect(new URL(value).port).toBe("8080");
+    }
+    // The host's own value is the last `-e` for the name, which is the one Docker applies.
+    expect(lastEnv(app, "INVENTORY_ORIGIN")).toBe("http://mock-inventory-v1:8080");
+  });
+
+  it("starts the mocks and the sinkhole before the app", async () => {
+    const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
+    await runWith(s);
+    const indexOfRun = (prefix: string) => fake.calls.findIndex((call) => call[0] === "run" && call[call.indexOf("--name") + 1]?.startsWith(prefix));
+    expect(indexOfRun("rovara-mock-")).toBeGreaterThan(-1);
+    expect(indexOfRun("rovara-mock-")).toBeLessThan(indexOfRun("rovara-app-"));
+    const lastMock = Math.max(...fake.calls.flatMap((call, index) => (call[0] === "run" && call[call.indexOf("--name") + 1]?.startsWith("rovara-mock-") ? [index] : [])));
+    expect(lastMock).toBeLessThan(indexOfRun("rovara-app-"));
+  });
+
+  it("is unavailable when a mock or the sinkhole cannot be started, and starts neither the app nor the executor", async () => {
+    const fake = new FakeDockerCli(); fake.mockStartFails = true; const s = await mockedPlan(fake);
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBe("mock-unavailable");
+    expect(fake.calls.some((call) => call[0] === "run" && call[call.indexOf("--name") + 1]?.startsWith("rovara-app-"))).toBe(false);
+    expect(fake.calls.some((call) => call[0] === "run" && call[call.indexOf("--name") + 1]?.startsWith("rovara-executor-"))).toBe(false);
+    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+  });
+
+  it("is unavailable when a mock died while the executor ran: its ledger can no longer show every call, and nothing is read", async () => {
+    for (const origin of ["inventory-v1", "unbound"]) {
+      const fake = new FakeDockerCli(); const s = await mockedPlan(fake);
+      fake.mocksDyingDuringExecutor.add(origin); fake.onExecutor = okOutput(s);
+      const result = await runWith(s);
+      expect(result.unavailableReason, origin).toBe("mock-unavailable");
+      expect(result.actualRun).toBeNull();
+      expect(s.assemble).not.toHaveBeenCalled();
+    }
+  });
+
+  it("stops the mocks once the executor is done, then reads every ledger and hands them to the readback", async () => {
+    const fake = new FakeDockerCli(); const s = await mockedPlan(fake);
+    fake.onExecutor = (outDir) => {
+      okOutput(s)(outDir);
+      fake.appendMockLedger("inventory-v1", [ledgerLine("success", 10), ledgerLine("refusal", 20), ledgerLine(null, 30, "/internal/admin")]);
+      fake.appendMockLedger("unbound", [ledgerLine(null, 40, "/")]);
+    };
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBeNull();
+    const snapshot = (s.assemble.mock.calls[0]![0] as { snapshot: { mockLedgers: { origin: string; componentId: string | null; malformed: number; lines: { kind: string; line: { variantId: string | null } }[] }[] } }).snapshot;
+    expect(snapshot.mockLedgers.map((ledger) => ledger.origin).sort()).toEqual(["inventory-v1", "unbound"]);
+    const inventory = snapshot.mockLedgers.find((ledger) => ledger.origin === "inventory-v1")!;
+    expect(inventory.componentId).toMatch(/^api-schema-[a-f0-9]{12}$/);
+    expect(inventory.lines.map((line) => [line.kind, line.line.variantId])).toEqual([["consumption", "success"], ["consumption", "refusal"], ["unmatched", null]]);
+    expect(inventory.malformed).toBe(0);
+    expect(snapshot.mockLedgers.find((ledger) => ledger.origin === "unbound")!.lines.map((line) => line.kind)).toEqual(["unmatched"]);
+    const killAt = fake.events.findIndex((event) => event.startsWith("kill rovara-mock-"));
+    expect(killAt).toBeGreaterThan(fake.events.indexOf("executor finished"));
+  });
+
+  it("removes the mock and sinkhole containers with the rest of the run, and attests only the run's two core containers", async () => {
+    const fake = new FakeDockerCli(); const s = await mockedPlan(fake); fake.onExecutor = okOutput(s);
+    const result = await runWith(s);
+    expect(result.unavailableReason).toBeNull();
+    expect(fake.liveResources(`rovara.run=${s.runId}`)).toEqual([]);
+    expect(fake.events.filter((event) => event.startsWith("rm rovara-mock-"))).toHaveLength(2);
+    const { cleanup } = s.assemble.mock.calls[0]![0] as { cleanup: { containers: string[] } };
+    expect([...cleanup.containers].sort()).toEqual([...dockerOwnedResourceInventory(s.runId).containers].sort());
   });
 });

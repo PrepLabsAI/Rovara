@@ -162,7 +162,7 @@ describe("application collection contracts", () => {
     const context = { bindingDigest: sha, compiledInventoryDigest: "b".repeat(64), preparedEnvironmentDigest: "c".repeat(64),
       candidateDigest: "d".repeat(64), roundId: uuidB, runId: capture.runId, groupId: "group-a", lifecycleId: capture.lifecycleId,
       observedAt: at, producer };
-    const captureWithMockCoverage = { ...capture, coverage: { ...capture.coverage, mockedComponentIds: ["mock-a"] } };
+    const captureWithMockCoverage = { ...capture, coverage: { ...capture.coverage, mockedComponentIds: ["mock-a"], observedMockedComponentIds: ["mock-a"] } };
     const frame = (artifactId: string, value: unknown) => {
       const body = Buffer.from(canonicalJson(value));
       return { ref: { artifactId, sha256: createHash("sha256").update(body).digest("hex"), byteLength: body.byteLength, mediaType: "application/json" }, bytes: body };

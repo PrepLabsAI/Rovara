@@ -10,8 +10,10 @@ import { validateE2EApplicationExecutionAdmission } from "../application-scenari
 import { createCredentialRedactor } from "../executor/redact.js";
 import { executorContainerArgs } from "./executor-container.js";
 import { verifyExecutorSeccompProfile } from "./executor-seccomp.js";
-import { readRegularFileTail } from "./regular-file.js";
-import { assembleDockerCollectionInputs, assembleExecutorActualRun, readExecutorResultFile, snapshotExecutorOutput, validateExecutorResult,
+import { openRegularFile, readRegularFileTail } from "./regular-file.js";
+import { SINKHOLE_ORIGIN_REF, planApplicationOrigins, mockOriginUrl } from "../application-mocks.js";
+import { SINKHOLE_ORIGIN, parseMockLedger, type ParsedMockLedger } from "./mock-ledger.js";
+import { assembleDockerCollectionInputs, assembleExecutorActualRun, dockerOwnedResourceInventory, readExecutorActionWindows, readExecutorResultFile, snapshotExecutorOutput, validateExecutorResult,
   type DockerCollectionInputs, type ExecutorOutputSnapshot, type ExecutorResultFile } from "./executor-readback.js";
 
 export { dockerOwnedResourceInventory, dockerOwnedResourceInventoryDigest, dockerOwnedCleanupReceipt } from "./executor-readback.js";
@@ -89,10 +91,15 @@ const BLANKED_ENV = ["HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "htt
 const limits = (memory: string, pids: string, cpus: string) => ["--memory", memory, "--memory-swap", memory, "--pids-limit", pids, "--cpus", cpus];
 const IMAGE_PULL_TIMEOUT_MS = 300_000;
 const OWNED_FILE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** The entry point of the executor image, which has a second mode: an approved origin's mock, or the sinkhole. */
+const MOCK_ENTRY_POINT = "/opt/agentx/packages/verifier/dist/executor/entry.js";
+const MOCK_LEDGER_READ_BYTES = 4 * 1024 * 1024;
+const MOCK_READY_POLL_MS = 50;
+const MOCK_READY_TIMEOUT_MS = 15_000;
 const sha = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 
 export type DockerApplicationUnavailableReason = "build-failed" | "app-unhealthy" | "app-exited" | "deadline-exceeded" | "executor-failed"
-  | "executor-result-mismatch" | "cancelled";
+  | "executor-result-mismatch" | "mock-unavailable" | "cancelled";
 
 export type DockerApplicationHostDeps = Readonly<{
   docker: DockerCli;
@@ -221,6 +228,10 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     return profile;
   });
   const portEnv = contract.service?.portEnv ?? "APP_PORT";
+  // Every approved mock is served as the declared origin whose contract it stands for, and every other declared origin is the sinkhole's. A mock no origin claims cannot be placed: no run.
+  const targetIds = new Set(compiled.expectedCases.map((item) => item.targetId));
+  const originPlan = planApplicationOrigins({ originBindings: contract.service?.originBindings ?? [], mocks: compiled.group.mocks.filter((mock) => targetIds.has(mock.requestedTargetId)) });
+  if (originPlan.unplaced.length > 0) throw new Error("docker application host approved mock has no declared origin of its application");
 
   const seccompProfile = verifyExecutorSeccompProfile(deps.executorSeccompProfile);
   const { docker } = deps;
@@ -229,7 +240,12 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
   const appName = `rovara-app-${runId}`;
   const executorName = `rovara-executor-${runId}`;
   const workspace = join(deps.runRoot, runId);
-  const dirs = { app: join(workspace, "app"), owned: join(workspace, "owned"), out: join(workspace, "out"), plan: join(workspace, "plan.json") };
+  // The mock fixtures (read-only to the mocks) and the mock ledgers (written by the mocks alone) sit apart from the executor's out directory, which the executor and the app never see.
+  const dirs = { app: join(workspace, "app"), owned: join(workspace, "owned"), out: join(workspace, "out"), plan: join(workspace, "plan.json"),
+    mock: join(workspace, "mock"), mockOut: join(workspace, "mock-out") };
+  const mockContainers = [...originPlan.mocked.map((item) => ({ origin: item.originRef, componentId: item.componentId, fixture: item.fixture })),
+    { origin: SINKHOLE_ORIGIN, componentId: null as string | null, fixture: null as (typeof originPlan.mocked)[number]["fixture"] | null }]
+    .map((item) => ({ ...item, name: `rovara-mock-${runId}-${item.origin}`, alias: `mock-${item.origin}` }));
   const pollMs = deps.appPollMs ?? 1_000;
   const graceMs = deps.deadlineGraceMs ?? DEFAULT_DEADLINE_GRACE_MS;
   const assemble = deps.assemble ?? assembleExecutorActualRun;
@@ -251,7 +267,7 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     // A throwaway root container with no network and only this directory mounted removes what this user cannot. The executor image
     // is the one image certain to be on the host already.
     await docker.run(["run", "--rm", "--pull=never", "--label", label, "--network", "none", "--user", "0:0", "--entrypoint", "rm", "-v", `${workspace}:/d`, ...BLANKED_ENV,
-      deps.executorImage, "-rf", "/d/app", "/d/out", "/d/owned"],
+      deps.executorImage, "-rf", "/d/app", "/d/out", "/d/owned", "/d/mock", "/d/mock-out"],
       { signal: new AbortController().signal, timeoutMs: ADMIN_TIMEOUT_MS }).catch(() => undefined);
     await rm(workspace, { recursive: true, force: true }).catch(() => undefined);
   }
@@ -343,6 +359,57 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     } catch { return ""; }
   }
 
+  /**
+   * Starts the sinkhole and one mock per approved origin from the executor image on the run's internal network alone. Each gets every capability dropped, a read-only root,
+   * Docker's default seccomp profile, the `node` user, small limits and no environment but the path of its fixture; the fixture is mounted read-only and the ledger directory is the only
+   * writable mount. A container is ready once it has opened its ledger, which it does before it listens. Returns false when any of them cannot be started.
+   */
+  async function startMocks(signal: AbortSignal): Promise<boolean> {
+    for (const mock of mockContainers) {
+      const fixtureArgs = mock.fixture === null ? [] : ["-v", `${join(dirs.mock, mock.origin)}:/mock:ro`, "-e", "ROVARA_MOCK_FIXTURE=/mock/fixture.json"];
+      const created = await docker.run(["run", "-d", "--name", mock.name, "--pull=never", ...hardening(["--network", network, "--network-alias", mock.alias]), "--read-only", "--init",
+        ...limits("128m", "64", "0.5"), "--user", "node", ...fixtureArgs, "-v", `${dirs.mockOut}:/out/mock`, deps.executorImage,
+        "node", MOCK_ENTRY_POINT, "--mock", ...(mock.fixture === null ? [] : ["/mock/fixture.json"]), "--origin", mock.origin], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
+      if (created.code !== 0) { appendBuildLog(`mock container for ${mock.origin} could not be started: ${created.stderr}${created.stdout}\n`); return false; }
+    }
+    const readyBy = Math.min(deps.now() + MOCK_READY_TIMEOUT_MS, deadlineAt);
+    for (const mock of mockContainers) {
+      for (;;) {
+        if (signal.aborted) return false;
+        const opened = await openRegularFile(join(dirs.mockOut, `${mock.origin}.jsonl`)).then(async ({ handle }) => { await handle.close(); return true; }, () => false);
+        if (opened && (await mockRunning(mock.name))) break;
+        if (deps.now() >= readyBy) { appendBuildLog(`mock container for ${mock.origin} did not become ready\n`); return false; }
+        await new Promise<void>((done) => setTimeout(done, MOCK_READY_POLL_MS));
+      }
+    }
+    return true;
+  }
+  async function mockRunning(name: string): Promise<boolean> {
+    const inspected = await admin(["inspect", "-f", "{{.State.Status}} {{.State.ExitCode}}", name]);
+    return inspected.code === 0 && inspected.stdout.trim().startsWith("running");
+  }
+  /**
+   * Called once the executor is done. Every mock and the sinkhole must still be running: one that stopped cannot have recorded every call made to it, and then no ledger is trusted.
+   * They are killed before their ledgers are read, so nothing is appended while it is read, and each ledger is read from an open regular file, bounded.
+   */
+  async function stopMocksAndReadLedgers(): Promise<ParsedMockLedger[] | null> {
+    for (const mock of mockContainers) if (!(await mockRunning(mock.name))) return null;
+    await admin(["kill", ...mockContainers.map((mock) => mock.name)]);
+    const ledgers: ParsedMockLedger[] = [];
+    for (const mock of mockContainers) {
+      try {
+        const { handle, size } = await openRegularFile(join(dirs.mockOut, `${mock.origin}.jsonl`));
+        try {
+          const length = Math.min(size, MOCK_LEDGER_READ_BYTES);
+          const buffer = Buffer.alloc(length);
+          const { bytesRead } = await handle.read(buffer, 0, length, 0);
+          ledgers.push(parseMockLedger({ origin: mock.origin, componentId: mock.componentId, fixture: mock.fixture, bytes: buffer.subarray(0, bytesRead), truncated: size > MOCK_LEDGER_READ_BYTES }));
+        } finally { await handle.close(); }
+      } catch { return null; }
+    }
+    return ledgers;
+  }
+
   async function execute(signal: AbortSignal): Promise<Outcome> {
     // Environment names that look like credentials are refused outright, whatever the recipe schema let through.
     const envNames = [...recipe.build.flatMap((command) => Object.keys(command.env)), ...Object.keys(launch.start.env)];
@@ -369,10 +436,15 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     if (existing && !existing.isDirectory()) await rm(ownedMount, { force: true });
     await mkdir(ownedMount, { recursive: true });
 
+    if (!(await startMocks(signal))) return { kind: "unavailable", reason: signal.aborted ? stopReason() : "mock-unavailable" };
+
     const appCreate = await docker.run(["run", "-d", "--name", appName, "--pull=never", ...hardening(["--network", network, "--network-alias", "app"]), "--read-only",
       "--tmpfs", "/tmp:rw,nosuid,nodev,noexec,size=256m", ...limits("1g", "512", "1"), "--user", "1000:1000", "-v", `${dirs.app}:/app:ro`, "-v", `${dirs.owned}:/app/.owned:ro`, "-w", containerCwd("/app", launch.start.cwd),
       // The recipe's literals come first, so the host's own port and seed variables always win.
       ...Object.entries(launch.start.env).flatMap(([name, value]) => ["-e", `${name}=${value}`]),
+      // Every declared origin is one of the run's own containers: the approved mock when there is one, the sinkhole otherwise. These come after the recipe's literals, so the recipe cannot point an origin elsewhere.
+      ...originPlan.mocked.flatMap((origin) => ["-e", `${origin.envName}=${mockOriginUrl(origin.originRef)}`]),
+      ...originPlan.unbound.flatMap((origin) => ["-e", `${origin.envName}=${mockOriginUrl(SINKHOLE_ORIGIN_REF)}`]),
       "-e", `${portEnv}=${APP_PORT}`, "-e", "ORDERS_TEST_SEED_FILE=/app/.owned/seed.json", ...BLANKED_ENV, deps.buildImage, launch.start.program, ...launch.start.args],
     { signal, timeoutMs: ADMIN_TIMEOUT_MS });
     if (appCreate.code !== 0) { state.appLogTail = redact(`${appCreate.stdout}${appCreate.stderr}`); return { kind: "unavailable", reason: signal.aborted ? stopReason() : "app-exited" }; }
@@ -423,13 +495,15 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       if (result === null) return { kind: "unavailable", reason: "executor-result-mismatch" };
       try { validateExecutorResult(result, binding); } catch { return { kind: "unavailable", reason: "executor-result-mismatch" }; }
       try {
+        const mockLedgers = await stopMocksAndReadLedgers();
+        if (mockLedgers === null) return { kind: "unavailable", reason: signal.aborted ? stopReason() : "mock-unavailable" };
         const snapshot = await snapshotExecutorOutput(dirs.out, result);
         // A run that was stopped (the deadline or the caller) while the output was being read has no result, and nothing is handed out.
         if (signal.aborted) return { kind: "unavailable", reason: stopReason() };
         await deps.onRunOutput?.({ outDir: dirs.out, accountProfileIds: profileIds, containsCredential: (bytes) => state.redactor.contains(bytes) });
         // The hook is advisory evidence capture and never implies a result: a run stopped while it ran is still not one.
         if (signal.aborted) return { kind: "unavailable", reason: stopReason() };
-        return { kind: "completed", exitCode: executor.code, snapshot };
+        return { kind: "completed", exitCode: executor.code, snapshot: { ...snapshot, mockLedgers: Object.freeze(mockLedgers), actionWindows: await readExecutorActionWindows(dirs.out) } };
       } catch { return { kind: "unavailable", reason: "executor-failed" }; }
     }
     // Exit 2 and every other code mean no trustworthy result: nothing from the out directory is read, whatever the reason.
@@ -455,6 +529,12 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       await mkdir(deps.runRoot, { recursive: true, mode: 0o700 });
       await mkdir(workspace, { mode: 0o700 });
       await mkdir(dirs.owned, { mode: 0o755 }); await mkdir(dirs.out, { mode: 0o755 });
+      await mkdir(dirs.mock, { mode: 0o755 }); await mkdir(dirs.mockOut, { mode: 0o755 });
+      for (const mock of mockContainers) {
+        if (mock.fixture === null) continue;
+        await mkdir(join(dirs.mock, mock.origin), { mode: 0o755 });
+        await writeFile(join(dirs.mock, mock.origin, "fixture.json"), JSON.stringify(mock.fixture), { mode: 0o644 });
+      }
       await writeFile(join(dirs.owned, "seed.json"), JSON.stringify(run.seed), { mode: 0o644 });
       for (const [name, content] of Object.entries(deps.ownedFiles ?? {})) {
         if (!OWNED_FILE_NAME.test(name) || name === "seed.json") throw new Error(`owned file name ${name} is not allowed`);
@@ -463,6 +543,8 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
       await writeFile(dirs.plan, JSON.stringify(plan), { mode: 0o644 });
       // The executor runs as an unprivileged user that must write its results here.
       await chmod(dirs.out, 0o777); await chmod(dirs.owned, 0o755);
+      // The mocks run as an unprivileged user that must create their ledgers here.
+      await chmod(dirs.mockOut, 0o777);
       const labels = ["--label", label, "--label", `${ROVARA_CREATED_LABEL}=${state.createdAt}`];
       // Fixed bridge names let the host firewall tell build, app and executor traffic apart; the name of the network stays last.
       const createdBuild = await docker.run(["network", "create", ...labels, "-o", `com.docker.network.bridge.name=${buildBridge}`, buildNetwork], { signal, timeoutMs: ADMIN_TIMEOUT_MS });
@@ -514,7 +596,9 @@ export function createDockerApplicationHost(deps: DockerApplicationHostDeps): Do
     const outcome = state.outcome;
     if (outcome === null) throw new Error("the run was never executed");
     if (outcome.kind === "unavailable") throw new Error(outcome.reason);
-    return { snapshot: outcome.snapshot, cleanup: { removedAt: state.cleanup.removedAt, containers: state.cleanup.containers, network } };
+    // The cleanup receipt a broker derives from the run id names the run's two core containers; the mocks are covered by the label-based confirmation that nothing of the run is left.
+    const core = new Set(dockerOwnedResourceInventory(runId).containers);
+    return { snapshot: outcome.snapshot, cleanup: { removedAt: state.cleanup.removedAt, containers: state.cleanup.containers.filter((name) => core.has(name)), network } };
   }
 
   async function readActualRun(signal: AbortSignal): Promise<E2EActualApplicationRun> {

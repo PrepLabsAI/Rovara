@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { E2E_EXECUTOR_APP_ORIGIN, E2E_EXECUTOR_COMPILED_ORIGIN, E2EApplicationExecutionAdmissionSchema, E2EExecutorPlanSchema, E2ERegisteredRuntimeSchema, E2ERoundSchema, E2ERunBindingSchema,
-  E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, createCandidateManifest, deriveE2EApplicationApprovalBinding, e2eApplicationMetadataSourceRefs,
+  E2EApiMockFixtureSchema, E2ERuntimeCapabilityDescriptorSchema, E2EApplicationPlanIntentSchema, canonicalJson, e2eApiSchemaComponentId, createCandidateManifest, deriveE2EApplicationApprovalBinding, e2eApplicationMetadataSourceRefs,
   e2eAppBuildManifestDigest, e2ePolicyDigest, e2eRuntimeCapabilityDigest, e2eScenarioBundleDigest, inspectE2ERepository, proposeE2ESetup,
   selectE2EApplicationExecutionPlan, type E2EExecutorPlan, type E2EPolicy, type E2EScenario, type E2ESourceSnapshot } from "@agentx/contracts";
 import { compileE2EApplicationScenarios, encodeE2EApplicationExecutionAdmission, type E2ECompiledApplicationSuite } from "../application-scenarios.js";
@@ -43,7 +43,7 @@ function gitTreeSha(entries: readonly { path: string; mode: string; objectId: st
 export const WEB_API_PROBE_APP_ORIGIN = E2E_EXECUTOR_COMPILED_ORIGIN;
 
 /** The scenarios a probe runs. Each is an ordinary source-style scenario that the real compiler turns into a CLI suite. */
-export type WebApiProbeName = "web-csv-positive-v1" | "web-egress-denial-v1" | "api-state-positive-v1" | "api-status-mismatch-v1" | "api-egress-denial-v1";
+export type WebApiProbeName = "web-csv-positive-v1" | "web-egress-denial-v1" | "api-state-positive-v1" | "api-status-mismatch-v1" | "api-egress-denial-v1" | "web-inventory-status-v1" | "web-inventory-csv-v1";
 /** The CSV the positive probe expects, from the installed probe asset (the same bytes the pinned asset digest covers). */
 function csvOracle(): { columns: string[]; rows: string[][] } {
   const oracle = loadWebApiQualificationProbeAssets().find((asset) => asset.probeId === "web-csv-positive-v1")!.probe.oracle;
@@ -64,6 +64,17 @@ function scenarioFor(probe: WebApiProbeName, targetId: string, accountProfileId:
     return { ...common, scenarioId: probe, steps: [{ kind: "navigate" as const, path: "/" }],
       assertions: [{ kind: "text" as const, testId: "network-denial", equals: "reachable" }] };
   }
+  if (probe === "web-inventory-status-v1") {
+    // The page asks the app for an order's stock status, which the app reads from its external inventory origin. The assertion is what a working inventory service shows.
+    return { ...common, scenarioId: probe, steps: [{ kind: "navigate" as const, path: "/" }, { kind: "click" as const, testId: "check-inventory" }],
+      assertions: [{ kind: "text" as const, testId: "inventory-status", equals: "in-stock" }] };
+  }
+  if (probe === "web-inventory-csv-v1") {
+    // The owner's export with each order's stock status from the external inventory origin: the approved mock answers `a1` with in-stock and refuses `a2`, which the export shows as unavailable.
+    return { ...common, scenarioId: probe, steps: [{ kind: "navigate" as const, path: "/" }, { kind: "click" as const, testId: "download-orders-inventory" }],
+      assertions: [{ kind: "csv" as const, downloadName: "orders-inventory.csv", columns: ["id", "customer", "total", "state", "inventory"],
+        rows: [["a1", "Ada", "12.5", "ready", "in-stock"], ["a2", "Grace", "23", "ready", "unavailable"]] }] };
+  }
   if (probe === "api-status-mismatch-v1") {
     // A healthy app answers 200; the scenario claims 503, so this assertion definitively does not hold.
     return { ...common, scenarioId: probe, steps: [{ kind: "request" as const, requestId: "health", path: "/health", method: "GET" as const, body: {} }],
@@ -83,7 +94,7 @@ function registeredRuntime(kind: "web" | "api", profileId: string, now: number) 
   const capabilities = E2ERuntimeCapabilityDescriptorSchema.parse({ schemaVersion: "e2e-runtime-capabilities/v1", profileId, kind,
     host: { os: "linux", arch: "arm64" }, engine: web ? { name: "web", version: "0.14.0", spiVersion: 1 } : { name: ROVARA_HTTP_ENGINE_DESCRIPTOR.name, version: ROVARA_HTTP_ENGINE_DESCRIPTOR.version, spiVersion: 1 },
     runtimeManifestDigest: (web ? "a" : "f").repeat(64), supportedSteps: web ? ["navigate", "click", "fill"] : ["request"],
-    supportedAssertions: web ? ["text", "visible", "csv", "state"] : ["http-status", "state"], evidenceScopes: ["runtime"],
+    supportedAssertions: web ? ["text", "visible", "csv", "state"] : ["http-status", "state"], evidenceScopes: ["runtime"], mocks: ["source-backed-api-fixtures/v1"],
     networkPolicyDigest: "1".repeat(64), ...(web ? { browsers: ["chromium"] } : { protocols: ["http"] }) });
   const binding = { deploymentMode: "ec2-ebs" as const, launchTemplateId: "lt-0123456789abcdef",
     subnets: [{ availabilityZone: "us-east-1a", subnetId: "subnet-0123456789abcdef" }], volumeSizeGiB: 32, volumeType: "gp3" as const };
@@ -127,6 +138,8 @@ export type WebApiProbePlan = Readonly<{
  * `runId` binds the run to a qualification challenge; without it the run id is random.
  */
 export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot: string; runId?: string; /** The workflow task id the run is bound to; default is a fixed qualification label. */ taskId?: string; deadlineMs?: number; healthTimeoutMs?: number; role?: "owner" | "viewer";
+  /** Approve the app's inventory mock (its OpenAPI document and its fixture, from the app tree) for the probe's target. */
+  mock?: boolean;
   /** Build commands for the recipe (the fixture itself builds nothing); the recipe digest is recomputed to match. */
   recipeBuild?: { program: string; args: string[]; cwd: string; timeoutMs: number; env: Record<string, string> }[];
   /** Overrides of the recipe's start command (arguments, timeout, env); the recipe digest is recomputed to match. */
@@ -142,13 +155,21 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     rawPackage.agentx.e2e.recipe = { ...body, recipeDigest: hash(canonicalJson(body)) };
   }
   if (kind === "api") rawPackage.agentx.e2e.targetAccounts = rawPackage.agentx.e2e.targetAccounts.map((item) => ({ ...item, baseTargetId: "api-1" }));
-  const packageBytes = Buffer.from(JSON.stringify(rawPackage));
   const packagePath = kind === "web" ? "apps/orders/package.json" : "server/package.json";
-  const sourceFiles = [{ path: packagePath, bytes: packageBytes }];
+  const appDirectory = dirname(packagePath);
+  // An origin's contract path is repository-relative; the app tree is the repository in the installed asset and sits in `appDirectory` in the plan's snapshot.
+  const service = (rawPackage.agentx.e2e as unknown as { service: { originBindings: { contractPath?: string }[] } }).service;
+  for (const binding of service.originBindings) if (binding.contractPath !== undefined) binding.contractPath = `${appDirectory}/${binding.contractPath}`;
+  const packageBytes = Buffer.from(JSON.stringify(rawPackage));
+  const mockFiles = options.mock ? [
+    { path: `${appDirectory}/inventory/openapi.json`, bytes: readFileSync(join(options.appRoot, "inventory/openapi.json")) },
+    { path: `${appDirectory}/e2e/mocks/inventory-v1.json`, bytes: readFileSync(join(options.appRoot, "e2e/mocks/inventory-v1.json")) },
+  ] : [];
+  const sourceFiles = [{ path: packagePath, bytes: packageBytes }, ...mockFiles];
   const treeSha = gitTreeSha(sourceFiles.map((item) => ({ path: item.path, mode: "100644", objectId: gitBlob(item.bytes) })));
   const candidate = createCandidateManifest([{ repositoryId: "fixture/orders", commitSha: "a".repeat(40), treeSha }]);
   const snapshot: E2ESourceSnapshot = { candidate, commitSha: candidate.repositories[0]!.commitSha, treeSha, treeComplete: true,
-    treePaths: sourceFiles.map((item) => item.path), sources: sourceFiles.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
+    treePaths: sourceFiles.map((item) => item.path).sort(), sources: sourceFiles.map((item) => ({ ...item, sha256: hash(item.bytes), kind: "blob" as const })) };
   const discovery = inspectE2ERepository(snapshot, candidate);
   const accountProfileId = options.role === "viewer" ? "orders-viewer" : "orders-owner";
   const target = discovery.inspection.proposedTargets.find((item) => item.kind === kind && item.accountProfileId === accountProfileId)!;
@@ -160,7 +181,13 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
   const now = new Date(nowMs).toISOString();
   const runtimeProfileId = E2E_EXECUTOR_HOST_PROFILE_ID;
   const runtime = registeredRuntime(kind, runtimeProfileId, nowMs);
-  const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [], mockFixtureRefs: [],
+  // The approved mock: the inventory fixture of the app tree, linked by the inventory origin's contract (its OpenAPI document) to the discovery component of that document.
+  const [openApiFile, fixtureFile] = mockFiles;
+  const mockComponentId = openApiFile === undefined ? "" : e2eApiSchemaComponentId(openApiFile.path);
+  const mockFixture = fixtureFile === undefined ? undefined : E2EApiMockFixtureSchema.parse(JSON.parse(fixtureFile.bytes.toString("utf8")));
+  const intent = E2EApplicationPlanIntentSchema.parse({ schemaVersion: 2, requestedTargetIds: [target.targetId], portableOperationRefs: [],
+    mockFixtureRefs: mockFixture === undefined || fixtureFile === undefined ? [] : [{ componentId: mockComponentId, requestedTargetId: target.targetId, operationId: mockFixture.operationId,
+      sourcePath: fixtureFile.path, sourceSha256: hash(fixtureFile.bytes) }],
     accountContextRefs: [{ applicationId: application.applicationId, profileId: accountProfileId, sourcePath: accountContext.path, sourceSha256: accountContext.sha256 }],
     scenarios: [scenario], semanticExportDeltas: [], applicationRuntimeRefs: [{ targetId: target.targetId, applicationId: application.applicationId,
       recipeDigest: application.recipe!.recipeDigest, sourceRefs: e2eApplicationMetadataSourceRefs(snapshot, application.applicationId, application.sourcePaths),
@@ -184,7 +211,9 @@ export function createWebApiProbePlan(options: { probe: WebApiProbeName; appRoot
     runtimeAvailability: [{ targetId: target.targetId, profileId: runtimeProfileId, connection: "connected" as const,
       approval: "approved" as const, qualification: "qualified" as const, authorizationRevision: "orders-auth-r1" }],
     portableApprovalBinding: { schemaVersion: "portable-approval-binding/v1" as const, planDigest, semanticApproval, operations: [], accountContexts: [],
-      bindingDigest: "0".repeat(64) }, approvedSemanticApproval: semanticApproval, mockableComponents: [] };
+      bindingDigest: "0".repeat(64) }, approvedSemanticApproval: semanticApproval,
+    mockableComponents: mockFixture === undefined || openApiFile === undefined ? [] : [{ componentId: mockComponentId, requestedTargetId: target.targetId, kind: "api" as const,
+      sourceRefs: [{ path: openApiFile.path, sha256: hash(openApiFile.bytes) }], fixture: mockFixture }] };
   selectionInput.portableApprovalBinding.bindingDigest = hash(canonicalJson(Object.fromEntries(Object.entries(selectionInput.portableApprovalBinding)
     .filter(([key]) => key !== "bindingDigest"))));
   const executionPlan = selectE2EApplicationExecutionPlan(selectionInput);
@@ -262,7 +291,9 @@ type BuildCommand = { program: string; args: string[]; cwd: string; timeoutMs: n
 export type WebApiProbeDriver = Readonly<{ probe: WebApiProbeName; /** A defect file under the app's defects directory, placed in the owned mount. */ defect: string | null;
   appEnv: Readonly<Record<string, string>>; recipeBuild: readonly BuildCommand[] | null;
   /** Replaces the arguments of the app's start command (the program stays `node`); null starts the app as its recipe says. */
-  startArgs: readonly string[] | null }>;
+  startArgs: readonly string[] | null;
+  /** True when the probe's plan approves the app's inventory mock for its target; absent means no mock is approved. */
+  mock?: boolean }>;
 
 export function webApiProbeDriver(probeId: string): WebApiProbeDriver {
   switch (probeId) {
@@ -270,7 +301,12 @@ export function webApiProbeDriver(probeId: string): WebApiProbeDriver {
     case "web-csv-negative-v1": return { probe: "web-csv-positive-v1", defect: "extra-order.json", appEnv: {}, recipeBuild: null, startArgs: null };
     case "web-egress-denial-v1": return { probe: "web-egress-denial-v1", defect: null, appEnv: { FIXTURE_EGRESS_PROBE_URL: `https://${WEB_API_EGRESS_PROBE_HOST}/ping` }, recipeBuild: null, startArgs: null };
     case "api-state-positive-v1": return { probe: "api-state-positive-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null };
-    case "api-egress-denial-v1": return { probe: "api-egress-denial-v1", defect: null, appEnv: { INVENTORY_ORIGIN: `https://${WEB_API_EGRESS_PROBE_HOST}` }, recipeBuild: null, startArgs: null };
+    case "api-egress-denial-v1": return { probe: "api-egress-denial-v1", defect: null, appEnv: { FIXTURE_INVENTORY_ORIGIN: `https://${WEB_API_EGRESS_PROBE_HOST}` }, recipeBuild: null, startArgs: null };
+    // The inventory origin is declared, and the plan approves its mock: the page's request reaches the app, which reads one order's stock from the mock, once.
+    case "web-mock-origin-v1": return { probe: "web-inventory-status-v1", defect: null, appEnv: {}, recipeBuild: null, startArgs: null, mock: true };
+    // The same page and the same assertion with no approved mock, against an app that hides a failed dependency behind the answer the page expects: every assertion can hold,
+    // and the only fact against a pass is the call the app made to an origin that no approved mock serves.
+    case "web-unmocked-call-v1": return { probe: "web-inventory-status-v1", defect: "swallow-dependency.json", appEnv: {}, recipeBuild: null, startArgs: null, mock: false };
     case "build-imds-denial-v1": return { probe: "web-csv-positive-v1", defect: null, appEnv: {}, recipeBuild: [webApiBuildProbeCommand("build-imds-denial-v1")], startArgs: null };
     case "build-lateral-denial-v1": return { probe: "web-csv-positive-v1", defect: null, appEnv: {}, recipeBuild: [webApiBuildProbeCommand("build-lateral-denial-v1")], startArgs: null };
     // The CSV scenario again: what makes this probe is that its run must also carry the executor's Chromium sandbox attestation (the pin's `chromiumSandbox`).

@@ -80,7 +80,9 @@ const sha = (value: unknown) => createHash("sha256").update(canonicalJson(value)
  */
 export function webApiRuntimeCapabilities(kind: "web" | "api", runtimeManifestDigest: string): E2ERuntimeCapabilityDescriptor {
   const common = { schemaVersion: "e2e-runtime-capabilities/v1", profileId: WEB_API_RUNTIME_PROFILE_ID, kind, host: { os: "linux", arch: "arm64" },
-    runtimeManifestDigest, evidenceScopes: ["runtime"], networkPolicyDigest: WEB_API_NETWORK_POLICY_DIGEST };
+    runtimeManifestDigest, evidenceScopes: ["runtime"], networkPolicyDigest: WEB_API_NETWORK_POLICY_DIGEST,
+    // The host serves an approved source-backed API fixture to the app as an in-network mock of its declared origin, and records every call no mock matched.
+    mocks: ["source-backed-api-fixtures/v1"] };
   return E2ERuntimeCapabilityDescriptorSchema.parse(kind === "web"
     ? { ...common, engine: { ...WEB_API_WEB_ENGINE }, supportedSteps: ["navigate", "fill", "click", "choose-file"],
       supportedAssertions: ["text", "visible", "csv"], browsers: ["chromium"] }

@@ -80,7 +80,8 @@ export function collectE2EApplicationRun(input: { actual: E2EActualApplicationRu
     const supervisorReadback = encodeE2EApplicationSupervisorReadback(proof.readback);
     const collection = { protocol: "e2e-application-collection/v1" as const, shards,
       applicationCaptures: proof.captures, supervisorReceiptRefs: input.actual.supervisorReceiptRefs,
-      mockConsumptions: proof.mockConsumptions, declaredMockComponentIds: [...input.actual.declaredMockComponentIds].sort(),
+      mockConsumptions: proof.mockConsumptions, ...(proof.unmockedCalls.length > 0 ? { unmockedCalls: proof.unmockedCalls } : {}),
+      declaredMockComponentIds: [...input.actual.declaredMockComponentIds].sort(),
       supervisorReadback, receivedAt: new Date().toISOString(), cleanup: "confirmed" as const };
     if (Buffer.byteLength(canonicalJson(collection)) > Math.min(26_214_400, e2eApplicationPrivateTransferMaxBytes(Math.max(1, input.actual.applicationCaptures.length), shards.length))) {
       throw new Error("complete application collection and raw supervisor proof exceed the unchanged private transfer ceiling");

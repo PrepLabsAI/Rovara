@@ -1,5 +1,3 @@
-import { runE2EExecutor } from "./run.js";
-
 // The host mounts the plan read-only and an empty writable out directory; both paths are fixed by the container contract
 // and can be overridden by arguments (`entry.js <plan> <out>`) or ROVARA_EXECUTOR_PLAN / ROVARA_EXECUTOR_OUT.
 const planPath = process.argv[2] ?? process.env.ROVARA_EXECUTOR_PLAN ?? "/run/rovara/plan.json";
@@ -16,8 +14,16 @@ process.on("uncaughtException", crash);
 process.on("unhandledRejection", crash);
 
 try {
-  const result = await runE2EExecutor({ planPath, outDir, signal: controller.signal });
-  process.exitCode = result.exitCode;
+  if (process.argv[2] === "--mock") {
+    // The second mode of this image: an approved origin's mock, or the sinkhole of every other declared origin. It serves until the host removes the container.
+    const { runMockMode } = await import("./mock-server.js");
+    const mock = await runMockMode(process.argv.slice(2));
+    controller.signal.addEventListener("abort", () => { void mock.close().finally(() => process.exit(0)); }, { once: true });
+  } else {
+    const { runE2EExecutor } = await import("./run.js");
+    const result = await runE2EExecutor({ planPath, outDir, signal: controller.signal });
+    process.exitCode = result.exitCode;
+  }
 } catch (error) {
   crash(error);
 }

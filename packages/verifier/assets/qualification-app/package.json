@@ -25,7 +25,7 @@
         "portEnv": "APP_PORT",
         "originBindings": [
           { "originRef": "orders-api", "envName": "ORDERS_API_ORIGIN" },
-          { "originRef": "inventory-v1", "envName": "INVENTORY_ORIGIN" }
+          { "originRef": "inventory-v1", "envName": "INVENTORY_ORIGIN", "contractPath": "inventory/openapi.json" }
         ]
       },
       "accountProfiles": [

@@ -68,7 +68,7 @@ export function createWebApiProbeRunner(deps: WebApiProbeRunnerDeps): (probeId: 
     // The app is verified against the pinned tree before anything is built; a changed installed app never reaches Docker.
     await stageWebApiQualificationApp(appRoot, staged);
     try {
-      const plan = createWebApiProbePlan({ probe: driver.probe, appRoot: staged, runId,
+      const plan = createWebApiProbePlan({ probe: driver.probe, appRoot: staged, runId, ...(driver.mock === true ? { mock: true } : {}),
         recipeStart: { env: { ...(driver.defect ? { ORDERS_TEST_DEFECT_FILE: DEFECT_FILE_IN_OWNED_MOUNT } : {}), ...driver.appEnv }, ...(driver.startArgs ? { args: [...driver.startArgs] } : {}) },
         ...(driver.recipeBuild ? { recipeBuild: driver.recipeBuild.map((command) => ({ ...command, args: [...command.args], env: { ...command.env } })) } : {}) });
       let blockedRequests: Uint8Array | null = null;

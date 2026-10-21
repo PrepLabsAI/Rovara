@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { DockerCli } from "../../packages/verifier/src/host/docker-application-host.js";
 
@@ -40,6 +40,17 @@ export class FakeDockerCli implements DockerCli {
   executorTimeoutMs: number | null = null;
   buildOutput = "";
   executorStdout = "executor said hello\n";
+  /** When set, starting a mock or sinkhole container fails, as `docker run` does when the image or the mounts are unusable. */
+  mockStartFails = false;
+  /** The host directory the mock containers write their ledgers to (the mount at /out/mock), once the first mock container was started. */
+  mockOutDir: string | null = null;
+  /** Origins whose mock container "died" when the executor started: the host must notice before it trusts any ledger. */
+  readonly mocksDyingDuringExecutor = new Set<string>();
+  /** Appends lines to an origin's ledger as the mock container would while the executor runs. */
+  appendMockLedger(origin: string, lines: readonly unknown[]): void {
+    if (this.mockOutDir === null) throw new Error("no mock container was started");
+    appendFileSync(join(this.mockOutDir, `${origin}.jsonl`), lines.map((line) => `${typeof line === "string" ? line : JSON.stringify(line)}\n`).join(""));
+  }
 
   constructor() { this.executorStarted = new Promise<void>((resolve) => { this.markExecutorStarted = resolve; }); }
 
@@ -68,6 +79,17 @@ export class FakeDockerCli implements DockerCli {
     const found = this.calls.find((args) => args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith(`rovara-${kind}-`));
     if (!found) throw new Error(`no ${kind} container was started`);
     return found;
+  }
+  /** The arguments of the `docker run` call that started the mock (or, with `unbound`, the sinkhole) of one origin. */
+  mockArgsFor(origin: string): string[] {
+    const found = this.calls.find((args) => args[0] === "run" && args.includes("--name") && /^rovara-mock-.+/.test(args[args.indexOf("--name") + 1]!)
+      && args[args.indexOf("--origin") + 1] === origin);
+    if (!found) throw new Error(`no mock container was started for ${origin}`);
+    return found;
+  }
+  /** Every origin that has a mock or sinkhole container, in the order they were started. */
+  mockOrigins(): string[] {
+    return this.calls.filter((args) => args[0] === "run" && args.includes("--name") && /^rovara-mock-/.test(args[args.indexOf("--name") + 1]!)).map((args) => args[args.indexOf("--origin") + 1]!);
   }
   /** The timeout each build container was given, in order (the first is the source copy). */
   buildTimeouts(): number[] { return this.calls.flatMap((args, index) => (args[0] === "run" && args.includes("--name") && args[args.indexOf("--name") + 1]!.startsWith("rovara-build-") ? [this.timeouts[index]!] : [])); }
@@ -116,6 +138,14 @@ export class FakeDockerCli implements DockerCli {
     }
     if (command === "network" && sub === "ls") return this.list("network", args);
     if (command === "ps") return this.list("container", args);
+    if (command === "kill") {
+      for (const name of args.slice(1)) {
+        const item = this.resources.get(name);
+        if (item) { item.state = "exited"; item.exitCode = 137; }
+        this.events.push(`kill ${name}`);
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    }
     if (command === "rm") {
       for (const name of args.slice(2)) {
         this.resources.delete(name);
@@ -150,6 +180,17 @@ export class FakeDockerCli implements DockerCli {
       this.resources.set(name, { kind: "container", name, labels: this.mark(args), state: "running", exitCode: 0, logs: "" });
       return { code: 0, stdout: "container-id", stderr: "" };
     }
+    if (name.startsWith("rovara-mock-")) {
+      if (this.mockStartFails) return { code: 125, stdout: "", stderr: "docker: Error response from daemon: cannot start the mock container" };
+      this.resources.set(name, { kind: "container", name, labels: this.mark(args), state: "running", exitCode: 0, logs: "" });
+      const mount = args.find((value, index) => args[index - 1] === "-v" && value.endsWith(":/out/mock"));
+      if (mount === undefined) return { code: 125, stdout: "", stderr: "docker: the mock container has no ledger mount" };
+      this.mockOutDir = mount.replace(/:\/out\/mock$/, "");
+      mkdirSync(this.mockOutDir, { recursive: true });
+      // The mock opens its ledger before it listens, which is what the host waits for.
+      writeFileSync(join(this.mockOutDir, `${args[args.indexOf("--origin") + 1]}.jsonl`), "", { flag: "a" });
+      return { code: 0, stdout: "container-id", stderr: "" };
+    }
     if (name.startsWith("rovara-build-")) {
       const index = Number(name.split("-").at(-1));
       const failing = index > 0 && this.build.exitCode !== 0;
@@ -160,6 +201,10 @@ export class FakeDockerCli implements DockerCli {
       this.executorTimeoutMs = opts.timeoutMs;
       this.markExecutorStarted();
       const outMount = args.find((value, index) => args[index - 1] === "-v" && value.endsWith(":/out"))!.replace(/:\/out$/, "");
+      for (const origin of this.mocksDyingDuringExecutor) {
+        const mock = [...this.resources.values()].find((item) => item.name.startsWith("rovara-mock-") && item.name.endsWith(`-${origin}`));
+        if (mock) { mock.state = "exited"; mock.exitCode = 2; }
+      }
       if (this.appExit) {
         const app = [...this.resources.values()].find((item) => item.name.startsWith("rovara-app-"))!;
         setTimeout(() => { app.state = "exited"; app.exitCode = this.appExit!.code; app.logs = this.appExit!.logs; }, 15);
